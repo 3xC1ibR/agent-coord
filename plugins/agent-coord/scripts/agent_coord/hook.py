@@ -52,15 +52,18 @@ def _deny(event: str, reason: str, context: str | None = None) -> dict[str, Any]
 def _format_messages(messages: list[dict[str, Any]]) -> str:
     if not messages:
         return ""
-    lines = ["Unread agent-coordination messages:"]
+    lines = ["Unread actionable agent-coordination messages:"]
     for message in messages:
         sender = message["sender_name"] or message["sender_session_id"]
         bead = f" for {message['sender_bead_id']}" if message["sender_bead_id"] else ""
         lines.append(
-            f"- Message #{message['id']} from {sender}{bead}: {message['body']}"
+            f"- Message #{message['id']} (thread {message['thread_id']}, "
+            f"reply_required={str(message['reply_required']).lower()}) from "
+            f"{sender}{bead}: {message['body']}"
         )
     lines.append(
-        "Use the agent-coordination skill to reply and acknowledge these messages."
+        "Reply conversationally only where reply_required=true. Transport "
+        "acknowledgements are silent."
     )
     return "\n".join(lines)
 
@@ -132,13 +135,17 @@ def handle(
             coordination.touch(session_id, "discussing", turn_active=True)
         else:
             coordination.touch(session_id, turn_active=True)
-        messages = coordination.inbox(session_id)
+        messages = coordination.inbox(
+            session_id, classifications={"action_required"}
+        )
         text = _format_messages(messages)
         return _context(event, text) if text else {}
 
     if event == "SessionStart":
         coordination.touch(session_id, turn_active=False)
-        messages = coordination.inbox(session_id)
+        messages = coordination.inbox(
+            session_id, classifications={"action_required"}
+        )
         cli_path = Path(__file__).resolve().parents[1] / "agent-coord"
         text = (
             f"This session is registered with agent-coord as {session_id}. "
@@ -183,7 +190,9 @@ def handle(
         return _context(event, text)
 
     coordination.touch(session_id, turn_active=True)
-    messages = coordination.inbox(session_id)
+    messages = coordination.inbox(
+        session_id, classifications={"action_required"}
+    )
     message_context = _format_messages(messages)
     tool_name = payload.get("tool_name")
 
@@ -201,6 +210,13 @@ def handle(
                 event,
                 f"No Beads work declaration is active for session {session_id}. "
                 "Claim a bead and run agent-coord begin-work before editing.",
+                message_context or None,
+            )
+        if session["lease_mode"] == "validation":
+            return _deny(
+                event,
+                "This declaration is a validation lease; explicit write tools "
+                "are disabled until a write lease is acquired.",
                 message_context or None,
             )
         if session["activity"] not in {"implementing", "validating"}:

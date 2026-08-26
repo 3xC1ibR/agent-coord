@@ -157,6 +157,38 @@ class ZellijWakeTests(unittest.TestCase):
         self.assertEqual(fake.dumps, 0)
         self.assertEqual(fake.wakes, [])
 
+    def test_informational_and_closure_messages_do_not_wake(self) -> None:
+        informational = self.store.send_message(
+            sender_session_id="sender",
+            recipient_session_id="receiver",
+            body="FYI",
+            classification="informational",
+            thread_id="thread-a",
+        )
+        closure = self.store.send_message(
+            sender_session_id="sender",
+            recipient_session_id="receiver",
+            body="Complete",
+            classification="closure",
+            thread_id="thread-b",
+        )
+        self.store.touch("receiver", "waiting", turn_active=False)
+        fake = FakeZellijClient()
+
+        result = self.watcher(fake).run_once()
+
+        self.assertEqual(result["status"], "waiting")
+        self.assertEqual(fake.dumps, 0)
+        self.assertEqual(fake.wakes, [])
+        self.assertEqual(self.store.pending_wake_message_ids("receiver"), [])
+        history = self.store.inbox(
+            "receiver", include_delivered=True, mark_delivered=False
+        )
+        self.assertEqual(
+            [message["id"] for message in history],
+            [informational["id"], closure["id"]],
+        )
+
     def test_typed_prompt_waits_then_wakes_exactly_once(self) -> None:
         message_id = self.send()
         self.store.touch("receiver", "waiting", turn_active=False)

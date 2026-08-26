@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
@@ -75,6 +76,17 @@ class CoordinationStoreTests(unittest.TestCase):
                     delivered_at REAL,
                     acknowledged_at REAL
                 );
+                INSERT INTO sessions VALUES (
+                    'legacy-sender', 'codex', '/tmp/repo', NULL, 'idle', NULL,
+                    '[]', 1, 1, NULL
+                );
+                INSERT INTO sessions VALUES (
+                    'legacy-recipient', 'claude', '/tmp/repo', NULL, 'idle', NULL,
+                    '[]', 1, 1, NULL
+                );
+                INSERT INTO messages (
+                    sender_session_id, recipient_session_id, body, created_at
+                ) VALUES ('legacy-sender', 'legacy-recipient', 'legacy body', 1);
                 """
             )
 
@@ -82,6 +94,30 @@ class CoordinationStoreTests(unittest.TestCase):
         migrated.register(session_id="legacy", client="codex", cwd=str(self.root))
 
         self.assertFalse(migrated.get_session("legacy")["turn_active"])
+        self.assertEqual(migrated.get_session("legacy")["lease_mode"], "write")
+        legacy_message = migrated.inbox(
+            "legacy-recipient", include_delivered=True, mark_delivered=False
+        )[0]
+        self.assertEqual(legacy_message["classification"], "action_required")
+        self.assertEqual(legacy_message["thread_id"], f"legacy:{legacy_message['id']}")
+        self.assertTrue(legacy_message["reply_required"])
+
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                """
+                INSERT INTO messages (
+                    sender_session_id, recipient_session_id, body, created_at
+                ) VALUES ('legacy-sender', 'legacy-recipient', 'old writer', 2)
+                """
+            )
+        remigrated = CoordinationStore(database, clock=self.clock)
+        history = remigrated.inbox(
+            "legacy-recipient", include_delivered=True, mark_delivered=False
+        )
+        self.assertEqual(
+            [message["thread_id"] for message in history],
+            [f"legacy:{message['id']}" for message in history],
+        )
 
     def test_session_lifecycle_and_staleness(self) -> None:
         self.register("one")
@@ -103,6 +139,24 @@ class CoordinationStoreTests(unittest.TestCase):
 
         self.assertTrue(active["turn_active"])
         self.assertFalse(stopped["turn_active"])
+
+    def test_validation_lease_is_exclusive_and_sets_validating_activity(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+
+        lease = self.store.begin_work(
+            session_id="one",
+            bead_id="work-a",
+            scopes=["src/**"],
+            lease_mode="validation",
+        )
+
+        self.assertEqual(lease["lease_mode"], "validation")
+        self.assertEqual(lease["activity"], "validating")
+        with self.assertRaises(ConflictError):
+            self.store.begin_work(
+                session_id="two", bead_id="work-b", scopes=["src/api/**"]
+            )
 
     def test_overlapping_scope_blocks_second_session(self) -> None:
         self.register("one")
@@ -158,6 +212,289 @@ class CoordinationStoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.inbox("two", include_delivered=True)), 1)
         acknowledged = self.store.acknowledge("two", message["id"])
         self.assertIsNotNone(acknowledged["acknowledged_at"])
+
+    def test_message_classification_thread_closure_and_reopen(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+        self.store.register_zellij_wake(
+            session_id="two", zellij_session="test-session", pane_id="terminal_7"
+        )
+
+        informational = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="FYI",
+            classification="informational",
+            thread_id="thread-a",
+        )
+        closure = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="Finished",
+            classification="closure",
+            thread_id="thread-a",
+        )
+        repeated = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="Finished again",
+            classification="closure",
+            thread_id="thread-a",
+        )
+
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual(repeated["id"], closure["id"])
+        self.assertEqual(self.store.pending_wake_message_ids("two"), [])
+        self.assertIsNotNone(closure["delivered_at"])
+
+        reopened = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="Validation failed; act again",
+            classification="action_required",
+            thread_id="thread-a",
+        )
+        self.assertEqual(self.store.pending_wake_message_ids("two"), [reopened["id"]])
+        history = self.store.inbox(
+            "two", include_delivered=True, mark_delivered=False
+        )
+        self.assertEqual(
+            [message["id"] for message in history],
+            [informational["id"], closure["id"], reopened["id"]],
+        )
+
+    def test_message_reply_requirements_default_by_classification_and_opt_out(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+
+        required = self.store.send_message(
+            sender_session_id="one", recipient_session_id="two", body="Act"
+        )
+        optional = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="Act without reply",
+            reply_required=False,
+        )
+        informational = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="FYI",
+            classification="informational",
+        )
+        closure = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="Complete",
+            classification="closure",
+        )
+
+        self.assertTrue(required["reply_required"])
+        self.assertFalse(optional["reply_required"])
+        self.assertFalse(informational["reply_required"])
+        self.assertFalse(closure["reply_required"])
+
+    def test_closure_delivers_older_pending_action_and_later_action_reopens(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+        self.store.register_zellij_wake(
+            session_id="two", zellij_session="test-session", pane_id="terminal_7"
+        )
+        pending = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="Please act",
+            thread_id="thread-a",
+        )
+        closure = self.store.send_message(
+            sender_session_id="two",
+            recipient_session_id="one",
+            body="Already resolved",
+            classification="closure",
+            thread_id="thread-a",
+        )
+
+        history = self.store.inbox(
+            "two", include_delivered=True, mark_delivered=False
+        )
+        self.assertIsNotNone(history[0]["delivered_at"])
+        self.assertEqual(history[0]["id"], pending["id"])
+        self.assertTrue(closure["terminal"])
+        self.assertEqual(self.store.pending_wake_message_ids("two"), [])
+
+        reopened = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="The issue reopened",
+            thread_id="thread-a",
+        )
+        self.assertEqual(self.store.pending_wake_message_ids("two"), [reopened["id"]])
+
+    def test_thread_reuse_requires_the_same_unordered_participant_pair(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+        self.register("three")
+        self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="Question",
+            thread_id="thread-a",
+        )
+        reverse = self.store.send_message(
+            sender_session_id="two",
+            recipient_session_id="one",
+            body="Answer",
+            thread_id="thread-a",
+        )
+        closure = self.store.send_message(
+            sender_session_id="two",
+            recipient_session_id="one",
+            body="Closed",
+            classification="closure",
+            thread_id="thread-a",
+        )
+        repeated_closure = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="Also closed",
+            classification="closure",
+            thread_id="thread-a",
+        )
+
+        self.assertEqual(reverse["thread_id"], "thread-a")
+        self.assertTrue(repeated_closure["idempotent"])
+        self.assertEqual(repeated_closure["id"], closure["id"])
+        with self.assertRaisesRegex(CoordinationError, "participant pair"):
+            self.store.send_message(
+                sender_session_id="three",
+                recipient_session_id="two",
+                body="Third party",
+                thread_id="thread-a",
+            )
+
+    def test_explicit_unread_and_bulk_ack_are_transport_silent(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+        first = self.store.send_message(
+            sender_session_id="one", recipient_session_id="two", body="one"
+        )
+        second = self.store.send_message(
+            sender_session_id="one",
+            recipient_session_id="two",
+            body="two",
+            classification="informational",
+        )
+        self.store.inbox("two")
+
+        unread = self.store.inbox("two", unread_only=True, mark_delivered=False)
+        self.assertEqual([message["id"] for message in unread], [first["id"], second["id"]])
+        acknowledged = self.store.acknowledge_all_unread("two")
+
+        self.assertEqual(acknowledged["message_ids"], [first["id"], second["id"]])
+        self.assertEqual(self.store.inbox("two", unread_only=True), [])
+        self.assertEqual(
+            len(self.store.inbox("two", include_delivered=True, mark_delivered=False)),
+            2,
+        )
+
+    def test_atomic_whole_declaration_handoff_to_validation_lease(self) -> None:
+        self.register("sender")
+        self.register("recipient", "claude")
+        self.store.begin_work(
+            session_id="sender",
+            bead_id="work-a",
+            scopes=["src/**", "tests/test_app.py"],
+        )
+
+        handoff = self.store.handoff_work(
+            sender_session_id="sender",
+            recipient_session_id="recipient",
+            target_bead_id="work-b",
+            scopes=["tests/test_app.py", "src/**"],
+            patch_label="adapter-v2",
+            validation_boundary="focused tests passed at revision 7",
+            validation_responsibility="recipient runs full suite",
+            mode="validation",
+            handoff_id="handoff-a",
+        )
+
+        self.assertEqual(handoff["source_bead_id"], "work-a")
+        self.assertEqual(handoff["target_bead_id"], "work-b")
+        self.assertEqual(handoff["mode"], "validation")
+        self.assertEqual(handoff["notification"]["classification"], "action_required")
+        self.assertFalse(handoff["notification"]["reply_required"])
+        self.assertIsNone(self.store.get_session("sender")["bead_id"])
+        recipient = self.store.get_session("recipient")
+        self.assertEqual(recipient["bead_id"], "work-b")
+        self.assertEqual(recipient["lease_mode"], "validation")
+        self.assertEqual(recipient["activity"], "validating")
+        self.assertEqual(len(self.store.inbox("recipient", mark_delivered=False)), 1)
+        with self.assertRaises(ConflictError):
+            self.store.begin_work(
+                session_id="sender", bead_id="work-c", scopes=["src/api.py"]
+            )
+
+    def test_handoff_rejects_partial_scope_and_non_idle_recipient_without_mutation(self) -> None:
+        self.register("sender")
+        self.register("recipient", "claude")
+        self.store.begin_work(
+            session_id="sender", bead_id="work-a", scopes=["src/**", "tests/**"]
+        )
+
+        with self.assertRaisesRegex(CoordinationError, "Partial scope"):
+            self.store.handoff_work(
+                sender_session_id="sender",
+                recipient_session_id="recipient",
+                scopes=["src/**"],
+                patch_label="partial",
+                validation_boundary="none",
+                validation_responsibility="recipient",
+                mode="write",
+            )
+        self.assertEqual(self.store.get_session("sender")["bead_id"], "work-a")
+        self.assertIsNone(self.store.get_session("recipient")["bead_id"])
+
+        self.store.touch("recipient", "discussing", turn_active=True)
+        with self.assertRaisesRegex(CoordinationError, "must be idle"):
+            self.store.handoff_work(
+                sender_session_id="sender",
+                recipient_session_id="recipient",
+                patch_label="busy",
+                validation_boundary="none",
+                validation_responsibility="recipient",
+                mode="write",
+            )
+        self.assertEqual(self.store.get_session("sender")["bead_id"], "work-a")
+
+    def test_handoff_rolls_back_every_effect_on_notification_failure(self) -> None:
+        self.register("sender")
+        self.register("recipient", "claude")
+        self.store.begin_work(
+            session_id="sender", bead_id="work-a", scopes=["src/**"]
+        )
+
+        with (
+            patch.object(
+                self.store,
+                "_insert_message",
+                side_effect=CoordinationError("simulated notification failure"),
+            ),
+            self.assertRaisesRegex(CoordinationError, "simulated notification"),
+        ):
+            self.store.handoff_work(
+                sender_session_id="sender",
+                recipient_session_id="recipient",
+                patch_label="rollback",
+                validation_boundary="focused tests",
+                validation_responsibility="recipient",
+                mode="write",
+                handoff_id="handoff-fails",
+            )
+
+        self.assertEqual(self.store.get_session("sender")["bead_id"], "work-a")
+        self.assertIsNone(self.store.get_session("recipient")["bead_id"])
+        with self.assertRaises(CoordinationError):
+            self.store.get_handoff("handoff-fails")
 
     def test_bead_address_rejects_zero_or_multiple_live_owners(self) -> None:
         self.register("sender")

@@ -180,7 +180,6 @@ def build_zellij_command(
             f"AGENT_COORD_DB={database_path}",
             "AGENT_COORD_CLIENT=codex",
             codex_executable,
-            "exec",
             "--cd",
             str(delegation["cwd"]),
             "--add-dir",

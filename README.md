@@ -10,12 +10,16 @@ The plugin answers these questions:
 - Which sessions are online, stale, or offline?
 - Which sessions are discussing, planning, implementing, validating, or waiting?
 - Which claimed Beads issue and file scopes does each working session own?
+- How can a session atomically transfer a complete scope and its validation
+  boundary without briefly releasing it to competing work?
+- How can a session reserve a stable scope for read-only validation?
 - How can one session send a durable message to another session or to the live
   owner of a Beads issue?
+- Which messages require action or a reply, and which are history-only receipts?
 - How can a Zellij session safely start a turn when a message arrives while it
   is idle?
-- How can a session delegate ready Beads work to a new Codex process in a
-  visible Zellij pane?
+- How can a session delegate ready Beads work to a new interactive Codex
+  session in a visible Zellij pane?
 
 ## Design
 
@@ -40,6 +44,12 @@ the same hooks, skill, CLI, and database schema.
 Delegation lifecycle state is also in SQLite. Launch mechanics are in a
 Zellij-specific adapter. The durable parent, child, result, and failure state
 does not depend on pane inspection.
+
+Scope declarations use conservative repository-relative paths and globs. Agent
+Coord does not claim symbol- or line-range ownership because the write hooks can
+reliably enforce paths, but cannot reliably identify every symbol changed by a
+patch. Atomic handoff transfers the complete declaration rather than attempting
+unsafe glob subtraction.
 
 ## Install
 
@@ -76,11 +86,18 @@ bd update <bead-id> --claim
   --session-id <session-id> \
   --bead <bead-id> \
   --scope 'src/**' \
-  --scope 'tests/test_feature.py'
+  --scope 'tests/test_feature.py' \
+  --lease-mode write
 ```
 
 `begin-work` rejects a declaration when another live session owns the same
 Beads issue or an overlapping scope in the same repository.
+
+Use `--lease-mode validation` to reserve an exclusive, stable scope without
+granting the session permission to use structured write tools. This is distinct
+from `--activity validating`: a normal write lease may enter the `validating`
+activity and still fix files. A validation lease blocks every overlapping lease
+until it is handed off or released.
 
 Common commands:
 
@@ -92,23 +109,59 @@ agent-coord conflicts --session-id <session-id>
 agent-coord send \
   --from-session <session-id> \
   --session <peer-session-id> \
+  --classification action_required \
+  --thread-id <thread-id> \
   'Can you release src/api/**?'
 
 agent-coord send \
   --from-session <session-id> \
   --bead <bead-id> \
+  --classification informational \
   'I need to coordinate a shared interface change.'
 
 agent-coord inbox --session-id <session-id>
+agent-coord inbox --session-id <session-id> --unread
+agent-coord inbox --session-id <session-id> --all
 agent-coord inbox --session-id <session-id> --wait
 agent-coord inbox --session-id <session-id> --wait --timeout 120
 agent-coord ack --session-id <session-id> --message-id <message-id>
+agent-coord ack --session-id <session-id> --all-unread
 agent-coord end-work --session-id <session-id>
 ```
 
 Messages stay in SQLite until the recipient reads them. Delivery and explicit
 acknowledgement have separate timestamps. Addressing by Beads issue succeeds
 only when exactly one live session declares that issue.
+
+Messages are classified as `action_required`, `informational`, or `closure`.
+Only undelivered `action_required` messages enter hook context or wake an idle
+agent. `reply_required` is separate: an actionable message may require work but
+no conversational reply, as with an atomic handoff. The default is true for
+`action_required` and false for the other classifications; use
+`--no-reply-required` to opt out explicitly. Transport acknowledgement is
+silent and never creates another message.
+
+Continue a conversation with the same `--thread-id`. A thread accepts only the
+same pair of sessions, in either direction. Close it with one terminal message:
+
+```bash
+agent-coord send \
+  --from-session <session-id> \
+  --session <peer-session-id> \
+  --classification closure \
+  --thread-id <thread-id> \
+  'Validation complete; no further coordination action is needed.'
+```
+
+Closure is idempotent and history-only. It marks older pending actionable
+messages in that thread delivered so they cannot trigger another wake or hook
+turn. A later explicit `action_required` message on the same thread reopens it
+for a material state change.
+
+The default `inbox` returns undelivered messages. `inbox --unread` is the compact
+unacknowledged view, including messages already delivered by a hook; use
+`inbox --all` only for complete history. `ack --all-unread` performs silent
+transport acknowledgement in one operation.
 
 `inbox --wait` blocks without model-token use until a message arrives,
 polling the local SQLite store and refreshing session liveness on each check.
@@ -122,6 +175,31 @@ would make the blocking call return immediately. On timeout the command
 exits with status `5` and prints a JSON error to stderr — a code distinct
 from the other documented exit statuses (`2` validation, `3` conflict, `4`
 ambiguous bead target).
+
+## Atomic handoff
+
+Use `handoff` when the current owner has reached a named patch or validation
+boundary and the recipient must acquire the complete declaration without a
+scope-free race:
+
+```bash
+agent-coord handoff \
+  --from-session <owner-session-id> \
+  --to-session <idle-recipient-session-id> \
+  --patch-label <patch-name> \
+  --validation-boundary '<state already validated>' \
+  --validation-responsibility '<checks the recipient owns>' \
+  --mode validation
+```
+
+The sender, recipient, scope transfer, audit record, and one actionable
+`reply_required=false` notification are updated in one SQLite transaction. The
+recipient must be registered, online, idle, and in the same repository. The
+command rejects partial scopes; optionally repeat every current `--scope` to
+assert the expected declaration. Use `--target-bead` only for a claimed
+`in_progress` issue; the CLI revalidates a changed target immediately before the
+transaction. Beads and SQLite remain separate stores, so their updates cannot be
+one cross-database transaction.
 
 ## Delegate work to a Codex Zellij pane
 
@@ -159,14 +237,15 @@ delegation state. It does not restrict model and effort combinations because
 Codex support can differ by model and release; the child Codex process validates
 the selected combination.
 
-The default command starts `codex exec --approve-for-me`. The optional `--yolo`
-flag starts Codex with `--dangerously-bypass-approvals-and-sandbox`. Use it only
-after explicit authorization.
+The default command opens the interactive Codex TUI with `--approve-for-me` in
+the requested Zellij pane. The optional `--yolo` flag starts Codex with
+`--dangerously-bypass-approvals-and-sandbox`. Use it only after explicit
+authorization.
 
 Codex also requires persisted trust before it runs hooks. Review and trust the
-installed Agent Coord hook in an interactive Codex session before unattended
-delegation. If the target repository's complete enabled hook set was reviewed,
-`--bypass-hook-trust` starts Codex with
+installed Agent Coord hook before delegation. If the target repository's
+complete enabled hook set was reviewed, `--bypass-hook-trust` starts the
+interactive Codex session with
 `--dangerously-bypass-hook-trust`. This separate flag keeps reviewed command
 permissions but runs all enabled hooks without persisted trust for that one
 invocation. Do not use it as a default.
@@ -225,15 +304,17 @@ AGENT_COORD_ZELLIJ_WAKE=1 claude
 AGENT_COORD_ZELLIJ_WAKE=1 codex
 ```
 
-The watcher polls only SQLite. When a message is unread, it confirms that the
-model turn is inactive and that the last recognizable Claude or Codex prompt is
-empty. It then atomically reserves all pending messages and sends one generic
-prompt to the registered pane with `zellij action`. Normal `UserPromptSubmit`
-hooks deliver the message body as context. The watcher does not focus the pane,
-erase input, mark the message delivered, or retry a reserved message. A typed
-prompt, active model turn, missing pane, or failed Zellij command therefore
-cannot corrupt user input or block the sender. Inspect `wake-zellij status` for
-the last error and recent wake attempts.
+The watcher polls only SQLite. When an actionable message is unread, it confirms
+that the model turn is inactive and that the last recognizable Claude or Codex
+prompt is empty. It then atomically reserves pending actionable messages and
+sends one generic prompt to the registered pane with `zellij action`. Normal
+`UserPromptSubmit` hooks deliver the message body and thread/reply metadata as
+context. Informational and closure messages stay available in inbox history but
+do not wake the agent. The watcher does not focus the pane, erase input, mark
+the message delivered, or retry a reserved message. A typed prompt, active
+model turn, missing pane, or failed Zellij command therefore cannot corrupt user
+input or block the sender. Inspect `wake-zellij status` for the last error and
+recent wake attempts.
 
 Wake-up is currently Zellij-specific. Durable messaging, inbox reads, and
 sender behavior do not require Zellij.
@@ -241,11 +322,13 @@ sender behavior do not require Zellij.
 ## Hook behavior
 
 - `SessionStart` registers the process, attaches an inherited delegation,
-  optionally starts Zellij wake, and delivers unread messages.
-- `UserPromptSubmit` records an active model turn and delivers unread messages.
+  optionally starts Zellij wake, and delivers unread actionable messages.
+- `UserPromptSubmit` records an active model turn and delivers unread actionable
+  messages.
 - `PreToolUse` checks structured write tools against the declared issue, state,
-  scopes, and live conflicts.
-- `PostToolUse` refreshes liveness and delivers unread messages.
+  lease mode, scopes, and live conflicts. Validation leases deny structured
+  write tools.
+- `PostToolUse` refreshes liveness and delivers unread actionable messages.
 - `Stop` records an inactive turn plus `waiting` for unfinished declared work
   or `idle` otherwise.
 - `SessionEnd` records an unfinished child delegation as failed, disables
@@ -254,6 +337,8 @@ sender behavior do not require Zellij.
 The write guard covers Claude `Edit` and `Write` tools and Codex `apply_patch`.
 It does not parse arbitrary shell commands. The skill instructs agents to
 declare work before any implementation, including shell-based writes.
+Validation lease mode expresses non-editing intent and protects structured
+write tools; it is not a security boundary for arbitrary shell commands.
 
 ## Develop and validate
 

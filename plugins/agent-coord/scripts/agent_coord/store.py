@@ -26,6 +26,8 @@ RELEVANT_ACTIVITIES = {"planning", "implementing", "validating", "waiting"}
 DEFAULT_STALE_AFTER_SECONDS = 30 * 60
 DEFAULT_INBOX_POLL_SECONDS = 0.5
 WAKEABLE_ACTIVITIES = {"idle", "waiting"}
+LEASE_MODES = {"write", "validation"}
+MESSAGE_CLASSIFICATIONS = {"action_required", "informational", "closure"}
 _WILDCARD = re.compile(r"[*?[]")
 
 
@@ -200,7 +202,8 @@ class CoordinationStore:
                     started_at REAL NOT NULL,
                     last_seen_at REAL NOT NULL,
                     ended_at REAL,
-                    turn_active INTEGER NOT NULL DEFAULT 0
+                    turn_active INTEGER NOT NULL DEFAULT 0,
+                    lease_mode TEXT NOT NULL DEFAULT 'write'
                 );
 
                 CREATE INDEX IF NOT EXISTS sessions_bead_idx
@@ -215,6 +218,9 @@ class CoordinationStore:
                     created_at REAL NOT NULL,
                     delivered_at REAL,
                     acknowledged_at REAL,
+                    classification TEXT NOT NULL DEFAULT 'action_required',
+                    thread_id TEXT NOT NULL DEFAULT '',
+                    reply_required INTEGER NOT NULL DEFAULT 1,
                     FOREIGN KEY(sender_session_id) REFERENCES sessions(session_id),
                     FOREIGN KEY(recipient_session_id) REFERENCES sessions(session_id)
                 );
@@ -289,6 +295,38 @@ class CoordinationStore:
                     "ALTER TABLE sessions ADD COLUMN turn_active "
                     "INTEGER NOT NULL DEFAULT 0"
                 )
+            if "lease_mode" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN lease_mode "
+                    "TEXT NOT NULL DEFAULT 'write'"
+                )
+            message_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(messages)")
+            }
+            if "classification" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN classification "
+                    "TEXT NOT NULL DEFAULT 'action_required'"
+                )
+            if "thread_id" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN thread_id "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            if "reply_required" not in message_columns:
+                # Existing rows predate classified messages, whose historical
+                # behavior was to request a response. Preserve that contract.
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN reply_required "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+            connection.execute(
+                """
+                UPDATE messages
+                SET thread_id = 'legacy:' || id
+                WHERE thread_id IS NULL OR thread_id = ''
+                """
+            )
             delegation_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(delegations)")
@@ -304,6 +342,52 @@ class CoordinationStore:
                 connection.execute(
                     "ALTER TABLE delegations ADD COLUMN reasoning_effort TEXT"
                 )
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS message_threads (
+                    thread_id TEXT PRIMARY KEY,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    closed_at REAL
+                );
+
+                INSERT OR IGNORE INTO message_threads (
+                    thread_id, created_at, updated_at, closed_at
+                )
+                SELECT thread_id, MIN(created_at), MAX(created_at), NULL
+                FROM messages
+                WHERE thread_id IS NOT NULL
+                GROUP BY thread_id;
+
+                CREATE INDEX IF NOT EXISTS messages_thread_idx
+                    ON messages(thread_id, id);
+                CREATE INDEX IF NOT EXISTS messages_actionable_recipient_idx
+                    ON messages(recipient_session_id, classification, delivered_at);
+
+                CREATE TABLE IF NOT EXISTS handoffs (
+                    handoff_id TEXT PRIMARY KEY,
+                    sender_session_id TEXT NOT NULL,
+                    recipient_session_id TEXT NOT NULL,
+                    source_bead_id TEXT NOT NULL,
+                    target_bead_id TEXT NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    patch_label TEXT NOT NULL,
+                    validation_boundary TEXT NOT NULL,
+                    validation_responsibility TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    notification_message_id INTEGER NOT NULL UNIQUE,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(sender_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(recipient_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(thread_id) REFERENCES message_threads(thread_id),
+                    FOREIGN KEY(notification_message_id) REFERENCES messages(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS handoffs_sessions_idx
+                    ON handoffs(sender_session_id, recipient_session_id, created_at);
+                """
+            )
 
     def _row_to_session(
         self, row: sqlite3.Row, now: float | None = None
@@ -324,6 +408,7 @@ class CoordinationStore:
             "presence": presence,
             "activity": row["activity"],
             "turn_active": bool(row["turn_active"]),
+            "lease_mode": row["lease_mode"],
             "bead_id": row["bead_id"],
             "write_scope": _json_scopes(row["write_scope_json"]),
             "started_at": _iso(row["started_at"]),
@@ -353,6 +438,176 @@ class CoordinationStore:
             "completed_at": _iso(row["completed_at"]),
             "result_message": row["result_message"],
             "error": row["error"],
+        }
+
+    def _row_to_message(
+        self, row: sqlite3.Row, *, delivered_at: float | None = None
+    ) -> dict[str, Any]:
+        keys = set(row.keys())
+        return {
+            "id": row["id"],
+            "sender_session_id": row["sender_session_id"],
+            "sender_name": row["sender_name"] if "sender_name" in keys else None,
+            "sender_client": row["sender_client"] if "sender_client" in keys else None,
+            "sender_bead_id": (
+                row["sender_bead_id"] if "sender_bead_id" in keys else None
+            ),
+            "recipient_session_id": row["recipient_session_id"],
+            "body": row["body"],
+            "classification": row["classification"],
+            "thread_id": row["thread_id"],
+            "reply_required": bool(row["reply_required"]),
+            "terminal": row["classification"] == "closure",
+            "created_at": _iso(row["created_at"]),
+            "delivered_at": _iso(
+                row["delivered_at"] if row["delivered_at"] is not None else delivered_at
+            ),
+            "acknowledged_at": _iso(row["acknowledged_at"]),
+        }
+
+    def _insert_message(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        sender_session_id: str,
+        recipient_session_id: str,
+        body: str,
+        classification: str,
+        thread_id: str,
+        reply_required: bool,
+        now: float,
+    ) -> tuple[sqlite3.Row, bool]:
+        if classification not in MESSAGE_CLASSIFICATIONS:
+            raise CoordinationError(
+                f"Unknown message classification: {classification}."
+            )
+        normalized_thread = thread_id.strip()
+        if not normalized_thread:
+            raise CoordinationError("Message thread ID must not be empty.")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO message_threads (
+                thread_id, created_at, updated_at, closed_at
+            ) VALUES (?, ?, ?, NULL)
+            """,
+            (normalized_thread, now, now),
+        )
+        thread = connection.execute(
+            "SELECT * FROM message_threads WHERE thread_id = ?",
+            (normalized_thread,),
+        ).fetchone()
+        assert thread is not None
+        participant = connection.execute(
+            """
+            SELECT sender_session_id, recipient_session_id
+            FROM messages
+            WHERE thread_id = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (normalized_thread,),
+        ).fetchone()
+        if participant is not None and not (
+            (
+                participant["sender_session_id"] == sender_session_id
+                and participant["recipient_session_id"] == recipient_session_id
+            )
+            or (
+                participant["sender_session_id"] == recipient_session_id
+                and participant["recipient_session_id"] == sender_session_id
+            )
+        ):
+            raise CoordinationError(
+                f"Thread {normalized_thread} belongs to a different participant pair."
+            )
+        if classification == "closure" and thread["closed_at"] is not None:
+            existing = connection.execute(
+                """
+                SELECT * FROM messages
+                WHERE thread_id = ? AND classification = 'closure'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (normalized_thread,),
+            ).fetchone()
+            if existing is not None:
+                # The participant-pair check above deliberately permits a
+                # reverse-direction terminal reply in the same conversation.
+                return existing, False
+        if classification == "action_required":
+            connection.execute(
+                """
+                UPDATE message_threads
+                SET updated_at = ?, closed_at = NULL
+                WHERE thread_id = ?
+                """,
+                (now, normalized_thread),
+            )
+        else:
+            connection.execute(
+                "UPDATE message_threads SET updated_at = ? WHERE thread_id = ?",
+                (now, normalized_thread),
+            )
+        cursor = connection.execute(
+            """
+            INSERT INTO messages (
+                sender_session_id, recipient_session_id, body, created_at,
+                delivered_at, classification, thread_id, reply_required
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sender_session_id,
+                recipient_session_id,
+                body,
+                now,
+                now if classification == "closure" else None,
+                classification,
+                normalized_thread,
+                int(reply_required),
+            ),
+        )
+        if classification == "closure":
+            # Closure suppresses every older pending actionable notification in
+            # this conversation before any wake or hook can observe it.
+            connection.execute(
+                """
+                UPDATE messages
+                SET delivered_at = ?
+                WHERE thread_id = ?
+                  AND classification = 'action_required'
+                  AND delivered_at IS NULL
+                  AND id < ?
+                """,
+                (now, normalized_thread, int(cursor.lastrowid)),
+            )
+            connection.execute(
+                """
+                UPDATE message_threads
+                SET updated_at = ?, closed_at = ?
+                WHERE thread_id = ?
+                """,
+                (now, now, normalized_thread),
+            )
+        row = connection.execute(
+            "SELECT * FROM messages WHERE id = ?", (int(cursor.lastrowid),)
+        ).fetchone()
+        assert row is not None
+        return row, True
+
+    def _row_to_handoff(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "handoff_id": row["handoff_id"],
+            "sender_session_id": row["sender_session_id"],
+            "recipient_session_id": row["recipient_session_id"],
+            "source_bead_id": row["source_bead_id"],
+            "target_bead_id": row["target_bead_id"],
+            "scope": _json_scopes(row["scope_json"]),
+            "patch_label": row["patch_label"],
+            "validation_boundary": row["validation_boundary"],
+            "validation_responsibility": row["validation_responsibility"],
+            "mode": row["mode"],
+            "thread_id": row["thread_id"],
+            "notification_message_id": row["notification_message_id"],
+            "created_at": _iso(row["created_at"]),
         }
 
     def register(
@@ -481,6 +736,7 @@ class CoordinationStore:
         bead_id: str,
         scopes: Iterable[str],
         activity: str = "implementing",
+        lease_mode: str = "write",
     ) -> dict[str, Any]:
         if activity not in {"planning", "implementing", "validating"}:
             raise CoordinationError(
@@ -488,6 +744,10 @@ class CoordinationStore:
             )
         if not bead_id.strip():
             raise CoordinationError("Bead ID must not be empty.")
+        if lease_mode not in LEASE_MODES:
+            raise CoordinationError("Lease mode must be write or validation.")
+        if lease_mode == "validation":
+            activity = "validating"
         session = self.get_session(session_id)
         normalized = sorted(
             {normalize_scope(scope, session["cwd"]) for scope in scopes}
@@ -510,10 +770,17 @@ class CoordinationStore:
                 """
                 UPDATE sessions
                 SET bead_id = ?, write_scope_json = ?, activity = ?,
-                    last_seen_at = ?, ended_at = NULL
+                    lease_mode = ?, last_seen_at = ?, ended_at = NULL
                 WHERE session_id = ?
                 """,
-                (bead_id, json.dumps(normalized), activity, now, session_id),
+                (
+                    bead_id,
+                    json.dumps(normalized),
+                    activity,
+                    lease_mode,
+                    now,
+                    session_id,
+                ),
             )
         return self.get_session(session_id)
 
@@ -537,7 +804,7 @@ class CoordinationStore:
                 """
                 UPDATE sessions
                 SET bead_id = NULL, write_scope_json = '[]', activity = 'idle',
-                    last_seen_at = ?
+                    lease_mode = 'write', last_seen_at = ?
                 WHERE session_id = ?
                 """,
                 (now, session_id),
@@ -545,6 +812,224 @@ class CoordinationStore:
             if cursor.rowcount != 1:
                 raise CoordinationError(f"Session {session_id} is not registered.")
         return self.get_session(session_id)
+
+    def handoff_work(
+        self,
+        *,
+        sender_session_id: str,
+        recipient_session_id: str,
+        patch_label: str,
+        validation_boundary: str,
+        validation_responsibility: str,
+        mode: str,
+        target_bead_id: str | None = None,
+        scopes: Iterable[str] | None = None,
+        handoff_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        if sender_session_id == recipient_session_id:
+            raise CoordinationError("A work declaration cannot be handed to itself.")
+        if mode not in LEASE_MODES:
+            raise CoordinationError("Handoff mode must be write or validation.")
+        audit_fields = {
+            "patch label": patch_label,
+            "validation boundary": validation_boundary,
+            "validation responsibility": validation_responsibility,
+        }
+        for label, value in audit_fields.items():
+            if not value.strip():
+                raise CoordinationError(f"Handoff {label} must not be empty.")
+        identifier = handoff_id.strip() if handoff_id is not None else str(uuid.uuid4())
+        if not identifier:
+            raise CoordinationError("Handoff ID must not be empty.")
+        notification_thread = (
+            thread_id.strip() if thread_id is not None else f"handoff:{identifier}"
+        )
+        if not notification_thread:
+            raise CoordinationError("Handoff thread ID must not be empty.")
+        now = self.clock()
+        cutoff = now - self.stale_after_seconds
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            sender_row = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?",
+                (sender_session_id,),
+            ).fetchone()
+            recipient_row = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?",
+                (recipient_session_id,),
+            ).fetchone()
+            if sender_row is None:
+                raise CoordinationError(
+                    f"Session {sender_session_id} is not registered."
+                )
+            if recipient_row is None:
+                raise CoordinationError(
+                    f"Session {recipient_session_id} is not registered."
+                )
+            if (
+                sender_row["ended_at"] is not None
+                or sender_row["last_seen_at"] < cutoff
+            ):
+                raise CoordinationError(
+                    f"Sender session {sender_session_id} must be online."
+                )
+            if sender_row["bead_id"] is None:
+                raise CoordinationError(
+                    f"Session {sender_session_id} has no work declaration to hand off."
+                )
+            sender_scopes = _json_scopes(sender_row["write_scope_json"])
+            if not sender_scopes:
+                raise CoordinationError("The sender declaration has no scopes.")
+            requested_scopes = sender_scopes
+            if scopes is not None:
+                requested_scopes = sorted(
+                    {
+                        normalize_scope(scope, sender_row["cwd"])
+                        for scope in scopes
+                    }
+                )
+                if requested_scopes != sorted(sender_scopes):
+                    raise CoordinationError(
+                        "Partial scope handoffs are not supported; hand off the "
+                        "whole declaration with its exact scopes."
+                    )
+            if recipient_row["cwd"] != sender_row["cwd"]:
+                raise CoordinationError(
+                    "Handoff recipient must be registered in the same repository."
+                )
+            if (
+                recipient_row["ended_at"] is not None
+                or recipient_row["last_seen_at"] < cutoff
+            ):
+                raise CoordinationError(
+                    f"Recipient session {recipient_session_id} must be online."
+                )
+            if (
+                recipient_row["activity"] != "idle"
+                or bool(recipient_row["turn_active"])
+                or recipient_row["bead_id"] is not None
+                or _json_scopes(recipient_row["write_scope_json"])
+            ):
+                raise CoordinationError(
+                    f"Recipient session {recipient_session_id} must be idle and "
+                    "have no work declaration."
+                )
+            source_bead_id = str(sender_row["bead_id"])
+            target = (
+                source_bead_id
+                if target_bead_id is None
+                else target_bead_id.strip()
+            )
+            if not target:
+                raise CoordinationError("Target Bead ID must not be empty.")
+
+            connection.execute(
+                """
+                UPDATE sessions
+                SET bead_id = NULL, write_scope_json = '[]', activity = 'idle',
+                    lease_mode = 'write', last_seen_at = ?
+                WHERE session_id = ?
+                """,
+                (now, sender_session_id),
+            )
+            conflicts = self._find_conflicts(
+                connection,
+                session_id=recipient_session_id,
+                cwd=str(sender_row["cwd"]),
+                bead_id=target,
+                scopes=requested_scopes,
+            )
+            if conflicts:
+                raise ConflictError(conflicts)
+            recipient_activity = "validating" if mode == "validation" else "implementing"
+            connection.execute(
+                """
+                UPDATE sessions
+                SET bead_id = ?, write_scope_json = ?, activity = ?,
+                    lease_mode = ?, last_seen_at = ?, ended_at = NULL
+                WHERE session_id = ?
+                """,
+                (
+                    target,
+                    json.dumps(requested_scopes),
+                    recipient_activity,
+                    mode,
+                    now,
+                    recipient_session_id,
+                ),
+            )
+            notification_body = (
+                f"Handoff {identifier}: patch {patch_label.strip()} transferred "
+                f"{source_bead_id} to {target} in {mode} mode. Validation boundary: "
+                f"{validation_boundary.strip()}. Validation responsibility: "
+                f"{validation_responsibility.strip()}."
+            )
+            message_row, inserted = self._insert_message(
+                connection,
+                sender_session_id=sender_session_id,
+                recipient_session_id=recipient_session_id,
+                body=notification_body,
+                classification="action_required",
+                thread_id=notification_thread,
+                reply_required=False,
+                now=now,
+            )
+            if not inserted:
+                raise CoordinationError(
+                    f"Handoff thread {notification_thread} is already closed."
+                )
+            connection.execute(
+                """
+                INSERT INTO handoffs (
+                    handoff_id, sender_session_id, recipient_session_id,
+                    source_bead_id, target_bead_id, scope_json, patch_label,
+                    validation_boundary, validation_responsibility, mode,
+                    thread_id, notification_message_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    identifier,
+                    sender_session_id,
+                    recipient_session_id,
+                    source_bead_id,
+                    target,
+                    json.dumps(requested_scopes),
+                    patch_label.strip(),
+                    validation_boundary.strip(),
+                    validation_responsibility.strip(),
+                    mode,
+                    notification_thread,
+                    message_row["id"],
+                    now,
+                ),
+            )
+            handoff_row = connection.execute(
+                "SELECT * FROM handoffs WHERE handoff_id = ?", (identifier,)
+            ).fetchone()
+            updated_sender = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (sender_session_id,)
+            ).fetchone()
+            updated_recipient = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (recipient_session_id,)
+            ).fetchone()
+            assert handoff_row is not None
+            assert updated_sender is not None
+            assert updated_recipient is not None
+            result = self._row_to_handoff(handoff_row)
+            result["sender"] = self._row_to_session(updated_sender, now)
+            result["recipient"] = self._row_to_session(updated_recipient, now)
+            result["notification"] = self._row_to_message(message_row)
+            return result
+
+    def get_handoff(self, handoff_id: str) -> dict[str, Any]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+            ).fetchone()
+        if row is None:
+            raise CoordinationError(f"Handoff {handoff_id} does not exist.")
+        return self._row_to_handoff(row)
 
     def end_session(self, session_id: str) -> dict[str, Any]:
         now = self.clock()
@@ -934,18 +1419,15 @@ class CoordinationStore:
                 f"Delegation {delegation_id} for Bead {row['bead_id']} "
                 f"{outcome}: {message.strip()}"
             )
-            connection.execute(
-                """
-                INSERT INTO messages (
-                    sender_session_id, recipient_session_id, body, created_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (
-                    child_session_id,
-                    row["parent_session_id"],
-                    notification,
-                    now,
-                ),
+            self._insert_message(
+                connection,
+                sender_session_id=child_session_id,
+                recipient_session_id=row["parent_session_id"],
+                body=notification,
+                classification="action_required",
+                thread_id=f"delegation:{delegation_id}",
+                reply_required=True,
+                now=now,
             )
         return self.get_delegation(delegation_id)
 
@@ -982,18 +1464,15 @@ class CoordinationStore:
                     f"Delegation {row['delegation_id']} for Bead {row['bead_id']} "
                     f"failed: {reason.strip()}"
                 )
-                connection.execute(
-                    """
-                    INSERT INTO messages (
-                        sender_session_id, recipient_session_id, body, created_at
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        child_session_id,
-                        row["parent_session_id"],
-                        notification,
-                        now,
-                    ),
+                self._insert_message(
+                    connection,
+                    sender_session_id=child_session_id,
+                    recipient_session_id=row["parent_session_id"],
+                    body=notification,
+                    classification="action_required",
+                    thread_id=f"delegation:{row['delegation_id']}",
+                    reply_required=True,
+                    now=now,
                 )
                 failed_ids.append(row["delegation_id"])
         return [self.get_delegation(identifier) for identifier in failed_ids]
@@ -1162,6 +1641,7 @@ class CoordinationStore:
                         ON message_wake_attempts.message_id = messages.id
                     WHERE messages.recipient_session_id = ?
                       AND messages.delivered_at IS NULL
+                      AND messages.classification = 'action_required'
                       AND message_wake_attempts.message_id IS NULL
                     ORDER BY messages.id
                     """,
@@ -1212,6 +1692,7 @@ class CoordinationStore:
                     FROM messages
                     WHERE id = ? AND recipient_session_id = ?
                       AND delivered_at IS NULL
+                      AND classification = 'action_required'
                     """,
                     (now, message_id, session_id),
                 )
@@ -1247,11 +1728,20 @@ class CoordinationStore:
         body: str,
         recipient_session_id: str | None = None,
         recipient_bead_id: str | None = None,
+        classification: str = "action_required",
+        thread_id: str | None = None,
+        reply_required: bool | None = None,
     ) -> dict[str, Any]:
         if bool(recipient_session_id) == bool(recipient_bead_id):
             raise CoordinationError("Specify exactly one recipient session or bead.")
         if not body.strip():
             raise CoordinationError("Message body must not be empty.")
+        if classification not in MESSAGE_CLASSIFICATIONS:
+            raise CoordinationError(
+                f"Unknown message classification: {classification}."
+            )
+        if reply_required is not None and not isinstance(reply_required, bool):
+            raise CoordinationError("Message reply_required must be a boolean.")
         sender = self.get_session(sender_session_id)
         recipient: dict[str, Any]
         if recipient_session_id:
@@ -1271,25 +1761,36 @@ class CoordinationStore:
                 raise AmbiguousTargetError(str(recipient_bead_id), candidates)
             recipient = candidates[0]
         now = self.clock()
+        normalized_thread = thread_id.strip() if thread_id is not None else None
+        if thread_id is not None and not normalized_thread:
+            raise CoordinationError("Message thread ID must not be empty.")
+        normalized_thread = normalized_thread or f"message:{uuid.uuid4()}"
+        should_reply = (
+            classification == "action_required"
+            if reply_required is None
+            else reply_required
+        )
         with self._connection() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO messages (
-                    sender_session_id, recipient_session_id, body, created_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (sender_session_id, recipient["session_id"], body.strip(), now),
+            connection.execute("BEGIN IMMEDIATE")
+            row, inserted = self._insert_message(
+                connection,
+                sender_session_id=sender_session_id,
+                recipient_session_id=recipient["session_id"],
+                body=body.strip(),
+                classification=classification,
+                thread_id=normalized_thread,
+                reply_required=should_reply,
+                now=now,
             )
-            message_id = int(cursor.lastrowid)
-        return {
-            "id": message_id,
-            "sender_session_id": sender_session_id,
-            "recipient_session_id": recipient["session_id"],
-            "recipient_name": recipient["name"],
-            "recipient_bead_id": recipient["bead_id"],
-            "body": body.strip(),
-            "created_at": _iso(now),
-        }
+        result = self._row_to_message(row)
+        result.update(
+            {
+                "recipient_name": recipient["name"],
+                "recipient_bead_id": recipient["bead_id"],
+                "idempotent": not inserted,
+            }
+        )
+        return result
 
     def inbox(
         self,
@@ -1297,11 +1798,30 @@ class CoordinationStore:
         *,
         include_delivered: bool = False,
         mark_delivered: bool = True,
+        unread_only: bool = False,
+        classifications: Iterable[str] | None = None,
     ) -> list[dict[str, Any]]:
         self.get_session(session_id)
+        if include_delivered and unread_only:
+            raise CoordinationError("Unread inbox cannot be combined with all history.")
         clauses = ["messages.recipient_session_id = ?"]
-        if not include_delivered:
+        values: list[Any] = [session_id]
+        if unread_only:
+            clauses.append("messages.acknowledged_at IS NULL")
+        elif not include_delivered:
             clauses.append("messages.delivered_at IS NULL")
+        normalized_classifications = (
+            sorted(set(classifications)) if classifications is not None else []
+        )
+        unknown = set(normalized_classifications) - MESSAGE_CLASSIFICATIONS
+        if unknown:
+            raise CoordinationError(
+                "Unknown message classification(s): " + ", ".join(sorted(unknown))
+            )
+        if normalized_classifications:
+            placeholders = ", ".join("?" for _ in normalized_classifications)
+            clauses.append(f"messages.classification IN ({placeholders})")
+            values.extend(normalized_classifications)
         where = " AND ".join(clauses)
         now = self.clock()
         with self._connection() as connection:
@@ -1317,7 +1837,7 @@ class CoordinationStore:
                     WHERE {where}
                     ORDER BY messages.id
                     """,
-                    (session_id,),
+                    values,
                 )
             )
             if mark_delivered and rows:
@@ -1330,19 +1850,7 @@ class CoordinationStore:
                     [(now, row["id"]) for row in rows],
                 )
         return [
-            {
-                "id": row["id"],
-                "sender_session_id": row["sender_session_id"],
-                "sender_name": row["sender_name"],
-                "sender_client": row["sender_client"],
-                "sender_bead_id": row["sender_bead_id"],
-                "body": row["body"],
-                "created_at": _iso(row["created_at"]),
-                "delivered_at": _iso(
-                    row["delivered_at"] or (now if mark_delivered else None)
-                ),
-                "acknowledged_at": _iso(row["acknowledged_at"]),
-            }
+            self._row_to_message(row, delivered_at=now if mark_delivered else None)
             for row in rows
         ]
 
@@ -1353,6 +1861,7 @@ class CoordinationStore:
         timeout_seconds: float | None = None,
         include_delivered: bool = False,
         mark_delivered: bool = True,
+        classifications: Iterable[str] | None = None,
         poll_interval_seconds: float = DEFAULT_INBOX_POLL_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
     ) -> list[dict[str, Any]]:
@@ -1371,6 +1880,7 @@ class CoordinationStore:
                 session_id,
                 include_delivered=False,
                 mark_delivered=mark_delivered,
+                classifications=classifications,
             )
             if messages:
                 return messages
@@ -1388,7 +1898,8 @@ class CoordinationStore:
             cursor = connection.execute(
                 """
                 UPDATE messages
-                SET delivered_at = COALESCE(delivered_at, ?), acknowledged_at = ?
+                SET delivered_at = COALESCE(delivered_at, ?),
+                    acknowledged_at = COALESCE(acknowledged_at, ?)
                 WHERE id = ? AND recipient_session_id = ?
                 """,
                 (now, now, message_id, session_id),
@@ -1405,4 +1916,40 @@ class CoordinationStore:
             "id": row["id"],
             "recipient_session_id": row["recipient_session_id"],
             "acknowledged_at": _iso(row["acknowledged_at"]),
+        }
+
+    def acknowledge_all_unread(self, session_id: str) -> dict[str, Any]:
+        self.get_session(session_id)
+        now = self.clock()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = list(
+                connection.execute(
+                    """
+                    SELECT id FROM messages
+                    WHERE recipient_session_id = ? AND acknowledged_at IS NULL
+                    ORDER BY id
+                    """,
+                    (session_id,),
+                )
+            )
+            message_ids = [int(row["id"]) for row in rows]
+            if message_ids:
+                connection.executemany(
+                    """
+                    UPDATE messages
+                    SET delivered_at = COALESCE(delivered_at, ?),
+                        acknowledged_at = COALESCE(acknowledged_at, ?)
+                    WHERE id = ? AND recipient_session_id = ?
+                    """,
+                    [
+                        (now, now, message_id, session_id)
+                        for message_id in message_ids
+                    ],
+                )
+        return {
+            "session_id": session_id,
+            "acknowledged": len(message_ids),
+            "message_ids": message_ids,
+            "acknowledged_at": _iso(now) if message_ids else None,
         }

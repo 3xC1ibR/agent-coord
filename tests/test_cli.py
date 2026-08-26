@@ -6,16 +6,105 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
-from agent_coord.cli import _parser, validate_claimed_bead
+from agent_coord.cli import _parser, run as cli_run, validate_claimed_bead
 from agent_coord.store import CoordinationError
 
 
 class CliTests(unittest.TestCase):
+    def test_send_reply_required_boolean_option_parses(self) -> None:
+        parser = _parser()
+        self.assertIsNone(
+            parser.parse_args(
+                ["send", "--from-session", "one", "--session", "two", "hello"]
+            ).reply_required
+        )
+        self.assertFalse(
+            parser.parse_args(
+                [
+                    "send", "--from-session", "one", "--session", "two",
+                    "--no-reply-required", "hello",
+                ]
+            ).reply_required
+        )
+        self.assertTrue(
+            parser.parse_args(
+                [
+                    "send", "--from-session", "one", "--session", "two",
+                    "--reply-required", "hello",
+                ]
+            ).reply_required
+        )
+
+    def test_handoff_parses_audited_whole_declaration_transfer(self) -> None:
+        arguments = _parser().parse_args(
+            [
+                "handoff",
+                "--from-session",
+                "sender",
+                "--to-session",
+                "recipient",
+                "--target-bead",
+                "work-b",
+                "--scope",
+                "src/**",
+                "--patch-label",
+                "adapter-v2",
+                "--validation-boundary",
+                "focused tests passed",
+                "--validation-responsibility",
+                "recipient runs full suite",
+                "--mode",
+                "validation",
+            ]
+        )
+
+        self.assertEqual(arguments.recipient_session_id, "recipient")
+        self.assertEqual(arguments.target_bead_id, "work-b")
+        self.assertEqual(arguments.mode, "validation")
+
+    @patch("agent_coord.cli.validate_claimed_bead")
+    @patch("agent_coord.cli.CoordinationStore")
+    def test_handoff_revalidates_changed_target_bead_immediately(
+        self, store_class, validate
+    ) -> None:
+        store = MagicMock()
+        store_class.return_value = store
+        store.get_session.return_value = {
+            "bead_id": "work-a",
+            "cwd": "/tmp/repo",
+        }
+        store.handoff_work.return_value = {"handoff_id": "handoff-a"}
+        arguments = _parser().parse_args(
+            [
+                "handoff",
+                "--from-session",
+                "sender",
+                "--session",
+                "recipient",
+                "--bead",
+                "work-b",
+                "--patch-label",
+                "adapter-v2",
+                "--validation-boundary",
+                "focused tests passed",
+                "--validation-responsibility",
+                "recipient",
+                "--mode",
+                "write",
+            ]
+        )
+
+        result = cli_run(arguments)
+
+        validate.assert_called_once_with("work-b", "/tmp/repo")
+        store.handoff_work.assert_called_once()
+        self.assertEqual(result["handoff_id"], "handoff-a")
+
     def test_delegate_parses_model_and_reasoning_effort(self) -> None:
         arguments = _parser().parse_args(
             [
@@ -180,6 +269,79 @@ class CliTests(unittest.TestCase):
                 database, "inbox", "--session-id", "two", "--wait", "--all"
             )
         self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_explicit_unread_inbox_and_ack_all_unread(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            for session_id, client in (("one", "codex"), ("two", "claude")):
+                self._run(
+                    database,
+                    "register",
+                    "--session-id",
+                    session_id,
+                    "--client",
+                    client,
+                    "--cwd",
+                    directory,
+                )
+            self._run(
+                database,
+                "send",
+                "--from-session",
+                "one",
+                "--session",
+                "two",
+                "--classification",
+                "informational",
+                "FYI",
+            )
+            self._run(
+                database, "send", "--from-session", "one", "--session", "two", "act"
+            )
+            self._run(database, "inbox", "--session-id", "two")
+
+            unread = self._run(
+                database, "inbox", "--session-id", "two", "--unread", "--peek"
+            )
+            acknowledged = self._run(
+                database, "ack", "--session-id", "two", "--all-unread"
+            )
+            empty = self._run(
+                database, "inbox", "--session-id", "two", "--unread", "--peek"
+            )
+
+        self.assertEqual(unread.returncode, 0, unread.stderr)
+        self.assertEqual(len(json.loads(unread.stdout)), 2)
+        self.assertEqual(json.loads(acknowledged.stdout)["acknowledged"], 2)
+        self.assertEqual(json.loads(empty.stdout), [])
+
+    def test_send_json_exposes_reply_required_and_accepts_opt_out_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            for session_id, client in (("one", "codex"), ("two", "claude")):
+                self._run(
+                    database,
+                    "register",
+                    "--session-id",
+                    session_id,
+                    "--client",
+                    client,
+                    "--cwd",
+                    directory,
+                )
+            result = self._run(
+                database,
+                "send",
+                "--from-session",
+                "one",
+                "--session",
+                "two",
+                "--no-reply-required",
+                "handoff received",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["reply_required"])
 
 
 if __name__ == "__main__":

@@ -15,6 +15,11 @@ from agent_coord.store import CoordinationError, CoordinationStore
 
 class HookTests(unittest.TestCase):
     def setUp(self) -> None:
+        wake_environment = patch.dict(
+            "os.environ", {"AGENT_COORD_ZELLIJ_WAKE": "0"}
+        )
+        wake_environment.start()
+        self.addCleanup(wake_environment.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -120,6 +125,55 @@ class HookTests(unittest.TestCase):
                 tool_input={
                     "command": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch"
                 },
+            ),
+            self.store,
+        )
+
+        self.assertEqual(result, {})
+
+    def test_validation_lease_denies_write_tools(self) -> None:
+        self.store.register(
+            session_id="codex-one", client="codex", cwd=str(self.root)
+        )
+        self.store.begin_work(
+            session_id="codex-one",
+            bead_id="work-a",
+            scopes=["src/**"],
+            activity="validating",
+            lease_mode="validation",
+        )
+
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={
+                    "command": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch"
+                },
+            ),
+            self.store,
+        )
+
+        self.assertIn(
+            "validation lease", result["hookSpecificOutput"]["permissionDecisionReason"]
+        )
+
+    def test_validating_activity_on_write_lease_remains_editable(self) -> None:
+        self.store.register(
+            session_id="codex-one", client="codex", cwd=str(self.root)
+        )
+        self.store.begin_work(
+            session_id="codex-one",
+            bead_id="work-a",
+            scopes=["src/**"],
+            activity="validating",
+        )
+
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="Write",
+                tool_input={"file_path": str(self.root / "src/app.py")},
             ),
             self.store,
         )
@@ -257,6 +311,87 @@ class HookTests(unittest.TestCase):
             "I need src/app.py.", first["hookSpecificOutput"]["additionalContext"]
         )
         self.assertEqual(second, {})
+
+    def test_hooks_surface_only_action_required_messages(self) -> None:
+        self.store.register(
+            session_id="codex-one", client="codex", cwd=str(self.root)
+        )
+        self.store.register(
+            session_id="claude-two", client="claude", cwd=str(self.root), name="peer"
+        )
+        self.store.send_message(
+            sender_session_id="claude-two",
+            recipient_session_id="codex-one",
+            body="FYI only",
+            classification="informational",
+            thread_id="thread-a",
+        )
+        self.store.send_message(
+            sender_session_id="claude-two",
+            recipient_session_id="codex-one",
+            body="Thread complete",
+            classification="closure",
+            thread_id="thread-b",
+        )
+        actionable = self.store.send_message(
+            sender_session_id="claude-two",
+            recipient_session_id="codex-one",
+            body="Please validate",
+            classification="action_required",
+            thread_id="thread-c",
+            reply_required=False,
+        )
+
+        result = handle(self.payload("UserPromptSubmit"), self.store)
+        context = result["hookSpecificOutput"]["additionalContext"]
+
+        self.assertIn("Please validate", context)
+        self.assertNotIn("FYI only", context)
+        self.assertNotIn("Thread complete", context)
+        self.assertIn("thread thread-c", context)
+        self.assertIn("reply_required=false", context)
+        self.assertIn("only where reply_required=true", context)
+        self.assertEqual(
+            self.store.inbox("codex-one", mark_delivered=False),
+            [
+                message
+                for message in self.store.inbox(
+                    "codex-one", include_delivered=True, mark_delivered=False
+                )
+                if message["id"] != actionable["id"]
+                and message["classification"] != "closure"
+            ],
+        )
+
+    def test_closure_before_hook_delivery_suppresses_actionable_context(self) -> None:
+        self.store.register(
+            session_id="codex-one", client="codex", cwd=str(self.root)
+        )
+        self.store.register(
+            session_id="claude-two", client="claude", cwd=str(self.root)
+        )
+        pending = self.store.send_message(
+            sender_session_id="claude-two",
+            recipient_session_id="codex-one",
+            body="Please validate",
+            thread_id="thread-a",
+        )
+        self.store.send_message(
+            sender_session_id="claude-two",
+            recipient_session_id="codex-one",
+            body="Resolved before delivery",
+            classification="closure",
+            thread_id="thread-a",
+        )
+
+        result = handle(self.payload("UserPromptSubmit"), self.store)
+
+        self.assertEqual(result, {})
+        history = self.store.inbox(
+            "codex-one", include_delivered=True, mark_delivered=False
+        )
+        self.assertEqual(history[0]["id"], pending["id"])
+        self.assertIsNotNone(history[0]["delivered_at"])
 
     def test_stop_preserves_work_as_waiting_and_session_end_marks_offline(self) -> None:
         handle(self.payload("SessionStart"), self.store)

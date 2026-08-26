@@ -95,6 +95,12 @@ def _parser() -> argparse.ArgumentParser:
         choices=["planning", "implementing", "validating"],
         default="implementing",
     )
+    begin.add_argument(
+        "--lease-mode",
+        choices=["write", "validation"],
+        default="write",
+        help="Reserve the declaration for editing or validation-only stability.",
+    )
 
     end_work = subcommands.add_parser("end-work", help="Release a work declaration.")
     end_work.add_argument("--session-id", required=True)
@@ -117,11 +123,53 @@ def _parser() -> argparse.ArgumentParser:
     target = send.add_mutually_exclusive_group(required=True)
     target.add_argument("--session")
     target.add_argument("--bead")
+    send.add_argument(
+        "--classification",
+        choices=["action_required", "informational", "closure"],
+        default="action_required",
+    )
+    send.add_argument(
+        "--reply-required",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Require a conversational reply. Defaults to true for action-required "
+            "messages and false for informational or closure messages."
+        ),
+    )
+    send.add_argument("--thread-id")
     send.add_argument("message")
+
+    handoff = subcommands.add_parser(
+        "handoff", help="Atomically transfer a whole work declaration."
+    )
+    handoff.add_argument("--from-session", required=True)
+    handoff.add_argument(
+        "--session", "--to-session", dest="recipient_session_id", required=True
+    )
+    handoff.add_argument("--bead", "--target-bead", dest="target_bead_id")
+    handoff.add_argument(
+        "--scope",
+        action="append",
+        help="Optional exact repetition of every current scope; subsets are rejected.",
+    )
+    handoff.add_argument("--patch-label", required=True)
+    handoff.add_argument("--validation-boundary", required=True)
+    handoff.add_argument("--validation-responsibility", required=True)
+    handoff.add_argument("--mode", required=True, choices=["write", "validation"])
+    handoff.add_argument("--thread-id")
 
     inbox = subcommands.add_parser("inbox", help="Read durable messages.")
     inbox.add_argument("--session-id", required=True)
-    inbox.add_argument("--all", action="store_true", dest="include_delivered")
+    inbox_mode = inbox.add_mutually_exclusive_group()
+    inbox_mode.add_argument(
+        "--all", action="store_true", dest="include_delivered"
+    )
+    inbox_mode.add_argument(
+        "--unread",
+        action="store_true",
+        help="Show compact unacknowledged messages, including delivered messages.",
+    )
     inbox.add_argument("--peek", action="store_true")
     inbox.add_argument(
         "--wait",
@@ -140,7 +188,9 @@ def _parser() -> argparse.ArgumentParser:
 
     acknowledge = subcommands.add_parser("ack", help="Acknowledge a message.")
     acknowledge.add_argument("--session-id", required=True)
-    acknowledge.add_argument("--message-id", required=True, type=int)
+    acknowledge_target = acknowledge.add_mutually_exclusive_group(required=True)
+    acknowledge_target.add_argument("--message-id", type=int)
+    acknowledge_target.add_argument("--all-unread", action="store_true")
 
     delegate = subcommands.add_parser(
         "delegate", help="Launch ready Beads work in a new Codex Zellij pane."
@@ -261,6 +311,7 @@ def run(arguments: argparse.Namespace) -> Any:
             bead_id=arguments.bead,
             scopes=arguments.scope,
             activity=arguments.activity,
+            lease_mode=arguments.lease_mode,
         )
     if command == "end-work":
         return store.end_work(arguments.session_id)
@@ -280,10 +331,35 @@ def run(arguments: argparse.Namespace) -> Any:
             recipient_session_id=arguments.session,
             recipient_bead_id=arguments.bead,
             body=arguments.message,
+            classification=arguments.classification,
+            thread_id=arguments.thread_id,
+            reply_required=arguments.reply_required,
+        )
+    if command == "handoff":
+        sender = store.get_session(arguments.from_session)
+        target_bead_id = arguments.target_bead_id or sender["bead_id"]
+        if target_bead_id is None:
+            raise CoordinationError(
+                f"Session {arguments.from_session} has no work declaration to hand off."
+            )
+        if target_bead_id != sender["bead_id"]:
+            validate_claimed_bead(target_bead_id, sender["cwd"])
+        return store.handoff_work(
+            sender_session_id=arguments.from_session,
+            recipient_session_id=arguments.recipient_session_id,
+            target_bead_id=target_bead_id,
+            scopes=arguments.scope,
+            patch_label=arguments.patch_label,
+            validation_boundary=arguments.validation_boundary,
+            validation_responsibility=arguments.validation_responsibility,
+            mode=arguments.mode,
+            thread_id=arguments.thread_id,
         )
     if command == "inbox":
         if arguments.timeout is not None and not arguments.wait:
             raise CoordinationError("--timeout requires --wait.")
+        if arguments.wait and arguments.unread:
+            raise CoordinationError("--wait cannot be combined with --unread.")
         if arguments.wait:
             return store.inbox_wait(
                 arguments.session_id,
@@ -295,8 +371,12 @@ def run(arguments: argparse.Namespace) -> Any:
             arguments.session_id,
             include_delivered=arguments.include_delivered,
             mark_delivered=not arguments.peek,
+            unread_only=arguments.unread,
         )
     if command == "ack":
+        if arguments.all_unread:
+            return store.acknowledge_all_unread(arguments.session_id)
+        assert arguments.message_id is not None
         return store.acknowledge(arguments.session_id, arguments.message_id)
     if command == "delegate":
         return delegate_codex(
