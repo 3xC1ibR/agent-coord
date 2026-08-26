@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
+sys.path.insert(0, str(PLUGIN_SCRIPTS))
+
+from agent_coord.hook import handle
+from agent_coord.store import CoordinationError, CoordinationStore
+
+
+class HookTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.store = CoordinationStore(self.root / "state.sqlite3")
+        self.outside = tempfile.TemporaryDirectory()
+        self.addCleanup(self.outside.cleanup)
+
+    def payload(self, event: str, session_id: str = "codex-one", **extra: object):
+        return {
+            "session_id": session_id,
+            "cwd": str(self.root),
+            "hook_event_name": event,
+            **extra,
+        }
+
+    def test_session_start_registers_and_announces_identity(self) -> None:
+        result = handle(self.payload("SessionStart"), self.store)
+
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("codex-one", context)
+        self.assertEqual(self.store.get_session("codex-one")["presence"], "online")
+
+    def test_session_start_attaches_inherited_delegation(self) -> None:
+        self.store.register(
+            session_id="parent",
+            client="claude",
+            cwd=str(self.root),
+        )
+        self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            delegation_id="delegation-a",
+        )
+
+        with patch.dict(
+            "os.environ", {"AGENT_COORD_DELEGATION_ID": "delegation-a"}
+        ):
+            result = handle(self.payload("SessionStart"), self.store)
+
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("attached to delegation delegation-a", context)
+        delegation = self.store.get_delegation("delegation-a")
+        self.assertEqual(delegation["child_session_id"], "codex-one")
+        self.assertEqual(delegation["status"], "attached")
+
+    @patch(
+        "agent_coord.hook.enable_from_environment",
+        side_effect=CoordinationError("zellij unavailable"),
+    )
+    def test_optional_wake_failure_keeps_session_start_context(self, _enable) -> None:
+        self.store.register(
+            session_id="claude-two",
+            client="claude",
+            cwd=str(self.root),
+        )
+        self.store.register(
+            session_id="codex-one",
+            client="codex",
+            cwd=str(self.root),
+        )
+        self.store.send_message(
+            sender_session_id="claude-two",
+            recipient_session_id="codex-one",
+            body="preserve this message",
+        )
+
+        result = handle(self.payload("SessionStart"), self.store)
+
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("preserve this message", context)
+        self.assertIn("Zellij wake could not start", context)
+
+    def test_write_without_work_declaration_is_denied(self) -> None:
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={
+                    "command": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch"
+                },
+            ),
+            self.store,
+        )
+
+        output = result["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("No Beads work declaration", output["permissionDecisionReason"])
+
+    def test_write_inside_declared_scope_is_allowed(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        self.store.begin_work(
+            session_id="codex-one", bead_id="work-a", scopes=["src/**"]
+        )
+
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={
+                    "command": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch"
+                },
+            ),
+            self.store,
+        )
+
+        self.assertEqual(result, {})
+
+    def test_write_outside_declared_scope_is_denied(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        self.store.begin_work(
+            session_id="codex-one", bead_id="work-a", scopes=["src/**"]
+        )
+
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="Write",
+                tool_input={"file_path": str(self.root / "tests/test_app.py")},
+            ),
+            self.store,
+        )
+
+        self.assertIn(
+            "outside the declared scope",
+            result["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_outside_repository_write_passes_through_without_declaration(self) -> None:
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="Write",
+                tool_input={"file_path": str(Path(self.outside.name) / "note.txt")},
+            ),
+            self.store,
+        )
+
+        self.assertEqual(result, {})
+
+    def test_outside_repository_write_passes_through_with_declaration(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        self.store.begin_work(
+            session_id="codex-one", bead_id="work-a", scopes=["src/**"]
+        )
+
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="Edit",
+                tool_input={"file_path": str(Path(self.outside.name) / "note.txt")},
+            ),
+            self.store,
+        )
+
+        self.assertEqual(result, {})
+
+    def test_relative_escape_is_treated_as_outside_the_repository(self) -> None:
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="Write",
+                tool_input={"file_path": "../elsewhere.txt"},
+            ),
+            self.store,
+        )
+
+        self.assertEqual(result, {})
+
+    def test_mixed_targets_still_gate_the_in_repository_path(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        self.store.begin_work(
+            session_id="codex-one", bead_id="work-a", scopes=["docs/**"]
+        )
+
+        command = (
+            "*** Begin Patch\n"
+            f"*** Update File: {Path(self.outside.name) / 'note.txt'}\n"
+            "*** Update File: src/app.py\n"
+            "*** End Patch"
+        )
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={"command": command},
+            ),
+            self.store,
+        )
+
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("src/app.py", reason)
+        self.assertNotIn("note.txt", reason)
+
+    def test_mixed_targets_allow_in_scope_in_repository_path(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        self.store.begin_work(
+            session_id="codex-one", bead_id="work-a", scopes=["src/**"]
+        )
+
+        command = (
+            "*** Begin Patch\n"
+            f"*** Update File: {Path(self.outside.name) / 'note.txt'}\n"
+            "*** Update File: src/app.py\n"
+            "*** End Patch"
+        )
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={"command": command},
+            ),
+            self.store,
+        )
+
+        self.assertEqual(result, {})
+
+    def test_user_prompt_delivers_a_message_once(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        self.store.register(
+            session_id="claude-two",
+            client="claude",
+            cwd=str(self.root),
+            name="peer",
+        )
+        self.store.send_message(
+            sender_session_id="claude-two",
+            recipient_session_id="codex-one",
+            body="I need src/app.py.",
+        )
+
+        first = handle(self.payload("UserPromptSubmit"), self.store)
+        self.assertTrue(self.store.get_session("codex-one")["turn_active"])
+        second = handle(self.payload("UserPromptSubmit"), self.store)
+
+        self.assertIn(
+            "I need src/app.py.", first["hookSpecificOutput"]["additionalContext"]
+        )
+        self.assertEqual(second, {})
+
+    def test_stop_preserves_work_as_waiting_and_session_end_marks_offline(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        self.store.begin_work(
+            session_id="codex-one", bead_id="work-a", scopes=["src/**"]
+        )
+        handle(self.payload("UserPromptSubmit"), self.store)
+        self.store.register_zellij_wake(
+            session_id="codex-one",
+            zellij_session="test-session",
+            pane_id="terminal_4",
+        )
+
+        self.assertEqual(handle(self.payload("Stop"), self.store), {})
+        self.assertEqual(self.store.get_session("codex-one")["activity"], "waiting")
+        self.assertFalse(self.store.get_session("codex-one")["turn_active"])
+        self.assertEqual(handle(self.payload("SessionEnd"), self.store), {})
+        self.assertEqual(self.store.get_session("codex-one")["presence"], "offline")
+        self.assertFalse(self.store.get_zellij_wake("codex-one")["enabled"])
+
+    def test_session_end_reports_an_unfinished_delegation(self) -> None:
+        self.store.register(
+            session_id="parent",
+            client="claude",
+            cwd=str(self.root),
+        )
+        self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            delegation_id="delegation-a",
+        )
+        handle(self.payload("SessionStart"), self.store)
+        self.store.attach_delegation("delegation-a", "codex-one")
+
+        handle(self.payload("SessionEnd"), self.store)
+
+        delegation = self.store.get_delegation("delegation-a")
+        self.assertEqual(delegation["status"], "failed")
+        self.assertIn("ended before", self.store.inbox("parent")[0]["body"])
+
+
+if __name__ == "__main__":
+    unittest.main()

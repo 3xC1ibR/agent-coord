@@ -1,5 +1,28 @@
 # Agent Instructions
 
+## Project workflow
+
+Agent Coord is a dependency-free Python CLI packaged as one dual-client Codex
+and Claude plugin. Keep the two client manifests thin. Put shared behavior in
+`plugins/agent-coord/scripts/agent_coord/` and shared agent guidance in
+`plugins/agent-coord/skills/agent-coordination/`.
+
+Before implementation, claim a Beads issue and declare the smallest useful file
+scope with the bundled `agent-coord begin-work` command. Do not edit when the
+command reports a conflict. Release the declaration with `agent-coord end-work`
+when the session no longer owns the scope.
+
+Run the test suite with:
+
+```bash
+python3 -W error::ResourceWarning -m unittest discover -s tests -v
+```
+
+After changing a file under `plugins/agent-coord/`, follow **Refresh installed
+plugins after changes** in `README.md` before live testing. Use the documented
+cachebuster helper and reinstall commands. Do not hand-edit marketplace files
+or reuse a session that loaded the previous plugin version.
+
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
 > **Architecture in one line:** Issues live in a local Dolt database

@@ -1,0 +1,24 @@
+{
+  "name": "agent-coord",
+  "version": "0.1.0+codex.20260826061120",
+  "description": "Coordinate local Codex and Claude Code sessions through Beads-linked work declarations, durable messages, and Codex work delegation.",
+  "author": {
+    "name": "r",
+    "email": "hi@rquinonez.com"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Coord",
+    "shortDescription": "Coordinate local coding-agent sessions.",
+    "longDescription": "Registers Codex and Claude Code sessions, links implementation work to claimed Beads issues, detects overlapping write scopes, delivers durable local messages, and delegates ready Beads work to new Codex Zellij panes.",
+    "developerName": "r",
+    "category": "Productivity",
+    "capabilities": [
+      "Local session coordination",
+      "Write-conflict guardrails",
+      "Durable messaging",
+      "Codex work delegation"
+    ],
+    "defaultPrompt": "Show the coding-agent sessions currently doing work in this repository."
+  }
+}

@@ -1,0 +1,95 @@
+Agent coordination feedback — 2026-08-26
+
+What worked
+
+- File-scope ownership prevented concurrent intake changes from overwriting each other.
+- Explicit messages made it possible to hand off shared files while preserving a narrow receipt-protocol patch.
+- The final integrated test ran after the adjacent refactor stabilized, instead of validating against a moving state.
+
+Improvements
+
+- Broad file-level scopes serialize small, independent changes too aggressively.
+- Add a short validation lease or reservation so the session that completed a child issue can run its final checks before another session claims the same files.
+- Distinguish read-only validation from write ownership.
+- Let handoffs name a patch and its validation responsibility, not only the files being released.
+
+Additional feedback from the Rig intake session — 2026-08-26
+
+Overall
+
+- The architecture is sound and the conflict protection paid for itself.
+- The current experience feels like a safe low-level locking protocol. It needs a higher-level handoff workflow to make coordinated work fast as well as safe.
+
+What worked
+
+- File leases prevented three sessions from editing the same large adapter and test file at the same time.
+- Explicit handoffs preserved adjacent receipt, authority, and bounded-context changes through focused and full validation.
+- Beads kept durable task state while Agent Coord kept ephemeral session ownership. This separation was clear and useful.
+- Message IDs and acknowledgements made the coordination history auditable.
+- Validation boundaries were explicit, so each session knew which state had passed which checks.
+
+Workflow friction
+
+- File-level scopes are too coarse for large shared files. Independent symbol-level edits became serialized work.
+- A normal handoff required several separate actions: request release, acknowledge, release, reacquire, validate, notify the next waiter, and release again.
+- "Stable" and "released" are different states, but the protocol does not make that transition atomic. Sessions had to ask whether they could proceed.
+- Inbox reads return the complete history when the immediate need is usually one unread message. This made repeated checks noisy and expensive.
+- Timed inbox waits produced inconsistent output near the caller's own timeout boundary.
+- The absolute installed CLI path is cumbersome to repeat.
+- Beads claim and Agent Coord begin-work are separate operations, which leaves a small race between durable assignment and ephemeral scope ownership.
+
+Highest-value improvements
+
+1. Add an atomic handoff command that releases or transfers scopes, identifies the recipient, records the validation boundary, and sends the notification in one operation.
+2. Support finer-grained ownership such as symbols or line ranges, with file scope as the fallback.
+3. Add a compact unread inbox and a wait-until-scope-free operation.
+4. Represent read-only validation separately from write ownership.
+5. Provide a short stable CLI entry point instead of requiring the installed cache path.
+
+Thread lifecycle and notification feedback
+
+- The session continued to receive coordination messages after both sides said that the handoff and coordination thread were complete.
+- Replying to a terminal confirmation caused another confirmation, which created an acknowledgement loop with no new actionable information.
+- Terminal acknowledgements should not wake an agent or require another reply.
+- Add an explicit close-thread or unsubscribe operation. After closure, deliver only material state changes such as a failed validation, reopened bead, or scope conflict.
+- Distinguish actionable messages from informational receipts. Hooks should surface actionable unread messages by default and keep terminal receipts available only in history.
+
+Concrete evidence from the terminal receipt loop
+
+- Messages 105 and 106 both said that no further coordination action was needed, but more terminal receipts followed.
+- Message 124 explicitly said, "Please do not acknowledge this message," but the workflow still caused an acknowledgement and another terminal receipt.
+- Messages 118, 119, 124, 126, and 130 contained no new state or requested action. Each delivery still consumed an agent turn and coordination overhead.
+- The distinction between delivery acknowledgement and conversational reply is not strong enough. A transport-level acknowledgement should be silent and must not create a new message.
+- Add message fields such as `action_required`, `reply_required`, `thread_id`, and `terminal`. Hooks should wake agents only for actionable messages by default.
+- A terminal message should close its thread automatically unless the sender reports a later material state change.
+
+Summary assessment
+
+- Agent Coord provided excellent collision protection and durable ownership during the intake work.
+- Its conversational efficiency was poor after the useful work finished. The coordination safeguards prevented real conflicts, but terminal-message loops and multi-step handoffs added minutes and noise without improving the result.
+- The highest-value design change is an atomic handoff with built-in thread closure: transfer or release scopes, record the validation state, notify the recipient once, and suppress further receipt replies.
+
+Concise Codex assessment — 2026-08-26
+
+Verdict
+
+- Good core, rough protocol.
+- Scope locking caught two real conflicts on the shared intake adapter and tests before concurrent edits could collide.
+- The separation between durable Beads state and temporary Agent Coord ownership is a sound design.
+- The explicit release and validation handoffs allowed three adjacent changes to land without overwriting one another.
+- Closure behavior was pathological. Requiring every terminal message to be both replied to and acknowledged created an acknowledgement loop with no coordination value.
+
+Recommended protocol changes
+
+- Classify messages as `action_required`, `informational`, or `closure`.
+- Require conversational replies only for `action_required` messages.
+- Make a transport acknowledgement terminal and silent. Never acknowledge an acknowledgement.
+- Add `inbox --unread` and `ack --all-unread` commands.
+- Add an atomic scope handoff or reservation queue so another sibling cannot acquire released files between an intended sender and recipient.
+- Represent `waiting_for_scope` separately from active implementation state.
+- Consider finer-grained ownership for independent changes in large shared files, while keeping file scope as the safe fallback.
+
+Bottom line
+
+- The safety mechanism is valuable and prevented actual races.
+- The messaging and handoff semantics need refinement so responsible coordination does not become two agents saying goodbye forever.

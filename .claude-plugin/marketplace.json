@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-coord",
+  "description": "Local cross-client coding-agent coordination",
+  "owner": {
+    "name": "r",
+    "email": "hi@rquinonez.com"
+  },
+  "plugins": [
+    {
+      "name": "agent-coord",
+      "description": "Coordinate local Claude Code and Codex sessions through Beads-linked work declarations and durable messages.",
+      "author": {
+        "name": "r",
+        "email": "hi@rquinonez.com"
+      },
+      "category": "productivity",
+      "source": "./plugins/agent-coord"
+    }
+  ]
+}

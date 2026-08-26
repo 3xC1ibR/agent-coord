@@ -1,0 +1,83 @@
+{
+  "description": "Register and optionally wake local Codex sessions, deliver messages, and guard conflicting writes.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COORD_CLIENT=codex python3 \"./scripts/agent-coord-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COORD_CLIENT=codex python3 \"./scripts/agent-coord-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COORD_CLIENT=codex python3 \"./scripts/agent-coord-hook\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COORD_CLIENT=codex python3 \"./scripts/agent-coord-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COORD_CLIENT=codex python3 \"./scripts/agent-coord-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COORD_CLIENT=codex python3 \"./scripts/agent-coord-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COORD_CLIENT=codex python3 \"./scripts/agent-coord-hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
