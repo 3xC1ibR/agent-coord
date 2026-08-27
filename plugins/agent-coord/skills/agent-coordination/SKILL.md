@@ -1,6 +1,6 @@
 ---
 name: agent-coordination
-description: Coordinate concurrent Claude Code and Codex sessions in a Beads repository. Use before implementation, when checking active work or file conflicts, when sending and receiving messages between local coding-agent sessions, or when delegating ready Beads work to a new Codex Zellij pane.
+description: Coordinate concurrent Claude Code and Codex sessions through conflict detection, durable local communication, and optional Zellij delegation. Use before implementation when another coding-agent session may be active, when checking file conflicts, when sending or receiving agent messages, or when delegating ready Beads work to a new Codex or Claude Code pane.
 ---
 
 # Agent Coordination
@@ -10,35 +10,40 @@ plugin root: the plugin root is two directories above this `SKILL.md`. Hooks
 announce the current coordination session ID and the absolute CLI path at
 session start.
 
-Beads remains the durable source of truth for work. Agent Coord stores
-ephemeral session activity, write scopes, durable local messages, and optional
-local wake state. Do not use Agent Coord instead of claiming or updating a
-Beads issue.
+Agent Coord stores ephemeral session activity, write scopes, durable local
+messages, and optional local wake state. Beads is optional for direct work. If
+the repository uses Beads, it remains the durable task source of truth; Agent
+Coord does not claim or update issues.
 
 ## Before implementation
 
-1. Run `bd show <bead-id>` and confirm the work belongs to that issue.
-2. Claim the issue with `bd update <bead-id> --claim` if it is not already
-   assigned to this user.
-3. Run the bundled CLI with:
+1. Inspect other working sessions with `<agent-coord> list --relevant --cwd
+   <repo>`. If no other session is doing work, proceed without a Beads issue or
+   scope. The write hook records the solo session as implementing.
+2. When another session is doing work, declare the smallest useful scope:
 
    ```bash
    <agent-coord> begin-work \
      --session-id <session-id> \
-     --bead <bead-id> \
      --scope '<file-or-directory-glob>' \
      --lease-mode write
    ```
 
-   Repeat `--scope` for distinct areas. Declare the smallest useful scope.
+   Repeat `--scope` for distinct areas. Add `--bead <bead-id>` only when the
+   work has a claimed, `in_progress` Beads issue. Direct scope declarations do
+   not require Beads.
+3. If an unscoped session is already working, the newcomer write stops and
+   sends that session an actionable scope request. Wait for the incumbent to
+   declare its scope, then declare a disjoint scope or resolve the overlap by
+   message before editing.
+
    Use `--lease-mode validation` only for an exclusive, stable validation
    reservation that must not edit through structured write tools. Ordinary
    `--activity validating` on a write lease may still make fixes.
-4. If the command reports a conflict, send the owning session a message and do
-   not edit until the overlap is resolved.
 
-The write hooks deny edits without a claimed Beads issue, edits outside the
-declared scope, and edits that overlap another live work declaration.
+The write hooks permit an unscoped write only while no other session requires
+coordination. With concurrent work, they stop unscoped newcomers, request an
+incumbent scope, deny edits outside declared scopes, and deny overlaps.
 
 ## Inspect and communicate
 
@@ -69,8 +74,9 @@ declared scope, and edits that overlap another live work declaration.
 
 ## Atomic handoff and thread closure
 
-Use one transactional handoff instead of releasing, notifying, and asking the
-recipient to reacquire the same paths:
+Atomic handoff requires a Bead-backed declaration. Use one transactional
+handoff instead of releasing, notifying, and asking the recipient to reacquire
+the same paths:
 
 ```bash
 <agent-coord> handoff \
@@ -130,11 +136,12 @@ conversationally only when `reply_required=true`, reuse the same thread, and use
 transport acknowledgement independently. Never reply to or acknowledge an
 acknowledgement; acknowledgements do not create messages.
 
-## Delegate work to a new Codex pane
+## Delegate work to a new agent pane
 
-Use `delegate` when a registered parent session must create a separate Codex
-worker. The work can have any implementation instructions, but it must have one
-open and ready Beads issue and explicit write scopes.
+Use `delegate` when a registered parent session must create a separate Codex or
+Claude Code worker. The work can have any implementation instructions, but it
+must have one open and ready Beads issue and explicit write scopes. Codex is the
+default child; pass `--client claude` to launch Claude Code.
 
 Run a validation-only preview first:
 
@@ -145,11 +152,12 @@ Run a validation-only preview first:
   --bead <ready-bead-id> \
   --scope 'src/**' \
   --scope 'tests/test_feature.py' \
+  --client <codex-or-claude> \
   --zellij-session <session-name> \
   --floating \
   --name <pane-name> \
-  --model <codex-model> \
-  --reasoning-effort <level> \
+  --model <client-model> \
+  --effort <level> \
   --dry-run \
   'Implement the specific requested change and run the focused tests.'
 ```
@@ -158,28 +166,31 @@ Remove `--dry-run` to launch the worker. The command can read the Zellij
 session from `ZELLIJ_SESSION_NAME`, so `--zellij-session` is optional when the
 parent runs inside the target session. `--floating` is optional.
 
-`--model` selects the child Codex model. `--reasoning-effort` sets its
-`model_reasoning_effort` configuration value. Each option is optional and is
-stored with the durable delegation. Do not guess a model or reasoning effort
-when the user did not request one. Let Codex validate whether the selected
-model supports the requested effort.
+`--model` and `--effort` select optional child settings. Effort maps to
+`model_reasoning_effort` for Codex and `--effort` for Claude Code;
+`--reasoning-effort` remains a compatibility alias. Both values are stored with
+the durable delegation. Do not guess either setting when the user did not
+request it. Let the selected client validate the combination.
 
-The default launch opens the interactive Codex TUI in the Zellij pane with
-`--approve-for-me`. Use `--yolo` only when the user explicitly authorizes Codex
-to bypass approvals and sandboxing. Never infer that permission from a request
-to delegate work.
+The reviewed launch opens the selected interactive TUI in the Zellij pane.
+Codex uses `--approve-for-me`; Claude Code uses safety-classified auto permission
+mode. Use `--yolo` only when the user explicitly authorizes bypassing the
+selected client's permission safeguards. Never infer that permission from a
+request to delegate work.
 
 Codex requires persisted trust before it runs hooks. Review and trust the
 installed Agent Coord hook before delegation. If that is not possible,
 `--bypass-hook-trust` is an explicit escape hatch for a repository whose
-complete enabled hook set was reviewed. This flag does not enable yolo mode,
+complete enabled hook set was reviewed. This Codex-only flag does not enable yolo mode,
 but it runs every enabled hook without persisted trust for that invocation. Do
 not add it by default or infer permission to use it from a request to delegate
-work.
+work. Claude Code rejects this flag combination and can show its normal
+repository trust prompt in a newly opened pane.
 
 The launcher rejects a blocked, claimed, or active Beads issue. It also rejects
 live scope conflicts and a second active delegation for the same issue. The
-child hook uses the inherited delegation ID to attach the new Codex session.
+child hook uses the inherited delegation ID and client identity to attach the
+new session.
 The generated prompt requires the child to read repository instructions,
 verify and claim the issue, declare the exact scopes, validate the work, obey
 git authority, and report a completed or failed result.
@@ -201,7 +212,7 @@ attach and remains active, the parent can release it with
 
 ## Release work
 
-Run `<agent-coord> end-work --session-id <id>` only when the session no longer
-owns the declared write scope. A stopped turn with unfinished work remains in
-`waiting` activity so another session can still see the lease. Session-end hooks
-mark the process offline, but they do not mutate Beads status.
+Run `<agent-coord> end-work --session-id <id>` when the session no longer owns
+work, including after an unscoped solo change. A stopped turn with unfinished
+work remains in `waiting` activity so a newcomer can detect it. Session-end
+hooks mark the process offline, but they do not mutate Beads status.

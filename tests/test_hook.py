@@ -16,7 +16,11 @@ from agent_coord.store import CoordinationError, CoordinationStore
 class HookTests(unittest.TestCase):
     def setUp(self) -> None:
         wake_environment = patch.dict(
-            "os.environ", {"AGENT_COORD_ZELLIJ_WAKE": "0"}
+            "os.environ",
+            {
+                "AGENT_COORD_CLIENT": "codex",
+                "AGENT_COORD_ZELLIJ_WAKE": "0",
+            },
         )
         wake_environment.start()
         self.addCleanup(wake_environment.stop)
@@ -69,6 +73,40 @@ class HookTests(unittest.TestCase):
         self.assertEqual(delegation["child_session_id"], "codex-one")
         self.assertEqual(delegation["status"], "attached")
 
+    def test_session_start_attaches_a_claude_delegation(self) -> None:
+        self.store.register(
+            session_id="parent",
+            client="codex",
+            cwd=str(self.root),
+        )
+        self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            client="claude",
+            delegation_id="delegation-claude",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "AGENT_COORD_CLIENT": "claude",
+                "AGENT_COORD_DELEGATION_ID": "delegation-claude",
+            },
+        ):
+            result = handle(
+                self.payload("SessionStart", session_id="claude-child"), self.store
+            )
+
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("attached to delegation delegation-claude", context)
+        delegation = self.store.get_delegation("delegation-claude")
+        self.assertEqual(delegation["child_session_id"], "claude-child")
+        self.assertEqual(self.store.get_session("claude-child")["client"], "claude")
+
     @patch(
         "agent_coord.hook.enable_from_environment",
         side_effect=CoordinationError("zellij unavailable"),
@@ -96,7 +134,7 @@ class HookTests(unittest.TestCase):
         self.assertIn("preserve this message", context)
         self.assertIn("Zellij wake could not start", context)
 
-    def test_write_without_work_declaration_is_denied(self) -> None:
+    def test_solo_write_without_work_declaration_is_allowed(self) -> None:
         result = handle(
             self.payload(
                 "PreToolUse",
@@ -108,9 +146,133 @@ class HookTests(unittest.TestCase):
             self.store,
         )
 
-        output = result["hookSpecificOutput"]
+        self.assertEqual(result, {})
+        self.assertEqual(self.store.get_session("codex-one")["activity"], "implementing")
+        handle(self.payload("Stop"), self.store)
+        self.assertEqual(self.store.get_session("codex-one")["activity"], "waiting")
+
+    def test_idle_peer_does_not_require_a_scope(self) -> None:
+        handle(self.payload("SessionStart", session_id="claude-two"), self.store)
+
+        result = handle(
+            self.payload(
+                "PreToolUse",
+                tool_name="apply_patch",
+                tool_input={
+                    "command": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch"
+                },
+            ),
+            self.store,
+        )
+
+        self.assertEqual(result, {})
+        self.assertEqual(self.store.get_session("codex-one")["activity"], "implementing")
+
+    def test_scope_request_clears_when_the_competing_session_exits(self) -> None:
+        incumbent_write = {
+            "command": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch"
+        }
+        handle(
+            self.payload(
+                "PreToolUse", tool_name="apply_patch", tool_input=incumbent_write
+            ),
+            self.store,
+        )
+        handle(self.payload("Stop"), self.store)
+        handle(self.payload("SessionStart", session_id="claude-two"), self.store)
+        handle(
+            self.payload(
+                "PreToolUse",
+                session_id="claude-two",
+                tool_name="Write",
+                tool_input={"file_path": str(self.root / "tests/test_app.py")},
+            ),
+            self.store,
+        )
+        self.assertTrue(self.store.get_session("codex-one")["scope_required"])
+
+        handle(self.payload("SessionEnd", session_id="claude-two"), self.store)
+        result = handle(
+            self.payload(
+                "PreToolUse", tool_name="apply_patch", tool_input=incumbent_write
+            ),
+            self.store,
+        )
+
+        self.assertEqual(result, {})
+        self.assertFalse(self.store.get_session("codex-one")["scope_required"])
+        self.assertEqual(
+            self.store.inbox(
+                "codex-one", unread_only=True, mark_delivered=False
+            ),
+            [],
+        )
+
+    def test_newcomer_stops_and_requests_an_incumbent_scope(self) -> None:
+        write = {
+            "command": "*** Begin Patch\n*** Update File: src/app.py\n*** End Patch"
+        }
+        self.assertEqual(
+            handle(
+                self.payload(
+                    "PreToolUse", tool_name="apply_patch", tool_input=write
+                ),
+                self.store,
+            ),
+            {},
+        )
+        handle(self.payload("Stop"), self.store)
+        handle(self.payload("SessionStart", session_id="claude-two"), self.store)
+
+        blocked = handle(
+            self.payload(
+                "PreToolUse",
+                session_id="claude-two",
+                tool_name="apply_patch",
+                tool_input={
+                    "command": "*** Begin Patch\n*** Update File: tests/test_app.py\n*** End Patch"
+                },
+            ),
+            self.store,
+        )
+
+        output = blocked["hookSpecificOutput"]
         self.assertEqual(output["permissionDecision"], "deny")
-        self.assertIn("No Beads work declaration", output["permissionDecisionReason"])
+        self.assertIn("--bead is optional", output["permissionDecisionReason"])
+        self.assertIn("Wait for the unscoped incumbent", output["permissionDecisionReason"])
+        self.assertEqual(self.store.get_session("claude-two")["activity"], "waiting")
+        self.assertTrue(self.store.get_session("codex-one")["scope_required"])
+        request = self.store.inbox(
+            "codex-one", unread_only=True, mark_delivered=False
+        )
+        self.assertEqual(len(request), 1)
+        self.assertIn("declare the smallest current scope", request[0]["body"])
+        self.assertFalse(request[0]["reply_required"])
+
+        incumbent_blocked = handle(
+            self.payload("PreToolUse", tool_name="apply_patch", tool_input=write),
+            self.store,
+        )
+        self.assertEqual(
+            incumbent_blocked["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn(
+            "declare the smallest current scope",
+            incumbent_blocked["hookSpecificOutput"]["additionalContext"],
+        )
+
+        incumbent = self.store.begin_work(
+            session_id="codex-one", scopes=["src/**"]
+        )
+        self.assertIsNone(incumbent["bead_id"])
+        self.assertFalse(incumbent["scope_required"])
+        self.assertEqual(
+            handle(
+                self.payload("PreToolUse", tool_name="apply_patch", tool_input=write),
+                self.store,
+            ),
+            {},
+        )
 
     def test_write_inside_declared_scope_is_allowed(self) -> None:
         handle(self.payload("SessionStart"), self.store)

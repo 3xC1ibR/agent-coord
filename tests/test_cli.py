@@ -16,6 +16,35 @@ from agent_coord.store import CoordinationError
 
 
 class CliTests(unittest.TestCase):
+    @patch("agent_coord.cli.validate_claimed_bead")
+    @patch("agent_coord.cli.CoordinationStore")
+    def test_begin_work_accepts_scope_without_bead(self, store_class, validate) -> None:
+        store = MagicMock()
+        store_class.return_value = store
+        store.get_session.return_value = {"cwd": "/tmp/repo"}
+        store.begin_work.return_value = {"write_scope": ["src/**"], "bead_id": None}
+        arguments = _parser().parse_args(
+            [
+                "begin-work",
+                "--session-id",
+                "one",
+                "--scope",
+                "src/**",
+            ]
+        )
+
+        result = cli_run(arguments)
+
+        validate.assert_not_called()
+        store.begin_work.assert_called_once_with(
+            session_id="one",
+            scopes=["src/**"],
+            bead_id=None,
+            activity="implementing",
+            lease_mode="write",
+        )
+        self.assertIsNone(result["bead_id"])
+
     def test_send_reply_required_boolean_option_parses(self) -> None:
         parser = _parser()
         self.assertIsNone(
@@ -105,7 +134,7 @@ class CliTests(unittest.TestCase):
         store.handoff_work.assert_called_once()
         self.assertEqual(result["handoff_id"], "handoff-a")
 
-    def test_delegate_parses_model_and_reasoning_effort(self) -> None:
+    def test_delegate_parses_client_model_and_effort(self) -> None:
         arguments = _parser().parse_args(
             [
                 "delegate",
@@ -115,16 +144,38 @@ class CliTests(unittest.TestCase):
                 "work-a",
                 "--scope",
                 "src/**",
+                "--client",
+                "claude",
                 "--model",
-                "gpt-5.6-terra",
-                "--reasoning-effort",
+                "opus",
+                "--effort",
                 "high",
                 "Implement the feature.",
             ]
         )
 
-        self.assertEqual(arguments.model, "gpt-5.6-terra")
+        self.assertEqual(arguments.client, "claude")
+        self.assertEqual(arguments.model, "opus")
         self.assertEqual(arguments.reasoning_effort, "high")
+
+    def test_delegate_defaults_to_codex_and_keeps_reasoning_effort_alias(self) -> None:
+        arguments = _parser().parse_args(
+            [
+                "delegate",
+                "--from-session",
+                "parent",
+                "--bead",
+                "work-a",
+                "--scope",
+                "src/**",
+                "--reasoning-effort",
+                "medium",
+                "Implement the feature.",
+            ]
+        )
+
+        self.assertEqual(arguments.client, "codex")
+        self.assertEqual(arguments.reasoning_effort, "medium")
 
     @patch("agent_coord.cli.shutil.which", return_value="/usr/local/bin/bd")
     @patch("agent_coord.cli.subprocess.run")

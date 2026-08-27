@@ -95,6 +95,7 @@ class CoordinationStoreTests(unittest.TestCase):
 
         self.assertFalse(migrated.get_session("legacy")["turn_active"])
         self.assertEqual(migrated.get_session("legacy")["lease_mode"], "write")
+        self.assertFalse(migrated.get_session("legacy")["scope_required"])
         legacy_message = migrated.inbox(
             "legacy-recipient", include_delivered=True, mark_delivered=False
         )[0]
@@ -139,6 +140,53 @@ class CoordinationStoreTests(unittest.TestCase):
 
         self.assertTrue(active["turn_active"])
         self.assertFalse(stopped["turn_active"])
+
+    def test_scope_only_declarations_reject_overlaps_without_beads(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+
+        first = self.store.begin_work(session_id="one", scopes=["src/**"])
+
+        self.assertIsNone(first["bead_id"])
+        self.assertEqual(first["write_scope"], ["src/**"])
+        with self.assertRaises(ConflictError):
+            self.store.begin_work(session_id="two", scopes=["src/api/**"])
+
+    def test_scope_requests_are_deduplicated_and_resolved_by_declaration(self) -> None:
+        self.register("incumbent")
+        self.register("newcomer", "claude")
+        self.store.touch("incumbent", "implementing", turn_active=False)
+        self.store.touch("newcomer", "discussing", turn_active=True)
+
+        blockers = self.store.scope_blocking_peers("newcomer")
+        first = self.store.request_scope_declarations(
+            "newcomer", [peer["session_id"] for peer in blockers]
+        )
+        second = self.store.request_scope_declarations(
+            "newcomer", [peer["session_id"] for peer in blockers]
+        )
+
+        self.assertEqual([peer["session_id"] for peer in blockers], ["incumbent"])
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [])
+        self.assertTrue(self.store.get_session("incumbent")["scope_required"])
+        self.assertFalse(first[0]["reply_required"])
+        with self.assertRaisesRegex(CoordinationError, "Wait for the requested"):
+            self.store.begin_work(session_id="newcomer", scopes=["tests/**"])
+
+        declared = self.store.begin_work(
+            session_id="incumbent", scopes=["src/**"]
+        )
+
+        self.assertFalse(declared["scope_required"])
+        self.assertEqual(
+            self.store.inbox("incumbent", unread_only=True, mark_delivered=False),
+            [],
+        )
+        newcomer = self.store.begin_work(
+            session_id="newcomer", scopes=["tests/**"]
+        )
+        self.assertEqual(newcomer["write_scope"], ["tests/**"])
 
     def test_validation_lease_is_exclusive_and_sets_validating_activity(self) -> None:
         self.register("one")
@@ -701,6 +749,47 @@ class CoordinationStoreTests(unittest.TestCase):
         inbox = self.store.inbox("parent")
         self.assertIn("work-a completed", inbox[0]["body"])
         self.assertIn("Implemented and validated", inbox[0]["body"])
+
+    def test_claude_delegation_records_and_matches_child_client(self) -> None:
+        self.register("parent")
+        self.register("claude-child", client="claude")
+        delegation = self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            client="claude",
+            model="opus",
+            reasoning_effort="high",
+            delegation_id="delegation-claude",
+        )
+
+        attached = self.store.attach_delegation(
+            delegation["delegation_id"], "claude-child"
+        )
+
+        self.assertEqual(attached["client"], "claude")
+        self.assertEqual(attached["model"], "opus")
+        self.assertEqual(attached["reasoning_effort"], "high")
+
+    def test_delegation_rejects_a_child_from_the_wrong_client(self) -> None:
+        self.register("parent")
+        self.register("codex-child")
+        self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            client="claude",
+            delegation_id="delegation-claude",
+        )
+
+        with self.assertRaisesRegex(CoordinationError, "targets claude"):
+            self.store.attach_delegation("delegation-claude", "codex-child")
 
     def test_duplicate_active_delegation_is_rejected(self) -> None:
         self.register("parent")

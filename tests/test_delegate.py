@@ -10,14 +10,21 @@ from pathlib import Path
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
-from agent_coord.delegate import delegate_codex, validate_ready_bead
+from agent_coord.delegate import delegate_work, validate_ready_bead
 from agent_coord.store import CoordinationError, CoordinationStore
 
 
 class FakeRun:
-    def __init__(self, root: Path, *, launch_returncode: int = 0) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        launch_returncode: int = 0,
+        claude_logged_in: bool = True,
+    ) -> None:
         self.root = root
         self.launch_returncode = launch_returncode
+        self.claude_logged_in = claude_logged_in
         self.calls: list[tuple[list[str], dict[str, object]]] = []
 
     def __call__(self, command, **options):
@@ -44,6 +51,13 @@ class FakeRun:
         if command[:3] == ["/mock/codex", "login", "status"]:
             return subprocess.CompletedProcess(
                 command, 0, stdout="Logged in\n", stderr=""
+            )
+        if command[:3] == ["/mock/claude", "auth", "status"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"loggedIn": self.claude_logged_in}) + "\n",
+                stderr="",
             )
         if command[0] == "/mock/zellij":
             return subprocess.CompletedProcess(
@@ -86,7 +100,7 @@ class DelegateTests(unittest.TestCase):
             "run": runner,
         }
         arguments.update(overrides)
-        return delegate_codex(self.store, **arguments)
+        return delegate_work(self.store, **arguments)
 
     def test_launch_constructs_reviewed_floating_codex_command(self) -> None:
         runner = FakeRun(self.root)
@@ -131,6 +145,49 @@ class DelegateTests(unittest.TestCase):
         self.assertEqual(result["delegation"]["model"], "gpt-5.6-terra")
         self.assertEqual(result["delegation"]["reasoning_effort"], "high")
 
+    def test_launch_constructs_reviewed_claude_command(self) -> None:
+        runner = FakeRun(self.root)
+
+        result = self.delegate(
+            runner,
+            client="claude",
+            model="opus",
+            reasoning_effort="high",
+        )
+
+        delegation = result["delegation"]
+        self.assertEqual(delegation["client"], "claude")
+        command = result["command"]
+        self.assertIn("AGENT_COORD_CLIENT=claude", command)
+        claude = command.index("/mock/claude")
+        self.assertEqual(command[claude + 1], "--add-dir")
+        self.assertNotIn("--cd", command)
+        self.assertIn("--permission-mode", command)
+        self.assertEqual(command[command.index("--permission-mode") + 1], "auto")
+        self.assertEqual(command[command.index("--model") + 1], "opus")
+        self.assertEqual(command[command.index("--effort") + 1], "high")
+        self.assertNotIn("--approve-for-me", command)
+        self.assertIn("delegated Claude Code worker", command[-1])
+
+    def test_claude_yolo_and_hook_trust_flags_are_client_specific(self) -> None:
+        runner = FakeRun(self.root)
+
+        result = self.delegate(runner, client="claude", yolo=True)
+
+        command = result["command"]
+        self.assertIn("--dangerously-skip-permissions", command)
+        self.assertNotIn("--permission-mode", command)
+        with self.assertRaisesRegex(CoordinationError, "only supported for Codex"):
+            self.delegate(runner, client="claude", bypass_hook_trust=True)
+
+    def test_claude_login_must_report_logged_in(self) -> None:
+        runner = FakeRun(self.root, claude_logged_in=False)
+
+        with self.assertRaisesRegex(CoordinationError, "loggedIn=false"):
+            self.delegate(runner, client="claude")
+
+        self.assertEqual(self.store.list_delegations(), [])
+
     def test_yolo_requires_the_explicit_flag(self) -> None:
         runner = FakeRun(self.root)
 
@@ -174,7 +231,7 @@ class DelegateTests(unittest.TestCase):
         with self.assertRaisesRegex(CoordinationError, "model must not be empty"):
             self.delegate(runner, model="  ")
         with self.assertRaisesRegex(
-            CoordinationError, "reasoning effort must not be empty"
+            CoordinationError, "effort must not be empty"
         ):
             self.delegate(runner, reasoning_effort="  ")
 

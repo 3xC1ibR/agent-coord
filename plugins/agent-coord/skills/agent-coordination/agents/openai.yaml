@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Coordination"
   short_description: "Coordinate concurrent local coding agents"
-  default_prompt: "List sessions doing Beads work here and flag write-scope conflicts."
+  default_prompt: "Use $agent-coordination to list active coding sessions and flag write-scope conflicts."

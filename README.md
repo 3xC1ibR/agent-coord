@@ -9,7 +9,8 @@ The plugin answers these questions:
 
 - Which sessions are online, stale, or offline?
 - Which sessions are discussing, planning, implementing, validating, or waiting?
-- Which claimed Beads issue and file scopes does each working session own?
+- Which sessions are working without scopes, and which file scopes do declared
+  sessions own?
 - How can a session atomically transfer a complete scope and its validation
   boundary without briefly releasing it to competing work?
 - How can a session reserve a stable scope for read-only validation?
@@ -18,15 +19,20 @@ The plugin answers these questions:
 - Which messages require action or a reply, and which are history-only receipts?
 - How can a Zellij session safely start a turn when a message arrives while it
   is idle?
-- How can a session delegate ready Beads work to a new interactive Codex
-  session in a visible Zellij pane?
+- How can a session delegate ready Beads work to a new interactive Codex or
+  Claude Code session in a visible Zellij pane?
 
 ## Design
 
-Beads is the source of truth for implementation work. Agent Coord does not
-claim, update, or close issues. Before a session can declare implementation
-work, `agent-coord begin-work` verifies that the issue is claimed and has the
-`in_progress` status.
+Agent Coord is a conflict detector and communication substrate. A sole working
+session does not need a Beads issue or write scope. When a second session tries
+to write, the hook stops the newcomer, sends the unscoped incumbent an
+actionable scope request, and requires concurrent writers to declare scopes.
+
+Beads is optional for direct work. When `begin-work` includes `--bead`, Agent
+Coord verifies that the issue is claimed and has the `in_progress` status. It
+does not claim, update, or close issues. Delegation and atomic handoff continue
+to require Bead identity because those workflows preserve durable ownership.
 
 Session and message state is in a WAL-mode SQLite database at:
 
@@ -77,21 +83,39 @@ the current installation.
 ## Use
 
 At session start, the hook registers the session and provides the session ID and
-the absolute path to the bundled CLI. Before implementation:
+the absolute path to the bundled CLI. A sole session can write immediately. The
+hook records its first structured repository write as active work. Run
+`end-work` when that solo work is finished so another session does not treat it
+as an incumbent.
+
+When another session is working, declare the smallest useful scope. Include a
+Beads issue only when the work already has durable task identity:
 
 ```bash
-bd update <bead-id> --claim
-
 <agent-coord-path> begin-work \
   --session-id <session-id> \
-  --bead <bead-id> \
   --scope 'src/**' \
   --scope 'tests/test_feature.py' \
   --lease-mode write
 ```
 
+```bash
+bd update <bead-id> --claim
+<agent-coord-path> begin-work \
+  --session-id <session-id> \
+  --bead <bead-id> \
+  --scope 'src/**'
+```
+
 `begin-work` rejects a declaration when another live session owns the same
-Beads issue or an overlapping scope in the same repository.
+non-null Beads issue or an overlapping scope in the same repository. Scope-only
+declarations receive the same overlap protection.
+
+If a newcomer finds an unscoped incumbent, its structured write is denied and
+the incumbent receives one actionable, `reply_required=false` request to
+declare a scope. The incumbent is also denied on its next structured write
+until it declares a scope. Repeated newcomer attempts do not duplicate the
+pending request.
 
 Use `--lease-mode validation` to reserve an exclusive, stable scope without
 granting the session permission to use structured write tools. This is distinct
@@ -178,9 +202,9 @@ ambiguous bead target).
 
 ## Atomic handoff
 
-Use `handoff` when the current owner has reached a named patch or validation
-boundary and the recipient must acquire the complete declaration without a
-scope-free race:
+Use `handoff` when the current owner has a Bead-backed declaration, has reached
+a named patch or validation boundary, and the recipient must acquire the
+complete declaration without a scope-free race:
 
 ```bash
 agent-coord handoff \
@@ -201,11 +225,12 @@ assert the expected declaration. Use `--target-bead` only for a claimed
 transaction. Beads and SQLite remain separate stores, so their updates cannot be
 one cross-database transaction.
 
-## Delegate work to a Codex Zellij pane
+## Delegate work to a Codex or Claude Code Zellij pane
 
-A registered Codex or Claude parent can launch a new Codex worker for an open,
-ready, and unclaimed Beads issue. First, preview and validate the launch without
-changing SQLite or opening a pane:
+A registered Codex or Claude parent can launch a new Codex or Claude Code worker
+for an open, ready, and unclaimed Beads issue. Codex remains the default child
+for backward compatibility; pass `--client claude` to select Claude Code. First,
+preview and validate the launch without changing SQLite or opening a pane:
 
 ```bash
 agent-coord delegate \
@@ -214,11 +239,12 @@ agent-coord delegate \
   --bead <ready-bead-id> \
   --scope 'src/**' \
   --scope 'tests/test_feature.py' \
+  --client claude \
   --zellij-session friendly-lemur \
   --floating \
   --name delegated-feature \
-  --model <codex-model> \
-  --reasoning-effort <level> \
+  --model <client-model> \
+  --effort <level> \
   --dry-run \
   'Implement the feature, run the focused tests, and report the result.'
 ```
@@ -229,17 +255,19 @@ Zellij session, the command reads `ZELLIJ_SESSION_NAME`, and you can omit
 use 90 percent width and 85 percent height by default. Use `--width` and
 `--height` to change these values.
 
-Use `--model` to select the child Codex model. Use `--reasoning-effort` to set
-the child `model_reasoning_effort` configuration value. The options are
-independent and optional. If you omit one, Codex uses its normal configuration
-for that setting. Agent Coord records both requested values in durable
-delegation state. It does not restrict model and effort combinations because
-Codex support can differ by model and release; the child Codex process validates
-the selected combination.
+Use `--model` and `--effort` to select the child model and effort. For Codex,
+Agent Coord maps effort to the `model_reasoning_effort` configuration value; for
+Claude Code it uses `--effort`. `--reasoning-effort` remains an alias for
+backward compatibility. Both options are independent and optional. Agent Coord
+records the requested values in durable delegation state and lets the selected
+client validate model and effort support.
 
-The default command opens the interactive Codex TUI with `--approve-for-me` in
-the requested Zellij pane. The optional `--yolo` flag starts Codex with
-`--dangerously-bypass-approvals-and-sandbox`. Use it only after explicit
+The reviewed command opens the selected interactive TUI in the requested
+Zellij pane. Codex uses `--approve-for-me`; Claude Code uses its safety-classified
+`--permission-mode auto`, which can still deny or request confirmation for risky
+actions. The optional `--yolo` flag maps to
+`--dangerously-bypass-approvals-and-sandbox` for Codex and
+`--dangerously-skip-permissions` for Claude Code. Use it only after explicit
 authorization.
 
 Codex also requires persisted trust before it runs hooks. Review and trust the
@@ -248,15 +276,19 @@ complete enabled hook set was reviewed, `--bypass-hook-trust` starts the
 interactive Codex session with
 `--dangerously-bypass-hook-trust`. This separate flag keeps reviewed command
 permissions but runs all enabled hooks without persisted trust for that one
-invocation. Do not use it as a default.
+invocation. Do not use it as a default. Claude Code has no corresponding
+`--bypass-hook-trust` launch option, so Agent Coord rejects that combination.
+An interactive Claude Code child can still show its normal repository trust
+prompt when the repository has not been trusted previously.
 
-Before launch, Agent Coord verifies the Git repository, `bd`, Codex login,
-Zellij, issue readiness, live write-scope conflicts, and active delegation
-state. It then creates one durable delegation record and starts Codex with an
-inherited delegation ID. Reviewed mode adds only the Agent Coord database
-directory as an extra writable root, so child CLI calls can update lifecycle
-state outside the repository. The child SessionStart hook attaches the new
-session. The generated instructions require the child to:
+Before launch, Agent Coord verifies the Git repository, `bd`, the selected
+client's login, Zellij, issue readiness, live write-scope conflicts, and active
+delegation state. It then creates one durable delegation record and starts the
+child with an inherited delegation ID and explicit client identity. Reviewed
+mode adds only the Agent Coord database directory as an extra allowed root, so
+child CLI calls can update lifecycle state outside the repository. The child
+SessionStart hook verifies the client and attaches the new session. The
+generated instructions require the child to:
 
 1. Read repository instructions and run `bd prime`.
 2. Verify and claim the ready issue.
@@ -325,12 +357,12 @@ sender behavior do not require Zellij.
   optionally starts Zellij wake, and delivers unread actionable messages.
 - `UserPromptSubmit` records an active model turn and delivers unread actionable
   messages.
-- `PreToolUse` checks structured write tools against the declared issue, state,
-  lease mode, scopes, and live conflicts. Validation leases deny structured
-  write tools.
+- `PreToolUse` permits unscoped solo writes. When concurrent work starts, it
+  stops the newcomer, requests an incumbent scope, and checks declared lease
+  mode, paths, and live conflicts. Validation leases deny structured writes.
 - `PostToolUse` refreshes liveness and delivers unread actionable messages.
-- `Stop` records an inactive turn plus `waiting` for unfinished declared work
-  or `idle` otherwise.
+- `Stop` records an inactive turn plus `waiting` for unfinished solo or
+  declared work, or `idle` otherwise.
 - `SessionEnd` records an unfinished child delegation as failed, disables
   Zellij wake, and marks the process offline without changing Beads.
 

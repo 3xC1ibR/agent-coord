@@ -1,7 +1,7 @@
 {
   "name": "agent-coord",
   "version": "0.1.0",
-  "description": "Coordinate local Claude Code and Codex sessions through Beads-linked work declarations, durable messages, and Codex work delegation.",
+  "description": "Coordinate local Claude Code and Codex sessions through write-conflict detection, durable messages, and cross-client work delegation.",
   "author": {
     "name": "r",
     "email": "hi@rquinonez.com"

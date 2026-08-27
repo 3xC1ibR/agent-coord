@@ -28,6 +28,8 @@ DEFAULT_INBOX_POLL_SECONDS = 0.5
 WAKEABLE_ACTIVITIES = {"idle", "waiting"}
 LEASE_MODES = {"write", "validation"}
 MESSAGE_CLASSIFICATIONS = {"action_required", "informational", "closure"}
+CLIENTS = {"claude", "codex"}
+SCOPE_REQUEST_THREAD_PREFIX = "scope-request:"
 _WILDCARD = re.compile(r"[*?[]")
 
 
@@ -203,7 +205,8 @@ class CoordinationStore:
                     last_seen_at REAL NOT NULL,
                     ended_at REAL,
                     turn_active INTEGER NOT NULL DEFAULT 0,
-                    lease_mode TEXT NOT NULL DEFAULT 'write'
+                    lease_mode TEXT NOT NULL DEFAULT 'write',
+                    scope_requested_at REAL
                 );
 
                 CREATE INDEX IF NOT EXISTS sessions_bead_idx
@@ -299,6 +302,10 @@ class CoordinationStore:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN lease_mode "
                     "TEXT NOT NULL DEFAULT 'write'"
+                )
+            if "scope_requested_at" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN scope_requested_at REAL"
                 )
             message_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(messages)")
@@ -411,6 +418,8 @@ class CoordinationStore:
             "lease_mode": row["lease_mode"],
             "bead_id": row["bead_id"],
             "write_scope": _json_scopes(row["write_scope_json"]),
+            "scope_required": row["scope_requested_at"] is not None,
+            "scope_requested_at": _iso(row["scope_requested_at"]),
             "started_at": _iso(row["started_at"]),
             "last_seen_at": _iso(row["last_seen_at"]),
             "ended_at": _iso(ended_at),
@@ -620,7 +629,7 @@ class CoordinationStore:
     ) -> dict[str, Any]:
         if not session_id.strip():
             raise CoordinationError("Session ID must not be empty.")
-        if client not in {"claude", "codex"}:
+        if client not in CLIENTS:
             raise CoordinationError("Client must be claude or codex.")
         repository = str(Path(cwd).resolve())
         now = self.clock()
@@ -691,18 +700,144 @@ class CoordinationStore:
             )
         )
 
+    @staticmethod
+    def _row_has_active_work(row: sqlite3.Row) -> bool:
+        return (
+            bool(row["turn_active"])
+            or row["activity"] in RELEVANT_ACTIVITIES
+            or bool(_json_scopes(row["write_scope_json"]))
+        )
+
+    def scope_blocking_peers(self, session_id: str) -> list[dict[str, Any]]:
+        """Return live peers that require an unscoped writer to coordinate."""
+        with self._connection() as connection:
+            current = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if current is None:
+                raise CoordinationError(f"Session {session_id} is not registered.")
+            if _json_scopes(current["write_scope_json"]):
+                return []
+            peers = [
+                row
+                for row in self._live_rows(connection, str(current["cwd"]))
+                if row["session_id"] != session_id and self._row_has_active_work(row)
+            ]
+            if not peers:
+                return []
+            if current["scope_requested_at"] is not None:
+                return [self._row_to_session(row) for row in peers]
+
+            current_has_work = current["activity"] in RELEVANT_ACTIVITIES
+            current_order = (current["started_at"], current["session_id"])
+            blockers: list[sqlite3.Row] = []
+            for peer in peers:
+                peer_has_work = (
+                    peer["activity"] in RELEVANT_ACTIVITIES
+                    or bool(_json_scopes(peer["write_scope_json"]))
+                )
+                peer_order = (peer["started_at"], peer["session_id"])
+                if peer_has_work or (not current_has_work and peer_order < current_order):
+                    blockers.append(peer)
+            return [self._row_to_session(row) for row in blockers]
+
+    @staticmethod
+    def _clear_scope_requirement_in_connection(
+        connection: sqlite3.Connection, session_id: str, now: float
+    ) -> None:
+        connection.execute(
+            "UPDATE sessions SET scope_requested_at = NULL WHERE session_id = ?",
+            (session_id,),
+        )
+        connection.execute(
+            """
+            UPDATE messages
+            SET delivered_at = COALESCE(delivered_at, ?),
+                acknowledged_at = COALESCE(acknowledged_at, ?)
+            WHERE recipient_session_id = ?
+              AND classification = 'action_required'
+              AND thread_id LIKE ?
+              AND acknowledged_at IS NULL
+            """,
+            (now, now, session_id, f"{SCOPE_REQUEST_THREAD_PREFIX}%"),
+        )
+
+    def clear_scope_requirement(self, session_id: str) -> dict[str, Any]:
+        now = self.clock()
+        self.get_session(session_id)
+        with self._connection() as connection:
+            self._clear_scope_requirement_in_connection(connection, session_id, now)
+        return self.get_session(session_id)
+
+    def request_scope_declarations(
+        self, sender_session_id: str, peer_session_ids: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        """Ask live, unscoped peers to declare scopes once per open request."""
+        sender = self.get_session(sender_session_id)
+        requested_ids = sorted(
+            {peer_id for peer_id in peer_session_ids if peer_id != sender_session_id}
+        )
+        if not requested_ids:
+            return []
+        now = self.clock()
+        inserted_messages: list[dict[str, Any]] = []
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            live_peers = {
+                row["session_id"]: row
+                for row in self._live_rows(connection, sender["cwd"])
+                if row["session_id"] in requested_ids
+            }
+            for peer_id in requested_ids:
+                peer = live_peers.get(peer_id)
+                if peer is None or _json_scopes(peer["write_scope_json"]):
+                    continue
+                updated = connection.execute(
+                    """
+                    UPDATE sessions
+                    SET scope_requested_at = ?
+                    WHERE session_id = ? AND scope_requested_at IS NULL
+                    """,
+                    (now, peer_id),
+                )
+                if updated.rowcount != 1:
+                    continue
+                pair = sorted((sender_session_id, peer_id))
+                thread_id = f"{SCOPE_REQUEST_THREAD_PREFIX}{pair[0]}:{pair[1]}"
+                body = (
+                    "Another live agent is ready to write in this repository. "
+                    "Before your next write, declare the smallest current scope "
+                    f"with agent-coord begin-work --session-id {peer_id} "
+                    "--scope '<path-or-glob>'. A Beads issue is optional. If you "
+                    "have no active work, end the session or run agent-coord "
+                    f"end-work --session-id {peer_id}."
+                )
+                message_row, inserted = self._insert_message(
+                    connection,
+                    sender_session_id=sender_session_id,
+                    recipient_session_id=peer_id,
+                    body=body,
+                    classification="action_required",
+                    thread_id=thread_id,
+                    reply_required=False,
+                    now=now,
+                )
+                if inserted:
+                    inserted_messages.append(self._row_to_message(message_row))
+        return inserted_messages
+
     def _find_conflicts(
         self,
         connection: sqlite3.Connection,
         *,
         session_id: str,
         cwd: str,
-        bead_id: str,
+        bead_id: str | None,
         scopes: list[str],
     ) -> list[dict[str, Any]]:
         conflicts: list[dict[str, Any]] = []
         for row in self._live_rows(connection, cwd):
-            if row["session_id"] == session_id or row["bead_id"] is None:
+            if row["session_id"] == session_id:
                 continue
             other_scopes = _json_scopes(row["write_scope_json"])
             overlaps = sorted(
@@ -713,7 +848,7 @@ class CoordinationStore:
                     if scopes_overlap(left, right)
                 }
             )
-            same_bead = row["bead_id"] == bead_id
+            same_bead = bead_id is not None and row["bead_id"] == bead_id
             if same_bead or overlaps:
                 conflicts.append(
                     {
@@ -733,8 +868,8 @@ class CoordinationStore:
         self,
         *,
         session_id: str,
-        bead_id: str,
         scopes: Iterable[str],
+        bead_id: str | None = None,
         activity: str = "implementing",
         lease_mode: str = "write",
     ) -> dict[str, Any]:
@@ -742,8 +877,9 @@ class CoordinationStore:
             raise CoordinationError(
                 "Work activity must be planning, implementing, or validating."
             )
-        if not bead_id.strip():
-            raise CoordinationError("Bead ID must not be empty.")
+        normalized_bead = bead_id.strip() if bead_id is not None else None
+        if bead_id is not None and not normalized_bead:
+            raise CoordinationError("Bead ID must not be empty when supplied.")
         if lease_mode not in LEASE_MODES:
             raise CoordinationError("Lease mode must be write or validation.")
         if lease_mode == "validation":
@@ -757,15 +893,37 @@ class CoordinationStore:
         now = self.clock()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            current_row = connection.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            assert current_row is not None
+            if current_row["scope_requested_at"] is None:
+                requested_predecessors = [
+                    row
+                    for row in self._live_rows(connection, session["cwd"])
+                    if row["session_id"] != session_id
+                    and row["scope_requested_at"] is not None
+                    and not _json_scopes(row["write_scope_json"])
+                ]
+                if requested_predecessors:
+                    owners = ", ".join(
+                        row["name"] or row["session_id"]
+                        for row in requested_predecessors
+                    )
+                    raise CoordinationError(
+                        "Wait for the requested incumbent scope declaration(s) "
+                        f"before declaring newcomer work: {owners}."
+                    )
             conflicts = self._find_conflicts(
                 connection,
                 session_id=session_id,
                 cwd=session["cwd"],
-                bead_id=bead_id,
+                bead_id=normalized_bead,
                 scopes=normalized,
             )
             if conflicts:
                 raise ConflictError(conflicts)
+            self._clear_scope_requirement_in_connection(connection, session_id, now)
             connection.execute(
                 """
                 UPDATE sessions
@@ -774,7 +932,7 @@ class CoordinationStore:
                 WHERE session_id = ?
                 """,
                 (
-                    bead_id,
+                    normalized_bead,
                     json.dumps(normalized),
                     activity,
                     lease_mode,
@@ -786,7 +944,7 @@ class CoordinationStore:
 
     def check_conflicts(self, session_id: str) -> list[dict[str, Any]]:
         session = self.get_session(session_id)
-        if session["bead_id"] is None:
+        if not session["write_scope"]:
             return []
         with self._connection() as connection:
             return self._find_conflicts(
@@ -800,6 +958,7 @@ class CoordinationStore:
     def end_work(self, session_id: str) -> dict[str, Any]:
         now = self.clock()
         with self._connection() as connection:
+            self._clear_scope_requirement_in_connection(connection, session_id, now)
             cursor = connection.execute(
                 """
                 UPDATE sessions
@@ -876,7 +1035,8 @@ class CoordinationStore:
                 )
             if sender_row["bead_id"] is None:
                 raise CoordinationError(
-                    f"Session {sender_session_id} has no work declaration to hand off."
+                    "Atomic handoff requires a Bead-backed work declaration; "
+                    f"session {sender_session_id} has no Bead."
                 )
             sender_scopes = _json_scopes(sender_row["write_scope_json"])
             if not sender_scopes:
@@ -1034,6 +1194,7 @@ class CoordinationStore:
     def end_session(self, session_id: str) -> dict[str, Any]:
         now = self.clock()
         with self._connection() as connection:
+            self._clear_scope_requirement_in_connection(connection, session_id, now)
             cursor = connection.execute(
                 """
                 UPDATE sessions
@@ -1126,18 +1287,21 @@ class CoordinationStore:
             raise CoordinationError("At least one delegated write scope is required.")
         if not instructions.strip():
             raise CoordinationError("Delegated instructions must not be empty.")
-        if client != "codex":
-            raise CoordinationError("The delegation launcher currently supports Codex.")
+        if client not in CLIENTS:
+            raise CoordinationError("Delegated client must be claude or codex.")
+        client_label = "Claude Code" if client == "claude" else "Codex"
+        if bypass_hook_trust and client != "codex":
+            raise CoordinationError("Hook-trust bypass is only supported for Codex.")
         if mode not in {"reviewed", "yolo"}:
             raise CoordinationError("Delegation mode must be reviewed or yolo.")
         normalized_model = model.strip() if model is not None else None
         if model is not None and not normalized_model:
-            raise CoordinationError("Codex model must not be empty.")
+            raise CoordinationError(f"{client_label} model must not be empty.")
         normalized_reasoning_effort = (
             reasoning_effort.strip() if reasoning_effort is not None else None
         )
         if reasoning_effort is not None and not normalized_reasoning_effort:
-            raise CoordinationError("Codex reasoning effort must not be empty.")
+            raise CoordinationError(f"{client_label} effort must not be empty.")
 
         identifier = delegation_id or str(uuid.uuid4())
         now = self.clock()
@@ -1331,6 +1495,11 @@ class CoordinationStore:
                 raise CoordinationError(
                     f"Delegation {delegation_id} targets {row['cwd']}, but session "
                     f"{child_session_id} registered in {child['cwd']}."
+                )
+            if child["client"] != row["client"]:
+                raise CoordinationError(
+                    f"Delegation {delegation_id} targets {row['client']}, but session "
+                    f"{child_session_id} registered as {child['client']}."
                 )
             attached = row["child_session_id"]
             if attached is not None and attached != child_session_id:

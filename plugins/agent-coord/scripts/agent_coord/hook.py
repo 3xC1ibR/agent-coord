@@ -68,6 +68,12 @@ def _format_messages(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _actionable_context(store: CoordinationStore, session_id: str) -> str:
+    return _format_messages(
+        store.inbox(session_id, classifications={"action_required"})
+    )
+
+
 def _extract_paths(payload: dict[str, Any], cwd: str) -> tuple[list[str], bool]:
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -117,16 +123,23 @@ def handle(
     session_id = session["session_id"]
 
     if event == "SessionEnd":
+        client_label = "Claude Code" if session["client"] == "claude" else "Codex"
         coordination.fail_active_delegations_for_child(
             session_id,
-            "The delegated Codex session ended before it reported a result.",
+            f"The delegated {client_label} session ended before it reported a result.",
         )
         coordination.disable_zellij_wake(session_id)
         coordination.end_session(session_id)
         return {}
 
     if event == "Stop":
-        activity = "waiting" if session["bead_id"] else "idle"
+        unfinished = (
+            bool(session["write_scope"])
+            or session["scope_required"]
+            or session["activity"]
+            in {"planning", "implementing", "validating", "waiting"}
+        )
+        activity = "waiting" if unfinished else "idle"
         coordination.touch(session_id, activity, turn_active=False)
         return {}
 
@@ -135,23 +148,18 @@ def handle(
             coordination.touch(session_id, "discussing", turn_active=True)
         else:
             coordination.touch(session_id, turn_active=True)
-        messages = coordination.inbox(
-            session_id, classifications={"action_required"}
-        )
-        text = _format_messages(messages)
+        text = _actionable_context(coordination, session_id)
         return _context(event, text) if text else {}
 
     if event == "SessionStart":
         coordination.touch(session_id, turn_active=False)
-        messages = coordination.inbox(
-            session_id, classifications={"action_required"}
-        )
         cli_path = Path(__file__).resolve().parents[1] / "agent-coord"
         text = (
             f"This session is registered with agent-coord as {session_id}. "
-            f"The bundled CLI is {cli_path}. Before implementation, claim a "
-            "Beads issue and use the agent-coordination skill to declare the "
-            "intended write scope."
+            f"The bundled CLI is {cli_path}. Use the agent-coordination skill "
+            "before implementation. A sole active session may write without a "
+            "Beads issue or scope. When another session is active, declare the "
+            "smallest write scope; a Beads issue is optional for direct work."
         )
         delegation_warning = None
         delegation_id = os.environ.get("AGENT_COORD_DELEGATION_ID")
@@ -184,16 +192,12 @@ def handle(
             )
         elif wake_warning:
             text += f" Zellij wake could not start: {wake_warning}"
-        formatted = _format_messages(messages)
+        formatted = _actionable_context(coordination, session_id)
         if formatted:
             text += "\n\n" + formatted
         return _context(event, text)
 
     coordination.touch(session_id, turn_active=True)
-    messages = coordination.inbox(
-        session_id, classifications={"action_required"}
-    )
-    message_context = _format_messages(messages)
     tool_name = payload.get("tool_name")
 
     if event == "PreToolUse" and tool_name in WRITE_TOOLS:
@@ -202,16 +206,46 @@ def handle(
         if not paths and has_outside:
             # Every target is outside the registered repository, which Agent
             # Coord does not own; the write passes through uncoordinated.
+            message_context = _actionable_context(coordination, session_id)
             if message_context:
                 return _context(event, message_context)
             return {}
-        if session["bead_id"] is None:
+
+        if not session["write_scope"]:
+            blockers = coordination.scope_blocking_peers(session_id)
+            if not blockers:
+                if session["scope_required"]:
+                    coordination.clear_scope_requirement(session_id)
+                coordination.touch(session_id, "implementing", turn_active=True)
+                message_context = _actionable_context(coordination, session_id)
+                return _context(event, message_context) if message_context else {}
+
+            unscoped_blockers = [peer for peer in blockers if not peer["write_scope"]]
+            if not session["scope_required"]:
+                coordination.request_scope_declarations(
+                    session_id,
+                    [peer["session_id"] for peer in unscoped_blockers],
+                )
+            coordination.touch(session_id, "waiting", turn_active=True)
+            owners = ", ".join(
+                peer["name"] or peer["session_id"] for peer in blockers
+            )
+            message_context = _actionable_context(coordination, session_id)
+            next_action = (
+                "Wait for the unscoped incumbent(s) to declare, then run "
+                if unscoped_blockers
+                else "Run "
+            )
             return _deny(
                 event,
-                f"No Beads work declaration is active for session {session_id}. "
-                "Claim a bead and run agent-coord begin-work before editing.",
+                "Another active session requires write-scope coordination: "
+                f"{owners}. {next_action}agent-coord begin-work --session-id "
+                f"{session_id} "
+                "--scope '<path-or-glob>' before editing. --bead is optional. "
+                "Unscoped blocking peers have been asked to declare their scopes.",
                 message_context or None,
             )
+        message_context = _actionable_context(coordination, session_id)
         if session["lease_mode"] == "validation":
             return _deny(
                 event,
@@ -256,6 +290,7 @@ def handle(
                 message_context or None,
             )
 
+    message_context = _actionable_context(coordination, session_id)
     if message_context:
         return _context(event, message_context)
     return {}

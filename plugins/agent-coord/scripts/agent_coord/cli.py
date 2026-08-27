@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .delegate import delegate_codex
+from .delegate import delegate_work
 from .store import (
     ACTIVITIES,
     AmbiguousTargetError,
@@ -85,10 +85,13 @@ def _parser() -> argparse.ArgumentParser:
     activity.add_argument("--activity", required=True, choices=sorted(ACTIVITIES))
 
     begin = subcommands.add_parser(
-        "begin-work", help="Declare claimed Beads work and intended write scope."
+        "begin-work", help="Declare an intended write scope and optional Beads work."
     )
     begin.add_argument("--session-id", required=True)
-    begin.add_argument("--bead", required=True)
+    begin.add_argument(
+        "--bead",
+        help="Optional claimed in-progress Beads issue for durable task identity.",
+    )
     begin.add_argument("--scope", action="append", required=True)
     begin.add_argument(
         "--activity",
@@ -193,12 +196,18 @@ def _parser() -> argparse.ArgumentParser:
     acknowledge_target.add_argument("--all-unread", action="store_true")
 
     delegate = subcommands.add_parser(
-        "delegate", help="Launch ready Beads work in a new Codex Zellij pane."
+        "delegate", help="Launch ready Beads work in a new agent Zellij pane."
     )
     delegate.add_argument("--from-session", required=True)
     delegate.add_argument("--cwd", default=os.getcwd())
     delegate.add_argument("--bead", required=True)
     delegate.add_argument("--scope", action="append", required=True)
+    delegate.add_argument(
+        "--client",
+        choices=["claude", "codex"],
+        default="codex",
+        help="Select the child client. Defaults to codex.",
+    )
     delegate.add_argument("--zellij-session")
     delegate.add_argument("--name", dest="pane_name")
     delegate.add_argument("--floating", action="store_true")
@@ -206,23 +215,25 @@ def _parser() -> argparse.ArgumentParser:
     delegate.add_argument("--height", default="85%")
     delegate.add_argument(
         "--model",
-        help="Select the model for the child Codex process.",
+        help="Select the model for the child agent process.",
     )
     delegate.add_argument(
+        "--effort",
         "--reasoning-effort",
+        dest="reasoning_effort",
         metavar="LEVEL",
-        help="Set model_reasoning_effort for the child Codex process.",
+        help="Select child effort (model_reasoning_effort for Codex).",
     )
     delegate.add_argument(
         "--yolo",
         action="store_true",
-        help="Explicitly bypass Codex approvals and sandboxing.",
+        help="Explicitly bypass the selected client's permission safeguards.",
     )
     delegate.add_argument(
         "--bypass-hook-trust",
         action="store_true",
         help=(
-            "Run enabled hooks without persisted trust. Use only after "
+            "Codex only: run enabled hooks without persisted trust after "
             "reviewing every hook in the target repository."
         ),
     )
@@ -231,7 +242,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Validate and print the launch plan without mutation.",
     )
-    delegate.add_argument("prompt", help="Specific instructions for the child Codex.")
+    delegate.add_argument("prompt", help="Specific instructions for the child agent.")
 
     delegation = subcommands.add_parser(
         "delegation", help="Inspect or finish durable delegation state."
@@ -305,11 +316,12 @@ def run(arguments: argparse.Namespace) -> Any:
         return store.touch(arguments.session_id, arguments.activity)
     if command == "begin-work":
         session = store.get_session(arguments.session_id)
-        validate_claimed_bead(arguments.bead, session["cwd"])
+        if arguments.bead is not None:
+            validate_claimed_bead(arguments.bead, session["cwd"])
         return store.begin_work(
             session_id=arguments.session_id,
-            bead_id=arguments.bead,
             scopes=arguments.scope,
+            bead_id=arguments.bead,
             activity=arguments.activity,
             lease_mode=arguments.lease_mode,
         )
@@ -379,7 +391,7 @@ def run(arguments: argparse.Namespace) -> Any:
         assert arguments.message_id is not None
         return store.acknowledge(arguments.session_id, arguments.message_id)
     if command == "delegate":
-        return delegate_codex(
+        return delegate_work(
             store,
             parent_session_id=arguments.from_session,
             cwd=arguments.cwd,
@@ -391,6 +403,7 @@ def run(arguments: argparse.Namespace) -> Any:
             floating=arguments.floating,
             width=arguments.width,
             height=arguments.height,
+            client=arguments.client,
             yolo=arguments.yolo,
             bypass_hook_trust=arguments.bypass_hook_trust,
             model=arguments.model,

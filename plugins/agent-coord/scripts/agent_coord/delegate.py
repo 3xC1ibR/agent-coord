@@ -19,6 +19,7 @@ from .store import (
 DEFAULT_FLOATING_WIDTH = "90%"
 DEFAULT_FLOATING_HEIGHT = "85%"
 _PANE_ID = re.compile(r"\bterminal_\d+\b")
+_CLIENT_LABELS = {"claude": "Claude Code", "codex": "Codex"}
 
 
 def _command_error(label: str, result: subprocess.CompletedProcess[str]) -> str:
@@ -110,12 +111,13 @@ def validate_ready_bead(
 def build_child_prompt(
     delegation: Mapping[str, Any], *, agent_coord_cli: str
 ) -> str:
+    client_label = _CLIENT_LABELS[str(delegation["client"])]
     scopes = "\n".join(f"- {scope}" for scope in delegation["write_scope"])
     finish_prefix = (
         f"{agent_coord_cli} delegation finish --delegation-id "
         f"{delegation['delegation_id']} --session-id <your-session-id>"
     )
-    return f"""You are a delegated Codex worker launched by Agent Coord.
+    return f"""You are a delegated {client_label} worker launched by Agent Coord.
 
 Delegation ID: {delegation['delegation_id']}
 Parent session: {delegation['parent_session_id']}
@@ -128,7 +130,7 @@ Requested work:
 {delegation['instructions']}
 
 Before editing, follow this sequence:
-1. Read all applicable AGENTS.md files and run `bd prime`.
+1. Read all applicable agent instructions for this repository, including AGENTS.md and/or CLAUDE.md files, and run `bd prime`.
 2. Run `bd ready` and `bd show {delegation['bead_id']}`. Stop and report failure if the Bead is no longer open and ready.
 3. Claim the Bead with `bd update {delegation['bead_id']} --claim`.
 4. Use the session ID announced by the Agent Coord SessionStart hook to run:
@@ -141,14 +143,14 @@ At each meaningful boundary, record a Beads checkpoint. If the work succeeds, ru
 If the work cannot complete, add a Beads note with the blocker and next action, release the declaration if active, then report with:
 `{finish_prefix} --outcome failed --message "<exact blocker or failure>"`
 
-Always run one of the two `delegation finish` commands before your Codex process exits. The SessionEnd hook will record an unfinished exit as a failure."""
+Always run one of the two `delegation finish` commands before your {client_label} process exits. The SessionEnd hook will record an unfinished exit as a failure."""
 
 
 def build_zellij_command(
     delegation: Mapping[str, Any],
     *,
     zellij_executable: str,
-    codex_executable: str,
+    client_executable: str,
     env_executable: str,
     agent_coord_cli: str,
     database_path: str,
@@ -158,6 +160,7 @@ def build_zellij_command(
     width: str = DEFAULT_FLOATING_WIDTH,
     height: str = DEFAULT_FLOATING_HEIGHT,
 ) -> list[str]:
+    client = str(delegation["client"])
     command = [
         zellij_executable,
         "--session",
@@ -178,45 +181,52 @@ def build_zellij_command(
             env_executable,
             f"AGENT_COORD_DELEGATION_ID={delegation['delegation_id']}",
             f"AGENT_COORD_DB={database_path}",
-            "AGENT_COORD_CLIENT=codex",
-            codex_executable,
-            "--cd",
-            str(delegation["cwd"]),
-            "--add-dir",
-            str(Path(database_path).parent),
+            f"AGENT_COORD_CLIENT={client}",
+            client_executable,
         ]
     )
+    if client == "codex":
+        command.extend(["--cd", str(delegation["cwd"])])
+    command.extend(["--add-dir", str(Path(database_path).parent)])
     model = delegation.get("model")
     if model:
         command.extend(["--model", str(model)])
     reasoning_effort = delegation.get("reasoning_effort")
     if reasoning_effort:
-        command.extend(
-            [
-                "--config",
-                f"model_reasoning_effort={json.dumps(reasoning_effort)}",
-            ]
-        )
+        if client == "codex":
+            command.extend(
+                [
+                    "--config",
+                    f"model_reasoning_effort={json.dumps(reasoning_effort)}",
+                ]
+            )
+        else:
+            command.extend(["--effort", str(reasoning_effort)])
     if delegation["mode"] == "yolo":
-        command.append("--dangerously-bypass-approvals-and-sandbox")
+        command.append(
+            "--dangerously-bypass-approvals-and-sandbox"
+            if client == "codex"
+            else "--dangerously-skip-permissions"
+        )
     else:
-        command.append("--approve-for-me")
+        if client == "codex":
+            command.append("--approve-for-me")
+        else:
+            command.extend(["--permission-mode", "auto"])
     if bypass_hook_trust:
         command.append("--dangerously-bypass-hook-trust")
     command.append(build_child_prompt(delegation, agent_coord_cli=agent_coord_cli))
     return command
 
 
-def _required_executable(
-    name: str, which: Callable[[str], str | None]
-) -> str:
+def _required_executable(name: str, which: Callable[[str], str | None]) -> str:
     executable = which(name)
     if executable is None:
-        raise CoordinationError(f"{name} is required for Codex delegation.")
+        raise CoordinationError(f"{name} is required for delegation.")
     return executable
 
 
-def _optional_codex_setting(value: str | None, label: str) -> str | None:
+def _optional_client_setting(value: str | None, label: str) -> str | None:
     if value is None:
         return None
     normalized = value.strip()
@@ -225,7 +235,7 @@ def _optional_codex_setting(value: str | None, label: str) -> str | None:
     return normalized
 
 
-def delegate_codex(
+def delegate_work(
     store: CoordinationStore,
     *,
     parent_session_id: str,
@@ -238,6 +248,7 @@ def delegate_codex(
     floating: bool = False,
     width: str = DEFAULT_FLOATING_WIDTH,
     height: str = DEFAULT_FLOATING_HEIGHT,
+    client: str = "codex",
     yolo: bool = False,
     bypass_hook_trust: bool = False,
     model: str | None = None,
@@ -247,6 +258,10 @@ def delegate_codex(
     which: Callable[[str], str | None] = shutil.which,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
+    target_client = client.strip().lower()
+    if target_client not in _CLIENT_LABELS:
+        raise CoordinationError("Delegated client must be claude or codex.")
+    client_label = _CLIENT_LABELS[target_client]
     parent = store.get_session(parent_session_id)
     if parent["presence"] != "online":
         raise CoordinationError(
@@ -254,14 +269,16 @@ def delegate_codex(
         )
     if not instructions.strip():
         raise CoordinationError("Delegated instructions must not be empty.")
-    target_model = _optional_codex_setting(model, "Codex model")
-    target_reasoning_effort = _optional_codex_setting(
-        reasoning_effort, "Codex reasoning effort"
+    if bypass_hook_trust and target_client != "codex":
+        raise CoordinationError("--bypass-hook-trust is only supported for Codex.")
+    target_model = _optional_client_setting(model, f"{client_label} model")
+    target_reasoning_effort = _optional_client_setting(
+        reasoning_effort, f"{client_label} effort"
     )
 
     git_executable = _required_executable("git", which)
     bd_executable = _required_executable("bd", which)
-    codex_executable = _required_executable("codex", which)
+    client_executable = _required_executable(target_client, which)
     zellij_executable = _required_executable("zellij", which)
     env_executable = _required_executable("env", which)
     repository = validate_repository(cwd, git_executable=git_executable, run=run)
@@ -290,20 +307,38 @@ def delegate_codex(
                 f"{active['delegation_id']}."
             )
 
+    auth_command = (
+        [client_executable, "login", "status"]
+        if target_client == "codex"
+        else [client_executable, "auth", "status", "--json"]
+    )
     login = run(
-        [codex_executable, "login", "status"],
+        auth_command,
         check=False,
         capture_output=True,
         text=True,
     )
     if login.returncode != 0:
-        raise CoordinationError(_command_error("Codex login is not ready", login))
+        raise CoordinationError(
+            _command_error(f"{client_label} login is not ready", login)
+        )
+    if target_client == "claude":
+        try:
+            auth_status = json.loads(login.stdout)
+        except json.JSONDecodeError as exc:
+            raise CoordinationError(
+                "Claude Code login is not ready: auth status returned invalid JSON."
+            ) from exc
+        if not isinstance(auth_status, dict) or auth_status.get("loggedIn") is not True:
+            raise CoordinationError(
+                "Claude Code login is not ready: auth status reports loggedIn=false."
+            )
     target_zellij = zellij_session or environ.get("ZELLIJ_SESSION_NAME")
     if not target_zellij:
         raise CoordinationError(
             "A Zellij session is required. Pass --zellij-session or run inside Zellij."
         )
-    target_name = pane_name or f"codex-{bead_id}"
+    target_name = pane_name or f"{target_client}-{bead_id}"
     mode = "yolo" if yolo else "reviewed"
     agent_coord_cli = str(Path(__file__).resolve().parents[1] / "agent-coord")
 
@@ -311,7 +346,7 @@ def delegate_codex(
         preview = {
             "delegation_id": "<dry-run>",
             "parent_session_id": parent_session_id,
-            "client": "codex",
+            "client": target_client,
             "cwd": repository,
             "bead_id": bead_id,
             "write_scope": normalized_scopes,
@@ -331,7 +366,7 @@ def delegate_codex(
             "command": build_zellij_command(
                 preview,
                 zellij_executable=zellij_executable,
-                codex_executable=codex_executable,
+                client_executable=client_executable,
                 env_executable=env_executable,
                 agent_coord_cli=agent_coord_cli,
                 database_path=str(store.database_path),
@@ -353,12 +388,13 @@ def delegate_codex(
         bypass_hook_trust=bypass_hook_trust,
         model=target_model,
         reasoning_effort=target_reasoning_effort,
+        client=target_client,
     )
     delegation["zellij_session"] = target_zellij
     command = build_zellij_command(
         delegation,
         zellij_executable=zellij_executable,
-        codex_executable=codex_executable,
+        client_executable=client_executable,
         env_executable=env_executable,
         agent_coord_cli=agent_coord_cli,
         database_path=str(store.database_path),
@@ -370,7 +406,7 @@ def delegate_codex(
     )
     result = run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
-        error = _command_error("Cannot launch Codex Zellij pane", result)
+        error = _command_error(f"Cannot launch {client_label} Zellij pane", result)
         store.fail_delegation_launch(delegation["delegation_id"], error)
         raise CoordinationError(error)
     match = _PANE_ID.search(result.stdout)
@@ -387,3 +423,8 @@ def delegate_codex(
         pane_id=match.group(0),
     )
     return {"status": launched["status"], "delegation": launched, "command": command}
+
+
+def delegate_codex(store: CoordinationStore, **arguments: Any) -> dict[str, Any]:
+    """Backward-compatible Python entry point for Codex-only callers."""
+    return delegate_work(store, client="codex", **arguments)
