@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -574,6 +575,99 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.store.get_session("codex-one")["presence"], "offline")
         self.assertFalse(self.store.get_zellij_wake("codex-one")["enabled"])
 
+    def test_completed_delegation_stop_captures_token_usage(self) -> None:
+        self.store.register(
+            session_id="parent",
+            client="claude",
+            cwd=str(self.root),
+        )
+        self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            delegation_id="delegation-a",
+        )
+        transcript = self.root / "codex.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 40,
+                                "cached_input_tokens": 25,
+                                "output_tokens": 10,
+                                "total_tokens": 50,
+                            }
+                        },
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with patch.dict(
+            "os.environ", {"AGENT_COORD_DELEGATION_ID": "delegation-a"}
+        ):
+            handle(self.payload("SessionStart"), self.store)
+            self.store.finish_delegation(
+                "delegation-a",
+                child_session_id="codex-one",
+                outcome="completed",
+                message="Done.",
+            )
+            result = handle(
+                self.payload(
+                    "Stop",
+                    transcript_path=str(transcript),
+                    model="gpt-test",
+                ),
+                self.store,
+            )
+
+        self.assertEqual(result, {})
+        delegation = self.store.get_delegation("delegation-a")
+        self.assertEqual(delegation["token_usage"]["normalized"]["total_tokens"], 50)
+        self.assertEqual(delegation["token_usage_capture_event"], "Stop")
+        self.assertTrue(Path(delegation["token_usage_artifact_path"]).is_file())
+
+    def test_token_usage_failure_does_not_break_stop(self) -> None:
+        self.store.register(
+            session_id="parent",
+            client="claude",
+            cwd=str(self.root),
+        )
+        self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            delegation_id="delegation-a",
+        )
+        with patch.dict(
+            "os.environ", {"AGENT_COORD_DELEGATION_ID": "delegation-a"}
+        ):
+            handle(self.payload("SessionStart"), self.store)
+            self.store.finish_delegation(
+                "delegation-a",
+                child_session_id="codex-one",
+                outcome="completed",
+                message="Done.",
+            )
+            result = handle(self.payload("Stop"), self.store)
+
+        delegation = self.store.get_delegation("delegation-a")
+        self.assertEqual(result, {})
+        self.assertIsNone(delegation["token_usage"])
+        self.assertIn("transcript_path", delegation["token_usage_error"])
+
     def test_session_end_reports_an_unfinished_delegation(self) -> None:
         self.store.register(
             session_id="parent",
@@ -591,11 +685,35 @@ class HookTests(unittest.TestCase):
         )
         handle(self.payload("SessionStart"), self.store)
         self.store.attach_delegation("delegation-a", "codex-one")
+        transcript = self.root / "codex.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 8,
+                                "output_tokens": 2,
+                                "total_tokens": 10,
+                            }
+                        },
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
-        handle(self.payload("SessionEnd"), self.store)
+        handle(
+            self.payload("SessionEnd", transcript_path=str(transcript)), self.store
+        )
 
         delegation = self.store.get_delegation("delegation-a")
         self.assertEqual(delegation["status"], "failed")
+        self.assertEqual(delegation["token_usage_capture_event"], "SessionEnd")
+        self.assertEqual(delegation["token_usage"]["normalized"]["total_tokens"], 10)
         self.assertIn("ended before", self.store.inbox("parent")[0]["body"])
 
 

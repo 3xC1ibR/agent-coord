@@ -83,6 +83,15 @@ def _json_scopes(value: str) -> list[str]:
     return parsed
 
 
+def _json_object(value: str | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise CoordinationError("Stored JSON object is invalid.")
+    return parsed
+
+
 def normalize_scope(value: str, cwd: str) -> str:
     candidate = value.strip().replace("\\", "/")
     if not candidate:
@@ -268,6 +277,7 @@ class CoordinationStore:
                     zellij_session TEXT,
                     pane_id TEXT,
                     mode TEXT NOT NULL,
+                    lease_mode TEXT NOT NULL DEFAULT 'write',
                     bypass_hook_trust INTEGER NOT NULL DEFAULT 0,
                     model TEXT,
                     reasoning_effort TEXT,
@@ -276,6 +286,11 @@ class CoordinationStore:
                     completed_at REAL,
                     result_message TEXT,
                     error TEXT,
+                    token_usage_json TEXT,
+                    token_usage_captured_at REAL,
+                    token_usage_capture_event TEXT,
+                    token_usage_artifact_path TEXT,
+                    token_usage_error TEXT,
                     FOREIGN KEY(parent_session_id) REFERENCES sessions(session_id),
                     FOREIGN KEY(child_session_id) REFERENCES sessions(session_id)
                 );
@@ -349,6 +364,22 @@ class CoordinationStore:
                 connection.execute(
                     "ALTER TABLE delegations ADD COLUMN reasoning_effort TEXT"
                 )
+            if "lease_mode" not in delegation_columns:
+                connection.execute(
+                    "ALTER TABLE delegations ADD COLUMN lease_mode "
+                    "TEXT NOT NULL DEFAULT 'write'"
+                )
+            for column, definition in (
+                ("token_usage_json", "TEXT"),
+                ("token_usage_captured_at", "REAL"),
+                ("token_usage_capture_event", "TEXT"),
+                ("token_usage_artifact_path", "TEXT"),
+                ("token_usage_error", "TEXT"),
+            ):
+                if column not in delegation_columns:
+                    connection.execute(
+                        f"ALTER TABLE delegations ADD COLUMN {column} {definition}"
+                    )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS message_threads (
@@ -439,6 +470,7 @@ class CoordinationStore:
             "zellij_session": row["zellij_session"],
             "pane_id": row["pane_id"],
             "mode": row["mode"],
+            "lease_mode": row["lease_mode"],
             "bypass_hook_trust": bool(row["bypass_hook_trust"]),
             "model": row["model"],
             "reasoning_effort": row["reasoning_effort"],
@@ -447,6 +479,11 @@ class CoordinationStore:
             "completed_at": _iso(row["completed_at"]),
             "result_message": row["result_message"],
             "error": row["error"],
+            "token_usage": _json_object(row["token_usage_json"]),
+            "token_usage_captured_at": _iso(row["token_usage_captured_at"]),
+            "token_usage_capture_event": row["token_usage_capture_event"],
+            "token_usage_artifact_path": row["token_usage_artifact_path"],
+            "token_usage_error": row["token_usage_error"],
         }
 
     def _row_to_message(
@@ -889,7 +926,7 @@ class CoordinationStore:
             {normalize_scope(scope, session["cwd"]) for scope in scopes}
         )
         if not normalized:
-            raise CoordinationError("At least one write scope is required.")
+            raise CoordinationError("At least one repository scope is required.")
         now = self.clock()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -897,6 +934,36 @@ class CoordinationStore:
                 "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
             ).fetchone()
             assert current_row is not None
+            delegated_rows = list(
+                connection.execute(
+                    """
+                    SELECT * FROM delegations
+                    WHERE child_session_id = ? AND status = 'attached'
+                    """,
+                    (session_id,),
+                )
+            )
+            if len(delegated_rows) > 1:
+                raise CoordinationError(
+                    f"Session {session_id} has more than one attached delegation."
+                )
+            if delegated_rows:
+                delegated = delegated_rows[0]
+                delegated_scopes = _json_scopes(delegated["write_scope_json"])
+                if normalized_bead != delegated["bead_id"]:
+                    raise CoordinationError(
+                        f"Delegation {delegated['delegation_id']} requires Bead "
+                        f"{delegated['bead_id']}."
+                    )
+                if normalized != delegated_scopes:
+                    raise CoordinationError(
+                        f"Delegation {delegated['delegation_id']} requires its exact scopes."
+                    )
+                if lease_mode != delegated["lease_mode"]:
+                    raise CoordinationError(
+                        f"Delegation {delegated['delegation_id']} requires "
+                        f"lease mode {delegated['lease_mode']}."
+                    )
             if current_row["scope_requested_at"] is None:
                 requested_predecessors = [
                     row
@@ -1270,6 +1337,7 @@ class CoordinationStore:
         scopes: Iterable[str],
         instructions: str,
         mode: str,
+        lease_mode: str = "write",
         bypass_hook_trust: bool = False,
         model: str | None = None,
         reasoning_effort: str | None = None,
@@ -1284,7 +1352,7 @@ class CoordinationStore:
             {normalize_scope(scope, repository) for scope in scopes}
         )
         if not normalized:
-            raise CoordinationError("At least one delegated write scope is required.")
+            raise CoordinationError("At least one delegated scope is required.")
         if not instructions.strip():
             raise CoordinationError("Delegated instructions must not be empty.")
         if client not in CLIENTS:
@@ -1294,6 +1362,10 @@ class CoordinationStore:
             raise CoordinationError("Hook-trust bypass is only supported for Codex.")
         if mode not in {"reviewed", "yolo"}:
             raise CoordinationError("Delegation mode must be reviewed or yolo.")
+        if lease_mode not in LEASE_MODES:
+            raise CoordinationError("Delegation lease mode must be write or validation.")
+        if lease_mode == "validation" and mode == "yolo":
+            raise CoordinationError("Validation-only delegation cannot use yolo mode.")
         normalized_model = model.strip() if model is not None else None
         if model is not None and not normalized_model:
             raise CoordinationError(f"{client_label} model must not be empty.")
@@ -1312,11 +1384,11 @@ class CoordinationStore:
                     INSERT INTO delegations (
                         delegation_id, parent_session_id, child_session_id,
                         client, cwd, bead_id, write_scope_json, instructions,
-                        status, zellij_session, pane_id, mode,
+                        status, zellij_session, pane_id, mode, lease_mode,
                         bypass_hook_trust, model, reasoning_effort, created_at,
                         updated_at, completed_at, result_message, error
                     ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'launching', NULL,
-                              NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                              NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
                     """,
                     (
                         identifier,
@@ -1327,6 +1399,7 @@ class CoordinationStore:
                         json.dumps(normalized),
                         instructions.strip(),
                         mode,
+                        lease_mode,
                         int(bypass_hook_trust),
                         normalized_model,
                         normalized_reasoning_effort,
@@ -1526,6 +1599,78 @@ class CoordinationStore:
                 """,
                 (child_session_id, now, delegation_id),
             )
+        return self.get_delegation(delegation_id)
+
+    def record_delegation_token_usage(
+        self,
+        delegation_id: str,
+        *,
+        child_session_id: str,
+        usage: dict[str, Any] | None,
+        capture_event: str,
+        artifact_path: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        if capture_event not in {"Stop", "SessionEnd"}:
+            raise CoordinationError(
+                "Token usage capture event must be Stop or SessionEnd."
+            )
+        if usage is None and not (error and error.strip()):
+            raise CoordinationError("Token usage capture requires usage or an error.")
+        encoded = json.dumps(usage, sort_keys=True) if usage is not None else None
+        normalized_error = error.strip() if error and error.strip() else None
+        now = self.clock()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM delegations WHERE delegation_id = ?",
+                (delegation_id,),
+            ).fetchone()
+            if row is None:
+                raise CoordinationError(
+                    f"Delegation {delegation_id} does not exist."
+                )
+            if row["child_session_id"] != child_session_id:
+                raise CoordinationError(
+                    f"Session {child_session_id} is not attached to delegation "
+                    f"{delegation_id}."
+                )
+            if row["status"] not in {"completed", "failed"}:
+                raise CoordinationError(
+                    f"Delegation {delegation_id} is not terminal."
+                )
+            if row["token_usage_json"] is not None:
+                return self._row_to_delegation(row)
+            if encoded is None:
+                connection.execute(
+                    """
+                    UPDATE delegations
+                    SET token_usage_capture_event = ?, token_usage_error = ?,
+                        updated_at = ?
+                    WHERE delegation_id = ? AND token_usage_json IS NULL
+                    """,
+                    (capture_event, normalized_error, now, delegation_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE delegations
+                    SET token_usage_json = ?, token_usage_captured_at = ?,
+                        token_usage_capture_event = ?,
+                        token_usage_artifact_path = ?, token_usage_error = ?,
+                        updated_at = ?
+                    WHERE delegation_id = ? AND token_usage_json IS NULL
+                    """,
+                    (
+                        encoded,
+                        now,
+                        capture_event,
+                        artifact_path,
+                        normalized_error,
+                        now,
+                        delegation_id,
+                    ),
+                )
         return self.get_delegation(delegation_id)
 
     def finish_delegation(

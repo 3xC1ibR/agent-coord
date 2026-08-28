@@ -214,6 +214,12 @@ def _parser() -> argparse.ArgumentParser:
     delegate.add_argument("--width", default="90%")
     delegate.add_argument("--height", default="85%")
     delegate.add_argument(
+        "--lease-mode",
+        choices=["write", "validation"],
+        default="write",
+        help="Launch an editing worker or a validation-only worker.",
+    )
+    delegate.add_argument(
         "--model",
         help="Select the model for the child agent process.",
     )
@@ -408,6 +414,7 @@ def run(arguments: argparse.Namespace) -> Any:
             bypass_hook_trust=arguments.bypass_hook_trust,
             model=arguments.model,
             reasoning_effort=arguments.reasoning_effort,
+            lease_mode=arguments.lease_mode,
             dry_run=arguments.dry_run,
         )
     if command == "delegation":

@@ -120,6 +120,37 @@ class CoordinationStoreTests(unittest.TestCase):
             [f"legacy:{message['id']}" for message in history],
         )
 
+    def test_existing_delegation_database_adds_runtime_columns(self) -> None:
+        database = self.root / "legacy-delegations.sqlite3"
+        legacy = CoordinationStore(database, clock=self.clock)
+        legacy.register(session_id="parent", client="codex", cwd=str(self.root))
+        legacy.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            delegation_id="delegation-a",
+        )
+        with closing(sqlite3.connect(database)) as connection:
+            for column in (
+                "lease_mode",
+                "token_usage_json",
+                "token_usage_captured_at",
+                "token_usage_capture_event",
+                "token_usage_artifact_path",
+                "token_usage_error",
+            ):
+                connection.execute(f"ALTER TABLE delegations DROP COLUMN {column}")
+
+        migrated = CoordinationStore(database, clock=self.clock)
+
+        self.assertEqual(
+            migrated.get_delegation("delegation-a")["lease_mode"], "write"
+        )
+        self.assertIsNone(migrated.get_delegation("delegation-a")["token_usage"])
+
     def test_session_lifecycle_and_staleness(self) -> None:
         self.register("one")
         session = self.store.touch("one", "planning")
@@ -728,12 +759,14 @@ class CoordinationStoreTests(unittest.TestCase):
             scopes=["src/**"],
             instructions="Implement work-a.",
             mode="reviewed",
+            lease_mode="validation",
             model="gpt-5.6-terra",
             reasoning_effort="high",
             delegation_id="delegation-a",
         )
 
         self.assertEqual(delegation["status"], "launching")
+        self.assertEqual(delegation["lease_mode"], "validation")
         self.assertEqual(delegation["model"], "gpt-5.6-terra")
         self.assertEqual(delegation["reasoning_effort"], "high")
         attached = self.store.attach_delegation("delegation-a", "child")
@@ -749,6 +782,110 @@ class CoordinationStoreTests(unittest.TestCase):
         inbox = self.store.inbox("parent")
         self.assertIn("work-a completed", inbox[0]["body"])
         self.assertIn("Implemented and validated", inbox[0]["body"])
+
+    def test_terminal_delegation_records_token_usage_once(self) -> None:
+        self.register("parent")
+        self.register("child")
+        self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="work-a",
+            scopes=["src/**"],
+            instructions="Implement work-a.",
+            mode="reviewed",
+            delegation_id="delegation-a",
+        )
+        self.store.attach_delegation("delegation-a", "child")
+        with self.assertRaisesRegex(CoordinationError, "is not terminal"):
+            self.store.record_delegation_token_usage(
+                "delegation-a",
+                child_session_id="child",
+                usage={"normalized": {"total_tokens": 1}},
+                capture_event="Stop",
+            )
+        self.store.finish_delegation(
+            "delegation-a",
+            child_session_id="child",
+            outcome="completed",
+            message="Done.",
+        )
+
+        captured = self.store.record_delegation_token_usage(
+            "delegation-a",
+            child_session_id="child",
+            usage={"normalized": {"total_tokens": 10}},
+            capture_event="Stop",
+            artifact_path="/repo/.agent-coord/delegation-a.usage.json",
+        )
+        repeated = self.store.record_delegation_token_usage(
+            "delegation-a",
+            child_session_id="child",
+            usage={"normalized": {"total_tokens": 20}},
+            capture_event="SessionEnd",
+        )
+
+        self.assertEqual(captured["token_usage"]["normalized"]["total_tokens"], 10)
+        self.assertEqual(repeated["token_usage"]["normalized"]["total_tokens"], 10)
+        self.assertEqual(captured["token_usage_capture_event"], "Stop")
+        self.assertIsNotNone(captured["token_usage_captured_at"])
+
+    def test_attached_validation_delegation_enforces_bead_scope_and_lease(self) -> None:
+        self.register("parent")
+        self.register("child")
+        with self.assertRaisesRegex(
+            CoordinationError, "Validation-only delegation cannot use yolo mode"
+        ):
+            self.store.create_delegation(
+                parent_session_id="parent",
+                cwd=str(self.root),
+                bead_id="unsafe-validation",
+                scopes=["src/**"],
+                instructions="Validate unsafely.",
+                mode="yolo",
+                lease_mode="validation",
+            )
+        self.store.create_delegation(
+            parent_session_id="parent",
+            cwd=str(self.root),
+            bead_id="validation-a",
+            scopes=["src/**", "tests/**"],
+            instructions="Validate the wave.",
+            mode="reviewed",
+            lease_mode="validation",
+            delegation_id="delegation-a",
+        )
+        self.store.attach_delegation("delegation-a", "child")
+
+        with self.assertRaisesRegex(CoordinationError, "requires Bead validation-a"):
+            self.store.begin_work(
+                session_id="child",
+                bead_id="other",
+                scopes=["src/**", "tests/**"],
+                lease_mode="validation",
+            )
+        with self.assertRaisesRegex(CoordinationError, "requires its exact scopes"):
+            self.store.begin_work(
+                session_id="child",
+                bead_id="validation-a",
+                scopes=["src/**"],
+                lease_mode="validation",
+            )
+        with self.assertRaisesRegex(CoordinationError, "requires lease mode validation"):
+            self.store.begin_work(
+                session_id="child",
+                bead_id="validation-a",
+                scopes=["src/**", "tests/**"],
+                lease_mode="write",
+            )
+
+        session = self.store.begin_work(
+            session_id="child",
+            bead_id="validation-a",
+            scopes=["src/**", "tests/**"],
+            lease_mode="validation",
+        )
+        self.assertEqual(session["lease_mode"], "validation")
+        self.assertEqual(session["activity"], "validating")
 
     def test_claude_delegation_records_and_matches_child_client(self) -> None:
         self.register("parent")

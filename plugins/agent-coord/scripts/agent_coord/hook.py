@@ -14,6 +14,7 @@ from .store import (
     normalize_target_path,
     path_is_in_scope,
 )
+from .usage import capture_delegation_usage
 from .zellij_wake import enable_from_environment
 
 WRITE_TOOLS = {"apply_patch", "Edit", "Write"}
@@ -112,6 +113,63 @@ def _ensure_registered(
     )
 
 
+def _capture_terminal_delegation_usage(
+    store: CoordinationStore, payload: dict[str, Any], session_id: str
+) -> None:
+    inherited_id = os.environ.get("AGENT_COORD_DELEGATION_ID")
+    try:
+        delegations = [
+            item
+            for item in store.list_delegations()
+            if item["child_session_id"] == session_id
+            and item["status"] in {"completed", "failed"}
+            and item["token_usage"] is None
+            and (inherited_id is None or item["delegation_id"] == inherited_id)
+        ]
+    except Exception:  # noqa: BLE001 -- Telemetry cannot break lifecycle hooks.
+        return
+    if not delegations:
+        return
+    capture_event = str(payload["hook_event_name"])
+    transcript_path = payload.get("transcript_path")
+    model = payload.get("model")
+    active_model = model if isinstance(model, str) and model else None
+    for delegation in delegations:
+        if not isinstance(transcript_path, str) or not transcript_path:
+            try:
+                store.record_delegation_token_usage(
+                    delegation["delegation_id"],
+                    child_session_id=session_id,
+                    usage=None,
+                    capture_event=capture_event,
+                    error="Hook input did not include a transcript_path.",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        try:
+            capture_delegation_usage(
+                store,
+                delegation=delegation,
+                session_id=session_id,
+                transcript_path=transcript_path,
+                capture_event=capture_event,
+                model=active_model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Usage telemetry must never break the coordination lifecycle.
+            try:
+                store.record_delegation_token_usage(
+                    delegation["delegation_id"],
+                    child_session_id=session_id,
+                    usage=None,
+                    capture_event=capture_event,
+                    error=f"Token usage capture failed: {exc}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def handle(
     payload: dict[str, Any], store: CoordinationStore | None = None
 ) -> dict[str, Any]:
@@ -128,6 +186,7 @@ def handle(
             session_id,
             f"The delegated {client_label} session ended before it reported a result.",
         )
+        _capture_terminal_delegation_usage(coordination, payload, session_id)
         coordination.disable_zellij_wake(session_id)
         coordination.end_session(session_id)
         return {}
@@ -141,6 +200,7 @@ def handle(
         )
         activity = "waiting" if unfinished else "idle"
         coordination.touch(session_id, activity, turn_active=False)
+        _capture_terminal_delegation_usage(coordination, payload, session_id)
         return {}
 
     if event == "UserPromptSubmit":

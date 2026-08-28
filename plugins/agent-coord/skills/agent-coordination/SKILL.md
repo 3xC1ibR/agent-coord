@@ -139,11 +139,11 @@ acknowledgement; acknowledgements do not create messages.
 ## Delegate work to a new agent pane
 
 Use `delegate` when a registered parent session must create a separate Codex or
-Claude Code worker. The work can have any implementation instructions, but it
-must have one open and ready Beads issue and explicit write scopes. Codex is the
-default child; pass `--client claude` to launch Claude Code.
+Claude Code worker. The work must have one open and ready Beads issue and
+explicit repository scopes. Codex is the default child; pass `--client claude`
+to launch Claude Code.
 
-Run a validation-only preview first:
+Run a dry-run preview first:
 
 ```bash
 <agent-coord> delegate \
@@ -158,6 +158,7 @@ Run a validation-only preview first:
   --name <pane-name> \
   --model <client-model> \
   --effort <level> \
+  --lease-mode write \
   --dry-run \
   'Implement the specific requested change and run the focused tests.'
 ```
@@ -171,6 +172,14 @@ parent runs inside the target session. `--floating` is optional.
 `--reasoning-effort` remains a compatibility alias. Both values are stored with
 the durable delegation. Do not guess either setting when the user did not
 request it. Let the selected client validate the combination.
+
+Use `--lease-mode validation` for an independent validator. The delegated
+scopes become an exclusive stability reservation. The generated prompt makes
+the child declare a validation lease, prohibits repository edits and
+remediation, and requires a compact verdict. A failed check is a completed
+validation result when every requested check ran and the child reported the
+failure. Use a new implementation issue for remediation and a new validation
+issue for the next attempt. Validation-only delegation rejects `--yolo`.
 
 The reviewed launch opens the selected interactive TUI in the Zellij pane.
 Codex uses `--approve-for-me`; Claude Code uses safety-classified auto permission
@@ -191,9 +200,11 @@ The launcher rejects a blocked, claimed, or active Beads issue. It also rejects
 live scope conflicts and a second active delegation for the same issue. The
 child hook uses the inherited delegation ID and client identity to attach the
 new session.
-The generated prompt requires the child to read repository instructions,
-verify and claim the issue, declare the exact scopes, validate the work, obey
-git authority, and report a completed or failed result.
+The generated prompt requires every child to read repository instructions,
+verify and claim the issue, declare the exact scopes, obey git authority, and
+report a compact result. An implementation child edits and runs focused
+validation. A validation child does not edit and reports its independent
+verdict.
 
 Inspect durable lifecycle state with:
 
@@ -202,6 +213,13 @@ Inspect durable lifecycle state with:
 <agent-coord> delegation list --parent-session <parent-session-id>
 <agent-coord> delegation list --parent-session <parent-session-id> --active
 ```
+
+After the child reports a completed or failed result, its `Stop` hook records
+token usage in durable delegation state and writes
+`.agent-coord/delegations/<delegation-id>.usage.json` under the delegated
+repository. `SessionEnd` is the fallback for an early exit. Inspect
+`token_usage`, `token_usage_artifact_path`, and `token_usage_error` in
+`delegation status`; usage-capture problems do not change the task outcome.
 
 The child sends its result to the parent inbox. The SessionEnd hook records a
 failure if the child exits without a result. The parent does not need to poll

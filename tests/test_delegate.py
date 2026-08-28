@@ -127,6 +127,33 @@ class DelegateTests(unittest.TestCase):
         )
         self.assertIsNone(delegation["model"])
         self.assertIsNone(delegation["reasoning_effort"])
+        self.assertEqual(delegation["lease_mode"], "write")
+
+    def test_validation_launch_records_lease_and_generates_non_editing_prompt(self) -> None:
+        runner = FakeRun(self.root)
+
+        result = self.delegate(
+            runner,
+            lease_mode="validation",
+            instructions="Run the complete test suite and report the verdict.",
+        )
+
+        delegation = result["delegation"]
+        prompt = result["command"][-1]
+        self.assertEqual(delegation["lease_mode"], "validation")
+        self.assertIn("delegated Codex validator", prompt)
+        self.assertIn("--activity validating --lease-mode validation", prompt)
+        self.assertIn("Do not edit repository files", prompt)
+        self.assertIn("A failed check is a completed validation result", prompt)
+        self.assertNotIn("Implement only the requested work", prompt)
+
+    def test_validation_launch_rejects_yolo(self) -> None:
+        runner = FakeRun(self.root)
+
+        with self.assertRaisesRegex(
+            CoordinationError, "Validation-only delegation cannot use --yolo"
+        ):
+            self.delegate(runner, lease_mode="validation", yolo=True)
 
     def test_launch_passes_and_records_model_and_reasoning_effort(self) -> None:
         runner = FakeRun(self.root)
@@ -224,6 +251,7 @@ class DelegateTests(unittest.TestCase):
         self.assertIn("<dry-run>", " ".join(result["command"]))
         self.assertEqual(result["delegation"]["model"], "gpt-5.6-luna")
         self.assertEqual(result["delegation"]["reasoning_effort"], "low")
+        self.assertEqual(result["delegation"]["lease_mode"], "write")
 
     def test_empty_model_or_reasoning_effort_is_rejected(self) -> None:
         runner = FakeRun(self.root)

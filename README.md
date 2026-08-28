@@ -245,6 +245,7 @@ agent-coord delegate \
   --name delegated-feature \
   --model <client-model> \
   --effort <level> \
+  --lease-mode write \
   --dry-run \
   'Implement the feature, run the focused tests, and report the result.'
 ```
@@ -261,6 +262,15 @@ Claude Code it uses `--effort`. `--reasoning-effort` remains an alias for
 backward compatibility. Both options are independent and optional. Agent Coord
 records the requested values in durable delegation state and lets the selected
 client validate model and effort support.
+
+Use `--lease-mode validation` to launch an independent validator. Its scopes
+form an exclusive stability reservation. The generated prompt prohibits
+repository edits and remediation. It requires a compact verdict with each
+command, exit status, duration, summary, and material finding. A failed check
+completes the validation task when all required checks ran and the validator
+reported the failure. Create an implementation issue for remediation and a new
+validation issue for the next attempt. Agent Coord rejects `--yolo` with a
+validation lease.
 
 The reviewed command opens the selected interactive TUI in the requested
 Zellij pane. Codex uses `--approve-for-me`; Claude Code uses its safety-classified
@@ -292,9 +302,10 @@ generated instructions require the child to:
 
 1. Read repository instructions and run `bd prime`.
 2. Verify and claim the ready issue.
-3. Declare the exact write scopes with `begin-work`.
-4. Apply repository validation, changelog, and git-authority rules.
-5. Record a completed or failed result before exit.
+3. Declare the exact scopes with the selected lease mode.
+4. Implement and run focused checks, or validate without editing.
+5. Apply repository validation, changelog, and git-authority rules.
+6. Record a compact completed or failed result before exit.
 
 Inspect delegation state with:
 
@@ -307,6 +318,29 @@ agent-coord delegation cancel \
   --from-session <parent-session-id> \
   --message 'The child did not attach.'
 ```
+
+When a delegated worker reports a terminal result, its next `Stop` hook records
+session token usage in the delegation row and writes:
+
+```text
+<delegation-cwd>/.agent-coord/delegations/<delegation-id>.usage.json
+```
+
+The artifact contains identifiers, client, model, terminal status, raw
+client-specific counters, and normalized input, cache, output, reasoning, and
+total token counts. It never copies prompt or response text. Codex uses the
+latest cumulative token-count event. Claude Code assistant records are
+de-duplicated by message ID before their per-response counters are summed.
+`SessionEnd` performs the same capture as a fallback when a worker exits before
+reporting a result.
+
+`delegation status` and `delegation list` expose `token_usage`,
+`token_usage_artifact_path`, and `token_usage_error`. Transcript formats belong
+to the selected client and may change; an unreadable or unrecognized transcript
+records `token_usage_error` without changing the delegation outcome or breaking
+the lifecycle hook. The `.agent-coord/` directory is local runtime output; add
+it to the repository's ignore policy if it should stay out of working-tree
+reports.
 
 The result creates a durable message in the parent inbox. If the child process
 exits before it reports a result, the SessionEnd hook records the delegation as
@@ -362,9 +396,11 @@ sender behavior do not require Zellij.
   mode, paths, and live conflicts. Validation leases deny structured writes.
 - `PostToolUse` refreshes liveness and delivers unread actionable messages.
 - `Stop` records an inactive turn plus `waiting` for unfinished solo or
-  declared work, or `idle` otherwise.
-- `SessionEnd` records an unfinished child delegation as failed, disables
-  Zellij wake, and marks the process offline without changing Beads.
+  declared work, or `idle` otherwise. After a delegated terminal result it also
+  captures token usage once.
+- `SessionEnd` records an unfinished child delegation as failed, performs
+  fallback token-usage capture, disables Zellij wake, and marks the process
+  offline without changing Beads.
 
 The write guard covers Claude `Edit` and `Write` tools and Codex `apply_patch`.
 It does not parse arbitrary shell commands. The skill instructs agents to

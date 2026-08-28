@@ -150,6 +150,8 @@ class CliTests(unittest.TestCase):
                 "opus",
                 "--effort",
                 "high",
+                "--lease-mode",
+                "validation",
                 "Implement the feature.",
             ]
         )
@@ -157,6 +159,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(arguments.client, "claude")
         self.assertEqual(arguments.model, "opus")
         self.assertEqual(arguments.reasoning_effort, "high")
+        self.assertEqual(arguments.lease_mode, "validation")
 
     def test_delegate_defaults_to_codex_and_keeps_reasoning_effort_alias(self) -> None:
         arguments = _parser().parse_args(
@@ -176,6 +179,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(arguments.client, "codex")
         self.assertEqual(arguments.reasoning_effort, "medium")
+        self.assertEqual(arguments.lease_mode, "write")
 
     @patch("agent_coord.cli.shutil.which", return_value="/usr/local/bin/bd")
     @patch("agent_coord.cli.subprocess.run")

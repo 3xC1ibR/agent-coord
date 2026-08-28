@@ -13,6 +13,7 @@ from .store import (
     ConflictError,
     CoordinationError,
     CoordinationStore,
+    LEASE_MODES,
     normalize_scope,
 )
 
@@ -113,10 +114,39 @@ def build_child_prompt(
 ) -> str:
     client_label = _CLIENT_LABELS[str(delegation["client"])]
     scopes = "\n".join(f"- {scope}" for scope in delegation["write_scope"])
+    lease_mode = str(delegation.get("lease_mode", "write"))
     finish_prefix = (
         f"{agent_coord_cli} delegation finish --delegation-id "
         f"{delegation['delegation_id']} --session-id <your-session-id>"
     )
+    if lease_mode == "validation":
+        return f"""You are a delegated {client_label} validator launched by Agent Coord.
+
+Delegation ID: {delegation['delegation_id']}
+Parent session: {delegation['parent_session_id']}
+Repository: {delegation['cwd']}
+Bead: {delegation['bead_id']}
+Authorized validation scopes:
+{scopes}
+
+Requested validation:
+{delegation['instructions']}
+
+Before validation, follow this sequence:
+1. Read all applicable repository instructions and run `bd prime`.
+2. Run `bd ready` and `bd show {delegation['bead_id']}`. Stop if the Bead is not open and ready.
+3. Claim the Bead with `bd update {delegation['bead_id']} --claim`.
+4. Use the session ID from the Agent Coord SessionStart hook to run:
+   `{agent_coord_cli} begin-work --session-id <your-session-id> --bead {delegation['bead_id']} --activity validating --lease-mode validation` with one `--scope` argument for each exact scope above.
+5. Validate only the requested work. Do not edit repository files or remediate findings. Obey repository validation and git-authority rules.
+
+Record a Beads checkpoint with the commands, verdict, findings, and next action. A failed check is a completed validation result when every required check ran and you reported the failure. Close the Bead when its validation acceptance criteria are complete. Release the declaration with `{agent_coord_cli} end-work --session-id <your-session-id>`, then report with:
+`{finish_prefix} --outcome completed --message "Verdict: <pass-or-fail>; Commands: <command, exit status, duration, and concise summary>; Findings: <material findings or none>; Repository changes: <none or unexpected paths>; Details: <Beads note or artifact path>"`
+
+Do not paste full successful logs into the result. If required validation cannot run, add a Beads note with the blocker, release the declaration, then report with:
+`{finish_prefix} --outcome failed --message "<exact blocker or incomplete validation>"`
+
+Always run one of the two `delegation finish` commands before your {client_label} process exits. The SessionEnd hook will record an unfinished exit as a failure."""
     return f"""You are a delegated {client_label} worker launched by Agent Coord.
 
 Delegation ID: {delegation['delegation_id']}
@@ -138,9 +168,9 @@ Before editing, follow this sequence:
 5. Implement only the requested work and obey repository validation, service-boundary, changelog, documentation, and git-authority rules. Do not commit or push unless the repository instructions or user explicitly authorize it.
 
 At each meaningful boundary, record a Beads checkpoint. If the work succeeds, run the required validation, close the Bead only when its acceptance criteria are genuinely complete, release the declaration with `{agent_coord_cli} end-work --session-id <your-session-id>`, then report with:
-`{finish_prefix} --outcome completed --message "<concise result and validation>"`
+`{finish_prefix} --outcome completed --message "Result: <concise outcome>; Changed paths: <paths or none>; Validation: <command, exit status, and concise summary>; Deviations or risks: <details or none>"`
 
-If the work cannot complete, add a Beads note with the blocker and next action, release the declaration if active, then report with:
+Do not paste full successful logs into the result. If the work cannot complete, add a Beads note with the blocker and next action, release the declaration if active, then report with:
 `{finish_prefix} --outcome failed --message "<exact blocker or failure>"`
 
 Always run one of the two `delegation finish` commands before your {client_label} process exits. The SessionEnd hook will record an unfinished exit as a failure."""
@@ -253,6 +283,7 @@ def delegate_work(
     bypass_hook_trust: bool = False,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    lease_mode: str = "write",
     dry_run: bool = False,
     environ: Mapping[str, str] = os.environ,
     which: Callable[[str], str | None] = shutil.which,
@@ -275,6 +306,11 @@ def delegate_work(
     target_reasoning_effort = _optional_client_setting(
         reasoning_effort, f"{client_label} effort"
     )
+    target_lease_mode = lease_mode.strip().lower()
+    if target_lease_mode not in LEASE_MODES:
+        raise CoordinationError("Delegation lease mode must be write or validation.")
+    if target_lease_mode == "validation" and yolo:
+        raise CoordinationError("Validation-only delegation cannot use --yolo.")
 
     git_executable = _required_executable("git", which)
     bd_executable = _required_executable("bd", which)
@@ -286,7 +322,7 @@ def delegate_work(
         {normalize_scope(scope, repository) for scope in scopes}
     )
     if not normalized_scopes:
-        raise CoordinationError("At least one delegated write scope is required.")
+        raise CoordinationError("At least one delegated scope is required.")
     issue = validate_ready_bead(
         bead_id,
         repository,
@@ -355,6 +391,7 @@ def delegate_work(
             "zellij_session": target_zellij,
             "pane_id": None,
             "mode": mode,
+            "lease_mode": target_lease_mode,
             "bypass_hook_trust": bypass_hook_trust,
             "model": target_model,
             "reasoning_effort": target_reasoning_effort,
@@ -385,6 +422,7 @@ def delegate_work(
         scopes=normalized_scopes,
         instructions=instructions,
         mode=mode,
+        lease_mode=target_lease_mode,
         bypass_hook_trust=bypass_hook_trust,
         model=target_model,
         reasoning_effort=target_reasoning_effort,
