@@ -12,21 +12,33 @@ from unittest.mock import patch
 
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.zellij_wake import (
+    PROMPT_EMPTY,
+    PROMPT_OCCUPIED,
+    PROMPT_SELF_WAKE,
+    WAKE_PROMPT,
     ZellijCommandError,
     ZellijWakeWatcher,
     enable_zellij_wake,
     environment_requests_wake,
     prompt_is_empty,
+    prompt_state,
     watch_zellij,
 )
 
 
 class FakeZellijClient:
-    def __init__(self, screen: str = "❯\n", error: str | None = None) -> None:
+    def __init__(
+        self,
+        screen: str = "❯\n",
+        error: str | None = None,
+        *,
+        submission_succeeds: bool = True,
+    ) -> None:
         self.screen = screen
         self.error = error
+        self.submission_succeeds = submission_succeeds
         self.dumps = 0
-        self.wakes: list[str] = []
+        self.wakes: list[str | None] = []
 
     def dump_screen(self) -> str:
         self.dumps += 1
@@ -34,12 +46,14 @@ class FakeZellijClient:
             raise ZellijCommandError(self.error)
         return self.screen
 
-    def wake(
-        self, prompt: str = "Check and handle your unread agent-coord messages."
-    ) -> None:
+    def wake(self, prompt: str | None = WAKE_PROMPT) -> None:
         if self.error:
             raise ZellijCommandError(self.error)
         self.wakes.append(prompt)
+        if self.submission_succeeds:
+            self.screen = "❯\n"
+        elif prompt is not None:
+            self.screen = f"❯ {prompt}\n"
 
 
 class ZellijWakeTests(unittest.TestCase):
@@ -66,11 +80,14 @@ class ZellijWakeTests(unittest.TestCase):
             pane_id="terminal_7",
         )
 
-    def watcher(self, fake: FakeZellijClient) -> ZellijWakeWatcher:
+    def watcher(
+        self, fake: FakeZellijClient, **options: object
+    ) -> ZellijWakeWatcher:
         return ZellijWakeWatcher(
             self.store,
             "receiver",
             client_factory=lambda **_arguments: fake,
+            **options,
         )
 
     def send(self, body: str = "hello") -> int:
@@ -90,6 +107,12 @@ class ZellijWakeTests(unittest.TestCase):
             prompt_is_empty("status\n› Ask Codex to do anything\nmodel", "codex")
         )
         self.assertFalse(prompt_is_empty("status\n› run the tests\nmodel", "codex"))
+        self.assertEqual(prompt_state(f"❯ {WAKE_PROMPT}\n", "claude"), PROMPT_SELF_WAKE)
+        self.assertEqual(prompt_state(f"› {WAKE_PROMPT}\n", "codex"), PROMPT_SELF_WAKE)
+        self.assertEqual(prompt_state("› Describe a task\n", "codex"), PROMPT_EMPTY)
+        self.assertEqual(
+            prompt_state(f"❯ {WAKE_PROMPT} later\n", "claude"), PROMPT_OCCUPIED
+        )
 
     def test_wake_opt_in_environment_is_explicit(self) -> None:
         self.assertTrue(environment_requests_wake({"AGENT_COORD_ZELLIJ_WAKE": "true"}))
@@ -205,6 +228,57 @@ class ZellijWakeTests(unittest.TestCase):
         self.assertEqual(woke["message_ids"], [message_id])
         self.assertEqual(repeated["status"], "waiting")
         self.assertEqual(len(fake.wakes), 1)
+
+    def test_unsubmitted_self_wake_prompt_is_retried_without_duplicate_text(
+        self,
+    ) -> None:
+        message_id = self.send()
+        self.store.touch("receiver", "waiting", turn_active=False)
+        fake = FakeZellijClient(submission_succeeds=False)
+        watcher = self.watcher(fake, verify_attempts=1)
+
+        failed = watcher.run_once()
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(fake.wakes, [WAKE_PROMPT])
+        self.assertEqual(fake.screen, f"❯ {WAKE_PROMPT}\n")
+        self.assertEqual(self.store.pending_wake_message_ids("receiver"), [message_id])
+        self.assertEqual(
+            self.store.get_zellij_wake("receiver")["recent_attempts"][0]["outcome"],
+            "failed",
+        )
+
+        fake.submission_succeeds = True
+        woke = watcher.run_once()
+
+        self.assertEqual(woke["status"], "woke")
+        self.assertEqual(woke["message_ids"], [message_id])
+        self.assertEqual(fake.wakes, [WAKE_PROMPT, None])
+        self.assertEqual(
+            self.store.get_zellij_wake("receiver")["recent_attempts"][0]["outcome"],
+            "sent",
+        )
+
+    def test_existing_self_wake_prompt_submits_for_a_new_pending_message(
+        self,
+    ) -> None:
+        previous_id = self.send("previous")
+        self.store.touch("receiver", "waiting", turn_active=False)
+        self.assertEqual(
+            self.store.claim_wake_messages("receiver", [previous_id]), [previous_id]
+        )
+        self.store.complete_wake_attempts(
+            "receiver", [previous_id], outcome="sent", detail=WAKE_PROMPT
+        )
+        pending_id = self.send("new escalation")
+        fake = FakeZellijClient(f"❯ {WAKE_PROMPT}\n")
+
+        result = self.watcher(fake).run_once()
+
+        self.assertEqual(result["status"], "woke")
+        self.assertEqual(result["message_ids"], [pending_id])
+        self.assertEqual(fake.wakes, [None])
+        self.assertEqual(self.store.pending_wake_message_ids("receiver"), [])
 
     def test_missing_pane_does_not_change_message_delivery(self) -> None:
         message_id = self.send()

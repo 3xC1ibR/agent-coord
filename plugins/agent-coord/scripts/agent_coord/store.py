@@ -26,6 +26,7 @@ RELEVANT_ACTIVITIES = {"planning", "implementing", "validating", "waiting"}
 DEFAULT_STALE_AFTER_SECONDS = 30 * 60
 DEFAULT_INBOX_POLL_SECONDS = 0.5
 WAKEABLE_ACTIVITIES = {"idle", "waiting"}
+WAKE_TRANSPORTS = {"managed-pty", "zellij"}
 LEASE_MODES = {"write", "validation"}
 MESSAGE_CLASSIFICATIONS = {"action_required", "informational", "closure"}
 CLIENTS = {"claude", "codex"}
@@ -254,6 +255,20 @@ class CoordinationStore:
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS wake_targets (
+                    session_id TEXT PRIMARY KEY,
+                    transport TEXT NOT NULL,
+                    endpoint_json TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    watcher_pid INTEGER,
+                    registered_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    last_checked_at REAL,
+                    last_wake_at REAL,
+                    last_error TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS message_wake_attempts (
                     message_id INTEGER PRIMARY KEY,
                     session_id TEXT NOT NULL,
@@ -273,6 +288,7 @@ class CoordinationStore:
                     bead_id TEXT NOT NULL,
                     write_scope_json TEXT NOT NULL,
                     instructions TEXT NOT NULL,
+                    name TEXT,
                     status TEXT NOT NULL,
                     zellij_session TEXT,
                     pane_id TEXT,
@@ -291,6 +307,13 @@ class CoordinationStore:
                     token_usage_capture_event TEXT,
                     token_usage_artifact_path TEXT,
                     token_usage_error TEXT,
+                    runtime_kind TEXT NOT NULL DEFAULT 'zellij',
+                    supervisor_pid INTEGER,
+                    child_pid INTEGER,
+                    output_log_path TEXT,
+                    runtime_started_at REAL,
+                    runtime_exited_at REAL,
+                    runtime_exit_code INTEGER,
                     FOREIGN KEY(parent_session_id) REFERENCES sessions(session_id),
                     FOREIGN KEY(child_session_id) REFERENCES sessions(session_id)
                 );
@@ -369,17 +392,58 @@ class CoordinationStore:
                     "ALTER TABLE delegations ADD COLUMN lease_mode "
                     "TEXT NOT NULL DEFAULT 'write'"
                 )
+            if "name" not in delegation_columns:
+                connection.execute("ALTER TABLE delegations ADD COLUMN name TEXT")
             for column, definition in (
                 ("token_usage_json", "TEXT"),
                 ("token_usage_captured_at", "REAL"),
                 ("token_usage_capture_event", "TEXT"),
                 ("token_usage_artifact_path", "TEXT"),
                 ("token_usage_error", "TEXT"),
+                ("runtime_kind", "TEXT NOT NULL DEFAULT 'zellij'"),
+                ("supervisor_pid", "INTEGER"),
+                ("child_pid", "INTEGER"),
+                ("output_log_path", "TEXT"),
+                ("runtime_started_at", "REAL"),
+                ("runtime_exited_at", "REAL"),
+                ("runtime_exit_code", "INTEGER"),
             ):
                 if column not in delegation_columns:
                     connection.execute(
                         f"ALTER TABLE delegations ADD COLUMN {column} {definition}"
                     )
+            legacy_wake_rows = list(
+                connection.execute(
+                    "SELECT * FROM zellij_wake_targets"
+                )
+            )
+            for row in legacy_wake_rows:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO wake_targets (
+                        session_id, transport, endpoint_json, enabled, watcher_pid,
+                        registered_at, updated_at, last_checked_at, last_wake_at,
+                        last_error
+                    ) VALUES (?, 'zellij', ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["session_id"],
+                        json.dumps(
+                            {
+                                "zellij_session": row["zellij_session"],
+                                "pane_id": row["pane_id"],
+                            },
+                            sort_keys=True,
+                        ),
+                        row["enabled"],
+                        row["watcher_pid"],
+                        row["registered_at"],
+                        row["updated_at"],
+                        row["last_checked_at"],
+                        row["last_wake_at"],
+                        row["last_error"],
+                    ),
+                )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS message_threads (
@@ -466,6 +530,7 @@ class CoordinationStore:
             "bead_id": row["bead_id"],
             "write_scope": _json_scopes(row["write_scope_json"]),
             "instructions": row["instructions"],
+            "name": row["name"],
             "status": row["status"],
             "zellij_session": row["zellij_session"],
             "pane_id": row["pane_id"],
@@ -484,6 +549,13 @@ class CoordinationStore:
             "token_usage_capture_event": row["token_usage_capture_event"],
             "token_usage_artifact_path": row["token_usage_artifact_path"],
             "token_usage_error": row["token_usage_error"],
+            "runtime_kind": row["runtime_kind"],
+            "supervisor_pid": row["supervisor_pid"],
+            "child_pid": row["child_pid"],
+            "output_log_path": row["output_log_path"],
+            "runtime_started_at": _iso(row["runtime_started_at"]),
+            "runtime_exited_at": _iso(row["runtime_exited_at"]),
+            "runtime_exit_code": row["runtime_exit_code"],
         }
 
     def _row_to_message(
@@ -1342,6 +1414,8 @@ class CoordinationStore:
         model: str | None = None,
         reasoning_effort: str | None = None,
         client: str = "codex",
+        runtime_kind: str = "managed-pty",
+        name: str | None = None,
         delegation_id: str | None = None,
     ) -> dict[str, Any]:
         self.get_session(parent_session_id)
@@ -1357,6 +1431,13 @@ class CoordinationStore:
             raise CoordinationError("Delegated instructions must not be empty.")
         if client not in CLIENTS:
             raise CoordinationError("Delegated client must be claude or codex.")
+        if runtime_kind not in {"managed-pty", "zellij"}:
+            raise CoordinationError(
+                "Delegation runtime must be managed-pty or zellij."
+            )
+        normalized_name = name.strip() if name is not None else None
+        if name is not None and not normalized_name:
+            raise CoordinationError("Delegation name must not be empty.")
         client_label = "Claude Code" if client == "claude" else "Codex"
         if bypass_hook_trust and client != "codex":
             raise CoordinationError("Hook-trust bypass is only supported for Codex.")
@@ -1383,12 +1464,12 @@ class CoordinationStore:
                     """
                     INSERT INTO delegations (
                         delegation_id, parent_session_id, child_session_id,
-                        client, cwd, bead_id, write_scope_json, instructions,
+                        client, cwd, bead_id, write_scope_json, instructions, name,
                         status, zellij_session, pane_id, mode, lease_mode,
-                        bypass_hook_trust, model, reasoning_effort, created_at,
-                        updated_at, completed_at, result_message, error
-                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'launching', NULL,
-                              NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                        bypass_hook_trust, model, reasoning_effort, runtime_kind,
+                        created_at, updated_at, completed_at, result_message, error
+                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'launching', NULL,
+                              NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
                     """,
                     (
                         identifier,
@@ -1398,11 +1479,13 @@ class CoordinationStore:
                         bead_id.strip(),
                         json.dumps(normalized),
                         instructions.strip(),
+                        normalized_name,
                         mode,
                         lease_mode,
                         int(bypass_hook_trust),
                         normalized_model,
                         normalized_reasoning_effort,
+                        runtime_kind,
                         now,
                         now,
                     ),
@@ -1463,9 +1546,22 @@ class CoordinationStore:
         self,
         delegation_id: str,
         *,
-        zellij_session: str,
-        pane_id: str,
+        runtime_kind: str = "zellij",
+        supervisor_pid: int | None = None,
+        output_log_path: str | None = None,
+        zellij_session: str | None = None,
+        pane_id: str | None = None,
     ) -> dict[str, Any]:
+        if runtime_kind not in {"managed-pty", "zellij"}:
+            raise CoordinationError(
+                "Delegation runtime must be managed-pty or zellij."
+            )
+        if runtime_kind == "zellij" and (not zellij_session or not pane_id):
+            raise CoordinationError(
+                "Zellij delegation launch requires a session and pane ID."
+            )
+        if supervisor_pid is not None and supervisor_pid <= 0:
+            raise CoordinationError("Supervisor PID must be positive.")
         now = self.clock()
         with self._connection() as connection:
             cursor = connection.execute(
@@ -1475,17 +1571,129 @@ class CoordinationStore:
                         WHEN status = 'launching' THEN 'launched'
                         ELSE status
                     END,
+                    runtime_kind = ?, supervisor_pid = ?, output_log_path = ?,
+                    runtime_started_at = COALESCE(runtime_started_at, ?),
                     zellij_session = ?, pane_id = ?, updated_at = ?
                 WHERE delegation_id = ?
                   AND status IN (
                       'launching', 'launched', 'attached', 'completed', 'failed'
                   )
                 """,
-                (zellij_session, pane_id, now, delegation_id),
+                (
+                    runtime_kind,
+                    supervisor_pid,
+                    output_log_path,
+                    now,
+                    zellij_session,
+                    pane_id,
+                    now,
+                    delegation_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise CoordinationError(
                     f"Delegation {delegation_id} cannot be marked launched."
+                )
+        return self.get_delegation(delegation_id)
+
+    def set_delegation_child_process(
+        self,
+        delegation_id: str,
+        *,
+        supervisor_pid: int,
+        child_pid: int,
+        output_log_path: str,
+    ) -> dict[str, Any]:
+        if supervisor_pid <= 0 or child_pid <= 0:
+            raise CoordinationError("Managed PTY process IDs must be positive.")
+        if not output_log_path.strip():
+            raise CoordinationError("Managed PTY output log path must not be empty.")
+        now = self.clock()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE delegations
+                SET runtime_kind = 'managed-pty', supervisor_pid = ?, child_pid = ?,
+                    output_log_path = ?, runtime_started_at = COALESCE(
+                        runtime_started_at, ?
+                    ), updated_at = ?
+                WHERE delegation_id = ?
+                  AND status IN (
+                      'launching', 'launched', 'attached', 'completed', 'failed'
+                  )
+                """,
+                (
+                    supervisor_pid,
+                    child_pid,
+                    output_log_path.strip(),
+                    now,
+                    now,
+                    delegation_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise CoordinationError(
+                    f"Delegation {delegation_id} cannot record a managed PTY process."
+                )
+        return self.get_delegation(delegation_id)
+
+    def record_delegation_runtime_exit(
+        self,
+        delegation_id: str,
+        *,
+        exit_code: int,
+    ) -> dict[str, Any]:
+        now = self.clock()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM delegations WHERE delegation_id = ?",
+                (delegation_id,),
+            ).fetchone()
+            if row is None:
+                raise CoordinationError(
+                    f"Delegation {delegation_id} does not exist."
+                )
+            active = row["status"] in {"launching", "launched", "attached"}
+            if active:
+                reason = (
+                    "Managed PTY child exited with status "
+                    f"{exit_code} before reporting a terminal result."
+                )
+                connection.execute(
+                    """
+                    UPDATE delegations
+                    SET status = 'failed', result_message = ?, error = ?,
+                        runtime_exited_at = ?, runtime_exit_code = ?,
+                        updated_at = ?, completed_at = ?
+                    WHERE delegation_id = ?
+                    """,
+                    (reason, reason, now, exit_code, now, now, delegation_id),
+                )
+                sender_id = row["child_session_id"] or row["parent_session_id"]
+                self._insert_message(
+                    connection,
+                    sender_session_id=sender_id,
+                    recipient_session_id=row["parent_session_id"],
+                    body=(
+                        f"Delegation {delegation_id} for Bead {row['bead_id']} "
+                        f"failed: {reason}"
+                    ),
+                    classification="action_required",
+                    thread_id=f"delegation:{delegation_id}",
+                    reply_required=True,
+                    now=now,
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE delegations
+                    SET runtime_exited_at = COALESCE(runtime_exited_at, ?),
+                        runtime_exit_code = COALESCE(runtime_exit_code, ?),
+                        updated_at = ?
+                    WHERE delegation_id = ?
+                    """,
+                    (now, exit_code, now, delegation_id),
                 )
         return self.get_delegation(delegation_id)
 
@@ -1791,30 +1999,37 @@ class CoordinationStore:
                 failed_ids.append(row["delegation_id"])
         return [self.get_delegation(identifier) for identifier in failed_ids]
 
-    def register_zellij_wake(
+    def register_wake_target(
         self,
         *,
         session_id: str,
-        zellij_session: str,
-        pane_id: str,
+        transport: str,
+        endpoint: dict[str, Any],
         watcher_pid: int | None = None,
     ) -> dict[str, Any]:
         self.get_session(session_id)
-        if not zellij_session.strip():
-            raise CoordinationError("Zellij session name must not be empty.")
-        if not pane_id.strip():
-            raise CoordinationError("Zellij pane ID must not be empty.")
+        normalized_transport = transport.strip()
+        if normalized_transport not in WAKE_TRANSPORTS:
+            supported = ", ".join(sorted(WAKE_TRANSPORTS))
+            raise CoordinationError(
+                f"Unsupported wake transport {normalized_transport or '<empty>'!r}; "
+                f"expected one of: {supported}."
+            )
+        if not endpoint:
+            raise CoordinationError("Wake endpoint must not be empty.")
+        if watcher_pid is not None and watcher_pid <= 0:
+            raise CoordinationError("Wake watcher PID must be positive.")
         now = self.clock()
         with self._connection() as connection:
             connection.execute(
                 """
-                INSERT INTO zellij_wake_targets (
-                    session_id, zellij_session, pane_id, enabled, watcher_pid,
+                INSERT INTO wake_targets (
+                    session_id, transport, endpoint_json, enabled, watcher_pid,
                     registered_at, updated_at
                 ) VALUES (?, ?, ?, 1, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
-                    zellij_session = excluded.zellij_session,
-                    pane_id = excluded.pane_id,
+                    transport = excluded.transport,
+                    endpoint_json = excluded.endpoint_json,
                     enabled = 1,
                     watcher_pid = COALESCE(excluded.watcher_pid, watcher_pid),
                     updated_at = excluded.updated_at,
@@ -1822,20 +2037,20 @@ class CoordinationStore:
                 """,
                 (
                     session_id,
-                    zellij_session.strip(),
-                    pane_id.strip(),
+                    normalized_transport,
+                    json.dumps(endpoint, sort_keys=True),
                     watcher_pid,
                     now,
                     now,
                 ),
             )
-        return self.get_zellij_wake(session_id)
+        return self.get_wake_target(session_id)
 
-    def get_zellij_wake(self, session_id: str) -> dict[str, Any]:
+    def get_wake_target(self, session_id: str) -> dict[str, Any]:
         self.get_session(session_id)
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT * FROM zellij_wake_targets WHERE session_id = ?",
+                "SELECT * FROM wake_targets WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
             attempts = list(
@@ -1852,12 +2067,12 @@ class CoordinationStore:
             )
         if row is None:
             raise CoordinationError(
-                f"Session {session_id} has no Zellij wake registration."
+                f"Session {session_id} has no wake registration."
             )
         return {
             "session_id": row["session_id"],
-            "zellij_session": row["zellij_session"],
-            "pane_id": row["pane_id"],
+            "transport": row["transport"],
+            "endpoint": _json_object(row["endpoint_json"]),
             "enabled": bool(row["enabled"]),
             "watcher_pid": row["watcher_pid"],
             "registered_at": _iso(row["registered_at"]),
@@ -1876,13 +2091,13 @@ class CoordinationStore:
             ],
         }
 
-    def disable_zellij_wake(self, session_id: str) -> dict[str, Any] | None:
+    def disable_wake(self, session_id: str) -> dict[str, Any] | None:
         self.get_session(session_id)
         now = self.clock()
         with self._connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE zellij_wake_targets
+                UPDATE wake_targets
                 SET enabled = 0, watcher_pid = NULL, updated_at = ?
                 WHERE session_id = ?
                 """,
@@ -1890,16 +2105,18 @@ class CoordinationStore:
             )
         if cursor.rowcount == 0:
             return None
-        return self.get_zellij_wake(session_id)
+        return self.get_wake_target(session_id)
 
-    def set_zellij_watcher_pid(
+    def set_wake_watcher_pid(
         self, session_id: str, watcher_pid: int | None
     ) -> dict[str, Any]:
+        if watcher_pid is not None and watcher_pid <= 0:
+            raise CoordinationError("Wake watcher PID must be positive.")
         now = self.clock()
         with self._connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE zellij_wake_targets
+                UPDATE wake_targets
                 SET watcher_pid = ?, updated_at = ?
                 WHERE session_id = ? AND enabled = 1
                 """,
@@ -1907,23 +2124,23 @@ class CoordinationStore:
             )
         if cursor.rowcount != 1:
             raise CoordinationError(
-                f"Session {session_id} has no enabled Zellij wake registration."
+                f"Session {session_id} has no enabled wake registration."
             )
-        return self.get_zellij_wake(session_id)
+        return self.get_wake_target(session_id)
 
-    def clear_zellij_watcher_pid(self, session_id: str, watcher_pid: int) -> None:
+    def clear_wake_watcher_pid(self, session_id: str, watcher_pid: int) -> None:
         now = self.clock()
         with self._connection() as connection:
             connection.execute(
                 """
-                UPDATE zellij_wake_targets
+                UPDATE wake_targets
                 SET watcher_pid = NULL, updated_at = ?
                 WHERE session_id = ? AND watcher_pid = ?
                 """,
                 (now, session_id, watcher_pid),
             )
 
-    def record_zellij_check(
+    def record_wake_check(
         self,
         session_id: str,
         *,
@@ -1934,7 +2151,7 @@ class CoordinationStore:
         with self._connection() as connection:
             connection.execute(
                 """
-                UPDATE zellij_wake_targets
+                UPDATE wake_targets
                 SET last_checked_at = ?, last_wake_at = CASE
                         WHEN ? THEN ? ELSE last_wake_at END,
                     last_error = ?, updated_at = ?
@@ -1942,6 +2159,84 @@ class CoordinationStore:
                 """,
                 (now, int(woke), now, error, now, session_id),
             )
+
+    def register_zellij_wake(
+        self,
+        *,
+        session_id: str,
+        zellij_session: str,
+        pane_id: str,
+        watcher_pid: int | None = None,
+    ) -> dict[str, Any]:
+        self.get_session(session_id)
+        if not zellij_session.strip():
+            raise CoordinationError("Zellij session name must not be empty.")
+        if not pane_id.strip():
+            raise CoordinationError("Zellij pane ID must not be empty.")
+        self.register_wake_target(
+            session_id=session_id,
+            transport="zellij",
+            endpoint={
+                "zellij_session": zellij_session.strip(),
+                "pane_id": pane_id.strip(),
+            },
+            watcher_pid=watcher_pid,
+        )
+        return self.get_zellij_wake(session_id)
+
+    def get_zellij_wake(self, session_id: str) -> dict[str, Any]:
+        self.get_session(session_id)
+        try:
+            target = self.get_wake_target(session_id)
+        except CoordinationError as exc:
+            raise CoordinationError(
+                f"Session {session_id} has no Zellij wake registration."
+            ) from exc
+        if target["transport"] != "zellij":
+            raise CoordinationError(
+                f"Session {session_id} has no Zellij wake registration."
+            )
+        endpoint = target["endpoint"] or {}
+        return {
+            **target,
+            "zellij_session": endpoint.get("zellij_session"),
+            "pane_id": endpoint.get("pane_id"),
+        }
+
+    def disable_zellij_wake(self, session_id: str) -> dict[str, Any] | None:
+        try:
+            target = self.get_wake_target(session_id)
+        except CoordinationError:
+            return None
+        if target["transport"] != "zellij":
+            return None
+        disabled = self.disable_wake(session_id)
+        if disabled is None:
+            return None
+        return self.get_zellij_wake(session_id)
+
+    def set_zellij_watcher_pid(
+        self, session_id: str, watcher_pid: int | None
+    ) -> dict[str, Any]:
+        try:
+            self.set_wake_watcher_pid(session_id, watcher_pid)
+        except CoordinationError as exc:
+            raise CoordinationError(
+                f"Session {session_id} has no enabled Zellij wake registration."
+            ) from exc
+        return self.get_zellij_wake(session_id)
+
+    def clear_zellij_watcher_pid(self, session_id: str, watcher_pid: int) -> None:
+        self.clear_wake_watcher_pid(session_id, watcher_pid)
+
+    def record_zellij_check(
+        self,
+        session_id: str,
+        *,
+        error: str | None = None,
+        woke: bool = False,
+    ) -> None:
+        self.record_wake_check(session_id, error=error, woke=woke)
 
     def pending_wake_message_ids(self, session_id: str) -> list[int]:
         self.get_session(session_id)
@@ -1953,6 +2248,7 @@ class CoordinationStore:
                     FROM messages
                     LEFT JOIN message_wake_attempts
                         ON message_wake_attempts.message_id = messages.id
+                       AND message_wake_attempts.outcome IN ('claimed', 'sent')
                     WHERE messages.recipient_session_id = ?
                       AND messages.delivered_at IS NULL
                       AND messages.classification = 'action_required'
@@ -1983,7 +2279,7 @@ class CoordinationStore:
             ).fetchone()
             target = connection.execute(
                 """
-                SELECT enabled FROM zellij_wake_targets WHERE session_id = ?
+                SELECT enabled FROM wake_targets WHERE session_id = ?
                 """,
                 (session_id,),
             ).fetchone()
@@ -1997,6 +2293,25 @@ class CoordinationStore:
             ):
                 return []
             for message_id in requested:
+                cursor = connection.execute(
+                    """
+                    UPDATE message_wake_attempts
+                    SET attempted_at = ?, outcome = 'claimed', detail = NULL
+                    WHERE message_id = ? AND session_id = ?
+                      AND outcome = 'failed'
+                      AND EXISTS (
+                          SELECT 1 FROM messages
+                          WHERE messages.id = message_wake_attempts.message_id
+                            AND messages.recipient_session_id = ?
+                            AND messages.delivered_at IS NULL
+                            AND messages.classification = 'action_required'
+                      )
+                    """,
+                    (now, message_id, session_id, session_id),
+                )
+                if cursor.rowcount == 1:
+                    claimed.append(message_id)
+                    continue
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO message_wake_attempts (
@@ -2114,16 +2429,41 @@ class CoordinationStore:
         mark_delivered: bool = True,
         unread_only: bool = False,
         classifications: Iterable[str] | None = None,
+        wait_started_at: float | None = None,
+        wait_after_message_id: int | None = None,
     ) -> list[dict[str, Any]]:
         self.get_session(session_id)
         if include_delivered and unread_only:
             raise CoordinationError("Unread inbox cannot be combined with all history.")
+        if (wait_started_at is None) != (wait_after_message_id is None):
+            raise CoordinationError("Inbox wait cursor is incomplete.")
+        if wait_started_at is not None and (include_delivered or unread_only):
+            raise CoordinationError(
+                "Inbox wait cursor cannot be combined with delivered history."
+            )
         clauses = ["messages.recipient_session_id = ?"]
         values: list[Any] = [session_id]
         if unread_only:
             clauses.append("messages.acknowledged_at IS NULL")
         elif not include_delivered:
-            clauses.append("messages.delivered_at IS NULL")
+            if wait_started_at is None:
+                clauses.append("messages.delivered_at IS NULL")
+            else:
+                clauses.append(
+                    """
+                    (
+                        messages.delivered_at IS NULL
+                        OR (
+                            messages.acknowledged_at IS NULL
+                            AND (
+                                messages.id > ?
+                                OR messages.delivered_at > ?
+                            )
+                        )
+                    )
+                    """
+                )
+                values.extend([wait_after_message_id, wait_started_at])
         normalized_classifications = (
             sorted(set(classifications)) if classifications is not None else []
         )
@@ -2187,7 +2527,24 @@ class CoordinationStore:
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise CoordinationError("--timeout must be a positive number of seconds.")
         self.get_session(session_id)
-        deadline = None if timeout_seconds is None else self.clock() + timeout_seconds
+        wait_started_at = self.clock()
+        deadline = (
+            None if timeout_seconds is None else wait_started_at + timeout_seconds
+        )
+        # Hooks and explicit inbox readers share delivery state. Keep a cursor so
+        # a message that another path delivers while this call sleeps still ends
+        # the wait, without replaying delivered history from before it started.
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(MAX(id), 0) AS latest_message_id
+                FROM messages
+                WHERE recipient_session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        assert row is not None
+        wait_after_message_id = int(row["latest_message_id"])
         while True:
             self.touch(session_id)
             messages = self.inbox(
@@ -2195,6 +2552,8 @@ class CoordinationStore:
                 include_delivered=False,
                 mark_delivered=mark_delivered,
                 classifications=classifications,
+                wait_started_at=wait_started_at,
+                wait_after_message_id=wait_after_message_id,
             )
             if messages:
                 return messages

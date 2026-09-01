@@ -1,6 +1,6 @@
 ---
 name: agent-coordination
-description: Coordinate concurrent Claude Code and Codex sessions through conflict detection, durable local communication, and optional Zellij delegation. Use before implementation when another coding-agent session may be active, when checking file conflicts, when sending or receiving agent messages, or when delegating ready Beads work to a new Codex or Claude Code pane.
+description: Coordinate concurrent Claude Code and Codex sessions through conflict detection, durable local communication, Agent Coord-owned PTY delegation, and an optional local operator UI. Use before implementation when another coding-agent session may be active, when checking file conflicts, when sending or receiving agent messages, or when delegating ready Beads work to a new Codex or Claude Code worker.
 ---
 
 # Agent Coordination
@@ -110,7 +110,7 @@ Closure is idempotent and suppresses older pending actionable messages in that
 thread. It does not require a reply or wake the recipient. A later explicit
 `action_required` message on the same thread reopens it for a material change.
 
-## Wake an idle Zellij session
+## Wake an ordinary idle Zellij session (compatibility)
 
 An agent at an idle prompt cannot receive hook context until a new turn starts.
 When automatic wake-up is wanted, run this once from that agent's Zellij pane:
@@ -136,7 +136,7 @@ conversationally only when `reply_required=true`, reuse the same thread, and use
 transport acknowledgement independently. Never reply to or acknowledge an
 acknowledgement; acknowledgements do not create messages.
 
-## Delegate work to a new agent pane
+## Delegate work to a managed agent
 
 Use `delegate` when a registered parent session must create a separate Codex or
 Claude Code worker. The work must have one open and ready Beads issue and
@@ -153,9 +153,7 @@ Run a dry-run preview first:
   --scope 'src/**' \
   --scope 'tests/test_feature.py' \
   --client <codex-or-claude> \
-  --zellij-session <session-name> \
-  --floating \
-  --name <pane-name> \
+  --name <worker-name> \
   --model <client-model> \
   --effort <level> \
   --lease-mode write \
@@ -163,9 +161,12 @@ Run a dry-run preview first:
   'Implement the specific requested change and run the focused tests.'
 ```
 
-Remove `--dry-run` to launch the worker. The command can read the Zellij
-session from `ZELLIJ_SESSION_NAME`, so `--zellij-session` is optional when the
-parent runs inside the target session. `--floating` is optional.
+Remove `--dry-run` to launch the worker. The default `managed-pty` runtime
+starts a detached Agent Coord supervisor, gives the child a controlling PTY,
+captures bounded output, and keeps the interactive client alive at its prompt
+between turns. It does not require Zellij or tmux and does not use the parent's
+PTY. Use `--runtime zellij --zellij-session <name>` only when the user requests
+the compatibility pane adapter; `--floating` is optional for that runtime.
 
 `--model` and `--effort` select optional child settings. Effort maps to
 `model_reasoning_effort` for Codex and `--effort` for Claude Code;
@@ -181,11 +182,11 @@ validation result when every requested check ran and the child reported the
 failure. Use a new implementation issue for remediation and a new validation
 issue for the next attempt. Validation-only delegation rejects `--yolo`.
 
-The reviewed launch opens the selected interactive TUI in the Zellij pane.
-Codex uses `--approve-for-me`; Claude Code uses safety-classified auto permission
-mode. Use `--yolo` only when the user explicitly authorizes bypassing the
-selected client's permission safeguards. Never infer that permission from a
-request to delegate work.
+The reviewed launch opens the selected interactive TUI in the owned PTY. Codex
+uses `--approve-for-me`; Claude Code uses safety-classified auto permission mode.
+Use `--yolo` only when the user explicitly authorizes bypassing the selected
+client's permission safeguards. Never infer that permission from a request to
+delegate work.
 
 Codex requires persisted trust before it runs hooks. Review and trust the
 installed Agent Coord hook before delegation. If that is not possible,
@@ -212,7 +213,26 @@ Inspect durable lifecycle state with:
 <agent-coord> delegation status --delegation-id <delegation-id>
 <agent-coord> delegation list --parent-session <parent-session-id>
 <agent-coord> delegation list --parent-session <parent-session-id> --active
+<agent-coord> delegation logs --delegation-id <delegation-id>
+<agent-coord> ui --parent-session <parent-session-id>
+<agent-coord> ui --cwd /absolute/repository/path
 ```
+
+The managed supervisor wakes an inactive child only for undelivered actionable
+messages and submits one generic prompt through its owned PTY. The prompt hook
+then supplies the durable body and thread metadata. This keeps delegated agents
+long-lived and lets children coordinate with their parent or with one another.
+The loopback-only UI shows the parent/child tree, lifecycle and process status,
+recent bounded output, complete received-message history, and activity. Managed
+terminal output is rendered using its cursor and erase controls rather than by
+concatenating repaint traffic. Live Zellij screens are snapshotted into the
+same durable output area, and the last successful capture remains available
+after a pane or UI restart. Use
+`--cwd` (or `--repo`) to restrict it to one repository; omitting the filter
+shows delegation trees across the shared database. The tree sorts by most
+recent activity by default and can switch to creation time or name. A selected
+parent shows clickable child summaries and recent child output. The UI is
+read-only, so follow-up work should be sent through Agent Coord messaging.
 
 After the child reports a completed or failed result, its `Stop` hook records
 token usage in durable delegation state and writes
@@ -221,10 +241,10 @@ repository. `SessionEnd` is the fallback for an early exit. Inspect
 `token_usage`, `token_usage_artifact_path`, and `token_usage_error` in
 `delegation status`; usage-capture problems do not change the task outcome.
 
-The child sends its result to the parent inbox. The SessionEnd hook records a
-failure if the child exits without a result. The parent does not need to poll
-the Zellij pane to determine the final lifecycle state. If a launch cannot
-attach and remains active, the parent can release it with
+The child sends its result to the parent inbox. The SessionEnd hook or managed
+supervisor records a failure if the child exits without a result. The parent
+does not need to poll a pane or process to determine the final lifecycle state.
+If a launch cannot attach and remains active, the parent can release it with
 `<agent-coord> delegation cancel --delegation-id <id> --from-session
 <parent-id> --message '<reason>'`.
 

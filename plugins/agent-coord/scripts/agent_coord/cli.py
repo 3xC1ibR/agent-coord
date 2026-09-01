@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .delegate import delegate_work
+from .managed_pty import read_delegation_output, supervise_managed_pty
 from .store import (
     ACTIVITIES,
     AmbiguousTargetError,
@@ -19,6 +20,7 @@ from .store import (
     CoordinationStore,
     InboxTimeoutError,
 )
+from .ui import serve_ui
 from .zellij_wake import enable_zellij_wake, watch_zellij
 
 
@@ -165,9 +167,7 @@ def _parser() -> argparse.ArgumentParser:
     inbox = subcommands.add_parser("inbox", help="Read durable messages.")
     inbox.add_argument("--session-id", required=True)
     inbox_mode = inbox.add_mutually_exclusive_group()
-    inbox_mode.add_argument(
-        "--all", action="store_true", dest="include_delivered"
-    )
+    inbox_mode.add_argument("--all", action="store_true", dest="include_delivered")
     inbox_mode.add_argument(
         "--unread",
         action="store_true",
@@ -196,7 +196,7 @@ def _parser() -> argparse.ArgumentParser:
     acknowledge_target.add_argument("--all-unread", action="store_true")
 
     delegate = subcommands.add_parser(
-        "delegate", help="Launch ready Beads work in a new agent Zellij pane."
+        "delegate", help="Launch ready Beads work in a persistent child agent."
     )
     delegate.add_argument("--from-session", required=True)
     delegate.add_argument("--cwd", default=os.getcwd())
@@ -208,9 +208,28 @@ def _parser() -> argparse.ArgumentParser:
         default="codex",
         help="Select the child client. Defaults to codex.",
     )
-    delegate.add_argument("--zellij-session")
-    delegate.add_argument("--name", dest="pane_name")
-    delegate.add_argument("--floating", action="store_true")
+    delegate.add_argument(
+        "--runtime",
+        choices=["managed-pty", "zellij"],
+        help=(
+            "Host the persistent child in an Agent Coord-owned PTY (default) "
+            "or a compatibility Zellij pane."
+        ),
+    )
+    delegate.add_argument(
+        "--zellij-session", help="Zellij compatibility runtime session name."
+    )
+    delegate.add_argument(
+        "--name",
+        dest="pane_name",
+        metavar="WORKER_NAME",
+        help="Durable worker name (and Zellij pane name when applicable).",
+    )
+    delegate.add_argument(
+        "--floating",
+        action="store_true",
+        help="Use a floating pane with the Zellij compatibility runtime.",
+    )
     delegate.add_argument("--width", default="90%")
     delegate.add_argument("--height", default="85%")
     delegate.add_argument(
@@ -260,9 +279,7 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="Show one delegation."
     )
     delegation_status.add_argument("--delegation-id", required=True)
-    delegation_list = delegation_commands.add_parser(
-        "list", help="List delegations."
-    )
+    delegation_list = delegation_commands.add_parser("list", help="List delegations.")
     delegation_list.add_argument("--parent-session")
     delegation_list.add_argument("--active", action="store_true")
     delegation_finish = delegation_commands.add_parser(
@@ -280,6 +297,16 @@ def _parser() -> argparse.ArgumentParser:
     delegation_cancel.add_argument("--delegation-id", required=True)
     delegation_cancel.add_argument("--from-session", required=True)
     delegation_cancel.add_argument("--message", required=True)
+    delegation_supervise = delegation_commands.add_parser(
+        "supervise", help="Run a managed PTY delegation supervisor."
+    )
+    delegation_supervise.add_argument("--delegation-id", required=True)
+    delegation_supervise.add_argument("--poll-interval", type=float, default=0.25)
+    delegation_logs = delegation_commands.add_parser(
+        "logs", help="Read recent persisted delegation output."
+    )
+    delegation_logs.add_argument("--delegation-id", required=True)
+    delegation_logs.add_argument("--tail-bytes", type=int, default=64 * 1024)
 
     wake_zellij = subcommands.add_parser(
         "wake-zellij", help="Manage opt-in wake-up for a Zellij agent pane."
@@ -303,6 +330,25 @@ def _parser() -> argparse.ArgumentParser:
     wake_watch.add_argument("--session-id", required=True)
     wake_watch.add_argument("--once", action="store_true")
     wake_watch.add_argument("--poll-interval", type=float, default=0.5)
+
+    ui = subcommands.add_parser(
+        "ui", help="Serve the local parent/child delegation monitor."
+    )
+    ui.add_argument("--host", default="127.0.0.1", help="Loopback bind address.")
+    ui.add_argument("--port", type=int, default=8765, help="Local HTTP port.")
+    ui.add_argument(
+        "--parent-session", help="Only show this parent and its delegations."
+    )
+    ui.add_argument(
+        "--cwd",
+        "--repo",
+        dest="ui_cwd",
+        metavar="PATH",
+        help="Only show delegation trees for this repository.",
+    )
+    ui.add_argument(
+        "--no-browser", action="store_true", help="Do not open the local URL."
+    )
     return parser
 
 
@@ -415,6 +461,7 @@ def run(arguments: argparse.Namespace) -> Any:
             model=arguments.model,
             reasoning_effort=arguments.reasoning_effort,
             lease_mode=arguments.lease_mode,
+            runtime=arguments.runtime,
             dry_run=arguments.dry_run,
         )
     if command == "delegation":
@@ -438,6 +485,21 @@ def run(arguments: argparse.Namespace) -> Any:
                 parent_session_id=arguments.from_session,
                 reason=arguments.message,
             )
+        if arguments.delegation_command == "supervise":
+            return supervise_managed_pty(
+                store,
+                arguments.delegation_id,
+                poll_interval_seconds=arguments.poll_interval,
+            )
+        if arguments.delegation_command == "logs":
+            return {
+                "delegation_id": arguments.delegation_id,
+                "output": read_delegation_output(
+                    store,
+                    arguments.delegation_id,
+                    max_bytes=arguments.tail_bytes,
+                ),
+            }
         raise AssertionError(
             f"Unhandled delegation command: {arguments.delegation_command}"
         )
@@ -465,6 +527,15 @@ def run(arguments: argparse.Namespace) -> Any:
                 poll_interval_seconds=arguments.poll_interval,
             )
         raise AssertionError(f"Unhandled wake command: {arguments.wake_command}")
+    if command == "ui":
+        return serve_ui(
+            store,
+            host=arguments.host,
+            port=arguments.port,
+            parent_session_id=arguments.parent_session,
+            cwd=(find_repository_root(arguments.ui_cwd) if arguments.ui_cwd else None),
+            open_browser=not arguments.no_browser,
+        )
     raise AssertionError(f"Unhandled command: {command}")
 
 

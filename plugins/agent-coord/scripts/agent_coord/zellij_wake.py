@@ -15,7 +15,12 @@ from typing import Any
 from .store import WAKEABLE_ACTIVITIES, CoordinationError, CoordinationStore
 
 DEFAULT_WAKE_POLL_SECONDS = 0.5
+DEFAULT_WAKE_VERIFY_ATTEMPTS = 5
+DEFAULT_WAKE_VERIFY_INTERVAL_SECONDS = 0.05
 WAKE_PROMPT = "Check and handle your unread agent-coord messages."
+PROMPT_EMPTY = "empty"
+PROMPT_SELF_WAKE = "self-wake"
+PROMPT_OCCUPIED = "occupied"
 _ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _CLAUDE_PROMPT = re.compile(r"^\s*❯\s*(.*)$")
 _CODEX_PROMPT = re.compile(r"^\s*›\s*(.*)$")
@@ -40,18 +45,27 @@ def _normalize_pane_id(value: str) -> str:
     )
 
 
-def prompt_is_empty(screen: str, client: str) -> bool:
-    """Return true only when the last recognizable client prompt has no input."""
+def prompt_state(screen: str, client: str) -> str:
+    """Classify the last recognizable client prompt without altering its input."""
     clean = _ANSI_ESCAPE.sub("", screen).replace("\u00a0", " ")
     matcher = _CLAUDE_PROMPT if client == "claude" else _CODEX_PROMPT
     matches = [matcher.match(line) for line in clean.splitlines()]
     prompts = [match.group(1).strip() for match in matches if match is not None]
     if not prompts:
-        return False
+        return PROMPT_OCCUPIED
     value = prompts[-1]
     if not value:
-        return True
-    return client == "codex" and value in _CODEX_PLACEHOLDERS
+        return PROMPT_EMPTY
+    if client == "codex" and value in _CODEX_PLACEHOLDERS:
+        return PROMPT_EMPTY
+    if value == WAKE_PROMPT:
+        return PROMPT_SELF_WAKE
+    return PROMPT_OCCUPIED
+
+
+def prompt_is_empty(screen: str, client: str) -> bool:
+    """Return true only when the last recognizable client prompt has no input."""
+    return prompt_state(screen, client) == PROMPT_EMPTY
 
 
 class ZellijClient:
@@ -92,8 +106,9 @@ class ZellijClient:
     def dump_screen(self) -> str:
         return self._action(["dump-screen", "--pane-id", self.pane_id]).stdout
 
-    def wake(self, prompt: str = WAKE_PROMPT) -> None:
-        self._action(["write-chars", "--pane-id", self.pane_id, prompt])
+    def wake(self, prompt: str | None = WAKE_PROMPT) -> None:
+        if prompt is not None:
+            self._action(["write-chars", "--pane-id", self.pane_id, prompt])
         self._action(["send-keys", "--pane-id", self.pane_id, "Enter"])
 
 
@@ -105,11 +120,33 @@ class ZellijWakeWatcher:
         *,
         executable: str = "zellij",
         client_factory: Callable[..., ZellijClient] = ZellijClient,
+        verify_attempts: int = DEFAULT_WAKE_VERIFY_ATTEMPTS,
+        verify_interval_seconds: float = DEFAULT_WAKE_VERIFY_INTERVAL_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.store = store
         self.session_id = session_id
         self.executable = executable
         self.client_factory = client_factory
+        self.verify_attempts = verify_attempts
+        self.verify_interval_seconds = verify_interval_seconds
+        self.sleep = sleep
+
+    def _submission_observed(
+        self, client: ZellijClient, client_name: str
+    ) -> tuple[bool, str | None]:
+        for attempt in range(self.verify_attempts):
+            if self.store.get_session(self.session_id)["turn_active"]:
+                return True, None
+            try:
+                screen = client.dump_screen()
+            except ZellijCommandError as exc:
+                return False, str(exc)
+            if prompt_state(screen, client_name) != PROMPT_SELF_WAKE:
+                return True, None
+            if attempt + 1 < self.verify_attempts:
+                self.sleep(self.verify_interval_seconds)
+        return False, "Agent Coord wake prompt remained unsubmitted."
 
     def run_once(self) -> dict[str, Any]:
         try:
@@ -149,7 +186,8 @@ class ZellijWakeWatcher:
                 "session_id": self.session_id,
                 "error": str(exc),
             }
-        if not prompt_is_empty(screen, session["client"]):
+        state = prompt_state(screen, session["client"])
+        if state == PROMPT_OCCUPIED:
             self.store.record_zellij_check(self.session_id)
             return {
                 "status": "prompt-not-empty",
@@ -161,7 +199,7 @@ class ZellijWakeWatcher:
         if not claimed:
             return {"status": "raced", "session_id": self.session_id}
         try:
-            client.wake()
+            client.wake(None if state == PROMPT_SELF_WAKE else WAKE_PROMPT)
         except ZellijCommandError as exc:
             self.store.complete_wake_attempts(
                 self.session_id,
@@ -175,6 +213,25 @@ class ZellijWakeWatcher:
                 "session_id": self.session_id,
                 "message_ids": claimed,
                 "error": str(exc),
+            }
+
+        submitted, submission_error = self._submission_observed(
+            client, session["client"]
+        )
+        if not submitted:
+            detail = submission_error or "Wake submission could not be verified."
+            self.store.complete_wake_attempts(
+                self.session_id,
+                claimed,
+                outcome="failed",
+                detail=detail,
+            )
+            self.store.record_zellij_check(self.session_id, error=detail)
+            return {
+                "status": "failed",
+                "session_id": self.session_id,
+                "message_ids": claimed,
+                "error": detail,
             }
 
         self.store.complete_wake_attempts(

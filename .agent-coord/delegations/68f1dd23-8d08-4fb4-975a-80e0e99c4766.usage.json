@@ -1,0 +1,30 @@
+{
+  "client": "codex",
+  "cwd": "/opt/projects/agent-coord",
+  "delegation_id": "68f1dd23-8d08-4fb4-975a-80e0e99c4766",
+  "schema_version": 1,
+  "session_id": "01a057fd-1ff8-7733-85d4-2dd947eb30cb",
+  "status": "completed",
+  "usage": {
+    "capture_event": "Stop",
+    "captured_at": "2026-08-31T13:34:01.037344+00:00",
+    "client": {
+      "cache_write_input_tokens": 0,
+      "cached_input_tokens": 1624832,
+      "input_tokens": 1715519,
+      "output_tokens": 12261,
+      "reasoning_output_tokens": 7032,
+      "total_tokens": 1727780
+    },
+    "model": "gpt-5.6-sol",
+    "normalized": {
+      "cache_write_input_tokens": 0,
+      "cached_input_tokens": 1624832,
+      "input_tokens": 1715519,
+      "output_tokens": 12261,
+      "reasoning_output_tokens": 7032,
+      "total_tokens": 1727780
+    },
+    "schema_version": 1
+  }
+}

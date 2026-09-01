@@ -11,7 +11,8 @@ from unittest.mock import MagicMock, patch
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
-from agent_coord.cli import _parser, run as cli_run, validate_claimed_bead
+from agent_coord.cli import _parser, validate_claimed_bead
+from agent_coord.cli import run as cli_run
 from agent_coord.store import CoordinationError
 
 
@@ -179,7 +180,42 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(arguments.client, "codex")
         self.assertEqual(arguments.reasoning_effort, "medium")
+        self.assertIsNone(arguments.runtime)
         self.assertEqual(arguments.lease_mode, "write")
+
+    def test_delegate_parses_managed_runtime_and_ui_options(self) -> None:
+        delegate = _parser().parse_args(
+            [
+                "delegate",
+                "--from-session",
+                "parent",
+                "--bead",
+                "work-a",
+                "--scope",
+                "src/**",
+                "--runtime",
+                "managed-pty",
+                "implement",
+            ]
+        )
+        ui = _parser().parse_args(
+            [
+                "ui",
+                "--parent-session",
+                "parent",
+                "--cwd",
+                "/tmp/repo",
+                "--port",
+                "9000",
+                "--no-browser",
+            ]
+        )
+
+        self.assertEqual(delegate.runtime, "managed-pty")
+        self.assertEqual(ui.parent_session, "parent")
+        self.assertEqual(ui.ui_cwd, "/tmp/repo")
+        self.assertEqual(ui.port, 9000)
+        self.assertTrue(ui.no_browser)
 
     @patch("agent_coord.cli.shutil.which", return_value="/usr/local/bin/bd")
     @patch("agent_coord.cli.subprocess.run")

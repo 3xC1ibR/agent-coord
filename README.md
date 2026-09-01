@@ -2,8 +2,9 @@
 
 Agent Coord is a local coordination channel for Claude Code and Codex sessions.
 It uses one dependency-free Python CLI, SQLite, hooks, and a shared skill. It
-does not need an MCP server. An optional receiver-side watcher can wake an idle
-agent that runs in Zellij.
+does not need an MCP server, terminal multiplexer, or long-lived parent process.
+Delegated workers run in Agent Coord-owned PTYs; an optional compatibility
+watcher can still wake an ordinary agent that runs in Zellij.
 
 The plugin answers these questions:
 
@@ -17,10 +18,12 @@ The plugin answers these questions:
 - How can one session send a durable message to another session or to the live
   owner of a Beads issue?
 - Which messages require action or a reply, and which are history-only receipts?
-- How can a Zellij session safely start a turn when a message arrives while it
-  is idle?
+- How can an Agent Coord-owned worker safely start a turn when a message arrives
+  while it is idle?
 - How can a session delegate ready Beads work to a new interactive Codex or
-  Claude Code session in a visible Zellij pane?
+  Claude Code session without Zellij or tmux?
+- How can an operator inspect the parent, its children, and each child's current
+  status and recent output?
 
 ## Design
 
@@ -47,9 +50,18 @@ threshold.
 The same plugin directory contains Codex and Claude manifests. Both clients use
 the same hooks, skill, CLI, and database schema.
 
-Delegation lifecycle state is also in SQLite. Launch mechanics are in a
-Zellij-specific adapter. The durable parent, child, result, and failure state
-does not depend on pane inspection.
+Delegation lifecycle state is also in SQLite. The default launch adapter owns a
+detached PTY for each child, captures bounded output, and wakes an idle child
+when actionable messages arrive. A Zellij adapter remains available for
+compatibility. Durable parent, child, result, and failure state does not depend
+on pane inspection.
+
+Wake registration is transport-neutral durable state: each session has a
+transport name, transport-owned endpoint metadata, enablement and watcher
+status, and a shared atomic message-reservation history. The `managed-pty` and
+`zellij` adapters own their different delivery safety checks; the message store
+does not. Registrations reject unknown transport names instead of accepting a
+target that no adapter can service.
 
 Scope declarations use conservative repository-relative paths and globs. Agent
 Coord does not claim symbol- or line-range ownership because the write hooks can
@@ -225,12 +237,13 @@ assert the expected declaration. Use `--target-bead` only for a claimed
 transaction. Beads and SQLite remain separate stores, so their updates cannot be
 one cross-database transaction.
 
-## Delegate work to a Codex or Claude Code Zellij pane
+## Delegate work to an Agent Coord-owned PTY
 
 A registered Codex or Claude parent can launch a new Codex or Claude Code worker
 for an open, ready, and unclaimed Beads issue. Codex remains the default child
-for backward compatibility; pass `--client claude` to select Claude Code. First,
-preview and validate the launch without changing SQLite or opening a pane:
+for backward compatibility; pass `--client claude` to select Claude Code. The
+default `managed-pty` runtime does not require Zellij or tmux. First, preview and
+validate the launch without changing SQLite or starting a process:
 
 ```bash
 agent-coord delegate \
@@ -240,8 +253,6 @@ agent-coord delegate \
   --scope 'src/**' \
   --scope 'tests/test_feature.py' \
   --client claude \
-  --zellij-session friendly-lemur \
-  --floating \
   --name delegated-feature \
   --model <client-model> \
   --effort <level> \
@@ -250,11 +261,18 @@ agent-coord delegate \
   'Implement the feature, run the focused tests, and report the result.'
 ```
 
-Remove `--dry-run` to launch the pane. If the parent runs inside the target
-Zellij session, the command reads `ZELLIJ_SESSION_NAME`, and you can omit
-`--zellij-session`. Omit `--floating` to create a normal pane. Floating panes
-use 90 percent width and 85 percent height by default. Use `--width` and
-`--height` to change these values.
+Remove `--dry-run` to launch the worker. Agent Coord starts a detached
+supervisor, allocates the child a controlling PTY, captures its output, and
+keeps the interactive client alive at its prompt between turns. The supervisor
+does not run inside the parent's PTY, so it survives the parent process and does
+not compete with the parent's terminal input or rendering.
+
+To use the previous pane-based adapter explicitly, pass `--runtime zellij` and
+`--zellij-session <name>`. When already inside the target Zellij session, the
+command can read `ZELLIJ_SESSION_NAME`. Add `--floating` for a floating pane;
+`--width` and `--height` set its dimensions. Supplying a Zellij-only option
+without an explicit runtime remains a compatibility shorthand that selects the
+Zellij adapter.
 
 Use `--model` and `--effort` to select the child model and effort. For Codex,
 Agent Coord maps effort to the `model_reasoning_effort` configuration value; for
@@ -272,10 +290,10 @@ reported the failure. Create an implementation issue for remediation and a new
 validation issue for the next attempt. Agent Coord rejects `--yolo` with a
 validation lease.
 
-The reviewed command opens the selected interactive TUI in the requested
-Zellij pane. Codex uses `--approve-for-me`; Claude Code uses its safety-classified
-`--permission-mode auto`, which can still deny or request confirmation for risky
-actions. The optional `--yolo` flag maps to
+The reviewed command opens the selected interactive TUI in the owned PTY. Codex
+uses `--approve-for-me`; Claude Code uses its safety-classified
+`--permission-mode auto`, which can still deny or request confirmation for
+risky actions. The optional `--yolo` flag maps to
 `--dangerously-bypass-approvals-and-sandbox` for Codex and
 `--dangerously-skip-permissions` for Claude Code. Use it only after explicit
 authorization.
@@ -292,13 +310,14 @@ An interactive Claude Code child can still show its normal repository trust
 prompt when the repository has not been trusted previously.
 
 Before launch, Agent Coord verifies the Git repository, `bd`, the selected
-client's login, Zellij, issue readiness, live write-scope conflicts, and active
-delegation state. It then creates one durable delegation record and starts the
-child with an inherited delegation ID and explicit client identity. Reviewed
-mode adds only the Agent Coord database directory as an extra allowed root, so
-child CLI calls can update lifecycle state outside the repository. The child
-SessionStart hook verifies the client and attaches the new session. The
-generated instructions require the child to:
+client's login, issue readiness, live write-scope conflicts, and active
+delegation state. The Zellij adapter additionally verifies Zellij. Agent Coord
+then creates one durable delegation record and starts the child with an
+inherited delegation ID and explicit client identity. Reviewed mode adds only
+the Agent Coord database directory as an extra allowed root, so child CLI calls
+can update lifecycle state outside the repository. The child SessionStart hook
+verifies the client and attaches the new session. The generated instructions
+require the child to:
 
 1. Read repository instructions and run `bd prime`.
 2. Verify and claim the ready issue.
@@ -313,11 +332,64 @@ Inspect delegation state with:
 agent-coord delegation status --delegation-id <delegation-id>
 agent-coord delegation list --parent-session <parent-session-id>
 agent-coord delegation list --parent-session <parent-session-id> --active
+agent-coord delegation logs --delegation-id <delegation-id>
 agent-coord delegation cancel \
   --delegation-id <delegation-id> \
   --from-session <parent-session-id> \
   --message 'The child did not attach.'
 ```
+
+The managed supervisor watches the local SQLite inbox. When its attached child
+is inactive at an idle or waiting prompt and has an undelivered actionable
+message, the supervisor atomically reserves the wake and submits one generic
+prompt through the owned PTY. The normal prompt hook supplies the durable
+message body, thread, and reply metadata. Children can therefore negotiate with
+the parent or with one another while remaining long-lived; informational and
+closure messages do not cause turns.
+
+Managed terminal traffic is persisted and bounded to approximately 1 MiB per
+delegation under the Agent Coord state directory. The output reader interprets
+cursor movement, line erasure, and screen repaint sequences before display, so
+interactive progress updates appear as one readable terminal screen instead of
+concatenated animation frames. `delegation logs` returns that rendered recent
+output without giving the caller an arbitrary file-read path. If the client
+exits before reporting a terminal result, the supervisor records the exit code,
+marks the delegation failed, and notifies the parent.
+
+### Local delegation UI
+
+Start the dependency-free, read-only operator UI with:
+
+```bash
+agent-coord ui --parent-session <parent-session-id>
+agent-coord ui --cwd /absolute/path/to/repository
+```
+
+It opens a local process tree containing the parent and its delegated children.
+`--cwd` (also available as `--repo`) restricts the tree to one normalized Git
+repository; without it, the UI shows delegation trees from every repository in
+the shared database. It can be combined with `--parent-session`.
+
+The tree can be sorted by name, creation time, or last activity. Last activity
+is the default, with the most recently active parent groups and children first;
+parent activity includes activity by its children. Selecting a parent shows
+clickable child cards with status, task, and recent output. Selecting a child
+shows its bounded recent output, complete received-message history (including
+delivered and acknowledged state), and activity metadata. Snapshot reads do
+not deliver or acknowledge messages.
+
+For a live Zellij delegation, snapshot reads also capture the pane's rendered
+screen into the delegation's bounded output file. The last successful snapshot
+remains available after the UI restarts or the pane disappears. Output from an
+older Zellij delegation cannot be recovered when its pane was already gone
+before any snapshot was saved; the UI explains that case and shows the durable
+final result instead of implying that capture is still pending.
+
+The page refreshes automatically. Use `--no-browser` on a headless machine and
+`--port <port>` to choose a port. The server accepts loopback addresses only,
+silently handles normal browser disconnects, and does not expose an input
+channel to the owned PTY; coordination input continues to use durable `send`
+messages.
 
 When a delegated worker reports a terminal result, its next `Stop` hook records
 session token usage in the delegation row and writes:
@@ -349,7 +421,7 @@ same repository and Beads issue is rejected. The parent can use `delegation
 cancel` to release an active record after a confirmed launch or attachment
 failure.
 
-## Wake idle Zellij sessions
+## Wake ordinary idle Zellij sessions (optional compatibility)
 
 An idle agent has no model turn in which a hook can run. Enable the optional
 Zellij watcher from the agent's own pane to let Agent Coord start one safe turn
@@ -376,19 +448,26 @@ prompt is empty. It then atomically reserves pending actionable messages and
 sends one generic prompt to the registered pane with `zellij action`. Normal
 `UserPromptSubmit` hooks deliver the message body and thread/reply metadata as
 context. Informational and closure messages stay available in inbox history but
-do not wake the agent. The watcher does not focus the pane, erase input, mark
-the message delivered, or retry a reserved message. A typed prompt, active
-model turn, missing pane, or failed Zellij command therefore cannot corrupt user
-input or block the sender. Inspect `wake-zellij status` for the last error and
-recent wake attempts.
+do not wake the agent. The watcher does not focus the pane, erase input, or mark
+the message delivered. It verifies that its generic prompt was submitted before
+recording a successful wake. If the exact Agent Coord prompt remains in the
+input, a later poll retries only Enter without typing a duplicate; any other
+typed input remains untouched. Failed or unverified attempts remain retryable
+while their actionable messages are still undelivered. An active model turn,
+missing pane, or failed Zellij command cannot corrupt user input or block the
+sender. Inspect `wake-zellij status` for the last error and recent wake
+attempts.
 
-Wake-up is currently Zellij-specific. Durable messaging, inbox reads, and
-sender behavior do not require Zellij.
+This command is only the compatibility wake adapter for ordinary sessions in
+Zellij. Managed delegation wake-up uses the Agent Coord-owned PTY automatically.
+Durable messaging, inbox reads, sending, managed delegation, and the local UI do
+not require Zellij or tmux.
 
 ## Hook behavior
 
 - `SessionStart` registers the process, attaches an inherited delegation,
-  optionally starts Zellij wake, and delivers unread actionable messages.
+  optionally starts compatibility Zellij wake, and delivers unread actionable
+  messages.
 - `UserPromptSubmit` records an active model turn and delivers unread actionable
   messages.
 - `PreToolUse` permits unscoped solo writes. When concurrent work starts, it
@@ -399,8 +478,8 @@ sender behavior do not require Zellij.
   declared work, or `idle` otherwise. After a delegated terminal result it also
   captures token usage once.
 - `SessionEnd` records an unfinished child delegation as failed, performs
-  fallback token-usage capture, disables Zellij wake, and marks the process
-  offline without changing Beads.
+  fallback token-usage capture, disables its registered wake transport, and
+  marks the process offline without changing Beads.
 
 The write guard covers Claude `Edit` and `Write` tools and Codex `apply_patch`.
 It does not parse arbitrary shell commands. The skill instructs agents to

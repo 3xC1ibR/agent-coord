@@ -1,0 +1,4 @@
+Agent Coord delegate dogfood
+Baseline: parent created this file.
+Delegate one: edited through managed delegation.
+Delegate two: edited through managed delegation.

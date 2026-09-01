@@ -141,6 +141,14 @@ class CoordinationStoreTests(unittest.TestCase):
                 "token_usage_capture_event",
                 "token_usage_artifact_path",
                 "token_usage_error",
+                "runtime_kind",
+                "supervisor_pid",
+                "child_pid",
+                "output_log_path",
+                "runtime_started_at",
+                "runtime_exited_at",
+                "runtime_exit_code",
+                "name",
             ):
                 connection.execute(f"ALTER TABLE delegations DROP COLUMN {column}")
 
@@ -150,6 +158,30 @@ class CoordinationStoreTests(unittest.TestCase):
             migrated.get_delegation("delegation-a")["lease_mode"], "write"
         )
         self.assertIsNone(migrated.get_delegation("delegation-a")["token_usage"])
+        self.assertEqual(
+            migrated.get_delegation("delegation-a")["runtime_kind"], "zellij"
+        )
+
+    def test_generic_wake_target_supports_managed_pty(self) -> None:
+        self.register("two")
+        target = self.store.register_wake_target(
+            session_id="two",
+            transport="managed-pty",
+            endpoint={"delegation_id": "delegation-a", "child_pid": 42},
+            watcher_pid=41,
+        )
+
+        self.assertEqual(target["transport"], "managed-pty")
+        self.assertEqual(target["endpoint"]["child_pid"], 42)
+        self.assertEqual(target["watcher_pid"], 41)
+        self.assertFalse(self.store.disable_wake("two")["enabled"])
+
+        with self.assertRaisesRegex(CoordinationError, "Unsupported wake transport"):
+            self.store.register_wake_target(
+                session_id="two",
+                transport="screen",
+                endpoint={"session": "legacy"},
+            )
 
     def test_session_lifecycle_and_staleness(self) -> None:
         self.register("one")
@@ -639,6 +671,52 @@ class CoordinationStoreTests(unittest.TestCase):
         after = self.store.get_session("two")["last_seen_at"]
         self.assertGreater(after, before)
 
+    def test_inbox_wait_returns_new_message_delivered_by_hook(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+        delivered_by_hook: list[dict[str, object]] = []
+
+        def fake_sleep(duration: float) -> None:
+            self.clock.now += duration
+            if delivered_by_hook:
+                return
+            sent = self.store.send_message(
+                sender_session_id="one", recipient_session_id="two", body="done"
+            )
+            delivered_by_hook.extend(self.store.inbox("two"))
+            self.assertEqual(delivered_by_hook[0]["id"], sent["id"])
+
+        messages = self.store.inbox_wait(
+            "two", timeout_seconds=2, poll_interval_seconds=1, sleep=fake_sleep
+        )
+
+        self.assertEqual([message["body"] for message in messages], ["done"])
+        self.assertEqual(messages[0]["id"], delivered_by_hook[0]["id"])
+
+    def test_inbox_wait_does_not_replay_old_delivered_message(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+        self.store.send_message(
+            sender_session_id="one", recipient_session_id="two", body="old"
+        )
+        self.assertEqual([message["body"] for message in self.store.inbox("two")], ["old"])
+        state = {"sent": False}
+
+        def fake_sleep(duration: float) -> None:
+            self.clock.now += duration
+            if state["sent"]:
+                return
+            state["sent"] = True
+            self.store.send_message(
+                sender_session_id="one", recipient_session_id="two", body="new"
+            )
+
+        messages = self.store.inbox_wait(
+            "two", timeout_seconds=2, poll_interval_seconds=1, sleep=fake_sleep
+        )
+
+        self.assertEqual([message["body"] for message in messages], ["new"])
+
     def test_inbox_wait_times_out_with_distinct_error(self) -> None:
         self.register("two", "claude")
         sleeps: list[float] = []
@@ -711,8 +789,34 @@ class CoordinationStoreTests(unittest.TestCase):
         self.store.complete_wake_attempts(
             "two", [message["id"]], outcome="sent", detail="test prompt"
         )
+        self.assertEqual(self.store.pending_wake_message_ids("two"), [])
         status = self.store.get_zellij_wake("two")
         self.assertEqual(status["recent_attempts"][0]["outcome"], "sent")
+
+    def test_failed_zellij_wake_attempt_can_be_reclaimed_until_delivery(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+        self.store.register_zellij_wake(
+            session_id="two",
+            zellij_session="test-session",
+            pane_id="terminal_7",
+        )
+        message = self.store.send_message(
+            sender_session_id="one", recipient_session_id="two", body="wake up"
+        )
+        self.store.touch("two", "waiting", turn_active=False)
+        self.assertEqual(
+            self.store.claim_wake_messages("two", [message["id"]]), [message["id"]]
+        )
+        self.store.complete_wake_attempts(
+            "two", [message["id"]], outcome="failed", detail="not submitted"
+        )
+
+        self.assertEqual(self.store.pending_wake_message_ids("two"), [message["id"]])
+        self.assertEqual(
+            self.store.claim_wake_messages("two", [message["id"]]), [message["id"]]
+        )
+        self.assertEqual(self.store.claim_wake_messages("two", [message["id"]]), [])
 
     def test_delivered_messages_are_not_wake_candidates(self) -> None:
         self.register("one")

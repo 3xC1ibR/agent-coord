@@ -187,7 +187,7 @@ def handle(
             f"The delegated {client_label} session ended before it reported a result.",
         )
         _capture_terminal_delegation_usage(coordination, payload, session_id)
-        coordination.disable_zellij_wake(session_id)
+        coordination.disable_wake(session_id)
         coordination.end_session(session_id)
         return {}
 
@@ -237,6 +237,11 @@ def handle(
                     f"for Bead {delegation['bead_id']}. Authorized scopes: "
                     f"{scopes}."
                 )
+                if delegation["runtime_kind"] == "managed-pty":
+                    text += (
+                        " Its persistent runtime and inbox wake are owned by "
+                        "Agent Coord."
+                    )
         if delegation_warning:
             text += f" Delegation attachment failed: {delegation_warning}"
         wake_status = None

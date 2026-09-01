@@ -1,0 +1,4 @@
+Agent Coord delegate overlap dogfood fixture
+
+delegate-one: pending
+delegate-two: completed-by-delegate-two

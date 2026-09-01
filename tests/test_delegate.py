@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
@@ -110,11 +111,14 @@ class DelegateTests(unittest.TestCase):
         delegation = result["delegation"]
         self.assertEqual(delegation["status"], "launched")
         self.assertEqual(delegation["pane_id"], "terminal_42")
+        self.assertTrue(delegation["output_log_path"].endswith("output.log"))
         command = result["command"]
         self.assertIn("--floating", command)
         self.assertIn("--approve-for-me", command)
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
-        self.assertIn("AGENT_COORD_DELEGATION_ID=" + delegation["delegation_id"], command)
+        self.assertIn(
+            "AGENT_COORD_DELEGATION_ID=" + delegation["delegation_id"], command
+        )
         self.assertIn("AGENT_COORD_DB=" + str(self.store.database_path), command)
         codex = command.index("/mock/codex")
         self.assertEqual(command[codex + 1], "--cd")
@@ -129,7 +133,51 @@ class DelegateTests(unittest.TestCase):
         self.assertIsNone(delegation["reasoning_effort"])
         self.assertEqual(delegation["lease_mode"], "write")
 
-    def test_validation_launch_records_lease_and_generates_non_editing_prompt(self) -> None:
+    @patch("agent_coord.managed_pty.launch_managed_pty")
+    def test_managed_pty_is_default_without_zellij_options(self, launch) -> None:
+        runner = FakeRun(self.root)
+        launch.side_effect = lambda store, identifier: {
+            "status": "launched",
+            "delegation": store.mark_delegation_launched(
+                identifier,
+                runtime_kind="managed-pty",
+                supervisor_pid=4321,
+                output_log_path=str(self.root / "output.log"),
+            ),
+            "command": ["agent-coord", "delegation", "supervise"],
+        }
+
+        result = self.delegate(
+            runner,
+            zellij_session=None,
+            pane_name=None,
+            floating=False,
+        )
+
+        launch.assert_called_once()
+        self.assertEqual(result["delegation"]["runtime_kind"], "managed-pty")
+        self.assertEqual(result["delegation"]["supervisor_pid"], 4321)
+        self.assertFalse(any(call[0][0] == "/mock/zellij" for call in runner.calls))
+
+    def test_managed_pty_dry_run_exposes_supervisor_and_client_commands(self) -> None:
+        runner = FakeRun(self.root)
+
+        result = self.delegate(
+            runner,
+            zellij_session=None,
+            pane_name=None,
+            floating=False,
+            dry_run=True,
+        )
+
+        self.assertEqual(result["delegation"]["runtime_kind"], "managed-pty")
+        self.assertIn("supervise", result["command"])
+        self.assertIn("/mock/codex", result["client_command"])
+        self.assertEqual(self.store.list_delegations(), [])
+
+    def test_validation_launch_records_lease_and_generates_non_editing_prompt(
+        self,
+    ) -> None:
         runner = FakeRun(self.root)
 
         result = self.delegate(
@@ -258,9 +306,7 @@ class DelegateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CoordinationError, "model must not be empty"):
             self.delegate(runner, model="  ")
-        with self.assertRaisesRegex(
-            CoordinationError, "effort must not be empty"
-        ):
+        with self.assertRaisesRegex(CoordinationError, "effort must not be empty"):
             self.delegate(runner, reasoning_effort="  ")
 
     def test_launch_failure_is_durable(self) -> None:

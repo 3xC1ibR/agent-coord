@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .store import (
+    LEASE_MODES,
     ConflictError,
     CoordinationError,
     CoordinationStore,
-    LEASE_MODES,
     normalize_scope,
 )
 
@@ -90,7 +90,9 @@ def validate_ready_bead(
         run=run,
     )
     if len(issues) != 1:
-        raise CoordinationError(f"Bead lookup for {bead_id} returned {len(issues)} rows.")
+        raise CoordinationError(
+            f"Bead lookup for {bead_id} returned {len(issues)} rows."
+        )
     issue = issues[0]
     if issue.get("status") != "open" or issue.get("assignee"):
         raise CoordinationError(
@@ -109,9 +111,7 @@ def validate_ready_bead(
     return issue
 
 
-def build_child_prompt(
-    delegation: Mapping[str, Any], *, agent_coord_cli: str
-) -> str:
+def build_child_prompt(delegation: Mapping[str, Any], *, agent_coord_cli: str) -> str:
     client_label = _CLIENT_LABELS[str(delegation["client"])]
     scopes = "\n".join(f"- {scope}" for scope in delegation["write_scope"])
     lease_mode = str(delegation.get("lease_mode", "write"))
@@ -122,22 +122,22 @@ def build_child_prompt(
     if lease_mode == "validation":
         return f"""You are a delegated {client_label} validator launched by Agent Coord.
 
-Delegation ID: {delegation['delegation_id']}
-Parent session: {delegation['parent_session_id']}
-Repository: {delegation['cwd']}
-Bead: {delegation['bead_id']}
+Delegation ID: {delegation["delegation_id"]}
+Parent session: {delegation["parent_session_id"]}
+Repository: {delegation["cwd"]}
+Bead: {delegation["bead_id"]}
 Authorized validation scopes:
 {scopes}
 
 Requested validation:
-{delegation['instructions']}
+{delegation["instructions"]}
 
 Before validation, follow this sequence:
 1. Read all applicable repository instructions and run `bd prime`.
-2. Run `bd ready` and `bd show {delegation['bead_id']}`. Stop if the Bead is not open and ready.
-3. Claim the Bead with `bd update {delegation['bead_id']} --claim`.
+2. Run `bd ready` and `bd show {delegation["bead_id"]}`. Stop if the Bead is not open and ready.
+3. Claim the Bead with `bd update {delegation["bead_id"]} --claim`.
 4. Use the session ID from the Agent Coord SessionStart hook to run:
-   `{agent_coord_cli} begin-work --session-id <your-session-id> --bead {delegation['bead_id']} --activity validating --lease-mode validation` with one `--scope` argument for each exact scope above.
+   `{agent_coord_cli} begin-work --session-id <your-session-id> --bead {delegation["bead_id"]} --activity validating --lease-mode validation` with one `--scope` argument for each exact scope above.
 5. Validate only the requested work. Do not edit repository files or remediate findings. Obey repository validation and git-authority rules.
 
 Record a Beads checkpoint with the commands, verdict, findings, and next action. A failed check is a completed validation result when every required check ran and you reported the failure. Close the Bead when its validation acceptance criteria are complete. Release the declaration with `{agent_coord_cli} end-work --session-id <your-session-id>`, then report with:
@@ -149,22 +149,22 @@ Do not paste full successful logs into the result. If required validation cannot
 Always run one of the two `delegation finish` commands before your {client_label} process exits. The SessionEnd hook will record an unfinished exit as a failure."""
     return f"""You are a delegated {client_label} worker launched by Agent Coord.
 
-Delegation ID: {delegation['delegation_id']}
-Parent session: {delegation['parent_session_id']}
-Repository: {delegation['cwd']}
-Bead: {delegation['bead_id']}
+Delegation ID: {delegation["delegation_id"]}
+Parent session: {delegation["parent_session_id"]}
+Repository: {delegation["cwd"]}
+Bead: {delegation["bead_id"]}
 Authorized write scopes:
 {scopes}
 
 Requested work:
-{delegation['instructions']}
+{delegation["instructions"]}
 
 Before editing, follow this sequence:
 1. Read all applicable agent instructions for this repository, including AGENTS.md and/or CLAUDE.md files, and run `bd prime`.
-2. Run `bd ready` and `bd show {delegation['bead_id']}`. Stop and report failure if the Bead is no longer open and ready.
-3. Claim the Bead with `bd update {delegation['bead_id']} --claim`.
+2. Run `bd ready` and `bd show {delegation["bead_id"]}`. Stop and report failure if the Bead is no longer open and ready.
+3. Claim the Bead with `bd update {delegation["bead_id"]} --claim`.
 4. Use the session ID announced by the Agent Coord SessionStart hook to run:
-   `{agent_coord_cli} begin-work --session-id <your-session-id> --bead {delegation['bead_id']}` with one `--scope` argument for each exact scope above.
+   `{agent_coord_cli} begin-work --session-id <your-session-id> --bead {delegation["bead_id"]}` with one `--scope` argument for each exact scope above.
 5. Implement only the requested work and obey repository validation, service-boundary, changelog, documentation, and git-authority rules. Do not commit or push unless the repository instructions or user explicitly authorize it.
 
 At each meaningful boundary, record a Beads checkpoint. If the work succeeds, run the required validation, close the Bead only when its acceptance criteria are genuinely complete, release the declaration with `{agent_coord_cli} end-work --session-id <your-session-id>`, then report with:
@@ -190,7 +190,6 @@ def build_zellij_command(
     width: str = DEFAULT_FLOATING_WIDTH,
     height: str = DEFAULT_FLOATING_HEIGHT,
 ) -> list[str]:
-    client = str(delegation["client"])
     command = [
         zellij_executable,
         "--session",
@@ -211,10 +210,31 @@ def build_zellij_command(
             env_executable,
             f"AGENT_COORD_DELEGATION_ID={delegation['delegation_id']}",
             f"AGENT_COORD_DB={database_path}",
-            f"AGENT_COORD_CLIENT={client}",
-            client_executable,
+            f"AGENT_COORD_CLIENT={delegation['client']}",
         ]
     )
+    command.extend(
+        build_client_command(
+            delegation,
+            client_executable=client_executable,
+            agent_coord_cli=agent_coord_cli,
+            database_path=database_path,
+            bypass_hook_trust=bypass_hook_trust,
+        )
+    )
+    return command
+
+
+def build_client_command(
+    delegation: Mapping[str, Any],
+    *,
+    client_executable: str,
+    agent_coord_cli: str,
+    database_path: str,
+    bypass_hook_trust: bool | None = None,
+) -> list[str]:
+    client = str(delegation["client"])
+    command = [client_executable]
     if client == "codex":
         command.extend(["--cd", str(delegation["cwd"])])
     command.extend(["--add-dir", str(Path(database_path).parent)])
@@ -243,7 +263,12 @@ def build_zellij_command(
             command.append("--approve-for-me")
         else:
             command.extend(["--permission-mode", "auto"])
-    if bypass_hook_trust:
+    should_bypass_hook_trust = (
+        bool(delegation.get("bypass_hook_trust"))
+        if bypass_hook_trust is None
+        else bypass_hook_trust
+    )
+    if should_bypass_hook_trust:
         command.append("--dangerously-bypass-hook-trust")
     command.append(build_child_prompt(delegation, agent_coord_cli=agent_coord_cli))
     return command
@@ -284,6 +309,7 @@ def delegate_work(
     model: str | None = None,
     reasoning_effort: str | None = None,
     lease_mode: str = "write",
+    runtime: str | None = None,
     dry_run: bool = False,
     environ: Mapping[str, str] = os.environ,
     which: Callable[[str], str | None] = shutil.which,
@@ -311,16 +337,25 @@ def delegate_work(
         raise CoordinationError("Delegation lease mode must be write or validation.")
     if target_lease_mode == "validation" and yolo:
         raise CoordinationError("Validation-only delegation cannot use --yolo.")
+    inferred_runtime = "zellij" if zellij_session or floating else "managed-pty"
+    target_runtime = (runtime or inferred_runtime).strip().lower()
+    if target_runtime not in {"managed-pty", "zellij"}:
+        raise CoordinationError("Delegation runtime must be managed-pty or zellij.")
+    if target_runtime == "managed-pty" and (zellij_session or floating):
+        raise CoordinationError(
+            "Zellij session and floating options require --runtime zellij."
+        )
 
     git_executable = _required_executable("git", which)
     bd_executable = _required_executable("bd", which)
     client_executable = _required_executable(target_client, which)
-    zellij_executable = _required_executable("zellij", which)
-    env_executable = _required_executable("env", which)
+    zellij_executable = None
+    env_executable = None
+    if target_runtime == "zellij":
+        zellij_executable = _required_executable("zellij", which)
+        env_executable = _required_executable("env", which)
     repository = validate_repository(cwd, git_executable=git_executable, run=run)
-    normalized_scopes = sorted(
-        {normalize_scope(scope, repository) for scope in scopes}
-    )
+    normalized_scopes = sorted({normalize_scope(scope, repository) for scope in scopes})
     if not normalized_scopes:
         raise CoordinationError("At least one delegated scope is required.")
     issue = validate_ready_bead(
@@ -369,8 +404,12 @@ def delegate_work(
             raise CoordinationError(
                 "Claude Code login is not ready: auth status reports loggedIn=false."
             )
-    target_zellij = zellij_session or environ.get("ZELLIJ_SESSION_NAME")
-    if not target_zellij:
+    target_zellij = (
+        zellij_session or environ.get("ZELLIJ_SESSION_NAME")
+        if target_runtime == "zellij"
+        else None
+    )
+    if target_runtime == "zellij" and not target_zellij:
         raise CoordinationError(
             "A Zellij session is required. Pass --zellij-session or run inside Zellij."
         )
@@ -387,20 +426,28 @@ def delegate_work(
             "bead_id": bead_id,
             "write_scope": normalized_scopes,
             "instructions": instructions.strip(),
+            "name": target_name,
             "status": "dry-run",
             "zellij_session": target_zellij,
             "pane_id": None,
+            "runtime_kind": target_runtime,
+            "supervisor_pid": None,
+            "child_pid": None,
+            "output_log_path": None,
             "mode": mode,
             "lease_mode": target_lease_mode,
             "bypass_hook_trust": bypass_hook_trust,
             "model": target_model,
             "reasoning_effort": target_reasoning_effort,
         }
-        return {
-            "status": "dry-run",
-            "bead": issue,
-            "delegation": preview,
-            "command": build_zellij_command(
+        if target_runtime == "managed-pty":
+            from .managed_pty import build_supervisor_command
+
+            command = build_supervisor_command(store, "<dry-run>")
+        else:
+            assert zellij_executable is not None
+            assert env_executable is not None
+            command = build_zellij_command(
                 preview,
                 zellij_executable=zellij_executable,
                 client_executable=client_executable,
@@ -412,6 +459,18 @@ def delegate_work(
                 bypass_hook_trust=bypass_hook_trust,
                 width=width,
                 height=height,
+            )
+        return {
+            "status": "dry-run",
+            "bead": issue,
+            "delegation": preview,
+            "command": command,
+            "client_command": build_client_command(
+                preview,
+                client_executable=client_executable,
+                agent_coord_cli=agent_coord_cli,
+                database_path=str(store.database_path),
+                bypass_hook_trust=bypass_hook_trust,
             ),
         }
 
@@ -427,7 +486,16 @@ def delegate_work(
         model=target_model,
         reasoning_effort=target_reasoning_effort,
         client=target_client,
+        runtime_kind=target_runtime,
+        name=target_name,
     )
+    if target_runtime == "managed-pty":
+        from .managed_pty import launch_managed_pty
+
+        return launch_managed_pty(store, delegation["delegation_id"])
+
+    assert zellij_executable is not None
+    assert env_executable is not None
     delegation["zellij_session"] = target_zellij
     command = build_zellij_command(
         delegation,
@@ -455,10 +523,14 @@ def delegate_work(
         except CoordinationError:
             pass
         raise CoordinationError(error)
+    from .managed_pty import output_log_path
+
     launched = store.mark_delegation_launched(
         delegation["delegation_id"],
+        runtime_kind="zellij",
         zellij_session=target_zellij,
         pane_id=match.group(0),
+        output_log_path=str(output_log_path(store, delegation["delegation_id"])),
     )
     return {"status": launched["status"], "delegation": launched, "command": command}
 
