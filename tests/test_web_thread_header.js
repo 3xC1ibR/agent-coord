@@ -108,7 +108,7 @@ test("a pending rename cannot be submitted twice or overwrite another thread edi
   assert.equal(c.focused, "rename-name");
 });
 
-test("the header omits Your turn while preserving actionable and running states", () => {
+test("the header omits Your turn and Working while preserving requests for input", () => {
   const c = setup();
   c.renderStatus();
   assert.equal(c.$("status").textContent, "");
@@ -121,5 +121,6 @@ test("the header omits Your turn while preserving actionable and running states"
   c.state.detail.requests = [];
   c.state.detail.running = true;
   c.renderStatus();
-  assert.equal(c.$("status").textContent, "Working");
+  assert.equal(c.$("status").textContent, "");
+  assert.equal(c.$("status").hidden, true);
 });

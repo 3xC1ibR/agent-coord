@@ -1,0 +1,4 @@
+interface:
+  display_name: "Thread Manager"
+  short_description: "Review and organize threads across workspaces"
+  default_prompt: "Use $manage-threads to review my open Agent Coord threads across all workspaces, summarize what needs attention, and help me organize them."

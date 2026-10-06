@@ -7,11 +7,19 @@
   <meta name="theme-color" content="#213a32">
   <title>Agent Coord · Threads</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/thread-hover.css">
+  <link rel="stylesheet" href="/filter-menu.css">
+  <link rel="stylesheet" href="/image-attachments.css">
+  <link rel="stylesheet" href="/views.css">
   <script src="/thread-groups.js" defer></script>
   <script src="/organization.js" defer></script>
   <script src="/notifications.js" defer></script>
   <script src="/markdown.js" defer></script>
+  <script src="/image-attachments.js" defer></script>
+  <script src="/views.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/thread-hover.js" defer></script>
+  <script src="/filter-menu.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to workspace</a>
@@ -20,21 +28,40 @@
     <a class="brand" href="/" aria-label="Agent Coord home"><span class="brand-mark" aria-hidden="true">a/c<span></span></span><span>Agent Coord<small>A place for work in progress</small></span></a>
     <button id="new-session" class="primary"><span aria-hidden="true">＋</span> New session <span aria-hidden="true">↗</span></button>
     <button id="home" class="nav-home" aria-current="page"><span aria-hidden="true">▦</span> Workspace <span id="thread-count" class="nav-count">0</span></button>
-    <label class="project-filter" for="repository">REPOSITORY<select id="repository"><option value="">All repositories</option></select></label>
-    <div class="project-filter"><div class="project-filter-heading"><label for="project">PROJECT</label><button id="create-project" class="quiet" type="button"><span aria-hidden="true">＋</span> New project</button></div><select id="project"><option value="">All projects</option></select></div>
     <div class="list-heading">YOUR THREADS<span aria-hidden="true">↓</span></div>
     <nav id="sessions" aria-label="Work threads"><p class="muted">Loading threads…</p></nav>
     <div class="sidebar-footer"><button id="notifications" class="notification-toggle" type="button" aria-pressed="false">Enable notifications</button><a id="monitor" href="/monitor"><span aria-hidden="true">⌁</span> Coordination monitor <span aria-hidden="true">↗</span></a></div>
   </aside>
   <main id="main" tabindex="-1">
     <header class="workspace-bar"><div class="breadcrumb"><button id="menu-toggle" class="icon-button" type="button" aria-label="Hide sidebar" title="Hide sidebar" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path></svg></button><button id="back-home" class="quiet">Workspace</button><span aria-hidden="true">/</span><span id="page-location">Overview</span></div><span id="connection" class="connection" role="status">Connecting…</span></header>
-    <section id="welcome" class="welcome">
+    <div class="views-bar">
+      <div id="view-tabs" class="view-tabs" role="tablist" aria-label="Saved views"></div>
+      <div class="view-actions">
+        <button id="reset-view" type="button" class="quiet" hidden>Reset filters</button>
+        <button id="update-view" type="button" class="quiet" hidden>Update view</button>
+        <button id="add-view" type="button" class="quiet" title="Save current filters and grouping as a view">＋ View</button>
+        <details id="view-menu" class="view-menu" hidden>
+          <summary id="view-menu-toggle" aria-label="View options" title="View options">•••</summary>
+          <div class="view-menu-panel">
+            <button id="view-rename" type="button">Rename view</button>
+            <button id="view-duplicate" type="button">Duplicate view</button>
+            <button id="view-move-left" type="button">Move left</button>
+            <button id="view-move-right" type="button">Move right</button>
+            <small>Ctrl + Shift + ← / → to switch views</small>
+            <button id="view-delete" type="button">Delete view</button>
+            <small>Deleting a view keeps all its threads.</small>
+          </div>
+        </details>
+      </div>
+    </div>
+    <section id="welcome" class="welcome" role="tabpanel" aria-labelledby="overview-title">
       <h1 id="overview-title" class="sr-only" tabindex="-1">Thread overview</h1>
-      <div class="workspace-tools"><label class="search-field" for="search"><span aria-hidden="true">⌕</span><span class="sr-only">Search threads</span><input id="search" type="search" placeholder="Find a thread…" autocomplete="off"><kbd aria-hidden="true">/</kbd></label><div class="view-filters"><label class="grouping-control" for="group-by"><span>Group by</span><select id="group-by"><option value="phase">Phase</option><option value="repository">Repository</option><option value="project">Project</option><option value="none">None</option></select></label><label for="view"><span class="sr-only">Thread view</span><select id="view"><option value="active">All open</option><option value="attention">Your turn</option><option value="completed">Completed</option><option value="archived">Closed</option></select></label><label for="phase-filter"><span class="sr-only">Phase</span><select id="phase-filter"><option value="">All phases</option><option>discussion</option><option>investigation</option><option>planning</option><option>implementation</option><option>validation</option><option>deployment</option><option>finished</option></select></label></div><div class="workspace-actions"><button id="welcome-project" class="quiet">New project</button><button id="welcome-new" class="primary">New session <span aria-hidden="true">↗</span></button></div></div>
+      <div class="workspace-tools"><label class="search-field" for="search"><span aria-hidden="true">⌕</span><span class="sr-only">Search threads</span><input id="search" type="search" placeholder="Find a thread…" autocomplete="off"><kbd aria-hidden="true">/</kbd></label><div class="view-filters"><label class="grouping-control" for="group-by"><span>Group by</span><select id="group-by"><option value="phase">Phase</option><option value="repository">Repository</option><option value="project">Project</option><option value="none">None</option></select></label><details id="filter-menu" class="filter-menu"><summary id="filter-toggle">Filters <span aria-hidden="true">⌄</span></summary><div class="filter-panel"><div class="filter-fields"><label for="view">Show<select id="view"><option value="active">All open</option><option value="attention">Your turn</option><option value="completed">Completed</option><option value="archived">Closed</option></select></label><label for="phase-filter">Phase<select id="phase-filter"><option value="">All phases</option><option>discussion</option><option>investigation</option><option>planning</option><option>implementation</option><option>validation</option><option>deployment</option><option>finished</option></select></label><label for="repository">Repository<select id="repository"><option value="">All repositories</option></select></label><div class="filter-project"><div class="filter-project-heading"><label for="project">Project</label><button id="create-project" class="quiet" type="button">＋ New project</button></div><select id="project"><option value="">All projects</option></select></div></div><button id="clear-filters" class="quiet" type="button">Clear filters</button></div></details></div><div class="workspace-actions"><button id="welcome-project" class="quiet">New project</button><button id="welcome-new" class="primary">New session <span aria-hidden="true">↗</span></button></div></div>
       <div id="overview" aria-label="Thread overview"></div>
       <footer class="overview-footer"><span id="results-count" role="status"></span></footer>
     </section>
     <section id="conversation" class="conversation" hidden>
+      <div id="image-drop-hint" class="image-drop-hint" hidden><strong>Drop images to attach</strong><span>PNG, JPEG, WebP, or GIF · Up to 4 images, 5 MiB each</span></div>
       <div class="conversation-main">
       <div class="conversation-content">
       <header class="conversation-head">
@@ -51,16 +78,26 @@
       <div id="timeline" class="timeline" aria-label="Conversation"></div>
       <div id="requests" class="requests" aria-live="polite"></div>
       </div>
-      <form id="composer" class="composer"><p id="command-feedback" class="command-feedback" role="status" hidden></p><label class="sr-only" for="message">Message Codex</label><textarea id="message" placeholder="Message Codex…" rows="3" maxlength="100000"></textarea><div class="composer-footer"><span id="composer-hint">Enter to send · Shift + Enter for a new line</span><div><button id="stop" type="button" class="quiet" hidden>Stop</button><button id="send" class="primary" type="submit">Send ↑</button></div></div></form>
+      <form id="composer" class="composer">
+        <section id="queued-messages" class="queued-messages" aria-label="Queued messages" aria-live="polite" hidden></section>
+        <p id="command-feedback" class="command-feedback" role="status" hidden></p>
+        <section id="image-attachments" class="image-attachments" aria-label="Attached images" aria-live="polite" hidden></section>
+        <label class="sr-only" for="message">Message Codex</label>
+        <textarea id="message" placeholder="Message Codex or drop images…" rows="3" maxlength="100000"></textarea>
+        <div class="composer-attachments"><button id="attach-images" type="button" class="quiet" aria-describedby="image-limits">＋ Attach images</button><span id="image-limits">Drop images here · 4 images max · 5 MiB each</span><input id="image-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple hidden></div>
+        <div class="composer-footer"><span id="composer-hint">Enter to send · Shift + Enter for a new line</span><div><button id="stop" type="button" class="quiet" hidden>Stop</button><button id="queue" type="button" class="quiet" hidden>Queue ⇥</button><button id="send" class="primary" type="submit">Send ↑</button></div></div>
+      </form>
       </div>
       <aside class="context-panel" aria-label="Thread context">
         <details id="thread-context" class="thread-context" open><summary>Where you left it <span id="checkpoint-phase"></span></summary><div id="checkpoint"></div><div class="context-actions"><button id="edit-checkpoint" class="quiet">Edit checkpoint</button><button id="add-link" class="quiet">Add link</button><button id="resume-browser" class="primary" hidden>Continue in browser</button></div></details>
       </aside>
-      <footer class="session-statusbar" aria-label="Session information"><span id="workspace" class="status-cwd"></span><div id="session-settings" class="session-settings" hidden><span id="session-model"></span><span id="session-effort"></span><span id="session-yolo" class="yolo-badge" title="No sandbox or approval prompts" hidden>YOLO</span></div></footer>
+      <footer class="session-statusbar" aria-label="Session information"><span id="workspace" class="status-cwd"></span><div id="session-settings" class="session-settings" hidden><span id="session-model"></span><span id="session-effort"></span><span id="session-yolo" class="yolo-badge" title="No sandbox or approval prompts" hidden>YOLO</span><button id="edit-permissions" type="button" class="quiet">Permissions</button></div></footer>
     </section>
   </main>
   <div id="error" class="error" role="alert" hidden><span></span><button aria-label="Dismiss error">×</button></div>
+  <dialog id="view-dialog" aria-labelledby="view-dialog-title"><form id="view-form"><h2 id="view-dialog-title">Save view</h2><p id="view-dialog-description" class="muted">Save the current filters and grouping as a tab.</p><label>View name<input id="view-name" required maxlength="160" placeholder="Rig, Stoic, or Ready to review" autocomplete="off"></label><p id="view-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="view-dialog">Cancel</button><button id="save-view" class="primary" type="submit">Save view</button></div></form></dialog>
   <dialog id="create-dialog" aria-labelledby="create-title"><form id="create-form"><div class="dialog-heading"><div><span class="eyebrow">MAKE ROOM FOR AN IDEA</span><h2 id="create-title">New session</h2></div><button type="button" class="quiet" id="close-dialog" aria-label="Close new session">×</button></div><label>Session name<input id="new-name" maxlength="160" placeholder="What are you working on?" autocomplete="off"></label><label>Workspace<select id="workspace-choice"></select></label><label id="workspace-path-label" hidden>Directory path<input id="new-cwd" required placeholder="/path/to/workspace" autocomplete="off"></label><p id="workspace-hint" class="muted"></p><div class="organization-fields"><label>Repository (optional)<select id="new-repository"></select></label><label>Project (optional)<select id="new-project"></select></label></div><label id="new-repository-input" hidden>Repository directory<input id="new-repository-value" maxlength="4000" placeholder="/path/to/repository"></label><label id="new-project-input" hidden>Project name<input id="new-project-value" maxlength="160" placeholder="Anthropic migration"></label><p id="new-organization-error" class="dialog-error" role="alert" hidden></p><div class="settings"><label>Model<select id="model"><option value="">Codex default</option></select></label><label>Reasoning<select id="effort"><option value="">Model default</option></select></label></div><label class="yolo-option"><input id="new-yolo" type="checkbox"><span>Use --yolo<small>No sandbox or approval prompts. Gives this session full machine access.</small></span></label><p class="muted">With YOLO off, Codex uses workspace access and asks for additional permissions.</p><button id="create" class="primary" type="submit">Create session</button></form></dialog>
+  <dialog id="permissions-dialog" aria-labelledby="permissions-title"><form id="permissions-form"><h2 id="permissions-title">Session permissions</h2><p id="permissions-thread" class="muted"></p><label class="yolo-option"><input id="edit-yolo" type="checkbox"><span>Use --yolo<small>No sandbox or approval prompts. Gives this session full machine access.</small></span></label><p class="muted">With YOLO off, Codex uses workspace access and asks for additional permissions. Changes apply to the next turn.</p><p id="permissions-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="permissions-dialog">Cancel</button><button id="save-permissions" class="primary" type="submit">Save permissions</button></div></form></dialog>
   <dialog id="checkpoint-dialog" aria-labelledby="checkpoint-title"><form id="checkpoint-form"><h2 id="checkpoint-title">Edit checkpoint</h2><label>Phase<select id="checkpoint-edit-phase"><option>discussion</option><option>investigation</option><option>planning</option><option>implementation</option><option>validation</option><option>deployment</option><option>finished</option></select></label><label>Where things stand<textarea id="checkpoint-summary" required maxlength="2000" rows="3"></textarea></label><label>Next action<textarea id="checkpoint-next" maxlength="1000" rows="2"></textarea></label><label>Who takes the next step?<select id="checkpoint-actor"><option value="nobody">No next action</option><option value="user">Me</option><option value="agent">Agent</option><option value="external">Waiting on someone or something</option></select></label><div class="dialog-actions"><button type="button" class="quiet" data-close="checkpoint-dialog">Cancel</button><button class="primary">Save checkpoint</button></div></form></dialog>
   <dialog id="link-dialog" aria-labelledby="link-title"><form id="link-form"><h2 id="link-title">Add a related link</h2><label>Type<select id="link-kind"><option value="pull_request">Pull request</option><option value="document">Document</option><option value="issue">Issue</option><option value="bead">Bead</option><option value="branch">Branch</option><option value="other">Other</option></select></label><label>Label<input id="link-label" maxlength="4000" placeholder="Optional description"></label><label>URL, file path, or identifier<input id="link-target" required maxlength="4000"></label><p class="muted">File paths are relative to this thread’s workspace.</p><div class="dialog-actions"><button type="button" class="quiet" data-close="link-dialog">Cancel</button><button class="primary">Add link</button></div></form></dialog>
   <dialog id="project-dialog" aria-labelledby="project-title"><form id="project-form"><h2 id="project-title">New project</h2><p class="muted">Give related threads a shared home. You can add existing threads or start new sessions in this project.</p><label>Project name<input id="project-name" required maxlength="160" placeholder="Anthropic migration" autocomplete="off"></label><p id="project-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="project-dialog">Cancel</button><button id="save-project" class="primary" type="submit">Create project</button></div></form></dialog>

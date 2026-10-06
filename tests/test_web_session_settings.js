@@ -8,7 +8,7 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 function setup() {
   const elements = new Map();
   const context = {$: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
-    state: {selected: "one", detail: {session: {model: "test-model", effort: "high", yolo: 1}, work_thread: {browser_session: true}}, commandFeedback: new Map(), drafts: new Map()},
+    state: {selected: "one", detail: {session: {model: "test-model", effort: "high", yolo: 1}, work_thread: {browser_session: true, attention: "now", title: "One"}, running: false}, commandFeedback: new Map(), drafts: new Map(), closing: new Set()},
     renderStatus() {}, refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function renderSessionSettings("), source.indexOf("function renderStatus(")), context);
@@ -22,6 +22,7 @@ test("status line shows effective settings and YOLO only for that session", () =
   assert.equal(c.$("session-model").textContent, "Model · test-model");
   assert.equal(c.$("session-effort").textContent, "Reasoning · high");
   assert.equal(c.$("session-yolo").hidden, false);
+  assert.equal(c.$("edit-permissions").disabled, false);
   c.state.detail.session = {model: "another", effort: "low", yolo: 0};
   c.renderSessionSettings();
   assert.equal(c.$("session-model").textContent, "Model · another");
@@ -29,6 +30,52 @@ test("status line shows effective settings and YOLO only for that session", () =
   c.state.detail.work_thread.browser_session = false;
   c.renderSessionSettings();
   assert.equal(c.$("session-settings").hidden, true);
+});
+
+test("permissions editor updates YOLO for an existing idle thread", async () => {
+  const c = setup();
+  const dialog = c.$("permissions-dialog");
+  dialog.dataset = {};
+  dialog.showModal = () => { dialog.open = true; };
+  dialog.close = () => { dialog.open = false; };
+  c.state.detail.session.yolo = 0;
+  c.openSessionPermissions();
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.dataset.threadId, "one");
+  assert.equal(c.$("edit-yolo").checked, false);
+  assert.equal(c.$("permissions-thread").textContent, "One");
+  c.$("edit-yolo").checked = true;
+  c.api = async (path, body) => {
+    assert.equal(path, "sessions/one");
+    assert.equal(body.yolo, true);
+    return {...c.state.detail.session, yolo: 1};
+  };
+  await c.saveSessionPermissions();
+  assert.equal(c.state.detail.session.yolo, 1);
+  assert.equal(dialog.open, false);
+  c.renderSessionSettings();
+  assert.equal(c.$("session-yolo").hidden, false);
+});
+
+test("permissions editor waits for a turn and keeps the choice on save failure", async () => {
+  const c = setup();
+  const dialog = c.$("permissions-dialog");
+  dialog.dataset = {};
+  dialog.showModal = () => { dialog.open = true; };
+  dialog.close = () => { dialog.open = false; };
+  c.state.detail.running = true;
+  c.renderSessionSettings();
+  assert.equal(c.$("edit-permissions").disabled, true);
+  c.openSessionPermissions();
+  assert.equal(dialog.open, undefined);
+  c.state.detail.running = false;
+  c.openSessionPermissions();
+  c.$("edit-yolo").checked = false;
+  c.api = async () => { throw new Error("Could not save"); };
+  await assert.rejects(c.saveSessionPermissions(), /Could not save/);
+  assert.equal(dialog.open, true);
+  assert.equal(c.$("edit-yolo").checked, false);
+  assert.equal(c.state.detail.session.yolo, 1);
 });
 
 test("slash command feedback appears without fabricating conversation items", async () => {
@@ -57,8 +104,10 @@ test("failed commands keep the draft and running sessions cannot change settings
   assert.equal(c.$("message").value, "/effort invalid");
   assert.equal(c.state.busy, false);
   c.state.detail.running = true;
-  c.api = async () => assert.fail("Must not send while running");
-  await c.sendMessage();
+  c.state.detail.activeTurn = "turn-one";
+  c.api = async () => { throw new Error("Wait for the running turn to finish before changing model or effort."); };
+  await assert.rejects(c.sendMessage(), /Wait for the running turn/);
+  assert.equal(c.$("message").value, "/effort invalid");
 });
 
 test("switching threads during a command preserves the new thread draft", async () => {

@@ -56,6 +56,20 @@ test("navigating during shutdown does not close the newly selected conversation"
   assert.equal(c.home, undefined);
 });
 
+test("overview close targets the card without opening it or touching another selected thread", async () => {
+  const c = setup();
+  c.state.selected = "another";
+  c.api = async path => assert.equal(path, "threads/card-thread/close");
+  await c.toggleThreadClosed({thread_id: "card-thread", attention: "now"});
+  assert.equal(c.state.selected, "another");
+  assert.equal(c.home, undefined);
+  c.state.selected = null;
+  c.state.detail = null;
+  await c.toggleThreadClosed({thread_id: "card-thread", attention: "now"});
+  assert.equal(c.state.selected, null);
+  assert.equal(c.home, undefined);
+});
+
 test("running and pending-input threads offer Stop and close; closed history offers Reopen", () => {
   const c = setup();
   for (const status of ["running", "needs input"]) {

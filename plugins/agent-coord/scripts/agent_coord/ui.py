@@ -16,8 +16,11 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .codex_app_server import BrowserBusyError, BrowserSessions
+from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .store import CoordinationError, CoordinationStore
+from .thread_preview import thread_preview
+from .views import ViewStore
 from .workspaces import matches_workspace
 
 DEFAULT_UI_HOST = "127.0.0.1"
@@ -247,6 +250,8 @@ def _handler(
     browser_sessions: BrowserSessions | None = None,
     csrf_token: str = "",
 ) -> type[BaseHTTPRequestHandler]:
+    views = ViewStore(store)
+
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: HTTPStatus, content_type: str, body: bytes) -> None:
             try:
@@ -259,7 +264,7 @@ def _handler(
                 self.send_header(
                     "Content-Security-Policy",
                     "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-                    "script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+                    "script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
                 )
                 self.end_headers()
                 self.wfile.write(body)
@@ -276,7 +281,7 @@ def _handler(
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
                 return
-            if parsed.path in {"/app.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css"}:
+            if parsed.path in {"/app.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/image-attachments.css", "/views.js", "/views.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -346,12 +351,16 @@ def _handler(
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
             elif route == "organization":
                 self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.list())
+            elif route == "views":
+                self._json(HTTPStatus.OK, {"data": views.list()})
             elif route == "models":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.models()})
             elif route == "sessions":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_sessions(archived=query.get("archived") == ["true"])})
             elif route == "threads":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_work_threads(archived=query.get("archived") == ["true"])})
+            elif route.startswith("threads/") and route.endswith("/preview"):
+                self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
             elif route.startswith("threads/"):
                 self._json(HTTPStatus.OK, browser_sessions.work_thread(unquote(route[8:])))
             elif route.startswith("sessions/"):
@@ -408,15 +417,31 @@ def _handler(
                 self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "Send a JSON request."})
                 return
             try:
+                route = urlparse(self.path).path.split("/")[1:]
+                image_route = len(route) == 5 and route[:3] == ["api", "browser", "sessions"] and route[4] in {"messages", "queue"}
+                max_body = MAX_MESSAGE_BODY_BYTES if image_route else _MAX_BODY_BYTES
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= _MAX_BODY_BYTES:
+                if not 0 < length <= max_body:
                     self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "Request body is empty or too large."})
                     return
                 self.connection.settimeout(10)
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
-                route = urlparse(self.path).path.split("/")[1:]
+                if route[:3] == ["api", "browser", "views"]:
+                    if len(route) == 3:
+                        self._json(HTTPStatus.CREATED, views.create(body))
+                    elif len(route) == 4:
+                        self._json(HTTPStatus.OK, views.update(unquote(route[3]), body))
+                    elif len(route) == 5 and route[4] in {"delete", "move"}:
+                        if route[4] == "delete":
+                            views.delete(unquote(route[3]), body)
+                        else:
+                            views.move(unquote(route[3]), body)
+                        self._json(HTTPStatus.OK, {"data": views.list()})
+                    else:
+                        raise CoordinationError("Unknown view action.")
+                    return
                 if route == ["api", "browser", "projects"]:
                     if set(body) != {"name"}:
                         raise CoordinationError("Project creation accepts a name.")
@@ -464,6 +489,9 @@ def _handler(
                     result = browser_sessions.update(thread_id, body)
                 elif len(route) == 5 and route[4] == "messages":
                     result = browser_sessions.send(thread_id, body)
+                elif len(route) == 5 and route[4] == "queue":
+                    result = (browser_sessions.queue.change(thread_id, body) if "action" in body
+                              else browser_sessions.queue.enqueue(thread_id, body))
                 elif len(route) == 5 and route[4] == "interrupt":
                     result = browser_sessions.interrupt(thread_id)
                 elif len(route) == 6 and route[4] == "requests":

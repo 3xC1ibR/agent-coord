@@ -1,13 +1,15 @@
 # Agent Coord
 
 Agent Coord is a local coordination channel for Claude Code and Codex sessions.
-It uses one dependency-free Python CLI, SQLite, hooks, and a shared skill. It
+It uses one dependency-free Python CLI, SQLite, hooks, and shared skills. It
 does not need an MCP server, terminal multiplexer, or long-lived parent process.
 Delegated workers run in Agent Coord-owned PTYs; an optional compatibility
 watcher can still wake an ordinary agent that runs in Zellij.
 
 The plugin answers these questions:
 
+- What work is open across my workspaces, and what needs my attention?
+- How can a dedicated agent help me review, group, rename, or park my threads?
 - Which sessions are online, stale, or offline?
 - Which sessions are discussing, planning, implementing, validating, or waiting?
 - Which sessions are working without scopes, and which file scopes do declared
@@ -48,7 +50,7 @@ Set `AGENT_COORD_DB` to use another path. Set
 threshold.
 
 The same plugin directory contains Codex and Claude manifests. Both clients use
-the same hooks, skill, CLI, and database schema.
+the same hooks, skills, CLI, and database schema.
 
 Delegation lifecycle state is also in SQLite. The default launch adapter owns a
 detached PTY for each child, captures bounded output, and wakes an idle child
@@ -373,6 +375,13 @@ close or reopen conversations. Creating a session requires neither a parent
 agent nor a Beads issue. Different sessions can run concurrently; an individual
 session accepts one active turn at a time.
 
+Drop PNG, JPEG, WebP, or GIF files into an open browser conversation, or use
+**Attach images**, to include up to four images of 5 MiB each. Review the
+thumbnails and remove individual attachments before sending. Images work with
+Send, Steer, and Queue, with or without text; sent and queued images appear in
+the conversation. Failed sends keep the draft available for retry, and queued
+images survive a server restart for review before resuming.
+
 **Close thread** ends the live session and returns to the open overview. A
 running session offers **Stop and close**, which waits for the turn to stop
 before closing. **Closed** history retains conversations, checkpoints, links,
@@ -397,6 +406,17 @@ approval prompts for that session (full machine access). The choice is saved
 and preserved when the session resumes; other sessions keep their own settings.
 
 Click the conversation title to rename it inline; Enter saves and Escape cancels.
+While Codex is working, **Enter** or **Steer** sends instructions to the active
+turn using Codex's steering API, which applies them at its next opportunity.
+**Tab** or **Queue** saves a follow-up to start as a new turn after the current
+turn finishes. Queued messages appear above the composer, can be removed, and
+run in order even if you switch conversations or close the browser tab.
+**Stop** interrupts the current turn and pauses queued messages; failed turns
+also pause the queue. Use **Resume queue** when ready. After a server restart,
+saved queued messages require review and resumption. Shift + Tab, empty Tab,
+and Tab while idle keep normal keyboard focus navigation.
+If the turn ends before steering arrives, the draft stays in the composer so
+you can send it as a new message.
 The bottom status line shows the working directory, resolved model, and reasoning effort. Send `/model`
 to list available models, `/model <model-id> [effort]` to switch, `/effort` to
 list supported effort levels, or `/effort <level>` to change effort. `/help`
@@ -482,6 +502,40 @@ failure.
 
 ### Work threads across repositories and projects
 
+To dedicate a fresh agent session to managing threads, start it in any directory
+and ask **Help me manage my open threads**. The installed **Thread Manager**
+(`manage-threads`) skill reviews all recorded workspaces by default, summarizes
+what needs attention, and carries out your requests to rename, organize, or
+move threads. In Codex you can also invoke it explicitly with `$manage-threads`.
+The source checkout and Beads are not required. The startup hook advertises the
+skill and the global `thread list` command; the plugin's default prompt starts
+this review. Saved checkpoints and history provide the review context, with
+stale or missing progress called out as uncertain.
+
+**Views** are named, saved filters displayed as tabs above the overview and
+conversation. Start with **All work**, choose repository, project, phase, Show,
+and search filters, choose a grouping, then click **＋ View** to save them.
+Each tab shows a count of threads that need you and a green dot for unread
+completed results. Counts follow that tab's saved filters, including pinned
+threads that need you; Later threads do not add to the attention count.
+
+Use **Ctrl + Shift + Left/Right** to cycle views outside text fields. When a
+view tab has focus, Left/Right, Home, and End navigate the tabs. Switching
+opens the scoped overview and sidebar, preserving each view's temporary
+filters, grouping, and scroll position in that window. Conversation drafts
+stay with their threads. New sessions prefill the selected project/repository
+and use the repository directory when it is an available workspace choice.
+
+Changing filters does not overwrite a view: **Update view** saves the current
+filters and grouping, and **Reset filters** restores the saved definition.
+The **•••** menu renames, duplicates, reorders, or deletes a view. Duplicating
+uses its saved definition. Deleting a view leaves all its threads intact.
+Views can overlap; a conversation's status and read state are shared wherever
+it appears. Definitions and tab order are stored in the coordination database
+and shared by browser and native app windows. Temporary filters and scroll
+positions stay local to each window. A concurrent edit requires resetting
+before overwriting another window's saved changes.
+
 The UI home page keeps durable work threads, with **Needs you** first and a
 separate **Later** section. Group by phase, repository, project, or none. Filter
 by repository and project independently, including **No repository** and
@@ -516,13 +570,26 @@ terminal conversations stay with their existing client, and Claude conversations
 continue in Claude Code. Existing terminal sessions begin capturing requests
 when they load the refreshed plugin; earlier prompts are not reconstructed.
 
-The overview keeps **Your turn** at the top for conversation replies, approvals,
+The overview starts with one section containing **Pinned** and **Your turn**
+side by side, stacked on narrow screens. Use the pin button on any open thread
+card to pin or unpin it. Pins survive restarts and keep threads at the top as
+work progresses, without changing Now/Later placement or read state. Pinned
+threads appear only in Pinned, including those waiting for your reply. When no
+visible threads are pinned, that column is hidden and Your turn uses the full
+width. Closed threads leave
+the open overview and retain their pin when reopened. Search and filters apply
+to both columns.
+
+**Your turn** contains conversation replies, approvals,
 and failed turns. A reply appears there when the agent finishes an unfinished
 conversation, even if the work is still in investigation or another phase.
 Opening it clears its new marker but keeps it in Your turn until another prompt
-starts. Work phase and conversation turn are tracked separately.
+starts or you move it to **Later**. Threads in Later stay out of Your turn,
+including pending approvals and failed turns. Moving them back to **Now** restores
+their priority when a reply or action is still needed. Work phase and conversation
+turn are tracked separately.
 
-Tasks with a current finished checkpoint appear under **Completed**, with unread
+Unpinned tasks with a current finished checkpoint appear under **Completed**, with unread
 results first and a **NEW RESULT** marker. They do not require a reply unless the
 checkpoint explicitly assigns a next step to you. A later question starts a new
 conversation turn; the earlier finished checkpoint no longer marks it complete.
@@ -700,6 +767,10 @@ uv run --with pyyaml python \
 uv run --with pyyaml python \
   /Users/walle/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
   plugins/agent-coord/skills/agent-coordination
+
+uv run --with pyyaml python \
+  /Users/walle/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
+  plugins/agent-coord/skills/manage-threads
 
 "${CLAUDE_BIN:-claude}" plugin validate --strict plugins/agent-coord
 "${CLAUDE_BIN:-claude}" plugin validate --strict .

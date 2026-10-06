@@ -232,7 +232,10 @@ def handle(
             f"The bundled CLI is {cli_path}. Use the agent-coordination skill "
             "before implementation. A sole active session may write without a "
             "Beads issue or scope. When another session is active, declare the "
-            "smallest write scope; a Beads issue is optional for direct work."
+            "smallest write scope; a Beads issue is optional for direct work. "
+            "To review or organize the user's threads across workspaces, use the "
+            "manage-threads skill; start with the bundled CLI's thread list "
+            "without --cwd, from any working directory."
         )
         delegation_warning = None
         delegation_id = os.environ.get("AGENT_COORD_DELEGATION_ID")

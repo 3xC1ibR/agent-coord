@@ -57,18 +57,38 @@ test("approvals and failures require attention; an interrupted turn is not a com
   assert.equal(status(stopped).label, "Stopped");
 });
 
-test("grouping preserves Later placement and excludes archived conversations from priority", () => {
+test("grouping keeps parked replies, approvals, and failures in Later and excludes closed threads from priority", () => {
   const parkedReply = thread("parked-reply", "discussion", "reply", {attention: "later"});
+  const parkedApproval = thread("parked-approval", "implementation", "input", {attention: "later"});
+  const parkedFailure = thread("parked-failure", "validation", "failed", {attention: "later"});
   const later = thread("later", "planning", null, {attention: "later"});
   const parkedResult = thread("parked-result", "finished", "completed", {attention: "later", unread: true});
   const archived = thread("archived", "finished", "reply", {attention: "archived", unread: true});
-  const input = [parkedReply, later, parkedResult, archived], before = JSON.stringify(input);
+  const input = [parkedReply, parkedApproval, parkedFailure, later, parkedResult, archived], before = JSON.stringify(input);
   const groups = groupThreads(input);
-  assert.deepEqual(groups.priority.map(t => t.thread_id), ["parked-reply"]);
-  assert.deepEqual(groups.later.map(t => t.thread_id), ["later", "parked-result"]);
+  assert.deepEqual(groups.priority, []);
+  assert.deepEqual(groups.later.map(t => t.thread_id), ["parked-reply", "parked-approval", "parked-failure", "later", "parked-result"]);
   assert.deepEqual(groups.phases.flatMap(g => g.threads).map(t => t.thread_id), ["archived"]);
   assert.equal(groups.completed.length, 0);
   assert.equal(JSON.stringify(input), before);
+});
+
+test("moving a thread between Now and Later updates Your turn without losing its response or unread state", () => {
+  for (const responseState of ["reply", "input", "failed"]) {
+    const item = thread("moving", "investigation", responseState, {unread: true});
+    const originalStatus = status(item);
+    assert.deepEqual([item].filter(awaitsUser), [item]);
+    item.attention = "later";
+    assert.deepEqual([item].filter(awaitsUser), []);
+    assert.deepEqual(groupThreads([item]).later, [item]);
+    assert.deepEqual(status(item), originalStatus);
+    assert.equal(item.response_state, responseState);
+    assert.equal(item.unread, true);
+    item.attention = "now";
+    assert.deepEqual([item].filter(awaitsUser), [item]);
+    assert.deepEqual(groupThreads([item]).priority, [item]);
+    assert.deepEqual(groupThreads([item]).later, []);
+  }
 });
 
 test("phase groups follow the workflow and retain recent-first order within a phase", () => {

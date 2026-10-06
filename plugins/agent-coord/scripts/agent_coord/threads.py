@@ -58,6 +58,7 @@ class ThreadStore:
                     title TEXT NOT NULL, original_request TEXT NOT NULL DEFAULT '',
                     title_source TEXT NOT NULL DEFAULT 'auto',
                     attention TEXT NOT NULL DEFAULT 'now',
+                    pinned INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     turn_started_at REAL, turn_id TEXT, turn_key TEXT,
                     seen_checkpoint_id INTEGER NOT NULL DEFAULT 0,
@@ -92,6 +93,8 @@ class ThreadStore:
             # Serialize upgrades across independently running terminal hooks.
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(work_threads)")}
+            if "pinned" not in columns:
+                db.execute("ALTER TABLE work_threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
             if "turn_key" not in columns:
                 db.execute("ALTER TABLE work_threads ADD COLUMN turn_key TEXT")
             if "seen_completion_id" not in columns:
@@ -135,6 +138,7 @@ class ThreadStore:
 
     def _read(self, db, row, *, history=False):
         result = dict(row)
+        result["pinned"] = bool(row["pinned"])
         latest = db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1", (row["thread_id"],)).fetchone()
         result["checkpoint"] = dict(latest) if latest else None
         result["checkpoint_stale"] = bool(latest and row["turn_started_at"] and latest["refreshed_at"] < row["turn_started_at"])
@@ -172,13 +176,15 @@ class ThreadStore:
                     if (repository_id is UNSET or thread["repository_id"] == repository_id)
                     and (project_id is UNSET or thread["project_id"] == project_id)]
 
-    def update(self, thread_id: str, *, title=None, attention=None, seen=False,
+    def update(self, thread_id: str, *, title=None, attention=None, pinned=UNSET, seen=False,
                seen_checkpoint_id=None, seen_completion_id=None, repository_id=UNSET, project_id=UNSET) -> dict:
         self.get(thread_id)
         if title is not None:
             title = _text(title, "Thread title", 160)
         if attention is not None and (not isinstance(attention, str) or attention not in ATTENTION_STATES):
             raise CoordinationError("Attention must be now, later, or archived.")
+        if pinned is not UNSET and not isinstance(pinned, bool):
+            raise CoordinationError("Pinned must be true or false.")
         if not seen and (seen_checkpoint_id is not None or seen_completion_id is not None):
             raise CoordinationError("Read markers require seen: true.")
         with self.store._connection() as db:
@@ -190,6 +196,8 @@ class ThreadStore:
                 db.execute("UPDATE work_threads SET title = ?, title_source = 'user' WHERE thread_id = ?", (title, thread_id))
             if attention is not None:
                 db.execute("UPDATE work_threads SET attention = ? WHERE thread_id = ?", (attention, thread_id))
+            if pinned is not UNSET:
+                db.execute("UPDATE work_threads SET pinned = ? WHERE thread_id = ?", (int(pinned), thread_id))
         return self.get(thread_id, history=True)
 
     @staticmethod
@@ -377,6 +385,10 @@ class ThreadStore:
             "Keep the name stable: omit title on later checkpoints unless the thread purpose changes substantially. "
             "User-chosen titles (title_source user) take precedence and cannot be overwritten by agent checkpoints. "
             "Distinguish proposals, implemented changes, validation, and deployment. "
+            'Set next_actor to user only when progress or completion requires a specific user answer, approval, decision, or action; describe it in next_action. '
+            "Keep optional advice, invitations to continue, and nonblocking reminders in summary. "
+            'When the requested work is complete and nothing remains, use phase finished, next_action "", and next_actor nobody. '
+            "If work remains, keep its actual phase and assign any required next step to its actual owner. Ending an agent turn does not create a required user action. "
             "Record unresolved decisions without inventing follow-up work. Skip unchanged checkpoints. "
             "Use exact artifact references; link kinds are pull_request, document, issue, bead, branch, other. "
             "Preserve the original request; only move Now/Later/Archived when the user requests it. "

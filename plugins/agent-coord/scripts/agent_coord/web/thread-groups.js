@@ -10,7 +10,7 @@ const threadGrouping = (() => {
   ];
 
   function awaitsUser(thread) {
-    return thread.attention !== "archived" && ["input", "reply", "failed"].includes(thread.response_state);
+    return thread.attention === "now" && ["input", "reply", "failed"].includes(thread.response_state);
   }
 
   function status(thread) {
@@ -30,14 +30,16 @@ const threadGrouping = (() => {
   }
 
   function groupThreads(threads) {
-    const priority = threads.filter(awaitsUser);
-    const rest = threads.filter(thread => !awaitsUser(thread));
+    const pinned = threads.filter(thread => thread.pinned && thread.attention !== "archived");
+    const priority = threads.filter(thread => awaitsUser(thread) && !thread.pinned);
+    const rest = threads.filter(thread => !awaitsUser(thread) && !pinned.includes(thread));
     const active = rest.filter(thread => thread.attention !== "later");
     const completed = active.filter(thread => thread.attention !== "archived" && thread.response_state === "completed")
       .sort((a, b) => Number(Boolean(b.unread)) - Number(Boolean(a.unread)));
     const ongoing = active.filter(thread => !completed.includes(thread));
     const known = new Set(phases.map(([key]) => key));
     return {
+      pinned,
       priority,
       completed,
       phases: phases.map(([key, label]) => ({key, label, threads: ongoing.filter(thread =>

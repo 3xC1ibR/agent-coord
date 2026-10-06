@@ -15,6 +15,10 @@ messages, and optional local wake state. Beads is optional for direct work. If
 the repository uses Beads, it remains the durable task source of truth; Agent
 Coord does not claim or update issues.
 
+For a session dedicated to reviewing or organizing the user's open threads,
+use the [Thread Manager skill](../manage-threads/SKILL.md). It discovers threads
+across workspaces from any directory and uses the same installed CLI and database.
+
 ## Keep a work-thread checkpoint
 
 Threads preserve the user's open conversations across stopped processes and
@@ -27,10 +31,10 @@ result, save a short factual checkpoint with the bundled CLI:
 ```bash
 <agent-coord> checkpoint --session-id <session-id> --json '{
   "title": "Database write performance",
-  "phase": "investigation",
-  "summary": "Compared two approaches; no implementation has been requested.",
-  "next_action": "Choose whether to pursue either approach.",
-  "next_actor": "user",
+  "phase": "finished",
+  "summary": "Compared the two approaches and documented the findings.",
+  "next_action": "",
+  "next_actor": "nobody",
   "links": [{"kind": "document", "label": "Findings", "target": "docs/findings.md"}]
 }'
 ```
@@ -38,9 +42,17 @@ result, save a short factual checkpoint with the bundled CLI:
 Use phases `discussion`, `investigation`, `planning`, `implementation`,
 `validation`, `deployment`, or `finished`. Describe what was established or
 changed in one or two sentences. Distinguish proposals, implemented changes,
-validation results, and deployment. Record the next unresolved action and its
-owner (`user`, `agent`, or `external`). For no remaining action use an empty
-`next_action` and `next_actor: "nobody"`; do not invent follow-up tasks.
+validation results, and deployment. Record the next required action and its
+actual owner (`user`, `agent`, or `external`). Set `next_actor: "user"` only when
+progress or completion requires a specific user answer, approval, decision, or
+action, and describe that requirement in `next_action`. Ending an agent turn
+does not create a required user action.
+
+Keep optional advice, invitations to continue, and nonblocking reminders in
+`summary`; do not turn them into user next steps. When the requested work is
+complete and nothing remains, use `phase: "finished"`, an empty `next_action`,
+and `next_actor: "nobody"`. If work remains, keep its actual phase and assign
+any required next step to its actual owner; do not invent follow-up tasks.
 Skip unchanged checkpoints. The command preserves history and the original
 request; it does not mark a Bead complete or close the thread.
 
@@ -298,7 +310,10 @@ sessions through `codex app-server`: streamed conversations, approvals and
 questions, stop, rename, close, reopen, and resume. Browser sessions do not
 require a parent or Bead. They default to workspace-write sandboxing and on-request approvals. The new
 session dialog has an explicit **Use --yolo** option for full machine access
-without sandboxing or approval prompts; it persists for that session only.
+without sandboxing or approval prompts. Existing idle browser sessions can change
+this setting through **Permissions** in the conversation footer; the choice
+persists for that session and applies to subsequent turns. Running or closed
+sessions must finish or reopen before their permissions can change.
 Click the conversation title to rename it inline. The bottom status line shows
 the working directory, effective model, and reasoning effort. `/model` lists
 models, `/model <model-id> [effort]` changes the next turn's model, and `/effort

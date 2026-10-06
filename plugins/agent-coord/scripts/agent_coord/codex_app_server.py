@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .store import CoordinationError, CoordinationStore
+from .browser_queue import BrowserMessageQueue
+from .image_inputs import message_images
 from .session_close import stop_terminal_session
 from .workspaces import matches_workspace, workspace_choices
 
@@ -175,7 +177,9 @@ class BrowserSessions:
         self.loaded: set[str] = set()
         self.thread_locks: dict[str, threading.RLock] = {}
         self.histories: dict[str, dict] = {}
-        self.history_queries_supported = True
+        self.history_lock = threading.Lock()
+        self.history_rpc = None
+        self.rpc_factory = rpc_factory
         self.closed = False
         with store._connection() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS browser_sessions (
@@ -189,6 +193,7 @@ class BrowserSessions:
             connection.execute("""CREATE TABLE IF NOT EXISTS browser_history (
                 thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL
             )""")
+        self.queue = BrowserMessageQueue(self)
         self.rpc = rpc_factory(store, self._event)
         # Upgrade browser conversations created before work threads existed.
         with self.store._connection() as connection:
@@ -249,7 +254,12 @@ class BrowserSessions:
                 session = self.store.get_session(thread_id)
                 unfinished = session["write_scope"] or session["scope_required"] or session["activity"] in {"implementing", "validating", "planning", "waiting"}
                 self.store.touch(thread_id, "waiting" if unfinished else "idle", turn_active=False)
+                if turn.get("status") == "completed":
+                    self.queue.wake()
+                else:
+                    self.queue.pause(thread_id, "The turn stopped or failed. Resume queued messages when ready.")
             if method == "thread/closed" and thread_id:
+                self.queue.pause(thread_id, "The thread closed. Reopen it to resume queued messages.")
                 self._save_history(thread_id)
                 self.loaded.discard(thread_id)
                 self.active.pop(thread_id, None)
@@ -257,6 +267,7 @@ class BrowserSessions:
                 self.store.end_session(thread_id)
             if method == "bridge/disconnected":
                 for loaded_id in self.loaded:
+                    self.queue.pause(loaded_id, "Codex disconnected. Review queued messages before resuming.")
                     self._save_history(loaded_id)
                     self.store.end_session(loaded_id)
                 self.loaded.clear()
@@ -322,17 +333,69 @@ class BrowserSessions:
         if method in {"item/completed", "turn/completed"}:
             self._save_history(params["threadId"])
 
-    def _read_thread(self, thread_id: str) -> dict:
-        if self.history_queries_supported:
+    @staticmethod
+    def _query_thread(rpc: CodexRPC, thread_id: str, *, include_turns: bool) -> dict:
+        # Codex can acknowledge the first turn after creating the rollout but
+        # before writing its metadata. Retry only that read failure, for at most
+        # 750 ms of backoff; never replay the accepted turn or mask a lasting error.
+        for delay in (0.05, 0.1, 0.2, 0.4, None):
             try:
-                result = self.rpc.request("thread/read", {"threadId": thread_id, "includeTurns": True})
-                return self._remember_thread(result["thread"])
+                return rpc.request("thread/read", {"threadId": thread_id, "includeTurns": include_turns})["thread"]
             except CoordinationError as exc:
-                if "list_turns is not supported" not in str(exc):
+                message = str(exc)
+                empty_rollout = (message.startswith("failed to read thread:")
+                                 and "failed to read session metadata " in message
+                                 and ": rollout at " in message and message.endswith(" is empty"))
+                if delay is None or not empty_rollout:
                     raise
-                self.history_queries_supported = False
-        result = self.rpc.request("thread/read", {"threadId": thread_id, "includeTurns": False})
-        return self._remember_thread(result["thread"])
+                time.sleep(delay)
+
+    def _stored_thread(self, thread_id: str) -> dict:
+        # Some Codex builds cannot list turns for a loaded paginated thread,
+        # but can read its persisted history on a connection that never resumes it.
+        with self.history_lock:
+            if self.closed:
+                raise CoordinationError("Browser sessions are closed.")
+            if self.history_rpc is None:
+                self.history_rpc = self.rpc_factory(self.store, lambda event: None)
+            try:
+                return self._query_thread(self.history_rpc, thread_id, include_turns=True)
+            except CoordinationError:
+                self.history_rpc.close()
+                self.history_rpc = None
+                raise
+
+    def _read_thread(self, thread_id: str) -> dict:
+        try:
+            thread = self._query_thread(self.rpc, thread_id, include_turns=True)
+        except CoordinationError as exc:
+            if "list_turns is not supported" not in str(exc):
+                raise
+            # Failure is local to this read, not a server-wide capability switch.
+            thread = self._query_thread(self.rpc, thread_id, include_turns=False)
+            try:
+                stored = self._stored_thread(thread_id)
+            except CoordinationError:
+                thread["historyUnavailable"] = True
+                return self._remember_thread(thread)
+            with self.lock:
+                turns = copy.deepcopy(stored.get("turns", []))
+                by_id = {turn["id"]: turn for turn in turns}
+                for cached in self._history(thread_id).get("turns", []):
+                    persisted = by_id.get(cached["id"])
+                    if persisted is None:
+                        turns.append(copy.deepcopy(cached))
+                    elif persisted.get("status") == "inProgress" or self.active.get(thread_id) == cached["id"]:
+                        # Disk can lag behind a streamed item or completion.
+                        items = {item["id"]: item for item in persisted.get("items", [])}
+                        items.update({item["id"]: copy.deepcopy(item) for item in cached.get("items", [])})
+                        persisted.update(copy.deepcopy(cached))
+                        persisted["items"] = list(items.values())
+                thread["turns"] = turns
+                thread["historyUnavailable"] = False
+                return self._remember_thread(thread)
+        thread["historyUnavailable"] = False
+        return self._remember_thread(thread)
 
     def events_after(self, sequence: int, timeout=15) -> dict:
         with self.changed:
@@ -427,14 +490,16 @@ class BrowserSessions:
 
     def _update_work_thread(self, thread_id: str, body: dict) -> dict:
         thread = self.work_thread(thread_id)
-        if set(body) - {"attention", "title", "seen", "seen_checkpoint_id", "seen_completion_id", "repository_id", "project_id"}:
-            raise CoordinationError("Thread update accepts attention, title, seen, read markers, repository_id, and project_id.")
+        if set(body) - {"attention", "title", "pinned", "seen", "seen_checkpoint_id", "seen_completion_id", "repository_id", "project_id"}:
+            raise CoordinationError("Thread update accepts attention, title, pinned, seen, read markers, repository_id, and project_id.")
         associations = {key: body[key] for key in ("repository_id", "project_id") if key in body}
         self.store.threads.organization.validate_assignments(**associations)
         if "attention" in body and not isinstance(body["attention"], str):
             raise CoordinationError("Attention must be now, later, or archived.")
         if "seen" in body and not isinstance(body["seen"], bool):
             raise CoordinationError("Seen must be true or false.")
+        if "pinned" in body and not isinstance(body["pinned"], bool):
+            raise CoordinationError("Pinned must be true or false.")
         if "title" in body:
             self._text(body["title"], "Thread title", 160)
         if body.get("attention") is not None and body["attention"] not in {"now", "later", "archived"}:
@@ -444,7 +509,8 @@ class BrowserSessions:
         if thread["browser_session"] and body.get("attention") in {"now", "later"} and self._record(thread_id)["archived"]:
             self.update(thread_id, {"archived": False})
         self.store.threads.update(thread_id, title=body.get("title"), attention=body.get("attention"), seen=body.get("seen", False),
-                                  seen_checkpoint_id=body.get("seen_checkpoint_id"), seen_completion_id=body.get("seen_completion_id"), **associations)
+                                  seen_checkpoint_id=body.get("seen_checkpoint_id"), seen_completion_id=body.get("seen_completion_id"),
+                                  **({"pinned": body["pinned"]} if "pinned" in body else {}), **associations)
         self._publish("browser/changed", {"threadId": thread_id})
         return self.work_thread(thread_id)
 
@@ -458,6 +524,7 @@ class BrowserSessions:
             thread = self.work_thread(thread_id)
             if thread["browser_session"]:
                 record = self._record(thread_id)
+                self.queue.pause(thread_id, "The thread closed. Reopen it to resume queued messages.")
                 with self.lock:
                     running = thread_id in self.active
                 if running:
@@ -687,30 +754,54 @@ class BrowserSessions:
                 elif thread.get("status", {}).get("type") != "active":
                     self.active.pop(thread_id, None)
             return {"session": record, "thread": thread, "work_thread": work_thread, "requests": self.pending_requests(thread_id),
-                    "activeTurn": self.active.get(thread_id), "running": thread_id in self.active}
+                    "activeTurn": self.active.get(thread_id), "running": thread_id in self.active,
+                    "queuedMessages": self.queue.list(thread_id)}
 
-    def send(self, thread_id: str, body: dict) -> dict:
-        message = self._text(body.get("message"), "Message", 100000)
+    def send(self, thread_id: str, body: dict, *, start_only: bool = False) -> dict:
+        message, images = message_images(body)
+        expected_turn = body.get("expectedTurnId")
+        if "expectedTurnId" in body:
+            expected_turn = self._text(expected_turn, "Expected turn ID", 200)
         with self._thread_lock(thread_id):
             record = self._record(thread_id)
             if record["archived"] or self.store.threads.get(thread_id)["attention"] == "archived":
                 raise CoordinationError("Reopen this thread before sending a message.")
             self.read(thread_id)
             record = self._record(thread_id)
-            command = self._command(thread_id, message)
+            command = self._command(thread_id, message) if message and not images else None
             if command is not None:
                 return command
             with self.lock:
-                if thread_id in self.active:
-                    raise BrowserBusyError("This session already has a running turn.")
-                self.active[thread_id] = None
-            params = {"threadId": thread_id, "input": [{"type": "text", "text": message}]}
+                turn_id = self.active.get(thread_id)
+                if start_only and thread_id in self.active:
+                    raise BrowserBusyError("A turn is already running. The queued message was not sent as steering.")
+                if expected_turn is not None and expected_turn != turn_id:
+                    raise BrowserBusyError("The active turn changed or finished. Your draft was not sent; send it again to continue.")
+                if thread_id in self.active and not turn_id:
+                    raise BrowserBusyError("The turn is starting. Wait a moment before steering.")
+                if not turn_id:
+                    self.active[thread_id] = None
+            inputs = ([{"type": "text", "text": message}] if message else [])
+            inputs.extend({"type": "image", "url": image["url"]} for image in images)
+            params = {"threadId": thread_id, "input": inputs}
+            if turn_id:
+                # The server checks this too, covering completion during the RPC.
+                result = self.rpc.request("turn/steer", {**params, "expectedTurnId": turn_id})
+                with self.store._connection() as connection:
+                    connection.execute("UPDATE browser_sessions SET updated_at = ? WHERE thread_id = ?", (time.time(), thread_id))
+                self._publish("browser/changed", {"threadId": thread_id})
+                return result
             if record["model"]:
                 params["model"] = record["model"]
             if record["effort"]:
                 params["effort"] = record["effort"]
             if record["yolo"]:
                 params.update(approvalPolicy="never", sandboxPolicy={"type": "dangerFullAccess"})
+            else:
+                roots = list(dict.fromkeys((record["cwd"], str(self.store.database_path.parent))))
+                params.update(approvalPolicy="on-request", sandboxPolicy={
+                    "type": "workspaceWrite", "writableRoots": roots, "networkAccess": False,
+                })
             try:
                 result = self.rpc.request("turn/start", params)
             except Exception:
@@ -718,7 +809,7 @@ class BrowserSessions:
                     self.active.pop(thread_id, None)
                 raise
             # Some app-server versions omit input items from turn/started.
-            self.store.threads.capture_request(thread_id, message)
+            self.store.threads.capture_request(thread_id, message or "\n".join("[Image]" for _ in images))
             with self.lock:
                 # A fast completed event may arrive before the request response.
                 if thread_id in self.active:
@@ -734,13 +825,26 @@ class BrowserSessions:
             turn_id = self.active.get(thread_id)
         if not turn_id:
             raise CoordinationError("This session has no running turn to stop yet.")
+        self.queue.pause(thread_id, "You stopped the turn. Resume queued messages when ready.")
         return self.rpc.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
 
     def update(self, thread_id: str, body: dict) -> dict:
         with self._thread_lock(thread_id):
             record = self._record(thread_id)
             if "yolo" in body:
-                raise CoordinationError("Choose YOLO when creating a new session.")
+                yolo = body["yolo"]
+                if not isinstance(yolo, bool):
+                    raise CoordinationError("YOLO must be true or false.")
+                if record["archived"] or self.store.threads.get(thread_id)["attention"] == "archived":
+                    raise CoordinationError("Restore this session before changing its permissions.")
+                with self.lock:
+                    if thread_id in self.active:
+                        raise BrowserBusyError("Wait for the running turn to finish before changing permissions.")
+                if yolo != bool(record["yolo"]):
+                    with self.store._connection() as connection:
+                        connection.execute("UPDATE browser_sessions SET yolo = ?, updated_at = ? WHERE thread_id = ?",
+                                           (int(yolo), time.time(), thread_id))
+                    record = self._record(thread_id)
             if "model" in body or "effort" in body:
                 record = self._change_settings(thread_id, body)
             if "name" in body:
@@ -759,6 +863,8 @@ class BrowserSessions:
                     if thread_id in self.active:
                         raise BrowserBusyError("Stop the running turn before archiving this session.")
                 if archived != bool(record["archived"]):
+                    if archived:
+                        self.queue.pause(thread_id, "The thread closed. Reopen it to resume queued messages.")
                     self.rpc.request("thread/archive" if archived else "thread/unarchive", {"threadId": thread_id})
                     with self.store._connection() as connection:
                         connection.execute("UPDATE browser_sessions SET archived = ? WHERE thread_id = ?", (int(archived), thread_id))
@@ -822,3 +928,8 @@ class BrowserSessions:
             self.closed = True
             self.changed.notify_all()
         self.rpc.close()
+        self.queue.close()
+        with self.history_lock:
+            if self.history_rpc is not None:
+                self.history_rpc.close()
+                self.history_rpc = None

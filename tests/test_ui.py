@@ -372,12 +372,58 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(self.request(path + "/messages", {"message": "/effort medium"})[0], 409)
         self.assertEqual(self.request("/api/browser/sessions", {"yolo": "true"})[0], 400)
 
+    def test_browser_steering_and_stale_turn_over_http(self):
+        status, created = self.request("/api/browser/sessions", {"name": "Steering"})
+        self.assertEqual(status, 201)
+        path = "/api/browser/sessions/" + created["session"]["thread_id"]
+        status, started = self.request(path + "/messages", {"message": "Begin"})
+        self.assertEqual(status, 200)
+        turn_id = started["turn"]["id"]
+        status, steered = self.request(path + "/messages", {"message": "Focus on the UI", "expectedTurnId": turn_id})
+        self.assertEqual(status, 200)
+        self.assertEqual(steered["turnId"], turn_id)
+        detail = self.request(path)[1]
+        self.assertTrue(detail["running"])
+        self.assertEqual(len(detail["thread"]["turns"]), 1)
+        self.assertEqual(detail["thread"]["turns"][0]["items"][-1]["content"][0]["text"], "Focus on the UI")
+        self.assertEqual(self.request(path + "/interrupt", {})[0], 200)
+        self.assertEqual(self.request(path + "/messages", {"message": "Late steering", "expectedTurnId": turn_id})[0], 409)
+        self.assertEqual(len(self.request(path)[1]["thread"]["turns"]), 1)
+        self.assertEqual(self.request(path + "/messages", {"message": "Next turn"})[0], 200)
+
+    def test_queue_messages_cancel_and_resume_over_http(self):
+        status, created = self.request("/api/browser/sessions", {"name": "Queue"})
+        self.assertEqual(status, 201)
+        path = "/api/browser/sessions/" + created["session"]["thread_id"]
+        self.assertEqual(self.request(path + "/messages", {"message": "Begin"})[0], 200)
+        status, queued = self.request(path + "/queue", {"message": "Follow-up"})
+        self.assertEqual(status, 200)
+        self.assertTrue(queued["queued"])
+        detail = self.request(path)[1]
+        self.assertEqual(detail["queuedMessages"][0]["message"], "Follow-up")
+        self.assertEqual(len(detail["thread"]["turns"]), 1)
+        self.assertEqual(self.request(path + "/queue", {"action": "cancel", "id": queued["id"]})[0], 200)
+        self.assertEqual(self.request(path)[1]["queuedMessages"], [])
+        self.assertEqual(self.request(path + "/queue", {"message": "Retained"})[0], 200)
+        self.assertEqual(self.request(path + "/interrupt", {})[0], 200)
+        self.assertEqual(self.request(path)[1]["queuedMessages"][0]["state"], "paused")
+        self.assertEqual(self.request(path + "/queue", {"action": "resume"})[0], 200)
+        with self.sessions.changed:
+            self.assertTrue(self.sessions.changed.wait_for(lambda: not self.sessions.queue.list(created["session"]["thread_id"]), timeout=5))
+        self.assertEqual(len(self.request(path)[1]["thread"]["turns"]), 2)
+        self.assertEqual(self.request(path + "/queue", {"message": "Denied"}, {"X-Agent-Coord-Token": "wrong"})[0], 403)
+
     def test_browser_create_chat_interrupt_archive_and_restore(self):
         status, shell = self.request("/")
         self.assertEqual(status, 200)
         self.assertIn("New session", shell)
         self.assertEqual(self.request("/app.js")[0], 200)
         self.assertEqual(self.request("/styles.css")[0], 200)
+        self.assertEqual(self.request("/filter-menu.js")[0], 200)
+        self.assertEqual(self.request("/filter-menu.css")[0], 200)
+        self.assertIn('id="filter-menu"', shell)
+        self.assertIn('id="repository"', shell)
+        self.assertIn('id="project"', shell)
         self.assertEqual(self.request("/markdown.js")[0], 200)
         self.assertIn('src="/markdown.js"', shell)
         monitor = self.request("/monitor")[1]
@@ -387,7 +433,7 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(status, 201)
         path = "/api/browser/sessions/" + result["session"]["thread_id"]
         self.assertEqual(self.request(path + "/messages", {"message": "Hello"})[0], 200)
-        self.assertEqual(self.request(path + "/messages", {"message": "Duplicate"})[0], 409)
+        self.assertEqual(self.request(path + "/messages", {"message": "Follow-up instruction"})[0], 200)
         self.assertTrue(self.request(path)[1]["running"])
         self.assertEqual(self.request(path + "/interrupt", {})[0], 200)
         self.assertEqual(self.request(path, {"archived": True})[0], 200)

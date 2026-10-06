@@ -8,12 +8,19 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
 from agent_coord.codex_app_server import BrowserBusyError, BrowserSessions, CodexRPC
 from agent_coord.store import CoordinationError, CoordinationStore
+
+
+EMPTY_ROLLOUT_ERROR = (
+    "failed to read thread: thread-store internal error: failed to read session metadata "
+    "/sessions/rollout.jsonl: rollout at /sessions/rollout.jsonl is empty"
+)
 
 
 class FakeCodex:
@@ -24,8 +31,10 @@ class FakeCodex:
         self.calls = []
         self.writes = []
         self.fail_turn = False
+        self.fail_steer = False
         self.fast_turn = False
         self.no_history = False
+        self.empty_rollout_reads = {}
         self.closed = False
 
     def request(self, method, params=None):
@@ -41,10 +50,15 @@ class FakeCodex:
             thread_id = "thread-" + str(len(self.threads) + 1)
             self.threads[thread_id] = {"id": thread_id, "cwd": params["cwd"], "turns": []}
         if method in {"thread/start", "thread/read", "thread/resume"}:
+            if method == "thread/read" and self.empty_rollout_reads.get(params.get("includeTurns"), 0):
+                self.empty_rollout_reads[params.get("includeTurns")] -= 1
+                raise CoordinationError(EMPTY_ROLLOUT_ERROR)
             if self.no_history and method == "thread/read" and params.get("includeTurns"):
                 raise CoordinationError("list_turns is not supported yet")
+            if thread_id not in self.threads:
+                raise CoordinationError("Thread not found.")
             thread = copy.deepcopy(self.threads[thread_id])
-            if self.no_history and (method == "thread/read" or params.get("excludeTurns")):
+            if params.get("excludeTurns") or (method == "thread/read" and not params.get("includeTurns")):
                 thread["turns"] = []
             if method in {"thread/start", "thread/resume"}:
                 settings = self.settings.setdefault(thread_id, {"model": "available-model", "reasoningEffort": "medium"})
@@ -62,6 +76,16 @@ class FakeCodex:
                 turn["status"] = "completed"
                 self.callback({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
             return {"turn": copy.deepcopy(turn)}
+        if method == "turn/steer":
+            if self.fail_steer:
+                raise CoordinationError("Steering unavailable.")
+            turn = self.threads[thread_id]["turns"][-1]
+            if turn["status"] != "inProgress" or turn["id"] != params["expectedTurnId"]:
+                raise CoordinationError("Active turn mismatch.")
+            item = {"id": "steer-" + str(len(turn["items"])), "type": "userMessage", "content": params["input"]}
+            turn["items"].append(item)
+            self.callback({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn["id"], "item": item}})
+            return {"turnId": turn["id"]}
         if method == "turn/interrupt":
             turn = self.threads[thread_id]["turns"][-1]
             turn["status"] = "interrupted"
@@ -155,7 +179,39 @@ class BrowserSessionTests(unittest.TestCase):
         options = reopened.rpc.calls[-1][1]
         self.assertEqual(options["approvalPolicy"], "never")
         self.assertEqual(options["sandboxPolicy"], {"type": "dangerFullAccess"})
-        with self.assertRaisesRegex(CoordinationError, "creating"):
+        with self.assertRaises(BrowserBusyError):
+            reopened.update(thread_id, {"yolo": False})
+        reopened.interrupt(thread_id)
+        self.assertFalse(reopened.update(thread_id, {"yolo": False})["yolo"])
+        reopened.send(thread_id, {"message": "Safer work"})
+        options = reopened.rpc.calls[-1][1]
+        self.assertEqual(options["approvalPolicy"], "on-request")
+        self.assertEqual(options["sandboxPolicy"], {
+            "type": "workspaceWrite", "writableRoots": [str(self.root)], "networkAccess": False,
+        })
+
+    def test_yolo_can_be_enabled_on_an_existing_idle_session(self):
+        thread_id = self.create()
+        for invalid in ("true", 1, None):
+            with self.assertRaisesRegex(CoordinationError, "YOLO"):
+                self.sessions.update(thread_id, {"yolo": invalid})
+        self.assertFalse(self.sessions._record(thread_id)["yolo"])
+        self.assertTrue(self.sessions.update(thread_id, {"yolo": True})["yolo"])
+        self.sessions.rpc.fast_turn = True
+        self.sessions.send(thread_id, {"message": "Work"})
+        options = self.sessions.rpc.calls[-1][1]
+        self.assertEqual(options["approvalPolicy"], "never")
+        self.assertEqual(options["sandboxPolicy"], {"type": "dangerFullAccess"})
+        self.sessions.close()
+        reopened = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(reopened.close)
+        reopened.rpc.threads = self.sessions.rpc.threads
+        self.assertTrue(reopened.read(thread_id)["session"]["yolo"])
+        options = next(params for method, params in reopened.rpc.calls if method == "thread/resume")
+        self.assertEqual(options["approvalPolicy"], "never")
+        self.assertEqual(options["sandbox"], "danger-full-access")
+        reopened.update(thread_id, {"archived": True})
+        with self.assertRaisesRegex(CoordinationError, "Restore"):
             reopened.update(thread_id, {"yolo": False})
 
     def test_existing_database_migrates_yolo_to_off(self):
@@ -200,16 +256,81 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["thread"]["turns"][0]["items"][0]["content"][0]["text"], "Continue the project.")
         self.assertEqual(reopened.rpc.calls[0][0], "thread/resume")
 
-    def test_parallel_sessions_work_but_duplicate_turn_is_rejected(self):
+    def test_parallel_sessions_steer_without_starting_duplicate_turns(self):
         first, second = self.create(), self.create()
         self.sessions.send(first, {"message": "First"})
         self.sessions.send(second, {"message": "Second"})
-        with self.assertRaisesRegex(BrowserBusyError, "already has"):
-            self.sessions.send(first, {"message": "Duplicate"})
+        result = self.sessions.send(first, {"message": "Focus on the UI"})
+        self.assertEqual(result, {"turnId": self.sessions.active[first]})
+        self.assertEqual(len(self.sessions.rpc.threads[first]["turns"]), 1)
         self.assertEqual(len(self.sessions.active), 2)
         self.sessions.interrupt(first)
         self.assertNotIn(first, self.sessions.active)
         self.assertIn(second, self.sessions.active)
+
+    def test_steering_uses_active_turn_and_preserves_history_and_original_request(self):
+        thread_id = self.create()
+        self.sessions.rpc.no_history = True
+        turn = self.sessions.send(thread_id, {"message": "Original request"})["turn"]
+        result = self.sessions.send(thread_id, {"message": "New direction", "expectedTurnId": turn["id"]})
+        self.assertEqual(result, {"turnId": turn["id"]})
+        self.assertEqual(self.sessions.rpc.calls[-1], ("turn/steer", {
+            "threadId": thread_id, "expectedTurnId": turn["id"], "input": [{"type": "text", "text": "New direction"}],
+        }))
+        self.assertEqual(self.store.threads.get(thread_id)["original_request"], "Original request")
+        detail = self.sessions.read(thread_id)
+        self.assertTrue(detail["running"])
+        self.assertEqual(len(detail["thread"]["turns"]), 1)
+        self.assertEqual(detail["thread"]["turns"][0]["items"][-1]["content"][0]["text"], "New direction")
+        with self.store._connection() as db:
+            history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        self.assertEqual(history["turns"][0]["items"][-1]["content"][0]["text"], "New direction")
+
+    def test_stale_steering_does_not_start_or_target_another_turn(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Start"})["turn"]
+        self.sessions.interrupt(thread_id)
+        with self.assertRaisesRegex(BrowserBusyError, "changed or finished"):
+            self.sessions.send(thread_id, {"message": "Too late", "expectedTurnId": turn["id"]})
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
+        self.sessions.send(thread_id, {"message": "Next turn"})
+        with self.assertRaisesRegex(BrowserBusyError, "changed or finished"):
+            self.sessions.send(thread_id, {"message": "Wrong turn", "expectedTurnId": turn["id"]})
+        self.assertFalse(any(method == "turn/steer" for method, _ in self.sessions.rpc.calls))
+
+    def test_failed_steering_preserves_active_turn_and_can_retry(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Start"})["turn"]
+        self.sessions.rpc.fail_steer = True
+        with self.assertRaisesRegex(CoordinationError, "Steering unavailable"):
+            self.sessions.send(thread_id, {"message": "Adjust"})
+        self.assertEqual(self.sessions.active[thread_id], turn["id"])
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"][0]["items"]), 1)
+        self.sessions.rpc.fail_steer = False
+        self.assertEqual(self.sessions.send(thread_id, {"message": "Adjust"}), {"turnId": turn["id"]})
+
+    def test_steering_rejects_invalid_expected_turn_ids(self):
+        thread_id = self.create()
+        for value in (None, "", [], 1):
+            with self.assertRaisesRegex(CoordinationError, "Expected turn ID"):
+                self.sessions.send(thread_id, {"message": "Adjust", "expectedTurnId": value})
+        self.assertFalse(any(method in {"turn/start", "turn/steer"} for method, _ in self.sessions.rpc.calls))
+
+    def test_completion_during_steering_does_not_restart_the_turn(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Start"})["turn"]
+        request = self.sessions.rpc.request
+
+        def complete_before_steer(method, params=None):
+            if method == "turn/steer":
+                request("turn/interrupt", {"threadId": thread_id, "turnId": turn["id"]})
+            return request(method, params)
+
+        self.sessions.rpc.request = complete_before_steer
+        with self.assertRaisesRegex(CoordinationError, "Active turn mismatch"):
+            self.sessions.send(thread_id, {"message": "Too late", "expectedTurnId": turn["id"]})
+        self.assertNotIn(thread_id, self.sessions.active)
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
 
     def test_streamed_history_survives_when_codex_cannot_query_stored_turns(self):
         thread_id = self.create()
@@ -230,6 +351,174 @@ class BrowserSessionTests(unittest.TestCase):
         thread = reopened.read(thread_id)["thread"]
         self.assertEqual(thread["turns"][0]["items"][-1]["text"], "Hello again")
         self.assertEqual(thread["turns"][0]["status"], "completed")
+
+    def history_reader(self, thread_id, turns):
+        reader = FakeCodex(self.store, lambda event: None)
+        reader.threads[thread_id] = {"id": thread_id, "turns": turns, "status": {"type": "notLoaded"}}
+        self.sessions.history_rpc = reader
+        return reader
+
+    def test_first_message_read_recovers_when_rollout_metadata_is_delayed(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "First message"})["turn"]
+        self.sessions.rpc.empty_rollout_reads = {True: 2}
+        with patch("agent_coord.codex_app_server.time.sleep") as sleep:
+            result = self.sessions.read(thread_id)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(result["thread"]["turns"], [turn])
+        self.assertEqual(result["activeTurn"], turn["id"])
+        self.assertTrue(result["running"])
+        self.assertFalse(result["thread"]["historyUnavailable"])
+        self.assertEqual(sum(method == "turn/start" for method, _ in self.sessions.rpc.calls), 1)
+
+    def test_summary_read_retries_empty_rollout_with_unsupported_loaded_history(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "First message"})["turn"]
+        self.sessions.rpc.no_history = True
+        self.sessions.rpc.empty_rollout_reads = {False: 1}
+        self.history_reader(thread_id, [turn])
+        with patch("agent_coord.codex_app_server.time.sleep") as sleep:
+            result = self.sessions.read(thread_id)
+        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(result["thread"]["turns"], [turn])
+        self.assertTrue(result["running"])
+        self.assertFalse(result["thread"]["historyUnavailable"])
+
+    def test_separate_history_reader_retries_delayed_metadata(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "First message"})["turn"]
+        self.sessions.rpc.no_history = True
+        reader = self.history_reader(thread_id, [turn])
+        reader.empty_rollout_reads = {True: 2}
+        with patch("agent_coord.codex_app_server.time.sleep") as sleep:
+            result = self.sessions.read(thread_id)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(result["thread"]["turns"], [turn])
+        self.assertFalse(result["thread"]["historyUnavailable"])
+        self.assertFalse(reader.closed)
+
+    def test_persistently_empty_rollout_still_fails_without_losing_the_active_turn(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "First message"})["turn"]
+        self.sessions.rpc.empty_rollout_reads = {True: 100}
+        with patch("agent_coord.codex_app_server.time.sleep") as sleep:
+            with self.assertRaises(CoordinationError) as caught:
+                self.sessions.read(thread_id)
+        self.assertEqual(str(caught.exception), EMPTY_ROLLOUT_ERROR)
+        self.assertGreater(sleep.call_count, 0)
+        self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 1)
+        self.assertEqual(self.sessions.active[thread_id], turn["id"])
+        self.assertEqual(self.sessions._history(thread_id)["turns"], [turn])
+        self.sessions.rpc.empty_rollout_reads.clear()
+        self.assertEqual(self.sessions.read(thread_id)["thread"]["turns"], [turn])
+        self.assertEqual(sum(method == "turn/start" for method, _ in self.sessions.rpc.calls), 1)
+
+    def test_thread_read_does_not_retry_unrelated_storage_or_transport_errors(self):
+        thread_id = self.create()
+        for error in ("Thread not found.", "Connection to Codex app-server was lost.",
+                      EMPTY_ROLLOUT_ERROR.replace("is empty", "contains invalid JSON"),
+                      "failed to read thread: permission denied"):
+            with self.subTest(error=error):
+                with patch.object(self.sessions.rpc, "request", side_effect=CoordinationError(error)) as request:
+                    with patch("agent_coord.codex_app_server.time.sleep") as sleep:
+                        with self.assertRaises(CoordinationError) as caught:
+                            self.sessions.read(thread_id)
+                self.assertEqual(str(caught.exception), error)
+                self.assertEqual(request.call_count, 1)
+                sleep.assert_not_called()
+
+    def test_resumed_terminal_history_is_recovered_without_resuming_the_history_reader(self):
+        thread_id = "terminal"
+        self.store.register(session_id=thread_id, client="codex", cwd=str(self.root))
+        self.store.end_session(thread_id)
+        turns = [{"id": "old-turn", "status": "completed", "items": [
+            {"id": "user", "type": "userMessage", "content": [{"type": "text", "text": "Original request"}]},
+            {"id": "answer", "type": "agentMessage", "text": "Saved answer"}]}]
+        self.sessions.rpc.threads[thread_id] = {"id": thread_id, "turns": turns, "status": {"type": "idle"}}
+        self.sessions.rpc.no_history = True
+        reader = self.history_reader(thread_id, turns)
+        self.sessions.resume_work_thread(thread_id)
+        result = self.sessions.read(thread_id)
+        self.assertEqual(result["thread"]["turns"], turns)
+        self.assertFalse(result["thread"]["historyUnavailable"])
+        self.assertEqual(result["thread"]["status"], {"type": "idle"})
+        self.assertEqual(reader.calls, [("thread/read", {"threadId": thread_id, "includeTurns": True})])
+        with self.store._connection() as db:
+            saved = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        self.assertEqual(saved["turns"], turns)
+        self.sessions.close()
+        self.assertTrue(reader.closed)
+
+    def test_one_unsupported_thread_does_not_disable_history_for_other_threads(self):
+        first, second = self.create(), self.create()
+        self.sessions.rpc.no_history = True
+        self.assertTrue(self.sessions.read(first)["thread"]["historyUnavailable"])
+        self.sessions.rpc.no_history = False
+        turns = [{"id": "stored", "status": "completed", "items": [
+            {"id": "answer", "type": "agentMessage", "text": "Other thread history"}]}]
+        self.sessions.rpc.threads[second]["turns"] = turns
+        result = self.sessions.read(second)["thread"]
+        self.assertEqual(result["turns"], turns)
+        self.assertFalse(result["historyUnavailable"])
+
+    def test_failed_history_read_keeps_cached_messages_and_can_recover(self):
+        thread_id = self.create()
+        turns = [{"id": "cached", "status": "completed", "items": [
+            {"id": "answer", "type": "agentMessage", "text": "Cached answer"}]}]
+        self.sessions._remember_thread({"id": thread_id, "turns": turns})
+        self.sessions.rpc.no_history = True
+        failed = self.history_reader(thread_id, turns)
+        failed.no_history = True
+        result = self.sessions.read(thread_id)["thread"]
+        self.assertTrue(result["historyUnavailable"])
+        self.assertEqual(result["turns"], turns)
+        self.assertTrue(failed.closed)
+        self.assertIsNone(self.sessions.history_rpc)
+        self.assertFalse(self.sessions.rpc.closed)
+        reader = self.history_reader(thread_id, turns)
+        recovered = self.sessions.read(thread_id)["thread"]
+        self.assertFalse(recovered["historyUnavailable"])
+        self.assertEqual(recovered["turns"], turns)
+        self.assertFalse(reader.closed)
+
+    def test_stored_history_does_not_overwrite_live_deltas_or_running_state(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Continue"})["turn"]
+        older = {"id": "older", "status": "completed", "items": [
+            {"id": "old-answer", "type": "agentMessage", "text": "Before browser resume"}]}
+        persisted = copy.deepcopy(turn)
+        persisted["items"].append({"id": "answer", "type": "agentMessage", "text": "Partial"})
+        self.sessions.rpc.threads[thread_id]["status"] = {"type": "active"}
+        self.sessions.rpc.no_history = True
+        reader = self.history_reader(thread_id, [older, persisted])
+        params = {"threadId": thread_id, "turnId": turn["id"]}
+        self.sessions._event({"method": "item/started", "params": {**params, "item": {"id": "answer", "type": "agentMessage", "text": "Partial"}}})
+        self.sessions._event({"method": "item/agentMessage/delta", "params": {**params, "itemId": "answer", "delta": " live reply"}})
+        result = self.sessions.read(thread_id)
+        self.assertEqual([item["id"] for item in result["thread"]["turns"]], ["older", turn["id"]])
+        self.assertEqual(result["thread"]["turns"][-1]["items"][-1]["text"], "Partial live reply")
+        self.assertEqual(result["activeTurn"], turn["id"])
+        self.assertTrue(result["running"])
+        self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn["id"], "status": "completed", "items": []}}})
+        self.sessions.rpc.threads[thread_id]["status"] = {"type": "idle"}
+        # Persisted history still has an in-progress snapshot after completion.
+        result = self.sessions.read(thread_id)
+        self.assertEqual(result["thread"]["turns"][-1]["status"], "completed")
+        self.assertFalse(result["running"])
+        self.assertTrue(all(method == "thread/read" for method, _ in reader.calls))
+
+    def test_archived_history_recovery_does_not_resume_or_reopen_thread(self):
+        thread_id = self.create()
+        self.sessions.update(thread_id, {"archived": True})
+        self.sessions.rpc.no_history = True
+        turns = [{"id": "old", "status": "completed", "items": [
+            {"id": "answer", "type": "agentMessage", "text": "Archived answer"}]}]
+        reader = self.history_reader(thread_id, turns)
+        self.sessions.rpc.calls.clear()
+        result = self.sessions.read(thread_id)
+        self.assertEqual(result["thread"]["turns"], turns)
+        self.assertEqual(result["work_thread"]["attention"], "archived")
+        self.assertTrue(all(method == "thread/read" for method, _ in self.sessions.rpc.calls + reader.calls))
 
     def test_fast_turn_completion_is_not_overwritten_by_start_response(self):
         thread_id = self.create()
