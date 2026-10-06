@@ -47,6 +47,19 @@ class HookTests(unittest.TestCase):
         self.assertIn("codex-one", context)
         self.assertEqual(self.store.get_session("codex-one")["presence"], "online")
 
+    def test_hooks_capture_intent_and_preserve_checkpoint_after_stop(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        handle(self.payload("UserPromptSubmit", prompt="Investigate the write path."), self.store)
+        self.store.threads.checkpoint("codex-one", {"phase": "investigation", "summary": "Two options remain."})
+        self.store.threads.update("codex-one", attention="later")
+        handle(self.payload("Stop"), self.store)
+        handle(self.payload("SessionEnd"), self.store)
+        resumed = handle(self.payload("SessionStart"), self.store)
+        self.assertIn("Two options remain.", resumed["hookSpecificOutput"]["additionalContext"])
+        thread = self.store.threads.get("codex-one")
+        self.assertEqual(thread["attention"], "later")
+        self.assertEqual(thread["original_request"], "Investigate the write path.")
+
     def test_session_start_attaches_inherited_delegation(self) -> None:
         self.store.register(
             session_id="parent",
@@ -473,7 +486,7 @@ class HookTests(unittest.TestCase):
         self.assertIn(
             "I need src/app.py.", first["hookSpecificOutput"]["additionalContext"]
         )
-        self.assertEqual(second, {})
+        self.assertNotIn("I need src/app.py.", second["hookSpecificOutput"]["additionalContext"])
 
     def test_hooks_surface_only_action_required_messages(self) -> None:
         self.store.register(
@@ -549,7 +562,7 @@ class HookTests(unittest.TestCase):
 
         result = handle(self.payload("UserPromptSubmit"), self.store)
 
-        self.assertEqual(result, {})
+        self.assertNotIn("Please validate", result["hookSpecificOutput"]["additionalContext"])
         history = self.store.inbox(
             "codex-one", include_delivered=True, mark_delivered=False
         )

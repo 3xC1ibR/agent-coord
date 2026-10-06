@@ -217,6 +217,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(ui.port, 9000)
         self.assertTrue(ui.no_browser)
 
+    @patch("agent_coord.cli.serve_ui")
+    @patch("agent_coord.cli.CoordinationStore")
+    def test_ui_preserves_the_selected_directory(self, store_class, serve) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            directory = root / "nested"
+            directory.mkdir()
+            with patch("agent_coord.cli.find_repository_root", return_value=str(root)):
+                cli_run(_parser().parse_args(["ui", "--cwd", str(directory), "--no-browser"]))
+            self.assertEqual(serve.call_args.kwargs["cwd"], str(directory))
+
     @patch("agent_coord.cli.shutil.which", return_value="/usr/local/bin/bd")
     @patch("agent_coord.cli.subprocess.run")
     def test_claimed_in_progress_bead_is_accepted(self, run, _which) -> None:

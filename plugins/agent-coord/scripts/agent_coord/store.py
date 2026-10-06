@@ -181,6 +181,8 @@ class CoordinationStore:
         self.clock = clock
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        from .threads import ThreadStore
+        self.threads = ThreadStore(self)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=5.0)
@@ -758,6 +760,7 @@ class CoordinationStore:
                 """,
                 (session_id, client, repository, name, now, now),
             )
+        self.threads.ensure(session_id)
         return self.get_session(session_id)
 
     def get_session(self, session_id: str) -> dict[str, Any]:

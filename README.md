@@ -356,19 +356,78 @@ output without giving the caller an arbitrary file-read path. If the client
 exits before reporting a terminal result, the supervisor records the exit code,
 marks the delegation failed, and notifies the parent.
 
-### Local delegation UI
+### Browser sessions and coordination UI
 
-Start the dependency-free, read-only operator UI with:
+Start the dependency-free local UI with:
 
 ```bash
 agent-coord ui --parent-session <parent-session-id>
 agent-coord ui --cwd /absolute/path/to/repository
+agent-coord ui --cwd /opt/projects
 ```
 
-It opens a local process tree containing the parent and its delegated children.
-`--cwd` (also available as `--repo`) restricts the tree to one normalized Git
-repository; without it, the UI shows delegation trees from every repository in
-the shared database. It can be combined with `--parent-session`.
+The home page lets developers create independent Codex sessions, choose a
+workspace and an available model/reasoning effort, chat with streamed responses,
+answer approvals and questions, stop a running turn, rename sessions, and
+close or reopen conversations. Creating a session requires neither a parent
+agent nor a Beads issue. Different sessions can run concurrently; an individual
+session accepts one active turn at a time.
+
+**Close thread** ends the live session and returns to the open overview. A
+running session offers **Stop and close**, which waits for the turn to stop
+before closing. **Closed** history retains conversations, checkpoints, links,
+and session settings; **Reopen** brings a thread back so you can continue it.
+Closing does not mark its task complete. **Later** keeps work you intend to
+return to in the open workspace. Existing archived threads appear in Closed.
+
+Browser sessions close through Codex's per-thread shutdown, leaving other
+sessions running. For a terminal Codex, the UI only stops a process verified
+by its open conversation transcript; it never targets a remembered pane ID
+or a shared app-server process. If that identity cannot be verified (including
+Claude terminals), exit the terminal session first, then close the thread.
+The terminal's shell or Zellij pane stays open. Closed history can be read
+without resuming execution.
+
+The backend starts `codex app-server` lazily and communicates over stdio using
+the [Codex App Server protocol](https://developers.openai.com/codex/app-server).
+Install and authenticate Codex before using browser sessions. Sessions use
+workspace-write sandboxing and on-request approvals routed to the developer by
+default. Select **Use --yolo** when creating a session to disable sandboxing and
+approval prompts for that session (full machine access). The choice is saved
+and preserved when the session resumes; other sessions keep their own settings.
+
+Click the conversation title to rename it inline; Enter saves and Escape cancels.
+The bottom status line shows the working directory, resolved model, and reasoning effort. Send `/model`
+to list available models, `/model <model-id> [effort]` to switch, `/effort` to
+list supported effort levels, or `/effort <level>` to change effort. `/help`
+lists these commands. Commands do not create model turns; changes apply to the
+next message and persist across server restarts. Wait for a running turn to
+finish before changing settings. When switching models, an unsupported effort
+falls back to the new model's advertised default.
+The UI uses the installed Codex configuration and plugins without bypassing
+hook trust. Trust the Agent Coord hooks through the normal Codex setup so its
+write guards run in browser sessions as they do in terminal sessions.
+
+Codex owns the model's conversation history. The shared Agent Coord database
+stores browser-created session names, workspaces, and model settings, plus a
+display copy of streamed conversation items. The display copy supports Codex
+builds that cannot yet query stored turns through app-server.
+Reloading or closing the browser does not stop work while the UI server runs.
+Stopping the UI server stops its Codex app-server; saved conversations can be
+reopened after restarting the UI. Browser sessions register in the same
+coordination store as terminal sessions. Existing terminal/delegated sessions
+remain visible in the coordination monitor and are not taken over by the chat
+interface.
+
+`--cwd` (also available as `--repo`) filters browser sessions and coordination
+to a directory and its descendants. For example, `--cwd /opt/projects` lets
+you select its repositories in the **New session → Workspace** dropdown.
+The dropdown lists immediate folders and previously used workspaces; choose
+**Enter another path…** for a nested folder. A repository filter also includes
+its linked Git worktrees. Without `--cwd`, developers can select any workspace
+and the monitor shows repositories in the shared database. `--parent-session`
+filters the coordination monitor only. Open **Coordination monitor** (or
+`/monitor`) to inspect the parent/child process tree and standalone sessions.
 
 The tree can be sorted by name, creation time, or last activity. Last activity
 is the default, with the most recently active parent groups and children first;
@@ -385,11 +444,11 @@ older Zellij delegation cannot be recovered when its pane was already gone
 before any snapshot was saved; the UI explains that case and shows the durable
 final result instead of implying that capture is still pending.
 
-The page refreshes automatically. Use `--no-browser` on a headless machine and
-`--port <port>` to choose a port. The server accepts loopback addresses only,
-silently handles normal browser disconnects, and does not expose an input
-channel to the owned PTY; coordination input continues to use durable `send`
-messages.
+The pages update automatically. Use `--no-browser` on a headless machine and
+`--port <port>` to choose a port. The server accepts loopback addresses only;
+browser mutations require a server-issued token and same-origin requests.
+The coordination monitor remains read-only. Follow-up work for PTY delegations
+continues to use durable `send` messages.
 
 When a delegated worker reports a terminal result, its next `Stop` hook records
 session token usage in the delegation row and writes:
@@ -420,6 +479,145 @@ failed and sends that failure to the parent. A second active delegation for the
 same repository and Beads issue is rejected. The parent can use `delegation
 cancel` to release an active record after a confirmed launch or attachment
 failure.
+
+### Work threads across repositories and projects
+
+The UI home page keeps durable work threads, with **Needs you** first and a
+separate **Later** section. Group by phase, repository, project, or none. Filter
+by repository and project independently, including **No repository** and
+**No project**; phase and **Needs you** filters can be combined with them.
+Every card includes its assigned repository/project, title, phase, runtime state,
+latest checkpoint, and next action. Closed threads have their own view.
+Selecting a thread shows its original
+request, checkpoint history, related links, and conversation. You can edit a
+checkpoint, add/remove links, rename, park, reopen, or close a thread.
+
+Repository and project are both optional. A repository identifies a Git codebase;
+a project is a named initiative that can span repositories. A thread can have
+either association, both, or neither. Use **New project** in the sidebar or
+overview to create a project without starting a session. Open an existing thread
+and choose **Add to project** (or **Change project**) to select an existing
+project, create a new one, or choose **No project** to detach it. The same dialog
+lets you assign or clear its repository independently. **New session** also
+offers these associations and defaults to the project selected in the filter.
+Creating a project does not require a repository. New sessions detect a repository
+from their workspace by default; selecting **No repository** explicitly clears it.
+Changing either association never changes the working directory or file access.
+
+These features work without Beads or a Git remote. A normal folder remains a
+workspace. Git worktrees group under their main repository while each session
+retains its actual working directory. Run `agent-coord ui` without `--cwd` to
+see all workspaces together, or use `--cwd /opt/projects` to show workspaces within
+that directory. Workspace scope always follows the actual working directory,
+independently of the thread's organizational associations. Registered terminal conversations are also captured;
+delegated sessions appear under their parent instead of filling the main list.
+A closed Codex terminal conversation can continue in the browser. Active
+terminal conversations stay with their existing client, and Claude conversations
+continue in Claude Code. Existing terminal sessions begin capturing requests
+when they load the refreshed plugin; earlier prompts are not reconstructed.
+
+The overview keeps **Your turn** at the top for conversation replies, approvals,
+and failed turns. A reply appears there when the agent finishes an unfinished
+conversation, even if the work is still in investigation or another phase.
+Opening it clears its new marker but keeps it in Your turn until another prompt
+starts. Work phase and conversation turn are tracked separately.
+
+Tasks with a current finished checkpoint appear under **Completed**, with unread
+results first and a **NEW RESULT** marker. They do not require a reply unless the
+checkpoint explicitly assigns a next step to you. A later question starts a new
+conversation turn; the earlier finished checkpoint no longer marks it complete.
+Other work remains grouped by phase, repository, or project. Grouping preserves
+the thread's saved Now/Later/Archived placement. The thread view selector can
+show only Your turn or Completed.
+
+New-result markers track completed turns independently of progress checkpoints,
+so opening a thread while an agent is working does not consume its future reply.
+Read state and reply priority survive a server restart. An interrupted turn or
+a disconnected process does not establish task completion.
+
+Choose **Enable notifications** in the sidebar to receive desktop alerts when a
+terminal or browser agent finishes a turn. The browser asks for notification
+permission only when you enable them. Keep a UI tab open; it can be in the
+background. Click an alert to open its thread. Turn failures also produce an
+alert; manually interrupted turns do not.
+
+Completion events are saved in the shared database, so short turns and stream
+reconnections do not lose them. Alerts respect the UI server's workspace scope
+and exclude archived threads. Opening or reloading the UI starts with new
+completions instead of replaying old ones. Tabs share notification delivery,
+and a conversation you are already viewing in a focused tab stays quiet. Click
+**Notifications on** to disable alerts. Terminal sessions must load the refreshed
+plugin to record turn completions.
+
+Agents maintain checkpoints with:
+
+```bash
+agent-coord checkpoint --session-id <id> --json '{
+  "title": "Database write performance",
+  "phase": "investigation",
+  "summary": "Compared two approaches; no implementation has started.",
+  "next_action": "Choose an approach.",
+  "next_actor": "user",
+  "links": [{"kind": "document", "label": "Findings", "target": "docs/findings.md"}]
+}'
+agent-coord thread show --session-id <id>
+agent-coord thread list
+agent-coord thread update --session-id <id> --attention later
+```
+
+Phases are `discussion`, `investigation`, `planning`, `implementation`,
+`validation`, `deployment`, and `finished`. Next actors are `user`, `agent`,
+`external`, and `nobody` (with an empty next action). `--json -` reads stdin.
+Hooks and browser launch instructions ask agents to save a factual checkpoint
+before returning control, when the phase changes, or after a significant result.
+Starting another turn marks an older checkpoint as potentially out of date.
+Ending a turn or process never implies that the work is finished. Parking a
+thread does not stop its agent or release its write scope.
+
+Checkpoints accept an optional `title` (1–160 characters). Agents choose a
+specific, short name at the first meaningful checkpoint, then omit it from
+later checkpoints unless the thread's purpose changes substantially. The
+title appears on the overview; the original request remains in the detail
+view. Hook context includes the current title and its source (`auto`, `agent`,
+or `user`). User renames take precedence and survive agent checkpoints and
+restarts; an ignored agent title does not prevent the progress update from
+being saved. Existing custom names are preserved during migration, while
+known placeholder names and opening-prompt excerpts remain eligible for agent
+naming.
+
+Projects and repositories can also be managed from the CLI:
+
+```bash
+agent-coord project create --name 'Anthropic migration'
+agent-coord project list
+agent-coord repository add --path /path/to/repository
+agent-coord repository list
+agent-coord thread update --session-id <id> --project <project-id>
+agent-coord thread update --session-id <id> --repository <repository-id>
+agent-coord thread update --session-id <id> --no-repository --no-project
+agent-coord thread list --repository <repository-id> --no-project
+```
+
+Thread data lives alongside coordination data in the local SQLite database.
+`thread_organization` stores nullable `repository_id` and `project_id`, referencing
+`work_repositories` and `named_projects`. The additive migration detects actual
+Git repositories for existing threads and leaves named projects unset. Cleared
+associations remain cleared across restarts. Checkpoints, titles, attention, and
+artifact references retain their history. Legacy `work_projects` and the old
+`project_id` columns are retained as workspace identities for already-running
+clients; they do not represent named projects.
+
+Link responses expose `workspace_id` for their artifact context. Link input
+accepts `workspace_id`; `project_id` remains a legacy alias for that workspace ID.
+There is no provider column or metadata blob. Supported kinds are `pull_request`,
+`document`, `issue`, `bead`, `branch`, and `other`. Multiple links of each type
+are supported; exact duplicates update their label. Local document paths retain
+their workspace context. Link targets remain owned by their respective systems;
+Agent Coord does not poll or infer their current status.
+
+Thread placement and checkpoint phases are independent of Beads. Linking an
+issue does not import the backlog or change issue status. Legacy delegation and
+atomic handoff still require a Bead as described above.
 
 ## Wake ordinary idle Zellij sessions (optional compatibility)
 

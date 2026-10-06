@@ -15,6 +15,77 @@ messages, and optional local wake state. Beads is optional for direct work. If
 the repository uses Beads, it remains the durable task source of truth; Agent
 Coord does not claim or update issues.
 
+## Keep a work-thread checkpoint
+
+Threads preserve the user's open conversations across stopped processes and
+repositories. They do not require Beads. A thread's Now/Later/Closed placement
+is the user's choice; changing coordination activity does not change placement.
+
+Before returning control to the user, at a phase change, or after a significant
+result, save a short factual checkpoint with the bundled CLI:
+
+```bash
+<agent-coord> checkpoint --session-id <session-id> --json '{
+  "title": "Database write performance",
+  "phase": "investigation",
+  "summary": "Compared two approaches; no implementation has been requested.",
+  "next_action": "Choose whether to pursue either approach.",
+  "next_actor": "user",
+  "links": [{"kind": "document", "label": "Findings", "target": "docs/findings.md"}]
+}'
+```
+
+Use phases `discussion`, `investigation`, `planning`, `implementation`,
+`validation`, `deployment`, or `finished`. Describe what was established or
+changed in one or two sentences. Distinguish proposals, implemented changes,
+validation results, and deployment. Record the next unresolved action and its
+owner (`user`, `agent`, or `external`). For no remaining action use an empty
+`next_action` and `next_actor: "nobody"`; do not invent follow-up tasks.
+Skip unchanged checkpoints. The command preserves history and the original
+request; it does not mark a Bead complete or close the thread.
+
+At the first meaningful checkpoint, include an optional `title`: a specific
+3–6 word name that makes the thread recognizable in the overview. Use the
+thread's purpose, not a progress report or a copy of the opening message.
+The saved context includes `title` and `title_source` (`auto`, `agent`, or
+`user`). Replace an `auto` title when you understand the work. Omit `title`
+on later checkpoints to keep the name stable, unless the purpose changes
+substantially. A user-chosen name takes precedence: agent checkpoints still
+save progress but cannot replace a title whose source is `user`. The original
+request remains unchanged. Titles accept 1–160 characters; the word count is
+writing guidance.
+
+Links accept `kind`, `label`, and `target`, with an optional `workspace_id` for a
+different artifact workspace. The link field `project_id` is a legacy alias for
+that workspace ID, not a named project ID. Kinds are `pull_request`, `document`, `issue`, `bead`, `branch`,
+and `other`. Use exact references. Document paths resolve against the session's
+workspace. Links are added or updated without removing earlier associations.
+For complex text, `--json -` reads the object from stdin. `thread show
+--session-id <id>` displays the original request, checkpoint history, and links.
+Session-start and prompt hooks provide the latest saved checkpoint as context.
+
+Repository and project are independent, optional thread associations. The
+workspace is the actual working directory; changing associations does not move
+files or change execution scope. Git repositories are detected for new threads;
+plain folders remain workspaces, and named projects are assigned explicitly.
+Use `project create --name <name>` / `project list` and
+`repository add --path <path>` / `repository list` to obtain IDs. At the user's
+request, assign them with `thread update --session-id <id> --project <id>` or
+`--repository <id>`; clear either with `--no-project` or `--no-repository`.
+The UI has independent filters and grouping, including No project and No repository.
+
+Move a thread only at the user's request, using the UI or `thread update
+--session-id <id> --attention now|later|archived`. Parking preserves conversation
+state and does not interrupt a running turn or release a file scope. Call
+`end-work` independently when you no longer own that scope.
+The CLI's legacy `archived` placement appears as **Closed** in the UI. The UI's
+**Close thread** / **Stop and close** action also ends the live session and
+releases its scope, then returns to the open overview. It keeps conversation
+history, checkpoints, links, and settings; **Reopen** allows continuing later.
+Closing does not imply task completion. Terminal shutdown requires a verified
+Codex transcript owner and never targets a remembered Zellij pane or shared
+app-server. When that cannot be verified, exit the terminal session first.
+
 ## Before implementation
 
 1. Inspect other working sessions with `<agent-coord> list --relevant --cwd
@@ -222,17 +293,37 @@ The managed supervisor wakes an inactive child only for undelivered actionable
 messages and submits one generic prompt through its owned PTY. The prompt hook
 then supplies the durable body and thread metadata. This keeps delegated agents
 long-lived and lets children coordinate with their parent or with one another.
-The loopback-only UI shows the parent/child tree, lifecycle and process status,
+The loopback-only UI home page creates and manages independent Codex browser
+sessions through `codex app-server`: streamed conversations, approvals and
+questions, stop, rename, close, reopen, and resume. Browser sessions do not
+require a parent or Bead. They default to workspace-write sandboxing and on-request approvals. The new
+session dialog has an explicit **Use --yolo** option for full machine access
+without sandboxing or approval prompts; it persists for that session only.
+Click the conversation title to rename it inline. The bottom status line shows
+the working directory, effective model, and reasoning effort. `/model` lists
+models, `/model <model-id> [effort]` changes the next turn's model, and `/effort
+<level>` changes its reasoning effort. `/effort` lists supported levels and
+`/help` lists commands. Changes are saved without starting a model turn and
+require an idle session. The installed Codex configuration is used without
+bypassing hook trust.
+Codex must be authenticated and Agent Coord hooks trusted through normal setup.
+Closing a browser tab does not stop work; stopping the UI server stops its
+app-server, and saved conversations can be resumed after a restart.
+
+The Coordination monitor link (`/monitor`) shows the parent/child tree, lifecycle and process status,
 recent bounded output, complete received-message history, and activity. Managed
 terminal output is rendered using its cursor and erase controls rather than by
 concatenating repaint traffic. Live Zellij screens are snapshotted into the
 same durable output area, and the last successful capture remains available
 after a pane or UI restart. Use
-`--cwd` (or `--repo`) to restrict it to one repository; omitting the filter
-shows delegation trees across the shared database. The tree sorts by most
-recent activity by default and can switch to creation time or name. A selected
-parent shows clickable child summaries and recent child output. The UI is
-read-only, so follow-up work should be sent through Agent Coord messaging.
+`--cwd` (or `--repo`) to filter it to a directory and its descendants; a
+repository also includes its linked Git worktrees. For example,
+`--cwd /opt/projects` offers child repositories in the New session Workspace
+dropdown. Omitting the filter shows delegation trees across the shared database.
+The tree sorts by most recent activity by default and can switch to creation
+time or name. A selected
+parent shows clickable child summaries and recent child output. The monitor is
+read-only, so follow-up work for delegated workers uses Agent Coord messaging.
 
 After the child reports a completed or failed result, its `Stop` hook records
 token usage in durable delegation state and writes

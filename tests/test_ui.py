@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 import urllib.request
+import urllib.error
 from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +18,8 @@ sys.path.insert(0, str(PLUGIN_SCRIPTS))
 from agent_coord.managed_pty import output_log_path
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import _handler, build_snapshot, make_ui_server
+from agent_coord.codex_app_server import BrowserSessions
+from test_codex_app_server import FakeCodex
 
 
 class OperatorUITests(unittest.TestCase):
@@ -230,7 +233,11 @@ class OperatorUITests(unittest.TestCase):
         self.assertEqual(len(build_snapshot(self.store)["parents"]), 2)
         filtered = build_snapshot(self.store, cwd=str(self.root))
         self.assertEqual(
-            [item["session_id"] for item in filtered["parents"]], ["parent"]
+            {item["session_id"] for item in filtered["parents"]}, {"parent", "other-parent"}
+        )
+        filtered = build_snapshot(self.store, cwd=str(other))
+        self.assertEqual(
+            [item["session_id"] for item in filtered["parents"]], ["other-parent"]
         )
 
     def test_snapshot_includes_complete_message_history_without_mutation(self) -> None:
@@ -271,7 +278,7 @@ class OperatorUITests(unittest.TestCase):
         host, port = server.server_address[:2]
         try:
             with urllib.request.urlopen(
-                f"http://{host}:{port}/", timeout=2
+                f"http://{host}:{port}/monitor", timeout=2
             ) as response:
                 page = response.read().decode()
             with urllib.request.urlopen(
@@ -306,6 +313,140 @@ class OperatorUITests(unittest.TestCase):
     def test_ui_rejects_non_loopback_binding(self) -> None:
         with self.assertRaisesRegex(CoordinationError, "only binds to loopback"):
             make_ui_server(self.store, host="0.0.0.0", port=0)
+
+    def test_snapshot_includes_standalone_sessions(self) -> None:
+        self.store.register(session_id="standalone", client="codex", cwd=str(self.root))
+        ids = {item["session_id"] for item in build_snapshot(self.store)["parents"]}
+        self.assertEqual(ids, {"parent", "standalone"})
+
+
+class BrowserHTTPTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.store = CoordinationStore(self.root / "state.sqlite3")
+        self.sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.server = make_ui_server(self.store, port=0, cwd=str(self.root), browser_sessions=self.sessions)
+        self.worker = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.worker.start()
+        self.addCleanup(self.stop_server)
+        self.url = "http://127.0.0.1:" + str(self.server.server_address[1])
+        self.token = self.request("/api/browser/config")[1]["token"]
+
+    def stop_server(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.worker.join(2)
+
+    def request(self, path, body=None, headers=None):
+        request_headers = dict(headers or {})
+        if body is not None:
+            request_headers.setdefault("Content-Type", "application/json")
+            request_headers.setdefault("X-Agent-Coord-Token", getattr(self, "token", ""))
+        request = urllib.request.Request(self.url + path, data=json.dumps(body).encode() if body is not None else None, headers=request_headers)
+        try:
+            response = urllib.request.urlopen(request, timeout=2)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        with response:
+            content = response.read().decode()
+            return response.status, json.loads(content) if response.headers.get_content_type() == "application/json" else content
+
+    def test_session_model_commands_and_yolo_over_http(self):
+        status, created = self.request("/api/browser/sessions", {"name": "Settings", "yolo": True})
+        self.assertEqual(status, 201)
+        path = "/api/browser/sessions/" + created["session"]["thread_id"]
+        self.assertTrue(created["session"]["yolo"])
+        self.assertEqual(created["session"]["model"], "available-model")
+        status, changed = self.request(path + "/messages", {"message": "/model other-model low"})
+        self.assertEqual(status, 200)
+        self.assertIn("Next message", changed["command"]["message"])
+        detail = self.request(path)[1]
+        self.assertFalse(detail["running"])
+        self.assertEqual(detail["thread"]["turns"], [])
+        self.assertEqual((detail["session"]["model"], detail["session"]["effort"]), ("other-model", "low"))
+        self.assertEqual(self.request(path + "/messages", {"message": "/effort unsupported"})[0], 400)
+        self.assertEqual(self.request(path, {"model": "available-model", "effort": "high"})[0], 200)
+        self.assertEqual(self.request(path + "/messages", {"message": "Begin"})[0], 200)
+        self.assertEqual(self.request(path + "/messages", {"message": "/effort medium"})[0], 409)
+        self.assertEqual(self.request("/api/browser/sessions", {"yolo": "true"})[0], 400)
+
+    def test_browser_create_chat_interrupt_archive_and_restore(self):
+        status, shell = self.request("/")
+        self.assertEqual(status, 200)
+        self.assertIn("New session", shell)
+        self.assertEqual(self.request("/app.js")[0], 200)
+        self.assertEqual(self.request("/styles.css")[0], 200)
+        self.assertEqual(self.request("/markdown.js")[0], 200)
+        self.assertIn('src="/markdown.js"', shell)
+        monitor = self.request("/monitor")[1]
+        self.assertIn('src="/markdown.js"', monitor)
+        self.assertIn("messageMarkdown.render(m.body)", monitor)
+        status, result = self.request("/api/browser/sessions", {"name": "Browser workflow"})
+        self.assertEqual(status, 201)
+        path = "/api/browser/sessions/" + result["session"]["thread_id"]
+        self.assertEqual(self.request(path + "/messages", {"message": "Hello"})[0], 200)
+        self.assertEqual(self.request(path + "/messages", {"message": "Duplicate"})[0], 409)
+        self.assertTrue(self.request(path)[1]["running"])
+        self.assertEqual(self.request(path + "/interrupt", {})[0], 200)
+        self.assertEqual(self.request(path, {"archived": True})[0], 200)
+        self.assertEqual(self.request("/api/browser/sessions")[1]["data"], [])
+        self.assertEqual(self.request(path, {"archived": False})[0], 200)
+
+    def test_mutations_require_same_origin_and_token(self):
+        for headers in [{"X-Agent-Coord-Token": ""}, {"X-Agent-Coord-Token": "wrong"}, {"Origin": "https://attacker.example"}, {"Host": "attacker.example"}, {"Sec-Fetch-Site": "cross-site"}]:
+            self.assertEqual(self.request("/api/browser/sessions", {}, headers)[0], 403)
+        self.assertEqual(self.sessions.rpc.calls, [])
+        self.assertEqual(self.request("/api/browser/config", headers={"Host": "attacker.example"})[0], 403)
+
+    def test_parent_workspace_offers_child_repositories_and_keeps_created_session_visible(self):
+        repo = self.root / "repo"
+        (repo / ".git").mkdir(parents=True)
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        self.store.register(session_id="outside", client="codex", cwd=outside.name)
+        self.assertEqual(self.request("/api/browser/config")[1]["workspaceRoot"], str(self.root))
+        status, choices = self.request("/api/browser/workspaces")
+        self.assertEqual(status, 200)
+        self.assertEqual({item["cwd"] for item in choices["data"]}, {str(self.root), str(repo)})
+        self.assertEqual(self.sessions.rpc.calls, [])
+        status, result = self.request("/api/browser/sessions", {"cwd": str(repo)})
+        self.assertEqual(status, 201)
+        thread_id = result["session"]["thread_id"]
+        self.assertEqual(result["session"]["cwd"], str(repo))
+        self.assertEqual(self.request("/api/browser/sessions/" + thread_id)[0], 200)
+        for route in ("sessions", "threads"):
+            self.assertEqual([item["thread_id"] for item in self.request("/api/browser/" + route)[1]["data"]], [thread_id])
+        self.assertEqual([item["session_id"] for item in self.request("/api/snapshot")[1]["parents"]], [thread_id])
+        self.assertEqual(self.request("/api/browser/sessions", {"cwd": outside.name})[0], 400)
+
+    def test_invalid_requests_do_not_start_codex(self):
+        self.assertEqual(self.request("/api/browser/sessions", [], {})[0], 400)
+        self.assertEqual(self.request("/api/browser/sessions", {}, {"Content-Type": "text/plain"})[0], 415)
+        self.assertEqual(self.request("/api/browser/sessions", {"name": "x" * 140000})[0], 413)
+        self.assertEqual(self.sessions.rpc.calls, [])
+
+    def test_thread_metadata_checkpoint_links_and_attention_over_http(self):
+        self.store.register(session_id="terminal", client="codex", cwd=str(self.root))
+        path = "/api/browser/threads/terminal"
+        self.assertEqual(self.request(path, {"attention": "later"})[0], 200)
+        self.assertEqual(self.request(path + "/checkpoint", {"phase": "investigation", "summary": "An answer worth revisiting."})[0], 200)
+        status, result = self.request(path + "/links", {"kind": "document", "target": "notes.md"})
+        self.assertEqual(status, 200)
+        self.assertEqual(result["links"][0]["target"], str(self.root / "notes.md"))
+        link_id = result["links"][0]["id"]
+        self.assertEqual(self.request(path + "/links", {"remove": link_id})[1]["links"], [])
+        threads = self.request("/api/browser/threads")[1]["data"]
+        self.assertEqual(threads[0]["attention"], "later")
+        self.assertEqual(threads[0]["checkpoint"]["summary"], "An answer worth revisiting.")
+        self.assertEqual(self.sessions.rpc.calls, [])
+        self.assertEqual(self.request(path, {"attention": "archived"}, {"X-Agent-Coord-Token": "wrong"})[0], 403)
+        self.assertEqual(self.request(path, {"attention": []})[0], 400)
+        self.assertEqual(self.request(path + "/links", {"kind": "document", "target": "javascript:alert(1)"})[0], 400)
+        self.assertEqual(self.request(path, {"attention": "archived"})[0], 200)
+        self.assertEqual(self.request("/api/browser/threads")[1]["data"], [])
+        self.assertEqual(len(self.request("/api/browser/threads?archived=true")[1]["data"]), 1)
 
 
 if __name__ == "__main__":

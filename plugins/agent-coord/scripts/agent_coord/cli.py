@@ -21,6 +21,7 @@ from .store import (
     InboxTimeoutError,
 )
 from .ui import serve_ui
+from .threads import ATTENTION_STATES
 from .zellij_wake import enable_zellij_wake, watch_zellij
 
 
@@ -85,6 +86,42 @@ def _parser() -> argparse.ArgumentParser:
     activity = subcommands.add_parser("set-activity", help="Set semantic activity.")
     activity.add_argument("--session-id", required=True)
     activity.add_argument("--activity", required=True, choices=sorted(ACTIVITIES))
+
+    checkpoint = subcommands.add_parser("checkpoint", help="Save a factual work-thread checkpoint and optional links.")
+    checkpoint.add_argument("--session-id", required=True)
+    checkpoint.add_argument("--json", dest="checkpoint_json", required=True, help="Checkpoint JSON object, or - to read stdin.")
+
+    thread = subcommands.add_parser("thread", help="Inspect or organize durable work threads without an issue tracker.")
+    thread_commands = thread.add_subparsers(dest="thread_command", required=True)
+    thread_list = thread_commands.add_parser("list")
+    thread_list.add_argument("--cwd")
+    thread_list.add_argument("--archived", action="store_true")
+    for command in (thread_list,):
+        for field in ("repository", "project"):
+            options = command.add_mutually_exclusive_group()
+            options.add_argument("--" + field, dest=field + "_id", default=argparse.SUPPRESS, metavar="ID")
+            options.add_argument("--no-" + field, dest=field + "_id", action="store_const", const=None, default=argparse.SUPPRESS)
+    thread_show = thread_commands.add_parser("show")
+    thread_show.add_argument("--session-id", required=True)
+    thread_update = thread_commands.add_parser("update")
+    thread_update.add_argument("--session-id", required=True)
+    thread_update.add_argument("--title")
+    thread_update.add_argument("--attention", choices=sorted(ATTENTION_STATES))
+    for field in ("repository", "project"):
+        options = thread_update.add_mutually_exclusive_group()
+        options.add_argument("--" + field, dest=field + "_id", default=argparse.SUPPRESS, metavar="ID")
+        options.add_argument("--no-" + field, dest=field + "_id", action="store_const", const=None, default=argparse.SUPPRESS)
+
+    project = subcommands.add_parser("project", help="Create or list named projects independent of repositories.")
+    project_commands = project.add_subparsers(dest="project_command", required=True)
+    project_commands.add_parser("list")
+    project_create = project_commands.add_parser("create")
+    project_create.add_argument("--name", required=True)
+    repository = subcommands.add_parser("repository", help="List or register Git repositories without changing a workspace.")
+    repository_commands = repository.add_subparsers(dest="repository_command", required=True)
+    repository_commands.add_parser("list")
+    repository_add = repository_commands.add_parser("add")
+    repository_add.add_argument("--path", required=True)
 
     begin = subcommands.add_parser(
         "begin-work", help="Declare an intended write scope and optional Beads work."
@@ -332,7 +369,7 @@ def _parser() -> argparse.ArgumentParser:
     wake_watch.add_argument("--poll-interval", type=float, default=0.5)
 
     ui = subcommands.add_parser(
-        "ui", help="Serve the local parent/child delegation monitor."
+        "ui", help="Create and manage Codex browser sessions and monitor coordination."
     )
     ui.add_argument("--host", default="127.0.0.1", help="Loopback bind address.")
     ui.add_argument("--port", type=int, default=8765, help="Local HTTP port.")
@@ -344,7 +381,7 @@ def _parser() -> argparse.ArgumentParser:
         "--repo",
         dest="ui_cwd",
         metavar="PATH",
-        help="Only show delegation trees for this repository.",
+        help="Show workspaces in this directory and its descendants, including repository worktrees.",
     )
     ui.add_argument(
         "--no-browser", action="store_true", help="Do not open the local URL."
@@ -366,6 +403,31 @@ def run(arguments: argparse.Namespace) -> Any:
         return store.get_session(arguments.session_id)
     if command == "set-activity":
         return store.touch(arguments.session_id, arguments.activity)
+    if command == "checkpoint":
+        raw = sys.stdin.read(100001) if arguments.checkpoint_json == "-" else arguments.checkpoint_json
+        if len(raw) > 100000:
+            raise CoordinationError("Checkpoint JSON is too large.")
+        try:
+            payload = json.loads(raw)
+        except ValueError as exc:
+            raise CoordinationError("Checkpoint must be valid JSON.") from exc
+        return store.threads.checkpoint(arguments.session_id, payload)
+    if command == "thread":
+        associations = {key: getattr(arguments, key) for key in ("repository_id", "project_id") if hasattr(arguments, key)}
+        if arguments.thread_command == "list":
+            return store.threads.list(archived=arguments.archived, cwd=arguments.cwd, **associations)
+        store.threads.ensure(arguments.session_id)
+        if arguments.thread_command == "show":
+            return store.threads.get(arguments.session_id, history=True)
+        return store.threads.update(arguments.session_id, title=arguments.title, attention=arguments.attention, **associations)
+    if command == "project":
+        if arguments.project_command == "create":
+            return store.threads.organization.create_project(arguments.name)
+        return store.threads.organization.list()["projects"]
+    if command == "repository":
+        if arguments.repository_command == "add":
+            return store.threads.organization.add_repository(arguments.path)
+        return store.threads.organization.list()["repositories"]
     if command == "begin-work":
         session = store.get_session(arguments.session_id)
         if arguments.bead is not None:
@@ -533,7 +595,7 @@ def run(arguments: argparse.Namespace) -> Any:
             host=arguments.host,
             port=arguments.port,
             parent_session_id=arguments.parent_session,
-            cwd=(find_repository_root(arguments.ui_cwd) if arguments.ui_cwd else None),
+            cwd=(str(Path(arguments.ui_cwd).expanduser().resolve()) if arguments.ui_cwd else None),
             open_browser=not arguments.no_browser,
         )
     raise AssertionError(f"Unhandled command: {command}")

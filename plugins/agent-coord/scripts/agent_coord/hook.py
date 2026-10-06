@@ -192,6 +192,10 @@ def handle(
         return {}
 
     if event == "Stop":
+        # Browser turns can still be interrupted or fail after a hook runs;
+        # app-server supplies their authoritative completion and outcome.
+        if not coordination.threads.is_browser_session(session_id):
+            coordination.threads.finish_turn(session_id, turn_id=payload.get("turn_id"))
         unfinished = (
             bool(session["write_scope"])
             or session["scope_required"]
@@ -204,11 +208,20 @@ def handle(
         return {}
 
     if event == "UserPromptSubmit":
+        if coordination.threads.is_browser_session(session_id):
+            prompt = payload.get("prompt")
+            if isinstance(prompt, str):
+                coordination.threads.capture_request(session_id, prompt)
+        else:
+            coordination.threads.start_turn(session_id, prompt=payload.get("prompt"), turn_id=payload.get("turn_id"))
         if session["bead_id"] is None and session["activity"] == "idle":
             coordination.touch(session_id, "discussing", turn_active=True)
         else:
             coordination.touch(session_id, turn_active=True)
-        text = _actionable_context(coordination, session_id)
+        text = coordination.threads.instructions(session_id)
+        messages = _actionable_context(coordination, session_id)
+        if messages:
+            text += "\n\n" + messages
         return _context(event, text) if text else {}
 
     if event == "SessionStart":
@@ -258,6 +271,7 @@ def handle(
         elif wake_warning:
             text += f" Zellij wake could not start: {wake_warning}"
         formatted = _actionable_context(coordination, session_id)
+        text += "\n\n" + coordination.threads.instructions(session_id)
         if formatted:
             text += "\n\n" + formatted
         return _context(event, text)

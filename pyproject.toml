@@ -21,3 +21,6 @@ package-dir = { "" = "plugins/agent-coord/scripts" }
 
 [tool.setuptools.packages.find]
 where = ["plugins/agent-coord/scripts"]
+
+[tool.setuptools.package-data]
+agent_coord = ["web/*.html", "web/*.css", "web/*.js"]
