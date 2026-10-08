@@ -1379,6 +1379,8 @@ class CoordinationStore:
                 for session in sessions
                 if session["bead_id"] is not None
                 or session["activity"] in RELEVANT_ACTIVITIES
+                or session["turn_active"]
+                or session["write_scope"]
             ]
         return sessions
 

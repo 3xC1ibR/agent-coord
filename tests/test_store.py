@@ -305,6 +305,61 @@ class CoordinationStoreTests(unittest.TestCase):
         relevant = self.store.list_sessions(cwd=str(self.root), relevant_only=True)
         self.assertEqual({item["session_id"] for item in relevant}, {"one", "two"})
 
+    def test_relevant_filter_includes_running_idle_and_discussing_sessions(self) -> None:
+        self.register("one")
+        self.register("reference")
+        for activity in ("idle", "discussing"):
+            with self.subTest(activity=activity):
+                self.store.touch("one", activity, turn_active=True)
+                relevant = self.store.list_sessions(cwd=str(self.root), relevant_only=True)
+                self.assertEqual({item["session_id"] for item in relevant}, {"one"})
+                self.store.touch("one", turn_active=False)
+                self.assertEqual(
+                    self.store.list_sessions(cwd=str(self.root), relevant_only=True), []
+                )
+
+    def test_relevant_filter_keeps_running_session_after_end_work(self) -> None:
+        self.register("one")
+        self.store.begin_work(session_id="one", scopes=["dummy-experiment.txt"])
+        self.store.touch("one", turn_active=True)
+        self.store.end_work("one")
+
+        relevant = self.store.list_sessions(cwd=str(self.root), relevant_only=True)
+        self.assertEqual([item["session_id"] for item in relevant], ["one"])
+        self.assertEqual(relevant[0]["activity"], "idle")
+        self.assertEqual(relevant[0]["write_scope"], [])
+        self.assertIsNone(relevant[0]["bead_id"])
+
+    def test_relevant_filter_includes_scope_without_activity_or_bead(self) -> None:
+        self.register("one")
+        self.store.begin_work(session_id="one", scopes=["src/**"])
+        self.store.touch("one", "idle", turn_active=False)
+
+        relevant = self.store.list_sessions(cwd=str(self.root), relevant_only=True)
+        self.assertEqual([item["session_id"] for item in relevant], ["one"])
+        self.assertEqual(relevant[0]["write_scope"], ["src/**"])
+        self.assertIsNone(relevant[0]["bead_id"])
+        self.store.end_work("one")
+        self.assertEqual(
+            self.store.list_sessions(cwd=str(self.root), relevant_only=True), []
+        )
+
+    def test_relevant_filter_preserves_cwd_and_offline_filters(self) -> None:
+        self.register("one")
+        self.store.touch("one", "discussing", turn_active=True)
+        self.store.register(session_id="elsewhere", client="codex", cwd=str(self.root / "other"))
+        self.store.touch("elsewhere", turn_active=True)
+        self.register("ended")
+        self.store.begin_work(session_id="ended", scopes=["src/**"])
+        self.store.end_session("ended")
+
+        relevant = self.store.list_sessions(cwd=str(self.root), relevant_only=True)
+        self.assertEqual({item["session_id"] for item in relevant}, {"one"})
+        including_offline = self.store.list_sessions(
+            cwd=str(self.root), relevant_only=True, include_offline=True
+        )
+        self.assertEqual({item["session_id"] for item in including_offline}, {"one", "ended"})
+
     def test_durable_message_delivery_and_acknowledgement(self) -> None:
         self.register("one")
         self.register("two", "claude")
