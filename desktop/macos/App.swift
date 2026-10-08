@@ -5,8 +5,31 @@ import Darwin
 
 private struct BackendConfiguration: Decodable {
     let python: String
-    let database: String
-    let path: String
+    let database: String?
+    let path: String?
+
+    func pythonURL(resources: URL) -> URL {
+        python.hasPrefix("/") ? URL(fileURLWithPath: python) : resources.appendingPathComponent(python)
+    }
+
+    var databasePath: String {
+        if let database = database { return database }
+        let environment = ProcessInfo.processInfo.environment
+        if let configured = environment["AGENT_COORD_DB"], !configured.isEmpty {
+            return (configured as NSString).expandingTildeInPath
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let state = environment["XDG_STATE_HOME"] ?? home + "/.local/state"
+        return (state as NSString).expandingTildeInPath + "/agent-coord/state.sqlite3"
+    }
+
+    var toolPath: String {
+        if let path = path { return path }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return ([home + "/.local/bin", home + "/.npm-global/bin", "/opt/homebrew/bin",
+                 "/usr/local/bin", ProcessInfo.processInfo.environment["PATH"] ?? "",
+                 "/usr/bin", "/bin", "/usr/sbin", "/sbin"]).filter { !$0.isEmpty }.joined(separator: ":")
+    }
 }
 
 // Only this Process is owned by the app. Never attach to or stop a server found
@@ -44,16 +67,17 @@ private final class Backend {
         log = try FileHandle(forWritingTo: logURL)
         try log?.seekToEnd()
         let child = Process(), input = Pipe(), output = Pipe()
-        child.executableURL = URL(fileURLWithPath: configuration.python)
+        child.executableURL = configuration.pythonURL(resources: resources)
         child.arguments = ["-u", resources.appendingPathComponent("backend.py").path,
-                           "--db", database ?? configuration.database]
+                           "--db", database ?? configuration.databasePath]
         var environment = ProcessInfo.processInfo.environment
-        // Finder has a minimal PATH. Capture tool locations at build time, and
-        // avoid inheriting the session identity of a terminal that opens the app.
+        // Finder has a minimal PATH. Portable builds use this user's tool locations.
+        // Avoid inheriting the session identity of a terminal that opens the app.
         for key in Array(environment.keys) where key.hasPrefix("AGENT_COORD_") || key.hasPrefix("ZELLIJ") || key == "CODEX_THREAD_ID" {
             environment.removeValue(forKey: key)
         }
-        environment["PATH"] = configuration.path
+        environment.removeValue(forKey: "PYTHONHOME")
+        environment["PATH"] = configuration.toolPath
         environment["PYTHONPATH"] = resources.appendingPathComponent("backend").path
         environment["PYTHONNOUSERSITE"] = "1"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -1380,9 +1404,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func smokePython(_ source: String, arguments: [String] = []) throws -> [String: Any] {
         let task = Process(), output = Pipe()
-        task.executableURL = URL(fileURLWithPath: configuration.python)
+        task.executableURL = configuration.pythonURL(resources: resources)
         task.arguments = ["-c", source, smokeDirectory!.appendingPathComponent("state.sqlite3").path] + arguments
-        task.environment = ["PATH": configuration.path, "PYTHONPATH": resources.appendingPathComponent("backend").path,
+        task.environment = ["PATH": configuration.toolPath, "PYTHONPATH": resources.appendingPathComponent("backend").path,
                             "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"]
         task.currentDirectoryURL = smokeDirectory
         task.standardOutput = output

@@ -50,14 +50,22 @@ shared browser UI or backend. Commands that send messages or stop work are not
 palette entries. Results use accessible combobox/listbox semantics, loading and
 empty states, and literal text for thread metadata.
 
+## Distribution
+
+The app can bundle a pinned Python runtime and all backend dependencies for
+Apple Silicon or Intel, resolve the recipient's database and tool paths at
+launch, and ship in a drag-to-Applications DMG. The build supports Developer ID
+signing, hardened runtime, notarization, stapling, and release checksums. See
+the [distribution guide](README.md#build-a-standalone-disk-image) for commands.
+Provider CLIs and authentication remain separate setup requirements. Ad hoc
+test builds are not public, notarized releases.
+
 ## Further capability direction
 
 These are design options, not additional committed implementation:
 
 | Capability | Implementation direction |
 | --- | --- |
-| Portable installation | Bundle Python, remove build-machine paths, and validate the package on another Mac. Codex authentication remains a setup requirement. |
-| Public distribution | Developer ID signing, notarization, and a distributable installer. |
 | Automatic updates | Integrate an updater such as [Sparkle](https://sparkle-project.org/documentation/) with signed releases and a hosted update feed. |
 | Background access | Menu bar controls, Dock badges, launch at login, and configurable system-wide shortcuts. |
 | Native screens | Add AppKit or SwiftUI panels where native controls improve settings, accessibility, or workflow. |

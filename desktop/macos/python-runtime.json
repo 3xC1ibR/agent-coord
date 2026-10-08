@@ -1,0 +1,17 @@
+{
+  "version": "3.12.15",
+  "release": "20261003",
+  "source": "https://github.com/astral-sh/python-build-standalone",
+  "targets": {
+    "arm64": {
+      "triple": "aarch64-apple-darwin",
+      "sha256": "ad8d0c637c0a36b967b310e2c07254f4d2ca8cabaa7699e55ed6290aceb481a2",
+      "full_sha256": "a23a0baff73a5f10c820841cc1889a5b7fc12048fe8c0622f6a481ab82ea367b"
+    },
+    "x86_64": {
+      "triple": "x86_64-apple-darwin",
+      "sha256": "562c30864ece2cb1d3e0ad66a1acd498611a47e5a10ce81b99158bef1ccbd355",
+      "full_sha256": "49e58a92353d51f23c1b1d6e3f391dbc7180f822e317d6568c89c959f2579ee8"
+    }
+  }
+}

@@ -4,7 +4,106 @@ The native app displays the Ribbon Field UI in a Swift AppKit/WKWebView
 window. It starts a private local backend automatically and uses the same
 coordination database as the CLI and plugins.
 
-## Build and install
+## Install a distributed app
+
+Open the Ribbon Field disk image for your Mac (`arm64` for Apple Silicon,
+`x86_64` for Intel), drag **Ribbon Field.app** to **Applications**, and open it.
+Requires macOS 12 or later. No Git checkout, Python installation, or Xcode is
+needed. Install and authenticate Codex CLI or Claude Code separately to start
+agent conversations; the app does not include provider accounts or credentials.
+
+Standalone builds include Python, the shared backend, web assets, optional Web
+Push dependencies, and their license notices. The database is created for the
+recipient at `~/.local/state/agent-coord/state.sqlite3`; existing data stays there
+when replacing the app. `AGENT_COORD_DB` and `XDG_STATE_HOME` are resolved at
+launch if configured. No builder account paths are embedded in `backend.json`.
+Finder launches search `~/.local/bin`, `~/.npm-global/bin`, `/opt/homebrew/bin`,
+`/usr/local/bin`, the inherited PATH, and system tool directories. Make provider
+CLIs available in one of those locations when using a shell version manager.
+
+Files labelled `-test.dmg` are ad hoc signed and **not notarized**. They are for
+testing, not the public download. A public release requires the Developer ID
+and notarization procedure below. Quit the old app before replacing it. When
+upgrading from `Agent Coord.app`, remove the old application bundle after moving
+Ribbon Field into Applications; user data and the internal bundle ID are shared.
+
+## Build a standalone disk image
+
+Release builders need macOS, Xcode Command Line Tools, Python 3.10+, `uv`, and
+network access. Recipients need none of those tools. Run from the repository root:
+
+```bash
+python3 desktop/macos/build.py --standalone --arch arm64 \
+  --output 'build/macos/distribution/arm64/Ribbon Field.app' \
+  --dmg build/macos/distribution/Ribbon-Field-0.1.0-arm64-test.dmg
+
+python3 desktop/macos/build.py --standalone --arch x86_64 \
+  --output 'build/macos/distribution/x86_64/Ribbon Field.app' \
+  --dmg build/macos/distribution/Ribbon-Field-0.1.0-x86_64-test.dmg
+```
+
+Each image contains the app, an Applications shortcut, and installation notes.
+The build also writes `.dmg.sha256` and `.dmg.json` files with the checksum,
+architecture, version, Python provenance, and notarization status. Existing DMG
+files are never overwritten; use a new release filename or remove a previous
+test artifact explicitly. `--version X.Y.Z` and `--build-number N` set the app's
+release identity. Keep `--version` consistent with the DMG filename.
+
+`python-runtime.json` pins each architecture's
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+archive and SHA-256 digest. Archives are cached in `build/macos/runtime-cache`
+and verified on every build. The matching full archive supplies third-party
+license notices and build metadata omitted from the smaller runtime archive.
+Native wheels are selected for the target Python and architecture; `http-ece`
+is built from its hash-locked pure Python source distribution. Intel uses
+cryptography 48.0.1 because [49 and later removed Intel macOS support](https://cryptography.io/en/49.0.0/changelog/).
+The ARM package keeps the current pinned cryptography release.
+
+Validate a relocated bundle with a fresh HOME, minimal PATH, and no provider
+credentials, then exercise its actual native windows without starting a model turn:
+
+```bash
+python3 desktop/macos/verify_distribution.py \
+  --app 'build/macos/distribution/arm64/Ribbon Field.app' --native-smoke \
+  --report build/macos/distribution/arm64-validation.json
+```
+
+Repeat for `x86_64` on Intel or an Apple Silicon Mac with Rosetta. This checks
+runtime imports and cryptography, SQLite, private backend startup/shutdown, the
+bundled CLI, signature preservation after copying, and the native smoke suite.
+An Intel run under Rosetta does not replace testing on physical Intel hardware.
+
+Pass `--dmg path/to/Ribbon-Field.dmg` instead of `--app` to verify the actual
+disk image, its Applications shortcut, and a relocated copy of its app. Full
+native smoke checks require an unlocked desktop for foreground window focus.
+
+## Sign and notarize a public release
+
+Install a **Developer ID Application** certificate and its private key in the
+builder's Keychain. An Apple Development certificate does not replace it.
+Configure a `notarytool` Keychain profile using Apple's
+[notarization instructions](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
+Keep credentials in Keychain, not source files or command history.
+
+```bash
+python3 desktop/macos/build.py --standalone --arch arm64 \
+  --version 0.1.0 --build-number 1 \
+  --sign-identity 'Developer ID Application: YOUR NAME (TEAMID)' \
+  --notary-profile ribbon-field \
+  --output 'build/macos/release/arm64/Ribbon Field.app' \
+  --dmg build/macos/release/Ribbon-Field-0.1.0-arm64.dmg
+```
+
+The command signs all nested native code and the app with hardened runtime and
+secure timestamps. It notarizes and staples the app, builds and signs the disk
+image, then notarizes, staples, and assesses the image. Rejected submissions
+fail the build. Repeat with `--arch x86_64` and matching output names for Intel.
+Distribute the accepted `.dmg` and its `.sha256` file through your download host.
+Download that hosted image on another Mac and verify installation and first
+launch with Gatekeeper enabled before announcing it. Hosting/upload is separate
+from building; this command does not publish anything.
+
+## Build and install locally
 
 Requirements: macOS 12 or later, Xcode Command Line Tools (`xcode-select --install`),
 Python 3.10 or later, and an installed, authenticated Codex CLI. Trust the Agent
@@ -38,13 +137,12 @@ The app contains a snapshot of the shared Python backend and web assets from
 or a versioned plugin cache at runtime. `backend-snapshot.json` inside its
 resources records the bundled file hashes.
 
-Python itself and Codex remain installed tools. The build records the Python
+For a local build without `--standalone`, Python and Codex remain installed tools. The build records the Python
 executable, tool PATH, and default coordination database so launching from Finder
 works without a shell. Use `--python /path/to/python3` or `--database /path/to/state.sqlite3`
 to override them. This is a local build for this Mac; rebuild if those paths
-move or to use a different Mac. Public distribution would additionally need a
-bundled runtime, Developer ID signing, and notarization. Local builds are ad hoc
-signed by the build command.
+move or to use a different Mac. Use the standalone build above for distribution.
+Local builds are ad hoc signed by the build command.
 
 ## Window and process behavior
 
