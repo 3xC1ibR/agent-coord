@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Purpose
+Historically, agent-coord started as a skill to allow agents to communicate with each other (hence the name).
+Later, we added `delegation`; giving agents the ability to spin up agents (different than the provider default)"
+Most recently (oct 2026) we added a ui; basically an ide.
+The immediate goal is to launch this a product; though there are still decisions pending.
+When considering adding new features, you must consider whether adding those features are necessary for the launch or if they are just a way to procrastinate launching.
+The app does not need to have *every* feature in order to be useful. It just has to do *one* thing really well-- focus on that and launch the damn thing.
+
+## Naming
+
+Ribbon Field is the public-facing app and marketing name. Agent Coord is the
+historical name of the coordination tooling. Preserve existing internal names,
+CLI/plugin/skill identifiers, bundle ID, deep links, and saved-data paths.
+
 ## Project workflow
 
 Agent Coord is a dependency-free Python CLI packaged as one dual-client Codex

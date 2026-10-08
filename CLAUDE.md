@@ -2,6 +2,12 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## Naming
+
+Ribbon Field is the public-facing app and marketing name. Agent Coord is the
+historical name of the coordination tooling. Preserve existing internal names,
+CLI/plugin/skill identifiers, bundle ID, deep links, and saved-data paths.
+
 ## Project workflow
 
 Agent Coord is a dependency-free Python CLI packaged as one dual-client Codex

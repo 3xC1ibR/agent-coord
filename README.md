@@ -1,4 +1,13 @@
-# Agent Coord
+# Ribbon Field
+
+Ribbon Field is the app for managing coding-agent conversations and work across
+projects. Its CLI, plugins, and coordination internals retain the Agent Coord
+name and existing commands.
+
+The [macOS app](desktop/macos/README.md) can be packaged as a standalone
+drag-to-Applications disk image for Apple Silicon or Intel. Recipients do not
+need to clone this repository or install Python. See the app guide for build,
+validation, Developer ID signing, and notarization commands.
 
 Agent Coord is a local coordination channel for Claude Code and Codex sessions.
 It uses one dependency-free Python CLI, SQLite, hooks, and shared skills. It
@@ -45,9 +54,39 @@ Session and message state is in a WAL-mode SQLite database at:
 ~/.local/state/agent-coord/state.sqlite3
 ```
 
-Set `AGENT_COORD_DB` to use another path. Set
-`AGENT_COORD_STALE_AFTER_SECONDS` to change the default 30-minute stale
-threshold.
+Database resolution is `--db`, then `AGENT_COORD_DB`, then
+`${XDG_STATE_HOME:-~/.local/state}/agent-coord/state.sqlite3`. Normal commands
+need no database flag. Set `AGENT_COORD_STALE_AFTER_SECONDS` to change the
+default 30-minute stale threshold.
+
+### Short agent commands
+
+```bash
+# Run once from the installed plugin to install a stable executable:
+/path/to/installed/plugin/scripts/agent-coord install-cli
+# ~/.local/bin must be on PATH; --bin-dir selects another directory.
+agent-coord inbox --unread
+agent-coord status
+agent-coord begin-work --scope 'src/**'
+agent-coord send --session <recipient-id> 'Ready for review.'
+agent-coord end-work
+```
+
+Caller identity resolves from explicit `--session-id` / `--from-session`, then
+`AGENT_COORD_SESSION_ID`, then `CODEX_THREAD_ID`. Missing identity is an error;
+the CLI never selects a caller from the working directory. Other threads and
+message recipients remain explicit. Ribbon Field supplies PATH and database
+context to both providers, and Claude receives its own session identity.
+Terminal Claude sessions use the SessionStart hook's `CLAUDE_ENV_FILE` exports.
+Child launches clear inherited parent identity. Without inherited context,
+hooks retain explicit executable, database, and identity fallbacks.
+
+Routine writes (`register`, `set-activity`, `checkpoint`, `thread update`,
+`begin-work`, `end-work`, `unregister`, `send`, `ack`) return compact JSON
+receipts. Add `--full` to retain the previous complete output; read commands
+such as `status` and `thread show` still return complete state.
+The stable launcher is refreshed by rerunning `install-cli` from the new
+installed plugin. It refuses to replace an unmanaged executable.
 
 The same plugin directory contains Codex and Claude manifests. Both clients use
 the same hooks, skills, CLI, and database schema.
@@ -107,7 +146,6 @@ Beads issue only when the work already has durable task identity:
 
 ```bash
 <agent-coord-path> begin-work \
-  --session-id <session-id> \
   --scope 'src/**' \
   --scope 'tests/test_feature.py' \
   --lease-mode write
@@ -116,7 +154,6 @@ Beads issue only when the work already has durable task identity:
 ```bash
 bd update <bead-id> --claim
 <agent-coord-path> begin-work \
-  --session-id <session-id> \
   --bead <bead-id> \
   --scope 'src/**'
 ```
@@ -141,30 +178,28 @@ Common commands:
 
 ```bash
 agent-coord list --cwd /path/to/repo --relevant
-agent-coord status --session-id <session-id>
-agent-coord conflicts --session-id <session-id>
+agent-coord status
+agent-coord conflicts
 
 agent-coord send \
-  --from-session <session-id> \
   --session <peer-session-id> \
   --classification action_required \
   --thread-id <thread-id> \
   'Can you release src/api/**?'
 
 agent-coord send \
-  --from-session <session-id> \
   --bead <bead-id> \
   --classification informational \
   'I need to coordinate a shared interface change.'
 
-agent-coord inbox --session-id <session-id>
-agent-coord inbox --session-id <session-id> --unread
-agent-coord inbox --session-id <session-id> --all
-agent-coord inbox --session-id <session-id> --wait
-agent-coord inbox --session-id <session-id> --wait --timeout 120
-agent-coord ack --session-id <session-id> --message-id <message-id>
-agent-coord ack --session-id <session-id> --all-unread
-agent-coord end-work --session-id <session-id>
+agent-coord inbox
+agent-coord inbox --unread
+agent-coord inbox --all
+agent-coord inbox --wait
+agent-coord inbox --wait --timeout 120
+agent-coord ack --message-id <message-id>
+agent-coord ack --all-unread
+agent-coord end-work
 ```
 
 Messages stay in SQLite until the recipient reads them. Delivery and explicit
@@ -184,7 +219,6 @@ same pair of sessions, in either direction. Close it with one terminal message:
 
 ```bash
 agent-coord send \
-  --from-session <session-id> \
   --session <peer-session-id> \
   --classification closure \
   --thread-id <thread-id> \
@@ -375,8 +409,13 @@ close or reopen conversations. Creating a session requires neither a parent
 agent nor a Beads issue. Different sessions can run concurrently; an individual
 session accepts one active turn at a time.
 
-Drop PNG, JPEG, WebP, or GIF files into an open browser conversation, or use
-**Attach images**, to include up to four images of 5 MiB each. Review the
+Use the **Expand chat** icon beside the thread actions to fill the window with
+the title, conversation, and input bar. **Collapse chat** or Escape restores the
+normal layout and your sidebar preference. Returning to the overview also exits
+expanded mode.
+
+Drop PNG, JPEG, WebP, or GIF files into an open browser conversation
+to include up to four images of 5 MiB each. Review the
 thumbnails and remove individual attachments before sending. Images work with
 Send, Steer, and Queue, with or without text; sent and queued images appear in
 the conversation. Failed sends keep the draft available for retry, and queued
@@ -397,13 +436,60 @@ Claude terminals), exit the terminal session first, then close the thread.
 The terminal's shell or Zellij pane stays open. Closed history can be read
 without resuming execution.
 
+Agents can request the same lifecycle action through the CLI and shared database,
+without discovering the UI's port or making an HTTP request:
+
+```bash
+agent-coord thread close --session-id <id>
+agent-coord thread close --session-id <own-id> --after-turn
+agent-coord thread close-status --session-id <id>
+agent-coord thread cancel-close --session-id <id>
+```
+
+Use `--after-turn` for self-closure, after saving the checkpoint. The runtime
+waits for that turn to finish, so the final response can arrive. New input or a
+new turn cancels a queued close, including steering and queued follow-ups.
+Results distinguish `queued`, `closing`, `closed`, `cancelled`, and `failed`;
+accepting a request does not mean the thread has closed. An ended terminal
+can close immediately without a runtime. Other requests persist until an
+updated Ribbon Field runtime serving that workspace can handle them. Restart
+the updated app if necessary; refreshing installed plugins alone does not
+replace an already-running backend. Failed requests retain their error and can
+be retried. Requests interrupted by a runtime crash report failure for review
+instead of automatically stopping a possibly resumed session. Cancellation is
+available until execution starts. The existing UI process ownership checks,
+history retention, and separation between closure and task completion apply.
+
 The backend starts `codex app-server` lazily and communicates over stdio using
 the [Codex App Server protocol](https://developers.openai.com/codex/app-server).
-Install and authenticate Codex before using browser sessions. Sessions use
+Open **New session**, then choose a model from the **Codex** or **Claude Code**
+groups in the composer’s **Model** picker. The provider session starts when you send.
+Install and authenticate the selected CLI first (`codex login` or
+`claude auth login`). Existing conversations retain their provider. Codex sessions use
 workspace-write sandboxing and on-request approvals routed to the developer by
-default. Select **Use --yolo** when creating a session to disable sandboxing and
-approval prompts for that session (full machine access). The choice is saved
+default. **New session** and native **⌘N** open a draft conversation in the current
+workspace. You can change providers and models before sending the first message.
+Existing conversations offer models from their current provider. Use `/permissions yolo` or the
+conversation footer’s **Permissions** control to disable sandboxing and approval
+prompts for that session (full machine access). `/permissions default` restores
+workspace access and approval prompts. The choice is saved
 and preserved when the session resumes; other sessions keep their own settings.
+
+Claude conversations use the installed `claude` CLI's bidirectional stream-json
+protocol, with one process per conversation and no extra runtime dependencies.
+Text, thinking, tool activity, approvals, questions, and attached images appear
+in the same chat UI. Claude's normal permission mode honors its configured rules
+and asks for restricted tool actions; it is not Codex's workspace sandbox.
+YOLO explicitly selects Claude's bypass-permissions mode. Model and effort
+choices come from the installed Claude CLI. Claude retains its native transcript
+for resume; Agent Coord retains the display history across restarts. While Claude
+is working, **Enter** queues a follow-up. **Stop** ends that conversation's process
+and pauses its queue; the next message resumes its saved transcript. Importing
+terminal Claude conversations and forking Claude threads are not yet supported.
+
+The provider lifecycle and permission mapping were informed by
+[T3 Code's Claude adapter](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts)
+and the [official Claude Agent SDK transport](https://github.com/anthropics/claude-agent-sdk-python/tree/main/src/claude_agent_sdk/_internal).
 
 Click the conversation title to rename it inline; Enter saves and Escape cancels.
 While Codex is working, **Enter** or **Steer** sends instructions to the active
@@ -417,23 +503,31 @@ saved queued messages require review and resumption. Shift + Tab, empty Tab,
 and Tab while idle keep normal keyboard focus navigation.
 If the turn ends before steering arrives, the draft stays in the composer so
 you can send it as a new message.
-The bottom status line shows the working directory, resolved model, and reasoning effort. Send `/model`
+The bottom status line shows the working directory, resolved model, and reasoning effort.
+Send `/cd` to see the directory or `/cd <path>` to change it. Relative paths resolve
+against the current directory; absolute paths, `~`, and quoted paths are supported.
+Directory changes preserve the conversation and apply to subsequent turns. Send `/model`
 to list available models, `/model <model-id> [effort]` to switch, `/effort` to
 list supported effort levels, or `/effort <level>` to change effort. `/help`
 lists these commands. Commands do not create model turns; changes apply to the
 next message and persist across server restarts. Wait for a running turn to
 finish before changing settings. When switching models, an unsupported effort
 falls back to the new model's advertised default.
+The slash menu completes model names and supported effort levels. In the UI,
+`/fork` opens a new thread from the current idle Codex conversation. `/close`
+stops any running turn and closes the current thread, keeping its history and
+returning to the overview. These two commands take no arguments or images and
+run immediately, including when submitted with the queue shortcut.
 The UI uses the installed Codex configuration and plugins without bypassing
 hook trust. Trust the Agent Coord hooks through the normal Codex setup so its
 write guards run in browser sessions as they do in terminal sessions.
 
-Codex owns the model's conversation history. The shared Agent Coord database
+Each provider owns the model's native conversation history. The shared Agent Coord database
 stores browser-created session names, workspaces, and model settings, plus a
 display copy of streamed conversation items. The display copy supports Codex
 builds that cannot yet query stored turns through app-server.
 Reloading or closing the browser does not stop work while the UI server runs.
-Stopping the UI server stops its Codex app-server; saved conversations can be
+Stopping the UI server stops its Codex app-server and Claude processes; saved conversations can be
 reopened after restarting the UI. Browser sessions register in the same
 coordination store as terminal sessions. Existing terminal/delegated sessions
 remain visible in the coordination monitor and are not taken over by the chat
@@ -441,9 +535,7 @@ interface.
 
 `--cwd` (also available as `--repo`) filters browser sessions and coordination
 to a directory and its descendants. For example, `--cwd /opt/projects` lets
-you select its repositories in the **New session → Workspace** dropdown.
-The dropdown lists immediate folders and previously used workspaces; choose
-**Enter another path…** for a nested folder. A repository filter also includes
+you switch into its repositories or nested folders with `/cd <path>`. A repository filter also includes
 its linked Git worktrees. Without `--cwd`, developers can select any workspace
 and the monitor shows repositories in the shared database. `--parent-session`
 filters the coordination monitor only. Open **Coordination monitor** (or
@@ -465,8 +557,15 @@ before any snapshot was saved; the UI explains that case and shows the durable
 final result instead of implying that capture is still pending.
 
 The pages update automatically. Use `--no-browser` on a headless machine and
-`--port <port>` to choose a port. The server accepts loopback addresses only;
+`--port <port>` to choose a port. The backend binds only to loopback addresses;
 browser mutations require a server-issued token and same-origin requests.
+For iPhone access, choose **Remote access** in the local sidebar to enable
+private Tailscale HTTPS and create a one-time pairing link. Both devices must
+join the same tailnet. Paired browsers share the Mac's conversations and can
+send messages and answer approvals. The Mac controls pairing, device revocation,
+and disabling the route. CLI hosts can use `agent-coord ui --tailscale` with
+an optional `--tailscale-port 8443`. See [Remote access](docs/remote-access.md)
+for setup, restart behavior, and the T3 Code implementation references.
 The coordination monitor remains read-only. Follow-up work for PTY delegations
 continues to use durable `send` messages.
 
@@ -512,27 +611,60 @@ skill and the global `thread list` command; the plugin's default prompt starts
 this review. Saved checkpoints and history provide the review context, with
 stale or missing progress called out as uncertain.
 
-**Views** are named, saved filters displayed as tabs above the overview and
-conversation. Start with **All work**, choose repository, project, phase, Show,
+To take the user directly to a view in the macOS app, from any directory:
+
+```bash
+agent-coord ui open --project "Billing" --from-session <session-id>
+agent-coord ui link --project "Billing"
+agent-coord ui open --view "Release review"
+agent-coord ui open --repository /opt/projects/example
+agent-coord ui open --thread <session-id>
+```
+
+Use the installed plugin's absolute CLI path when it is not on PATH. Names match
+exactly, ignoring case; IDs also work, and ambiguous repository names require an
+ID or root path. Project and repository filters can be combined; `--no-project`
+and `--no-repository` select unassigned threads. A saved view or thread is a
+separate destination. With no selection the command opens the All work overview.
+
+`ui link` returns a stable `agentcoord://` app link. `ui open` launches or focuses
+Ribbon Field.app and waits briefly for the UI to acknowledge the destination.
+`status: displayed` confirms navigation; `requested` means macOS accepted the
+request but display is unconfirmed, and `failed` includes the UI's error.
+`--wait 0..30` controls that wait. An app built with URL support must be installed.
+Links are bound to the selected coordination database; a different app database
+produces an error instead of showing unrelated work.
+
+`--from-session` selects the native window that submitted the session's latest
+message, including queued messages when dispatched. If that window has closed,
+the app uses its current window. Navigation preserves conversation drafts and
+supports Back. Project/repository links use temporary All work filters and do
+not edit named saved views, change thread placement, or send messages.
+The existing `agent-coord ui [--port ...]` command still starts the browser UI.
+
+**Views** are named, saved filters displayed as tabs above the overview.
+Start with **All work**, choose repository, project, phase, Show,
 and search filters, choose a grouping, then click **＋ View** to save them.
 Each tab shows a count of threads that need you and a green dot for unread
-completed results. Counts follow that tab's saved filters, including pinned
+completed results. Counts follow that tab's current filters, including pinned
 threads that need you; Later threads do not add to the attention count.
 
 Use **Ctrl + Shift + Left/Right** to cycle views outside text fields. When a
 view tab has focus, Left/Right, Home, and End navigate the tabs. Switching
-opens the scoped overview and sidebar, preserving each view's temporary
-filters, grouping, and scroll position in that window. Conversation drafts
+opens the scoped overview and sidebar, preserving each view's filters,
+grouping, and scroll position. Conversation drafts
 stay with their threads. New sessions prefill the selected project/repository
 and use the repository directory when it is an available workspace choice.
 
-Changing filters does not overwrite a view: **Update view** saves the current
-filters and grouping, and **Reset filters** restores the saved definition.
+Changing filters or grouping in a named view saves them automatically, including
+search. **All work** keeps temporary filters local to each window; **Reset filters**
+clears them. If a save fails, **Retry saving** tries again and **Reset filters**
+restores the saved definition without overwriting another window's changes.
 The **•••** menu renames, duplicates, reorders, or deletes a view. Duplicating
 uses its saved definition. Deleting a view leaves all its threads intact.
 Views can overlap; a conversation's status and read state are shared wherever
 it appears. Definitions and tab order are stored in the coordination database
-and shared by browser and native app windows. Temporary filters and scroll
+and shared by browser and native app windows. All work filters and scroll
 positions stay local to each window. A concurrent edit requires resetting
 before overwriting another window's saved changes.
 
@@ -570,43 +702,110 @@ terminal conversations stay with their existing client, and Claude conversations
 continue in Claude Code. Existing terminal sessions begin capturing requests
 when they load the refreshed plugin; earlier prompts are not reconstructed.
 
-The overview starts with one section containing **Pinned** and **Your turn**
-side by side, stacked on narrow screens. Use the pin button on any open thread
-card to pin or unpin it. Pins survive restarts and keep threads at the top as
-work progresses, without changing Now/Later placement or read state. Pinned
-threads appear only in Pinned, including those waiting for your reply. When no
-visible threads are pinned, that column is hidden and Your turn uses the full
-width. Closed threads leave
-the open overview and retain their pin when reopened. Search and filters apply
-to both columns.
+Choose **Fork** on an idle Codex thread to open a separate conversation with
+the same history. Saved Codex terminal threads can also be forked into the
+browser. Reopen closed threads first; running threads and pending input must
+finish before forking. The new thread has an editable title and a **Forked
+from** link, and appears independently in the overview. Its workspace,
+repository, project, model, and reasoning effort carry over. Browser permission
+settings carry over too; terminal forks use the browser's default workspace
+permissions. File claims, queued messages, approvals, checkpoints, pins, and
+read markers start fresh. Both threads share the same files; forking does not
+create a Git worktree. Opening a fork starts no model turn until you send a
+message. This version forks through the latest available turn; selecting an
+earlier turn and launching terminal forks are not included.
 
-**Your turn** contains conversation replies, approvals,
-and failed turns. A reply appears there when the agent finishes an unfinished
-conversation, even if the work is still in investigation or another phase.
-Opening it clears its new marker but keeps it in Your turn until another prompt
-starts or you move it to **Later**. Threads in Later stay out of Your turn,
-including pending approvals and failed turns. Moving them back to **Now** restores
-their priority when a reply or action is still needed. Work phase and conversation
-turn are tracked separately.
+The overview keeps one **Attention** queue above fixed work stages:
+**Getting started → Investigating → Planning → Implementing → Validating →
+Deploying → Done**. Discussion and debugging belong in Investigating. Answering
+an investigation leaves it in Investigating; Done means the requested change or
+execution was delivered. Reading a response does not change its underlying stage.
+Empty stages remain visible. Within each stage, working agents come first, then
+cards sort by most recent activity; ties keep a stable order. The animated green
+border indicates a working agent. Idle cards keep their full detail for six hours,
+then show a shorter summary with fewer secondary details. After 24 hours they show
+the title, project/repository, and age, with unread indicators and controls retained.
+Older cards use a quieter background without dimming their titles. Running, pinned,
+and required-action cards keep their details; pins do not override activity sorting.
+New activity restores the full card, and hover previews or opening the thread
+retain access to its full context. The Attention queue does not decay.
 
-Unpinned tasks with a current finished checkpoint appear under **Completed**, with unread
-results first and a **NEW RESULT** marker. They do not require a reply unless the
-checkpoint explicitly assigns a next step to you. A later question starts a new
-conversation turn; the earlier finished checkpoint no longer marks it complete.
-Other work remains grouped by phase, repository, or project. Grouping preserves
-the thread's saved Now/Later/Archived placement. The thread view selector can
-show only Your turn or Completed.
+Attention shows the reason each thread surfaced. With Jev enabled, the order is
+**Blocked**, **Review requested**, **Update** about execution, **Findings ready**,
+then routine **✓ Done · No action needed**. Required input and failed turns take
+precedence. Reading an update, findings, or success clears its notification and
+returns the thread to its stage. Required actions stay until resolved. Uncertain
+or unavailable classifications remain visible as Reply and can be marked handled.
+**Mark reviewed** acknowledges a classified review; explicit checkpoint actions
+and active approvals require an answer or resolution. A follow-up consumes the
+previous response only when the new turn starts.
+
+A delivered thread stays quietly visible in Done until you close it or move it.
+Pins order cards within a stage and never hide attention or override its priority.
+Search, saved views, repository/project filters, and optional association grouping
+continue to apply. The saved `completed` filter now selects Done.
+
+**Now**, **Later**, and **Closed** select deliberate placement. Use **Move to Later**
+on a card to set it aside, or **Move to Now** to return it. Later stays out of the
+current workspace and attention counts, with checkpoint summaries visible in its
+own view. Parking preserves the pending response and does not stop work. Closed
+conversations retain their history and can be reopened. No completion, read receipt,
+classification, or grouping operation changes saved placement.
 
 New-result markers track completed turns independently of progress checkpoints,
 so opening a thread while an agent is working does not consume its future reply.
-Read state and reply priority survive a server restart. An interrupted turn or
+Read and handled markers survive a server restart. Handling a displayed older
+response cannot clear a newer response. Existing open responses start unhandled
+when upgrading, even if already read; saved placement and pins are preserved.
+An interrupted turn or
 a disconnected process does not establish task completion.
+
+### Automatic reply classification with Jev
+
+The UI backend can classify completed replies using TypeSafe's
+[Choice API](https://docs.typesafe.ai/primitives/choice). Create `jev.json` next
+to the coordination database (normally `~/.local/state/agent-coord/jev.json`):
+
+```json
+{"enabled": true, "api_key_file": "/absolute/path/to/typesafe-key"}
+```
+
+The file referenced by `api_key_file` contains only the API key. Restart the web
+server and desktop app after configuring it. `AGENT_COORD_JEV_CONFIG` can select
+another configuration file. Remove the configuration or set `enabled` to false
+to stop new requests; saved classifications remain valid for their original reply.
+Missing or invalid configuration leaves automatic classification disabled.
+
+The background worker sends a bounded excerpt of recent user messages, final
+assistant replies, the original request, and the current checkpoint to
+`api.typesafe.ai`. It excludes tool results, reasoning, progress messages, and
+image data. It never resumes a conversation or starts another agent. The key
+is read locally for each request and is not stored in SQLite or diagnostic logs.
+
+The model is pinned to `jev-1.13.0`. Choice probabilities, confidence, model,
+policy version, and sanitized failure codes are saved in `response_classifications`
+and exposed as `response_classification` in thread JSON for tuning. Confidence
+below 0.65 leaves the response in Attention as an unclassified Reply. Without a
+usable classification, a current finished checkpoint backed by an implementation,
+validation, or deployment stage can supply Done; other replies stay unclassified.
+Real pending input and explicit checkpoint user actions always win.
+Successful and uncertain results are cached per completed turn and checkpoint;
+shared SQLite leases prevent duplicate web/desktop requests. Failed requests have
+at most three attempts with backoff. Startup scans also classify existing open,
+unhandled completed replies; user placement, read/handled receipts, and pins stay
+unchanged. Terminal history uses a bounded local transcript tail; unavailable
+history conservatively leaves the reply visible.
 
 Choose **Enable notifications** in the sidebar to receive desktop alerts when a
 terminal or browser agent finishes a turn. The browser asks for notification
 permission only when you enable them. Keep a UI tab open; it can be in the
 background. Click an alert to open its thread. Turn failures also produce an
 alert; manually interrupted turns do not.
+
+Codex command, file-change, and permission approval requests also produce a
+**Codex is requesting approval** alert for browser sessions. Pending approvals
+are checked on connection and reconnection; answered requests stay quiet, and
+each request alerts once across tabs without changing its approval decision.
 
 Completion events are saved in the shared database, so short turns and stream
 reconnections do not lose them. Alerts respect the UI server's workspace scope
@@ -633,7 +832,11 @@ agent-coord thread update --session-id <id> --attention later
 ```
 
 Phases are `discussion`, `investigation`, `planning`, `implementation`,
-`validation`, `deployment`, and `finished`. Next actors are `user`, `agent`,
+`validation`, `deployment`, and `finished`. Keep the activity phase when answering questions or completing
+investigations and plans. Use `finished` for delivered implementation or execution,
+including requested validation/deployment. The UI exposes a separate `work_phase`
+that retains the last activity for older inquiry checkpoints marked finished.
+Next actors are `user`, `agent`,
 `external`, and `nobody` (with an empty next action). `--json -` reads stdin.
 Hooks and browser launch instructions ask agents to save a factual checkpoint
 before returning control, when the phase changes, or after a significant result.
@@ -694,7 +897,7 @@ when an unread message arrives:
 
 ```bash
 agent-coord wake-zellij enable --session-id <session-id>
-agent-coord wake-zellij status --session-id <session-id>
+agent-coord wake-zellij status
 agent-coord wake-zellij disable --session-id <session-id>
 ```
 
@@ -758,11 +961,9 @@ The runtime supports Python 3.10 or later and has no third-party dependencies.
 
 ```bash
 python3 -W error::ResourceWarning -m unittest discover -s tests -v
-python3 -m compileall -q plugins/agent-coord/scripts tests
+python3 -m compileall -q plugins/agent-coord/scripts scripts tests
 
-uv run --with pyyaml python \
-  /Users/walle/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py \
-  plugins/agent-coord
+python3 scripts/plugin_tools.py validate
 
 uv run --with pyyaml python \
   /Users/walle/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
@@ -776,8 +977,11 @@ uv run --with pyyaml python \
 "${CLAUDE_BIN:-claude}" plugin validate --strict .
 ```
 
-The two Codex validator paths are local Codex development helpers. Use the
-equivalent installed paths when this repository is on another machine.
+The plugin layout validator and refresh helpers live in `scripts/plugin_tools.py`
+and use only Python's standard library. They check this project's manifests,
+shared hooks, skill entry points, and runtime files; client installation and
+Claude's strict validator remain separate checks. The skill validator path is a
+local Codex development helper; use its installed equivalent on another machine.
 
 ## Refresh installed plugins after changes
 
@@ -792,23 +996,24 @@ commands from the repository root:
 ```bash
 set -euo pipefail
 
-plugin_creator_root="${CODEX_HOME:-$HOME/.codex}/skills/.system/plugin-creator"
 marketplace_file="$PWD/.agents/plugins/marketplace.json"
 claude_bin="${CLAUDE_BIN:-$(command -v claude)}"
 
 marketplace_name="$(
-  python3 "$plugin_creator_root/scripts/read_marketplace_name.py" \
+  python3 scripts/plugin_tools.py marketplace-name \
     --marketplace-path "$marketplace_file"
 )"
 
-python3 "$plugin_creator_root/scripts/update_plugin_cachebuster.py" \
-  "$PWD/plugins/agent-coord"
+python3 scripts/plugin_tools.py cachebuster
 
-codex_install_json="$(codex plugin add "agent-coord@$marketplace_name" --json)"
+codex_install_json="$(python3 scripts/plugin_tools.py install-codex "$marketplace_name")"
 printf '%s\n' "$codex_install_json"
 
 "$claude_bin" plugin uninstall agent-coord@agent-coord --scope user
 "$claude_bin" plugin install agent-coord@agent-coord --scope user
+
+codex_cache="$(printf '%s' "$codex_install_json" | jq -r .installedPath)"
+"$codex_cache/scripts/agent-coord" install-cli
 ```
 
 If `claude` resolves to an older installation without the `plugin` command,
@@ -819,6 +1024,13 @@ The cachebuster helper preserves the base Codex version and replaces its one
 `+codex.<value>` suffix. Do not increase the base version only to refresh a
 local cache. Claude uses its own manifest version, so uninstall and install it
 again to replace the cached files even when that version did not change.
+These helpers are repository-owned because Codex manages and may replace its
+`.system` skill bundle; the former `plugin-creator` helpers are not present in
+every Codex installation. Do not put project maintenance dependencies there.
+`install-codex` runs `codex plugin add` and preserves previous cache directories
+even if installation fails. Codex can remove an old version during an update;
+keeping its files prevents missing-hook errors in sessions still using that
+path. Start fresh sessions for live testing of the new version.
 
 Verify that both installed copies contain the source files. The following
 continues from the variables above and ignores generated Python bytecode:
@@ -830,22 +1042,14 @@ claude_cache="$(
     '.[] | select(.id == "agent-coord@agent-coord") | .installPath'
 )"
 
-while IFS= read -r -d '' source_file; do
-  relative_path="${source_file#plugins/agent-coord/}"
-  cmp "$source_file" "$codex_cache/$relative_path"
-  cmp "$source_file" "$claude_cache/$relative_path"
-done < <(
-  find plugins/agent-coord -type f \
-    ! -path '*/__pycache__/*' \
-    ! -name '*.pyc' \
-    -print0
-)
+python3 scripts/plugin_tools.py verify "$codex_cache"
+python3 scripts/plugin_tools.py verify "$claude_cache"
 
 codex plugin list
 "$claude_bin" plugin list --json
 ```
 
-Any `cmp` failure means the installed cache does not match the repository.
+Any verification failure means the installed cache does not match the repository.
 Stop and correct the selected marketplace or installation before live testing.
 After verification, start new Codex and Claude sessions. Existing sessions keep
 the skills and hooks that they loaded at startup.
