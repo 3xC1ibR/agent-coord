@@ -14,3 +14,15 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+
+# Demo video build artifacts
+demo/node_modules/
+demo/out/
+top_of_mind.md
+purpose.md
+braindump.txt
+
+# Local editor, experiment, and generated agent artifacts
+.idea/
+dummy-experiment.txt
+.agent-coord/delegations/*.usage.json

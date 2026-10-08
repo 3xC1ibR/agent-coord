@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ribbon Field demo composition</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="stage"></div>
+<script src="engine.js"></script>
+<script src="scenes.js"></script>
+<script>
+  window.__ready = Engine.ready().then(() => { Engine.render(0); return true; });
+  window.__render = t => { Engine.render(t); return true; };
+  window.__duration = () => Engine.duration();
+  window.__cues = () => Engine.cues();
+</script>
+</body>
+</html>
