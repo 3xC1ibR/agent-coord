@@ -169,7 +169,7 @@ class BrowserSessionTests(unittest.TestCase):
                          ("available-model", "high", 1))
         resume = next(p for m, p in self.sessions.rpc.calls if m == "thread/resume")
         self.assertEqual(resume["threadId"], child)
-        self.assertIn("checkpoint --session-id " + child, resume["developerInstructions"])
+        self.assertIn("agent-coord checkpoint --json", resume["developerInstructions"])
         self.assertNotIn("checkpoint --session-id " + parent, resume["developerInstructions"])
         self.assertEqual(resume["sandbox"], "danger-full-access")
         self.assertEqual(sum(m == "turn/start" for m, _ in self.sessions.rpc.calls), 1)
@@ -880,8 +880,8 @@ class BrowserSessionTests(unittest.TestCase):
     def test_browser_launch_supplies_checkpoint_instructions_and_captures_intent(self):
         thread_id = self.create()
         options = next(params for method, params in self.sessions.rpc.calls if method == "thread/start")
-        self.assertIn("checkpoint --session-id", options["developerInstructions"])
-        self.assertIn(str(self.store.database_path), options["developerInstructions"])
+        self.assertIn("agent-coord checkpoint --json", options["developerInstructions"])
+        self.assertNotIn(" --db ", options["developerInstructions"])
         self.sessions.rpc.fast_turn = True
         self.sessions.send(thread_id, {"message": "Investigate database performance."})
         self.sessions.send(thread_id, {"message": "Consider another option."})
@@ -969,6 +969,22 @@ class RPCProcessTests(unittest.TestCase):
         client = CodexRPC(self.store, events.append, command=[sys.executable, "-u", "-c", script])
         self.addCleanup(client.close)
         return client, events
+
+    def test_process_does_not_inherit_parent_identity(self):
+        client, _ = self.client('''
+import sys,json,os
+for line in sys.stdin:
+ m=json.loads(line)
+ if 'id' in m:
+  print(json.dumps({'id':m['id'],'result':{k:os.environ.get(k) for k in ('AGENT_COORD_SESSION_ID','CODEX_THREAD_ID','CLAUDE_ENV_FILE','PATH','AGENT_COORD_DB')}}),flush=True)
+''')
+        with patch.dict("os.environ", {"AGENT_COORD_SESSION_ID": "parent", "CODEX_THREAD_ID": "parent", "CLAUDE_ENV_FILE": "/parent/file"}):
+            result = client.request("environment")
+        self.assertIsNone(result["AGENT_COORD_SESSION_ID"])
+        self.assertIsNone(result["CODEX_THREAD_ID"])
+        self.assertIsNone(result["CLAUDE_ENV_FILE"])
+        self.assertEqual(result["AGENT_COORD_DB"], str(self.store.database_path))
+        self.assertTrue(Path(result["PATH"].split(":")[0], "agent-coord").is_file())
 
     def test_process_interleaves_server_requests_and_client_responses(self):
         client, events = self.client('''

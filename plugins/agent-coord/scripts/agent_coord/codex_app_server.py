@@ -18,6 +18,7 @@ from concurrent.futures import Future, TimeoutError
 from pathlib import Path
 from typing import Any, Callable
 
+from .context import client_environment
 from .store import CoordinationError, CoordinationStore
 from .browser_queue import BrowserMessageQueue
 from .claude_code import ClaudeRPC
@@ -64,7 +65,7 @@ class CodexRPC:
                     "AGENT_COORD_DELEGATION_ID", "AGENT_COORD_ZELLIJ_WAKE"
                 }:
                     env.pop(key)
-            env.update(AGENT_COORD_DB=str(self.store.database_path), AGENT_COORD_CLIENT="codex")
+            env = client_environment(env, self.store.database_path, "codex")
             try:
                 self.process = subprocess.Popen(
                     self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -672,10 +673,8 @@ class BrowserSessions:
                 stop_terminal_session(self.store.get_session(thread_id))
                 if thread["turn_active"]:
                     self.store.threads.finish_turn(thread_id, turn_id=thread["turn_id"], status="interrupted")
-            self.store.disable_wake(thread_id)
-            self.store.end_work(thread_id)
-            self.store.end_session(thread_id)
-            self.store.threads.update(thread_id, attention="archived")
+            from .thread_control import finish_close
+            finish_close(self.store, thread_id)
             self._publish("browser/changed", {"threadId": thread_id})
             return self.work_thread(thread_id)
 
@@ -787,7 +786,7 @@ class BrowserSessions:
             "cwd": record["cwd"], "approvalPolicy": "never" if yolo else "on-request", "approvalsReviewer": "user",
             "sandbox": "danger-full-access" if yolo else "workspace-write",
             "config": {"sandbox_workspace_write.writable_roots": [str(self.store.database_path.parent)]},
-            "developerInstructions": self.store.threads.instructions(record.get("thread_id")),
+            "developerInstructions": self.store.threads.instructions(record.get("thread_id"), caller_context=True),
         }
         if record.get("model"):
             options["model"] = record["model"]

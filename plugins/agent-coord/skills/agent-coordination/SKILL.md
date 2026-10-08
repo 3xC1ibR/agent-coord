@@ -5,10 +5,26 @@ description: Coordinate concurrent Claude Code and Codex sessions through confli
 
 # Agent Coordination
 
-Use the bundled `scripts/agent-coord` CLI. Resolve it from this file's installed
-plugin root: the plugin root is two directories above this `SKILL.md`. Hooks
-announce the current coordination session ID and the absolute CLI path at
-session start.
+Use `agent-coord` on PATH. Ribbon Field and managed workers add the bundled
+scripts directory to PATH; Claude's SessionStart hook also exports it for Bash.
+For terminal setup, run the installed plugin's `scripts/agent-coord install-cli`
+once to install a stable launcher in `~/.local/bin` (which must be on PATH).
+Rerun after plugin refresh to retarget the launcher. If unavailable, use the
+absolute CLI path announced by the hook; the plugin root is two directories
+above this `SKILL.md`.
+
+Routine commands infer the caller from `AGENT_COORD_SESSION_ID`, then
+`CODEX_THREAD_ID`. Explicit `--session-id` / `--from-session` override it.
+Claude browser sessions receive their identity at launch; terminal sessions
+receive it through `CLAUDE_ENV_FILE`. If context is unavailable, use the session
+ID announced by the hook. Never guess an identity from cwd or another session.
+Recipients and other threads remain explicit.
+
+Omit `--db` normally: resolution is `--db`, `AGENT_COORD_DB`, then
+`${XDG_STATE_HOME:-~/.local/state}/agent-coord/state.sqlite3`. Follow an explicit
+hook-provided database override when the shell cannot inherit that context.
+Routine mutations return compact JSON receipts; add `--full` for the complete
+result, or use `status` / `thread show` to inspect saved state.
 
 Agent Coord stores ephemeral session activity, write scopes, durable local
 messages, and optional local wake state. Beads is optional for direct work. If
@@ -29,7 +45,7 @@ Before returning control to the user, at a phase change, or after a significant
 result, save a short factual checkpoint with the bundled CLI:
 
 ```bash
-<agent-coord> checkpoint --session-id <session-id> --json '{
+agent-coord checkpoint --json '{
   "title": "Database write performance",
   "phase": "investigation",
   "summary": "Compared the two approaches and documented the findings.",
@@ -94,24 +110,30 @@ Move a thread only at the user's request, using the UI or `thread update
 --session-id <id> --attention now|later|archived`. Parking preserves conversation
 state and does not interrupt a running turn or release a file scope. Call
 `end-work` independently when you no longer own that scope.
-The CLI's legacy `archived` placement appears as **Closed** in the UI. The UI's
-**Close thread** / **Stop and close** action also ends the live session and
-releases its scope, then returns to the open overview. It keeps conversation
-history, checkpoints, links, and settings; **Reopen** allows continuing later.
+The CLI's legacy `archived` placement appears as **Closed** in the UI. To close
+a session, use `thread close --session-id <id>`; the owning Ribbon Field runtime
+performs the same lifecycle action as **Close thread** / **Stop and close**.
+For your own thread, save the checkpoint and use `--after-turn` so your final
+response arrives before closure. New input cancels the pending request. Inspect
+with `thread close-status`, or cancel a queued request with `thread cancel-close`
+(both take `--session-id`). A `queued` receipt is not confirmed closure; active
+sessions need the updated app runtime. Do not search for ports or private HTTP
+routes. See the [thread-management workflow](references/thread-management.md).
+Closing releases the scope and keeps conversation history, checkpoints, links,
+and settings; **Reopen** allows continuing later.
 Closing does not imply task completion. Terminal shutdown requires a verified
 Codex transcript owner and never targets a remembered Zellij pane or shared
 app-server. When that cannot be verified, exit the terminal session first.
 
 ## Before implementation
 
-1. Inspect other working sessions with `<agent-coord> list --relevant --cwd
+1. Inspect other working sessions with `agent-coord list --relevant --cwd
    <repo>`. If no other session is doing work, proceed without a Beads issue or
    scope. The write hook records the solo session as implementing.
 2. When another session is doing work, declare the smallest useful scope:
 
    ```bash
-   <agent-coord> begin-work \
-     --session-id <session-id> \
+   agent-coord begin-work \
      --scope '<file-or-directory-glob>' \
      --lease-mode write
    ```
@@ -134,28 +156,25 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
 
 ## Inspect and communicate
 
-- List relevant sessions with `<agent-coord> list --relevant --cwd <repo>`.
-- Recheck the current declaration with `<agent-coord> status --session-id <id>`.
-- Check overlap with `<agent-coord> conflicts --session-id <id>`.
-- Send actionable work with `<agent-coord> send --from-session <id> --session
+- List relevant sessions with `agent-coord list --relevant --cwd <repo>`.
+- Recheck the current declaration with `agent-coord status`.
+- Check overlap with `agent-coord conflicts`.
+- Send actionable work with `agent-coord send --session
   <peer-id> --classification action_required '<message>'`.
-- Send to the one live owner of a bead with `<agent-coord> send --from-session
-  <id> --bead <bead-id> --classification action_required '<message>'`.
+- Send to the one live owner of a bead with `agent-coord send --bead <bead-id> --classification action_required '<message>'`.
 - Continue a conversation by passing its `--thread-id`. Threads permit the same
   two sessions in either direction and reject unrelated participants.
 - Use `--no-reply-required` when work is actionable but a conversational reply
   is unnecessary. Informational and closure messages default to no reply.
-- Read the compact unacknowledged inbox with `<agent-coord> inbox --session-id
-  <id> --unread`. Use `--all` only for complete history.
+- Read the compact unacknowledged inbox with `agent-coord inbox --unread`. Use `--all` only for complete history.
 - Block for a peer handoff without polling with
-  `<agent-coord> inbox --session-id <id> --wait`. It returns immediately if a
+  `agent-coord inbox --wait`. It returns immediately if a
   message is undelivered, otherwise it polls the local store and
   refreshes session liveness until a message arrives, waiting indefinitely.
   Add `--timeout <seconds>` to bound the wait; on timeout it exits with
   status `5`. `--timeout` alone (without `--wait`) is rejected, and `--wait`
   cannot be combined with `--all`.
-- Acknowledge a delivered message with `<agent-coord> ack --session-id <id>
-  --message-id <message-id>`, or acknowledge the current unread set with
+- Acknowledge a delivered message with `agent-coord ack --message-id <message-id>`, or acknowledge the current unread set with
   `--all-unread`. Acknowledgement is a silent transport update and never sends
   a conversational receipt.
 
@@ -166,8 +185,7 @@ handoff instead of releasing, notifying, and asking the recipient to reacquire
 the same paths:
 
 ```bash
-<agent-coord> handoff \
-  --from-session <owner-session-id> \
+agent-coord handoff \
   --to-session <idle-recipient-session-id> \
   --patch-label <patch-name> \
   --validation-boundary '<state already validated>' \
@@ -185,8 +203,7 @@ subtraction is unsafe. Use `--mode write` for continued implementation and
 Close a finished coordination thread with one terminal message:
 
 ```bash
-<agent-coord> send \
-  --from-session <id> \
+agent-coord send \
   --session <peer-id> \
   --classification closure \
   --thread-id <thread-id> \
@@ -203,7 +220,7 @@ An agent at an idle prompt cannot receive hook context until a new turn starts.
 When automatic wake-up is wanted, run this once from that agent's Zellij pane:
 
 ```bash
-<agent-coord> wake-zellij enable --session-id <session-id>
+agent-coord wake-zellij enable
 ```
 
 Alternatively, start the client with `AGENT_COORD_ZELLIJ_WAKE=1` so its
@@ -233,8 +250,7 @@ to launch Claude Code.
 Run a dry-run preview first:
 
 ```bash
-<agent-coord> delegate \
-  --from-session <parent-session-id> \
+agent-coord delegate \
   --cwd /absolute/repository/path \
   --bead <ready-bead-id> \
   --scope 'src/**' \
@@ -297,12 +313,12 @@ verdict.
 Inspect durable lifecycle state with:
 
 ```bash
-<agent-coord> delegation status --delegation-id <delegation-id>
-<agent-coord> delegation list --parent-session <parent-session-id>
-<agent-coord> delegation list --parent-session <parent-session-id> --active
-<agent-coord> delegation logs --delegation-id <delegation-id>
-<agent-coord> ui --parent-session <parent-session-id>
-<agent-coord> ui --cwd /absolute/repository/path
+agent-coord delegation status --delegation-id <delegation-id>
+agent-coord delegation list --parent-session <parent-session-id>
+agent-coord delegation list --parent-session <parent-session-id> --active
+agent-coord delegation logs --delegation-id <delegation-id>
+agent-coord ui --parent-session <parent-session-id>
+agent-coord ui --cwd /absolute/repository/path
 ```
 
 The managed supervisor wakes an inactive child only for undelivered actionable
@@ -371,12 +387,11 @@ The child sends its result to the parent inbox. The SessionEnd hook or managed
 supervisor records a failure if the child exits without a result. The parent
 does not need to poll a pane or process to determine the final lifecycle state.
 If a launch cannot attach and remains active, the parent can release it with
-`<agent-coord> delegation cancel --delegation-id <id> --from-session
-<parent-id> --message '<reason>'`.
+`agent-coord delegation cancel --delegation-id <id> --message '<reason>'`.
 
 ## Release work
 
-Run `<agent-coord> end-work --session-id <id>` when the session no longer owns
+Run `agent-coord end-work` when the session no longer owns
 work, including after an unscoped solo change. A stopped turn with unfinished
 work remains in `waiting` activity so a newcomer can detect it. Session-end
 hooks mark the process offline, but they do not mutate Beads status.

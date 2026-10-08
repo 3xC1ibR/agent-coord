@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .context import caller_session, command_prefix
 from .store import CoordinationError
 from .organization import OrganizationStore, UNSET
 from .attention import AttentionStore
@@ -278,11 +279,15 @@ class ThreadStore:
 
     def user_message(self, session_id: str) -> None:
         """Resume a parked thread when a user message is accepted."""
+        from .thread_control import cancel_pending
         with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cancel_pending(db, session_id, self.store.clock())
             db.execute("UPDATE work_threads SET attention = 'now', updated_at = ? WHERE thread_id = ? AND attention = 'later'",
                        (self.store.clock(), session_id))
 
     def start_turn(self, session_id: str, *, prompt=None, turn_id=None) -> None:
+        from .thread_control import cancel_pending
         self.ensure(session_id)
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -293,6 +298,7 @@ class ThreadStore:
             self._mark_seen(db, session_id)
             self._mark_receipts(db, session_id, kind="handled")
             now = self.store.clock()
+            cancel_pending(db, session_id, now)
             request = row["original_request"]
             title = row["title"]
             if not request and isinstance(prompt, str) and prompt.strip():
@@ -440,14 +446,15 @@ class ThreadStore:
             db.execute("DELETE FROM thread_links WHERE thread_id = ? AND id = ?", (thread_id, link_id))
         return self.get(thread_id, history=True)
 
-    def instructions(self, session_id: str | None = None) -> str:
-        command = shlex.quote(str(Path(__file__).resolve().parents[1] / "agent-coord"))
-        command += " --db " + shlex.quote(str(self.store.database_path))
-        identity = shlex.quote(session_id) if session_id else '"$CODEX_THREAD_ID"'
+    def instructions(self, session_id: str | None = None, *, caller_context: bool = False) -> str:
+        command = "agent-coord" if caller_context else command_prefix(self.store.database_path)
+        identity = ""
+        if session_id and not caller_context and caller_session() != session_id:
+            identity = " --session-id " + shlex.quote(session_id)
         text = (
             "Maintain the Agent Coord work-thread checkpoint before returning control to the user, "
             "at a phase change, or after a significant result. Run " + command +
-            " checkpoint --session-id " + identity + " --json '<object>'. "
+            " checkpoint" + identity + " --json '<object>'. "
             'The object has phase (discussion, investigation, planning, implementation, validation, deployment, finished), '
             'summary (1–2 factual sentences), next_action (empty if none), next_actor (user, agent, external, nobody), '
             'optional title (a concise 3–6 word thread name), and optional links [{"kind":"document","label":"Design","target":"docs/design.md"}]. '

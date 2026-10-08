@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .context import cli_path
 from .store import (
     LEASE_MODES,
     ConflictError,
@@ -208,6 +209,8 @@ def build_zellij_command(
         [
             "--",
             env_executable,
+            "-u", "AGENT_COORD_SESSION_ID", "-u", "CODEX_THREAD_ID", "-u", "CLAUDE_ENV_FILE",
+            "PATH=" + str(cli_path().parent) + os.pathsep + os.environ.get("PATH", os.defpath),
             f"AGENT_COORD_DELEGATION_ID={delegation['delegation_id']}",
             f"AGENT_COORD_DB={database_path}",
             f"AGENT_COORD_CLIENT={delegation['client']}",

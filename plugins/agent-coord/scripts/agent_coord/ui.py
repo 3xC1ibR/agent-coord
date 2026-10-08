@@ -21,6 +21,7 @@ from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
 from .store import CoordinationError, CoordinationStore
+from .thread_control import ThreadControlWorker
 from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
@@ -668,8 +669,11 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     browser_sessions: BrowserSessions | None = None
     remote_access: RemoteAccess | None = None
     web_push: WebPush | None = None
+    thread_control: ThreadControlWorker | None = None
 
     def server_close(self) -> None:
+        if self.thread_control is not None:
+            self.thread_control.close()
         if self.web_push is not None:
             self.web_push.close()
         if self.remote_access is not None:
@@ -717,10 +721,12 @@ def make_ui_server(
     server.browser_sessions = sessions
     server.remote_access = remote
     server.web_push = push
+    server.thread_control = ThreadControlWorker(sessions)
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
     remote.restore(f"http://{target_host}:{bound_port}")
     push.start()
+    server.thread_control.start()
     return server
 
 

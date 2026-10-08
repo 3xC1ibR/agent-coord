@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .context import caller_session, install_cli
 from .delegate import delegate_work
 from .managed_pty import read_delegation_output, supervise_managed_pty
 from .navigation import NavigationStore
@@ -23,6 +24,7 @@ from .store import (
 )
 from .ui import serve_ui
 from .threads import ATTENTION_STATES
+from .thread_control import ThreadControl
 from .zellij_wake import enable_zellij_wake, watch_zellij
 
 
@@ -74,22 +76,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--db", help="Override the shared SQLite database path.")
     subcommands = parser.add_subparsers(dest="command", required=True)
+    installer = subcommands.add_parser("install-cli", help="Install or refresh the stable agent-coord launcher.")
+    installer.add_argument("--bin-dir", help="Executable directory; defaults to ~/.local/bin.")
 
     register = subcommands.add_parser("register", help="Register or refresh a session.")
-    register.add_argument("--session-id", required=True)
+    register.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     register.add_argument("--client", required=True, choices=["claude", "codex"])
     register.add_argument("--cwd", default=os.getcwd())
     register.add_argument("--name")
 
     status = subcommands.add_parser("status", help="Show one session.")
-    status.add_argument("--session-id", required=True)
+    status.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
 
     activity = subcommands.add_parser("set-activity", help="Set semantic activity.")
-    activity.add_argument("--session-id", required=True)
+    activity.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     activity.add_argument("--activity", required=True, choices=sorted(ACTIVITIES))
 
     checkpoint = subcommands.add_parser("checkpoint", help="Save a factual work-thread checkpoint and optional links.")
-    checkpoint.add_argument("--session-id", required=True)
+    checkpoint.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     checkpoint.add_argument("--json", dest="checkpoint_json", required=True, help="Checkpoint JSON object, or - to read stdin.")
 
     thread = subcommands.add_parser("thread", help="Inspect or organize durable work threads without an issue tracker.")
@@ -103,9 +107,16 @@ def _parser() -> argparse.ArgumentParser:
             options.add_argument("--" + field, dest=field + "_id", default=argparse.SUPPRESS, metavar="ID")
             options.add_argument("--no-" + field, dest=field + "_id", action="store_const", const=None, default=argparse.SUPPRESS)
     thread_show = thread_commands.add_parser("show")
-    thread_show.add_argument("--session-id", required=True)
+    thread_show.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
+    thread_close = thread_commands.add_parser("close", help="Request lifecycle closure through the Ribbon Field runtime.")
+    thread_close.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
+    thread_close.add_argument("--after-turn", action="store_true", help="Wait for this turn to end; new input cancels a queued close. Use for your own session.")
+    for name, help_text in (("close-status", "Inspect a close request without repeating it."),
+                            ("cancel-close", "Cancel a queued close before execution starts.")):
+        control = thread_commands.add_parser(name, help=help_text)
+        control.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     thread_update = thread_commands.add_parser("update")
-    thread_update.add_argument("--session-id", required=True)
+    thread_update.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     thread_update.add_argument("--title")
     thread_update.add_argument("--attention", choices=sorted(ATTENTION_STATES))
     for field in ("repository", "project"):
@@ -127,7 +138,7 @@ def _parser() -> argparse.ArgumentParser:
     begin = subcommands.add_parser(
         "begin-work", help="Declare an intended write scope and optional Beads work."
     )
-    begin.add_argument("--session-id", required=True)
+    begin.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     begin.add_argument(
         "--bead",
         help="Optional claimed in-progress Beads issue for durable task identity.",
@@ -146,10 +157,10 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     end_work = subcommands.add_parser("end-work", help="Release a work declaration.")
-    end_work.add_argument("--session-id", required=True)
+    end_work.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
 
     unregister = subcommands.add_parser("unregister", help="Mark a session offline.")
-    unregister.add_argument("--session-id", required=True)
+    unregister.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
 
     list_parser = subcommands.add_parser("list", help="List known sessions.")
     list_parser.add_argument("--cwd", default=os.getcwd())
@@ -159,10 +170,10 @@ def _parser() -> argparse.ArgumentParser:
     conflicts = subcommands.add_parser(
         "conflicts", help="Check a session's work scope."
     )
-    conflicts.add_argument("--session-id", required=True)
+    conflicts.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
 
     send = subcommands.add_parser("send", help="Send a durable message.")
-    send.add_argument("--from-session", required=True)
+    send.add_argument("--from-session", help="Sender; defaults to the current caller session.")
     target = send.add_mutually_exclusive_group(required=True)
     target.add_argument("--session")
     target.add_argument("--bead")
@@ -186,7 +197,7 @@ def _parser() -> argparse.ArgumentParser:
     handoff = subcommands.add_parser(
         "handoff", help="Atomically transfer a whole work declaration."
     )
-    handoff.add_argument("--from-session", required=True)
+    handoff.add_argument("--from-session", help="Sender; defaults to the current caller session.")
     handoff.add_argument(
         "--session", "--to-session", dest="recipient_session_id", required=True
     )
@@ -203,7 +214,7 @@ def _parser() -> argparse.ArgumentParser:
     handoff.add_argument("--thread-id")
 
     inbox = subcommands.add_parser("inbox", help="Read durable messages.")
-    inbox.add_argument("--session-id", required=True)
+    inbox.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     inbox_mode = inbox.add_mutually_exclusive_group()
     inbox_mode.add_argument("--all", action="store_true", dest="include_delivered")
     inbox_mode.add_argument(
@@ -228,7 +239,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     acknowledge = subcommands.add_parser("ack", help="Acknowledge a message.")
-    acknowledge.add_argument("--session-id", required=True)
+    acknowledge.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     acknowledge_target = acknowledge.add_mutually_exclusive_group(required=True)
     acknowledge_target.add_argument("--message-id", type=int)
     acknowledge_target.add_argument("--all-unread", action="store_true")
@@ -236,7 +247,7 @@ def _parser() -> argparse.ArgumentParser:
     delegate = subcommands.add_parser(
         "delegate", help="Launch ready Beads work in a persistent child agent."
     )
-    delegate.add_argument("--from-session", required=True)
+    delegate.add_argument("--from-session", help="Sender; defaults to the current caller session.")
     delegate.add_argument("--cwd", default=os.getcwd())
     delegate.add_argument("--bead", required=True)
     delegate.add_argument("--scope", action="append", required=True)
@@ -324,7 +335,7 @@ def _parser() -> argparse.ArgumentParser:
         "finish", help="Record a child result and notify its parent."
     )
     delegation_finish.add_argument("--delegation-id", required=True)
-    delegation_finish.add_argument("--session-id", required=True)
+    delegation_finish.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     delegation_finish.add_argument(
         "--outcome", required=True, choices=["completed", "failed"]
     )
@@ -333,7 +344,7 @@ def _parser() -> argparse.ArgumentParser:
         "cancel", help="Mark an active delegation as failed from its parent."
     )
     delegation_cancel.add_argument("--delegation-id", required=True)
-    delegation_cancel.add_argument("--from-session", required=True)
+    delegation_cancel.add_argument("--from-session", help="Sender; defaults to the current caller session.")
     delegation_cancel.add_argument("--message", required=True)
     delegation_supervise = delegation_commands.add_parser(
         "supervise", help="Run a managed PTY delegation supervisor."
@@ -353,19 +364,19 @@ def _parser() -> argparse.ArgumentParser:
     wake_enable = wake_commands.add_parser(
         "enable", help="Register this pane and start its detached wake watcher."
     )
-    wake_enable.add_argument("--session-id", required=True)
+    wake_enable.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     wake_enable.add_argument("--zellij-session")
     wake_enable.add_argument("--pane-id")
     wake_status = wake_commands.add_parser("status", help="Show wake registration.")
-    wake_status.add_argument("--session-id", required=True)
+    wake_status.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     wake_disable = wake_commands.add_parser(
         "disable", help="Disable wake-up for a session."
     )
-    wake_disable.add_argument("--session-id", required=True)
+    wake_disable.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     wake_watch = wake_commands.add_parser(
         "watch", help="Run the receiver-side watcher in the foreground."
     )
-    wake_watch.add_argument("--session-id", required=True)
+    wake_watch.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     wake_watch.add_argument("--once", action="store_true")
     wake_watch.add_argument("--poll-interval", type=float, default=0.5)
 
@@ -401,12 +412,24 @@ def _parser() -> argparse.ArgumentParser:
         if name == "open":
             target.add_argument("--from-session", help="Target the window that sent this session's latest message.")
             target.add_argument("--wait", type=float, default=5, metavar="SECONDS", help="Wait up to 0–30 seconds for display acknowledgement (default 5).")
+    for mutation in (register, activity, checkpoint, thread_update, begin, end_work, unregister, send, acknowledge):
+        mutation.add_argument("--full", action="store_true", help="Return the complete result instead of a compact receipt.")
     return parser
 
 
 def run(arguments: argparse.Namespace) -> Any:
-    store = CoordinationStore(arguments.db)
     command = arguments.command
+    if command == "install-cli":
+        return install_cli(arguments.bin_dir)
+    for field in ("session_id", "from_session"):
+        if hasattr(arguments, field) and not getattr(arguments, field):
+            # ui open's origin is an optional window hint, not a required caller.
+            identity = caller_session()
+            if not identity and command != "ui":
+                flag = "--" + field.replace("_", "-")
+                raise CoordinationError(f"No caller session. Pass {flag}, or set AGENT_COORD_SESSION_ID (Codex also supports CODEX_THREAD_ID).")
+            setattr(arguments, field, identity)
+    store = CoordinationStore(arguments.db)
     if command == "register":
         return store.register(
             session_id=arguments.session_id,
@@ -434,6 +457,13 @@ def run(arguments: argparse.Namespace) -> Any:
         store.threads.ensure(arguments.session_id)
         if arguments.thread_command == "show":
             return store.threads.get(arguments.session_id, history=True)
+        if arguments.thread_command in {"close", "close-status", "cancel-close"}:
+            control = ThreadControl(store)
+            if arguments.thread_command == "close":
+                return control.request_close(arguments.session_id, after_turn=arguments.after_turn)
+            if arguments.thread_command == "cancel-close":
+                return control.cancel(arguments.session_id)
+            return control.status(arguments.session_id)
         return store.threads.update(arguments.session_id, title=arguments.title, attention=arguments.attention, **associations)
     if command == "project":
         if arguments.project_command == "create":
@@ -625,6 +655,24 @@ def run(arguments: argparse.Namespace) -> Any:
     raise AssertionError(f"Unhandled command: {command}")
 
 
+def mutation_receipt(arguments, result):
+    """Keep reads and rich workflow results intact; summarize routine writes."""
+    if not hasattr(arguments, "full") or arguments.full:
+        return result
+    receipt = {"status": "ok", "command": arguments.command}
+    if isinstance(result, dict):
+        fields = ("session_id", "thread_id", "id", "activity", "bead_id", "write_scope", "lease_mode",
+                  "title", "attention", "project_id", "repository_id", "recipient_session_id",
+                  "classification", "reply_required", "acknowledged_at", "acknowledged", "message_ids", "sender_session_id")
+        receipt.update({key: result[key] for key in fields if key in result})
+        if arguments.command == "checkpoint":
+            checkpoint = result["checkpoint"]
+            receipt.update(checkpoint_id=checkpoint["id"], phase=checkpoint["phase"])
+    elif isinstance(result, list):
+        receipt["count"] = len(result)
+    return receipt
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
@@ -658,7 +706,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except CoordinationError as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2
-    print(json.dumps(result, indent=2, sort_keys=True))
+    print(json.dumps(mutation_receipt(arguments, result), indent=2, sort_keys=True))
     return 0
 
 

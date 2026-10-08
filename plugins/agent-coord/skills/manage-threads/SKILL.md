@@ -7,7 +7,16 @@ description: Review, organize, and navigate Agent Coord threads across workspace
 
 Help the user review and organize their Agent Coord threads from any working
 directory. Use the installed plugin's CLI and shared database; the source
-repository and Beads are not required.
+repository and Beads are not required. Use `agent-coord` on PATH; normal
+commands inherit the database through `AGENT_COORD_DB` or the default state
+location. The session-start hook supplies an absolute executable/database
+fallback when needed. See the [coordination skill](../agent-coordination/SKILL.md)
+for launcher setup and caller identity resolution.
+
+Use a known session ID directly for a specific action. For an explicit request
+to close your own thread, save its checkpoint and use `thread close --session-id
+<your-session-id> --after-turn`. Report the returned status accurately: queued
+means pending, not closed. The shared workflow covers cancellation and failures.
 
 Read the [thread-management workflow](../agent-coordination/references/thread-management.md)
 for global discovery, interpreting saved progress, organization requests, and

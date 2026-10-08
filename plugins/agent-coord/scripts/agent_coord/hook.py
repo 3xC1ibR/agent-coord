@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .cli import find_repository_root
+from .context import command_prefix, persist_claude_environment
 from .store import (
     CoordinationError,
     CoordinationStore,
@@ -231,17 +232,24 @@ def handle(
         return _context(event, text) if text else {}
 
     if event == "SessionStart":
+        shell_context_ready = False
+        if session["client"] == "claude":
+            shell_context_ready = persist_claude_environment(coordination.database_path, session_id)
         coordination.touch(session_id, turn_active=False)
-        cli_path = Path(__file__).resolve().parents[1] / "agent-coord"
+        cli_path = "agent-coord" if shell_context_ready else command_prefix(coordination.database_path)
         text = (
             f"This session is registered with agent-coord as {session_id}. "
-            f"The bundled CLI is {cli_path}. Use the agent-coordination skill "
+            f"Use {cli_path}; caller identity is inferred from AGENT_COORD_SESSION_ID or CODEX_THREAD_ID. "
+            "Explicit --session-id and --from-session override it. Use the agent-coordination skill "
             "before implementation. A sole active session may write without a "
             "Beads issue or scope. When another session is active, declare the "
             "smallest write scope; a Beads issue is optional for direct work. "
             "To review or organize the user's threads across workspaces, use the "
-            "manage-threads skill; start with the bundled CLI's thread list "
-            "without --cwd, from any working directory."
+            "manage-threads skill. Use thread list without --cwd for discovery; "
+            "use a known session ID directly for a specific thread. To close "
+            "your own thread after an explicit user request, save the checkpoint, "
+            "then run thread close --session-id <your-session-id> --after-turn. "
+            "A queued receipt is not confirmation that the thread has closed."
         )
         delegation_warning = None
         delegation_id = os.environ.get("AGENT_COORD_DELEGATION_ID")
@@ -280,7 +288,7 @@ def handle(
         elif wake_warning:
             text += f" Zellij wake could not start: {wake_warning}"
         formatted = _actionable_context(coordination, session_id)
-        text += "\n\n" + coordination.threads.instructions(session_id)
+        text += "\n\n" + coordination.threads.instructions(session_id, caller_context=shell_context_ready)
         if formatted:
             text += "\n\n" + formatted
         return _context(event, text)

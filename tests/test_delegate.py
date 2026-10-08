@@ -120,6 +120,9 @@ class DelegateTests(unittest.TestCase):
             "AGENT_COORD_DELEGATION_ID=" + delegation["delegation_id"], command
         )
         self.assertIn("AGENT_COORD_DB=" + str(self.store.database_path), command)
+        for key in ("AGENT_COORD_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_ENV_FILE"):
+            self.assertEqual(command[command.index(key) - 1], "-u")
+        self.assertTrue(any(item.startswith("PATH=") for item in command))
         codex = command.index("/mock/codex")
         self.assertEqual(command[codex + 1], "--cd")
         self.assertNotIn("exec", command)

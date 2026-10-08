@@ -16,7 +16,8 @@ sessions; it does not automatically import other clients' historical chats.
 
 ## Review what is open
 
-Start with the global inventory unless the user asks for a narrower review:
+Use a known session ID directly for a specific thread, including your own
+session ID from the hook. For discovery, start with the global inventory:
 
 ```bash
 <agent-coord> thread list
@@ -103,11 +104,41 @@ resolved ID, check each result, and report any failures separately.
 
 Moving a thread to Later does not stop its agent or release its file scope.
 `thread update --attention archived` changes placement only, including for a
-running session. The UI's **Close thread** / **Stop and close** action also ends
-the live session and releases its scope; use that action when the request is
-to close a live session. Closing preserves history and does not mark the
-underlying task complete. **Reopen** restores a closed session for continuation.
-Do not substitute metadata changes for lifecycle actions.
+running session. Use the lifecycle command when the user requests closure:
+
+```bash
+<agent-coord> thread close --session-id <thread-id>
+<agent-coord> thread close-status --session-id <thread-id>
+<agent-coord> thread cancel-close --session-id <thread-id>
+```
+
+The command uses the shared database to ask the owning Ribbon Field runtime
+to perform the same action as **Close thread** / **Stop and close**. It stops
+execution, releases the scope, and preserves conversation history, checkpoints,
+and links. Closing does not mark the underlying task complete. **Reopen** in
+the UI restores a closed session for continuation. An ended terminal session
+can close without a running app; other sessions need the updated runtime.
+
+When asked to close **your own thread**, finish the authorized work, save an
+accurate checkpoint, and make this your last lifecycle operation before replying:
+
+```bash
+<agent-coord> thread close --session-id <your-session-id> --after-turn
+```
+
+This waits for the recorded turn to end, allowing your final response to arrive.
+New user input, including steering or queued follow-ups, cancels a pending close.
+Do not poll your own after-turn close while keeping that same turn alive.
+
+JSON results distinguish `queued`, `closing`, `closed`, `cancelled`, and `failed`.
+`close-status` reports `none` when there is no request and the thread is open.
+A queued receipt is not confirmation of closure: say it is queued to close after
+your reply. If the updated runtime is unavailable, report that the request is
+pending and requires starting or restarting the updated app. For a failure,
+report the supplied reason; preserve the thread and checkpoint. Cancellation
+works only before execution starts. Do not substitute placement changes, scan
+processes or logs for UI ports, call private HTTP routes, or retry by killing
+processes manually. Terminal closure retains the UI's process ownership guard.
 
 ## Show a destination in the app
 

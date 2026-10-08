@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .context import client_environment
 from .store import WAKEABLE_ACTIVITIES, CoordinationError, CoordinationStore
 from .zellij_wake import WAKE_PROMPT, ZellijClient, ZellijCommandError
 
@@ -607,7 +608,7 @@ def supervise_managed_pty(
             database_path=str(store.database_path),
         )
     output_path = output_log_path(store, delegation_id)
-    child_environment = dict(os.environ if environment is None else environment)
+    child_environment = client_environment(os.environ if environment is None else environment, store.database_path, str(delegation["client"]))
     child_environment.update(
         {
             "AGENT_COORD_DELEGATION_ID": delegation_id,

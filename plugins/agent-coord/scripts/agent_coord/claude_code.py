@@ -15,6 +15,7 @@ import uuid
 from collections import deque
 from concurrent.futures import Future, TimeoutError
 
+from .context import client_environment
 from .store import CoordinationError
 
 
@@ -47,7 +48,7 @@ class ClaudeConnection:
             "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID", "AGENT_COORD_SESSION_ID",
             "AGENT_COORD_DELEGATION_ID", "AGENT_COORD_ZELLIJ_WAKE",
         }}
-        env.update(AGENT_COORD_DB=str(store.database_path), AGENT_COORD_CLIENT="claude")
+        env = client_environment(env, store.database_path, "claude", session_id=options["threadId"])
         try:
             self.process = subprocess.Popen(args, cwd=options["cwd"], env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -244,7 +245,7 @@ class ClaudeRPC:
             if thread_id in self.turns:
                 raise CoordinationError("A Claude turn is already running.")
             options = {**self.options.get(thread_id, {}), **self._options(params)}
-            options["developerInstructions"] = self.store.threads.instructions(thread_id)
+            options["developerInstructions"] = self.store.threads.instructions(thread_id, caller_context=True)
             connection = self._connection(thread_id, options)
             user = {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}
             turn = {"id": str(uuid.uuid4()), "items": [user], "status": "inProgress"}

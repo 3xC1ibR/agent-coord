@@ -9,6 +9,7 @@ import uuid
 from .store import CoordinationError
 from .image_inputs import message_images
 from .navigation import window_id
+from .thread_control import cancel_pending
 
 
 class BrowserMessageQueue:
@@ -59,6 +60,8 @@ class BrowserMessageQueue:
             self.sessions.read(thread_id)
             item_id = str(uuid.uuid4())
             with self.sessions.store._connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                cancel_pending(db, thread_id, self.sessions.store.clock())
                 db.execute("""INSERT INTO browser_message_queue
                            (id, thread_id, message, state, error, owner, created_at, images_json, window_id)
                            VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, ?)""",

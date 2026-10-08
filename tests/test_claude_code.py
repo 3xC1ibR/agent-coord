@@ -20,7 +20,8 @@ for line in sys.stdin:
         if message["request"]["subtype"] == "disconnect":
             break
         response = {"args": sys.argv[1:], "parent": "CODEX_THREAD_ID" in os.environ,
-                    "client": os.environ.get("AGENT_COORD_CLIENT")}
+                    "client": os.environ.get("AGENT_COORD_CLIENT"),
+                    "session": os.environ.get("AGENT_COORD_SESSION_ID"), "path": os.environ.get("PATH")}
         print(json.dumps({"type": "control_response", "response": {
             "subtype": "success", "request_id": message["request_id"], "response": response}}), flush=True)
     elif message.get("type") == "user":
@@ -60,6 +61,8 @@ class ClaudeTransportTests(unittest.TestCase):
         self.assertNotIn("--allow-dangerously-skip-permissions", result["args"])
         self.assertFalse(result["parent"])
         self.assertEqual(result["client"], "claude")
+        self.assertEqual(result["session"], "test-session")
+        self.assertTrue(Path(result["path"].split(os.pathsep)[0], "agent-coord").is_file())
         connection.write({"type": "user", "message": {"role": "user", "content": "Hello"}})
         self.assertTrue(complete.wait(3))
         self.assertEqual([m["type"] for m in messages], ["assistant", "result"])
