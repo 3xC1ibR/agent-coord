@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = {config: null, creatingSession: false, sessions: [], organization: {repositories: [], projects: []}, selected: null, detail: null, drafts: new Map(), closing: new Set(), pinning: new Set(), updatingThreads: new Set(), groupExpansion: new Map(), commandFeedback: new Map(), busy: false, listSignature: ""};
+const state = {config: null, creatingSession: false, sessions: [], organization: {repositories: [], projects: []}, selected: null, detail: null, drafts: new Map(), closing: new Set(), pinning: new Set(), updatingThreads: new Set(), groupExpansion: new Map(), phaseScroll: new Map(), commandFeedback: new Map(), busy: false, listSignature: ""};
 let notifications;
 let savedViews;
 let navigation;
@@ -110,11 +110,43 @@ async function markThreadHandled(thread) {
 async function toggleThreadLater(thread) {
   await updateThreadAttention(thread, {attention: thread.attention === "later" ? "now" : "later"});
 }
+function snoozeTime(choice, custom, now = new Date()) {
+  let date;
+  if (choice === "tomorrow") {
+    date = new Date(now); date.setDate(date.getDate() + 1); date.setHours(9, 0, 0, 0);
+  } else if (choice === "custom") date = new Date(custom);
+  else if (["1", "3"].includes(choice)) date = new Date(now.getTime() + Number(choice) * 3600000);
+  if (!date || !Number.isFinite(date.getTime()) || date <= now) throw new Error("Choose a time in the future.");
+  return date.getTime() / 1000;
+}
+function snoozeLabel(thread) {
+  return thread.snooze_due ? "Snooze ended" : thread.snoozed ? "Until " + new Date(thread.snoozed_until * 1000).toLocaleString([], {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  }) : "";
+}
+function openThreadSnooze(thread) {
+  state.snoozingThread = thread;
+  $("snooze-form").reset(); $("snooze-custom-label").hidden = true; $("snooze-custom").required = false;
+  $("snooze-error").hidden = true;
+  $("snooze-thread").textContent = thread.title;
+  $("snooze-dialog").showModal(); $("snooze-duration").focus();
+}
+async function snoozeThread(thread, deadline) {
+  const ticket = state.rollUp?.ticket(thread.thread_id);
+  await updateThreadAttention(thread, {snoozed_until: deadline});
+  await state.rollUp?.responded(ticket);
+}
+async function resumeThreadSnooze(thread) {
+  const ticket = state.rollUp?.ticket(thread.thread_id);
+  await updateThreadAttention(thread, {resume_snooze: thread.snoozed_until});
+  await state.rollUp?.responded(ticket);
+}
 function threadCard(thread, compact = false, inAttention = false) {
   const reason = threadGrouping.reason(thread);
   const needsInput = threadGrouping.awaitsUser(thread) && ["blocked", "review"].includes(reason.key);
   const {key: status, label: statusLabel} = threadGrouping.status(thread);
   const button = node("button", null, "session" + (compact ? " compact" : "") + (status === "running" ? " active-thread" : "") + (needsInput ? " needs-attention" : "") + (state.selected === thread.thread_id ? " selected" : ""));
+  if (!compact && !inAttention) button.className += " card-age-" + threadGrouping.cardAge(thread);
   button.dataset.thread = thread.thread_id;
   button.title = thread.title;
   button.setAttribute("aria-current", state.selected === thread.thread_id ? "true" : "false");
@@ -130,6 +162,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     title.append(node("span", thread.title));
     if (thread.unread_result) title.append(node("span", "NEW", "unread-mark"));
     button.append(project, title);
+    if (snoozeLabel(thread)) button.append(node("small", snoozeLabel(thread), "placement-label"));
   } else {
     const top = node("div", null, "card-top");
     const badge = node("span", null, status === "running" || inAttention || thread.response_state !== "interrupted" ? "sr-only" : "status-tag " + status);
@@ -141,10 +174,12 @@ function threadCard(thread, compact = false, inAttention = false) {
     const meta = node("div", null, "card-meta");
     meta.append(node("span", threadGrouping.phaseLabel(thread), "phase-label"));
     if (thread.attention === "later") meta.append(node("span", "Later", "placement-label"));
+    if (snoozeLabel(thread)) meta.append(node("span", snoozeLabel(thread), "placement-label"));
     if (thread.unread && !inAttention) meta.append(node("span", thread.unread_result ? "NEW RESPONSE" : "NEW", "unread-mark"));
     if (thread.links.length) meta.append(node("span", thread.links.length + (thread.links.length === 1 ? " link" : " links")));
-    const time = node("span", relativeTime(thread.updated_at), "card-time");
-    if (thread.updated_at) time.title = new Date(thread.updated_at * 1000).toLocaleString();
+    const activityAt = threadGrouping.activityAt(thread);
+    const time = node("span", relativeTime(activityAt), "card-time");
+    if (activityAt) time.title = "Last activity: " + new Date(activityAt * 1000).toLocaleString();
     meta.append(time);
     button.append(top, title, snippet, meta);
     if (thread.checkpoint?.next_action) {
@@ -209,9 +244,13 @@ function threadCard(thread, compact = false, inAttention = false) {
       control.onclick = event => { event.stopPropagation(); action(callback); };
       actions.append(control);
     }
-    if (thread.can_handle_response) addAction(reason.key === "review" ? "Mark reviewed" : "Mark handled", "handle", () => markThreadHandled(thread));
-    addAction(thread.attention === "later" ? "Move to Now" : "Move to Later", "later", () => toggleThreadLater(thread));
-    if (!inAttention) card.append(actions);
+    if (!inAttention) {
+      if (thread.can_handle_response) addAction(reason.key === "review" ? "Mark reviewed" : "Mark handled", "handle", () => markThreadHandled(thread));
+      addAction(thread.attention === "later" ? "Move to Now" : "Move to Later", "later", () => toggleThreadLater(thread));
+    }
+    if (thread.snoozed || thread.snooze_due) addAction("Resume", "resume-snooze", () => resumeThreadSnooze(thread));
+    addAction(thread.snoozed ? "Change snooze…" : thread.snooze_due ? "Snooze again…" : "Snooze…", "snooze", () => openThreadSnooze(thread));
+    card.append(actions);
     return card;
   }
   return button;
@@ -233,6 +272,91 @@ function renderClosedToggle() {
   $("show-closed").setAttribute("aria-pressed", String(archived));
   $("show-closed").title = archived ? "Return to open threads" : "Show closed threads";
 }
+function createOverviewMotion() {
+  const running = new Map(), reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+  let previousView;
+  const stop = () => { for (const motion of running.values()) motion.stop(); running.clear(); };
+  // Floating copies must never lag behind scrolling, resizing, or navigation.
+  window.addEventListener("scroll", stop, {capture: true, passive: true});
+  window.addEventListener("resize", stop, {passive: true});
+  reduced.addEventListener("change", stop);
+  function cards() {
+    return [...$("overview").querySelectorAll("[data-card-thread]")].map(card => ({
+      card, id: card.dataset.cardThread, group: card.closest("[data-group]").dataset.group,
+      rect: card.getBoundingClientRect(),
+    }));
+  }
+  function visible(item) {
+    const r = item.rect, board = item.card.closest(".phase-board"), clip = board?.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 &&
+      r.bottom <= window.innerHeight && r.right <= window.innerWidth &&
+      (!clip || r.left >= clip.left && r.right <= clip.right);
+  }
+  function floatingCopy(card, rect) {
+    const copy = card.cloneNode(true), originals = [card, ...card.querySelectorAll("*")];
+    // Preserve the destination's appearance outside its grid/Attention ancestors.
+    [copy, ...copy.querySelectorAll("*")].forEach((el, index) => {
+      const computed = getComputedStyle(originals[index]);
+      for (const property of computed) el.style.setProperty(property, computed.getPropertyValue(property));
+      el.removeAttribute("id");
+      el.removeAttribute("data-thread");
+      el.removeAttribute("data-card-thread");
+      el.style.pointerEvents = "none";
+    });
+    copy.setAttribute("aria-hidden", "true");
+    copy.inert = true;
+    Object.assign(copy.style, {position: "fixed", left: rect.left + "px", top: rect.top + "px",
+      width: rect.width + "px", height: rect.height + "px", margin: "0", zIndex: "20",
+      transformOrigin: "top left", transition: "none"});
+    document.body.append(copy);
+    return copy;
+  }
+  return {
+    capture(view) {
+      const enabled = previousView === view && !$("welcome").hidden && !reduced.matches &&
+        typeof Element.prototype.animate === "function";
+      previousView = view;
+      const before = new Map();
+      if (enabled) for (const item of cards()) {
+        const flight = running.get(item.id);
+        if (flight?.copy) item.rect = flight.copy.getBoundingClientRect();
+        if (visible(item)) before.set(item.id, {...item, continuing: Boolean(flight)});
+      }
+      stop();
+      return before;
+    },
+    play(before) {
+      const after = cards();
+      if (!after.some(item => before.has(item.id) &&
+        (before.get(item.id).group !== item.group || before.get(item.id).continuing))) return;
+      for (const item of after) {
+        const old = before.get(item.id);
+        if (!old || !visible(item)) continue;
+        const dx = old.rect.left - item.rect.left, dy = old.rect.top - item.rect.top;
+        if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+        const timing = {duration: 380, easing: "cubic-bezier(.22, 1, .36, 1)"};
+        const animations = [];
+        let copy;
+        if (old.group !== item.group || old.continuing) {
+          copy = floatingCopy(item.card, item.rect);
+          const from = `translate(${dx}px, ${dy}px) scale(${old.rect.width / item.rect.width}, ${old.rect.height / item.rect.height})`;
+          animations.push(copy.animate([{transform: from}, {transform: "none"}], timing));
+          const fade = {duration: timing.duration, easing: "linear"};
+          animations.push(copy.animate([{opacity: 1}, {opacity: 1, offset: .8}, {opacity: 0}], fade));
+          animations.push(item.card.animate([{opacity: 0}, {opacity: 0, offset: .8}, {opacity: 1}], fade));
+        } else {
+          animations.push(item.card.animate([{transform: `translate(${dx}px, ${dy}px)`}, {transform: "none"}], timing));
+        }
+        const motion = {copy, stop() { animations.forEach(animation => animation.cancel()); copy?.remove(); }};
+        running.set(item.id, motion);
+        animations[0].onfinish = () => {
+          if (running.get(item.id) !== motion) return;
+          running.delete(item.id); motion.stop();
+        };
+      }
+    },
+  };
+}
 function renderList() {
   if (state.paneMode) { renderStatus(); return; }
   renderClosedToggle();
@@ -243,7 +367,8 @@ function renderList() {
     {show: $("view").value, phase: $("phase-filter").value, search: query}));
   const archived = $("view").value === "archived";
   const groupBy = $("group-by").value;
-  const signature = JSON.stringify([threads, state.selected, [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, Math.floor(Date.now() / 60000)]);
+  const viewId = savedViews?.activeId || "all";
+  const signature = JSON.stringify([threads, state.selected, [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
   $("home").setAttribute("aria-current", state.selected ? "false" : "page");
   $("thread-count").textContent = String(threads.length);
   const repositories = new Set(threads.map(t => t.repository_id).filter(Boolean)).size;
@@ -252,6 +377,9 @@ function renderList() {
     " · " + repositories + (repositories === 1 ? " repository" : " repositories") + " · " + projects + (projects === 1 ? " project" : " projects");
   if (signature === state.listSignature) { renderStatus(); return; }
   state.listSignature = signature;
+  state.overviewMotion ||= createOverviewMotion();
+  const motionBefore = state.overviewMotion.capture(JSON.stringify([viewId, groupBy, query,
+    $("view").value, $("phase-filter").value, $("repository").value, $("project").value, state.selected]));
   const focused = document.activeElement?.dataset.thread;
   const focusAction = document.activeElement?.dataset.action;
   const focusGroup = document.activeElement?.closest("[data-group]")?.dataset.group;
@@ -270,7 +398,9 @@ function renderList() {
     const cards = node("div", null, "thread-cards");
     for (const thread of items) {
       section.append(threadCard(thread, true));
-      cards.append(threadCard(thread, false, key === "priority"));
+      const card = threadCard(thread, false, key === "priority");
+      card.dataset.cardThread = thread.thread_id;
+      cards.append(card);
     }
     if (!items.length && !attentionCount) cards.append(node("p", "—", "stage-empty"));
     overview.append(cards);
@@ -282,16 +412,24 @@ function renderList() {
   } else if ($("view").value === "later") {
     if (groups.later.length) addGroup("later", "Later", groups.later, $("overview"), "Set aside for another time. Pick up from the last checkpoint when you’re ready.");
   } else {
-    const attention = node("section", null, "attention-panel");
-    attention.setAttribute("aria-label", "Attention queue");
-    addGroup("priority", "Attention", groups.priority, attention);
-    if (!groups.priority.length) attention.querySelector(".stage-empty").textContent = "Nothing needs your attention.";
-    $("overview").append(attention);
+    if (groups.priority.length) {
+      const attention = node("section", null, "attention-panel");
+      attention.setAttribute("aria-label", "Attention queue");
+      addGroup("priority", "Attention", groups.priority, attention);
+      $("overview").append(attention);
+    }
     const board = node("div", null, groupBy === "phase" ? "phase-board" : "organization-board");
     board.setAttribute("aria-label", "Work stages");
     const organized = groupBy === "phase" ? groups.phases : threadOrganization.groupThreads(groups.phases.flatMap(group => group.threads), groupBy);
     for (const group of organized) addGroup(group.key, group.label, group.threads, board, group.detail || "", group.attention || 0);
     $("overview").append(board);
+    if (groupBy === "phase") {
+      // Keep each view's place through polling and updates while a thread is open.
+      board.onscroll = () => {
+        if (board.isConnected && !$("welcome").hidden && board.clientWidth) state.phaseScroll.set(viewId, board.scrollLeft);
+      };
+      board.scrollLeft = state.phaseScroll.get(viewId) || 0;
+    }
   }
   if (!threads.length) {
     $("sessions").append(node("p", filtered ? "No matching threads" : "Nothing here yet", "empty"));
@@ -313,6 +451,7 @@ function renderList() {
     }
     $("overview").append(empty);
   }
+  state.overviewMotion.play(motionBefore);
   if (focused) {
     const candidates = [...focusArea.querySelectorAll("[data-thread]")].filter(el => el.dataset.thread === focused && el.dataset.action === focusAction);
     const target = candidates.find(el => el.closest("[data-group]")?.dataset.group === focusGroup) || candidates[0];
@@ -382,6 +521,11 @@ function renderThread() {
   renderTitle();
   $("page-location").textContent = work.project_name || work.repository_name || "Thread";
   $("park").textContent = work.attention === "later" ? "Move to Now" : "Move to Later";
+  $("snooze-thread-button").hidden = work.attention === "archived";
+  $("snooze-thread-button").textContent = work.snoozed ? "Change snooze…" : work.snooze_due ? "Snooze again…" : "Snooze…";
+  $("resume-snooze").hidden = !(work.snoozed || work.snooze_due);
+  $("snooze-status").textContent = snoozeLabel(work);
+  for (const id of ["snooze-thread-button", "resume-snooze"]) $(id).disabled = state.updatingThreads.has(work.thread_id);
   $("handle-response").hidden = !work.can_handle_response;
   $("handle-response").disabled = state.updatingThreads.has(work.thread_id);
   $("organize-thread").textContent = work.project_id ? "Change project" : "Add to project";
@@ -1176,6 +1320,23 @@ async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess 
 }
 $("close-thread").onclick = () => action(toggleThreadClosed, $("close-thread"));
 $("park").onclick = () => action(() => toggleThreadLater(state.detail.work_thread), $("park"));
+$("snooze-thread-button").onclick = () => openThreadSnooze(state.detail.work_thread);
+$("resume-snooze").onclick = () => action(() => resumeThreadSnooze(state.detail.work_thread), $("resume-snooze"));
+$("snooze-duration").onchange = () => {
+  const custom = $("snooze-duration").value === "custom";
+  $("snooze-custom-label").hidden = !custom; $("snooze-custom").required = custom;
+  if (custom) $("snooze-custom").focus();
+};
+$("snooze-form").onsubmit = async event => {
+  event.preventDefault();
+  if ($("save-snooze").disabled) return;
+  $("save-snooze").disabled = true; $("snooze-error").hidden = true;
+  try {
+    await snoozeThread(state.snoozingThread, snoozeTime($("snooze-duration").value, $("snooze-custom").value));
+    $("snooze-dialog").close();
+  } catch (error) { $("snooze-error").textContent = error.message; $("snooze-error").hidden = false; }
+  finally { $("save-snooze").disabled = false; }
+};
 $("handle-response").onclick = () => action(() => markThreadHandled(state.detail.work_thread), $("handle-response"));
 $("session-name").onclick = startTitleEdit;
 $("cancel-rename").onclick = cancelTitleEdit;

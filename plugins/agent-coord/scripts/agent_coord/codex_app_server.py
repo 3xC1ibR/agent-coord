@@ -441,10 +441,11 @@ class BrowserSessions:
     def completions_after(self, sequence: int) -> dict:
         batch = self.store.threads.completions_after(sequence)
         batch["events"] = [event for event in batch["events"]
-                           if event["attention"] != "archived" and matches_workspace(event["cwd"], self.cwd)]
+                           if event["attention"] != "archived" and matches_workspace(event["cwd"], self.cwd)
+                           and not (event["snoozed_until"] and event["snoozed_until"] > self.store.clock())]
         return batch
 
-    def claim_notification(self, completion_id: int) -> bool:
+    def completion_notification_allowed(self, completion_id: int) -> bool:
         if type(completion_id) is not int or completion_id <= 0:
             raise CoordinationError("Choose a valid turn completion.")
         with self.store._connection() as db:
@@ -452,7 +453,10 @@ class BrowserSessions:
         if row is None:
             raise CoordinationError("Turn completion not found.")
         thread = self.work_thread(row["thread_id"], history=False)
-        return thread["attention"] != "archived" and self.store.threads.claim_notification(completion_id)
+        return thread["attention"] != "archived" and not thread["snoozed"]
+
+    def claim_notification(self, completion_id: int) -> bool:
+        return self.completion_notification_allowed(completion_id) and self.store.threads.claim_notification(completion_id)
 
     @staticmethod
     def _approval_request(request: dict) -> bool:
@@ -474,7 +478,7 @@ class BrowserSessions:
                     thread = self.store.threads.get(thread_id, history=False)
                 except CoordinationError:
                     continue
-                if thread["attention"] != "archived":
+                if thread["attention"] != "archived" and not thread["snoozed"]:
                     notifications.append({"request_key": key, "thread_id": thread_id, "status": "approval",
                                           "client": self._record(thread_id)["client"],
                                           "title": thread["title"], "project_name": thread["project_name"],
@@ -491,7 +495,8 @@ class BrowserSessions:
                 return False
             thread_id = request["params"].get("threadId")
             self._record(thread_id)
-            if self.store.threads.get(thread_id, history=False)["attention"] == "archived":
+            thread = self.store.threads.get(thread_id, history=False)
+            if thread["attention"] == "archived" or thread["snoozed"]:
                 return False
             request["notification_claimed"] = True
             return True
@@ -555,13 +560,14 @@ class BrowserSessions:
             else "reply" if thread["unhandled_response"]
             else "available" if completion or (checkpoint and not thread["turn_key"]) else None)
         thread["needs_attention"] = (thread["attention"] == "now" and
-                                     thread["response_state"] in {"input", "action", "reply", "failed", "update"})
+                                     (thread["snooze_due"] or thread["response_state"] in {"input", "action", "reply", "failed", "update"}))
         input_reason = handoff if handoff in {"blocked", "review"} else (
             "review" if thread["work_phase"] in {"investigation", "planning", "validation"} else "blocked")
         thread["attention_reason"] = (
             "blocked" if waiting or thread["response_state"] == "failed"
             else input_reason if thread["response_state"] == "input"
-            else handoff or "reply" if thread["response_state"] in {"action", "reply", "update"} else None)
+            else handoff or "reply" if thread["response_state"] in {"action", "reply", "update"}
+            else "snooze" if thread["snooze_due"] else None)
         # Queue age describes the outstanding request/result, never metadata edits
         # such as reading, renaming, pinning, or a checkpoint heartbeat.
         thread["attention_since"] = thread["attention_key"] = None
@@ -572,6 +578,9 @@ class BrowserSessions:
             elif checkpoint and thread["response_state"] == "input":
                 thread["attention_since"] = checkpoint["created_at"]
                 thread["attention_key"] = f"checkpoint:{checkpoint['id']}"
+            elif thread["snooze_due"]:
+                thread["attention_since"] = thread["snoozed_until"]
+                thread["attention_key"] = f"snooze:{thread['snoozed_until']}"
             elif completion:
                 thread["attention_since"] = completion["completed_at"]
                 thread["attention_key"] = f"completion:{completion['id']}"
@@ -609,8 +618,9 @@ class BrowserSessions:
     def _update_work_thread(self, thread_id: str, body: dict) -> dict:
         thread = self.work_thread(thread_id)
         if set(body) - {"attention", "title", "pinned", "seen", "seen_checkpoint_id", "seen_completion_id",
-                        "handled", "handled_checkpoint_id", "handled_completion_id", "repository_id", "project_id"}:
-            raise CoordinationError("Thread update accepts attention, title, pinned, read and handled markers, repository_id, and project_id.")
+                        "handled", "handled_checkpoint_id", "handled_completion_id", "repository_id", "project_id",
+                        "snoozed_until", "resume_snooze"}:
+            raise CoordinationError("Thread update accepts attention, title, pinned, read and handled markers, snoozed_until, resume_snooze, repository_id, and project_id.")
         associations = {key: body[key] for key in ("repository_id", "project_id") if key in body}
         self.store.threads.organization.validate_assignments(**associations)
         if "attention" in body and not isinstance(body["attention"], str):
@@ -636,6 +646,7 @@ class BrowserSessions:
                                   seen_checkpoint_id=body.get("seen_checkpoint_id"), seen_completion_id=body.get("seen_completion_id"),
                                   handled=body.get("handled", False), handled_checkpoint_id=body.get("handled_checkpoint_id"),
                                   handled_completion_id=body.get("handled_completion_id"),
+                                  **{key: body[key] for key in ("snoozed_until", "resume_snooze") if key in body},
                                   **({"pinned": body["pinned"]} if "pinned" in body else {}), **associations)
         self._publish("browser/changed", {"threadId": thread_id})
         return self.work_thread(thread_id)

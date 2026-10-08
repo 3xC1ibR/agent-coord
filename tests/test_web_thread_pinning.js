@@ -12,25 +12,25 @@ function thread(id, extra = {}) {
 }
 const ids = threads => threads.map(t => t.thread_id);
 
-test("pins order within their stage without hiding attention or Later", () => {
+test("pins preserve activity order without hiding attention or Later", () => {
   const input = [thread("ordinary"), thread("pin", {pinned: true}),
     thread("reply", {pinned: true, response_state: "reply"}),
     thread("later", {pinned: true, attention: "later"}),
     thread("closed", {pinned: true, attention: "archived"})];
   const before = JSON.stringify(input), groups = groupThreads(input);
-  assert.deepEqual(ids(groups.phases.flatMap(g => g.threads)), ["pin", "ordinary"]);
+  assert.deepEqual(ids(groups.phases.flatMap(g => g.threads)), ["ordinary", "pin"]);
   assert.deepEqual(ids(groups.priority), ["reply"]);
   assert.deepEqual(ids(groups.later), ["later"]);
   assert.deepEqual(ids(groups.closed), ["closed"]);
   assert.equal(JSON.stringify(input), before);
 });
 
-test("unpinning restores stable order within the same stage", () => {
+test("unpinning preserves newest-first order within the same stage", () => {
   const first = thread("first", {created_at: 1}), second = thread("second", {created_at: 2, pinned: true});
   const cards = () => ids(groupThreads([first, second]).phases.flatMap(g => g.threads));
   assert.deepEqual(cards(), ["second", "first"]);
   second.pinned = false;
-  assert.deepEqual(cards(), ["first", "second"]);
+  assert.deepEqual(cards(), ["second", "first"]);
 });
 
 function setup(item = thread("one")) {

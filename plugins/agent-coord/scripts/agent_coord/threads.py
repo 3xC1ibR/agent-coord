@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shlex
 import uuid
 from pathlib import Path
@@ -97,6 +98,8 @@ class ThreadStore:
             # Serialize upgrades across independently running terminal hooks.
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(work_threads)")}
+            if "snoozed_until" not in columns:
+                db.execute("ALTER TABLE work_threads ADD COLUMN snoozed_until REAL")
             for field in ("forked_from_thread_id", "forked_from_turn_id"):
                 if field not in columns:
                     db.execute(f"ALTER TABLE work_threads ADD COLUMN {field} TEXT")
@@ -151,6 +154,9 @@ class ThreadStore:
 
     def _read(self, db, row, *, history=False):
         result = dict(row)
+        deadline = row["snoozed_until"]
+        result["snoozed"] = bool(deadline is not None and row["attention"] == "later" and deadline > self.store.clock())
+        result["snooze_due"] = bool(deadline is not None and row["attention"] == "now" and deadline <= self.store.clock())
         result["pinned"] = bool(row["pinned"])
         latest = db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1", (row["thread_id"],)).fetchone()
         result["checkpoint"] = dict(latest) if latest else None
@@ -196,6 +202,7 @@ class ThreadStore:
     def get(self, thread_id: str, *, history=False) -> dict:
         self.organization.backfill()
         with self.store._connection() as db:
+            self._wake_snoozes(db)
             row = db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone()
             if row is None:
                 raise CoordinationError("Work thread not found.")
@@ -204,6 +211,7 @@ class ThreadStore:
     def list(self, *, archived=False, cwd=None, repository_id=UNSET, project_id=UNSET) -> list[dict]:
         self.organization.backfill()
         with self.store._connection() as db:
+            self._wake_snoozes(db)
             rows = db.execute(self._SELECT + " WHERE (t.attention = 'archived') = ? ORDER BY t.updated_at DESC, t.thread_id", (int(archived),)).fetchall()
             threads = [self._read(db, row) for row in rows if cwd is None or row["project_root"] == project_root(cwd)]
             return [thread for thread in threads
@@ -219,9 +227,16 @@ class ThreadStore:
                        (source["thread_id"], turn_id, source["original_request"], thread_id))
             self.organization.update(db, thread_id, repository_id=source["repository_id"], project_id=source["project_id"])
 
+    def _wake_snoozes(self, db):
+        # Persist wake-up on observation, including the first read after restart.
+        # Keep the deadline until an explicit user action acknowledges the reminder.
+        db.execute("""UPDATE work_threads SET attention = 'now'
+                      WHERE attention = 'later' AND snoozed_until <= ?""", (self.store.clock(),))
+
     def update(self, thread_id: str, *, title=None, attention=None, pinned=UNSET, seen=False,
                seen_checkpoint_id=None, seen_completion_id=None, handled=False,
-               handled_checkpoint_id=None, handled_completion_id=None, repository_id=UNSET, project_id=UNSET) -> dict:
+               handled_checkpoint_id=None, handled_completion_id=None, repository_id=UNSET, project_id=UNSET,
+               snoozed_until=UNSET, resume_snooze=UNSET) -> dict:
         self.get(thread_id)
         if title is not None:
             title = _text(title, "Thread title", 160)
@@ -237,8 +252,25 @@ class ThreadStore:
             raise CoordinationError("Handling requires the displayed checkpoint and completion IDs.")
         if not handled and (handled_checkpoint_id is not None or handled_completion_id is not None):
             raise CoordinationError("Handled markers require handled: true.")
+        if snoozed_until is not UNSET or resume_snooze is not UNSET:
+            if attention is not None or (snoozed_until is not UNSET and resume_snooze is not UNSET):
+                raise CoordinationError("Choose either snooze, resume, or a placement change.")
+            value = snoozed_until if snoozed_until is not UNSET else resume_snooze
+            if type(value) not in (int, float) or not 0 < value <= 253402300799 or not math.isfinite(value):
+                raise CoordinationError("Snooze time must be a valid Unix timestamp.")
+            if snoozed_until is not UNSET and snoozed_until <= self.store.clock():
+                raise CoordinationError("Choose a snooze time in the future.")
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if snoozed_until is not UNSET or resume_snooze is not UNSET:
+                current = db.execute("SELECT attention, snoozed_until FROM work_threads WHERE thread_id = ?", (thread_id,)).fetchone()
+                if current["attention"] == "archived":
+                    raise CoordinationError("Reopen this thread before snoozing or resuming it.")
+                if resume_snooze is not UNSET and current["snoozed_until"] != resume_snooze:
+                    raise CoordinationError("This snooze changed. Refresh the thread before resuming it.")
+                db.execute("UPDATE work_threads SET attention = ?, snoozed_until = ? WHERE thread_id = ?",
+                           ("later" if snoozed_until is not UNSET else "now",
+                            snoozed_until if snoozed_until is not UNSET else None, thread_id))
             if handled:
                 current = self._read(db, db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone())
                 checkpoint = current["checkpoint"] if not current["checkpoint_stale"] else None
@@ -254,7 +286,7 @@ class ThreadStore:
             if title is not None:
                 db.execute("UPDATE work_threads SET title = ?, title_source = 'user' WHERE thread_id = ?", (title, thread_id))
             if attention is not None:
-                db.execute("UPDATE work_threads SET attention = ? WHERE thread_id = ?", (attention, thread_id))
+                db.execute("UPDATE work_threads SET attention = ?, snoozed_until = NULL WHERE thread_id = ?", (attention, thread_id))
             if pinned is not UNSET:
                 db.execute("UPDATE work_threads SET pinned = ? WHERE thread_id = ?", (int(pinned), thread_id))
         return self.get(thread_id, history=True)
@@ -283,7 +315,8 @@ class ThreadStore:
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             cancel_pending(db, session_id, self.store.clock())
-            db.execute("UPDATE work_threads SET attention = 'now', updated_at = ? WHERE thread_id = ? AND attention = 'later'",
+            db.execute("""UPDATE work_threads SET attention = 'now', snoozed_until = NULL, updated_at = ?
+                          WHERE thread_id = ? AND (attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL))""",
                        (self.store.clock(), session_id))
 
     def start_turn(self, session_id: str, *, prompt=None, turn_id=None) -> None:
@@ -338,7 +371,7 @@ class ThreadStore:
         with self.store._connection() as db:
             latest = db.execute("SELECT COALESCE(MAX(id), 0) FROM turn_completions").fetchone()[0]
             rows = db.execute("""SELECT c.id, c.thread_id, c.status, c.completed_at,
-                                        t.title, t.attention, p.name AS project_name,
+                                        t.title, t.attention, t.snoozed_until, p.name AS project_name,
                                         r.name AS repository_name, s.cwd
                                  FROM turn_completions c JOIN work_threads t ON t.thread_id = c.thread_id
                                  LEFT JOIN thread_organization o ON o.thread_id = t.thread_id

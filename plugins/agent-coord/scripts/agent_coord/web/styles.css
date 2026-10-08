@@ -399,6 +399,10 @@ dialog p { font-size: 11px; margin-top: 0; }
   .requests { margin: 0 15px; max-height: none; }
   .settings { grid-template-columns: 1fr; gap: 0; }
 }
+/* iOS zooms focused text fields below 16px, including on touch devices in landscape. */
+@media (max-width: 720px), (hover: none) and (pointer: coarse) {
+  .composer textarea { font-size: 16px; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
 
 /* Expanded chat keeps the conversation and composer across the whole window. */
@@ -522,9 +526,29 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 .phase-board .finished .thread-snippet { color: var(--muted); }
 #overview > .later .thread-cards { grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
 .placement-label { border: 1px solid var(--line); padding: 1px 5px; border-radius: 3px; }
+/* Aging reduces detail without dimming readable titles or hiding card controls. */
+.thread-cards .session.card-age-settled { background: color-mix(in srgb, var(--surface) 65%, var(--paper)); }
+.thread-cards .session.card-age-old { background: color-mix(in srgb, var(--surface) 30%, var(--paper)); }
+.session.card-age-settled .thread-snippet { -webkit-line-clamp: 2; margin-block: 8px; }
+.session.card-age-settled .card-meta > :not(.card-time):not(.unread-mark),
+.session.card-age-settled .next-action,
+.session.card-age-settled .stale-checkpoint,
+.session.card-age-old .thread-snippet,
+.session.card-age-old .next-action,
+.session.card-age-old .stale-checkpoint,
+.session.card-age-old .card-meta > :not(.card-time):not(.unread-mark) { display: none; }
+.session.card-age-old .card-top { margin-bottom: 6px; }
+.session.card-age-old .card-meta { padding-top: 6px; }
+.thread-cards .session.card-age-settled:hover,
+.thread-cards .session.card-age-old:hover { background: var(--surface); }
 @container (max-width: 1150px) { .phase-board { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @container (max-width: 620px) {
-  .phase-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .phase-board {
+    grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 88%;
+    overflow-x: auto; padding-bottom: 12px; scroll-snap-type: x proximity;
+    overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+  }
+  .phase-board > .thread-group { scroll-snap-align: start; }
   .attention-card > .session, .attention-card > .session.needs-attention { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 12px; }
   .attention-reason { padding-right: 50px; }
   .attention-reason small { display: inline; margin-left: 8px; }

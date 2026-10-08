@@ -261,6 +261,12 @@ class WebPush:
             self._send(row["device"], row["event"])
 
     def _send(self, device, event):
+        # A completion may already be queued for retry when the user snoozes.
+        # Recheck at delivery as well as filtering newly discovered events.
+        if event.startswith("turn:") and not self.sessions.completion_notification_allowed(int(event[5:])):
+            with self.lock, self.connection() as db:
+                db.execute("DELETE FROM outbox WHERE device=? AND event=?", (device, event))
+            return
         if event.startswith("approval:") and not any("approval:" + item["request_key"] == event
                                                      for item in self.sessions.approval_notifications(include_claimed=True)):
             with self.lock, self.connection() as db:
