@@ -49,7 +49,13 @@ class FakeCodex:
         if method == "thread/start":
             thread_id = "thread-" + str(len(self.threads) + 1)
             self.threads[thread_id] = {"id": thread_id, "cwd": params["cwd"], "turns": []}
-        if method in {"thread/start", "thread/read", "thread/resume"}:
+        if method == "thread/fork":
+            parent = thread_id
+            thread_id = "thread-" + str(len(self.threads) + 1)
+            self.threads[thread_id] = {**copy.deepcopy(self.threads[parent]), "id": thread_id,
+                                       "sessionId": parent, "forkedFromId": parent}
+            self.settings[thread_id] = copy.deepcopy(self.settings.get(parent, {"model": "available-model", "reasoningEffort": "medium"}))
+        if method in {"thread/start", "thread/fork", "thread/read", "thread/resume"}:
             if method == "thread/read" and self.empty_rollout_reads.get(params.get("includeTurns"), 0):
                 self.empty_rollout_reads[params.get("includeTurns")] -= 1
                 raise CoordinationError(EMPTY_ROLLOUT_ERROR)
@@ -60,7 +66,7 @@ class FakeCodex:
             thread = copy.deepcopy(self.threads[thread_id])
             if params.get("excludeTurns") or (method == "thread/read" and not params.get("includeTurns")):
                 thread["turns"] = []
-            if method in {"thread/start", "thread/resume"}:
+            if method in {"thread/start", "thread/fork", "thread/resume"}:
                 settings = self.settings.setdefault(thread_id, {"model": "available-model", "reasoningEffort": "medium"})
                 settings["model"] = params.get("model", settings["model"])
                 settings["reasoningEffort"] = params.get("config", {}).get("model_reasoning_effort", settings["reasoningEffort"])
@@ -88,6 +94,8 @@ class FakeCodex:
             return {"turnId": turn["id"]}
         if method == "turn/interrupt":
             turn = self.threads[thread_id]["turns"][-1]
+            if params.get("turnId") and (turn["status"] != "inProgress" or turn["id"] != params["turnId"]):
+                raise CoordinationError(f"expected active turn id {turn['id']} but found {params['turnId']}")
             turn["status"] = "interrupted"
             self.callback({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
         return {}
@@ -123,6 +131,130 @@ class BrowserSessionTests(unittest.TestCase):
         self.sessions.loaded.discard(thread_id)
         record = self.sessions.read(thread_id)["session"]
         self.assertEqual((record["model"], record["effort"]), ("available-model", "medium"))
+
+    def test_fork_copies_history_and_settings_but_starts_independent_state(self):
+        parent = self.create(yolo=True, model="available-model", effort="high")
+        self.sessions.rpc.fast_turn = True
+        self.sessions.send(parent, {"message": "Explore the original approach"})
+        project = self.store.threads.organization.create_project("Fork project")
+        self.store.threads.update(parent, attention="later", pinned=True, project_id=project["id"], repository_id=None)
+        self.store.threads.checkpoint(parent, {"phase": "planning", "summary": "Original plan",
+                                             "next_action": "Review", "next_actor": "user"})
+        self.store.begin_work(session_id=parent, scopes=["src/**"])
+        before = self.store.threads.get(parent, history=True)
+        original_history = copy.deepcopy(self.sessions.rpc.threads[parent])
+        fork = self.sessions.fork_work_thread(parent)
+        child = fork["thread_id"]
+        self.assertNotEqual(child, parent)
+        self.assertEqual(fork["forked_from"], {"thread_id": parent, "title": before["title"]})
+        self.assertEqual(fork["forked_from_turn_id"], "turn-0")
+        self.assertEqual(fork["project_id"], project["id"])
+        self.assertIsNone(fork["repository_id"])
+        self.assertEqual(fork["attention"], "now")
+        self.assertFalse(fork["pinned"])
+        self.assertIsNone(fork["checkpoint"])
+        self.assertIsNone(fork["turn_completion"])
+        self.assertFalse(fork["unread"])
+        self.assertEqual(fork["original_request"], before["original_request"])
+        self.assertEqual(self.store.get_session(child)["write_scope"], [])
+        self.assertIsNone(self.store.get_session(child)["bead_id"])
+        self.assertEqual(self.sessions.queue.list(child), [])
+        self.assertEqual(self.sessions.pending_requests(child), [])
+        self.assertEqual(self.store.threads.get(parent, history=True), before)
+        self.assertEqual(self.sessions.rpc.threads[parent], original_history)
+        self.assertEqual({t["thread_id"] for t in self.sessions.list_work_threads()}, {parent, child})
+        detail = self.sessions.read(child)
+        self.assertEqual(detail["thread"]["turns"], original_history["turns"])
+        self.assertEqual((detail["session"]["model"], detail["session"]["effort"], detail["session"]["yolo"]),
+                         ("available-model", "high", 1))
+        resume = next(p for m, p in self.sessions.rpc.calls if m == "thread/resume")
+        self.assertEqual(resume["threadId"], child)
+        self.assertIn("checkpoint --session-id " + child, resume["developerInstructions"])
+        self.assertNotIn("checkpoint --session-id " + parent, resume["developerInstructions"])
+        self.assertEqual(resume["sandbox"], "danger-full-access")
+        self.assertEqual(sum(m == "turn/start" for m, _ in self.sessions.rpc.calls), 1)
+        self.sessions.send(child, {"message": "Try another approach"})
+        self.assertEqual(self.sessions.rpc.threads[parent], original_history)
+        self.assertEqual(self.store.threads.get(parent, history=True), before)
+
+    def test_fork_survives_restart_and_resume_failure_without_another_fork(self):
+        parent = self.create()
+        self.sessions.rpc.fast_turn = True
+        self.sessions.send(parent, {"message": "Original"})
+        child = self.sessions.fork_work_thread(parent)["thread_id"]
+        with patch.object(self.sessions.rpc, "request", side_effect=CoordinationError("Connection lost")):
+            with self.assertRaisesRegex(CoordinationError, "Connection lost"):
+                self.sessions.read(child)
+        self.sessions.close()
+        reopened = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(reopened.close)
+        reopened.rpc.threads = self.sessions.rpc.threads
+        detail = reopened.read(child)
+        self.assertEqual(detail["work_thread"]["forked_from_thread_id"], parent)
+        self.assertEqual(len(detail["thread"]["turns"]), 1)
+        self.assertFalse(detail["work_thread"]["unread"])
+        self.assertFalse(any(m == "thread/fork" for m, _ in reopened.rpc.calls))
+
+    def test_fork_rejects_busy_closed_claude_and_online_terminal_sources(self):
+        parent = self.create()
+        self.sessions.send(parent, {"message": "Working"})
+        self.assertFalse(self.sessions.work_thread(parent)["can_fork"])
+        with self.assertRaises(BrowserBusyError):
+            self.sessions.fork_work_thread(parent)
+        self.sessions.interrupt(parent)
+        self.sessions.requests["pending"] = {"params": {"threadId": parent}}
+        with self.assertRaises(BrowserBusyError):
+            self.sessions.fork_work_thread(parent)
+        self.sessions.requests.clear()
+        self.store.threads.update(parent, attention="archived")
+        with self.assertRaises(CoordinationError):
+            self.sessions.fork_work_thread(parent)
+        for client in ("claude", "codex"):
+            self.store.register(session_id=client, client=client, cwd=str(self.root))
+            with self.assertRaises(CoordinationError):
+                self.sessions.fork_work_thread(client)
+        self.assertFalse(any(m == "thread/fork" for m, _ in self.sessions.rpc.calls))
+
+    def test_fork_rechecks_native_activity_and_rpc_failure_leaves_parent_intact(self):
+        parent = self.create()
+        before = self.store.threads.get(parent, history=True)
+        self.sessions.rpc.threads[parent]["status"] = {"type": "active"}
+        with self.assertRaises(BrowserBusyError):
+            self.sessions.fork_work_thread(parent)
+        self.sessions.rpc.threads[parent]["status"] = {"type": "idle"}
+        request = self.sessions.rpc.request
+        def fail_fork(method, params=None):
+            if method == "thread/fork":
+                raise CoordinationError("Fork unavailable")
+            return request(method, params)
+        with patch.object(self.sessions.rpc, "request", side_effect=fail_fork):
+            with self.assertRaisesRegex(CoordinationError, "Fork unavailable"):
+                self.sessions.fork_work_thread(parent)
+        self.assertEqual([t["thread_id"] for t in self.sessions.list_work_threads()], [parent])
+        self.assertEqual(self.store.threads.get(parent, history=True), before)
+
+    def test_saved_terminal_can_fork_without_resuming_parent(self):
+        self.store.register(session_id="terminal", client="codex", cwd=str(self.root))
+        self.store.end_session("terminal")
+        self.sessions.rpc.threads["terminal"] = {"id": "terminal", "turns": []}
+        child = self.sessions.fork_work_thread("terminal")["thread_id"]
+        self.assertTrue(self.sessions.work_thread(child)["browser_session"])
+        self.assertFalse(self.sessions.work_thread("terminal")["browser_session"])
+        self.assertEqual(self.store.get_session("terminal")["presence"], "offline")
+        self.assertFalse(any(m == "thread/resume" for m, _ in self.sessions.rpc.calls))
+        params = next(p for m, p in self.sessions.rpc.calls if m == "thread/fork")
+        self.assertEqual(params["sandbox"], "workspace-write")
+        self.assertEqual(params["approvalPolicy"], "on-request")
+
+    def test_fork_is_workspace_scoped(self):
+        parent = self.create()
+        subdir = self.root / "subdir"
+        subdir.mkdir()
+        filtered = BrowserSessions(self.store, str(subdir), rpc_factory=FakeCodex)
+        self.addCleanup(filtered.close)
+        with self.assertRaisesRegex(CoordinationError, "workspace"):
+            filtered.fork_work_thread(parent)
+        self.assertEqual(filtered.rpc.calls, [])
 
     def test_slash_commands_change_next_turn_without_sending_prompt(self):
         thread_id = self.create()
@@ -267,6 +399,78 @@ class BrowserSessionTests(unittest.TestCase):
         self.sessions.interrupt(first)
         self.assertNotIn(first, self.sessions.active)
         self.assertIn(second, self.sessions.active)
+
+    def test_stop_targets_latest_turn_despite_old_in_progress_history(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Current work"}, start_only=True)["turn"]
+        self.sessions.rpc.threads[thread_id]["turns"].insert(0, {"id": "stale", "status": "inProgress", "items": []})
+        self.assertEqual(self.sessions.read(thread_id)["activeTurn"], turn["id"])
+        self.sessions.interrupt(thread_id)
+        self.assertEqual(self.sessions.rpc.calls[-1], ("turn/interrupt", {"threadId": thread_id, "turnId": turn["id"]}))
+        self.assertFalse(self.sessions.read(thread_id)["running"])
+
+    def test_old_in_progress_history_does_not_resurrect_after_latest_completion(self):
+        thread_id = self.create()
+        self.sessions.rpc.threads[thread_id]["turns"] = [
+            {"id": "stale", "status": "inProgress", "items": []},
+            {"id": "finished", "status": "completed", "items": []},
+        ]
+        self.assertFalse(self.sessions.read(thread_id)["running"])
+        self.sessions.rpc.fast_turn = True
+        self.sessions.send(thread_id, {"message": "Next work"}, start_only=True)
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 3)
+
+    def test_stop_uses_current_turn_with_separate_stored_history_reader(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Current work"})["turn"]
+        self.sessions.rpc.no_history = True
+        self.history_reader(thread_id, [
+            {"id": "stale", "status": "inProgress", "items": []}, turn,
+        ])
+        self.assertEqual(self.sessions.read(thread_id)["activeTurn"], turn["id"])
+        self.sessions.interrupt(thread_id)
+        self.assertFalse(self.sessions.read(thread_id)["running"])
+
+    def test_read_keeps_new_turn_started_while_history_response_is_in_flight(self):
+        thread_id = self.create()
+        old = self.sessions.send(thread_id, {"message": "Old work"})["turn"]
+        original = self.sessions.rpc.request
+
+        def request(method, params=None):
+            result = original(method, params)
+            if method == "thread/read":
+                original("turn/interrupt", {"threadId": thread_id, "turnId": old["id"]})
+                original("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": "New work"}]})
+            return result
+
+        with patch.object(self.sessions.rpc, "request", side_effect=request):
+            detail = self.sessions.read(thread_id)
+        current = self.sessions.rpc.threads[thread_id]["turns"][-1]["id"]
+        self.assertEqual(detail["activeTurn"], current)
+        self.sessions.interrupt(thread_id)
+
+    def test_read_does_not_resurrect_turn_completed_during_history_request(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Work"})["turn"]
+        original = self.sessions.rpc.request
+
+        def request(method, params=None):
+            result = original(method, params)
+            if method == "thread/read":
+                original("turn/interrupt", {"threadId": thread_id, "turnId": turn["id"]})
+            return result
+
+        with patch.object(self.sessions.rpc, "request", side_effect=request):
+            self.assertFalse(self.sessions.read(thread_id)["running"])
+
+    def test_incomplete_history_does_not_replace_streamed_active_turn(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Current work"})["turn"]
+        stale = {"id": thread_id, "status": {"type": "active"}, "turns": [
+            {"id": "stale", "status": "inProgress", "items": []},
+        ]}
+        with patch.object(self.sessions, "_read_thread", return_value=stale):
+            self.assertEqual(self.sessions.read(thread_id)["activeTurn"], turn["id"])
 
     def test_steering_uses_active_turn_and_preserves_history_and_original_request(self):
         thread_id = self.create()
@@ -694,12 +898,13 @@ class BrowserSessionTests(unittest.TestCase):
         thread = reopened.list_work_threads()[0]
         self.assertEqual(thread["attention"], "later")
         self.assertEqual(thread["checkpoint"]["author"], "user")
-        self.assertTrue(thread["needs_attention"])
+        self.assertFalse(thread["needs_attention"])
+        self.assertEqual(thread["response_state"], "input")
         reopened.update_work_thread(thread_id, {"attention": "archived"})
         self.assertEqual(reopened.list_work_threads(), [])
         with self.assertRaisesRegex(CoordinationError, "Reopen"):
             reopened.send(thread_id, {"message": "Work"})
-        reopened.update_work_thread(thread_id, {"attention": "now"})
+        self.assertTrue(reopened.update_work_thread(thread_id, {"attention": "now"})["needs_attention"])
         reopened.send(thread_id, {"message": "Continue."})
 
     def test_terminal_threads_are_visible_without_starting_codex_and_only_resume_offline(self):

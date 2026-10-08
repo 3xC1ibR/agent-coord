@@ -1,0 +1,46 @@
+.thread-panes { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--line); }
+.thread-panes[hidden], .conversation-pane-frame[hidden], .thread-pane[hidden] { display: none !important; }
+.pane-layout { position: absolute; inset: 0; display: flex; padding: 6px; }
+.pane-column { display: flex; flex-direction: column; flex-basis: 0; min-width: 0; min-height: 0; }
+.thread-pane { display: flex; flex-direction: column; flex-basis: 0; min-height: 0; min-width: 0; background: var(--surface); border: 1px solid #bdc8bc; border-radius: 6px; overflow: hidden; }
+.thread-pane.pane-focused { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.pane-header { display: flex; align-items: center; gap: 3px; padding: 3px 5px; flex-shrink: 0; min-width: 0; height: 35px; background: #eef0e7; }
+.pane-header > button { flex-shrink: 0; padding: 3px 7px; }
+.pane-tabs { display: flex; align-items: stretch; flex: 1; overflow-x: auto; min-width: 0; scrollbar-width: thin; }
+.pane-tabs button { max-width: 220px; min-width: 60px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; padding: 4px 8px; border-radius: 4px; }
+.pane-tabs button[aria-selected=true] { background: var(--surface); color: var(--ink); box-shadow: inset 0 -2px var(--accent); }
+.pane-tabs button[data-status=working]::before { content: "● "; color: var(--accent); }
+.pane-tabs button[data-status=input]::before { content: "● "; color: #ad6022; }
+.pane-content { flex: 1; min-height: 0; }
+.pane-deck { position: absolute; inset: 0; pointer-events: none; }
+.conversation-pane-frame { position: absolute; border: 0; pointer-events: auto; background: var(--surface); }
+.pane-divider { flex: 0 0 8px; touch-action: none; position: relative; }
+.pane-divider.horizontal { cursor: col-resize; }
+.pane-divider.vertical { cursor: row-resize; }
+.pane-divider:hover, .pane-divider:focus-visible { background: #b7c9b6; outline: none; border-radius: 3px; }
+.pane-resizing .pane-deck { visibility: hidden; }
+.pane-maximized > .pane-divider, .pane-maximized .pane-column > .pane-divider,
+.pane-maximized > .pane-column:not(.maximized-column) { display: none; }
+body.panes-visible #welcome, body.panes-visible > main > #conversation { display: none !important; }
+body.panes-visible main > .views-bar { display: flex; }
+body.pane-document { display: block; height: 100dvh; }
+.pane-document > .sidebar, .pane-document > .sidebar-backdrop, .pane-document .workspace-bar,
+.pane-document .views-bar, .pane-document #welcome, .pane-document .context-panel,
+.pane-document #expand-chat, .pane-document #toggle-context, .pane-document #desktop-new-window, .pane-document .skip-link { display: none !important; }
+.pane-document > main { height: 100dvh; }
+.pane-document .conversation { display: flex; flex-direction: column; height: 100%; }
+.pane-document .conversation[hidden] { display: none; }
+.pane-document .conversation-main { flex: 1; width: 100%; }
+.pane-document .conversation-content { display: flex; overflow: hidden; }
+.pane-document .conversation-head { padding: 8px 12px; flex-wrap: wrap; gap: 4px; flex-shrink: 0; }
+.pane-document .conversation-heading { flex: 1 1 140px; }
+.pane-document .thread-title { font-size: 14px; }
+.pane-document .session-actions { flex-wrap: wrap; gap: 4px; }
+.pane-document .session-actions button { font-size: 10px; padding: 2px 5px; }
+.pane-document .timeline { padding: 12px; min-height: 0; overflow: auto; }
+.pane-document .composer { margin: 0 10px 8px; }
+.pane-document .composer textarea { max-height: 100px; }
+.pane-document .composer-footer { gap: 4px; }
+.pane-document .composer-footer > span { display: none; }
+.pane-document .session-statusbar { padding: 4px 10px; min-height: 24px; font-size: 9px; gap: 3px 8px; }
+.pane-document .error { max-width: calc(100% - 24px); left: 12px; right: 12px; bottom: 12px; }

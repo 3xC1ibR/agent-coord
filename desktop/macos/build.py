@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a local Agent Coord.app using Apple's command-line developer tools."""
+"""Build a local Ribbon Field.app using Apple's command-line developer tools."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,11 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SCRIPTS = ROOT / "plugins/agent-coord/scripts"
 BUNDLE_ID = "com.agentcoord.desktop"
+APP_NAME = "Ribbon Field"
+BUNDLE_NAME = APP_NAME + ".app"
+LEGACY_BUNDLE_NAME = "Agent Coord.app"
+# Retain the executable and bundle identity used by existing local tooling.
+EXECUTABLE_NAME = "Agent Coord"
 
 
 def check_destination(destination: Path) -> None:
@@ -33,21 +38,52 @@ def check_destination(destination: Path) -> None:
     raise ValueError(f"Refusing to replace an unrelated file or application: {destination}")
 
 
-def replace_app(source: Path, destination: Path) -> None:
+def check_not_running(app: Path) -> None:
+    executable = app / "Contents/MacOS" / EXECUTABLE_NAME
+    if executable.exists() and subprocess.run(
+        ["/usr/sbin/lsof", "-t", str(executable)], capture_output=True,
+    ).stdout.strip():
+        raise ValueError(f"Quit the app before replacing it: {app}")
+
+
+def legacy_installation(destination: Path) -> Path | None:
+    legacy = destination.with_name(LEGACY_BUNDLE_NAME)
+    if destination.name == BUNDLE_NAME and (legacy.exists() or legacy.is_symlink()):
+        return legacy
+    return None
+
+
+def replace_app(source: Path, destination: Path, *, legacy: Path | None = None) -> None:
     check_destination(destination)
+    check_not_running(destination)
+    if legacy is not None:
+        check_destination(legacy)
+        check_not_running(legacy)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".agent-coord-install-", dir=destination.parent) as scratch:
-        staged = Path(scratch) / "Agent Coord.app"
+        staged = Path(scratch) / BUNDLE_NAME
         shutil.copytree(source, staged)
         old = Path(scratch) / "previous.app"
-        if destination.exists():
-            destination.rename(old)
+        old_legacy = Path(scratch) / "legacy.app"
         try:
+            if destination.exists():
+                destination.rename(old)
+            if legacy is not None:
+                legacy.rename(old_legacy)
             staged.rename(destination)
         except OSError:
+            if old_legacy.exists():
+                old_legacy.rename(legacy)
             if old.exists():
                 old.rename(destination)
             raise
+
+
+def register_app(destination: Path) -> None:
+    # Refresh LaunchServices even when only URL handlers changed and the local
+    # development bundle version stayed the same.
+    subprocess.run(["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+                    "-f", str(destination)], check=True)
 
 
 def copy_backend(resources: Path) -> dict[str, str]:
@@ -66,7 +102,7 @@ def copy_backend(resources: Path) -> dict[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "build/macos/Agent Coord.app")
+    parser.add_argument("--output", type=Path, default=ROOT / "build/macos" / BUNDLE_NAME)
     parser.add_argument("--install", action="store_true", help="Also install into ~/Applications.")
     parser.add_argument("--install-dir", type=Path, default=Path.home() / "Applications")
     parser.add_argument("--python", default=sys.executable, help="Python 3.10+ used by the app.")
@@ -82,14 +118,11 @@ def main() -> int:
     if not shutil.which("codex"):
         parser.error("Install Codex and make it available on PATH before building the app.")
     output = args.output.expanduser().absolute()
-    destination = args.install_dir.expanduser().absolute() / "Agent Coord.app"
-    for path in {output, *([destination] if args.install else [])}:
+    destination = args.install_dir.expanduser().absolute() / BUNDLE_NAME
+    legacy = legacy_installation(destination) if args.install else None
+    for path in {output, *([destination] if args.install else []), *([legacy] if legacy else [])}:
         check_destination(path)
-        executable = path / "Contents/MacOS/Agent Coord"
-        if executable.exists() and subprocess.run(
-            ["/usr/sbin/lsof", "-t", str(executable)], capture_output=True,
-        ).stdout.strip():
-            parser.error(f"Quit the app before replacing it: {path}")
+        check_not_running(path)
 
     sys.path.insert(0, str(SCRIPTS))
     from agent_coord.store import default_database_path
@@ -97,14 +130,22 @@ def main() -> int:
     database = (args.database or default_database_path()).expanduser().absolute()
     with tempfile.TemporaryDirectory(prefix="agent-coord-build-") as scratch:
         scratch = Path(scratch)
-        app = scratch / "Agent Coord.app"
+        app = scratch / BUNDLE_NAME
         contents = app / "Contents"
         resources = contents / "Resources"
         binaries = contents / "MacOS"
         resources.mkdir(parents=True)
         binaries.mkdir()
         snapshot = copy_backend(resources)
-        for name in ("backend.py", "bridge.js"):
+        # Keep optional crypto/network packages out of the dependency-free CLI.
+        # Use the same interpreter as the backend for compatible binary wheels.
+        uv = shutil.which("uv")
+        installer = ([uv, "pip", "install", "--python", python] if uv else
+                     [python, "-m", "pip", "install", "--disable-pip-version-check", "--no-compile"])
+        subprocess.run(installer + ["--require-hashes", "--target", str(resources / "push-libs"),
+                                    "-r", str(HERE / "push-requirements.txt")], check=True)
+        shutil.copyfile(HERE / "push-requirements.txt", resources / "push-requirements.txt")
+        for name in ("backend.py", "bridge.js", "command-palette.js"):
             shutil.copyfile(HERE / name, resources / name)
         config = {
             "python": str(Path(python).absolute()), "database": str(database),
@@ -114,27 +155,32 @@ def main() -> int:
         (resources / "backend-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
         shutil.copyfile(ROOT / "LICENSE", resources / "LICENSE")
         info = {
-                "CFBundleIdentifier": BUNDLE_ID, "CFBundleName": "Agent Coord",
-                "CFBundleDisplayName": "Agent Coord", "CFBundleExecutable": "Agent Coord",
+                "CFBundleIdentifier": BUNDLE_ID, "CFBundleName": APP_NAME,
+                "CFBundleDisplayName": APP_NAME, "CFBundleExecutable": EXECUTABLE_NAME,
                 "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "0.1.0",
                 "CFBundleVersion": "1", "CFBundleIconFile": "AppIcon",
                 "LSMinimumSystemVersion": "12.0", "NSHighResolutionCapable": True,
                 "NSPrincipalClass": "NSApplication",
+                "CFBundleURLTypes": [{"CFBundleURLName": BUNDLE_ID, "CFBundleURLSchemes": ["agentcoord"],
+                                      "CFBundleTypeRole": "Viewer"}],
                 "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
             }
         (contents / "Info.plist").write_text(json.dumps(info))
         subprocess.run(["/usr/bin/plutil", "-convert", "xml1", str(contents / "Info.plist")], check=True)
         environment = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="12.0")
         subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-O", str(HERE / "App.swift"),
-                        "-o", str(binaries / "Agent Coord")], check=True, env=environment)
+                        str(HERE / "WorkspaceFiles.swift"), str(HERE / "FileBrowser.swift"),
+                        "-o", str(binaries / EXECUTABLE_NAME)], check=True, env=environment)
         subprocess.run(["xcrun", "swift", str(HERE / "Icon.swift"), str(scratch / "AppIcon.iconset")], check=True)
         subprocess.run(["iconutil", "-c", "icns", str(scratch / "AppIcon.iconset"),
                         "-o", str(resources / "AppIcon.icns")], check=True)
         subprocess.run(["codesign", "--force", "--sign", "-", str(app)], check=True)
         subprocess.run(["codesign", "--verify", "--strict", str(app)], check=True)
-        replace_app(app, output)
+        replace_app(app, output, legacy=legacy if args.install and output == destination else None)
     if args.install and destination != output:
-        replace_app(output, destination)
+        replace_app(output, destination, legacy=legacy)
+    if args.install:
+        register_app(destination)
     print(json.dumps({"built": str(output), "installed": str(destination) if args.install else None}, indent=2))
     return 0
 

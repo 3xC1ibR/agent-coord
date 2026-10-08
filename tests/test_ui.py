@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import errno
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -20,6 +22,24 @@ from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import _handler, build_snapshot, make_ui_server
 from agent_coord.codex_app_server import BrowserSessions
 from test_codex_app_server import FakeCodex
+
+
+class MonitorBrowserTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for slash command browser tests")
+    def test_slash_command_autocomplete(self) -> None:
+        result = subprocess.run(
+            ["node", "--test", str(Path(__file__).with_name("test_web_slash_commands.js"))],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for monitor browser tests")
+    def test_monitor_refresh_behavior(self) -> None:
+        result = subprocess.run(
+            ["node", "--test", str(Path(__file__).with_name("test_monitor_ui.js"))],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class OperatorUITests(unittest.TestCase):
@@ -372,6 +392,22 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(self.request(path + "/messages", {"message": "/effort medium"})[0], 409)
         self.assertEqual(self.request("/api/browser/sessions", {"yolo": "true"})[0], 400)
 
+    def test_fork_over_http_preserves_parent_and_rejects_invalid_requests(self):
+        parent = self.request("/api/browser/sessions", {"name": "Source"})[1]["session"]["thread_id"]
+        path = "/api/browser/threads/" + parent + "/fork"
+        self.assertEqual(self.request(path, {}, {"X-Agent-Coord-Token": "wrong"})[0], 403)
+        self.assertEqual(self.request(path, {"threadId": "other"})[0], 400)
+        status, fork = self.request(path, {})
+        self.assertEqual(status, 200)
+        self.assertNotEqual(fork["thread_id"], parent)
+        self.assertEqual(fork["forked_from_thread_id"], parent)
+        detail = self.request("/api/browser/sessions/" + fork["thread_id"])[1]
+        self.assertEqual(detail["work_thread"]["forked_from"]["title"], "Source")
+        self.assertFalse(detail["running"])
+        self.assertFalse(any(m == "turn/start" for m, _ in self.sessions.rpc.calls))
+        self.sessions.send(parent, {"message": "Working"})
+        self.assertEqual(self.request(path, {})[0], 409)
+
     def test_browser_steering_and_stale_turn_over_http(self):
         status, created = self.request("/api/browser/sessions", {"name": "Steering"})
         self.assertEqual(status, 201)
@@ -418,6 +454,9 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("New session", shell)
         self.assertEqual(self.request("/app.js")[0], 200)
+        self.assertEqual(self.request("/slash-commands.js")[0], 200)
+        self.assertIn('src="/slash-commands.js"', shell)
+        self.assertIn('aria-controls="slash-commands"', shell)
         self.assertEqual(self.request("/styles.css")[0], 200)
         self.assertEqual(self.request("/filter-menu.js")[0], 200)
         self.assertEqual(self.request("/filter-menu.css")[0], 200)

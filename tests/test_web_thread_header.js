@@ -12,6 +12,8 @@ function setup() {
     $: id => {
       if (!elements.has(id)) elements.set(id, {
         value: "", focus() { c.focused = id; }, select() { c.selectedText = id; },
+        replaceChildren(...children) { this.children = children; },
+        append(...children) { this.children.push(...children); },
         setCustomValidity(message) { this.validationMessage = message; },
         reportValidity() { this.reported = true; },
       });
@@ -20,9 +22,11 @@ function setup() {
     state: {selected: "one", titleEdit: null, sessions: [], closing: new Set(),
       detail: {session: {}, work_thread: {thread_id: "one", title: "Original title", browser_session: true, attention: "now", response_state: "reply"}}},
     threadPath: id => "threads/" + id, threadGrouping: grouping,
+    node: (tag, text) => ({tag, textContent: text}),
     renderSessionSettings() {}, refreshThread: async () => {}, refreshList: async () => {},
   };
   vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
   vm.runInContext(source.slice(source.indexOf("function renderTitle("), source.indexOf("function renderSessionSettings(")), c);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function itemText(")), c);
   return c;
@@ -123,4 +127,67 @@ test("the header omits Your turn and Working while preserving requests for input
   c.renderStatus();
   assert.equal(c.$("status").textContent, "");
   assert.equal(c.$("status").hidden, true);
+});
+
+test("fork availability follows backend eligibility and live activity", () => {
+  const c = setup();
+  Object.assign(c.state.detail.work_thread, {client: "codex", can_fork: true});
+  c.renderStatus();
+  assert.equal(c.$("fork-thread").hidden, false);
+  assert.equal(!!c.$("fork-thread").disabled, false);
+  c.state.detail.running = true;
+  c.renderStatus();
+  assert.equal(c.$("fork-thread").disabled, true);
+  c.state.detail.running = false;
+  c.state.detail.work_thread.can_fork = false;
+  c.renderStatus();
+  assert.equal(c.$("fork-thread").disabled, true);
+  c.state.detail.work_thread.client = "claude";
+  c.renderStatus();
+  assert.equal(c.$("fork-thread").hidden, true);
+});
+
+test("fork origin is a navigable text link and clears on thread changes", async () => {
+  const c = setup();
+  c.state.detail.work_thread.forked_from = {thread_id: "parent", title: "<Original>"};
+  c.renderTitle();
+  const link = c.$("fork-origin").children[1];
+  assert.equal(link.textContent, "<Original>");
+  assert.equal(link.href, "#parent");
+  c.action = fn => fn();
+  c.select = async id => { c.navigated = id; };
+  link.onclick({preventDefault() {}});
+  assert.equal(c.navigated, "parent");
+  c.state.detail = null;
+  c.renderTitle();
+  assert.equal(c.$("fork-origin").hidden, true);
+  assert.equal(c.$("fork-origin").children.length, 0);
+});
+
+test("fork action prevents duplicate requests and does not steal changed selection", async () => {
+  const c = setup();
+  Object.assign(c.state.detail.work_thread, {client: "codex", can_fork: true});
+  c.action = fn => fn();
+  let resolve, requests = 0;
+  c.api = (path, body) => {
+    assert.equal(path, "threads/one/fork");
+    assert.equal(Object.keys(body).length, 0);
+    requests++;
+    return new Promise(done => { resolve = done; });
+  };
+  c.select = async id => { c.navigated = id; };
+  vm.runInContext(source.slice(source.indexOf('$("fork-thread").onclick'), source.indexOf("async function boot(")), c);
+  const pending = c.$("fork-thread").onclick();
+  await c.$("fork-thread").onclick();
+  assert.equal(requests, 1);
+  c.state.selected = "two";
+  resolve({thread_id: "fork"});
+  await pending;
+  assert.equal(c.navigated, undefined);
+  assert.equal(c.state.forking, false);
+  c.state.selected = "one";
+  const next = c.$("fork-thread").onclick();
+  resolve({thread_id: "fork-two"});
+  await next;
+  assert.equal(c.navigated, "fork-two");
 });

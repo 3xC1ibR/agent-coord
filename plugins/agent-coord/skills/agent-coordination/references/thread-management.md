@@ -30,7 +30,7 @@ the manager's directory. The coordination command `list --relevant` is for
 working-session conflicts and is not a complete work-thread inventory.
 
 The inventory includes titles, original requests, repository/project/workspace
-associations, latest checkpoints, links, turn activity, unread results, and a
+associations, latest checkpoints, links, turn activity, unread results, unhandled responses, and a
 `checkpoint_stale` flag. Inspect selected threads more closely with:
 
 ```bash
@@ -54,9 +54,21 @@ Interpret the saved evidence carefully:
 
 - A current checkpoint with `next_actor: user` and a specific `next_action`
   identifies a required user action. An unread result may only need review.
-- `phase: finished` establishes completion only when the checkpoint is current.
-  A completed model turn, stopped process, or old last-activity timestamp alone
-  does not establish completion of the user's work.
+- `unhandled_response` is independent of unread state, work stage, and placement.
+  One Attention queue ranks blockers, requested reviews, execution updates,
+  findings, then routine Done / No action needed. Jev uses the requested outcome
+  and recent exchange; uncertain classifications remain visible as Reply.
+  Reading updates, findings, and success clears attention and returns the thread
+  to its stage. Required answers and approvals stay until resolved. Mark reviewed
+  acknowledges a classified review; a follow-up consumes the prior response.
+- Stages are Getting started, Investigating, Planning, Implementing, Validating,
+  Deploying, and Done. Discussion/debugging map to Investigating. An answered
+  investigation retains that stage; Done indicates delivered implementation or
+  execution. `work_phase` retains the activity of older inquiry checkpoints
+  marked finished. A stopped process or completed turn alone is not delivery.
+- Pins stay within stages and never hide required attention. Done stays quietly
+  visible until the user moves or closes it. Later has a separate browsable view
+  with checkpoint summaries and preserves pending responses.
 - A stale or missing checkpoint leaves progress uncertain. Describe that gap;
   do not invent a next step or silently classify the work as finished.
 - Now/Later/Closed placement is separate from progress and process activity.
@@ -97,10 +109,45 @@ to close a live session. Closing preserves history and does not mark the
 underlying task complete. **Reopen** restores a closed session for continuation.
 Do not substitute metadata changes for lifecycle actions.
 
-The optional `ui` command without `--cwd` opens the global overview. It provides
-search, pinning, full conversation viewing where available, and lifecycle
-controls. Offer that route when the requested action is not exposed in the CLI;
-do not read or write database tables as a substitute. The shared
+## Show a destination in the app
+
+For requests like **Show only the Billing project**, **Take me to this thread**,
+or **Open my Release review view**, navigate directly:
+
+```bash
+<agent-coord> ui open --project 'Billing' --from-session <your-session-id>
+<agent-coord> ui open --repository <name-or-id-or-root-path> --from-session <your-session-id>
+<agent-coord> ui open --view 'Release review' --from-session <your-session-id>
+<agent-coord> ui open --thread <thread-id> --from-session <your-session-id>
+```
+
+The command launches or focuses **Ribbon Field.app** on macOS. Pass the manager's
+own session ID so navigation targets the native window that submitted its latest
+message. If that window is no longer available, the app uses its current window.
+Project/repository links apply temporary All work filters without modifying saved
+view definitions, thread placement, or conversation drafts. Back returns to the
+previous destination. `--project` and `--repository` can be combined;
+`--no-project` / `--no-repository` select unassigned work. No selector means All
+work. Choose a saved view or thread separately from overview filters.
+
+For **Give me a link**, use `ui link` with the same destination selector and
+present the returned `url` as a Markdown link, for example `[Billing](<url>)`.
+Do not construct localhost URLs or guess the app's current port. Links use stable
+IDs and survive app restarts. Names resolve exactly, ignoring case; use the
+reported IDs/paths to resolve ambiguous repository names. Missing destinations
+are errors, never a reason to show all threads. The link targets the selected
+coordination database; it cannot switch the native app to another database.
+
+Report `status: displayed` as confirmed navigation. `requested` means macOS
+accepted the open request but the UI has not confirmed it; say so and include
+the returned link. `failed` includes the display error. `--wait <0..30>` adjusts
+the acknowledgement wait. If the app is absent or has not been rebuilt with
+link support, explain the command's error instead of claiming it opened.
+Use inventory commands for requests to summarize or review threads in chat.
+
+The existing `ui` command without a subcommand starts the browser UI. It provides
+search, pinning, full conversation viewing where available, and lifecycle controls.
+Do not read or write database tables as a substitute. The shared
 [coordination skill](../SKILL.md) covers messaging, wake-up, and delegation when
 the user asks to follow up with workers. Thread review alone does not require
 starting or messaging another agent.

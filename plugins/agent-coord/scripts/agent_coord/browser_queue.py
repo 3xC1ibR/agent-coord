@@ -8,6 +8,7 @@ import uuid
 
 from .store import CoordinationError
 from .image_inputs import message_images
+from .navigation import window_id
 
 
 class BrowserMessageQueue:
@@ -27,6 +28,8 @@ class BrowserMessageQueue:
             columns = {row[1] for row in db.execute("PRAGMA table_info(browser_message_queue)")}
             if "images_json" not in columns:
                 db.execute("ALTER TABLE browser_message_queue ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]'")
+            if "window_id" not in columns:
+                db.execute("ALTER TABLE browser_message_queue ADD COLUMN window_id TEXT")
 
     def list(self, thread_id):
         self.sessions._record(thread_id)
@@ -50,15 +53,16 @@ class BrowserMessageQueue:
 
     def enqueue(self, thread_id, body):
         message, images = message_images(body)
+        source_window = window_id(body.get("windowId"))
         with self.sessions._thread_lock(thread_id):
             self._open(thread_id)
             self.sessions.read(thread_id)
             item_id = str(uuid.uuid4())
             with self.sessions.store._connection() as db:
                 db.execute("""INSERT INTO browser_message_queue
-                           (id, thread_id, message, state, error, owner, created_at, images_json)
-                           VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?)""",
-                           (item_id, thread_id, message, self.owner, time.time(), json.dumps(images)))
+                           (id, thread_id, message, state, error, owner, created_at, images_json, window_id)
+                           VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, ?)""",
+                           (item_id, thread_id, message, self.owner, time.time(), json.dumps(images), source_window))
             self.sessions._publish("browser/changed", {"threadId": thread_id})
             self.wake()
             return {"queued": True, "id": item_id}
@@ -125,7 +129,8 @@ class BrowserMessageQueue:
                                          (item["id"], self.owner)).rowcount
                 if not claimed:
                     return  # Stop/disconnect may have paused it during the read.
-                sessions.send(thread_id, {"message": item["message"], "images": item["images"]}, start_only=True)
+                sessions.send(thread_id, {"message": item["message"], "images": item["images"],
+                                          "windowId": item["window_id"]}, start_only=True)
             except Exception as exc:
                 # Keep the message and images for review after transport failures.
                 with sessions.store._connection() as db:

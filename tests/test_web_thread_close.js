@@ -13,6 +13,7 @@ function setup() {
     threadGrouping: grouping, renderSessionSettings() {}, refreshDetail: async () => {}, refreshList: async () => {},
     threadPath: id => "threads/" + id, goHome() { c.state.selected = null; c.state.detail = null; c.home = true; }};
   vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function itemText(")), c);
   vm.runInContext(source.slice(source.indexOf("async function toggleThreadClosed("), source.indexOf('$("close-thread").onclick')), c);
   return c;

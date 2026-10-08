@@ -1,0 +1,71 @@
+/* Theme overrides follow component styles; light keeps the original palette. */
+.theme-control { display: flex; flex-direction: row; align-items: center; gap: 10px; margin: 0; font-size: 11px; }
+.theme-control select { width: auto; flex: 1; padding: 7px 9px; font-size: 11px; }
+.sidebar .theme-control { color: #e6ede0; }
+.sidebar .theme-control select, .monitor-header .theme-control select { color-scheme: dark; color: #e6ede0; background: #213a32; border-color: #64786a; }
+.monitor-header .theme-control { flex-shrink: 0; }
+@media (max-width: 720px) {
+  .monitor-header { flex-wrap: wrap; gap: 12px; }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #17221e;
+  --surface: #202e27;
+  --ink: #e3e9de;
+  --muted: #a9b5a6;
+  --line: #3b4c40;
+  --accent: #a8cf9b;
+  --tint: #2c4033;
+  --warm: #edb18a;
+  --dark-hover: #304438;
+  --dark-border: #6f8872;
+  --dark-warning: #3c3223;
+  --dark-warning-border: #89704b;
+  color: var(--ink);
+  background: var(--paper);
+}
+:root[data-theme="dark"] button:hover:not(:disabled) { background: var(--dark-hover); border-color: var(--dark-border); }
+:root[data-theme="dark"] .primary { color: #17291e; }
+:root[data-theme="dark"] .primary:hover:not(:disabled) { background: #bfdfa9; border-color: #bfdfa9; }
+:root[data-theme="dark"] .thread-cards .session:hover { background: #283a2f; border-color: var(--dark-border); }
+:root[data-theme="dark"] .card-close:hover:not(:disabled),
+:root[data-theme="dark"] .view-attention { background: #443326; }
+:root[data-theme="dark"] .later .thread-cards .session:hover,
+:root[data-theme="dark"] .later .empty-state,
+:root[data-theme="dark"] .context-panel,
+:root[data-theme="dark"] .session-statusbar,
+:root[data-theme="dark"] .pane-header,
+:root[data-theme="dark"] .monitor-page nav { background: var(--surface); }
+:root[data-theme="dark"] .roll-up-bar,
+:root[data-theme="dark"] .message.user,
+:root[data-theme="dark"] .remote-status { background: var(--tint); }
+:root[data-theme="dark"] .stale-checkpoint,
+:root[data-theme="dark"] .pane-tabs button[data-status=input]::before { color: var(--warm); }
+:root[data-theme="dark"] .thread-cards .session.needs-attention { border-top-color: var(--warm); }
+:root[data-theme="dark"] .empty-state,
+:root[data-theme="dark"] .checkpoint-entry,
+:root[data-theme="dark"] .thread-link,
+:root[data-theme="dark"] .composer,
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] dialog,
+:root[data-theme="dark"] .remote-device,
+:root[data-theme="dark"] .thread-pane { border-color: var(--line); }
+:root[data-theme="dark"] .composer:focus-within,
+:root[data-theme="dark"] .thread-pane.pane-focused { border-color: var(--accent); }
+:root[data-theme="dark"] input::placeholder,
+:root[data-theme="dark"] textarea::placeholder { color: var(--muted); }
+:root[data-theme="dark"] .empty-state .empty-symbol { color: var(--accent); }
+:root[data-theme="dark"] .request { background: var(--dark-warning); border-color: var(--dark-warning-border); }
+:root[data-theme="dark"] .error { color: #f5d5c2; background: #452e25; border-color: #b88062; }
+:root[data-theme="dark"] .dialog-error { color: #f3a49b; }
+:root[data-theme="dark"] .thread-hover,
+:root[data-theme="dark"] .remote-access-dialog { background: var(--surface); color: var(--ink); border-color: var(--line); box-shadow: 0 12px 42px #0005; }
+:root[data-theme="dark"] dialog::backdrop { background: #08120eb3; }
+:root[data-theme="dark"] .image-drop-hint { background: #17221ef2; }
+:root[data-theme="dark"] .pane-divider:hover,
+:root[data-theme="dark"] .pane-divider:focus-visible { background: var(--dark-border); }
+:root[data-theme="dark"] .monitor-page .node.selected { background: var(--tint); border-color: var(--dark-border); }
+:root[data-theme="dark"] .monitor-page .node:hover { background: var(--dark-hover); }

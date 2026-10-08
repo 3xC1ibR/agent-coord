@@ -12,6 +12,7 @@ from typing import Any
 
 from .delegate import delegate_work
 from .managed_pty import read_delegation_output, supervise_managed_pty
+from .navigation import NavigationStore
 from .store import (
     ACTIVITIES,
     AmbiguousTargetError,
@@ -373,6 +374,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     ui.add_argument("--host", default="127.0.0.1", help="Loopback bind address.")
     ui.add_argument("--port", type=int, default=8765, help="Local HTTP port.")
+    ui.add_argument("--tailscale", "--tailscale-serve", action="store_true", help="Enable private Tailscale HTTPS; pair devices from the local UI.")
+    ui.add_argument("--tailscale-port", type=int, default=443, help="Tailscale HTTPS port (default: 443).")
     ui.add_argument(
         "--parent-session", help="Only show this parent and its delegations."
     )
@@ -386,6 +389,18 @@ def _parser() -> argparse.ArgumentParser:
     ui.add_argument(
         "--no-browser", action="store_true", help="Do not open the local URL."
     )
+    navigation = ui.add_subparsers(dest="ui_command")
+    for name in ("link", "open"):
+        target = navigation.add_parser(name, help="Get an app link." if name == "link" else "Launch or focus the macOS app at a view.")
+        for key in ("project", "repository"):
+            choices = target.add_mutually_exclusive_group()
+            choices.add_argument("--" + key, help="Exact name or ID" + (", or repository root path." if key == "repository" else "."))
+            choices.add_argument("--no-" + key, dest=key, action="store_const", const="__none__")
+        target.add_argument("--view", help="Saved view name or ID (or All work).")
+        target.add_argument("--thread", help="Thread/session ID.")
+        if name == "open":
+            target.add_argument("--from-session", help="Target the window that sent this session's latest message.")
+            target.add_argument("--wait", type=float, default=5, metavar="SECONDS", help="Wait up to 0–30 seconds for display acknowledgement (default 5).")
     return parser
 
 
@@ -590,6 +605,13 @@ def run(arguments: argparse.Namespace) -> Any:
             )
         raise AssertionError(f"Unhandled wake command: {arguments.wake_command}")
     if command == "ui":
+        if arguments.ui_command:
+            navigation = NavigationStore(store)
+            target = navigation.link(project=arguments.project, repository=arguments.repository,
+                                     view=arguments.view, thread=arguments.thread)
+            if arguments.ui_command == "link":
+                return {**target, "status": "link"}
+            return navigation.open(target, from_session=arguments.from_session, wait=arguments.wait)
         return serve_ui(
             store,
             host=arguments.host,
@@ -597,6 +619,8 @@ def run(arguments: argparse.Namespace) -> Any:
             parent_session_id=arguments.parent_session,
             cwd=(str(Path(arguments.ui_cwd).expanduser().resolve()) if arguments.ui_cwd else None),
             open_browser=not arguments.no_browser,
+            tailscale=arguments.tailscale,
+            tailscale_port=arguments.tailscale_port,
         )
     raise AssertionError(f"Unhandled command: {command}")
 

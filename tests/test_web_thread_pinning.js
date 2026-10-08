@@ -12,70 +12,25 @@ function thread(id, extra = {}) {
 }
 const ids = threads => threads.map(t => t.thread_id);
 
-test("pins stay together across phases and placement without changing saved thread state", () => {
-  const input = [thread("working", {pinned: true}),
-    thread("later", {pinned: true, attention: "later", response_state: "reply"}),
-    thread("done", {pinned: true, response_state: "completed", checkpoint: {phase: "finished"}}),
-    thread("ordinary")];
+test("pins order within their stage without hiding attention or Later", () => {
+  const input = [thread("ordinary"), thread("pin", {pinned: true}),
+    thread("reply", {pinned: true, response_state: "reply"}),
+    thread("later", {pinned: true, attention: "later"}),
+    thread("closed", {pinned: true, attention: "archived"})];
   const before = JSON.stringify(input), groups = groupThreads(input);
-  assert.deepEqual(ids(groups.pinned), ["working", "later", "done"]);
-  assert.deepEqual(ids(groups.phases.flatMap(g => g.threads)), ["ordinary"]);
-  assert.deepEqual(groups.completed, []);
-  assert.deepEqual(groups.later, []);
+  assert.deepEqual(ids(groups.phases.flatMap(g => g.threads)), ["pin", "ordinary"]);
+  assert.deepEqual(ids(groups.priority), ["reply"]);
+  assert.deepEqual(ids(groups.later), ["later"]);
+  assert.deepEqual(ids(groups.closed), ["closed"]);
   assert.equal(JSON.stringify(input), before);
 });
 
-test("pinned replies, approvals and failures appear only in Pinned", () => {
-  for (const response_state of ["reply", "input", "failed"]) {
-    const item = thread("reply", {pinned: true, response_state, unread: true});
-    assert.equal(awaitsUser(item), true);
-    assert.deepEqual(groupThreads([item]).priority, []);
-    assert.deepEqual(ids(groupThreads([item]).pinned), ["reply"]);
-    item.pinned = false;
-    assert.deepEqual(ids(groupThreads([item]).priority), ["reply"]);
-    assert.deepEqual(groupThreads([item]).pinned, []);
-    item.pinned = true;
-    item.attention = "later";
-    assert.equal(awaitsUser(item), false);
-    assert.deepEqual(groupThreads([item]).priority, []);
-    assert.deepEqual(ids(groupThreads([item]).pinned), ["reply"]);
-    assert.equal(item.unread, true);
-  }
-});
-
-test("pinning never duplicates a thread across overview groups", () => {
-  const input = [thread("pin", {pinned: true, response_state: "reply"}),
-    thread("reply", {response_state: "reply"}), thread("work"),
-    thread("later", {attention: "later"}), thread("done", {response_state: "completed"})];
-  const groups = groupThreads(input);
-  const visible = [...groups.pinned, ...groups.priority, ...groups.completed,
-    ...groups.phases.flatMap(g => g.threads), ...groups.later];
-  assert.equal(visible.length, input.length);
-  assert.deepEqual(new Set(ids(visible)), new Set(ids(input)));
-});
-
-test("unpinning restores each thread to its normal group", () => {
-  const input = [thread("working", {pinned: true}),
-    thread("later", {pinned: true, attention: "later"}),
-    thread("done", {pinned: true, response_state: "completed"}),
-    thread("reply", {pinned: true, response_state: "reply"})];
-  for (const item of input) item.pinned = false;
-  const groups = groupThreads(input);
-  assert.deepEqual(groups.pinned, []);
-  assert.deepEqual(ids(groups.phases.flatMap(g => g.threads)), ["working"]);
-  assert.deepEqual(ids(groups.later), ["later"]);
-  assert.deepEqual(ids(groups.completed), ["done"]);
-  assert.deepEqual(ids(groups.priority), ["reply"]);
-});
-
-test("closed pins leave the top section and reappear when reopened", () => {
-  const item = thread("closed", {pinned: true, attention: "archived", response_state: "reply"});
-  const groups = groupThreads([item]);
-  assert.deepEqual(groups.pinned, []);
-  assert.deepEqual(groups.priority, []);
-  assert.deepEqual(ids(groups.phases.flatMap(g => g.threads)), ["closed"]);
-  item.attention = "now";
-  assert.deepEqual(ids(groupThreads([item]).pinned), ["closed"]);
+test("unpinning restores stable order within the same stage", () => {
+  const first = thread("first", {created_at: 1}), second = thread("second", {created_at: 2, pinned: true});
+  const cards = () => ids(groupThreads([first, second]).phases.flatMap(g => g.threads));
+  assert.deepEqual(cards(), ["second", "first"]);
+  second.pinned = false;
+  assert.deepEqual(cards(), ["first", "second"]);
 });
 
 function setup(item = thread("one")) {

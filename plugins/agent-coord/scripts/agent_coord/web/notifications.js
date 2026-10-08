@@ -1,8 +1,8 @@
 "use strict";
 
 class TurnNotifications {
-  constructor({button, claim, selected, openThread, onError}, env = globalThis) {
-    Object.assign(this, {button, claim, selected, openThread, onError, env});
+  constructor({button, claim, claimApproval, selected, openThread, onError}, env = globalThis) {
+    Object.assign(this, {button, claim, claimApproval, selected, openThread, onError, env});
     this.owner = env.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
     this.memory = new Map();
     this.queue = Promise.resolve();
@@ -41,7 +41,7 @@ class TurnNotifications {
     this.button.setAttribute("aria-pressed", String(enabled));
     this.button.title = !supported ? "Desktop notifications are not available in this browser." : denied ?
       "Allow notifications for this site in your browser settings, then reload." : enabled ?
-      "Turn off desktop alerts for completed turns." : "Get turn-finished alerts while a UI tab is open.";
+      "Turn off desktop alerts for completed turns and approval requests." : "Get turn-finished and approval alerts while a UI tab is open.";
   }
 
   async toggle() {
@@ -87,15 +87,16 @@ class TurnNotifications {
   }
 
   async deliver(event) {
-    if (this.closed || !this.enabled() || !["completed", "failed"].includes(event.status)) return;
+    if (this.closed || !this.enabled() || !["completed", "failed", "approval"].includes(event.status)) return;
     // The server claim is atomic across tabs and persists across reconnects.
     // Consume focused-thread events too, so they cannot pop up in another tab.
     const quiet = this.viewing(event.thread_id);
-    if (!await this.claim(event.id)) return;
+    const approval = event.status === "approval";
+    if (!await (approval ? this.claimApproval(event.request_key) : this.claim(event.id))) return;
     if (this.closed || !this.enabled() || quiet || this.viewing(event.thread_id)) return;
-    const label = event.status === "failed" ? "Turn failed" : "Turn finished";
-    const notification = new this.env.Notification(`${event.project_name || event.repository_name || "Agent Coord"} · ${label}`, {
-      body: event.title, tag: "agent-coord-turn-" + event.id,
+    const label = approval ? (event.client === "claude" ? "Claude" : "Codex") + " is requesting approval" : event.status === "failed" ? "Turn failed" : "Turn finished";
+    const notification = new this.env.Notification(`${event.project_name || event.repository_name || "Ribbon Field"} · ${label}`, {
+      body: event.title, tag: approval ? "agent-coord-approval-" + event.request_key : "agent-coord-turn-" + event.id,
     });
     notification.onclick = async () => {
       this.env.focus();

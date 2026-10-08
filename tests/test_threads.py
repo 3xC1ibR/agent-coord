@@ -39,6 +39,23 @@ class WorkThreadTests(unittest.TestCase):
         self.assertEqual(thread["title"], "Database performance")
         self.assertEqual(thread["attention"], "later")
 
+    def test_work_phase_retains_inquiries_and_requires_evidence_of_delivery(self):
+        self.assertEqual(self.threads.get("conversation")["work_phase"], "new")
+        for activity in ("discussion", "investigation", "planning", "implementation", "validation", "deployment"):
+            with self.subTest(activity=activity):
+                self.save(phase=activity, next_actor="nobody", next_action="")
+                done = self.save(phase="finished", next_actor="nobody", next_action="")
+                expected = "finished" if activity in {"implementation", "validation", "deployment"} else "investigation" if activity == "discussion" else activity
+                self.assertEqual(done["work_phase"], expected)
+                self.assertEqual(done["checkpoint"]["phase"], "finished")
+                self.assertEqual(done["attention"], "now")
+                self.assertEqual(CoordinationStore(self.store.database_path).threads.get("conversation")["work_phase"], expected)
+
+    def test_finished_without_an_activity_does_not_invent_delivery(self):
+        saved = self.save(phase="finished", next_actor="nobody", next_action="")
+        self.assertEqual(saved["work_phase"], "new")
+
+
     def test_checkpoint_title_names_thread_and_survives_later_turns(self):
         request = "Can you investigate the database writes and compare our options?"
         self.threads.start_turn("conversation", prompt=request, turn_id="first")

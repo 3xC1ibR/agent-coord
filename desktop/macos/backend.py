@@ -12,6 +12,13 @@ import select
 import signal
 import sys
 import threading
+from pathlib import Path
+
+# Optional Web Push dependencies are installed into the signed app bundle,
+# never into the user's global Python or the client plugin caches.
+push_libraries = Path(__file__).resolve().parent / "push-libs"
+if push_libraries.is_dir():
+    sys.path.insert(0, str(push_libraries))
 
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import make_ui_server
@@ -55,5 +62,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (CoordinationError, OSError) as exc:
-        print(f"Agent Coord could not start: {exc}", file=sys.stderr)
+        print(f"Ribbon Field could not start: {exc}", file=sys.stderr)
         raise SystemExit(1)

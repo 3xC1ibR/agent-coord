@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,7 +64,7 @@ class DesktopBackendTests(unittest.TestCase):
         process, url = self.start()
         self.assertTrue(url.startswith("http://127.0.0.1:"))
         with urllib.request.urlopen(url, timeout=5) as response:
-            self.assertIn(b"Agent Coord", response.read())
+            self.assertIn(b"Ribbon Field", response.read())
         self.assertTrue(self.read_json(url + "api/browser/config")["token"])
         self.assertEqual(self.read_json(url + "api/browser/threads")["data"], [])
         self.assertIsNone(process.poll())
@@ -132,6 +133,12 @@ class DesktopBackendTests(unittest.TestCase):
 
 
 class DesktopPackagingTests(unittest.TestCase):
+    @staticmethod
+    def make_bundle(app, marker):
+        (app / "Contents").mkdir(parents=True)
+        (app / "Contents/Info.plist").write_text(json.dumps({"CFBundleIdentifier": build.BUNDLE_ID}))
+        (app / marker).write_text(marker)
+
     def test_snapshot_contains_all_current_backend_and_web_resources(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -171,6 +178,88 @@ class DesktopPackagingTests(unittest.TestCase):
             build.replace_app(source, destination)
             self.assertEqual((destination / "new.txt").read_text(), "new")
             self.assertFalse((destination / "old.txt").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS bundle tools")
+    def test_rebrand_migrates_legacy_install_and_replaces_existing_new_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "source.app", root / build.BUNDLE_NAME
+            legacy = root / build.LEGACY_BUNDLE_NAME
+            for app, marker in ((source, "new.txt"), (destination, "old.txt"), (legacy, "legacy.txt")):
+                self.make_bundle(app, marker)
+            self.assertEqual(build.legacy_installation(destination), legacy)
+            build.replace_app(source, destination, legacy=legacy)
+            self.assertEqual((destination / "new.txt").read_text(), "new.txt")
+            self.assertFalse((destination / "old.txt").exists())
+            self.assertFalse(legacy.exists())
+            self.assertIsNone(build.legacy_installation(destination))
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS bundle tools")
+    def test_rebrand_restores_both_bundles_when_final_rename_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "source.app", root / build.BUNDLE_NAME
+            legacy = root / build.LEGACY_BUNDLE_NAME
+            for app, marker in ((source, "new.txt"), (destination, "old.txt"), (legacy, "legacy.txt")):
+                self.make_bundle(app, marker)
+            rename = Path.rename
+
+            def fail_staged_rename(path, target):
+                if path.name == build.BUNDLE_NAME and path.parent.name.startswith(".agent-coord-install-"):
+                    raise OSError("simulated installation failure")
+                return rename(path, target)
+
+            with mock.patch.object(Path, "rename", fail_staged_rename):
+                with self.assertRaisesRegex(OSError, "simulated installation failure"):
+                    build.replace_app(source, destination, legacy=legacy)
+            self.assertEqual((destination / "old.txt").read_text(), "old.txt")
+            self.assertEqual((legacy / "legacy.txt").read_text(), "legacy.txt")
+            self.assertFalse((destination / "new.txt").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS bundle tools")
+    def test_rebrand_refuses_unrelated_or_symlinked_legacy_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "source.app", root / build.BUNDLE_NAME
+            legacy = root / build.LEGACY_BUNDLE_NAME
+            self.make_bundle(source, "new.txt")
+            legacy.mkdir()
+            (legacy / "keep.txt").write_text("user data")
+            with self.assertRaises(ValueError):
+                build.replace_app(source, destination, legacy=legacy)
+            self.assertFalse(destination.exists())
+            self.assertEqual((legacy / "keep.txt").read_text(), "user data")
+            unrelated = root / "unrelated"
+            legacy.rename(unrelated)
+            legacy.symlink_to(unrelated)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                build.replace_app(source, destination, legacy=build.legacy_installation(destination))
+            self.assertEqual((unrelated / "keep.txt").read_text(), "user data")
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS bundle tools")
+    def test_rebrand_refuses_running_legacy_app_before_any_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "source.app", root / build.BUNDLE_NAME
+            legacy = root / build.LEGACY_BUNDLE_NAME
+            self.make_bundle(source, "new.txt")
+            self.make_bundle(legacy, "legacy.txt")
+            executable = legacy / "Contents/MacOS" / build.EXECUTABLE_NAME
+            executable.parent.mkdir()
+            executable.write_text("running executable")
+            run = subprocess.run
+
+            def running_legacy(args, **kwargs):
+                if args[0] == "/usr/sbin/lsof":
+                    return subprocess.CompletedProcess(args, 0, stdout=b"123\n", stderr=b"")
+                return run(args, **kwargs)
+
+            with mock.patch.object(build.subprocess, "run", side_effect=running_legacy):
+                with self.assertRaisesRegex(ValueError, "Quit the app"):
+                    build.replace_app(source, destination, legacy=legacy)
+            self.assertFalse(destination.exists())
+            self.assertTrue(executable.exists())
+            self.assertEqual((legacy / "legacy.txt").read_text(), "legacy.txt")
 
 
 if __name__ == "__main__":

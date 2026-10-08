@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import copy
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -19,7 +20,10 @@ from typing import Any, Callable
 
 from .store import CoordinationError, CoordinationStore
 from .browser_queue import BrowserMessageQueue
+from .claude_code import ClaudeRPC
+from .attention import AttentionClassifier
 from .image_inputs import message_images
+from .navigation import NavigationStore, window_id
 from .session_close import stop_terminal_session
 from .workspaces import matches_workspace, workspace_choices
 
@@ -77,7 +81,7 @@ class CodexRPC:
                 reader.start()
             try:
                 self.request("initialize", {"clientInfo": {
-                    "name": "agent_coord_ui", "title": "Agent Coord", "version": "0.1.0"
+                    "name": "agent_coord_ui", "title": "Ribbon Field", "version": "0.1.0"
                 }}, start=False)
                 self.write({"method": "initialized", "params": {}})
                 self.ready = True
@@ -165,13 +169,14 @@ class CodexRPC:
 
 
 class BrowserSessions:
-    def __init__(self, store: CoordinationStore, cwd: str | None = None, *, rpc_factory=CodexRPC):
+    def __init__(self, store: CoordinationStore, cwd: str | None = None, *, rpc_factory=CodexRPC, claude_factory=ClaudeRPC):
         self.store = store
         self.cwd = str(Path(cwd).expanduser().resolve()) if cwd else None
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
         self.events: deque[dict] = deque(maxlen=1500)
         self.sequence = 0
+        self.turn_revisions: dict[str, int] = {}
         self.requests: dict[str, dict] = {}
         self.active: dict[str, str | None] = {}
         self.loaded: set[str] = set()
@@ -188,13 +193,17 @@ class BrowserSessions:
                 updated_at REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0
             )""")
             columns = {row[1] for row in connection.execute("PRAGMA table_info(browser_sessions)")}
+            if "client" not in columns:
+                connection.execute("ALTER TABLE browser_sessions ADD COLUMN client TEXT NOT NULL DEFAULT 'codex'")
             if "yolo" not in columns:
                 connection.execute("ALTER TABLE browser_sessions ADD COLUMN yolo INTEGER NOT NULL DEFAULT 0")
             connection.execute("""CREATE TABLE IF NOT EXISTS browser_history (
                 thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL
             )""")
+        self.navigation = NavigationStore(store)
         self.queue = BrowserMessageQueue(self)
         self.rpc = rpc_factory(store, self._event)
+        self.claude = claude_factory(store, self._event)
         # Upgrade browser conversations created before work threads existed.
         with self.store._connection() as connection:
             previous = connection.execute("SELECT * FROM browser_sessions").fetchall()
@@ -207,6 +216,7 @@ class BrowserSessions:
                 first = next((item for turn in history.get("turns", []) for item in turn.get("items", []) if item.get("type") == "userMessage"), None)
                 if first:
                     self.store.threads.capture_request(row["thread_id"], "\n".join(c.get("text", "") for c in first.get("content", [])))
+        self.classifier = AttentionClassifier(self)
 
     def _thread_lock(self, thread_id: str):
         with self.lock:
@@ -221,6 +231,18 @@ class BrowserSessions:
             raise CoordinationError("Browser session not found in this workspace.")
         return dict(row)
 
+    def _provider(self, client: str):
+        if not isinstance(client, str) or client not in {"codex", "claude"}:
+            raise CoordinationError("Choose Codex or Claude Code as the session provider.")
+        return self.claude if client == "claude" else self.rpc
+
+    def _rpc(self, thread_id: str):
+        # Saved terminal Codex threads can be read before browser adoption/fork.
+        session = self.store.get_session(thread_id)
+        if not matches_workspace(session["cwd"], self.cwd):
+            raise CoordinationError("Session not found in this workspace.")
+        return self._provider(session["client"])
+
     def _publish(self, method: str, params: dict, **extra) -> None:
         with self.changed:
             self.sequence += 1
@@ -231,11 +253,18 @@ class BrowserSessions:
         method, params = message["method"], message.get("params") or {}
         thread_id = params.get("threadId")
         with self.lock:
+            if thread_id and method in {"turn/started", "turn/completed", "thread/closed"}:
+                self.turn_revisions[thread_id] = self.turn_revisions.get(thread_id, 0) + 1
+            if method == "bridge/disconnected":
+                for loaded_id in list(self.loaded):
+                    if self._record(loaded_id)["client"] != "codex":
+                        continue
+                    self.turn_revisions[loaded_id] = self.turn_revisions.get(loaded_id, 0) + 1
             if thread_id in self.loaded:
                 self._capture_history(method, params)
             if "id" in message:
                 key = str(uuid.uuid4())
-                self.requests[key] = {**message, "key": key}
+                self.requests[key] = {**message, "key": key, "received_at": self.store.clock()}
                 self._publish(method, params, requestKey=key)
                 return
             if method == "serverRequest/resolved":
@@ -256,6 +285,7 @@ class BrowserSessions:
                 self.store.touch(thread_id, "waiting" if unfinished else "idle", turn_active=False)
                 if turn.get("status") == "completed":
                     self.queue.wake()
+                    self.classifier.wake()
                 else:
                     self.queue.pause(thread_id, "The turn stopped or failed. Resume queued messages when ready.")
             if method == "thread/closed" and thread_id:
@@ -266,13 +296,16 @@ class BrowserSessions:
                 self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") != thread_id}
                 self.store.end_session(thread_id)
             if method == "bridge/disconnected":
-                for loaded_id in self.loaded:
+                for loaded_id in list(self.loaded):
+                    if self._record(loaded_id)["client"] != "codex":
+                        continue
                     self.queue.pause(loaded_id, "Codex disconnected. Review queued messages before resuming.")
                     self._save_history(loaded_id)
                     self.store.end_session(loaded_id)
-                self.loaded.clear()
-                self.active.clear()
-                self.requests.clear()
+                disconnected = {t for t in self.loaded if self._record(t)["client"] == "codex"}
+                self.loaded.difference_update(disconnected)
+                self.active = {t: v for t, v in self.active.items() if t not in disconnected}
+                self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") not in disconnected}
             self._publish(method, params)
 
     def _history(self, thread_id: str) -> dict:
@@ -367,12 +400,12 @@ class BrowserSessions:
 
     def _read_thread(self, thread_id: str) -> dict:
         try:
-            thread = self._query_thread(self.rpc, thread_id, include_turns=True)
+            thread = self._query_thread(self._rpc(thread_id), thread_id, include_turns=True)
         except CoordinationError as exc:
             if "list_turns is not supported" not in str(exc):
                 raise
             # Failure is local to this read, not a server-wide capability switch.
-            thread = self._query_thread(self.rpc, thread_id, include_turns=False)
+            thread = self._query_thread(self._rpc(thread_id), thread_id, include_turns=False)
             try:
                 stored = self._stored_thread(thread_id)
             except CoordinationError:
@@ -420,6 +453,48 @@ class BrowserSessions:
         thread = self.work_thread(row["thread_id"], history=False)
         return thread["attention"] != "archived" and self.store.threads.claim_notification(completion_id)
 
+    @staticmethod
+    def _approval_request(request: dict) -> bool:
+        return request["method"] in {
+            "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+        }
+
+    def approval_notifications(self, *, include_claimed: bool = False) -> list[dict]:
+        """Include still-pending approvals on fresh streams and reconnects."""
+        with self.lock:
+            notifications = []
+            for key, request in self.requests.items():
+                if not self._approval_request(request) or (request.get("notification_claimed") and not include_claimed):
+                    continue
+                try:
+                    thread_id = request["params"].get("threadId")
+                    self._record(thread_id)
+                    thread = self.store.threads.get(thread_id, history=False)
+                except CoordinationError:
+                    continue
+                if thread["attention"] != "archived":
+                    notifications.append({"request_key": key, "thread_id": thread_id, "status": "approval",
+                                          "client": self._record(thread_id)["client"],
+                                          "title": thread["title"], "project_name": thread["project_name"],
+                                          "repository_name": thread["repository_name"]})
+            return notifications
+
+    def claim_approval_notification(self, key: str) -> bool:
+        """Atomically claim a live approval across tabs without answering it."""
+        if not isinstance(key, str) or not key.strip():
+            raise CoordinationError("Choose a valid approval request key.")
+        with self.lock:
+            request = self.requests.get(key)
+            if not request or not self._approval_request(request) or request.get("notification_claimed"):
+                return False
+            thread_id = request["params"].get("threadId")
+            self._record(thread_id)
+            if self.store.threads.get(thread_id, history=False)["attention"] == "archived":
+                return False
+            request["notification_claimed"] = True
+            return True
+
     def list_workspaces(self) -> list[dict]:
         with self.store._connection() as connection:
             known = [row[0] for row in connection.execute(
@@ -443,7 +518,7 @@ class BrowserSessions:
     def pending_requests(self, thread_id: str) -> list[dict]:
         self._record(thread_id)
         with self.lock:
-            return [{k: v for k, v in request.items() if k != "id"}
+            return [{k: v for k, v in request.items() if k not in {"id", "notification_claimed"}}
                     for request in self.requests.values() if request["params"].get("threadId") == thread_id]
 
     def work_thread(self, thread_id: str, *, history=True) -> dict:
@@ -454,23 +529,65 @@ class BrowserSessions:
             thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
         session = self.store.get_session(thread_id)
         with self.lock:
-            waiting = any(r["params"].get("threadId") == thread_id for r in self.requests.values())
+            waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
             thread["status"] = ("needs input" if waiting else "running" if thread_id in self.active
                                 else "idle" if thread_id in self.loaded else "saved" if session["presence"] == "offline"
                                 else "running" if session["turn_active"] and session["presence"] == "online" else session["presence"])
         checkpoint = thread["checkpoint"] if not thread["checkpoint_stale"] else None
         completion = thread["turn_completion"]
-        # A turn ending hands the conversation back. Only a current finished
-        # checkpoint establishes task completion; reading either is independent.
+        classification = thread["response_classification"]
+        handoff = classification["choice"] if classification and classification["status"] == "classified" else None
+        if (handoff is None and (not classification or classification["status"] != "uncertain")
+                and checkpoint and checkpoint["phase"] == "finished" and checkpoint["next_actor"] == "nobody"
+                and thread["work_phase"] == "finished" and completion and completion["status"] == "completed"):
+            handoff = "done"
+        # Input and explicit handoffs are authoritative. A missing, uncertain,
+        # or stale classification keeps the response visible for consideration.
         thread["response_state"] = (
             "input" if waiting else "working" if thread["status"] == "running"
-            else completion["status"] if completion and completion["status"] in {"failed", "interrupted"}
-            else "reply" if checkpoint and checkpoint["next_actor"] == "user"
-            else "completed" if checkpoint and checkpoint["phase"] == "finished"
-            else "reply" if completion and completion["status"] == "completed" else None)
-        thread["needs_attention"] = (thread["attention"] != "archived" and
-                                     thread["response_state"] in {"input", "reply", "failed"})
+            else "input" if checkpoint and checkpoint["next_actor"] == "user" and checkpoint["next_action"]
+            else "interrupted" if completion and completion["status"] == "interrupted"
+            else "failed" if completion and completion["status"] == "failed" and thread["unhandled_response"]
+            else "update" if thread["unhandled_response"] and handoff in {"update", "findings", "done"} and thread["unread_result"]
+            else "available" if thread["unhandled_response"] and handoff in {"update", "findings", "done"}
+            else "action" if thread["unhandled_response"] and handoff in {"blocked", "review"}
+            else "reply" if thread["unhandled_response"]
+            else "available" if completion or (checkpoint and not thread["turn_key"]) else None)
+        thread["needs_attention"] = (thread["attention"] == "now" and
+                                     thread["response_state"] in {"input", "action", "reply", "failed", "update"})
+        input_reason = handoff if handoff in {"blocked", "review"} else (
+            "review" if thread["work_phase"] in {"investigation", "planning", "validation"} else "blocked")
+        thread["attention_reason"] = (
+            "blocked" if waiting or thread["response_state"] == "failed"
+            else input_reason if thread["response_state"] == "input"
+            else handoff or "reply" if thread["response_state"] in {"action", "reply", "update"} else None)
+        # Queue age describes the outstanding request/result, never metadata edits
+        # such as reading, renaming, pinning, or a checkpoint heartbeat.
+        thread["attention_since"] = thread["attention_key"] = None
+        if thread["needs_attention"]:
+            if waiting:
+                thread["attention_since"] = min(r.get("received_at", thread["created_at"]) for r in waiting.values())
+                thread["attention_key"] = "requests:" + ",".join(sorted(waiting))
+            elif checkpoint and thread["response_state"] == "input":
+                thread["attention_since"] = checkpoint["created_at"]
+                thread["attention_key"] = f"checkpoint:{checkpoint['id']}"
+            elif completion:
+                thread["attention_since"] = completion["completed_at"]
+                thread["attention_key"] = f"completion:{completion['id']}"
+            elif checkpoint:
+                thread["attention_since"] = checkpoint["created_at"]
+                thread["attention_key"] = f"checkpoint:{checkpoint['id']}"
+        thread["can_handle_response"] = (thread["attention"] != "archived" and thread["unhandled_response"]
+                                         and thread["response_state"] in {"action", "reply", "failed"}
+                                         and handoff != "blocked")
         thread["can_resume"] = bool(not thread["browser_session"] and thread["client"] == "codex" and session["presence"] == "offline")
+        thread["can_fork"] = bool(thread["client"] == "codex" and thread["attention"] != "archived"
+                                  and thread["status"] in {"idle", "saved"}
+                                  and (thread["browser_session"] or session["presence"] == "offline"))
+        thread["forked_from"] = None
+        if thread["forked_from_thread_id"]:
+            source = self.store.threads.get(thread["forked_from_thread_id"])
+            thread["forked_from"] = {"thread_id": source["thread_id"], "title": source["title"]}
         if history:
             with self.store._connection() as db:
                 children = db.execute("SELECT DISTINCT d.child_session_id FROM delegations d JOIN work_threads t ON t.thread_id = d.child_session_id WHERE d.parent_session_id = ?", (thread_id,)).fetchall()
@@ -490,14 +607,20 @@ class BrowserSessions:
 
     def _update_work_thread(self, thread_id: str, body: dict) -> dict:
         thread = self.work_thread(thread_id)
-        if set(body) - {"attention", "title", "pinned", "seen", "seen_checkpoint_id", "seen_completion_id", "repository_id", "project_id"}:
-            raise CoordinationError("Thread update accepts attention, title, pinned, seen, read markers, repository_id, and project_id.")
+        if set(body) - {"attention", "title", "pinned", "seen", "seen_checkpoint_id", "seen_completion_id",
+                        "handled", "handled_checkpoint_id", "handled_completion_id", "repository_id", "project_id"}:
+            raise CoordinationError("Thread update accepts attention, title, pinned, read and handled markers, repository_id, and project_id.")
         associations = {key: body[key] for key in ("repository_id", "project_id") if key in body}
         self.store.threads.organization.validate_assignments(**associations)
         if "attention" in body and not isinstance(body["attention"], str):
             raise CoordinationError("Attention must be now, later, or archived.")
         if "seen" in body and not isinstance(body["seen"], bool):
             raise CoordinationError("Seen must be true or false.")
+        if "handled" in body and not isinstance(body["handled"], bool):
+            raise CoordinationError("Handled must be true or false.")
+        if body.get("handled") and (thread["response_state"] in {"working", "input"} or
+                                    thread["attention_reason"] == "blocked" and thread["response_state"] != "failed"):
+            raise BrowserBusyError("Answer or cancel pending input and wait for the running turn before marking its response handled.")
         if "pinned" in body and not isinstance(body["pinned"], bool):
             raise CoordinationError("Pinned must be true or false.")
         if "title" in body:
@@ -510,6 +633,8 @@ class BrowserSessions:
             self.update(thread_id, {"archived": False})
         self.store.threads.update(thread_id, title=body.get("title"), attention=body.get("attention"), seen=body.get("seen", False),
                                   seen_checkpoint_id=body.get("seen_checkpoint_id"), seen_completion_id=body.get("seen_completion_id"),
+                                  handled=body.get("handled", False), handled_checkpoint_id=body.get("handled_checkpoint_id"),
+                                  handled_completion_id=body.get("handled_completion_id"),
                                   **({"pinned": body["pinned"]} if "pinned" in body else {}), **associations)
         self._publish("browser/changed", {"threadId": thread_id})
         return self.work_thread(thread_id)
@@ -535,7 +660,7 @@ class BrowserSessions:
                 if not record["archived"]:
                     # Codex archives the rollout and unloads this thread; the
                     # shared app-server stays available to other conversations.
-                    self.rpc.request("thread/archive", {"threadId": thread_id})
+                    self._rpc(thread_id).request("thread/archive", {"threadId": thread_id})
                     with self.store._connection() as db:
                         db.execute("UPDATE browser_sessions SET archived = 1 WHERE thread_id = ?", (thread_id,))
                 with self.lock:
@@ -603,10 +728,54 @@ class BrowserSessions:
             self._publish("browser/changed", {"threadId": thread_id})
             return self.work_thread(thread_id)
 
-    def models(self) -> list[dict]:
+    def fork_work_thread(self, thread_id: str) -> dict:
+        with self._thread_lock(thread_id):
+            source = self.work_thread(thread_id)
+            if source["status"] in {"running", "needs input"}:
+                raise BrowserBusyError("Wait for the running turn and pending input to finish before forking.")
+            if not source["can_fork"]:
+                raise CoordinationError("Fork requires an open, idle Codex thread or a saved Codex terminal thread.")
+            # Read without resuming or taking ownership of the source. Also check
+            # native state, which may have advanced since our last notification.
+            original = self._read_thread(thread_id)
+            turns = original.get("turns", [])
+            latest = turns[-1] if turns else {}
+            if original.get("status", {}).get("type") == "active" or latest.get("status") == "inProgress":
+                raise BrowserBusyError("Wait for the running turn to finish before forking.")
+            name = "Fork of " + source["title"][:152]
+            record = {"cwd": source["cwd"], "name": name, "yolo": False}
+            if source["browser_session"]:
+                settings = self._record(thread_id)
+                record.update({key: settings[key] for key in ("model", "effort", "yolo")})
+            params = {"threadId": thread_id, **self._options(record)}
+            if latest.get("id"):
+                params["lastTurnId"] = latest["id"]
+            result = self.rpc.request("thread/fork", params)
+            child_id = result["thread"]["id"]
+            # thread.sessionId may identify the shared Codex tree root. Only the
+            # new thread.id is an independent Agent Coord checkpoint identity.
+            self.store.register(session_id=child_id, client="codex", cwd=record["cwd"], name=name)
+            self.store.threads.record_fork(child_id, source, turn_id=latest.get("id"))
+            with self.store._connection() as db:
+                now = self.store.clock()
+                db.execute("""INSERT INTO browser_sessions
+                              (thread_id, cwd, name, model, effort, yolo, created_at, updated_at)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                           (child_id, record["cwd"], name, result.get("model") or record.get("model"),
+                            result.get("reasoningEffort", record.get("effort")), int(record["yolo"]), now, now))
+            with self.lock:
+                self._remember_thread(result["thread"])
+            self.store.end_session(child_id)
+            # Leave the fork saved locally. Opening/sending uses read() to resume
+            # with child-specific instructions before any turn. A failed resume
+            # can be retried by opening the same child, without forking again.
+            self._publish("browser/changed", {"threadId": child_id})
+            return self.work_thread(child_id)
+
+    def models(self, client: str = "codex") -> list[dict]:
         models, cursor = [], None
         while True:
-            result = self.rpc.request("model/list", {"limit": 100, **({"cursor": cursor} if cursor else {})})
+            result = self._provider(client).request("model/list", {"limit": 100, **({"cursor": cursor} if cursor else {})})
             models.extend(result["data"])
             cursor = result.get("nextCursor")
             if not cursor:
@@ -631,14 +800,14 @@ class BrowserSessions:
         record = self._record(thread_id)
         model = result.get("model") or record["model"]
         effort = result.get("reasoningEffort", record["effort"])
-        if model and effort is None:
-            selected = next((m for m in self.models() if m["model"] == model), {})
+        if model and effort is None and record["client"] == "codex":
+            selected = next((m for m in self.models(record["client"]) if m["model"] == model), {})
             effort = selected.get("defaultReasoningEffort")
         with self.store._connection() as db:
             db.execute("UPDATE browser_sessions SET model = ?, effort = ? WHERE thread_id = ?", (model, effort, thread_id))
 
-    def _validate_settings(self, model: str | None, effort: str | None) -> dict:
-        selected = next((m for m in self.models() if m["model"] == model), None)
+    def _validate_settings(self, model: str | None, effort: str | None, client: str = "codex") -> dict:
+        selected = next((m for m in self.models(client) if m["model"] == model), None)
         if not selected:
             raise CoordinationError("Choose an available model. Use /model to list models.")
         supported = [e["reasoningEffort"] for e in selected.get("supportedReasoningEfforts", [])]
@@ -654,32 +823,81 @@ class BrowserSessions:
             if thread_id in self.active:
                 raise BrowserBusyError("Wait for the running turn to finish before changing model or effort.")
         model = self._text(body.get("model", record["model"]), "Model", 200)
-        selected = self._validate_settings(model, None)
+        selected = self._validate_settings(model, None, record["client"])
         supported = [e["reasoningEffort"] for e in selected.get("supportedReasoningEfforts", [])]
         effort = body.get("effort", record["effort"])
         if "effort" in body:
             effort = self._text(effort, "Reasoning effort", 40)
         elif effort not in supported:
             effort = selected.get("defaultReasoningEffort")
-        self._validate_settings(model, effort)
+        self._validate_settings(model, effort, record["client"])
         with self.store._connection() as db:
             db.execute("UPDATE browser_sessions SET model = ?, effort = ?, updated_at = ? WHERE thread_id = ?",
                        (model, effort, time.time(), thread_id))
         self._publish("browser/changed", {"threadId": thread_id})
         return self._record(thread_id)
 
+    def _change_directory(self, thread_id: str, argument: str) -> dict:
+        record = self._record(thread_id)
+        with self.lock:
+            if thread_id in self.active:
+                raise BrowserBusyError("Wait for the running turn to finish before changing directories.")
+        try:
+            # Accept a pasted path with spaces as well as a quoted shell path.
+            if argument.startswith(("'", '"')):
+                paths = shlex.split(argument)
+                if len(paths) != 1:
+                    raise ValueError("Choose one directory.")
+                argument = paths[0]
+            if not argument or "\0" in argument:
+                raise ValueError("Empty or invalid directory.")
+            path = Path(argument).expanduser()
+            directory = str((Path(record["cwd"]) / path).resolve())
+            valid = Path(directory).is_dir() and matches_workspace(directory, self.cwd)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise CoordinationError("Use /cd <directory>, with matching quotes around quoted paths.") from exc
+        if not valid:
+            raise CoordinationError("Choose an existing directory within this UI's workspace.")
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_sessions SET cwd = ?, updated_at = ? WHERE thread_id = ?",
+                       (directory, time.time(), thread_id))
+            db.execute("UPDATE sessions SET cwd = ? WHERE session_id = ?", (directory, thread_id))
+        self._publish("browser/changed", {"threadId": thread_id})
+        return self._record(thread_id)
+
     def _command(self, thread_id: str, message: str) -> dict | None:
         parts = message.split()
         command = parts[0].lower()
-        if command not in {"/model", "/effort", "/help"}:
+        if command not in {"/cd", "/permissions", "/model", "/effort", "/help"}:
             return None
+        default_permissions = ("Claude Code configured permissions with tool approval prompts"
+                               if self._record(thread_id)["client"] == "claude"
+                               else "workspace access with approval prompts")
         if command == "/help":
-            reply = "Commands: /model [model-id] [effort], /effort [level], /help. Changes apply to your next message."
+            reply = ("Commands: /cd [directory], /model [model-id] [effort], /effort [level], "
+                     "/permissions [default|yolo], /help. Changes apply to your next message. "
+                     "Use /cd with a relative, absolute, or ~ path. "
+                     "Permissions: default uses " + default_permissions + "; "
+                     "yolo gives full machine access without approval prompts. "
+                     "In the UI, /fork opens a new thread from an idle Codex conversation; "
+                     "/close stops and closes the current thread, keeping its history.")
+        elif command == "/cd":
+            argument = message[len(parts[0]):].strip()
+            record = self._change_directory(thread_id, argument) if argument else self._record(thread_id)
+            reply = "Working directory: " + record["cwd"] + ". Use /cd <directory> to change it."
+        elif command == "/permissions":
+            if len(parts) > 2 or (len(parts) == 2 and parts[1].lower() not in {"default", "yolo"}):
+                raise CoordinationError("Use /permissions default or /permissions yolo.")
+            record = (self.update(thread_id, {"yolo": parts[1].lower() == "yolo"})
+                      if len(parts) == 2 else self._record(thread_id))
+            reply = ("Permissions: yolo — full machine access without approval prompts." if record["yolo"] else
+                     "Permissions: default — " + default_permissions + ".")
+            reply += " Use /permissions default or /permissions yolo to change them."
         elif len(parts) == 1:
             record = self._record(thread_id)
-            models = self.models()
+            models = self.models(record["client"])
             if command == "/model":
-                reply = "Current model: " + (record["model"] or "Codex default") + ". Available: " + ", ".join(m["model"] for m in models) + ". Use /model <model-id> [effort]."
+                reply = "Current model: " + (record["model"] or ("Claude default" if record["client"] == "claude" else "Codex default")) + ". Available: " + ", ".join(m["model"] for m in models) + ". Use /model <model-id> [effort]."
             else:
                 selected = next((m for m in models if m["model"] == record["model"]), {})
                 reply = "Current effort: " + (record["effort"] or "Model default") + ". Available: " + ", ".join(e["reasoningEffort"] for e in selected.get("supportedReasoningEfforts", [])) + ". Use /effort <level>."
@@ -706,17 +924,19 @@ class BrowserSessions:
         yolo = body.get("yolo", False)
         if not isinstance(yolo, bool):
             raise CoordinationError("YOLO must be true or false.")
-        record = {"cwd": repository, "name": name, "model": body.get("model") or None, "effort": body.get("effort") or None, "yolo": yolo}
+        client = body.get("client", "codex")
+        provider = self._provider(client)
+        record = {"client": client, "cwd": repository, "name": name, "model": body.get("model") or None, "effort": body.get("effort") or None, "yolo": yolo}
         if record["model"] or record["effort"]:
-            self._validate_settings(record["model"], record["effort"])
-        result = self.rpc.request("thread/start", self._options(record))
+            self._validate_settings(record["model"], record["effort"], client)
+        result = provider.request("thread/start", self._options(record))
         thread_id = result["thread"]["id"]
         now = time.time()
         with self.store._connection() as connection:
-            connection.execute("INSERT INTO browser_sessions (thread_id, cwd, name, model, effort, yolo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                               (thread_id, repository, name, record["model"], record["effort"], int(yolo), now, now))
+            connection.execute("INSERT INTO browser_sessions (thread_id, cwd, name, model, effort, yolo, created_at, updated_at, client) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                               (thread_id, repository, name, record["model"], record["effort"], int(yolo), now, now, client))
         self._capture_settings(thread_id, result)
-        self.store.register(session_id=thread_id, client="codex", cwd=repository, name=name)
+        self.store.register(session_id=thread_id, client=client, cwd=repository, name=name)
         self.store.threads.update(thread_id, **associations)
         with self.lock:
             self._remember_thread(result["thread"])
@@ -732,15 +952,17 @@ class BrowserSessions:
 
     def read(self, thread_id: str) -> dict:
         with self._thread_lock(thread_id):
+            with self.lock:
+                revision = self.turn_revisions.get(thread_id, 0)
             record = self._record(thread_id)
             work_thread = self.work_thread(thread_id)
             if record["archived"] or work_thread["attention"] == "archived":
                 thread = self._read_thread(thread_id)
             elif thread_id not in self.loaded:
-                result = self.rpc.request("thread/resume", {"threadId": thread_id, "excludeTurns": True, **self._options(record)})
+                result = self._rpc(thread_id).request("thread/resume", {"threadId": thread_id, "excludeTurns": True, **self._options(record)})
                 self._capture_settings(thread_id, result)
                 record = self._record(thread_id)
-                self.store.register(session_id=thread_id, client="codex", cwd=record["cwd"], name=record["name"])
+                self.store.register(session_id=thread_id, client=record["client"], cwd=record["cwd"], name=record["name"])
                 with self.lock:
                     self.loaded.add(thread_id)
                 self._remember_thread(result["thread"])
@@ -748,17 +970,32 @@ class BrowserSessions:
             else:
                 thread = self._read_thread(thread_id)
             with self.lock:
-                active_turn = next((t["id"] for t in thread.get("turns", []) if t.get("status") == "inProgress"), None)
-                if active_turn:
-                    self.active[thread_id] = active_turn
-                elif thread.get("status", {}).get("type") != "active":
-                    self.active.pop(thread_id, None)
+                # A response predating a turn event cannot replace live state.
+                if revision == self.turn_revisions.get(thread_id, 0):
+                    turns = thread.get("turns", [])
+                    latest = turns[-1] if turns else {}
+                    status = thread.get("status", {}).get("type")
+                    known = self.active.get(thread_id)
+                    missing_live_turn = known and not any(t["id"] == known for t in turns)
+                    if status in {"idle", "notLoaded"}:
+                        self.active.pop(thread_id, None)
+                    elif not missing_live_turn:
+                        # Earlier turns can retain stale inProgress statuses;
+                        # only the latest turn can still be running. Incomplete
+                        # stored history must not replace a streamed turn ID.
+                        if latest.get("status") == "inProgress":
+                            self.active[thread_id] = latest["id"]
+                        elif status != "active":
+                            self.active.pop(thread_id, None)
+                active_turn = self.active.get(thread_id)
+                running = thread_id in self.active
             return {"session": record, "thread": thread, "work_thread": work_thread, "requests": self.pending_requests(thread_id),
-                    "activeTurn": self.active.get(thread_id), "running": thread_id in self.active,
+                    "activeTurn": active_turn, "running": running,
                     "queuedMessages": self.queue.list(thread_id)}
 
     def send(self, thread_id: str, body: dict, *, start_only: bool = False) -> dict:
         message, images = message_images(body)
+        source_window = window_id(body.get("windowId"))
         expected_turn = body.get("expectedTurnId")
         if "expectedTurnId" in body:
             expected_turn = self._text(expected_turn, "Expected turn ID", 200)
@@ -786,13 +1023,16 @@ class BrowserSessions:
             params = {"threadId": thread_id, "input": inputs}
             if turn_id:
                 # The server checks this too, covering completion during the RPC.
-                result = self.rpc.request("turn/steer", {**params, "expectedTurnId": turn_id})
+                with self.navigation.sending(thread_id, source_window):
+                    result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                self.store.threads.user_message(thread_id)
                 with self.store._connection() as connection:
                     connection.execute("UPDATE browser_sessions SET updated_at = ? WHERE thread_id = ?", (time.time(), thread_id))
                 self._publish("browser/changed", {"threadId": thread_id})
                 return result
             if record["model"]:
                 params["model"] = record["model"]
+            params["cwd"] = record["cwd"]
             if record["effort"]:
                 params["effort"] = record["effort"]
             if record["yolo"]:
@@ -803,12 +1043,14 @@ class BrowserSessions:
                     "type": "workspaceWrite", "writableRoots": roots, "networkAccess": False,
                 })
             try:
-                result = self.rpc.request("turn/start", params)
+                with self.navigation.sending(thread_id, source_window):
+                    result = self._rpc(thread_id).request("turn/start", params)
             except Exception:
                 with self.lock:
                     self.active.pop(thread_id, None)
                 raise
             # Some app-server versions omit input items from turn/started.
+            self.store.threads.user_message(thread_id)
             self.store.threads.capture_request(thread_id, message or "\n".join("[Image]" for _ in images))
             with self.lock:
                 # A fast completed event may arrive before the request response.
@@ -826,7 +1068,7 @@ class BrowserSessions:
         if not turn_id:
             raise CoordinationError("This session has no running turn to stop yet.")
         self.queue.pause(thread_id, "You stopped the turn. Resume queued messages when ready.")
-        return self.rpc.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+        return self._rpc(thread_id).request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
 
     def update(self, thread_id: str, body: dict) -> dict:
         with self._thread_lock(thread_id):
@@ -849,12 +1091,12 @@ class BrowserSessions:
                 record = self._change_settings(thread_id, body)
             if "name" in body:
                 name = self._text(body["name"], "Session name", 160)
-                self.rpc.request("thread/name/set", {"threadId": thread_id, "name": name})
+                self._rpc(thread_id).request("thread/name/set", {"threadId": thread_id, "name": name})
                 with self.store._connection() as connection:
                     connection.execute("UPDATE browser_sessions SET name = ? WHERE thread_id = ?", (name, thread_id))
                 self.store.threads.update(thread_id, title=name)
                 if thread_id in self.loaded:
-                    self.store.register(session_id=thread_id, client="codex", cwd=record["cwd"], name=name)
+                    self.store.register(session_id=thread_id, client=record["client"], cwd=record["cwd"], name=name)
             if "archived" in body:
                 archived = body["archived"]
                 if not isinstance(archived, bool):
@@ -865,7 +1107,7 @@ class BrowserSessions:
                 if archived != bool(record["archived"]):
                     if archived:
                         self.queue.pause(thread_id, "The thread closed. Reopen it to resume queued messages.")
-                    self.rpc.request("thread/archive" if archived else "thread/unarchive", {"threadId": thread_id})
+                    self._rpc(thread_id).request("thread/archive" if archived else "thread/unarchive", {"threadId": thread_id})
                     with self.store._connection() as connection:
                         connection.execute("UPDATE browser_sessions SET archived = ? WHERE thread_id = ?", (int(archived), thread_id))
                     if archived:
@@ -912,11 +1154,11 @@ class BrowserSessions:
             else:
                 if decision != "cancel":
                     raise CoordinationError("This request type is unsupported; cancel it to continue.")
-                self.rpc.write({"id": request["id"], "error": {"code": -32601, "message": "Request not supported by Agent Coord UI."}})
+                self._rpc(thread_id).write({"id": request["id"], "error": {"code": -32601, "message": "Request not supported by Ribbon Field UI."}})
                 self.requests.pop(key)
                 self._publish("browser/requests", {"threadId": thread_id})
                 return {}
-            self.rpc.write({"id": request["id"], "result": result})
+            self._rpc(thread_id).write({"id": request["id"], "result": result})
             self.requests.pop(key)
             self._publish("browser/requests", {"threadId": thread_id})
             return {}
@@ -927,7 +1169,12 @@ class BrowserSessions:
                 return
             self.closed = True
             self.changed.notify_all()
+        self.classifier.close()
         self.rpc.close()
+        self.claude.close()
+        for thread_id in list(self.loaded):
+            if self._record(thread_id)["client"] == "claude":
+                self._event({"method": "thread/closed", "params": {"threadId": thread_id}})
         self.queue.close()
         with self.history_lock:
             if self.history_rpc is not None:

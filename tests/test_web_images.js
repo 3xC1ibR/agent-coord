@@ -118,6 +118,7 @@ function appSetup() {
     threadGrouping: {status: () => ({label: "Idle"})}, messageMarkdown: {render: text => text},
     refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id});
   vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function requestButton(")), c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   vm.runInContext(source.slice(source.indexOf("function composerKeydown("), source.indexOf('$("message").onkeydown')), c);

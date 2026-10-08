@@ -42,6 +42,65 @@ class TurnNotificationTests(unittest.TestCase):
         self.hook("Stop", session_id, turn_id=turn_id)
         return self.store.threads.completion_cursor()
 
+    def approval(self, thread_id=None, method="item/commandExecution/requestApproval", request_id=42):
+        thread_id = thread_id or self.sessions.create({"name": "Approval test"})["session"]["thread_id"]
+        self.sessions._event({"id": request_id, "method": method, "params": {"threadId": thread_id}})
+        return thread_id, next(reversed(self.sessions.requests))
+
+    def test_all_supported_approvals_notify_without_completing_the_turn(self):
+        for index, method in enumerate(("item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval")):
+            self.approval(method=method, request_id=index)
+        self.approval(method="item/tool/requestUserInput", request_id=4)
+        self.approval(method="mcpServer/elicitation/request", request_id=5)
+        events = self.sessions.approval_notifications()
+        self.assertEqual(len(events), 3)
+        self.assertEqual({event["status"] for event in events}, {"approval"})
+        self.assertTrue(all(event["title"] == "Approval test" for event in events))
+        self.assertEqual(self.store.threads.completion_cursor(), 0)
+
+    def test_approval_claim_is_atomic_and_resolved_requests_stay_quiet(self):
+        thread_id, key = self.approval()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: self.sessions.claim_approval_notification(key), range(8)))
+        self.assertEqual(sum(results), 1)
+        self.assertEqual(self.sessions.approval_notifications(), [])
+        self.sessions.answer(thread_id, key, {"decision": "decline"})
+        self.assertFalse(self.sessions.claim_approval_notification(key))
+        _, resolved = self.approval(request_id=43)
+        self.sessions._event({"method": "serverRequest/resolved", "params": {"requestId": 43}})
+        self.assertFalse(self.sessions.claim_approval_notification(resolved))
+        self.assertEqual(self.sessions.approval_notifications(), [])
+
+    def test_pending_approval_survives_event_replay_gaps_and_fresh_connections(self):
+        _, key = self.approval()
+        for index in range(1505):
+            self.sessions._publish("progress", {"index": index})
+        self.assertTrue(self.sessions.events_after(0, timeout=0)["reset"])
+        self.assertEqual(self.sessions.approval_notifications()[0]["request_key"], key)
+        self.assertEqual(self.sessions.approval_notifications()[0]["request_key"], key)
+
+    def test_approval_claims_filter_workspaces_closed_threads_and_nonapprovals(self):
+        thread_id, key = self.approval()
+        self.store.threads.update(thread_id, attention="archived")
+        self.assertEqual(self.sessions.approval_notifications(), [])
+        self.assertFalse(self.sessions.claim_approval_notification(key))
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        other = BrowserSessions(self.store, outside.name, rpc_factory=FakeCodex)
+        self.addCleanup(other.close)
+        other.rpc.threads.update(self.sessions.rpc.threads)
+        outside_thread = other.create({})["session"]["thread_id"]
+        self.sessions.rpc.threads.update(other.rpc.threads)
+        _, outside_key = self.approval(outside_thread)
+        self.assertEqual(self.sessions.approval_notifications(), [])
+        with self.assertRaises(CoordinationError):
+            self.sessions.claim_approval_notification(outside_key)
+        _, question = self.approval(method="item/tool/requestUserInput")
+        self.assertFalse(self.sessions.claim_approval_notification(question))
+        for invalid in (None, 42, ""):
+            with self.assertRaises(CoordinationError):
+                self.sessions.claim_approval_notification(invalid)
+
     def test_short_terminal_turns_survive_reopen_and_repeated_stop(self):
         self.hook("SessionStart")
         self.assertEqual(self.store.threads.completion_cursor(), 0)
@@ -199,6 +258,24 @@ class NotificationHTTPTests(unittest.TestCase):
         event_id = self.complete("first")
         url = self.url + "/api/browser/notifications/claim"
         body = json.dumps({"completion_id": event_id}).encode()
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}), timeout=3)
+        self.assertEqual(denied.exception.code, 403)
+        denied.exception.close()
+        for expected in (True, False):
+            request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "X-Agent-Coord-Token": self.config["token"]})
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(json.load(response)["claimed"], expected)
+
+    def test_stream_includes_pending_approvals_on_a_fresh_connection(self):
+        thread_id = self.sessions.create({"name": "Needs approval"})["session"]["thread_id"]
+        self.sessions._event({"id": 42, "method": "item/fileChange/requestApproval", "params": {"threadId": thread_id}})
+        batch = self.event_batch("/api/browser/events", str(self.sessions.sequence))
+        self.assertEqual(batch["events"], [])
+        self.assertEqual(batch["approvals"][0]["thread_id"], thread_id)
+        key = batch["approvals"][0]["request_key"]
+        url = self.url + "/api/browser/notifications/claim"
+        body = json.dumps({"request_key": key}).encode()
         with self.assertRaises(urllib.error.HTTPError) as denied:
             urllib.request.urlopen(urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}), timeout=3)
         self.assertEqual(denied.exception.code, 403)

@@ -31,7 +31,7 @@ result, save a short factual checkpoint with the bundled CLI:
 ```bash
 <agent-coord> checkpoint --session-id <session-id> --json '{
   "title": "Database write performance",
-  "phase": "finished",
+  "phase": "investigation",
   "summary": "Compared the two approaches and documented the findings.",
   "next_action": "",
   "next_actor": "nobody",
@@ -49,9 +49,13 @@ action, and describe that requirement in `next_action`. Ending an agent turn
 does not create a required user action.
 
 Keep optional advice, invitations to continue, and nonblocking reminders in
-`summary`; do not turn them into user next steps. When the requested work is
-complete and nothing remains, use `phase: "finished"`, an empty `next_action`,
-and `next_actor: "nobody"`. If work remains, keep its actual phase and assign
+`summary`; do not turn them into user next steps. Keep the phase of the underlying activity: an answered investigation stays
+`investigation`, a completed plan stays `planning`, and a status question during
+deployment stays `deployment`. Use `finished` only after delivering the requested
+implementation or execution, including validation/deployment if requested, with
+nothing remaining. Use an empty `next_action` and `next_actor: "nobody"` when
+there is no required next step. Required user review belongs in `validation`
+with `next_actor: "user"`. If work remains, keep its actual phase and assign
 any required next step to its actual owner; do not invent follow-up tasks.
 Skip unchanged checkpoints. The command preserves history and the original
 request; it does not mark a Bead complete or close the thread.
@@ -305,20 +309,37 @@ The managed supervisor wakes an inactive child only for undelivered actionable
 messages and submits one generic prompt through its owned PTY. The prompt hook
 then supplies the durable body and thread metadata. This keeps delegated agents
 long-lived and lets children coordinate with their parent or with one another.
-The loopback-only UI home page creates and manages independent Codex browser
-sessions through `codex app-server`: streamed conversations, approvals and
+The loopback-only UI home page creates and manages independent Codex and Claude Code browser
+sessions through `codex app-server` or Claude's stream-json protocol: streamed conversations, approvals and
 questions, stop, rename, close, reopen, and resume. Browser sessions do not
-require a parent or Bead. They default to workspace-write sandboxing and on-request approvals. The new
-session dialog has an explicit **Use --yolo** option for full machine access
-without sandboxing or approval prompts. Existing idle browser sessions can change
-this setting through **Permissions** in the conversation footer; the choice
+require a parent or Bead. **New session** and native **⌘N** open a draft conversation
+in the current workspace. Choose a Codex or Claude Code model in the composer’s
+**Model** picker; the provider session starts when the first message is sent.
+Existing conversations offer models from their current provider.
+Each conversation retains its provider across restarts. Claude uses the installed
+CLI and its configured permission rules; approvals and questions appear in the
+chat. Claude follow-ups queue while a turn runs, and Stop ends only that
+conversation's process. The next message resumes its native transcript. Claude
+terminal import and thread forking are not supported. Codex sessions default to workspace-write
+sandboxing and on-request approvals. `/permissions yolo` enables full machine
+access without approval prompts; `/permissions default` restores workspace access.
+Idle browser sessions can also change this setting through **Permissions**
+in the conversation footer; the choice
 persists for that session and applies to subsequent turns. Running or closed
 sessions must finish or reopen before their permissions can change.
 Click the conversation title to rename it inline. The bottom status line shows
-the working directory, effective model, and reasoning effort. `/model` lists
+the working directory, effective model, and reasoning effort. `/cd` shows the
+current directory; `/cd <path>` changes it for subsequent turns. Relative paths
+resolve against the current directory; quoted paths and `~` are supported.
+Directory changes stay within the UI workspace filter. `/model` lists
 models, `/model <model-id> [effort]` changes the next turn's model, and `/effort
-<level>` changes its reasoning effort. `/effort` lists supported levels and
-`/help` lists commands. Changes are saved without starting a model turn and
+<level>` changes its reasoning effort. The slash menu completes model names and
+supported effort levels. `/effort` lists supported levels and `/help` lists commands.
+In the UI, `/fork` opens a new thread from the current idle Codex conversation;
+`/close` stops and closes the current thread, preserving its history and returning
+to the overview. These thread commands take no arguments or images and run
+immediately, even when submitted with the queue shortcut.
+Setting changes are saved without starting a model turn and
 require an idle session. The installed Codex configuration is used without
 bypassing hook trust.
 Codex must be authenticated and Agent Coord hooks trusted through normal setup.
@@ -333,8 +354,7 @@ same durable output area, and the last successful capture remains available
 after a pane or UI restart. Use
 `--cwd` (or `--repo`) to filter it to a directory and its descendants; a
 repository also includes its linked Git worktrees. For example,
-`--cwd /opt/projects` offers child repositories in the New session Workspace
-dropdown. Omitting the filter shows delegation trees across the shared database.
+`--cwd /opt/projects` permits `/cd` into its child repositories. Omitting the filter shows delegation trees across the shared database.
 The tree sorts by most recent activity by default and can switch to creation
 time or name. A selected
 parent shows clickable child summaries and recent child output. The monitor is

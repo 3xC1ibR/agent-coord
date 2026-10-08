@@ -4,7 +4,10 @@
 .view-tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); background: var(--tint); font-weight: 600; }
 .view-tab-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .view-attention { display: inline-grid; place-items: center; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 10px; color: var(--warm); background: #f6e7df; font: 10px var(--mono); }
-.view-completed { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--accent); }
+.view-completed, .view-active { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--accent); }
+.view-active { animation: view-work-blink 1.4s ease-in-out infinite; }
+@keyframes view-work-blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
+@media (prefers-reduced-motion: reduce) { .view-active { animation: none; } }
 .view-actions { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
 .view-actions > button, .view-menu > summary { padding: 6px 9px; font-size: 11px; white-space: nowrap; }
 .view-actions #update-view { color: var(--accent); }

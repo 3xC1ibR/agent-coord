@@ -1,6 +1,7 @@
 "use strict";
 
 const threadViews = (() => {
+  const grouping = typeof module !== "undefined" ? require("./thread-groups.js") : threadGrouping;
   const defaults = {repository: "", project: "", phase: "", show: "active", search: ""};
   function filters(values = {}) {
     return Object.fromEntries(Object.entries(defaults).map(([key, value]) =>
@@ -9,23 +10,26 @@ const threadViews = (() => {
   function matches(thread, values) {
     const f = filters(values);
     if ((thread.attention === "archived") !== (f.show === "archived")) return false;
+    if (f.show === "later" ? thread.attention !== "later" : f.show !== "archived" && thread.attention !== "now") return false;
     for (const field of ["repository", "project"]) {
       if (f[field] && (f[field] === "__none__" ? thread[field + "_id"] != null : thread[field + "_id"] !== f[field])) return false;
     }
-    if (f.phase && thread.checkpoint?.phase !== f.phase) return false;
+    if (f.phase && grouping.phase(thread) !== (f.phase === "discussion" ? "investigation" : f.phase)) return false;
     if (f.show === "attention" && !needsYou(thread)) return false;
-    if (f.show === "completed" && thread.response_state !== "completed") return false;
+    // Preserve the saved filter key, now presented as Done.
+    if (f.show === "completed" && grouping.phase(thread) !== "finished") return false;
     const text = [thread.title, thread.repository_name, thread.repository_root, thread.project_name,
       thread.checkpoint?.summary, thread.checkpoint?.next_action].filter(Boolean).join(" ").toLocaleLowerCase();
     return !f.search || text.includes(f.search.toLocaleLowerCase());
   }
   function needsYou(thread) {
-    return thread.attention === "now" && ["input", "reply", "failed"].includes(thread.response_state);
+    return grouping.awaitsUser(thread);
   }
   function badges(threads, values) {
     const visible = threads.filter(thread => matches(thread, values));
     return {attention: visible.filter(needsYou).length,
-      completed: visible.some(t => t.attention !== "archived" && t.response_state === "completed" && (t.unread_result || t.unread))};
+      active: visible.some(t => t.attention !== "archived" && t.response_state === "working"),
+      completed: visible.some(t => t.attention === "now" && t.unhandled_response && (t.unread_result || t.unread))};
   }
   function same(a, b) {
     return a.group_by === b.group_by && JSON.stringify(filters(a.filters)) === JSON.stringify(filters(b.filters));
@@ -52,6 +56,7 @@ class SavedViews {
     this.all = {id: "all", name: "All work", filters: threadViews.filters(), group_by: this.$("group-by").value || "phase", version: 1};
     this.items = [this.all]; this.activeId = "all"; this.definition = this.all;
     this.navigation = {}; this.threads = []; this.switchVersion = 0; this.busy = false; this.signature = "";
+    this.saves = new Map();
     try { this.navigation = JSON.parse(storage?.getItem(this.key) || "{}"); } catch { /* Optional window state. */ }
     if (!this.navigation || typeof this.navigation !== "object" || Array.isArray(this.navigation)) this.navigation = {};
     this.bind();
@@ -84,7 +89,57 @@ class SavedViews {
     const old = this.navigation[this.activeId];
     this.navigation[this.activeId] = {...this.read(), version: this.definition.version,
       scroll: this.$("welcome").hidden ? old?.scroll || 0 : this.$("welcome").scrollTop};
+    this.storeNavigation();
+  }
+  storeNavigation() {
     try { this.storage?.setItem(this.key, JSON.stringify(this.navigation)); } catch { /* Optional window state. */ }
+  }
+  effective(view) {
+    if (view.id === this.activeId) return this.read();
+    const pending = this.saves.get(view.id), remembered = this.navigation[view.id];
+    return pending?.value || (remembered?.version === view.version ? remembered : view);
+  }
+  persist() {
+    this.remember();
+    return this.save(this.definition, this.read());
+  }
+  save(definition, value) {
+    const id = definition.id;
+    if (id === "all") { this.render(); return Promise.resolve(); }
+    let pending = this.saves.get(id);
+    if (!pending && threadViews.same(definition, value)) return Promise.resolve();
+    if (!pending) {
+      pending = {definition, value, promise: null, error: null};
+      this.saves.set(id, pending);
+    }
+    pending.value = value;
+    if (!pending.promise) {
+      pending.error = null;
+      // Serialize updates to each view and coalesce edits made during a request.
+      // Keep the original version on failure so another window's edit is safe.
+      pending.promise = Promise.resolve().then(async () => {
+        while (!threadViews.same(pending.definition, pending.value)) {
+          const updated = await this.api("views/" + encodeURIComponent(id),
+            {filters: pending.value.filters, group_by: pending.value.group_by, version: pending.definition.version});
+          pending.definition = updated;
+          this.items = this.items.map(view => view.id === id ? updated : view);
+          if (this.activeId === id) this.definition = updated;
+          if (this.navigation[id]) this.navigation[id].version = updated.version;
+          this.storeNavigation();
+        }
+      }).catch(async error => {
+        pending.error = error;
+        // Reset must use the latest definition after a version conflict.
+        try { this.sync((await this.api("views")).data); } catch { /* Retry remains available offline. */ }
+        this.onError(error);
+      }).finally(() => {
+        pending.promise = null;
+        if (!pending.error) this.saves.delete(id);
+        this.render();
+      });
+    }
+    this.render();
+    return pending.promise;
   }
   async start() {
     this.items = [this.all, ...(await this.api("views")).data];
@@ -95,12 +150,16 @@ class SavedViews {
     const remembered = this.navigation[this.activeId];
     this.apply(remembered?.version === this.definition.version ? remembered : this.definition);
     this.render();
+    // Retain filters remembered by older clients instead of silently widening
+    // their named views on upgrade. Never replace a newer saved definition.
+    await Promise.all(this.items.filter(view => view.id !== "all" && this.navigation[view.id]?.version === view.version)
+      .map(view => this.save(view, this.navigation[view.id])));
   }
   sync(items) {
     const dirty = this.dirty();
     this.items = [this.all, ...items];
     const exists = this.items.some(view => view.id === this.activeId);
-    if (!exists || (!dirty && this.definition.version !== this.current().version)) {
+    if (!exists || (!dirty && !this.saves.has(this.activeId) && this.definition.version !== this.current().version)) {
       if (!exists) this.activeId = "all";
       this.definition = this.current(); this.apply(this.definition);
       this.saveActive();
@@ -116,19 +175,32 @@ class SavedViews {
     this.$("welcome").scrollTop = Number.isFinite(scroll) ? Math.max(0, scroll) : 0;
   }
   async activate(id, reset = false) {
+    if (reset) await this.saves.get(id)?.promise;
     const target = this.items.find(view => view.id === id);
     if (!target) return;
     this.remember();
     const version = ++this.switchVersion;
-    this.activeId = id; this.definition = target;
+    if (reset) { this.saves.delete(id); delete this.navigation[id]; }
+    const pending = this.saves.get(id);
+    this.activeId = id; this.definition = pending?.definition || target;
     const remembered = this.navigation[id];
-    this.apply(!reset && remembered?.version === target.version ? remembered : target);
-    if (reset) delete this.navigation[id];
+    this.apply(pending?.value || (!reset && remembered?.version === target.version ? remembered : target));
     this.saveActive(); this.closeMenu(); this.render();
     const changing = this.onSwitch();
     this.focusActive();
     await changing;
     if (version === this.switchVersion) this.restoreScroll();
+  }
+  async overview(filters, group = "phase") {
+    // Agent links are temporary All work filters. Never autosave them into the
+    // named view the user happened to have open when the request arrived.
+    this.remember();
+    ++this.switchVersion;
+    this.activeId = "all"; this.definition = this.all;
+    this.apply({filters, group_by: group});
+    this.remember(); this.saveActive(); this.closeMenu(); this.render();
+    await this.onSwitch();
+    this.$("welcome").scrollTop = 0;
   }
   focusActive() {
     const tab = this.$("view-tabs").querySelector('[aria-selected="true"]');
@@ -137,9 +209,11 @@ class SavedViews {
   closeMenu() { this.$("view-menu").open = false; this.$("filter-menu").open = false; }
   changed() {
     const dirty = this.dirty(), custom = this.activeId !== "all";
-    this.$("reset-view").hidden = !dirty;
+    const pending = this.saves.get(this.activeId);
+    this.$("reset-view").hidden = !dirty || (custom && !pending?.error);
     this.$("update-view").hidden = !dirty || !custom;
-    this.$("update-view").disabled = this.busy;
+    this.$("update-view").textContent = pending?.promise ? "Saving…" : pending?.error ? "Retry saving" : "Save filters";
+    this.$("update-view").disabled = this.busy || Boolean(pending?.promise);
     this.$("view-menu").hidden = !custom;
     this.$("view-move-left").disabled = this.items.indexOf(this.current()) <= 1 || this.busy;
     this.$("view-move-right").disabled = this.current() === this.items.at(-1) || this.busy;
@@ -149,7 +223,7 @@ class SavedViews {
   render(threads = this.threads) {
     this.threads = threads;
     this.changed();
-    const badges = this.items.map(view => threadViews.badges(threads, view.filters));
+    const badges = this.items.map(view => threadViews.badges(threads, this.effective(view).filters));
     const signature = JSON.stringify([this.items, this.activeId, badges]);
     if (signature === this.signature) return;
     this.signature = signature;
@@ -161,14 +235,16 @@ class SavedViews {
       button.setAttribute("role", "tab"); button.setAttribute("aria-controls", "welcome");
       button.setAttribute("aria-selected", String(view.id === this.activeId)); button.tabIndex = view.id === this.activeId ? 0 : -1;
       const label = this.doc.createElement("span"); label.className = "view-tab-name"; label.textContent = view.name; button.append(label);
-      button.title = view.name + " · " + counts.attention + " need you" + (counts.completed ? " · New completed results" : "");
+      button.title = view.name + " · " + counts.attention + " in attention" +
+        (counts.active ? " · Active work" : "") + (counts.completed ? " · New responses" : "");
       button.setAttribute("aria-label", button.title);
       if (counts.attention) {
         const badge = this.doc.createElement("span"); badge.className = "view-attention"; badge.textContent = String(counts.attention);
         badge.setAttribute("aria-hidden", "true"); button.append(badge);
       }
-      if (counts.completed) {
-        const dot = this.doc.createElement("span"); dot.className = "view-completed"; dot.setAttribute("aria-hidden", "true"); button.append(dot);
+      if (counts.active || counts.completed) {
+        const dot = this.doc.createElement("span"); dot.className = counts.active ? "view-active" : "view-completed";
+        dot.setAttribute("aria-hidden", "true"); button.append(dot);
       }
       button.onclick = () => this.activate(view.id).catch(this.onError);
       tabs.append(button);
@@ -179,11 +255,14 @@ class SavedViews {
   async mutation(fn) {
     if (this.busy) return;
     this.busy = true; this.changed(); this.$("save-view").disabled = true;
-    try { await fn(); }
+    try { await Promise.all([...this.saves.values()].map(pending => pending.promise)); await fn(); }
     catch (error) { this.onError(error); }
     finally { this.busy = false; this.$("save-view").disabled = false; this.render(); }
   }
-  openDialog(mode) {
+  async openDialog(mode) {
+    const id = this.activeId;
+    await this.saves.get(id)?.promise;
+    if (this.activeId !== id) return;
     this.closeMenu();
     // Capture the target and definition so polling or navigation cannot retarget a save.
     const view = this.current();
@@ -197,27 +276,27 @@ class SavedViews {
     this.$("view-dialog").showModal(); this.$("view-name").focus();
   }
   bind() {
-    this.$("add-view").onclick = () => this.openDialog("create");
+    this.$("add-view").onclick = () => this.openDialog("create").catch(this.onError);
     this.$("reset-view").onclick = () => this.activate(this.activeId, true).catch(this.onError);
-    this.$("update-view").onclick = () => this.mutation(async () => {
-      const id = this.activeId, value = this.read();
-      const updated = await this.api("views/" + encodeURIComponent(id), {...value, version: this.definition.version});
-      this.items = this.items.map(view => view.id === id ? updated : view);
-      if (this.activeId === id) this.definition = updated;
-      this.remember();
-    });
-    for (const mode of ["rename", "duplicate"]) this.$("view-" + mode).onclick = () => this.openDialog(mode);
-    for (const direction of ["left", "right"]) this.$("view-move-" + direction).onclick = () => this.mutation(async () => {
-      const result = await this.api("views/" + encodeURIComponent(this.activeId) + "/move", {direction});
-      this.sync(result.data); this.closeMenu(); this.render(); this.focusActive();
-    });
-    this.$("view-delete").onclick = () => this.mutation(async () => {
+    this.$("update-view").onclick = () => this.persist();
+    for (const mode of ["rename", "duplicate"]) this.$("view-" + mode).onclick = () => this.openDialog(mode).catch(this.onError);
+    for (const direction of ["left", "right"]) this.$("view-move-" + direction).onclick = () => {
       const id = this.activeId;
-      const result = await this.api("views/" + encodeURIComponent(id) + "/delete", {version: this.definition.version});
-      this.items = [this.all, ...result.data];
-      await this.activate("all");
-      delete this.navigation[id]; this.remember();
-    });
+      return this.mutation(async () => {
+        const result = await this.api("views/" + encodeURIComponent(id) + "/move", {direction});
+        this.sync(result.data); this.closeMenu(); this.render(); this.focusActive();
+      });
+    };
+    this.$("view-delete").onclick = () => {
+      const id = this.activeId, definition = this.definition, pending = this.saves.get(id);
+      return this.mutation(async () => {
+        const result = await this.api("views/" + encodeURIComponent(id) + "/delete",
+          {version: (pending?.definition || definition).version});
+        this.items = [this.all, ...result.data];
+        if (this.activeId === id) await this.activate("all");
+        this.saves.delete(id); delete this.navigation[id]; this.remember();
+      });
+    };
     this.$("view-form").onsubmit = event => {
       event.preventDefault();
       return this.mutation(async () => {

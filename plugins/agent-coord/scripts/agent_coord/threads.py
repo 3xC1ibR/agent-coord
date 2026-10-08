@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from .store import CoordinationError
 from .organization import OrganizationStore, UNSET
+from .attention import AttentionStore
 
 PHASES = {"discussion", "investigation", "planning", "implementation", "validation", "deployment", "finished"}
 ATTENTION_STATES = {"now", "later", "archived"}
@@ -62,7 +63,9 @@ class ThreadStore:
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     turn_started_at REAL, turn_id TEXT, turn_key TEXT,
                     seen_checkpoint_id INTEGER NOT NULL DEFAULT 0,
-                    seen_completion_id INTEGER NOT NULL DEFAULT 0
+                    seen_completion_id INTEGER NOT NULL DEFAULT 0,
+                    handled_checkpoint_id INTEGER NOT NULL DEFAULT 0,
+                    handled_completion_id INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS thread_checkpoints (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,6 +96,14 @@ class ThreadStore:
             # Serialize upgrades across independently running terminal hooks.
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(work_threads)")}
+            for field in ("forked_from_thread_id", "forked_from_turn_id"):
+                if field not in columns:
+                    db.execute(f"ALTER TABLE work_threads ADD COLUMN {field} TEXT")
+            # Reading a response or finishing work never established that the
+            # user handled it. Existing open responses therefore remain pending.
+            for field in ("handled_checkpoint_id", "handled_completion_id"):
+                if field not in columns:
+                    db.execute(f"ALTER TABLE work_threads ADD COLUMN {field} INTEGER NOT NULL DEFAULT 0")
             if "pinned" not in columns:
                 db.execute("ALTER TABLE work_threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
             if "turn_key" not in columns:
@@ -116,6 +127,7 @@ class ThreadStore:
                         db.execute("UPDATE work_threads SET title_source = 'user' WHERE thread_id = ?", (row["thread_id"],))
 
         self.organization = OrganizationStore(store)
+        self.attention = AttentionStore(store)
 
     def ensure(self, session_id: str) -> dict:
         session = self.store.get_session(session_id)
@@ -146,9 +158,30 @@ class ThreadStore:
                                    WHERE thread_id = ? AND turn_key = ?""",
                                 (row["thread_id"], row["turn_key"])).fetchone()
         result["turn_completion"] = dict(completion) if completion else None
+        result["response_classification"] = self.attention.read(db, result)
+        # Completing a reply does not advance an investigation to delivery. Keep
+        # its last real activity, including checkpoints written by older clients.
+        phase = latest["phase"] if latest else "new"
+        classification = result["response_classification"]
+        choice = classification["choice"] if classification and classification["status"] == "classified" else None
+        if phase == "finished":
+            previous = db.execute("""SELECT phase FROM thread_checkpoints WHERE thread_id = ?
+                                     AND phase != 'finished' ORDER BY id DESC LIMIT 1""", (row["thread_id"],)).fetchone()
+            prior = previous["phase"] if previous else "new"
+            if choice == "findings":
+                phase = prior if prior in {"discussion", "investigation", "planning"} else "investigation"
+            elif choice in {"update", "blocked", "review"}:
+                phase = prior
+            elif choice != "done" and latest["author"] != "user" and prior not in {"implementation", "validation", "deployment"}:
+                phase = prior
+        result["work_phase"] = "investigation" if phase == "discussion" else phase
         result["unread_result"] = bool(completion and completion["status"] != "interrupted"
                                        and completion["id"] > row["seen_completion_id"])
         result["unread"] = bool(result["unread_result"] or (latest and latest["id"] > row["seen_checkpoint_id"]))
+        result["unhandled_response"] = bool(
+            (completion and completion["status"] != "interrupted" and completion["id"] > row["handled_completion_id"])
+            # Legacy threads may have a saved result without turn receipts.
+            or (not row["turn_key"] and latest and latest["id"] > row["handled_checkpoint_id"]))
         result["links"] = [dict(link) for link in db.execute("SELECT * FROM thread_links WHERE thread_id = ? ORDER BY id", (row["thread_id"],))]
         if history:
             result["checkpoints"] = [dict(cp) for cp in db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC", (row["thread_id"],))]
@@ -176,8 +209,18 @@ class ThreadStore:
                     if (repository_id is UNSET or thread["repository_id"] == repository_id)
                     and (project_id is UNSET or thread["project_id"] == project_id)]
 
+    def record_fork(self, thread_id: str, source: dict, *, turn_id: str | None = None) -> None:
+        """Copy context and lineage, leaving all execution and receipt state fresh."""
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""UPDATE work_threads SET forked_from_thread_id = ?, forked_from_turn_id = ?,
+                          original_request = ?, title_source = 'auto' WHERE thread_id = ?""",
+                       (source["thread_id"], turn_id, source["original_request"], thread_id))
+            self.organization.update(db, thread_id, repository_id=source["repository_id"], project_id=source["project_id"])
+
     def update(self, thread_id: str, *, title=None, attention=None, pinned=UNSET, seen=False,
-               seen_checkpoint_id=None, seen_completion_id=None, repository_id=UNSET, project_id=UNSET) -> dict:
+               seen_checkpoint_id=None, seen_completion_id=None, handled=False,
+               handled_checkpoint_id=None, handled_completion_id=None, repository_id=UNSET, project_id=UNSET) -> dict:
         self.get(thread_id)
         if title is not None:
             title = _text(title, "Thread title", 160)
@@ -187,8 +230,23 @@ class ThreadStore:
             raise CoordinationError("Pinned must be true or false.")
         if not seen and (seen_checkpoint_id is not None or seen_completion_id is not None):
             raise CoordinationError("Read markers require seen: true.")
+        if not isinstance(handled, bool):
+            raise CoordinationError("Handled must be true or false.")
+        if handled and (handled_checkpoint_id is None or handled_completion_id is None):
+            raise CoordinationError("Handling requires the displayed checkpoint and completion IDs.")
+        if not handled and (handled_checkpoint_id is not None or handled_completion_id is not None):
+            raise CoordinationError("Handled markers require handled: true.")
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if handled:
+                current = self._read(db, db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone())
+                checkpoint = current["checkpoint"] if not current["checkpoint_stale"] else None
+                if checkpoint and checkpoint["next_actor"] == "user" and checkpoint["next_action"]:
+                    raise CoordinationError("Answer the pending question or resolve the requested action before marking this response handled.")
+                classification = current["response_classification"]
+                if classification and classification["status"] == "classified" and classification["choice"] == "blocked":
+                    raise CoordinationError("Resolve the blocker before marking this response handled.")
+                self._mark_receipts(db, thread_id, handled_checkpoint_id, handled_completion_id, kind="handled")
             if seen:
                 self._mark_seen(db, thread_id, seen_checkpoint_id, seen_completion_id)
             self.organization.update(db, thread_id, repository_id=repository_id, project_id=project_id)
@@ -202,16 +260,27 @@ class ThreadStore:
 
     @staticmethod
     def _mark_seen(db, thread_id, checkpoint_id=None, completion_id=None):
+        ThreadStore._mark_receipts(db, thread_id, checkpoint_id, completion_id, kind="seen")
+
+    @staticmethod
+    def _mark_receipts(db, thread_id, checkpoint_id=None, completion_id=None, *, kind):
         # UI receipts name only the records actually displayed. A reply arriving
-        # between the detail read and this update must remain unread.
-        for table, field, cursor in (("thread_checkpoints", "seen_checkpoint_id", checkpoint_id),
-                                     ("turn_completions", "seen_completion_id", completion_id)):
+        # between rendering and this update must remain unread and unhandled.
+        for table, field, cursor in (("thread_checkpoints", kind + "_checkpoint_id", checkpoint_id),
+                                     ("turn_completions", kind + "_completion_id", completion_id)):
             if cursor is not None and (type(cursor) is not int or cursor < 0 or (cursor > 0 and not db.execute(
                     f"SELECT 1 FROM {table} WHERE thread_id = ? AND id = ?", (thread_id, cursor)).fetchone())):
-                raise CoordinationError("Read markers must identify a displayed checkpoint or completion in this thread.")
+                label = "Read" if kind == "seen" else "Handled"
+                raise CoordinationError(f"{label} markers must identify a displayed checkpoint or completion in this thread.")
             db.execute(f"""UPDATE work_threads SET {field} = MAX({field}, COALESCE(
                 (SELECT MAX(id) FROM {table} WHERE thread_id = ? AND (? IS NULL OR id <= ?)), 0))
                 WHERE thread_id = ?""", (thread_id, cursor, cursor, thread_id))
+
+    def user_message(self, session_id: str) -> None:
+        """Resume a parked thread when a user message is accepted."""
+        with self.store._connection() as db:
+            db.execute("UPDATE work_threads SET attention = 'now', updated_at = ? WHERE thread_id = ? AND attention = 'later'",
+                       (self.store.clock(), session_id))
 
     def start_turn(self, session_id: str, *, prompt=None, turn_id=None) -> None:
         self.ensure(session_id)
@@ -222,6 +291,7 @@ class ThreadStore:
             if turn_id and row["turn_id"] == turn_id:
                 return
             self._mark_seen(db, session_id)
+            self._mark_receipts(db, session_id, kind="handled")
             now = self.store.clock()
             request = row["original_request"]
             title = row["title"]
@@ -387,7 +457,9 @@ class ThreadStore:
             "Distinguish proposals, implemented changes, validation, and deployment. "
             'Set next_actor to user only when progress or completion requires a specific user answer, approval, decision, or action; describe it in next_action. '
             "Keep optional advice, invitations to continue, and nonblocking reminders in summary. "
-            'When the requested work is complete and nothing remains, use phase finished, next_action "", and next_actor nobody. '
+            'Use phase for the underlying activity, not whether you finished replying: an answered investigation stays investigation, and a completed plan stays planning. '
+            'Use finished only after actually delivering the requested implementation or execution, including validation/deployment if requested, with nothing remaining; use next_action "" and next_actor nobody. '
+            'For a status question during deployment, keep deployment. Required user review belongs in validation with next_actor user. '
             "If work remains, keep its actual phase and assign any required next step to its actual owner. Ending an agent turn does not create a required user action. "
             "Record unresolved decisions without inventing follow-up work. Skip unchanged checkpoints. "
             "Use exact artifact references; link kinds are pull_request, document, issue, bead, branch, other. "

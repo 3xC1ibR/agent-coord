@@ -15,6 +15,7 @@ function setup() {
     refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id,
   };
   vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), context);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function itemText(")), context);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), context);
   vm.runInContext(source.slice(source.indexOf("function composerKeydown("), source.indexOf('$("message").onkeydown')), context);

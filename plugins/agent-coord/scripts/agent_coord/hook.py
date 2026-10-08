@@ -15,7 +15,7 @@ from .store import (
     path_is_in_scope,
 )
 from .usage import capture_delegation_usage
-from .zellij_wake import enable_from_environment
+from .zellij_wake import WAKE_PROMPT, enable_from_environment
 
 WRITE_TOOLS = {"apply_patch", "Edit", "Write"}
 PATCH_PATH = re.compile(
@@ -214,6 +214,12 @@ def handle(
                 coordination.threads.capture_request(session_id, prompt)
         else:
             coordination.threads.start_turn(session_id, prompt=payload.get("prompt"), turn_id=payload.get("turn_id"))
+            # Browser sends own this transition; their hook may arrive after the
+            # user parks an already-running turn. Automatic inbox wakes are not
+            # a user returning to a terminal conversation.
+            prompt = payload.get("prompt")
+            if not isinstance(prompt, str) or prompt.strip() != WAKE_PROMPT:
+                coordination.threads.user_message(session_id)
         if session["bead_id"] is None and session["activity"] == "idle":
             coordination.touch(session_id, "discussing", turn_active=True)
         else:

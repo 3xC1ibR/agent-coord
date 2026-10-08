@@ -1,55 +1,57 @@
 "use strict";
 
-// Shared by the overview and navigation. Grouping never changes saved placement.
+// Stage, attention reason, and saved placement are independent.
 const threadGrouping = (() => {
   const phases = [
-    ["discussion", "Discussing"], ["investigation", "Investigating"],
+    ["new", "Getting started"], ["investigation", "Investigating"],
     ["planning", "Planning"], ["implementation", "Implementing"],
-    ["validation", "Validating"], ["deployment", "Deploying"],
-    ["finished", "Completed"], ["new", "Getting started"],
+    ["validation", "Validating"], ["deployment", "Deploying"], ["finished", "Done"],
   ];
-
-  function awaitsUser(thread) {
-    return thread.attention === "now" && ["input", "reply", "failed"].includes(thread.response_state);
+  const reasons = {
+    blocked: {rank: 0, label: "Blocked"}, review: {rank: 1, label: "Review requested"},
+    update: {rank: 2, label: "Update"}, findings: {rank: 3, label: "Findings ready"},
+    reply: {rank: 3, label: "Reply"}, done: {rank: 4, label: "✓ Done"},
+  };
+  function phase(thread) {
+    const value = thread.work_phase || thread.checkpoint?.phase;
+    return value === "discussion" ? "investigation" : phases.some(([key]) => key === value) ? value : "new";
   }
+  function phaseLabel(thread) { return phases.find(([key]) => key === phase(thread))[1]; }
+  function reason(thread) {
+    const key = thread.attention_reason || ({input: "blocked", action: "review", failed: "blocked", update: "update"}[thread.response_state]) || "reply";
+    return {key, ...(reasons[key] || reasons.reply)};
+  }
+  function awaitsUser(thread) {
+    return thread.attention === "now" && (typeof thread.needs_attention === "boolean"
+      ? thread.needs_attention : ["input", "action", "reply", "failed", "update"].includes(thread.response_state));
+  }
+  const stable = (a, b) => (a.created_at || 0) - (b.created_at || 0) || a.thread_id.localeCompare(b.thread_id);
+  const stageOrder = (a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || stable(a, b);
+  const attentionOrder = (a, b) => reason(a).rank - reason(b).rank ||
+    (a.attention_since || a.created_at || 0) - (b.attention_since || b.created_at || 0) || stable(a, b);
 
   function status(thread) {
     if (thread.attention === "archived") return {key: "idle", label: "Closed"};
-    const response = {
-      input: {key: "waiting", label: "Needs input"},
-      reply: {key: "waiting", label: "Your turn"},
-      completed: {key: "completed", label: "Completed"},
-      working: {key: "running", label: "Working"},
-      failed: {key: "failed", label: "Failed"},
-      interrupted: {key: "idle", label: "Stopped"},
-    }[thread.response_state];
-    return response || {key: thread.status, label: {
-      running: "Working", idle: "Ready", online: "Ready", saved: "Saved",
-      offline: "Offline", stale: "Inactive",
-    }[thread.status] || thread.status};
+    if (thread.response_state === "working" || thread.status === "running" && thread.response_state !== "input")
+      return {key: "running", label: "Working"};
+    if (["input", "action", "reply", "update", "failed"].includes(thread.response_state))
+      return {key: thread.response_state === "failed" ? "failed" : ["blocked", "review"].includes(reason(thread).key) ? "waiting" : "idle", label: reason(thread).label};
+    return {key: "idle", label: thread.response_state === "interrupted" ? "Stopped" : phaseLabel(thread)};
   }
-
   function groupThreads(threads) {
-    const pinned = threads.filter(thread => thread.pinned && thread.attention !== "archived");
-    const priority = threads.filter(thread => awaitsUser(thread) && !thread.pinned);
-    const rest = threads.filter(thread => !awaitsUser(thread) && !pinned.includes(thread));
-    const active = rest.filter(thread => thread.attention !== "later");
-    const completed = active.filter(thread => thread.attention !== "archived" && thread.response_state === "completed")
-      .sort((a, b) => Number(Boolean(b.unread)) - Number(Boolean(a.unread)));
-    const ongoing = active.filter(thread => !completed.includes(thread));
-    const known = new Set(phases.map(([key]) => key));
+    const now = threads.filter(thread => thread.attention === "now");
+    const priority = now.filter(awaitsUser).sort(attentionOrder);
     return {
-      pinned,
       priority,
-      completed,
-      phases: phases.map(([key, label]) => ({key, label, threads: ongoing.filter(thread =>
-        (known.has(thread.checkpoint?.phase) ? thread.checkpoint.phase : "new") === key)
-      })).filter(group => group.threads.length),
-      later: rest.filter(thread => thread.attention === "later"),
+      phases: phases.map(([key, label]) => ({key, label,
+        threads: now.filter(thread => !awaitsUser(thread) && phase(thread) === key).sort(stageOrder),
+        attention: priority.filter(thread => phase(thread) === key).length,
+      })),
+      later: threads.filter(thread => thread.attention === "later").sort(stageOrder),
+      closed: threads.filter(thread => thread.attention === "archived").sort(stable),
     };
   }
-
-  return {awaitsUser, groupThreads, status};
+  return {awaitsUser, groupThreads, status, phase, phaseLabel, reason, attentionOrder};
 })();
 
 if (typeof module !== "undefined") module.exports = threadGrouping;

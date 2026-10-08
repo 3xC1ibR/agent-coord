@@ -8,11 +8,17 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 function setup() {
   const elements = new Map();
   const context = {$: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
-    state: {selected: "one", detail: {session: {model: "test-model", effort: "high", yolo: 1}, work_thread: {browser_session: true, attention: "now", title: "One"}, running: false}, commandFeedback: new Map(), drafts: new Map(), closing: new Set()},
-    renderStatus() {}, refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id};
+    state: {selected: "one", sessions: [{thread_id: "one"}], detail: {session: {model: "test-model", effort: "high", yolo: 1}, work_thread: {thread_id: "one", browser_session: true, attention: "now", title: "One"}, running: false}, commandFeedback: new Map(), drafts: new Map(), closing: new Set()},
+    renderModelPicker() {}, renderStatus() {}, refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id,
+    threadPath: id => "threads/" + id,
+    select: async id => { context.state.selected = id; },
+    goHome: () => { context.state.selected = null; context.state.detail = null; }};
   vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), context);
   vm.runInContext(source.slice(source.indexOf("function renderSessionSettings("), source.indexOf("function renderStatus(")), context);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), context);
+  vm.runInContext(source.slice(source.indexOf("async function toggleThreadClosed("), source.indexOf('$("close-thread").onclick')), context);
+  vm.runInContext(source.slice(source.indexOf("async function forkThread("), source.indexOf("async function boot(")), context);
   return context;
 }
 
@@ -120,4 +126,103 @@ test("switching threads during a command preserves the new thread draft", async 
   await c.sendMessage();
   assert.equal(c.$("message").value, "draft two");
   assert.equal(c.state.commandFeedback.get("one"), "Available models");
+});
+
+test("fork command uses the thread endpoint, clears the command and opens the fork", async () => {
+  const c = setup();
+  c.$("message").value = "  /FORK "; c.state.drafts.set("one", "  /FORK ");
+  c.state.commandFeedback.set("one", "Old feedback");
+  c.state.rollUp = {ticket() {}, responded() { assert.fail("A thread command must not count as a reply"); }};
+  c.api = async (path, body) => {
+    assert.equal(path, "threads/one/fork");
+    assert.deepEqual(Object.keys(body), []);
+    return {thread_id: "child"};
+  };
+  c.select = async id => {
+    assert.equal(c.$("message").value, "", "Clear the command before navigation saves the source draft");
+    c.state.selected = id;
+  };
+  await c.sendMessage();
+  assert.equal(c.state.selected, "child");
+  assert.equal(c.state.drafts.has("one"), false);
+  assert.equal(c.state.commandFeedback.has("one"), false);
+  assert.equal(c.state.forking, false);
+  assert.equal(c.state.busy, false);
+});
+
+test("close commands run immediately for both providers even when queueing", async () => {
+  for (const client of ["codex", "claude"]) {
+    const c = setup();
+    c.state.detail.work_thread.client = client;
+    c.state.detail.running = true; c.state.detail.activeTurn = "turn";
+    c.$("message").value = "/close";
+    c.api = async (path, body) => {
+      assert.equal(path, "threads/one/close");
+      assert.deepEqual(Object.keys(body), []);
+    };
+    await c.sendMessage("queue");
+    assert.equal(c.state.selected, null);
+    assert.equal(c.state.sessions.length, 0);
+    assert.equal(c.$("view").value, "active");
+    assert.equal(c.$("message").value, "");
+    assert.equal(c.state.closing.size, 0);
+    assert.equal(c.state.busy, false);
+  }
+});
+
+test("thread command errors preserve drafts and never fall through to model prompts", async () => {
+  for (const command of ["/fork", "/close"]) {
+    const c = setup();
+    c.$("message").value = command; c.state.drafts.set("one", command);
+    let calls = 0;
+    c.api = async path => {
+      assert.equal(path, "threads/one" + command); calls++;
+      throw new Error(command === "/fork" ? "Fork requires an open, idle Codex thread" : "The turn is still stopping");
+    };
+    await assert.rejects(c.sendMessage(), /Fork requires|still stopping/);
+    assert.equal(calls, 1);
+    assert.equal(c.$("message").value, command);
+    assert.equal(c.state.drafts.get("one"), command);
+    assert.equal(c.state.selected, "one");
+    assert.equal(c.state.busy, false);
+    assert.equal(c.state.closing.size, 0);
+  }
+});
+
+test("thread commands reject extra arguments and attachments without taking action", async () => {
+  for (const command of ["/fork", "/close"]) {
+    const c = setup();
+    c.api = async () => assert.fail("Invalid command must not invoke an action or send a message");
+    c.$("message").value = command + " extra";
+    await assert.rejects(c.sendMessage(), /without arguments/);
+    assert.equal(c.$("message").value, command + " extra");
+    c.$("message").value = command;
+    c.state.attachments = {snapshot: () => [{name: "image.png", url: "image"}], pending: () => false};
+    await assert.rejects(c.sendMessage(), /Remove attached images/);
+    assert.equal(c.$("message").value, command);
+  }
+});
+
+test("navigation during thread commands preserves the new thread and draft", async () => {
+  for (const command of ["/fork", "/close"]) {
+    const c = setup();
+    c.$("message").value = command; c.state.drafts.set("one", command);
+    c.api = async path => {
+      assert.equal(path, "threads/one" + command);
+      c.state.selected = "two"; c.$("message").value = "Draft two";
+      return {thread_id: "child"};
+    };
+    await c.sendMessage();
+    assert.equal(c.state.selected, "two");
+    assert.equal(c.$("message").value, "Draft two");
+    assert.equal(c.state.drafts.has("one"), false);
+  }
+});
+
+test("fork preserves text entered while the command runs", async () => {
+  const c = setup();
+  c.$("message").value = "/fork";
+  c.api = async () => { c.$("message").value = "New source draft"; return {thread_id: "child"}; };
+  c.select = async () => assert.equal(c.$("message").value, "New source draft");
+  await c.sendMessage();
 });

@@ -47,6 +47,19 @@ class ThreadAttentionTests(unittest.TestCase):
     def thread(self):
         return self.sessions.work_thread("terminal")
 
+    def test_explicit_delivery_is_done_without_jev_and_stays_visible_after_reading(self):
+        self.start()
+        self.checkpoint("implementation", "agent")
+        self.checkpoint("finished", "nobody")
+        self.finish()
+        delivered = self.thread()
+        self.assertEqual(delivered["attention_reason"], "done")
+        self.assertTrue(delivered["needs_attention"])
+        read = self.sessions.update_work_thread("terminal", {"seen": True})
+        self.assertFalse(read["needs_attention"])
+        self.assertEqual(read["work_phase"], "finished")
+        self.assertEqual(read["attention"], "now")
+
     def test_investigation_reply_survives_read_and_restart_until_next_prompt(self):
         self.start()
         self.checkpoint()
@@ -79,15 +92,16 @@ class ThreadAttentionTests(unittest.TestCase):
         result = self.sessions.update_work_thread("terminal", {
             "seen": True, "seen_checkpoint_id": checkpoint["id"], "seen_completion_id": 0,
         })
-        self.assertEqual(result["response_state"], "completed")
-        self.assertFalse(result["needs_attention"])
+        self.assertEqual(result["response_state"], "reply")
+        self.assertTrue(result["needs_attention"])
         self.assertTrue(result["unread_result"])
         read = self.sessions.update_work_thread("terminal", {
             "seen": True, "seen_checkpoint_id": checkpoint["id"],
             "seen_completion_id": result["turn_completion"]["id"],
         })
         self.assertFalse(read["unread"])
-        self.assertEqual(read["response_state"], "completed")
+        self.assertEqual(read["response_state"], "reply")
+        self.assertTrue(read["needs_attention"])
         self.assertFalse(self.sessions.update_work_thread("terminal", {
             "seen": True, "seen_checkpoint_id": 0, "seen_completion_id": 0,
         })["unread"], "an older receipt must not regress read state")
@@ -122,9 +136,9 @@ class ThreadAttentionTests(unittest.TestCase):
 
     def test_explicit_user_action_survives_read_and_legacy_missing_completion(self):
         self.checkpoint("planning", "user")
-        self.assertEqual(self.thread()["response_state"], "reply")
+        self.assertEqual(self.thread()["response_state"], "input")
         self.sessions.update_work_thread("terminal", {"seen": True, "attention": "later"})
-        self.assertTrue(self.thread()["needs_attention"])
+        self.assertFalse(self.thread()["needs_attention"])
         self.assertEqual(self.thread()["attention"], "later")
         self.sessions.update_work_thread("terminal", {"attention": "archived"})
         self.assertFalse(self.thread()["needs_attention"])
@@ -195,7 +209,7 @@ class ThreadAttentionTests(unittest.TestCase):
         self.assertTrue(reopened.threads.get("terminal")["unread_result"])
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed only for frontend integration")
-    def test_api_reply_and_completed_task_land_in_separate_ui_groups(self):
+    def test_api_finished_and_discussion_responses_both_need_attention_until_handled(self):
         self.start()
         self.checkpoint()
         self.finish()
@@ -204,10 +218,15 @@ class ThreadAttentionTests(unittest.TestCase):
         self.checkpoint("finished", "nobody")
         self.finish()
         completed = self.thread()
+        handled = self.sessions.update_work_thread("terminal", {
+            "handled": True, "handled_checkpoint_id": completed["checkpoint"]["id"],
+            "handled_completion_id": completed["turn_completion"]["id"],
+        })
         completed["thread_id"] = "completed"
+        handled["thread_id"] = "handled"
         script = """const g = require('./plugins/agent-coord/scripts/agent_coord/web/thread-groups.js');
 const fs = require('node:fs'); const groups = g.groupThreads(JSON.parse(fs.readFileSync(0, 'utf8')));
-console.log(JSON.stringify({reply: groups.priority.map(t=>t.thread_id), completed: groups.completed.map(t=>t.thread_id)}));"""
-        result = subprocess.run([shutil.which("node"), "-e", script], input=json.dumps([reply, completed]),
+console.log(JSON.stringify({reply: groups.priority.map(t=>t.thread_id), stages: groups.phases.flatMap(g=>g.threads).map(t=>t.thread_id)}));"""
+        result = subprocess.run([shutil.which("node"), "-e", script], input=json.dumps([reply, completed, handled]),
                                 cwd=Path(__file__).resolve().parents[1], text=True, capture_output=True, timeout=10, check=True)
-        self.assertEqual(json.loads(result.stdout), {"reply": ["terminal"], "completed": ["completed"]})
+        self.assertEqual(json.loads(result.stdout), {"reply": ["terminal", "completed"], "stages": ["handled"]})

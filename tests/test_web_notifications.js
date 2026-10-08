@@ -4,7 +4,7 @@ const {test} = require("node:test");
 const TurnNotifications = require("../plugins/agent-coord/scripts/agent_coord/web/notifications.js");
 
 function fixture(shared = {}) {
-  shared.values ||= new Map(); shared.claims ||= new Set(); shared.shown ||= [];
+  shared.values ||= new Map(); shared.claims ||= new Set(); shared.approvalClaims ||= new Set(); shared.shown ||= [];
   const listeners = new Map(), opened = [], errors = [];
   let selected = null, focused = false, permissionRequests = 0;
   const button = {textContent: "", disabled: false, title: "", setAttribute(name, value) { this[name] = value; }};
@@ -25,6 +25,7 @@ function fixture(shared = {}) {
   const client = new TurnNotifications({
     button,
     claim: async id => { if (shared.claims.has(id)) return false; shared.claims.add(id); return true; },
+    claimApproval: async key => { if (shared.approvalClaims.has(key)) return false; shared.approvalClaims.add(key); return true; },
     selected: () => selected, openThread: id => opened.push(id), onError: error => errors.push(error),
   }, env);
   return {client, env, button, opened, errors, shared, listeners,
@@ -34,6 +35,50 @@ function fixture(shared = {}) {
   };
 }
 const completion = (id = 1, values = {}) => ({id, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "completed", ...values});
+const approval = (key = "request-one", values = {}) => ({request_key: key, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "approval", ...values});
+
+test("approval requests notify once across tabs and clicking opens their conversation", async () => {
+  const shared = {}, first = fixture(shared), second = fixture(shared);
+  await first.button.onclick();
+  second.env.Notification.permission = "granted";
+  await Promise.all([first.client.receive([approval()]), second.client.receive([approval()])]);
+  await first.client.receive([approval()]);
+  assert.equal(shared.shown.length, 1);
+  const notice = shared.shown[0];
+  assert.equal(notice.title, "agent-coord · Codex is requesting approval");
+  assert.equal(notice.options.body, "Check the build");
+  assert.equal(notice.options.tag, "agent-coord-approval-request-one");
+  await notice.onclick();
+  assert.deepEqual(first.opened, ["thread-one"]);
+  assert.equal(notice.closed, true);
+  await first.client.receive([approval("request-two"), completion()]);
+  assert.equal(shared.shown.length, 3, "new approvals and turn completion get independent alerts");
+  first.client.destroy(); second.client.destroy();
+});
+
+test("approval notifications respect opt-in and focused conversations", async () => {
+  const f = fixture();
+  await f.client.receive([approval()]);
+  assert.equal(f.shared.approvalClaims.size, 0);
+  await f.button.onclick();
+  f.focus("thread-one");
+  await f.client.receive([approval()]);
+  f.blur();
+  await f.client.receive([approval()]);
+  assert.equal(f.shared.shown.length, 0, "a focused approval stays consumed");
+  await f.client.receive([approval("new-request")]);
+  assert.equal(f.shared.shown.length, 1);
+  f.client.destroy();
+});
+
+test("resolved approval requests remain quiet when their claim fails", async () => {
+  const f = fixture();
+  await f.button.onclick();
+  f.client.claimApproval = async () => false;
+  await f.client.receive([approval()]);
+  assert.equal(f.shared.shown.length, 0);
+  f.client.destroy();
+});
 
 test("permission is requested only by the enable action, and can be turned off", async () => {
   const f = fixture();
@@ -117,7 +162,7 @@ test("threads without a named project use their repository or the app name", asy
   await f.button.onclick();
   await f.client.receive([completion(1, {project_name: null, repository_name: "repository"}), completion(2, {project_name: null})]);
   assert.equal(f.shared.shown[0].title, "repository · Turn finished");
-  assert.equal(f.shared.shown[1].title, "Agent Coord · Turn finished");
+  assert.equal(f.shared.shown[1].title, "Ribbon Field · Turn finished");
   f.client.destroy();
 });
 

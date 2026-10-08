@@ -7,6 +7,10 @@
   const escape = value => String(value).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
   function safeURL(value) {
     if (!value || /[\s\u0000-\u001f\u007f\\]/.test(value)) return false;
+    if (/^agentcoord:/i.test(value)) {
+      const navigation = typeof module !== "undefined" && module.exports ? require("./navigation.js") : root.agentCoordNavigation;
+      return navigation?.safe(value) || false;
+    }
     return /^(https?:\/\/|mailto:)/i.test(value) || (!/^[a-z][a-z\d+.-]*:/i.test(value) && !value.startsWith("//"));
   }
   function inline(text, depth = 0) {

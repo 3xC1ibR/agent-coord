@@ -20,17 +20,27 @@ test("filters intersect, include unassigned threads, and separate closed threads
   assert.deepEqual(ids({phase: "validation"}), []);
 });
 
-test("tab badges count pinned requests, exclude Later, and share completion read state", () => {
+test("tab badges share handled attention, include pins, and exclude Later", () => {
   const input = [thread("reply", {response_state: "reply", pinned: true}), thread("approval", {response_state: "input"}),
     thread("failure", {response_state: "failed"}), thread("later", {response_state: "reply", attention: "later"}),
-    thread("done", {response_state: "completed", unread_result: true}), thread("closed", {response_state: "reply", attention: "archived"})];
-  assert.deepEqual(threadViews.badges(input, {}), {attention: 3, completed: true});
-  assert.deepEqual(threadViews.badges(input, {show: "completed"}), {attention: 0, completed: true});
-  assert.deepEqual(threadViews.badges(input, {show: "archived"}), {attention: 0, completed: false});
+    thread("done", {response_state: "reply", unhandled_response: true, unread_result: true}), thread("closed", {response_state: "reply", attention: "archived"})];
+  assert.deepEqual(threadViews.badges(input, {}), {attention: 4, active: false, completed: true});
+  assert.deepEqual(threadViews.badges(input, {show: "completed"}), {attention: 0, active: false, completed: false});
+  assert.deepEqual(threadViews.badges(input, {show: "archived"}), {attention: 0, active: false, completed: false});
   assert.deepEqual(input.filter(t => threadViews.matches(t, {show: "attention"})), input.filter(grouping.awaitsUser));
   input[4].unread_result = false;
   for (const filter of [{repository: "rig"}, {project: "migration"}]) {
-    assert.deepEqual(threadViews.badges(input, filter), {attention: 3, completed: false});
+    assert.deepEqual(threadViews.badges(input, filter), {attention: 4, active: false, completed: false});
+  }
+});
+
+test("active-work badges follow the view's filters and ignore waiting or closed work", () => {
+  const input = [thread("running", {attention: "later"}), thread("waiting", {repository_id: "stoic", response_state: "input"}),
+    thread("closed", {repository_id: "stoic", attention: "archived"})];
+  assert.equal(threadViews.badges(input, {repository: "rig", project: "migration", phase: "implementation", search: "running", show: "later"}).active, true);
+  for (const filters of [{repository: "stoic"}, {project: "other"}, {phase: "finished"}, {search: "waiting"},
+    {show: "attention"}, {show: "completed"}, {show: "archived"}]) {
+    assert.equal(threadViews.badges(input, filters).active, false);
   }
 });
 
@@ -101,30 +111,46 @@ function setup({saved = [], windowStorage = storage(), preferences = storage()} 
   return {views, controls, doc, calls, records, errors, windowStorage, preferences, switches: () => switches};
 }
 
-test("switching remembers each view's filters, grouping, and scroll without saving temporary edits", async () => {
+test("an agent project link resets temporary filters without saving over the active named view", async () => {
+  const c = setup({saved: [{id: "review", name: "Review", filters: {project: "other", search: "invoice"}}]});
+  await c.views.start(); await c.views.activate("review");
+  const before = structuredClone(c.records);
+  await c.views.overview({project: "billing"});
+  assert.equal(c.views.activeId, "all");
+  assert.equal(c.controls.project.value, "billing");
+  assert.equal(c.controls.search.value, "");
+  assert.deepEqual(c.records, before);
+  assert.equal(c.calls.filter(call => call.body).length, 0);
+  await c.views.activate("review");
+  assert.equal(c.controls.project.value, "other");
+  assert.equal(c.controls.search.value, "invoice");
+});
+
+test("named views automatically save filters and grouping while keeping their own scroll", async () => {
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}},
     {id: "stoic", name: "Stoic", filters: {repository: "stoic"}, group_by: "none"}]});
   await c.views.start();
   await c.views.activate("rig");
-  c.controls.search.value = "Temporary search"; c.controls["group-by"].value = "project"; c.controls.welcome.scrollTop = 340;
+  c.controls.search.value = "Saved search"; c.controls["group-by"].value = "project"; c.controls.welcome.scrollTop = 340;
+  await c.views.persist();
   await c.views.activate("stoic");
   assert.equal(c.controls.search.value, ""); assert.equal(c.controls["group-by"].value, "none");
   c.controls.welcome.scrollTop = 92;
   await c.views.activate("rig");
-  assert.equal(c.controls.search.value, "Temporary search"); assert.equal(c.controls["group-by"].value, "project");
+  assert.equal(c.controls.search.value, "Saved search"); assert.equal(c.controls["group-by"].value, "project");
   assert.equal(c.controls.welcome.scrollTop, 340);
-  assert.equal(c.views.dirty(), true);
-  assert.equal(c.calls.filter(call => call.body).length, 0);
-  assert.equal(c.records[0].filters.search, "");
+  assert.equal(c.views.dirty(), false);
+  assert.equal(c.calls.filter(call => call.body).length, 1);
+  assert.equal(c.records[0].filters.search, "Saved search");
   await c.views.activate("rig", true);
-  assert.equal(c.controls.search.value, ""); assert.equal(c.views.dirty(), false);
+  assert.equal(c.controls.search.value, "Saved search"); assert.equal(c.views.dirty(), false);
 });
 
-test("update explicitly saves filters and survives a fresh window", async () => {
+test("automatic filter saving survives a fresh window", async () => {
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}}]});
   await c.views.start(); await c.views.activate("rig");
   c.controls["phase-filter"].value = "validation";
-  await c.controls["update-view"].onclick();
+  await c.views.persist();
   assert.equal(c.records[0].filters.phase, "validation"); assert.equal(c.views.dirty(), false);
   assert.equal(c.records[0].version, 2);
   const other = setup({saved: c.records, preferences: c.preferences});
@@ -170,17 +196,17 @@ test("optional browser storage cannot prevent view creation or navigation", asyn
 test("save, rename, duplicate, reorder and delete change only view definitions", async () => {
   const c = setup(); await c.views.start();
   c.controls.repository.value = "rig"; c.controls["group-by"].value = "repository";
-  c.controls["add-view"].onclick(); c.controls["view-name"].value = "Rig";
+  await c.controls["add-view"].onclick(); c.controls["view-name"].value = "Rig";
   await c.controls["view-form"].onsubmit({preventDefault() {}});
   const id = c.views.activeId;
   assert.equal(c.records[0].filters.repository, "rig");
   assert.equal(c.records[0].group_by, "repository");
   assert.equal(c.controls["view-dialog"].open, false);
   c.controls.search.value = "temporary";
-  c.controls["view-rename"].onclick(); c.controls["view-name"].value = "Rig work";
+  await c.controls["view-rename"].onclick(); c.controls["view-name"].value = "Rig work";
   await c.controls["view-form"].onsubmit({preventDefault() {}});
   assert.equal(c.records[0].name, "Rig work"); assert.equal(c.controls.search.value, "temporary");
-  c.controls["view-duplicate"].onclick(); c.controls["view-name"].value = "Rig copy";
+  await c.controls["view-duplicate"].onclick(); c.controls["view-name"].value = "Rig copy";
   await c.controls["view-form"].onsubmit({preventDefault() {}});
   const copy = c.views.activeId;
   assert.notEqual(copy, id); assert.equal(c.records[1].filters.search, "");
@@ -199,7 +225,7 @@ test("tabs remain accessible as live counts update and text editing retains its 
   await c.views.start(); await c.views.activate("rig");
   c.views.render([thread("approval", {response_state: "input"})]);
   assert.equal(c.doc.activeElement.dataset.viewId, "rig");
-  assert.match(c.doc.activeElement.attributes["aria-label"], /1 need you/);
+  assert.match(c.doc.activeElement.attributes["aria-label"], /1 in attention/);
   assert.equal(c.controls["view-tabs"].children.filter(el => el.tabIndex === 0).length, 1);
   let prevented = false;
   c.doc.listeners.keydown({key: "ArrowLeft", ctrlKey: true, shiftKey: true,
@@ -210,14 +236,143 @@ test("tabs remain accessible as live counts update and text editing retains its 
   assert.equal(c.views.navigation.rig.scroll, 123);
 });
 
-test("reload restores a window's temporary state and falls back safely for a deleted active view", async () => {
+test("view dots show running work and return to the unread-result state when it stops", async () => {
+  const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}},
+    {id: "stoic", name: "Stoic", filters: {repository: "stoic"}}]});
+  await c.views.start(); await c.views.activate("rig");
+  const running = thread("running"), completed = thread("done", {response_state: "reply", unhandled_response: true, unread_result: true});
+  c.views.render([running, completed]);
+  const tab = id => c.controls["view-tabs"].children.find(el => el.dataset.viewId === id);
+  const dots = id => tab(id).children.filter(el => ["view-active", "view-completed"].includes(el.className));
+  assert.equal(dots("all")[0].className, "view-active");
+  assert.equal(dots("rig").length, 1); assert.equal(dots("rig")[0].className, "view-active");
+  assert.match(tab("rig").attributes["aria-label"], /Active work.*New responses/);
+  assert.equal(dots("stoic").length, 0);
+  running.response_state = "available";
+  c.views.render([running, completed]);
+  assert.equal(dots("rig")[0].className, "view-completed");
+  assert.doesNotMatch(tab("rig").attributes["aria-label"], /Active work/);
+  assert.equal(c.doc.activeElement.dataset.viewId, "rig");
+  completed.unread_result = false; c.views.render([running, completed]);
+  assert.equal(dots("rig").length, 0);
+});
+
+test("reload migrates remembered named-view filters and falls back safely for a deleted view", async () => {
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}}]});
   await c.views.start(); await c.views.activate("rig");
   c.controls.search.value = "draft filter"; c.controls.welcome.scrollTop = 88; c.views.remember();
   const reopened = setup({saved: c.records, windowStorage: c.windowStorage, preferences: c.preferences});
   await reopened.views.start(); reopened.views.restoreScroll();
   assert.equal(reopened.controls.search.value, "draft filter"); assert.equal(reopened.controls.welcome.scrollTop, 88);
+  assert.equal(reopened.records[0].filters.search, "draft filter");
+  assert.deepEqual(Object.keys(reopened.calls.find(call => call.body).body).sort(), ["filters", "group_by", "version"]);
   const deleted = setup({windowStorage: c.windowStorage, preferences: c.preferences});
   await deleted.views.start();
   assert.equal(deleted.views.activeId, "all"); assert.equal(deleted.controls.repository.value, "");
+});
+
+test("badges follow each view's filters immediately, including views with no requests", async () => {
+  const c = setup({saved: [{id: "rig", name: "Rig"}, {id: "stoic", name: "Stoic"}]});
+  await c.views.start();
+  const input = [thread("one", {repository_id: "stoic", response_state: "reply"}),
+    thread("two", {repository_id: "stoic", response_state: "input"}),
+    thread("elsewhere", {repository_id: "coord", response_state: "reply"})];
+  c.views.render(input);
+  await c.views.activate("rig"); c.controls.repository.value = "rig";
+  const rigSave = c.views.persist();
+  const tab = id => c.controls["view-tabs"].children.find(button => button.dataset.viewId === id);
+  assert.match(tab("rig").attributes["aria-label"], /0 in attention/);
+  assert.equal(tab("rig").children.some(child => child.className === "view-attention"), false);
+  await c.views.activate("stoic"); c.controls.repository.value = "stoic";
+  const stoicSave = c.views.persist();
+  assert.match(tab("all").attributes["aria-label"], /3 in attention/);
+  assert.match(tab("rig").attributes["aria-label"], /0 in attention/);
+  assert.match(tab("stoic").attributes["aria-label"], /2 in attention/);
+  await Promise.all([rigSave, stoicSave]);
+  c.controls.search.value = "no matches"; await c.views.persist();
+  assert.match(tab("stoic").attributes["aria-label"], /0 in attention/);
+});
+
+test("rapid edits serialize by view and delayed responses cannot retarget a save", async () => {
+  const c = setup({saved: [{id: "rig", name: "Rig"}, {id: "stoic", name: "Stoic"}]});
+  await c.views.start(); await c.views.activate("rig");
+  const api = c.views.api, requests = [];
+  c.views.api = async (path, body) => {
+    if (body) await new Promise(resolve => requests.push(resolve));
+    return api(path, body);
+  };
+  c.controls.repository.value = "rig";
+  const first = c.views.persist(); await Promise.resolve();
+  c.controls.search.value = "latest"; c.controls["group-by"].value = "project";
+  const latest = c.views.persist();
+  await c.views.activate("stoic"); c.controls.repository.value = "stoic";
+  const other = c.views.persist(); await Promise.resolve();
+  requests[1](); await other;
+  assert.equal(c.records[1].filters.repository, "stoic");
+  requests[0]();
+  while (requests.length < 3) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(c.controls.repository.value, "stoic"); assert.equal(c.controls.search.value, "");
+  await c.views.activate("rig");
+  assert.equal(c.controls.search.value, "latest");
+  requests[2](); await Promise.all([first, latest]);
+  assert.equal(c.records[0].filters.repository, "rig");
+  assert.equal(c.records[0].filters.search, "latest");
+  assert.equal(c.records[0].group_by, "project"); assert.equal(c.records[0].version, 3);
+  assert.equal(c.views.dirty(), false); assert.deepEqual(c.errors, []);
+});
+
+test("failed automatic saves preserve the filters for retry and reset loads a concurrent edit", async () => {
+  const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}}]});
+  await c.views.start(); await c.views.activate("rig");
+  const api = c.views.api;
+  c.views.api = async (path, body) => { if (body) throw new Error("Offline"); return api(path, body); };
+  c.controls.search.value = "keep this"; await c.views.persist();
+  assert.equal(c.controls.search.value, "keep this");
+  assert.equal(c.controls["update-view"].textContent, "Retry saving");
+  assert.equal(c.controls["reset-view"].hidden, false);
+  c.views.api = api; await c.controls["update-view"].onclick();
+  assert.equal(c.records[0].filters.search, "keep this"); assert.equal(c.views.dirty(), false);
+  c.records[0].version++; c.records[0].filters.phase = "validation";
+  c.controls.search.value = "conflicting edit"; await c.views.persist();
+  assert.match(c.errors.at(-1).message, /another window/);
+  assert.equal(c.records[0].filters.search, "keep this");
+  await c.controls["reset-view"].onclick();
+  assert.equal(c.controls.search.value, "keep this"); assert.equal(c.controls["phase-filter"].value, "validation");
+  assert.equal(c.views.dirty(), false);
+});
+
+test("All work filters remain local and stale remembered filters cannot replace newer saved views", async () => {
+  const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}}]});
+  await c.views.start(); c.controls.repository.value = "stoic"; await c.views.persist();
+  assert.equal(c.calls.filter(call => call.body).length, 0);
+  assert.equal(c.controls["reset-view"].hidden, false);
+  await c.views.activate("rig"); await c.views.activate("all");
+  assert.equal(c.controls.repository.value, "stoic");
+  await c.controls["reset-view"].onclick(); assert.equal(c.controls.repository.value, "");
+  await c.views.activate("rig"); c.controls.search.value = "old draft"; c.views.remember();
+  c.records[0].version++; c.records[0].filters.phase = "validation";
+  const reopened = setup({saved: c.records, windowStorage: c.windowStorage, preferences: c.preferences});
+  await reopened.views.start();
+  assert.equal(reopened.controls.search.value, ""); assert.equal(reopened.controls["phase-filter"].value, "validation");
+  assert.equal(reopened.calls.filter(call => call.body).length, 0);
+});
+
+test("view actions wait for automatic saves without targeting a different tab", async () => {
+  const c = setup({saved: [{id: "rig", name: "Rig"}, {id: "stoic", name: "Stoic"}]});
+  await c.views.start(); await c.views.activate("rig");
+  const api = c.views.api;
+  let release;
+  c.views.api = async (path, body) => {
+    if (path === "views/rig" && body) await new Promise(resolve => { release = resolve; });
+    return api(path, body);
+  };
+  c.controls.repository.value = "rig";
+  const saving = c.views.persist(); await Promise.resolve();
+  const renaming = c.controls["view-rename"].onclick();
+  const deleting = c.controls["view-delete"].onclick();
+  await c.views.activate("stoic"); release();
+  await Promise.all([saving, renaming, deleting]);
+  assert.equal(c.controls["view-dialog"].open, undefined);
+  assert.deepEqual(c.records.map(view => view.id), ["stoic"]);
+  assert.equal(c.views.activeId, "stoic"); assert.deepEqual(c.errors, []);
 });

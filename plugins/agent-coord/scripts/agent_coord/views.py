@@ -7,7 +7,7 @@ import uuid
 from .store import CoordinationError
 
 DEFAULT_FILTERS = {"repository": "", "project": "", "phase": "", "show": "active", "search": ""}
-PHASES = {"", "discussion", "investigation", "planning", "implementation", "validation", "deployment", "finished"}
+PHASES = {"", "new", "discussion", "investigation", "planning", "implementation", "validation", "deployment", "finished"}
 GROUPS = {"phase", "repository", "project", "none"}
 
 
@@ -60,7 +60,7 @@ class ViewStore:
         filters = {**DEFAULT_FILTERS, **filters}
         if any(not isinstance(value, str) for value in filters.values()):
             raise CoordinationError("View filters must be strings.")
-        if filters["show"] not in {"active", "attention", "completed", "archived"} or filters["phase"] not in PHASES:
+        if filters["show"] not in {"active", "attention", "completed", "later", "archived"} or filters["phase"] not in PHASES:
             raise CoordinationError("Choose a supported thread status and phase.")
         if len(filters["search"]) > 1000:
             raise CoordinationError("View searches must be at most 1000 characters.")

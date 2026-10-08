@@ -13,7 +13,7 @@ for (points, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), 
     NSColor(calibratedRed: 0.13, green: 0.23, blue: 0.20, alpha: 1).setFill()
     NSBezierPath(roundedRect: NSRect(x: s * 0.06, y: s * 0.06, width: s * 0.88, height: s * 0.88),
         xRadius: s * 0.19, yRadius: s * 0.19).fill()
-    let text = "a/c" as NSString
+    let text = "rf" as NSString
     let attributes: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: s * 0.43, weight: .semibold),
         .foregroundColor: NSColor(calibratedRed: 0.97, green: 0.96, blue: 0.91, alpha: 1)

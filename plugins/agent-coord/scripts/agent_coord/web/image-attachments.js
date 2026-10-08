@@ -66,8 +66,6 @@
     render() {
       const area = this.document.getElementById("image-attachments"), items = this.items();
       const id = this.getThread(), enabled = this.canAttach();
-      this.document.getElementById("attach-images").disabled = !enabled || items.length >= MAX_IMAGES;
-      this.document.getElementById("image-files").disabled = !enabled;
       if (!enabled) this.highlight(false);
       const previous = this.rendered;
       if (previous?.id === id && previous.enabled === enabled && previous.items.length === items.length &&
@@ -97,9 +95,7 @@
     }
 
     bind() {
-      const doc = this.document, zone = doc.getElementById("conversation"), input = doc.getElementById("image-files");
-      doc.getElementById("attach-images").onclick = () => input.click();
-      input.onchange = () => { const files = Array.from(input.files); input.value = ""; this.add(files); };
+      const doc = this.document, zone = doc.getElementById("conversation");
       const hasFiles = event => Array.from(event.dataTransfer?.types || []).includes("Files") ||
         Array.from(event.dataTransfer?.items || []).some(item => item.kind === "file");
       const accepts = event => !zone.hidden && zone.contains(event.target) && this.canAttach();

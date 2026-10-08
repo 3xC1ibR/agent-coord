@@ -54,6 +54,6 @@ def message_images(body: dict) -> tuple[str, list[dict]]:
     if not message and not validated:
         raise CoordinationError("Enter a message or attach an image.")
     command = message.split(maxsplit=1)[0].lower() if message else ""
-    if validated and command in {"/model", "/effort", "/help"}:
-        raise CoordinationError("Remove attached images before using /model, /effort, or /help.")
+    if validated and command in {"/cd", "/permissions", "/model", "/effort", "/help"}:
+        raise CoordinationError("Remove attached images before using chat configuration commands.")
     return message, validated

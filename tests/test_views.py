@@ -51,7 +51,7 @@ class SavedViewTests(unittest.TestCase):
         all_open = self.views.create({"name": "Everything"})
         self.assertEqual(all_open["filters"], DEFAULT_FILTERS)
         self.assertEqual(all_open["group_by"], "phase")
-        for filters in ({"repository": "__none__"}, {"project": "__none__"},
+        for filters in ({"repository": "__none__"}, {"project": "__none__"}, {"show": "later"}, {"phase": "new"},
                         {"repository": self.repository["id"]}, {"project": self.project["id"]}):
             item = self.views.create({"name": str(filters), "filters": filters})
             self.assertEqual(item["filters"], {**DEFAULT_FILTERS, **filters})
