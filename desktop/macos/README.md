@@ -117,14 +117,24 @@ macOS controls alert style and permission in System Settings.
 
 The native **Files** pane follows the selected conversation's working folder.
 Expand folders, select files for a read-only preview, or double-click a file to
-open it in its default app. **Insert Path** adds a reference to the draft without
+open it in the selected editor. **Insert Path** adds a reference to the draft without
 sending it. Right-click for Copy Path and Reveal in Finder. **Choose…** browses
 another folder; **Follow conversation** returns to the conversation's folder.
 Hidden files are optional. The visible pane refreshes every three seconds;
 the refresh button updates it immediately. **View → Toggle File Browser**
-(Option-Command-B) controls its visibility. See [design and open-source
-references](FILE_BROWSER.md) for the shared backend and future remote/Windows
-boundary.
+(Option-Command-B) controls its visibility. The pane starts closed; your explicit
+show/hide choice is remembered for new windows and future launches. See
+[design and open-source references](FILE_BROWSER.md) for the shared backend and
+future remote/Windows boundary.
+
+Choose **Editor → Choose Application…** in the Files pane to set the editor used
+by both the pane and file links in chat. **System Default** uses the macOS file
+association. The choice is shared across windows and remembered between launches.
+Chat links open directly in that editor, even with the Files pane closed. Absolute
+and relative paths resolve within the originating conversation’s working folder;
+missing files and paths outside that folder show an error in the app. Line suffixes
+such as `:12` and `#L12` are accepted, but opening at a particular line depends on
+editor integration and is not currently supported. This routing is native-app only.
 
 Drop Finder files and folders into an editable conversation to insert their
 quoted absolute paths at the cursor. Existing text is preserved and the message

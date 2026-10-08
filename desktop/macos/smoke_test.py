@@ -67,6 +67,9 @@ def main() -> int:
                 "command_palette_shortcut", "command_palette_active_window", "command_palette_action",
                 "command_palette_toggle", "command_palette_focus_and_modal",
                 "mixed_file_drop", "workspace_folder_drop", "window_drafts_and_navigation_isolated",
+                "file_browser_default_collapsed", "file_browser_collapsed_layout", "file_browser_open_shortcut",
+                "file_browser_opened", "file_browser_visible_preference_restored", "file_browser_hidden_preference_restored",
+                "file_browser_editor_menu_enabled", "file_browser_editor_picker_opens", "file_browser_editor_picker_cancels",
                 "file_browser_follows_conversation", "file_browser_window_isolation", "file_browser_lazy_expansion",
                 "file_browser_preview", "file_browser_inserts_without_sending", "file_browser_refresh",
                 "file_browser_shortcut", "file_browser_collapsed",
@@ -89,6 +92,7 @@ def main() -> int:
     print(json.dumps(result, indent=2))
     if not args.sessions_only:
         print(f"File browser: {report}.files.png")
+        print(f"Collapsed file browser: {report}.files-collapsed.png")
     if not args.files_only and not args.sessions_only:
         print(f"Screenshot: {report}.png")
         print(f"Command palette: {report}.palette.png")

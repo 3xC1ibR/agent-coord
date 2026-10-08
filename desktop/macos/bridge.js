@@ -179,15 +179,33 @@
     }).catch(reportError);
   }
   const boundPanes = new WeakSet();
+  function openFileLink(event) {
+    if (event.defaultPrevented || event.button !== 0) return;
+    const link = event.target.closest?.(".markdown a[href]");
+    if (!link) return;
+    // Read the authored path: link.href has already acquired the backend origin.
+    const raw = link.getAttribute("href");
+    if (!raw || /^(?:[?#]|\/\/)/.test(raw)) return;
+    const path = raw.replace(/(?::\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/, "");
+    if (/^[a-z][a-z\d+.-]*:/i.test(path) || /^\/(?:[?#]|$|monitor(?:[?#]|$)|api\/)/.test(path)) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    try {
+      const doc = link.ownerDocument;
+      const workspace = doc.getElementById("workspace")?.textContent.trim() || "";
+      send({action: "openFile", path: decodeURIComponent(path), workspace}).catch(reportError);
+    } catch (error) { reportError(error); }
+  }
   function bindPane(doc) {
     if (boundPanes.has(doc)) return;
     boundPanes.add(doc); doc.addEventListener("drop", handleDrop, true);
+    doc.addEventListener("click", openFileLink, true);
     const observer = new MutationObserver(() => window.dispatchEvent(new Event("agent-coord-pane-state")));
     observer.observe(doc.body, {subtree: true, childList: true, characterData: true,
       attributes: true, attributeFilter: ["open", "disabled", "hidden"]});
     doc.defaultView?.addEventListener("pagehide", () => observer.disconnect(), {once: true});
   }
   document.addEventListener("drop", handleDrop, true);
+  document.addEventListener("click", openFileLink, true);
 
   function openWindow(url) { send({action: "newWindow", url}).catch(reportError); }
   // Modifier-click works on thread buttons as well as regular internal links.

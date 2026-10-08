@@ -30,6 +30,7 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
         toggle: (value, on) => on ? classes.add(value) : classes.delete(value)};
     }
     closest(selector) {
+      if (selector === ".markdown a[href]") return this.markdownLink ? this : this.parent?.closest(selector) || null;
       if (selector === "[hidden]") return this.hidden ? this : this.parent?.closest(selector) || null;
       if (selector === "button[data-thread]") return this.dataset.thread ? this : this.parent?.closest(selector) || null;
       return null;
@@ -177,6 +178,67 @@ test("file browser follows the focused workspace and inserts a path without send
   assert.equal(f.messages.at(-1).action, "toggleFiles");
   f.nodes.get("permissions-dialog").open = true;
   assert.equal(f.env.agentCoordDesktop.insertPaths(["/tmp/other"]), false);
+});
+
+function fileLinkClick(f, href, options = {}) {
+  const link = f.env.document.createElement();
+  Object.assign(link, {markdownLink: true, ownerDocument: f.env.document, getAttribute: () => href});
+  const child = f.env.document.createElement(); child.parent = link;
+  const event = new Event("click", {cancelable: true});
+  Object.defineProperties(event, {target: {value: child}, button: {value: 0},
+    ...Object.fromEntries(Object.entries(options).map(([key, value]) => [key, {value}]))});
+  f.env.document.dispatchEvent(event);
+  return event;
+}
+
+test("chat file links open through the native editor without HTTP navigation", async () => {
+  const f = fixture();
+  f.nodes.set("workspace", {textContent: "/opt/projects/agent-coord"});
+  for (const [href, path] of [
+    ["/opt/projects/agent-coord/dummy-experiment.txt", "/opt/projects/agent-coord/dummy-experiment.txt"],
+    ["./notes%20with%20spaces.md:12:3", "./notes with spaces.md"],
+    ["notes.md#L12-L20", "notes.md"],
+    ["notes.md:12", "notes.md"],
+    ["src/main.swift#L12C2", "src/main.swift"],
+    ["literal%23name%3A12.txt", "literal#name:12.txt"],
+  ]) {
+    assert.equal(fileLinkClick(f, href, {metaKey: true}).defaultPrevented, true);
+    assert.deepEqual(f.messages.at(-1), {action: "openFile", path, workspace: "/opt/projects/agent-coord"});
+  }
+  assert(!f.messages.some(message => message.action === "newWindow"));
+  await settle();
+});
+
+test("web, app, and anchor links retain their existing navigation", () => {
+  const f = fixture();
+  for (const href of ["https://example.com/a.md:12", "http://127.0.0.1:1234/monitor", "mailto:a@example.com",
+    "agentcoord://thread/one", "//example.com/file.txt", "#section", "?filter=all", "/", "/#thread", "/monitor", "/api/browser/config"])
+    assert.equal(fileLinkClick(f, href).defaultPrevented, false, href);
+  assert.equal(fileLinkClick(f, "/tmp/file.txt", {button: 2}).defaultPrevented, false);
+  assert(!f.messages.some(message => message.action === "openFile"));
+});
+
+test("a tiled file link uses its own conversation folder even when another pane is focused", () => {
+  const parent = fixture(), child = fixture({}, "default", true);
+  parent.nodes.set("workspace", {textContent: "/tmp/outer"});
+  child.nodes.set("workspace", {textContent: "/tmp/child"});
+  parent.env.agentCoordDesktop.bindPane(child.env.document);
+  parent.env.agentCoordDesktop.bindPane(child.env.document);
+  assert.equal(fileLinkClick(child, "notes.md").defaultPrevented, true);
+  assert.deepEqual(parent.messages.filter(message => message.action === "openFile"),
+    [{action: "openFile", path: "notes.md", workspace: "/tmp/child"}]);
+});
+
+test("native file errors appear in chat and malformed paths cannot navigate", async () => {
+  const f = fixture();
+  f.replies.openFile = Promise.reject(new Error("The file is missing"));
+  assert.equal(fileLinkClick(f, "missing.md").defaultPrevented, true);
+  await settle();
+  assert.equal(f.nodes.get("error").hidden, false);
+  assert.equal(f.nodes.get("error").querySelector("span").textContent, "The file is missing");
+  const count = f.messages.length;
+  assert.equal(fileLinkClick(f, "bad%ZZ.md").defaultPrevented, true);
+  assert.equal(f.messages.length, count);
 });
 
 test("Roll up command and palette route to the current window and respect dialogs", () => {

@@ -304,24 +304,31 @@ private final class FileBrowserBackground: NSView {
         guard let node = selected else { return }
         if node.file.directory { tree.isItemExpanded(node) ? tree.collapseItem(node) : tree.expandItem(node) }
         else if let path = selectedPath {
-            let url = URL(fileURLWithPath: path)
-            if let application = editorURL {
-                guard FileManager.default.fileExists(atPath: application.path) else {
-                    showOpenError("The selected editor is no longer at \(application.path). Choose another application from the Editor menu.")
-                    return
-                }
-                NSWorkspace.shared.open([url], withApplicationAt: application, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
-                    if let error = error {
-                        DispatchQueue.main.async { self?.showOpenError(error.localizedDescription) }
-                    }
-                }
-            } else if !NSWorkspace.shared.open(url) {
-                showOpenError("macOS could not open this file. Choose an application from the Editor menu.")
+            openFile(URL(fileURLWithPath: path)) { [weak self] error in
+                if let error = error { self?.showOpenError(error) }
             }
         }
     }
+    func openFile(_ url: URL, completion: @escaping (String?) -> Void) {
+        if let application = editorURL {
+            guard FileManager.default.fileExists(atPath: application.path) else {
+                completion("The selected editor is no longer at \(application.path). Choose another application from the Editor menu.")
+                return
+            }
+            NSWorkspace.shared.open([url], withApplicationAt: application, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                DispatchQueue.main.async { completion(error?.localizedDescription) }
+            }
+        } else {
+            completion(NSWorkspace.shared.open(url) ? nil :
+                "macOS could not open this file. Choose an application from the Editor menu.")
+        }
+    }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        selectedPath != nil && (menuItem.action != #selector(insertSelected) || canInsert)
+        switch menuItem.action {
+        case #selector(insertSelected): return selectedPath != nil && canInsert
+        case #selector(copyPath), #selector(revealSelected), #selector(openSelected): return selectedPath != nil
+        default: return true
+        }
     }
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         ((item as? FileBrowserNode) ?? rootNode).children.count

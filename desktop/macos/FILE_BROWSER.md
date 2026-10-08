@@ -5,6 +5,9 @@ view. It follows the focused conversation's working directory, including tiled
 conversations and `/cd` changes. Choose a folder to browse independently;
 enable **Follow conversation** to return. Each window owns its browser state.
 **View → Toggle File Browser** (Option-Command-B) shows or hides the pane.
+The pane starts closed so the conversation uses the full content width. An
+explicit show/hide choice is remembered for new windows and future launches;
+existing windows keep their current layout.
 
 Folders load on expansion. The visible browser refreshes every three seconds
 and offers manual refresh. Select a file for a bounded, read-only UTF-8 preview;
@@ -59,9 +62,10 @@ without adding a Swift package or replacing the existing application shell.
 Backend tests cover traversal, root scope, symlinks, hidden files, bounded
 listing and previews, binary files, special files and HTTP access controls.
 The native smoke test uses the real backend with temporary files and no model
-turns, checking folder following, window isolation, lazy expansion, preview,
-refresh, path insertion and the menu shortcut. Its `.files.png` artifact shows
-the native pane alongside the conversation UI.
+turns, checking the default collapsed layout, saved visibility, folder following,
+window isolation, lazy expansion, preview, refresh, path insertion and the menu
+shortcut. Its `.files.png` artifact shows the native pane alongside the
+conversation UI; `.files-collapsed.png` shows the conversation with it closed.
 
 Run `python3 desktop/macos/smoke_test.py --files-only` for the focused browser
 checks. The complete smoke run also exercises foreground window activation;

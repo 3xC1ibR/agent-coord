@@ -1,5 +1,27 @@
 import Foundation
 
+enum WorkspaceFileLink {
+    static func resolve(path: String, workspace: String) throws -> URL {
+        func failure(_ message: String) -> NSError {
+            NSError(domain: "WorkspaceFiles", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        guard workspace.hasPrefix("/"), !path.isEmpty,
+              !path.contains("\0"), !workspace.contains("\0") else {
+            throw failure("Open a conversation with a local working folder to open file links.")
+        }
+        let root = URL(fileURLWithPath: workspace, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
+        let file = (path.hasPrefix("/") ? URL(fileURLWithPath: path) : root.appendingPathComponent(path))
+            .standardizedFileURL.resolvingSymlinksInPath()
+        guard file.path.hasPrefix(root.path == "/" ? "/" : root.path + "/") else {
+            throw failure("This file is outside the conversation’s working folder.")
+        }
+        guard (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+            throw failure("The file is missing or is not a regular file: \(file.lastPathComponent)")
+        }
+        return file
+    }
+}
+
 struct WorkspaceFile: Decodable {
     let name: String
     let path: String

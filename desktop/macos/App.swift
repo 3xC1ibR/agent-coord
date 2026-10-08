@@ -418,7 +418,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         item.split.addSplitViewItem(filePane); item.filesItem = filePane
         window.contentViewController = item.split
         item.split.splitView.setPosition(max(440, window.frame.width - 310), ofDividerAt: 0)
-        filePane.isCollapsed = preferences.object(forKey: "fileBrowserVisible") as? Bool == false
+        filePane.isCollapsed = !preferences.bool(forKey: "fileBrowserVisible")
         item.files.insertPaths = { [weak item] paths in
             guard let item = item, item.loaded else { return }
             item.webView.callAsyncJavaScript("return window.agentCoordDesktop.insertPaths(paths, target)",
@@ -669,6 +669,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         let center = UNUserNotificationCenter.current()
         switch action {
+        case "openFile":
+            guard let path = body["path"] as? String, let workspace = body["workspace"] as? String else {
+                replyHandler(nil, "Choose a file in the conversation’s working folder."); return
+            }
+            do {
+                let file = try WorkspaceFileLink.resolve(path: path, workspace: workspace)
+                owner.files.openFile(file) { error in
+                    if let error = error { replyHandler(nil, error) }
+                    else { replyHandler(true, nil) }
+                }
+            } catch { replyHandler(nil, error.localizedDescription) }
         case "navigationReady":
             owner.navigationReady = true
             deliverLinks(to: owner)
@@ -1152,6 +1163,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     @MainActor private func smokeFiles(_ item: DesktopWindow, other: DesktopWindow) async throws {
+        try smokeCheck("file_browser_default_collapsed",
+            preferences.object(forKey: "fileBrowserVisible") == nil &&
+            item.filesItem?.isCollapsed == true && other.filesItem?.isCollapsed == true)
+        item.split.view.layoutSubtreeIfNeeded()
+        try smokeCheck("file_browser_collapsed_layout",
+            abs(item.webView.bounds.width - item.split.view.bounds.width) < 2)
+        try smokeCheck("file_browser_open_shortcut", smokeKey("b", flags: [.command, .option], code: 11))
+        try smokeCheck("file_browser_opened",
+            item.filesItem?.isCollapsed == false && other.filesItem?.isCollapsed == true)
+        let visibleWindow = makeWindow()
+        try smokeCheck("file_browser_visible_preference_restored", visibleWindow.filesItem?.isCollapsed == false)
+        visibleWindow.window.close()
+        item.window.makeKeyAndOrderFront(nil)
         let base = smokeDirectory!.resolvingSymlinksInPath().appendingPathComponent("Browser fixture", isDirectory: true)
         try FileManager.default.createDirectory(at: base.appendingPathComponent("Sources"), withIntermediateDirectories: true)
         let file = base.appendingPathComponent("README.md")
@@ -1165,6 +1189,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             print(json.dumps({'ready': True}))
             """, arguments: [base.path])
         _ = try await smokeJS("""
+            // Keep the UI-only draft editable through metadata refreshes without
+            // creating a provider session or starting a model turn.
+            window.smokeFileRenderStatus = renderStatus;
+            renderStatus = function () {
+              if (state.selected === 'files-smoke' && state.detail?.work_thread)
+                state.detail.work_thread.browser_session = true;
+              return window.smokeFileRenderStatus();
+            };
             await refreshList(); await select('files-smoke');
             // Make a draft destination without starting a model or importing a terminal.
             document.querySelector('#composer').hidden = false;
@@ -1195,6 +1227,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             try await Task.sleep(nanoseconds: 25_000_000)
         }
         try smokeCheck("file_browser_preview", item.files.previewText.string.hasPrefix("# Native files"))
+        let windowCount = windows.count
+        let linkHandled = try await smokeJS("""
+            const message = document.createElement('div');
+            message.className = 'markdown';
+            message.innerHTML = messageMarkdown.render('[Missing file](./missing-link-test.txt:12)');
+            document.querySelector('#timeline').append(message);
+            document.querySelector('#error').hidden = true;
+            message.querySelector('a').click();
+            try {
+              for (let i = 0; i < 60; i++) {
+                if (!document.querySelector('#error').hidden)
+                  return document.querySelector('#error span').textContent.includes('missing-link-test.txt');
+                await new Promise(resolve => setTimeout(resolve, 25));
+              }
+              return false;
+            } finally { document.querySelector('#error').hidden = true; }
+            """, in: item.webView)
+        try smokeCheck("file_browser_chat_link_native_error", linkHandled as? Bool == true && windows.count == windowCount)
         item.files.insertSelected()
         let inserted = try await smokeJS("""
             for (let i = 0; i < 60; i++) {
@@ -1204,6 +1254,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
             return false;
             """, in: item.webView)
+        if inserted as? Bool != true {
+            smokeResults["file_browser_insert_debug"] = try await smokeJS("""
+                return {value: document.querySelector('#message').value,
+                        error: document.querySelector('#error span').textContent,
+                        composerHidden: document.querySelector('#composer').hidden,
+                        selected: state.selected};
+                """, in: item.webView)
+        }
         try smokeCheck("file_browser_inserts_without_sending", inserted as? Bool == true)
         try "Changed by an agent\n".write(to: file, atomically: true, encoding: .utf8)
         item.files.refreshFiles()
@@ -1212,6 +1270,36 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             try await Task.sleep(nanoseconds: 25_000_000)
         }
         try smokeCheck("file_browser_refresh", item.files.previewText.string == "Changed by an agent\n")
+        // Exercise the native chooser after web editing checks; the file panel
+        // changes native focus independently of the web-view test fixture.
+        item.files.outline.deselectAll(nil)
+        func editorPicker(in view: NSView) -> NSPopUpButton? {
+            if let picker = view as? NSPopUpButton { return picker }
+            return view.subviews.lazy.compactMap { editorPicker(in: $0) }.first
+        }
+        guard let picker = editorPicker(in: item.files.view) else {
+            try smokeCheck("file_browser_editor_menu_enabled", false); return
+        }
+        picker.menu?.update()
+        try smokeCheck("file_browser_editor_menu_enabled",
+            item.files.outline.selectedRow == -1 && picker.itemArray.filter { !$0.isSeparatorItem }.allSatisfy { $0.isEnabled })
+        let responderBeforePicker = item.window.firstResponder
+        picker.selectItem(withTitle: "Choose Application…")
+        picker.sendAction(picker.action, to: picker.target)
+        for _ in 0..<60 {
+            if item.window.attachedSheet is NSOpenPanel { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        let editorPanel = item.window.attachedSheet as? NSOpenPanel
+        try smokeCheck("file_browser_editor_picker_opens",
+            editorPanel?.title == "Choose File Editor" && editorPanel?.canChooseFiles == true)
+        editorPanel?.cancel(nil)
+        for _ in 0..<60 {
+            if item.window.attachedSheet == nil { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        try smokeCheck("file_browser_editor_picker_cancels", item.window.attachedSheet == nil)
+        item.window.makeFirstResponder(responderBeforePicker)
         if let content = item.window.contentView, let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
             content.cacheDisplay(in: content.bounds, to: bitmap)
             if let data = bitmap.representation(using: .png, properties: [:]) {
@@ -1219,8 +1307,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
         }
         try smokeCheck("file_browser_shortcut", smokeKey("b", flags: [.command, .option], code: 11))
-        try smokeCheck("file_browser_collapsed", item.filesItem?.isCollapsed == true && other.filesItem?.isCollapsed == false)
-        _ = smokeKey("b", flags: [.command, .option], code: 11)
+        try smokeCheck("file_browser_collapsed", item.filesItem?.isCollapsed == true && other.filesItem?.isCollapsed == true)
+        let hiddenWindow = makeWindow()
+        try smokeCheck("file_browser_hidden_preference_restored", hiddenWindow.filesItem?.isCollapsed == true)
+        hiddenWindow.window.close()
+        item.window.makeKeyAndOrderFront(nil)
+        item.split.view.layoutSubtreeIfNeeded()
+        if let content = item.window.contentView, let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+            content.cacheDisplay(in: content.bounds, to: bitmap)
+            if let data = bitmap.representation(using: .png, properties: [:]) {
+                try data.write(to: smokeReport!.appendingPathExtension("files-collapsed.png"))
+            }
+        }
+        _ = try await smokeJS("renderStatus = window.smokeFileRenderStatus; delete window.smokeFileRenderStatus; return true;", in: item.webView)
     }
 
     @MainActor private func smokeRollUp(_ window: DesktopWindow) async throws {
