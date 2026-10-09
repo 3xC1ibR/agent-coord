@@ -5,6 +5,13 @@ const {parse, safe, initialLink, Router} = require("../plugins/agent-coord/scrip
 const markdown = require("../plugins/agent-coord/scripts/agent_coord/web/markdown.js");
 const request = "11111111-1111-4111-8111-111111111111";
 
+test("message links preserve exact turn and item and reject incomplete destinations", () => {
+  assert.deepEqual(parse("agentcoord://thread/t?turn=turn%2Fid&item=item%3A1").route,
+    {kind: "thread", id: "t", turn: "turn/id", item: "item:1"});
+  for (const link of ["agentcoord://thread/t?turn=t", "agentcoord://view/all?turn=t&item=i",
+    "agentcoord://thread/t?turn=t&item=%0A"]) assert.equal(safe(link), false);
+});
+
 test("only recognized app routes are clickable in assistant messages", () => {
   for (const url of ["agentcoord://overview?project=billing", "agentcoord://view/review", "agentcoord://thread/thread-1"]) {
     assert.equal(safe(url), true);

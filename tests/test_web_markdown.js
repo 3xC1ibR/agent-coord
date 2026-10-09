@@ -71,14 +71,14 @@ test("empty and incomplete streamed syntax is stable and deeply nested content i
 
 test("conversation renders and refreshes agent Markdown while user text stays literal", () => {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
-  const element = (tag, text, className) => ({tag, textContent: text, className, childNodes: [],
+  const element = (tag, text, className) => ({tag, textContent: text, className, dataset: {}, childNodes: [],
     append(...children) { this.childNodes.push(...children); },
     replaceChildren(fragment) { this.childNodes = fragment.childNodes; },
     setAttribute(name, value) { this[name] = value; },
     querySelectorAll() { return []; }, scrollHeight: 100, scrollTop: 0, clientHeight: 100});
   const timeline = element("div"), user = {type: "userMessage", content: [{text: "**literal**"}]};
   const agent = {type: "agentMessage", text: "**Result**\n\n```js\nconst x = 1;"};
-  const context = {state: {detail: {thread: {turns: [{items: [user, agent]}]}}},
+  const context = {state: {selected: "test-thread", detail: {thread: {turns: [{items: [user, agent]}]}}},
     $: () => timeline, node: element, document: {createDocumentFragment: () => element("fragment")}, messageMarkdown: {render}};
   const disclosureEntry = {};
   context.conversationEntry = () => disclosureEntry;

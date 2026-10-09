@@ -153,7 +153,7 @@ function overview() {
       replaceChildren(...items) { for (const item of this.children) item.parent = null; this.children = []; this.append(...items); },
     };
   }
-  const c = {node: element, $: id => controls[id] ||= Object.assign(element("div"), {root: true}),
+  const c = {conversationSearch: null, node: element, $: id => controls[id] ||= Object.assign(element("div"), {root: true}),
     document: {activeElement: null}, savedViews: {activeId: "all", render() {}},
     state: {sessions: [thread("one")], selected: null, pinning: new Set(), updatingThreads: new Set(),
       phaseScroll: new Map(), organization: {projects: []}, listSignature: "",

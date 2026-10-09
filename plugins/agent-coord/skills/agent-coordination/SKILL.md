@@ -299,8 +299,11 @@ The existing `delegate` command creates a terminal worker for a scoped task.
 
 Prefer an existing relevant app conversation, including Closed. Discover with
 `thread search 'topic keywords' --app-only --limit 10` without `--cwd` unless
-the user selected a workspace. Search title, original request, latest checkpoint,
-and artifacts; each keyword must match. Follow `next_cursor` with `--cursor`
+the user selected a workspace. Search saved context and user/assistant messages;
+all keywords must match saved context or occur together in one message. Use
+`--source context` for routing metadata alone or `--my-messages` for what the
+user wrote. Excerpts include message links, and coverage reports missing history;
+external provider transcripts are not searched. Follow `next_cursor` with `--cursor`
 using the same query and filters. Pages are bounded (maximum 50), ordered by
 relevance then meaningful-work recency, and include identity, stable URL,
 placement, provider, summary, `last_work_at`, and wake pause state.

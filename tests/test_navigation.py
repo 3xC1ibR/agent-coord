@@ -32,6 +32,14 @@ class NavigationTests(unittest.TestCase):
         self.nav = NavigationStore(self.store)
         self.billing = self.store.threads.organization.create_project("Billing & Renewals")
 
+    def test_message_destinations_round_trip_and_reject_incomplete_targets(self):
+        target = self.nav.link(thread="manager", turn="turn/id", item="item:1")
+        self.assertEqual(self.nav.resolve(target["url"])["route"],
+                         {"kind": "thread", "id": "manager", "turn": "turn/id", "item": "item:1"})
+        for suffix in ("thread/manager?turn=t", "thread/manager?item=i", "overview?turn=t&item=i", "view/all?turn=t&item=i"):
+            with self.assertRaises(CoordinationError):
+                self.nav.resolve("agentcoord://" + suffix)
+
     def test_cli_resolves_case_insensitive_names_and_preserves_server_command(self):
         target = run(_parser().parse_args(["--db", str(self.store.database_path), "ui", "link", "--project", "billing & renewals"]))
         self.assertEqual(target["route"]["filters"], {"project": self.billing["id"]})

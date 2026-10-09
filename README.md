@@ -372,14 +372,22 @@ agent-coord thread search 'release validation' --app-only --limit 10 --cursor <n
 agent-coord thread show --session-id <agent-id>
 ```
 
-Each keyword must match the title, original request, latest checkpoint, or
-artifact labels/paths. Results rank relevance first and meaningful work recency
+Each keyword must match saved context (title, original request, latest checkpoint,
+or artifact labels/paths), or all keywords must occur in one saved conversation
+message. User and assistant prose are searched; tool output and provider setup
+instructions are excluded. Use `--source context` for routing context alone,
+`--source messages` for conversation prose, or `--my-messages` for user messages
+alone. Results rank relevance first and meaningful work recency
 second, and include the stable identity, app link, placement, provider, summary,
 and wake pause state. `last_work_at` uses turns, completions, and new checkpoints;
 moving/renaming a thread or refreshing an identical checkpoint does not make its
 context fresh. Search globally by default, or select `--repository`, `--project`,
 `--no-repository`, `--no-project`, or an explicit `--cwd`. Omit `--app-only` to
-also find terminal conversation context. Search does not scan full transcripts.
+also find terminal conversation context. Search indexes saved app history locally;
+it does not scan provider transcript folders or resume agents. Each result includes
+up to three message excerpts, roles, known timestamps, matching-message counts,
+and links to the matching turn/item. Coverage reports missing or partial saved
+histories rather than implying that all provider history has been searched.
 Continue with the same query and filters until `next_cursor` is null; pages are
 live, so restart discovery if conversations change during paging.
 
@@ -838,6 +846,13 @@ commands, API fields, deep links, and saved filter keys remain compatible.
 **Views** are named, saved filters displayed as tabs above the overview.
 Start with **All work**, choose repository, group, phase, Show,
 and search filters, choose a grouping, then click **＋ View** to save them.
+Typing in **Search conversations** searches all registered conversations in the
+app's workspace, including Later and Closed. Choose **Current view** to apply the
+selected placement, repository, group and phase filters; **My messages** restricts
+matches to what you wrote. Click a matching excerpt to open that message. Search
+reports how many conversations have saved history; historical sessions outside
+Ribbon Field are not included. Saved-view attention badges retain their existing
+metadata-filter semantics, independently of the conversation search results.
 Each tab shows a count of threads that need you and a green dot for unread
 completed results. Counts follow that tab's current filters, including pinned
 threads that need you; Later threads do not add to the attention count.

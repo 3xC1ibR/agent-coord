@@ -24,6 +24,7 @@
   <link rel="stylesheet" href="/remote-access.css">
   <link rel="stylesheet" href="/thread-panes.css">
   <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/conversation-search.css">
   <script src="/remote-access.js" defer></script>
   <script src="/thread-groups.js" defer></script>
   <script src="/organization.js" defer></script>
@@ -42,6 +43,7 @@
   <script src="/model-picker.js" defer></script>
   <script src="/schedules.js" defer></script>
   <script src="/agent-messages.js" defer></script>
+  <script src="/conversation-search.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/thread-hover.js" defer></script>
   <script src="/filter-menu.js" defer></script>
@@ -98,7 +100,7 @@
       <div id="folder-welcome" class="folder-welcome" hidden><h2>Start with a folder</h2><p>Choose where your agents will work. You can open another folder whenever you need it.</p><button id="welcome-folder" class="primary" type="button">Open folder…</button></div>
       <h1 id="overview-title" class="sr-only" tabindex="-1">Thread overview</h1>
       <div class="workspace-tools">
-        <label class="search-field" for="search"><span aria-hidden="true">⌕</span><span class="sr-only">Search threads</span><input id="search" type="search" placeholder="Find a thread…" autocomplete="off"><kbd aria-hidden="true">/</kbd></label>
+        <label class="search-field" for="search"><span aria-hidden="true">⌕</span><span class="sr-only">Search conversations</span><input id="search" type="search" placeholder="Search conversations…" autocomplete="off"><kbd aria-hidden="true">/</kbd></label>
         <div class="view-filters">
           <details id="filter-menu" class="filter-menu">
             <summary id="filter-toggle">Filters <span id="filter-count" hidden></span><span aria-hidden="true">⌄</span></summary>
@@ -117,6 +119,16 @@
         </div>
         <div class="workspace-actions"><button id="welcome-project" class="quiet" hidden>New group</button><button id="welcome-new" class="primary" aria-label="New session"><span class="new-session-label">New session</span><span class="mobile-new-label">New</span> <span aria-hidden="true">＋</span></button></div>
       </div>
+      <div id="search-options" class="search-options" hidden>
+        <label for="search-scope">Search in<select id="search-scope"><option value="all">All conversations</option><option value="current">Current view</option></select></label>
+        <label for="search-mine"><input id="search-mine" type="checkbox">My messages</label>
+      </div>
+      <section id="conversation-results" class="conversation-results" aria-label="Conversation search results" hidden>
+        <p id="search-status" role="status" aria-live="polite"></p>
+        <div id="search-hits"></div>
+        <button id="search-more" type="button" class="quiet" hidden>More results</button>
+        <button id="search-retry" type="button" class="quiet" hidden>Refresh results</button>
+      </section>
       <div id="overview" aria-label="Thread overview"></div>
       <footer class="overview-footer"><span id="results-count" role="status"></span></footer>
     </section>

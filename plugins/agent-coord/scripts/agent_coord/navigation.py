@@ -81,10 +81,15 @@ class NavigationStore:
             raise CoordinationError(f"Ambiguous {kind} {value!r}. Use an ID: {choices}")
         raise CoordinationError(f"Unknown {kind} {value!r}. List available {kind}s first.")
 
-    def link(self, *, project=None, repository=None, view=None, thread=None):
+    def link(self, *, project=None, repository=None, view=None, thread=None, turn=None, item=None):
         if (view is not None or thread is not None) and sum(x is not None for x in (project, repository, view, thread)) != 1:
             raise CoordinationError("Choose a saved view, a thread, or overview filters.")
         query = {}
+        if turn is not None or item is not None:
+            if thread is None or not all(isinstance(v, str) and 0 < len(v) <= 200
+                                         and not any(ord(c) < 32 for c in v) for v in (turn, item)):
+                raise CoordinationError("A message destination needs a thread, turn, and item.")
+            query.update(turn=turn, item=item)
         if view is not None:
             selected = self._choose([{"id": "all", "name": "All work"}, *self.views.list()], view, "view")
             route = {"kind": "view", "id": selected["id"]}
@@ -92,6 +97,8 @@ class NavigationStore:
         elif thread is not None:
             selected = self.store.threads.get(thread)
             route = {"kind": "thread", "id": thread}
+            if turn is not None:
+                route.update(turn=turn, item=item)
             label = selected["title"]
         else:
             organization = self.store.threads.organization.list()
@@ -128,12 +135,14 @@ class NavigationStore:
             query = dict(pairs)
             if (url.scheme != "agentcoord" or url.netloc not in {"overview", "view", "thread"}
                     or url.fragment or len(query) != len(pairs)
-                    or set(query) - {"project", "repository", "database", "request", "window"}):
+                    or set(query) - {"project", "repository", "database", "request", "window", "turn", "item"}):
                 raise ValueError()
         except ValueError as exc:
             raise CoordinationError("Invalid Ribbon Field route.") from exc
         if query.get("database", self.database_id) != self.database_id:
             raise CoordinationError("This link belongs to a different Ribbon Field database.")
+        if set(query) & {"turn", "item"} and (url.netloc != "thread" or not all(query.get(k) for k in ("turn", "item"))):
+            raise CoordinationError("Invalid message destination.")
         if url.netloc == "overview":
             if url.path not in {"", "/"}:
                 raise CoordinationError("Invalid overview route.")
@@ -149,7 +158,7 @@ class NavigationStore:
                 raise CoordinationError("Invalid view or thread route.")
             if url.netloc == "view" and not any(item["id"] == identity for item in [{"id": "all"}, *self.views.list()]):
                 raise CoordinationError("The linked view is unavailable.")
-            target = self.link(**{url.netloc: identity})
+            target = self.link(**{url.netloc: identity}, **({k: query[k] for k in ("turn", "item")} if "turn" in query else {}))
         if "window" in query:
             window_id(query["window"])
         request_id = query.get("request")

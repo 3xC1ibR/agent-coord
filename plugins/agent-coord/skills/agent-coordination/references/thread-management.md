@@ -39,8 +39,14 @@ placements instead of dumping the inventory:
 ```
 
 Add `--app-only` for agents that support app inbox wake. The same association
-filters are available. Each keyword matches saved routing context (title,
-original request, latest checkpoint, or artifacts), not full transcripts.
+filters are available. Keywords match saved routing context (title,
+original request, latest checkpoint, or artifacts) or all occur in one saved
+user/assistant message. Use `--source context` for routing metadata alone,
+`--source messages` for message prose, or `--my-messages` for user messages only.
+Results include up to three matching excerpts with roles, known timestamps and
+message links. The coverage object reports saved, partial and missing histories.
+Search never resumes a provider or scans transcript folders; sessions outside
+the registered inventory remain outside its coverage.
 Results include identity, URL, summary, placement, provider, and `last_work_at`,
 ranked by relevance then meaningful-work recency. Metadata edits and identical
 checkpoint refreshes do not refresh that date. Inspect older matches and current

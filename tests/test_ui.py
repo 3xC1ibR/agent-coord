@@ -388,6 +388,26 @@ class BrowserHTTPTests(unittest.TestCase):
             content = response.read().decode()
             return response.status, json.loads(content) if response.headers.get_content_type() == "application/json" else content
 
+    def test_conversation_search_scope_and_no_provider_resume(self):
+        for identity, directory, placement in (("here", self.root, "now"), ("closed", self.root, "archived"),
+                                                ("elsewhere", self.root.parent / "other-workspace", "now")):
+            self.store.register(session_id=identity, client="codex", cwd=str(directory), name="Unrelated title")
+            self.store.threads.update(identity, attention=placement)
+            history = {"turns": [{"id": "turn", "items": [{"id": "item", "type": "userMessage",
+                "content": [{"type": "text", "text": "Could Jev help?"}]}]}]}
+            with self.store._connection() as db:
+                db.execute("INSERT INTO browser_history VALUES (?, ?)", (identity, json.dumps(history)))
+        with patch.object(self.sessions, "read", side_effect=AssertionError("Search resumed a provider")):
+            status, all_results = self.request("/api/browser/search?q=jev&my_messages=true")
+            self.assertEqual(status, 200)
+            self.assertEqual({t["thread_id"] for t in all_results["items"]}, {"here", "closed"})
+            self.assertEqual(all_results["coverage"]["threads"], 2)
+            status, current = self.request("/api/browser/search?q=jev&scope=current&show=archived")
+            self.assertEqual([t["thread_id"] for t in current["items"]], ["closed"])
+            self.assertEqual(self.request("/api/browser/search?q=jev&scope=bad")[0], 400)
+        for asset in ("/conversation-search.js", "/conversation-search.css"):
+            self.assertEqual(self.request(asset)[0], 200)
+
     def test_session_model_commands_and_yolo_over_http(self):
         status, created = self.request("/api/browser/sessions", {"name": "Settings", "yolo": True})
         self.assertEqual(status, 201)

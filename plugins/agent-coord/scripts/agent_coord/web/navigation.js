@@ -7,12 +7,14 @@
     if (typeof value !== "string" || value.length > 8192 || /[\s\u0000-\u001f\u007f\\]/.test(value)) throw new Error("Invalid Ribbon Field link.");
     const url = new URL(value), q = url.searchParams;
     if (url.protocol !== "agentcoord:" || !["overview", "view", "thread"].includes(url.host) || url.username || url.password || url.port || url.hash ||
-        [...q.keys()].some(key => !["project", "repository", "database", "request", "window"].includes(key) || q.getAll(key).length !== 1)) {
+        [...q.keys()].some(key => !["project", "repository", "database", "request", "window", "turn", "item"].includes(key) || q.getAll(key).length !== 1)) {
       throw new Error("Invalid Ribbon Field route.");
     }
     if ((q.has("database") && !/^[a-f\d]{24}$/.test(q.get("database"))) ||
         ["request", "window"].some(key => q.has(key) && !uuid(q.get(key)))) throw new Error("Invalid navigation destination.");
     let route;
+    if (["turn", "item"].some(key => q.has(key)) && (url.host !== "thread" ||
+        !["turn", "item"].every(key => q.get(key)?.length <= 200 && q.get(key)?.length > 0 && !/[\u0000-\u001f]/.test(q.get(key))))) throw new Error("Invalid message destination.");
     if (url.host === "overview") {
       if (!["", "/"].includes(url.pathname) || ["project", "repository"].some(key => q.has(key) && !identity(q.get(key)))) throw new Error("Invalid overview route.");
       route = {kind: "overview", filters: Object.fromEntries(["project", "repository"].filter(key => q.has(key)).map(key => [key, q.get(key)]))};
@@ -20,6 +22,7 @@
       const id = decodeURIComponent(url.pathname.slice(1));
       if (!url.pathname.startsWith("/") || !identity(id) || q.has("project") || q.has("repository")) throw new Error("Invalid view or thread route.");
       route = {kind: url.host, id};
+      if (q.has("turn")) Object.assign(route, {turn: q.get("turn"), item: q.get("item")});
     }
     return {route, request_id: q.get("request")};
   }

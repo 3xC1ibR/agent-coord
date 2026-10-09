@@ -6,13 +6,13 @@ const vm = require("node:vm");
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
 
 function setup(thread) {
-  const element = (tag, text, className) => ({tag, textContent: text, className, childNodes: [],
+  const element = (tag, text, className) => ({tag, textContent: text, className, dataset: {}, childNodes: [],
     append(...children) { this.childNodes.push(...children); },
     replaceChildren(fragment) { this.childNodes = fragment.childNodes; },
     setAttribute(name, value) { this[name] = value; },
     querySelectorAll() { return []; }, scrollHeight: 100, scrollTop: 0, clientHeight: 100});
   const timeline = element("div");
-  const context = {state: {detail: {thread, work_thread: {browser_session: true}}},
+  const context = {state: {selected: "test-thread", detail: {thread, work_thread: {browser_session: true}}},
     $: () => timeline, node: element, document: {createDocumentFragment: () => element("fragment")},
     messageMarkdown: {render: text => text}, timeline};
   const disclosureEntry = {};

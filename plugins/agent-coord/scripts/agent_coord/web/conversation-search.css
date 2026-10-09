@@ -1,0 +1,16 @@
+.search-options { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin: 0 0 18px; }
+.search-options label { display: flex; flex-direction: row; align-items: center; gap: 8px; color: var(--muted); white-space: nowrap; }
+.search-options select { max-width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.search-options input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+.conversation-results { max-width: 980px; }
+#search-status { color: var(--muted); line-height: 1.6; margin: 0 0 18px; }
+.search-hit { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin: 0 0 14px; overflow-wrap: anywhere; }
+.search-hit h2 { font-size: 17px; line-height: 1.4; margin: 0 0 6px; }
+.search-title:hover { text-decoration: underline; }
+.search-meta { display: block; color: var(--muted); font-size: 12px; line-height: 1.5; margin: 4px 0 10px; }
+.search-excerpt { display: block; padding: 12px; margin-top: 10px; border-left: 3px solid var(--line); line-height: 1.6; }
+.search-excerpt:hover { background: var(--tint); border-color: var(--accent); }
+.search-excerpt mark { background: var(--tint); color: var(--ink); font-weight: 650; }
+.search-context { line-height: 1.6; }
+.message.search-target { outline: 2px solid var(--accent); outline-offset: 5px; border-radius: 5px; }
+@media (max-width: 640px) { .search-hit { padding: 14px; } .search-options { gap: 10px; } }

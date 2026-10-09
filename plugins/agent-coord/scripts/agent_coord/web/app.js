@@ -4,12 +4,14 @@ const state = {config: null, creatingSession: false, sessions: [], organization:
 let notifications;
 let savedViews;
 let navigation;
+let conversationSearch;
 state.sourceWindowId = window.agentCoordDesktop?.windowId || crypto.randomUUID();
 state.paneMode = window.parent !== window && new URLSearchParams(location.search).get("pane") === "1";
 if (state.paneMode) state.sourceWindowId = window.parent.agentCoordSourceWindowId || state.sourceWindowId;
 window.agentCoordSourceWindowId = state.sourceWindowId;
 window.agentCoordFocusMessage = focusAgentMessage;
 window.agentCoordOpenMessage = openAgentMessage;
+window.agentCoordFocusSearchMessage = focusSearchMessage;
 let listRequest = 0;
 const base = "/api/browser/";
 const sessionPath = id => "sessions/" + encodeURIComponent(id);
@@ -373,6 +375,7 @@ function renderList() {
   if (state.paneMode) { renderStatus(); return; }
   renderClosedToggle();
   savedViews?.render(state.viewThreads || state.sessions);
+  if (conversationSearch?.update()) { renderStatus(); return; }
   const query = $("search").value.trim().toLocaleLowerCase();
   const projectThreads = state.sessions.filter(t => threadOrganization.matches(t, $("repository").value, $("project").value));
   const threads = projectThreads.filter(t => threadViews.matches(t,
@@ -859,6 +862,9 @@ function renderTimeline() {
       const text = itemText(item);
       if (item.type === "userMessage" || item.type === "agentMessage") {
         const message = node("article", null, "message " + (item.type === "userMessage" ? "user" : "agent"));
+        message.dataset.searchTurn = turn.id || "search-turn-" + turns.indexOf(turn);
+        message.dataset.searchItem = item.id || "search-item-" + (turn.items || []).indexOf(item);
+        message.tabIndex = -1;
         const body = node("div", null, item.type === "agentMessage" ? "text markdown" : "text");
         if (item.type === "agentMessage") body.innerHTML = messageMarkdown.render(text);
         else {
@@ -901,6 +907,19 @@ function renderTimeline() {
   if (state.timelineScroll) state.timelineScroll.afterRender(atBottom);
   else if (atBottom) el.scrollTop = el.scrollHeight;
   if (state.messageTarget && state.messageTarget.thread === state.selected) focusAgentMessage(state.messageTarget.id);
+  if (state.searchTarget?.thread === state.selected) focusSearchMessage(state.searchTarget);
+}
+function focusSearchMessage(target) {
+  if (target.thread !== state.selected) return false;
+  state.searchTarget = target;
+  const messages = [...$("timeline").querySelectorAll("[data-search-item]")];
+  const found = messages.find(el => el.dataset.searchTurn === target.turn && el.dataset.searchItem === target.item);
+  if (!found) return false;
+  for (const el of messages) el.classList.toggle("search-target", el === found);
+  found.scrollIntoView({block: "center"}); found.focus({preventScroll: true});
+  state.timelineScroll?.restore($("timeline").scrollTop);
+  state.searchTarget = null;
+  return true;
 }
 function focusAgentMessage(id) {
   if (!/^\d+$/.test(String(id))) return;
@@ -1341,6 +1360,9 @@ $("group-by").onchange = () => {
   filtersChanged();
 };
 $("search").oninput = filtersChanged;
+conversationSearch = new ConversationSearch.Search({document, api, filters: () => ({
+  show: $("view").value, phase: $("phase-filter").value,
+  repository: $("repository").value, project: $("project").value})});
 function setChatExpanded(expanded) {
   expanded = Boolean(expanded && state.selected);
   if (expanded) setNavigation(false);
@@ -1691,7 +1713,15 @@ async function boot() {
     capture: () => ({viewId: savedViews.activeId, ...savedViews.read(), tiled: Boolean(window.agentCoordPanes?.active),
       thread: window.agentCoordPanes?.active ? window.agentCoordPanes.selected : state.selected}),
     apply: async route => {
-      if (route.kind === "thread") await select(route.id);
+      if (route.kind === "thread") {
+        // Message results open a full conversation so an exact target is visible
+        // even when the overview previously used tiled panes.
+        if (route.item && window.agentCoordPanes?.active) goHome();
+        await select(route.id);
+        if (route.item && state.selected === route.id && !focusSearchMessage({thread: route.id, turn: route.turn, item: route.item})) {
+          throw new Error("The matching message is no longer available in this conversation's saved history.");
+        }
+      }
       else if (route.kind === "view") {
         savedViews.sync((await api("views")).data);
         await savedViews.activate(route.id);

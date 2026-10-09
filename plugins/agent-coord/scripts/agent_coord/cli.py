@@ -103,8 +103,11 @@ def _parser() -> argparse.ArgumentParser:
     thread_list = thread_commands.add_parser("list")
     thread_list.add_argument("--cwd")
     thread_list.add_argument("--archived", action="store_true")
-    thread_search = thread_commands.add_parser("search", help="Search routing context across open and closed threads, ranked by relevance then work recency.")
-    thread_search.add_argument("query", help="Up to 10 keywords; each must match title, request, latest checkpoint, or artifacts.")
+    thread_search = thread_commands.add_parser("search", help="Search saved messages and context across open and closed threads.")
+    thread_search.add_argument("query", help="Up to 10 literal keywords in saved context or a conversation message.")
+    thread_search.add_argument("--source", choices=("all", "context", "messages"), default="all",
+                               help="Search saved context and messages (default), or either source separately.")
+    thread_search.add_argument("--my-messages", action="store_true", help="Match only user messages, excluding saved context and assistant replies.")
     thread_search.add_argument("--cwd")
     thread_search.add_argument("--limit", type=int, default=10)
     thread_search.add_argument("--cursor", help="Continue with the same query and filters using next_cursor.")
@@ -530,7 +533,8 @@ def run(arguments: argparse.Namespace) -> Any:
         if arguments.thread_command == "search":
             from .thread_search import search_threads
             return search_threads(store, arguments.query, limit=arguments.limit, cursor=arguments.cursor,
-                                  cwd=arguments.cwd, app_only=arguments.app_only, **associations)
+                                  cwd=arguments.cwd, app_only=arguments.app_only, source=arguments.source,
+                                  my_messages=arguments.my_messages, **associations)
         store.threads.ensure(arguments.session_id)
         if arguments.thread_command == "show":
             return store.threads.get(arguments.session_id, history=True)

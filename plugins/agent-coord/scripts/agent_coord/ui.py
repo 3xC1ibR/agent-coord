@@ -356,7 +356,7 @@ def _handler(
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
                 return
-            if parsed.path in {"/agent-messages.js", "/agent-messages.css"}:
+            if parsed.path in {"/agent-messages.js", "/agent-messages.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -455,6 +455,33 @@ def _handler(
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_sessions(archived=query.get("archived") == ["true"])})
             elif route == "threads":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_work_threads(archived=query.get("archived") == ["true"])})
+            elif route == "search":
+                from .thread_search import search_threads
+                scope = query.get("scope", ["all"])[0]
+                if scope not in {"all", "current"}:
+                    raise CoordinationError("Search scope must be all or current.")
+                show = query.get("show", ["active"])[0]
+                # Reuse the app inventory boundary (workspace and managed-worker
+                # exclusions). No detail reads, provider resumes, or seen marks.
+                threads = browser_sessions.list_work_threads(archived=show == "archived" if scope == "current" else False)
+                if scope == "all":
+                    threads += browser_sessions.list_work_threads(archived=True)
+                else:
+                    placement = "archived" if show == "archived" else "later" if show == "later" else "now"
+                    threads = [t for t in threads if t["attention"] == placement
+                               and (show != "attention" or t["needs_attention"])
+                               and (show != "completed" or t["work_phase"] == "finished")]
+                    for field in ("repository", "project"):
+                        selected = query.get(field, [""])[0]
+                        if selected:
+                            threads = [t for t in threads if t[field + "_id"] == (None if selected == "__none__" else selected)]
+                    phase = query.get("phase", [""])[0]
+                    if phase:
+                        threads = [t for t in threads if (t["work_phase"] or "new") == phase]
+                self._json(HTTPStatus.OK, search_threads(store, query.get("q", [""])[0],
+                    limit=20, cursor=query.get("cursor", [None])[0],
+                    my_messages=query.get("my_messages") == ["true"],
+                    thread_ids=[t["thread_id"] for t in threads]))
             elif route.startswith("threads/") and route.endswith("/preview"):
                 self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
             elif route.startswith("threads/") and route.endswith("/messages"):
