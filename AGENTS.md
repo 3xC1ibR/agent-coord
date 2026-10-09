@@ -5,9 +5,29 @@
 Historically, agent-coord started as a skill to allow agents to communicate with each other (hence the name).
 Later, we added `delegation`; giving agents the ability to spin up agents (different than the provider default)"
 Most recently (oct 2026) we added a ui; basically an ide.
-The immediate goal is to launch this a product; though there are still decisions pending.
-When considering adding new features, you must consider whether adding those features are necessary for the launch or if they are just a way to procrastinate launching.
-The app does not need to have *every* feature in order to be useful. It just has to do *one* thing really well-- focus on that and launch the damn thing.
+
+## Product focus
+
+**Launch mode.** Prioritize getting the useful product into other people's hands
+and learning from adoption, repeat use, feedback, and payment. Favor changes that
+remove concrete barriers to discovery, installation, first value, or continued
+use. Challenge additional features and polish without a clear connection to that
+learning.
+
+Before starting or expanding work, identify its concrete contribution to the
+project's current objective.
+
+When that connection is weak, push back before implementation: explain the
+tradeoff and recommend a smaller change, a more direct experiment, or deferral.
+Do not manufacture a launch justification for unrelated work.
+
+Respect an explicit user decision to proceed and existing authorization. Raise
+the concern once; do not create repeated confirmation loops.
+
+Prefer the smallest useful change and observable evidence. Feature count,
+architectural completeness, and speculative future needs are not sufficient
+reasons to expand scope. Necessary reliability, security, and maintenance work
+count when their connection to the objective is clear.
 
 ## Naming
 

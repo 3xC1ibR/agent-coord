@@ -2,6 +2,29 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## Product focus
+
+**Launch mode.** Prioritize getting the useful product into other people's hands
+and learning from adoption, repeat use, feedback, and payment. Favor changes that
+remove concrete barriers to discovery, installation, first value, or continued
+use. Challenge additional features and polish without a clear connection to that
+learning.
+
+Before starting or expanding work, identify its concrete contribution to the
+project's current objective.
+
+When that connection is weak, push back before implementation: explain the
+tradeoff and recommend a smaller change, a more direct experiment, or deferral.
+Do not manufacture a launch justification for unrelated work.
+
+Respect an explicit user decision to proceed and existing authorization. Raise
+the concern once; do not create repeated confirmation loops.
+
+Prefer the smallest useful change and observable evidence. Feature count,
+architectural completeness, and speculative future needs are not sufficient
+reasons to expand scope. Necessary reliability, security, and maintenance work
+count when their connection to the objective is clear.
+
 ## Naming
 
 Ribbon Field is the public-facing app and marketing name. Agent Coord is the

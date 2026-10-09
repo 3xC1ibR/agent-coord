@@ -1,0 +1,16 @@
+/* Direction A · Ochre: warm paper and ink, one amber accent. Near-black dark mode. */
+:root {
+  --paper: #f6f3ec; --surface: #fffdf8; --ink: #1e1b16; --muted: #6b6459;
+  --line: #e2ddd2; --line-strong: #cdc6b7; --accent: #96660f; --accent-hover: #7a530b; --on-accent: #fffdf8;
+  --tint: #f3ead6; --warm: #b4432c; --warm-tint: #f8e4dd; --danger: #b4432c;
+  --panel: #efebe1; --hover-bg: #efebe1; --hover-line: #b8b09e; --dot-idle: #a39d92; --shadow: #1e1b1626;
+  --sb-bg: #1b1915; --sb-ink: #efeae0; --sb-muted: #948d81; --sb-line: #363229; --sb-hover: #2a2722;
+  --sb-accent: #e3b25a; --sb-primary-bg: #e3b25a; --sb-primary-ink: #1b1915;
+}
+:root[data-theme="dark"] {
+  --paper: #121110; --surface: #1b1917; --ink: #ebe6dc; --muted: #9a938a;
+  --line: #2b2925; --line-strong: #3b3832; --accent: #e3b25a; --accent-hover: #f0c57a; --on-accent: #1b1915;
+  --tint: #2a2416; --warm: #f0a083; --warm-tint: #3a2a22; --danger: #f08a7a;
+  --panel: #171513; --hover-bg: #242220; --hover-line: #4a4540; --dot-idle: #5f5a53; --shadow: #0006;
+  --sb-bg: #0d0c0b; --sb-line: #2b2925; --sb-hover: #1d1b18;
+}

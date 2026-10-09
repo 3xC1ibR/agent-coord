@@ -1,0 +1,16 @@
+/* Direction D · Mono: no accent hue at all. Ink is the accent; orange is reserved for attention. */
+:root {
+  --paper: #f4f4f2; --surface: #ffffff; --ink: #171717; --muted: #6b6b68;
+  --line: #e3e3df; --line-strong: #cfcfca; --accent: #171717; --accent-hover: #000000; --on-accent: #ffffff;
+  --tint: #ebebe7; --warm: #d2491e; --warm-tint: #fbe7df; --danger: #c62828;
+  --panel: #ededea; --hover-bg: #ededea; --hover-line: #b4b4ae; --dot-idle: #a7a7a3; --shadow: #17171726;
+  --sb-bg: #111111; --sb-ink: #ededea; --sb-muted: #8d8d89; --sb-line: #2a2a28; --sb-hover: #1f1f1e;
+  --sb-accent: #ffffff; --sb-primary-bg: #ededea; --sb-primary-ink: #111111;
+}
+:root[data-theme="dark"] {
+  --paper: #0e0e0e; --surface: #171717; --ink: #e8e8e5; --muted: #8f8f8b;
+  --line: #292928; --line-strong: #3a3a38; --accent: #f2f2ef; --accent-hover: #ffffff; --on-accent: #0e0e0e;
+  --tint: #242423; --warm: #ff8a5b; --warm-tint: #3b2619; --danger: #ff7b72;
+  --panel: #121212; --hover-bg: #202020; --hover-line: #4a4a48; --dot-idle: #5c5c5a; --shadow: #0006;
+  --sb-bg: #080808; --sb-line: #292928; --sb-hover: #181818;
+}

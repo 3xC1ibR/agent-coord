@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ribbon Field · Style mockup</title>
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/styles.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/thread-hover.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/agent-messages.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/filter-menu.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/image-attachments.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/views.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/folders.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/remote-access.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/thread-panes.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/theme.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/conversation-search.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/speech.css">
+  <link rel="stylesheet" href="../../plugins/agent-coord/scripts/agent_coord/web/thread-mentions.css">
+  <script>
+    (() => {
+      const q = new URLSearchParams(location.search);
+      const theme = q.get("theme") === "dark" ? "dark" : "light";
+      const dir = q.get("dir") || "current";
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+      document.documentElement.dataset.page = q.get("page") === "conversation" ? "conversation" : "overview";
+      if (dir !== "current") document.write('<link rel="stylesheet" href="direction-' + dir + '.css">');
+    })();
+  </script>
+  <style>
+    html[data-page="overview"] #conversation { display: none; }
+    html[data-page="conversation"] #welcome,
+    html[data-page="conversation"] .projects-bar,
+    html[data-page="conversation"] .views-bar { display: none; }
+    html[data-page="conversation"] .workspace-bar { min-height: 44px; padding-inline: 24px; }
+  </style>
+</head>
+<body>
+  <aside id="sidebar" class="sidebar" aria-label="Workspace navigation">
+    <a class="brand" href="#"><span class="brand-mark" aria-hidden="true">rf<span></span></span><span>Ribbon Field<small>A place for work in progress</small></span></a>
+    <button class="primary"><span aria-hidden="true">＋</span> New session <span aria-hidden="true">↗</span></button>
+    <div class="folder-control"><label>Project directory</label><select><option>~/projects/ribbon-field</option></select><button class="quiet" type="button">Open project…</button></div>
+    <button class="nav-home" aria-current="page"><span aria-hidden="true">▦</span> Workspace <span class="nav-count">12</span></button>
+    <button class="quiet" type="button">Scheduled prompts</button>
+    <button class="quiet" type="button">Roll up waiting threads</button>
+    <div class="list-heading">YOUR THREADS<span aria-hidden="true">↓</span></div>
+    <nav aria-label="Work threads">
+      <section class="thread-group">
+        <div class="group-heading"><h2>Now</h2></div>
+        <button class="session compact active-thread selected"><div class="session-title"><span>Restyle accent and dark theme</span></div></button>
+        <button class="session compact needs-attention"><div class="session-title"><span class="dot waiting"></span><span>Native push on iOS devices</span><span class="unread-mark">New</span></div></button>
+        <button class="session compact response-unread"><div class="session-title"><span class="dot completed"></span><span>Search saved conversation messages</span></div></button>
+        <button class="session compact"><div class="session-title"><span class="dot running"></span><span>Preserve thread mentions across drafts</span></div></button>
+        <button class="session compact"><div class="session-title"><span class="dot"></span><span>Competitor research notes</span></div></button>
+      </section>
+      <section class="thread-group">
+        <div class="group-heading"><h2>Later</h2></div>
+        <button class="session compact"><div class="session-title"><span class="dot"></span><span>Monitor page type scale</span></div><small class="placement-label">Tomorrow</small></button>
+        <button class="session compact"><div class="session-title"><span class="dot failed"></span><span>Remote access pairing retry</span></div></button>
+      </section>
+    </nav>
+    <div class="sidebar-footer"><label class="theme-control">Appearance<select><option>System</option></select></label><button class="notification-toggle" type="button">Enable notifications</button><a href="#"><span aria-hidden="true">⌁</span> Coordination monitor <span aria-hidden="true">↗</span></a></div>
+  </aside>
+  <main id="main">
+    <header class="workspace-bar"><div class="breadcrumb"><button class="icon-button" type="button" aria-label="Hide sidebar"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path></svg></button><button class="quiet page-back">Workspace</button><span class="page-sep" aria-hidden="true">/</span><span class="page-location">Overview</span></div><span class="connection" data-state="connected">Connected</span></header>
+    <div class="projects-bar"><div class="view-tabs" role="tablist"><button class="view-tab" role="tab" aria-selected="true"><span class="view-active"></span><span class="view-tab-name">ribbon-field</span></button><button class="view-tab" role="tab"><span class="view-tab-name">client-site</span><span class="view-attention">2</span></button><button class="view-tab" role="tab"><span class="view-completed"></span><span class="view-tab-name">notes</span></button></div><button class="quiet" type="button" aria-label="Open project">＋</button></div>
+    <div class="views-bar">
+      <div class="saved-view-tabs" role="tablist"><button class="saved-view-tab" aria-selected="true">All threads</button><button class="saved-view-tab">Needs me</button><button class="saved-view-tab">Agents</button></div>
+      <div class="view-actions"><button type="button" class="quiet">Tile threads</button><button type="button" class="quiet">＋ View</button><details class="view-menu"><summary>•••</summary></details></div>
+    </div>
+    <section id="welcome" class="welcome">
+      <div class="workspace-tools">
+        <label class="search-field"><span aria-hidden="true">⌕</span><input type="search" placeholder="Search conversations…"><kbd aria-hidden="true">/</kbd></label>
+        <div class="view-filters">
+          <details class="filter-menu"><summary>Filters <span aria-hidden="true">⌄</span></summary></details>
+          <div class="placement-switch" role="group"><button type="button" class="quiet" aria-pressed="true">Now</button><button type="button" class="quiet" aria-pressed="false">Later</button><button type="button" class="quiet closed-toggle" aria-pressed="false">Closed</button></div>
+        </div>
+        <div class="workspace-actions"><button class="primary">New session <span aria-hidden="true">＋</span></button></div>
+      </div>
+      <div id="overview">
+        <section class="attention-panel">
+          <div class="group-heading"><h2>Needs you · 2</h2></div>
+          <div class="thread-cards">
+            <div class="thread-card attention-card"><button class="session needs-attention response-unread"><div class="attention-copy"><div class="session-title"><span>Native push on iOS devices</span></div><p class="thread-snippet work-summary">Push subscription works on macOS Safari. iOS needs the app added to the Home Screen first; waiting for you to confirm the install copy before shipping.</p><div class="card-meta"><span class="project-name">ribbon-field</span><span class="phase-label">validation</span><span class="card-time">12 min ago</span></div><div class="next-action"><span>↳</span><span class="next-copy"><span class="next-label">Your next step · </span>Approve the Home Screen install copy</span></div></div></button><div class="card-actions"><button data-action="handle">Dismiss</button><button>Open</button></div></div>
+            <div class="thread-card attention-card"><button class="session needs-attention"><div class="attention-copy"><div class="session-title"><span>Remote access pairing retry</span></div><p class="thread-snippet work-summary">Failed: pairing code expired before the phone finished the handshake. Needs a decision on the timeout before another attempt.</p><div class="card-meta"><span class="project-name">client-site</span><span class="phase-label">implementation</span><span class="card-time">1 h ago</span></div></div></button><div class="card-actions"><button data-action="handle">Dismiss</button><button>Open</button></div></div>
+          </div>
+        </section>
+        <div class="phase-board">
+          <section class="thread-group new"><div class="group-heading"><h2>New</h2></div><div class="thread-cards"><p class="stage-empty">—</p></div></section>
+          <section class="thread-group investigation"><div class="group-heading"><h2>Investigating</h2></div><div class="thread-cards">
+            <div class="thread-card"><button class="session active-thread selected card-age-fresh"><div class="session-title"><span>Restyle accent and dark theme</span></div><p class="thread-snippet work-summary">Read the design reference and the current palette. Building rendered mockups of a few color directions next.</p><div class="card-meta"><span class="project-name">ribbon-field</span><span class="card-time">now</span></div></button><div class="card-actions"><button>Open</button><div class="card-end-actions"><button class="card-more">⋯</button></div></div></div>
+            <div class="thread-card"><button class="session card-age-settled"><div class="session-title"><span>Competitor research notes</span></div><p class="thread-snippet work-summary">Compared six coordination tools on pricing and onboarding.</p><div class="card-meta"><span class="card-time">2 d ago</span></div></button></div>
+          </div></section>
+          <section class="thread-group planning"><div class="group-heading"><h2>Planning</h2></div><div class="thread-cards">
+            <div class="thread-card"><button class="session card-age-fresh"><div class="session-title"><span>Monitor page type scale</span></div><p class="thread-snippet work-summary">Proposed a 12/14/19 scale that matches the workspace. Waiting on a second look before touching the monitor.</p><div class="card-meta"><span class="project-name">ribbon-field</span><span class="unread-mark">New checkpoint</span><span class="card-time">3 h ago</span></div><div class="next-action"><span>↳</span><span class="next-copy"><span class="next-label">Up next · </span>Apply the scale to the monitor header</span></div></button><div class="card-actions"><button>Open</button></div></div>
+          </div></section>
+          <section class="thread-group orchestrating"><div class="group-heading"><h2>Orchestrating</h2></div><div class="thread-cards"><p class="stage-empty">—</p></div></section>
+          <section class="thread-group implementation"><div class="group-heading"><h2>Implementing</h2></div><div class="thread-cards">
+            <div class="thread-card"><button class="session active-thread card-age-fresh"><div class="session-title"><span>Preserve thread mentions across drafts</span></div><p class="thread-snippet work-summary">Mentions now survive queueing and scheduling. Running the suite.</p><div class="card-meta"><span class="project-name">ribbon-field</span><span class="card-time">4 min ago</span></div></button><div class="card-actions"><button>Open</button></div></div>
+          </div></section>
+          <section class="thread-group validation"><div class="group-heading"><h2>Validating</h2></div><div class="thread-cards">
+            <div class="thread-card"><button class="session response-unread card-age-fresh"><div class="session-title"><span>Search saved conversation messages</span></div><p class="thread-snippet work-summary">Completed: search opens the exact matching message and highlights it. 41 tests pass.</p><div class="card-meta"><span class="project-name">ribbon-field</span><span class="card-time">25 min ago</span></div></button><div class="card-actions"><button data-action="handle">Dismiss</button><button>Open</button></div></div>
+          </div></section>
+          <section class="thread-group deployment"><div class="group-heading"><h2>Deploying</h2></div><div class="thread-cards"><p class="stage-empty">—</p></div></section>
+          <section class="thread-group finished"><div class="group-heading"><h2>Done</h2></div><div class="thread-cards">
+            <div class="thread-card"><button class="session response-read card-age-old"><div class="session-title"><span>Make Beads optional for delegation</span></div><p class="thread-snippet work-summary">Completed.</p><div class="card-meta"><span class="card-time">yesterday</span></div></button></div>
+            <div class="thread-card"><button class="session response-read card-age-old"><div class="session-title"><span>Record plugin refresh steps</span></div><div class="card-meta"><span class="card-time">2 d ago</span></div></button></div>
+          </div></section>
+        </div>
+      </div>
+      <footer class="overview-footer"><span>9 threads · 2 need you</span><span>Updated just now</span></footer>
+    </section>
+    <section id="conversation" class="conversation">
+      <div class="conversation-main">
+        <div class="conversation-content">
+          <header class="conversation-head">
+            <div class="conversation-heading"><h1><button class="thread-title" type="button">Restyle accent and dark theme</button></h1></div>
+            <div class="conversation-controls">
+              <div class="session-actions"><span class="status">Running</span><button class="quiet">Move to Later…</button><button class="quiet">Fork</button><button class="quiet">Add to group</button><button class="quiet">Close thread</button></div>
+              <button class="icon-button toggle-context" type="button" aria-expanded="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16"></path></svg></button>
+              <button class="icon-button expand-chat" type="button"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="expand-icon" d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M3 3l6 6m12-6-6 6M3 21l6-6m12 6-6-6"></path></svg></button>
+            </div>
+          </header>
+          <div class="timeline">
+            <div class="message user"><div class="text markdown"><p>Can you help me update the styling? I'm not a fan of the green accent, or the gray background in dark mode. Keep the <strong>layout</strong> unchanged and generate a few mockups.</p></div></div>
+            <details class="turn-work" data-status="completed" open><summary><span class="tool-icon" aria-hidden="true"></span><span class="work-label">Tool calls · 3</span><span class="work-state">✓</span></summary>
+              <details class="tool" data-status="completed"><summary class="tool-summary"><span class="tool-icon terminal" aria-hidden="true"></span><span class="tool-label">Terminal (cmd: zsh)</span><span class="tool-preview">grep -n -- "--[a-z-]*:" styles.css theme.css</span></summary></details>
+              <details class="tool" data-status="completed"><summary class="tool-summary"><span class="tool-icon" aria-hidden="true"></span><span class="tool-label">Read</span><span class="tool-preview">plugins/agent-coord/scripts/agent_coord/web/theme.css</span></summary></details>
+              <details class="tool" data-status="inProgress"><summary class="tool-summary"><span class="tool-icon terminal" aria-hidden="true"></span><span class="tool-label">Terminal (cmd: zsh)</span><span class="tool-preview">"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --screenshot …</span></summary></details>
+            </details>
+            <div class="message agent"><div class="text markdown"><p>The palette lives in two files. Light mode is defined at the top of <code>styles.css</code> and dark mode overrides it in <code>theme.css</code>. The sidebar is a third, hard-coded green that does not change with the theme.</p><p>I read the <a href="#">reference article</a>. The advice that applies here:</p><ul><li>Pick one opinionated accent and use it sparingly for state, not decoration.</li><li>Remove gradients, glows and tinted containers that do not carry meaning.</li><li>Let the dark theme go genuinely dark instead of a lifted gray.</li></ul><pre><code>:root[data-theme="dark"] {
+  --paper: #17221e;   /* current: green-gray */
+  --accent: #a8cf9b;  /* current: mint */
+}</code></pre><p>Four directions are rendering now. Each keeps every layout rule and only swaps the color variables.</p></div></div>
+          </div>
+        </div>
+        <form class="composer" onsubmit="return false">
+          <div class="composer-draft"><textarea placeholder="Message Claude or drop images…" rows="1">Show me the oxblood one in dark mode first.</textarea></div>
+          <div class="composer-model"><button class="attach-image" type="button" aria-label="Attach images"><span aria-hidden="true">+</span></button><button class="model-trigger" type="button"><svg class="provider-logo provider-logo-claude" viewBox="0 0 24 24" aria-hidden="true"><path d="m4.7 15.4 4.2-2.4.1-.2-.1-.1h-.2l-.7-.1-2.4-.1-2.1-.1-2-.1-.5-.1-.5-.6.1-.3.4-.3h.6l1.3.1 2 .1 1.4.1 2.1.2h.3l.1-.1-.1-.1-.1-.1-2-1.4-2.2-1.4-1.1-.8-.6-.4-.3-.4-.1-.8.5-.6.7.1h.2l.7.5 1.5 1.2 2 1.5.3.2.1-.1v-.1l-.1-.2-1.1-2L8.4 5l-.5-.8-.1-.5c0-.2 0-.4.1-.6l.6-.8.4-.1.9.1.3.3.5 1.2.9 1.9 1.3 2.6.4.8.2.7.1.2h.1v-.1l.1-1.5.2-1.8.2-2.3.1-.7.3-.8.6-.4.5.2.4.6-.1.4-.2 1.5-.5 2.3-.3 1.5h.2l.2-.2.8-1.1 1.4-1.8.6-.7.7-.8.5-.4h.9l.6 1-.3.9-.9 1.2-.8 1-1.1 1.5-.7 1.2.1.1h.2l2.6-.6 1.4-.2 1.7-.3.8.3.1.4-.3.7-1.8.4-2.1.4-3.1.7h-.1l.1.1 1.4.1.6.1h1.5l2.8.2.7.5.4.6-.1.4-1.1.6-1.5-.4-3.5-.8-1.2-.3h-.2v.1l1 1 1.8 1.6 2.3 2.1.1.5-.3.4h-.3l-2-1.5-.8-.7-1.8-1.5h-.1v.1l.4.6 2.2 3.3.1 1-.2.3-.6.2-.6-.1-1.3-1.8-1.3-2-1.1-1.8-.1.1-.6 6.7-.3.3-.7.3-.6-.4-.3-.7.3-1.4.4-1.8.3-1.4.3-1.8.2-.6v-.1l-1.4 1.9-2.1 2.9-1.7 1.8-.4.2-.7-.4.1-.6.4-.6 2.3-3 1.4-1.8.9-1.1v-.1h-.1L5 18.7l-1.4.2-.6-.3-.1-.6.3-.5 1.2-1 .3-.1Z"/></svg><span class="model-trigger-name">Claude Fable 5.1</span><span class="model-chevron" aria-hidden="true">⌄</span></button><button class="model-trigger effort-trigger" type="button">Effort · High <span aria-hidden="true">⌄</span></button></div>
+          <div class="composer-footer"><span>Enter to send · Shift + Enter for a new line</span><div><button type="button" class="quiet">Stop</button><button type="button" class="quiet">Schedule…</button><button class="primary" type="submit">Send ↑</button></div></div>
+        </form>
+      </div>
+      <aside class="context-panel" aria-label="Thread context">
+        <details class="thread-context" open><summary>Where you left it <span>· investigation</span></summary>
+          <div><p>User asked for new styling mockups: no green accent, no gray dark-mode background, layout unchanged. Read the reference article and the current palette; building rendered mockups of four color directions.</p><small class="muted">Saved by agent · Oct 9, 2026, 12:51 PM</small><p class="checkpoint-next">Next · Agent: Render mockups with headless Chrome</p>
+          <div class="thread-links"><div class="thread-link"><small class="muted">document</small><a href="#">Reference article ↗</a><code>https://www.lennysnewsletter.com/p/how-to-turn-your-ai-into-a-world</code><button class="quiet">×</button></div></div>
+          <details><summary>Original request</summary><p class="original-request">Can you help me update the styling? I'm not a fan of the green accent…</p></details>
+          <details><summary>Checkpoint history · 2</summary><article class="checkpoint-entry"><small class="muted">investigation · Oct 9, 12:51 PM</small><p>Read the article and current palette.</p></article></details></div>
+          <div class="context-actions"><button class="quiet">Edit checkpoint</button><button class="quiet">Add link</button></div>
+        </details>
+      </aside>
+      <footer class="session-statusbar"><span class="status-cwd">/opt/projects/agent-coord</span><div class="session-settings"><span>claude-fable-5-1</span><span>effort high</span><span class="yolo-badge">YOLO</span><button type="button" class="quiet">Permissions</button></div></footer>
+    </section>
+  </main>
+</body>
+</html>
