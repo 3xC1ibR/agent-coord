@@ -13,6 +13,7 @@ function setup({loadModels = async () => []} = {}) {
     addEventListener(type, listener) { this.listeners[type] = listener; }
     emit(type, event = {}) { this.listeners[type]?.(event); }
     setAttribute(name, value) { this.attributes[name] = value; }
+    getAttribute(name) { return this.attributes[name]; }
     removeAttribute(name) { delete this.attributes[name]; }
     append(...items) { this.children.push(...items); }
     replaceChildren() { this.children = []; }

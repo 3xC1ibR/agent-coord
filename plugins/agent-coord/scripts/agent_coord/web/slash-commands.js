@@ -86,8 +86,10 @@
 
     close() {
       this.menu.hidden = true;
-      this.input.setAttribute("aria-expanded", "false");
-      this.input.removeAttribute("aria-activedescendant");
+      if (this.input.getAttribute("aria-controls") === this.menu.id) {
+        this.input.setAttribute("aria-expanded", "false");
+        this.input.removeAttribute("aria-activedescendant");
+      }
     }
 
     render(force = false) {
@@ -103,6 +105,7 @@
       this.key = key;
       this.matches = matches;
       this.menu.hidden = false;
+      this.input.setAttribute("aria-controls", this.menu.id);
       this.menu.setAttribute("aria-label", query.kind === "model" ? "Models" : query.kind === "effort" ? "Reasoning effort" : "Slash commands");
       this.input.setAttribute("aria-expanded", "true");
       this.menu.replaceChildren();

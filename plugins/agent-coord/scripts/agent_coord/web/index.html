@@ -41,6 +41,8 @@
   <script src="/conversation-scroll.js" defer></script>
   <script src="/mobile-chat.js" defer></script>
   <script src="/model-picker.js" defer></script>
+  <link rel="stylesheet" href="/thread-mentions.css">
+  <script src="/thread-mentions.js" defer></script>
   <script src="/schedules.js" defer></script>
   <script src="/agent-messages.js" defer></script>
   <script src="/conversation-search.js" defer></script>
@@ -161,6 +163,7 @@
       </div>
       <div class="jump-to-latest-anchor"><button id="jump-to-latest" class="jump-to-latest" type="button" aria-controls="timeline" hidden><span aria-hidden="true">↓</span> Jump to latest</button></div>
       <form id="composer" class="composer">
+        <div id="thread-mentions" class="thread-mentions" role="listbox" aria-label="Thread references" hidden></div>
         <div id="slash-commands" class="slash-commands" role="listbox" aria-label="Slash commands" hidden></div>
         <div class="composer-draft">
         <section id="queued-messages" class="queued-messages" aria-label="Queued messages" aria-live="polite" hidden></section>
@@ -169,6 +172,7 @@
         <label id="message-label" class="sr-only" for="message">Message Codex</label>
         <textarea id="message" placeholder="Message Codex or drop images…" rows="1" maxlength="100000" role="combobox" aria-multiline="true" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="slash-commands" aria-expanded="false"></textarea>
         </div>
+        <div id="thread-references" class="thread-references" aria-label="Selected thread references"></div>
         <div class="composer-model"><button id="attach-image" class="attach-image" type="button" aria-label="Attach images" title="Attach images"><span aria-hidden="true">+</span></button><input id="image-picker" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><select id="model-picker" aria-label="Model" hidden tabindex="-1"></select><button id="model-trigger" class="model-trigger" type="button" aria-label="Choose model" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" disabled>Model <span aria-hidden="true">⌄</span></button><div id="model-menu" class="model-menu" role="listbox" aria-label="Models" hidden></div><select id="effort-picker" aria-label="Reasoning effort" hidden tabindex="-1"></select><button id="effort-trigger" class="model-trigger effort-trigger" type="button" aria-label="Choose reasoning effort" aria-haspopup="listbox" aria-controls="effort-menu" aria-expanded="false" disabled>Effort <span aria-hidden="true">⌄</span></button><div id="effort-menu" class="model-menu" role="listbox" aria-label="Reasoning effort" hidden></div><span id="model-picker-status" class="muted" role="status"></span></div>
         <div class="composer-footer"><span id="composer-hint">Enter to send · Shift + Enter for a new line</span><div><button id="stop" type="button" class="quiet" hidden>Stop</button><button id="queue" type="button" class="quiet" hidden>Queue ⇥</button><button id="schedule-prompt" type="button" class="quiet">Schedule…</button><button id="send" class="primary" type="submit">Send ↑</button></div></div>
       </form>
@@ -191,7 +195,7 @@
   <dialog id="schedule-dialog" aria-labelledby="schedule-title"><form id="schedule-form">
     <h2 id="schedule-title">Schedule prompt</h2>
     <p class="muted">Starts a new thread. Include everything the agent needs to work independently.</p>
-    <label>Prompt<textarea id="schedule-message" required maxlength="100000" rows="4"></textarea></label>
+    <div class="mention-editor"><label>Prompt<textarea id="schedule-message" required maxlength="100000" rows="4" role="combobox" aria-multiline="true" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="schedule-mentions" aria-expanded="false"></textarea></label><div id="schedule-mentions" class="thread-mentions" role="listbox" aria-label="Thread references" hidden></div><div id="schedule-references" class="thread-references" aria-label="Selected thread references"></div></div>
     <label>Workspace<input id="schedule-workspace" required autocomplete="off" placeholder="/path/to/repository"></label>
     <label>Date and time · <span id="schedule-timezone"></span><input id="schedule-time" type="datetime-local" required></label>
     <p id="schedule-preview" class="muted"></p>

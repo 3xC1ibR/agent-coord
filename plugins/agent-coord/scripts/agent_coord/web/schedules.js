@@ -14,6 +14,12 @@
       Object.assign(this, {document, api, getDraft, openThread, onSaved, onError});
       this.$ = id => document.getElementById(id);
       this.catalogs = new Map();
+      if (typeof ThreadMentions !== "undefined") {
+        this.mentions = new ThreadMentions({input: this.$("schedule-message"), menu: this.$("schedule-mentions"), references: this.$("schedule-references"),
+          getThread: () => this.requestId, canComplete: () => this.$("schedule-dialog").open && !this.saving,
+          loadThreads: async () => { const results = await Promise.all([this.api("threads"), this.api("threads?archived=true")]); return results.flatMap(r=>r.data); }});
+        this.$("schedule-message").addEventListener("keydown", event => { if (!event.isComposing) this.mentions.keydown(event); });
+      }
       this.$("schedule-prompt").onclick = () => this.open().catch(onError);
       this.$("scheduled-prompts").onclick = () => this.showList().catch(onError);
       this.$("new-schedule").onclick = () => this.open().catch(onError);
@@ -33,7 +39,7 @@
     error(id, error) { this.$(id).hidden = !error; this.$(id).textContent = error?.message || ""; }
 
     async open(item = null) {
-      const draft = item ? {settings: item.settings, message: item.message} : this.getDraft();
+      const draft = item ? {settings: item.settings, message: item.message, mentions: item.mentions} : this.getDraft();
       if (draft.images?.length) throw new Error("Scheduled prompts currently support text. Remove the attachments before scheduling.");
       if (this.saving || this.opening) return;
       this.opening = true;
@@ -45,6 +51,7 @@
         this.$("schedule-title").textContent = item ? "Edit scheduled prompt" : "Schedule prompt";
         this.error("schedule-error", null);
         this.$("schedule-message").value = draft.message || "";
+        this.mentions?.restore(this.requestId, draft.message || "", draft.mentions || []);
         this.$("schedule-workspace").value = draft.settings.cwd || "";
         this.$("schedule-full-access").checked = !!draft.settings.yolo;
         const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(0, 0, 0, 0);
@@ -121,6 +128,8 @@
           if (Object.hasOwn(this.draft.settings, key)) settings[key] = this.draft.settings[key];
         }
         const body = {message: this.$("schedule-message").value, run_at: scheduledTime(this.$("schedule-time").value), timezone: this.timezone, settings};
+        const mentions = this.mentions?.snapshot() || [];
+        if (mentions.length) body.mentions = mentions;
         if (this.editing) await this.api("schedules/" + encodeURIComponent(this.editing.id), {...body, action: "edit", version: this.editing.version});
         else await this.api("schedules", {...body, id: this.requestId});
         this.$("schedule-dialog").close();

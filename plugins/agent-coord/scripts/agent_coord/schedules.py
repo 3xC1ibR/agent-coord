@@ -10,6 +10,7 @@ import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .store import CoordinationError
+from .thread_mentions import thread_mentions
 from .workspaces import matches_workspace
 
 GRACE_SECONDS = 60
@@ -37,10 +38,15 @@ class ScheduledPrompts:
                 CREATE TABLE IF NOT EXISTS schedule_runtimes (id TEXT PRIMARY KEY, heartbeat REAL NOT NULL);
             """)
 
+            columns = {row[1] for row in db.execute("PRAGMA table_info(scheduled_prompts)")}
+            if "mentions_json" not in columns:
+                db.execute("ALTER TABLE scheduled_prompts ADD COLUMN mentions_json TEXT NOT NULL DEFAULT '[]'")
+
     @staticmethod
     def _describe(row):
         item = dict(row)
         item["settings"] = json.loads(item.pop("settings_json"))
+        item["mentions"] = json.loads(item.pop("mentions_json"))
         item.pop("request_json")
         item.pop("owner")
         return item
@@ -57,9 +63,11 @@ class ScheduledPrompts:
         return [self._describe(row) for row in rows if matches_workspace(row["cwd"], self.sessions.cwd)]
 
     def _validate(self, body):
-        if set(body) - {"id", "version", "message", "run_at", "timezone", "settings"}:
+        if set(body) - {"id", "version", "message", "run_at", "timezone", "settings", "mentions"}:
             raise CoordinationError("Unknown scheduled prompt setting.")
-        message = self.sessions._text(body.get("message"), "Prompt", 100000)
+        message = body.get("message")
+        self.sessions._text(message, "Prompt", 100000)
+        mentions = thread_mentions(message, body, self.sessions)
         if message.startswith("/"):
             raise CoordinationError("Schedule a prompt, not a slash command.")
         run_at = body.get("run_at")
@@ -80,7 +88,7 @@ class ScheduledPrompts:
         selected = self.sessions._validate_settings(record["model"], record["effort"], record["client"])
         if record["effort"] is None:
             record["effort"] = selected.get("defaultReasoningEffort")
-        return message, run_at, timezone, {**record, **associations}
+        return message, run_at, timezone, {**record, **associations}, mentions
 
     def create(self, body):
         try:
@@ -96,14 +104,14 @@ class ScheduledPrompts:
                 if row["request_json"] != request:
                     raise CoordinationError("This prompt was already saved. Reopen it from Scheduled prompts to edit it.")
                 return self._describe(row)
-        message, run_at, timezone, settings = self._validate(body)
+        message, run_at, timezone, settings, mentions = self._validate(body)
         now = self.store.clock()
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("""INSERT OR IGNORE INTO scheduled_prompts
-                (id, cwd, settings_json, message, run_at, timezone, state, request_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?)""",
-                (schedule_id, settings["cwd"], json.dumps(settings), message, run_at, timezone, request, now, now))
+                (id, cwd, settings_json, message, run_at, timezone, state, request_json, created_at, updated_at, mentions_json)
+                VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)""",
+                (schedule_id, settings["cwd"], json.dumps(settings), message, run_at, timezone, request, now, now, json.dumps(mentions)))
             row = self._get(db, schedule_id)
             if row["request_json"] != request:
                 raise CoordinationError("This scheduled prompt ID has already been used.")
@@ -126,10 +134,10 @@ class ScheduledPrompts:
                 raise CoordinationError("This prompt has already started or was cancelled. Open its thread to review it.")
             now = self.store.clock()
             if action == "edit":
-                message, run_at, timezone, settings = values
+                message, run_at, timezone, settings, mentions = values
                 db.execute("""UPDATE scheduled_prompts SET cwd = ?, settings_json = ?, message = ?, run_at = ?,
-                    timezone = ?, state = 'scheduled', error = NULL, version = version + 1, updated_at = ? WHERE id = ?""",
-                    (settings["cwd"], json.dumps(settings), message, run_at, timezone, now, schedule_id))
+                    timezone = ?, mentions_json = ?, state = 'scheduled', error = NULL, version = version + 1, updated_at = ? WHERE id = ?""",
+                    (settings["cwd"], json.dumps(settings), message, run_at, timezone, json.dumps(mentions), now, schedule_id))
             else:
                 if action == "run_now" and row["state"] != "missed":
                     raise CoordinationError("Run now is available for missed prompts.")
@@ -242,7 +250,7 @@ class ScheduledPrompts:
                 if self.stopped.is_set() or self.sessions.closed:
                     raise CoordinationError("Ribbon Field stopped before this prompt could start.")
                 sending = True
-                result = self.sessions.send(thread_id, {"message": item["message"]}, start_only=True)
+                result = self.sessions.send(thread_id, {"message": item["message"], "mentions": item["mentions"]}, start_only=True)
             # Also supports providers that return before emitting turn/started.
             with self.store._connection() as db:
                 db.execute("""UPDATE scheduled_prompts SET state = 'running', turn_id = ?, updated_at = ?,

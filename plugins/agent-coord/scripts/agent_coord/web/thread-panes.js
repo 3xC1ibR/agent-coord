@@ -298,11 +298,13 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
   const $ = id => document.getElementById(id), container = $("thread-panes");
   const shell = new ThreadPanes({document, container, search: location.search,
     getDraft: id => ({text: state.selected === id ? $("message").value : state.drafts.get(id) || "",
+      mentions: state.mentions?.snapshot(id, state.selected === id ? $("message").value : state.drafts.get(id) || "") || [],
       images: state.attachments.items(id), scroll: state.selected === id ? (state.timelineScroll?.position() ?? $("timeline").scrollTop) : null}),
     onDraft: (id, draft) => {
       if (!shell.active && state.selected === id) return;
       state.drafts.set(id, draft.text); state.attachments.drafts.set(id, draft.images);
       if (shell.active && state.selected === id) $("message").value = draft.text;
+      state.mentions?.restore(id, draft.text, draft.mentions || []);
     },
     onFocus: () => { notifications()?.syncFocus(); window.dispatchEvent(new Event("agent-coord-pane-state")); },
     onExit: () => goHome(), onTile: () => shell.toggleCurrent(), onError: showError});
@@ -405,7 +407,7 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
   const $ = id => document.getElementById(id);
   document.body.classList.add("pane-document");
   let active = false, seen = "", restoredScroll = null;
-  const exportDraft = () => ({text: $("message").value, images: state.attachments.items(), scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop});
+  const exportDraft = () => ({text: $("message").value, mentions: state.mentions?.snapshot() || [], images: state.attachments.items(), scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop});
   const markSeen = async () => {
     const work = state.detail?.work_thread;
     if (!active || !document.hasFocus() || !work) return;
@@ -431,6 +433,7 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
     restoreDraft: draft => {
       $("message").value = draft.text || ""; state.drafts.set(state.selected, draft.text || "");
       state.attachments.drafts.set(state.selected, draft.images || []);
+      state.mentions?.restore(state.selected, draft.text || "", draft.mentions || []);
       if (Number.isFinite(draft.scroll)) {
         restoredScroll = draft.scroll;
         if (state.timelineScroll) state.timelineScroll.restore(draft.scroll);

@@ -506,6 +506,7 @@ async function select(id, {rollUp = false} = {}) {
   if (state.selected) state.drafts.set(state.selected, $("message").value);
   retainConversation();
   state.selected = id;
+  $("message").value = state.drafts.get(id) || "";
   const cached = conversationEntry(id);
   notifications?.syncFocus();
   state.detail = cached.detail;
@@ -513,7 +514,6 @@ async function select(id, {rollUp = false} = {}) {
   state.titleEdit = null;
   state.attachments?.highlight(false);
   renderStatus();
-  $("message").value = state.drafts.get(id) || "";
   if (navigation) navigation.remember();
   else history.replaceState(null, "", "#" + encodeURIComponent(id));
   $("welcome").hidden = true;
@@ -777,6 +777,7 @@ function renderStatus() {
   $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (work?.client === "claude" ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
   state.attachments?.render();
   state.slashCommands?.render();
+  state.mentions?.render();
   if (state.paneMode) globalThis.agentCoordPane?.updateStatus();
 }
 function renderQueuedMessages() {
@@ -868,7 +869,22 @@ function renderTimeline() {
         const body = node("div", null, item.type === "agentMessage" ? "text markdown" : "text");
         if (item.type === "agentMessage") body.innerHTML = messageMarkdown.render(text);
         else {
-          body.textContent = text;
+          const display = globalThis.ThreadMentions?.displayMessage(text) || {text, refs: []};
+          body.textContent = display.text;
+          if (display.refs.length) {
+            const references = node("div", null, "message-thread-references");
+            for (const ref of display.refs) {
+              const link = node("a", ref.text + " · " + ref.session_id.slice(-8));
+              link.href = "/#" + encodeURIComponent(ref.session_id);
+              link.setAttribute("aria-label", "Thread reference " + ref.text + " " + ref.session_id);
+              link.onclick = event => {
+                if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault(); select(ref.session_id).catch(showError);
+              };
+              references.append(link);
+            }
+            body.append(references);
+          }
           const images = (item.content || []).filter(c => c.type === "image");
           if (images.length) ChatImageAttachments.appendPreviews(document, body, images);
         }
@@ -1308,7 +1324,7 @@ async function newSession() {
   // Each provider loads independently; an unavailable CLI cannot block the other.
   await loadSessionModels();
 }
-async function sendSessionDraft(text, images) {
+async function sendSessionDraft(text, images, mentions = []) {
   const draft = state.newSessionDraft;
   state.creatingSession = true;
   try {
@@ -1317,9 +1333,12 @@ async function sendSessionDraft(text, images) {
       draft.createdId = result.session.thread_id;
     }
     const body = {message: text, windowId: state.sourceWindowId};
+    if (mentions.length) body.mentions = mentions;
     if (images.length) body.images = images.map(({name, url}) => ({name, url}));
     const result = await api(sessionPath(draft.createdId) + "/messages", body);
     state.attachments?.sent("new-session", images);
+    state.mentions?.sent("new-session", text, mentions);
+    state.mentions?.move("new-session", draft.createdId);
     const remainingImages = state.attachments?.items("new-session") || [];
     if (remainingImages.length) {
       state.attachments.drafts.set(draft.createdId, remainingImages);
@@ -1493,7 +1512,9 @@ async function sendMessage(mode = "steer") {
   const images = state.attachments?.snapshot(id) || [];
   if (state.busy || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
       (detail.running && !detail.activeTurn) || state.attachments?.pending(id) || (!text.trim() && !images.length)) return;
+  const mentions = state.mentions?.snapshot(id, text) || [];
   const body = {message: text};
+  if (mentions.length) body.mentions = mentions;
   if (state.sourceWindowId) body.windowId = state.sourceWindowId;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
   if (detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
@@ -1504,7 +1525,7 @@ async function sendMessage(mode = "steer") {
         state.drafts.delete("new-session"); state.attachments?.drafts.delete("new-session");
         $("message").value = ""; state.newSessionDraft = null; goHome(); return;
       }
-      await sendSessionDraft(text, images); return;
+      await sendSessionDraft(text, images, mentions); return;
     }
     const command = text.trim().split(/\s+/)[0].toLowerCase();
     if (command === "/fork" || command === "/close") {
@@ -1523,6 +1544,7 @@ async function sendMessage(mode = "steer") {
     }
     const result = await api(sessionPath(id) + (mode === "queue" ? "/queue" : "/messages"), body);
     state.attachments?.sent(id, images);
+    state.mentions?.sent(id, text, mentions);
     if (result.command) state.commandFeedback.set(id, result.command.message);
     else state.commandFeedback.delete(id);
     if (id === state.selected) {
@@ -1538,6 +1560,7 @@ async function sendMessage(mode = "steer") {
 $("composer").onsubmit = event => { event.preventDefault(); action(sendMessage); };
 function composerKeydown(event) {
   if (event.isComposing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+  if (state.mentions?.keydown(event)) return;
   if (state.slashCommands?.keydown(event)) return;
   if (event.key === "Enter") {
     event.preventDefault();
@@ -1650,13 +1673,22 @@ async function boot() {
         if (thread && key in thread) settings[key] = thread[key];
       }
       return {settings, source: state.selected, message: state.selected ? $("message").value : "",
-        images: state.attachments?.items(state.selected) || []};
+        images: state.attachments?.items(state.selected) || [], mentions: state.mentions?.snapshot() || []};
     },
     onSaved: draft => {
       if (draft.source && state.selected === draft.source && $("message").value === draft.message) {
         $("message").value = ""; state.drafts.delete(draft.source); renderStatus();
       }
     }});
+  state.mentions = new ThreadMentions({input: $("message"), menu: $("thread-mentions"), references: $("thread-references"),
+    getThread: () => state.selected,
+    loadThreads: async () => {
+      const results = await Promise.all([api("threads"), api("threads?archived=true")]);
+      return [...results[0].data, ...results[1].data];
+    },
+    canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !state.busy &&
+      state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
+    onChange: () => { state.drafts.set(state.selected, $("message").value); globalThis.agentCoordPane?.saveDraft(); }});
   state.slashCommands = new ChatSlashCommands({input: $("message"), menu: $("slash-commands"),
     getThread: () => state.selected,
     getSession: () => state.detail?.session,

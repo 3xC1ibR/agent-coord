@@ -27,6 +27,7 @@ from .timeline_clock import preserve_timing, restore_timing, set_time
 from .schedules import ScheduledPrompts
 from .claude_code import ClaudeRPC
 from .attention import AttentionClassifier
+from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
 from .session_close import stop_terminal_session
@@ -1081,6 +1082,9 @@ class BrowserSessions:
 
     def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False) -> dict:
         message, images = message_images(body)
+        if body.get("mentions"):
+            message = body["message"]  # Selected ranges refer to the untrimmed composer text.
+        mentions = thread_mentions(message, body, self)
         source_window = window_id(body.get("windowId"))
         expected_turn = body.get("expectedTurnId")
         if "expectedTurnId" in body:
@@ -1116,7 +1120,7 @@ class BrowserSessions:
                     raise BrowserBusyError("The turn is starting. Wait a moment before steering.")
                 if not turn_id:
                     self.active[thread_id] = None
-            inputs = ([{"type": "text", "text": message}] if message else [])
+            inputs = ([{"type": "text", "text": provider_message(message, mentions)}] if message else [])
             inputs.extend({"type": "image", "url": image["url"]} for image in images)
             params = {"threadId": thread_id, "input": inputs}
             if turn_id:

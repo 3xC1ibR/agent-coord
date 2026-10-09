@@ -231,7 +231,7 @@ test("background conversations keep unread results until actual focus and consum
   assert.equal(requests.length, 1);
   pane.receive({events: [{method: "item/agentMessage/delta", params: {threadId: "a"}}], completions: [{thread_id: "a"}]});
   assert.equal(events.length, 1); assert.equal(refreshed, 1);
-  assert.deepEqual(JSON.parse(JSON.stringify(pane.exportDraft())), {text: "Draft A", images: [], scroll: 123});
+  assert.deepEqual(JSON.parse(JSON.stringify(pane.exportDraft())), {text: "Draft A", mentions: [], images: [], scroll: 123});
   pane.restoreDraft({text: "New", images: [], scroll: null});
   assert.equal(controls.timeline.scrollTop, 123, "new panes retain the transcript's initial scroll position");
   pane.restoreDraft({text: "Existing", images: [], scroll: 0});
