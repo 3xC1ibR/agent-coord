@@ -344,7 +344,7 @@ class RemoteAccess:
 
 PAIR_PAGE = b'''<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Pair with Ribbon Field</title>
-<meta name="theme-color" content="#213a32">
+<meta name="theme-color" content="#121215">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Ribbon Field">
@@ -352,7 +352,7 @@ PAIR_PAGE = b'''<!doctype html><html lang="en"><meta charset="utf-8">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" sizes="180x180" href="/app-icons/apple-touch-icon.png">
 <link rel="icon" type="image/png" sizes="192x192" href="/app-icons/icon-192.png">
-<style>body{font:17px system-ui;background:#f5f6f3;color:#213a32;max-width:430px;margin:12vh auto;padding:24px}input,button{box-sizing:border-box;font:inherit;padding:14px;width:100%;margin:12px 0}button{background:#213a32;color:white;border:0;border-radius:8px}p{line-height:1.5}</style>
+<style>body{font:17px system-ui;background:#f5f5f4;color:#18181b;max-width:430px;margin:12vh auto;padding:24px}input,button{box-sizing:border-box;font:inherit;padding:14px;width:100%;margin:12px 0}button{background:#2550d8;color:white;border:0;border-radius:8px}p{line-height:1.5}</style>
 <h1>Continue on this device</h1><p>Open a fresh pairing link from Remote access on your Mac. Both devices must be connected to your Tailscale network.</p>
 <form><div id="pair-link-field" hidden><label for="pair-link">Pairing link</label><input id="pair-link" type="url" placeholder="Paste the link from your Mac" autocomplete="off" autocapitalize="off" spellcheck="false"></div><label for="name">Device name</label><input id="name" value="My iPhone" maxlength="80" required autocomplete="off"><button>Pair this device</button></form>
 <p id="status" role="status"></p><script>

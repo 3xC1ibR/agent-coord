@@ -834,6 +834,7 @@ class CoordinationStore:
         client: str,
         cwd: str,
         name: str | None = None,
+        project_cwd: str | None = None,
     ) -> dict[str, Any]:
         if not session_id.strip():
             raise CoordinationError("Session ID must not be empty.")
@@ -857,7 +858,7 @@ class CoordinationStore:
                 """,
                 (session_id, client, repository, name, now, now),
             )
-        self.threads.ensure(session_id)
+        self.threads.ensure(session_id, project_cwd=project_cwd)
         return self.get_session(session_id)
 
     def get_session(self, session_id: str) -> dict[str, Any]:

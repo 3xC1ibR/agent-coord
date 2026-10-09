@@ -93,12 +93,15 @@ class WorkThreadTests(unittest.TestCase):
         self.assertEqual(thread["title_source"], "agent")
         self.assertEqual(thread["original_request"], request)
 
-    def test_agent_can_deliberately_rename_its_title_without_duplicate_checkpoints(self):
+    def test_routine_checkpoint_preserves_established_title_and_explicit_rename_remains_available(self):
         first = self.save(title="Database write performance")
         changed = self.save(title="Database connection pooling")
-        self.assertEqual(changed["title"], "Database connection pooling")
+        self.assertEqual(changed["title"], "Database write performance")
         self.assertEqual(changed["checkpoint"]["id"], first["checkpoint"]["id"])
         self.assertEqual(len(self.save(title="Database connection pooling")["checkpoints"]), 1)
+        renamed = self.threads.update("conversation", title="Database connection pooling")
+        self.assertEqual(renamed["title"], "Database connection pooling")
+        self.assertEqual(renamed["title_source"], "user")
 
     def test_user_title_wins_over_agent_checkpoints_after_reopen(self):
         self.save(title="Database write performance")
@@ -146,7 +149,8 @@ class WorkThreadTests(unittest.TestCase):
             with self.subTest(title=title), self.assertRaisesRegex(CoordinationError, "Thread title"):
                 self.save(title=title, summary="Should not be saved.", links=[{"kind": "issue", "target": "issue-1"}])
             self.assertEqual(self.threads.get("conversation", history=True), before)
-        self.assertEqual(self.save(title="x" * 160)["title"], "x" * 160)
+        self.assertEqual(self.save(title="x" * 160)["title"], "Valid title")
+        self.assertEqual(self.threads.update("conversation", title="x" * 160)["title"], "x" * 160)
 
     def test_legacy_titles_migrate_without_overwriting_custom_names(self):
         request = "Investigate  the\ndatabase writes. " + "A" * 120

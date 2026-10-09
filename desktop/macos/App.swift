@@ -320,7 +320,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         app.addItem(withTitle: "Quit Ribbon Field", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = menu("File")
         file.addItem(withTitle: "New Session", action: #selector(webCommand(_:)), keyEquivalent: "n").representedObject = "newSession"
-        file.addItem(withTitle: "Open Folder…", action: #selector(webCommand(_:)), keyEquivalent: "o").representedObject = "openFolder"
+        file.addItem(withTitle: "Open Project…", action: #selector(webCommand(_:)), keyEquivalent: "o").representedObject = "openFolder"
         let newWindowItem = file.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "N")
         newWindowItem.keyEquivalentModifierMask = [.command, .shift]; newWindowItem.target = self
         let duplicate = file.addItem(withTitle: "Open Current View in New Window", action: #selector(duplicateWindow), keyEquivalent: "n")
@@ -751,7 +751,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             panel.canChooseFiles = !workspace
             panel.canChooseDirectories = true
             panel.allowsMultipleSelection = !workspace
-            panel.prompt = workspace ? "Open Folder" : "Insert Paths"
+            panel.prompt = workspace ? "Open Project" : "Insert Paths"
             panel.beginSheetModal(for: owner.window) { response in
                 guard response == .OK else { replyHandler([], nil); return }
                 do { replyHandler(try self.fileReferences(panel.urls), nil) }

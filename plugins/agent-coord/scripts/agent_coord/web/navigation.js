@@ -29,6 +29,7 @@
   function safe(value) { try { parse(value); return true; } catch { return false; } }
   function pageURL(snapshot) {
     const query = new URLSearchParams();
+    if (snapshot.directory) query.set("directory", snapshot.directory);
     if (snapshot.viewId !== "all") query.set("view", snapshot.viewId);
     else for (const key of ["project", "repository"]) if (snapshot.filters[key]) query.set(key, snapshot.filters[key]);
     return "/" + (query.toString() ? "?" + query : "") + (snapshot.thread ? "#" + encodeURIComponent(snapshot.thread) : "");
@@ -74,7 +75,8 @@
         const route = target.route;
         const displayed = route.kind === "thread" ? snapshot.thread === route.id : !snapshot.thread &&
           (route.kind === "view" ? snapshot.viewId === route.id : snapshot.viewId === "all" &&
-            ["project", "repository"].every(key => (snapshot.filters[key] || "") === (route.filters[key] || "")));
+            ["project", "repository"].every(key => key === "repository" && snapshot.directory ? !snapshot.filters.repository :
+              (snapshot.filters[key] || "") === (route.filters[key] || "")));
         if (!displayed) throw new Error("The destination changed before it could be displayed. Open the link again.");
         this.history[push ? "pushState" : "replaceState"]({agentCoord: snapshot}, "", pageURL(snapshot));
         if (request) await this.api("navigation/ack", {request_id: request, status: "displayed", window_id: this.windowId});

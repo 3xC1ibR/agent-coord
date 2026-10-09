@@ -67,6 +67,10 @@ class AppControl:
             if payload.get("client", "codex") not in {"codex", "claude"}:
                 raise CoordinationError("Choose Codex or Claude Code as the session provider.")
         if operation == "create":
+            if payload.get("mode") not in (None, "orchestration"):
+                raise CoordinationError("Creation mode must be orchestration or omitted.")
+            if payload.get("mode") is None:
+                payload.pop("mode", None)
             prompt = payload.get("prompt")
             if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100000:
                 raise CoordinationError("The initial request must contain 1–100000 characters.")
@@ -231,6 +235,7 @@ class AppControlWorker:
                 result = self.control.settings(thread_id)
             else:
                 reply_required = payload.pop("reply_required", False)
+                mode = payload.pop("mode", None)
                 # Fail invalid settings before entering the uncertain provider boundary.
                 self.sessions._creation_settings(payload)
                 provider_started = True
@@ -255,7 +260,7 @@ class AppControlWorker:
                           "Use Agent Coord messaging when coordination is needed.\n\n"
                           "User request:\n" + payload["prompt"]))
                 result = {**self.control.settings(thread_id), "message_id": message["id"],
-                          "reply_required": message["reply_required"]}
+                          "reply_required": message["reply_required"], "mode": mode}
             self.control.complete(request["request_id"], result=result)
         except Exception as exc:
             self.control.complete(request["request_id"], error=str(exc), uncertain=provider_started)

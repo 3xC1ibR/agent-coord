@@ -164,6 +164,7 @@ function overview() {
     groupHeading: label => element("h2", label), threadCard: () => element("button"), renderStatus() {}, renderClosedToggle() {},
   };
   c.$("welcome"); c.$("view").value = "active"; c.$("group-by").value = "phase";
+  c.threadsInProject = threads => threads; // This fixture supplies one project’s inventory.
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function renderList("), source.indexOf("async function select(")), c);
   c.board = () => c.$("overview").children.find(el => el.className === "phase-board");

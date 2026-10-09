@@ -59,6 +59,10 @@ Have the app agent answer the user directly in its own conversation
 and accept follow-ups there. Give the user a link to that conversation.
 Do not require routine answers to pass back through the dispatcher.
 
+When creating an app agent for dispatch, omit `--mode`. Reserve
+`--mode orchestration` for agents created to contribute to a coordinated outcome
+delivered by their creator; requesting a reply alone does not imply that mode.
+
 ## Coordinate ownership and completion
 
 Let the assigned agent own its investigation, implementation,

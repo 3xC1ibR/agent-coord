@@ -150,6 +150,7 @@
     windowId: "__AGENT_COORD_WINDOW_ID__",
     folderSlot: "native-__AGENT_COORD_FOLDER_SLOT__",
     chooseFolder: async () => (await send({action: "chooseFiles", workspace: true}))[0]?.path || null,
+    newWindow: url => send({action: "newWindow", url}),
     navigationReady: () => send({action: "navigationReady"}).catch(reportError),
   });
 
@@ -228,7 +229,7 @@
         const available = commands();
         const actions = [
           ["newSession", "New session", "⌘N", "create chat"],
-          ["openFolder", "Open folder", "⌘O", "working directory recent"],
+          ["openFolder", "Open project", "⌘O", "folder directory recent"],
           ["nextSession", "Next session in current view", "⌃Tab", "switch cycle thread"],
           ["previousSession", "Previous session in current view", "⌃⇧Tab", "switch cycle thread"],
           ["workspace", "Show workspace", "⌘1", "home overview"],

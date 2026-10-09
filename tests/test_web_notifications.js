@@ -47,7 +47,7 @@ test("snooze expiry alerts once across tabs with thread context and opens its co
   await first.client.receive([snooze()]);
   assert.equal(shared.shown.length, 1);
   const notice = shared.shown[0];
-  assert.equal(notice.title, "agent-coord · Snooze ended");
+  assert.equal(notice.title, "agent-coord · Reminder");
   assert.equal(notice.options.body, "Check the build");
   assert.equal(notice.options.tag, "agent-coord-snooze-1");
   await notice.onclick();
@@ -69,7 +69,7 @@ test("snooze expiry respects opt-in, focused-thread suppression and cancelled cl
   await f.client.receive([snooze()]);
   assert.equal(f.shared.shown.length, 0);
   await f.client.receive([snooze(2, {project_name: null, repository_name: "repo"})]);
-  assert.equal(f.shared.shown[0].title, "repo · Snooze ended");
+  assert.equal(f.shared.shown[0].title, "repo · Reminder");
   f.client.claimSnooze = async () => false;
   await f.client.receive([snooze(3)]);
   assert.equal(f.shared.shown.length, 1);

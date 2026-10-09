@@ -242,7 +242,7 @@ test("explicit overview links leave old tiles; Back restores tiling only for a t
   const vm = require("node:vm"), fs = require("node:fs");
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const panes = {active: true, selected: "draft-thread", restoreView() { this.active = true; }};
-  const state = {selected: null, sourceWindowId: "window"};
+  const state = {selected: null, sourceWindowId: "window", organization: {repositories: [], projects: []}};
   const views = {activeId: "all", filters: {}, read() { return {filters: this.filters}; }, sync() {},
     async overview(filters) { this.activeId = "all"; this.filters = filters; panes.restoreView(); },
     async activate(id) { this.activeId = id; panes.restoreView(); }};

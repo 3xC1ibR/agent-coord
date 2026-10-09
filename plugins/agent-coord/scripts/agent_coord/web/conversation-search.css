@@ -9,8 +9,8 @@
 .search-title:hover { text-decoration: underline; }
 .search-meta { display: block; color: var(--muted); font-size: 12px; line-height: 1.5; margin: 4px 0 10px; }
 .search-excerpt { display: block; padding: 12px; margin-top: 10px; border-left: 3px solid var(--line); line-height: 1.6; }
-.search-excerpt:hover { background: var(--tint); border-color: var(--accent); }
+.search-excerpt:hover { background: var(--tint); border-color: var(--hover-line); }
 .search-excerpt mark { background: var(--tint); color: var(--ink); font-weight: 650; }
 .search-context { line-height: 1.6; }
-.message.search-target { outline: 2px solid var(--accent); outline-offset: 5px; border-radius: 5px; }
+.message.search-target { outline: 2px solid var(--ink); outline-offset: 5px; border-radius: 5px; }
 @media (max-width: 640px) { .search-hit { padding: 14px; } .search-options { gap: 10px; } }

@@ -151,7 +151,7 @@ class JevAttentionTests(unittest.TestCase):
         self.assertEqual(item["response_state"], "update")
         self.assertTrue(item["needs_attention"])
         self.assertEqual(item["attention_reason"], "update")
-        self.assertFalse(item["can_handle_response"])
+        self.assertTrue(item["can_handle_response"])
         item = self.sessions.update_work_thread("terminal", {"seen": True})
         self.assertEqual(item["response_state"], "available")
         self.assertEqual(item["attention"], "now")

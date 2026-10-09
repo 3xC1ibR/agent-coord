@@ -28,7 +28,7 @@ function setup() {
   const result = createThreadHover({overview, document, window,
     schedule: fn => { tasks.set(++sequence, fn); return sequence; }, cancel: id => tasks.delete(id),
     getThread: id => ({thread_id: id, title: id, cwd: "/workspace", checkpoint: {summary: "Saved progress"}}),
-    statusLabel: () => "Working", relativeTime: () => "Just now",
+    relativeTime: () => "Just now",
     loadPreview: id => new Promise((resolve, reject) => requests.push({id, resolve, reject}))});
   return {...result, overview, document, window, first, second, requests,
     async flush() { const pending = [...tasks.values()]; tasks.clear(); for (const fn of pending) fn(); await Promise.resolve(); },
@@ -54,6 +54,8 @@ test("late responses cannot overwrite another card and raw HTML is escaped", asy
   s.requests[1].resolve(response("second")); await Promise.resolve();
   s.requests[0].resolve(response("first")); await Promise.resolve();
   assert.match(s.panel.text, /second/); assert.doesNotMatch(s.panel.text, /first/);
+  assert.equal(s.panel.children[0].className, "hover-title");
+  assert.equal(s.panel.children.some(el => el.className === "hover-status"), false);
   assert.match(s.panel.html, /&lt;script&gt;literal message&lt;\/script&gt;/);
   assert.doesNotMatch(s.panel.html, /<script>/);
   assert.equal(s.panel.style.left, "170px"); assert.equal(s.panel.style.top, "388px");

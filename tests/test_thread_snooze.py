@@ -305,7 +305,7 @@ class SnoozeExpiryPushTests(unittest.TestCase):
         f.push.tick()
         self.assertEqual(len(f.transport.sent), 2)
         for item in f.transport.sent:
-            self.assertEqual(item["payload"]["title"], "Ribbon Field · Snooze ended")
+            self.assertEqual(item["payload"]["title"], "Ribbon Field · Reminder")
             self.assertEqual(item["payload"]["body"], "Secret project content")
             self.assertEqual(item["payload"]["url"], "/#terminal")
         f.now += 2 * 86400
@@ -328,7 +328,7 @@ class SnoozeExpiryPushTests(unittest.TestCase):
         restarted = f.manager()
         restarted.tick()
         self.assertEqual(len(f.transport.sent), 1)
-        self.assertEqual(f.transport.sent[0]["payload"]["title"], "Ribbon Field · Snooze ended")
+        self.assertEqual(f.transport.sent[0]["payload"]["title"], "Ribbon Field · Reminder")
 
     def test_failed_unsent_reminder_retries_after_restart_even_after_its_ttl(self):
         f = self.f

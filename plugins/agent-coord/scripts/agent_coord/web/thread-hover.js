@@ -1,7 +1,7 @@
 "use strict";
 
 // Kept separate from card rendering so list refreshes need no per-card listeners.
-function createThreadHover({overview, document, window, getThread, loadPreview, statusLabel, relativeTime,
+function createThreadHover({overview, document, window, getThread, loadPreview, relativeTime,
   markdown = typeof module !== "undefined" && module.exports ? require("./markdown.js") : globalThis.messageMarkdown,
   schedule = setTimeout, cancel = clearTimeout}) {
   const panel = document.createElement("aside");
@@ -38,10 +38,9 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   }
   function render(thread, message, loading = false, failed = false) {
     panel.replaceChildren();
-    panel.append(element("div", [statusLabel(thread), thread.checkpoint?.phase || "New"].filter(Boolean).join(" · "), "hover-status"),
-      element("h3", thread.title, "hover-title"));
-    const facts = [thread.project_name && "Project: " + thread.project_name,
-      thread.repository_name && "Repository: " + thread.repository_name,
+    panel.append(element("h3", thread.title, "hover-title"));
+    const facts = [thread.project_cwd && "Project: " + thread.project_cwd,
+      thread.project_name && "Group: " + thread.project_name,
       thread.cwd && "Workspace: " + thread.cwd,
       thread.updated_at && "Updated " + relativeTime(thread.updated_at)].filter(Boolean);
     panel.append(element("p", facts.join("\n"), "hover-facts"));
@@ -128,7 +127,4 @@ if (typeof module !== "undefined" && module.exports) module.exports = {createThr
 else createThreadHover({overview: document.getElementById("overview"), document, window,
   getThread: id => state.sessions.find(thread => thread.thread_id === id),
   loadPreview: id => api(threadPath(id) + "/preview"),
-  statusLabel: thread => {
-    const status = threadGrouping.status(thread);
-    return status.key === "running" ? "" : status.label;
-  }, relativeTime});
+  relativeTime});

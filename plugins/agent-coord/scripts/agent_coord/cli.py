@@ -124,6 +124,8 @@ def _parser() -> argparse.ArgumentParser:
     create_agent.add_argument("--cwd", default=os.getcwd())
     create_agent.add_argument("--name", required=True)
     create_agent.add_argument("--client", choices=["codex", "claude"], default="codex")
+    create_agent.add_argument("--mode", choices=["orchestration"],
+                              help="Record orchestration intent for this creation (default: unspecified).")
     create_agent.add_argument("--model")
     create_agent.add_argument("--effort")
     create_agent.add_argument("--yolo", action="store_true", help="Explicitly authorize full machine access without approval prompts.")
@@ -491,6 +493,7 @@ def run(arguments: argparse.Namespace) -> Any:
             client=arguments.client,
             cwd=find_repository_root(arguments.cwd),
             name=arguments.name,
+            project_cwd=arguments.cwd,
         )
     if command == "status":
         return store.get_session(arguments.session_id)
@@ -525,7 +528,7 @@ def run(arguments: argparse.Namespace) -> Any:
                     prompt = sys.stdin.read(100001) if arguments.prompt == "-" else arguments.prompt
                     payload.update(name=arguments.name, prompt=prompt, yolo=arguments.yolo,
                                    reply_required=arguments.reply_required)
-                    payload.update({key: getattr(arguments, key) for key in ("model", "effort") if getattr(arguments, key) is not None})
+                    payload.update({key: getattr(arguments, key) for key in ("model", "effort", "mode") if getattr(arguments, key) is not None})
             receipt = control.request(operation, arguments.from_session, payload,
                                       thread_id=getattr(arguments, "session_id", None), request_id=arguments.request_id)
             return control.status(receipt["request_id"], wait=arguments.wait)

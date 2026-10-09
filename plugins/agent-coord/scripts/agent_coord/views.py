@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 
 from .store import CoordinationError
 
@@ -20,6 +21,8 @@ class ViewStore:
                 group_by TEXT NOT NULL, position INTEGER NOT NULL,
                 version INTEGER NOT NULL DEFAULT 1
             )""")
+            if "cwd" not in {row["name"] for row in db.execute("PRAGMA table_info(saved_views)")}:
+                db.execute("ALTER TABLE saved_views ADD COLUMN cwd TEXT")
 
     @staticmethod
     def _decode(row):
@@ -45,13 +48,18 @@ class ViewStore:
 
     @staticmethod
     def _validate(db, body, view_id=None):
+        cwd = body.get("cwd")
+        if cwd is not None:
+            if not isinstance(cwd, str) or not cwd.strip() or len(cwd) > 4000:
+                raise CoordinationError("Choose a project directory for this view.")
+            cwd = str(Path(cwd).expanduser().resolve())
         name = body.get("name")
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 160:
             raise CoordinationError("View names must contain 1–160 characters.")
         name = name.strip()
-        if name.casefold() == "all work" or any(
+        if name.casefold() in {"all work", "all conversations"} or any(
             row["id"] != view_id and row["name"].casefold() == name.casefold()
-            for row in db.execute("SELECT id, name FROM saved_views")
+            for row in db.execute("SELECT id, name FROM saved_views WHERE cwd IS ?", (cwd,))
         ):
             raise CoordinationError("A view with that name already exists. Choose another name.")
         filters = body.get("filters", {})
@@ -75,18 +83,18 @@ class ViewStore:
         group = body.get("group_by", "phase")
         if not isinstance(group, str) or group not in GROUPS:
             raise CoordinationError("Choose a supported view grouping.")
-        return name, json.dumps(filters), group
+        return name, json.dumps(filters), group, cwd
 
     def create(self, body):
-        if set(body) - {"name", "filters", "group_by"}:
+        if set(body) - {"name", "filters", "group_by", "cwd"}:
             raise CoordinationError("View creation accepts a name, filters, and grouping.")
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            name, filters, group = self._validate(db, body)
+            name, filters, group, cwd = self._validate(db, body)
             view_id = str(uuid.uuid4())
             position = db.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM saved_views").fetchone()[0]
-            db.execute("INSERT INTO saved_views (id, name, filters, group_by, position) VALUES (?, ?, ?, ?, ?)",
-                       (view_id, name, filters, group, position))
+            db.execute("INSERT INTO saved_views (id, name, filters, group_by, position, cwd) VALUES (?, ?, ?, ?, ?, ?)",
+                       (view_id, name, filters, group, position, cwd))
             return self._decode(self._get(db, view_id))
 
     def update(self, view_id, body):
@@ -96,7 +104,7 @@ class ViewStore:
             db.execute("BEGIN IMMEDIATE")
             current = self._get(db, view_id)
             self._version(current, body)
-            name, filters, group = self._validate(db, {**self._decode(current), **body}, view_id)
+            name, filters, group, _ = self._validate(db, {**self._decode(current), **body}, view_id)
             db.execute("UPDATE saved_views SET name = ?, filters = ?, group_by = ?, version = version + 1 WHERE id = ?",
                        (name, filters, group, view_id))
             return self._decode(self._get(db, view_id))
@@ -114,10 +122,11 @@ class ViewStore:
             raise CoordinationError("Choose left or right to move the view.")
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            self._get(db, view_id)
-            ordered = [row["id"] for row in db.execute("SELECT id FROM saved_views ORDER BY position, id")]
+            current = self._get(db, view_id)
+            rows = list(db.execute("SELECT id, position FROM saved_views WHERE cwd IS ? ORDER BY position, id", (current["cwd"],)))
+            ordered = [row["id"] for row in rows]
             index = ordered.index(view_id)
             neighbor = index + (-1 if body["direction"] == "left" else 1)
             if 0 <= neighbor < len(ordered):
-                ordered[index], ordered[neighbor] = ordered[neighbor], ordered[index]
-                db.executemany("UPDATE saved_views SET position = ? WHERE id = ?", enumerate(ordered))
+                db.executemany("UPDATE saved_views SET position = ? WHERE id = ?",
+                               [(rows[neighbor]["position"], view_id), (rows[index]["position"], ordered[neighbor])])

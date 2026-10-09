@@ -59,6 +59,8 @@ class OrganizationStore:
                 CREATE INDEX IF NOT EXISTS organization_project_idx
                     ON thread_organization(project_id);
             """)
+            if "cwd" not in {row["name"] for row in db.execute("PRAGMA table_info(named_projects)")}:
+                db.execute("ALTER TABLE named_projects ADD COLUMN cwd TEXT")
         self.backfill()
 
     def backfill(self):
@@ -92,7 +94,7 @@ class OrganizationStore:
         with self.store._connection() as db:
             return {
                 "repositories": [dict(row) for row in db.execute("SELECT * FROM work_repositories ORDER BY name COLLATE NOCASE, root")],
-                "projects": [dict(row) for row in db.execute("SELECT id, name FROM named_projects ORDER BY name_key")],
+                "projects": [dict(row) for row in db.execute("SELECT id, name, cwd FROM named_projects ORDER BY name_key")],
             }
 
     @staticmethod
@@ -112,15 +114,19 @@ class OrganizationStore:
             link["workspace_id"] = link.pop("project_id")
         return thread
 
-    def create_project(self, name: str) -> dict:
+    def create_project(self, name: str, cwd: str | None = None) -> dict:
         if not isinstance(name, str) or not name.strip() or len(name) > 160:
             raise CoordinationError("Group name must contain 1–160 characters.")
         name = name.strip()
-        key = name.casefold()
+        if cwd is not None:
+            if not isinstance(cwd, str) or not cwd.strip():
+                raise CoordinationError("Choose a project directory for this group.")
+            cwd = str(Path(cwd).expanduser().resolve())
+        key = name.casefold() + ("\0" + cwd if cwd else "")
         with self.store._connection() as db:
-            db.execute("INSERT OR IGNORE INTO named_projects (id, name, name_key) VALUES (?, ?, ?)",
-                       (str(uuid.uuid4()), name, key))
-            return dict(db.execute("SELECT id, name FROM named_projects WHERE name_key = ?", (key,)).fetchone())
+            db.execute("INSERT OR IGNORE INTO named_projects (id, name, name_key, cwd) VALUES (?, ?, ?, ?)",
+                       (str(uuid.uuid4()), name, key, cwd))
+            return dict(db.execute("SELECT id, name, cwd FROM named_projects WHERE name_key = ?", (key,)).fetchone())
 
     def add_repository(self, path: str) -> dict:
         if not isinstance(path, str) or not path.strip() or len(path) > 4000:

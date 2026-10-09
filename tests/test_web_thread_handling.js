@@ -13,7 +13,7 @@ function response(extra = {}) {
     can_handle_response: true, needs_attention: true, unhandled_response: true, ...extra};
 }
 function setup(item = response()) {
-  const c = {state: {sessions: [item], detail: null, selected: null, updatingThreads: new Set()},
+  const c = {listRequest: 0, state: {sessions: [item], detail: null, selected: null, updatingThreads: new Set()},
     threadPath: id => "threads/" + id, renderList() {}, renderThread() {}, refreshList: async () => {}};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("async function updateThreadAttention("), source.indexOf("function threadCard(")), c);
@@ -54,7 +54,15 @@ test("Dismiss on attention and ordinary overview cards handles the displayed res
     };
     const card = c.threadCard(item, false, inAttention);
     const controls = card.children.find(child => child.className === "card-actions");
-    const dismiss = controls.children.find(child => child.dataset.action === "handle");
+    const endActions = controls.children.find(child => child.className === "card-end-actions");
+    const dismiss = endActions.children.find(child => child.dataset.action === "handle");
+    assert.deepEqual(Array.from(endActions.children, child => child.dataset.action), ["handle"]);
+    const more = controls.children.find(child => child.dataset.action === "more");
+    assert.equal(more.textContent, "⋮");
+    let menu;
+    c.state.threadActions = {notify() {}, showMenu: (trigger, title, items) => { menu = items; }};
+    more.onclick({stopPropagation() {}});
+    assert.equal(menu[0].label, "Move to Later…");
     assert.ok(dismiss);
     assert.equal(dismiss.textContent, "Dismiss");
     assert.equal(dismiss.attributes["aria-label"], "Dismiss · Recommendation");
@@ -68,7 +76,8 @@ test("Dismiss on attention and ordinary overview cards handles the displayed res
 test("Dismiss is absent for required input and disabled while the card is saving or closing", () => {
   const item = response({links: []}), c = cardSetup(item);
   const control = () => c.threadCard(item, false, true).children
-    .find(child => child.className === "card-actions").children.find(child => child.dataset.action === "handle");
+    .find(child => child.className === "card-actions").children.find(child => child.className === "card-end-actions")
+    .children.find(child => child.dataset.action === "handle");
   c.state.updatingThreads.add(item.thread_id);
   assert.equal(control().disabled, true);
   c.state.updatingThreads.clear(); c.state.closing.add(item.thread_id);
@@ -129,7 +138,7 @@ test("required input cannot be dismissed with the generic handled action", async
 
 test("parking defers attention while preserving the response, and returning restores it", async () => {
   const item = response(), c = setup(item), calls = [];
-  c.api = async (path, body) => { calls.push(JSON.parse(JSON.stringify(body))); return {...item, ...body}; };
+  c.api = async (path, body) => { calls.push(JSON.parse(JSON.stringify(body))); return {...item, ...body, needs_attention: body.attention === "now"}; };
   await c.toggleThreadLater(item);
   assert.equal(grouping.awaitsUser(c.state.sessions[0]), false);
   assert.equal(c.state.sessions[0].unhandled_response, true);

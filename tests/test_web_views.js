@@ -91,7 +91,7 @@ function setup({saved = [], windowStorage = storage(), preferences = storage()} 
     "filter-menu", "reset-view", "update-view", "view-move-left", "view-move-right", "back-home", "overview-title", "add-view",
     "save-view", "view-dialog-title", "view-dialog-description", "view-name", "view-error", "view-dialog", "view-form",
     "view-rename", "view-duplicate", "view-delete", "view-menu-toggle", "view-custom-actions", "filter-count",
-    "mobile-view", "mobile-view-attention", "mobile-view-activity"];
+    "mobile-view", "mobile-view-attention", "mobile-view-activity", "saved-view-tabs"];
   const controls = Object.fromEntries(ids.map(id => [id, new Element(id)]));
   controls.view.value = "active"; controls["group-by"].value = "phase";
   doc.getElementById = id => controls[id]; doc.createElement = () => new Element();
@@ -124,6 +124,7 @@ test("mobile picker switches saved filters, keeps counts current, and falls back
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}},
     {id: "stoic", name: "Stoic", filters: {repository: "stoic"}}]});
   await c.views.start();
+  c.views.mobile = {matches: true};
   c.views.render([thread("approval", {response_state: "input"})]);
   const picker = c.controls["mobile-view"];
   assert.match(picker.children.find(option => option.value === "rig").textContent, /1 need attention/);
@@ -254,13 +255,15 @@ test("save, rename, duplicate, reorder and delete change only view definitions",
   assert.deepEqual(c.errors, []);
 });
 
-test("tabs remain accessible as live counts update and text editing retains its shortcuts", async () => {
+test("view tabs keep focus as live counts update and text editing retains its shortcuts", async () => {
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}}]});
   await c.views.start(); await c.views.activate("rig");
   c.views.render([thread("approval", {response_state: "input"})]);
-  assert.equal(c.doc.activeElement.dataset.viewId, "rig");
-  assert.match(c.doc.activeElement.attributes["aria-label"], /1 in attention/);
-  assert.equal(c.controls["view-tabs"].children.filter(el => el.tabIndex === 0).length, 1);
+  assert.equal(c.doc.activeElement, c.controls["saved-view-tabs"].children[1]);
+  assert.equal(c.doc.activeElement.attributes["aria-selected"], "true");
+  assert.match(c.doc.activeElement.attributes["aria-label"], /1 need attention/);
+  assert.equal(c.controls["mobile-view-attention"].textContent, "1");
+  assert.equal(c.controls["view-tabs"].children.length, 0);
   let prevented = false;
   c.doc.listeners.keydown({key: "ArrowLeft", ctrlKey: true, shiftKey: true,
     target: {closest: () => ({})}, preventDefault() { prevented = true; }});
@@ -276,19 +279,15 @@ test("view dots show running work and return to the unread-result state when it 
   await c.views.start(); await c.views.activate("rig");
   const running = thread("running"), completed = thread("done", {response_state: "reply", unhandled_response: true, unread_result: true});
   c.views.render([running, completed]);
-  const tab = id => c.controls["view-tabs"].children.find(el => el.dataset.viewId === id);
-  const dots = id => tab(id).children.filter(el => ["view-active", "view-completed"].includes(el.className));
-  assert.equal(dots("all")[0].className, "view-active");
-  assert.equal(dots("rig").length, 1); assert.equal(dots("rig")[0].className, "view-active");
-  assert.match(tab("rig").attributes["aria-label"], /Active work.*New responses/);
-  assert.equal(dots("stoic").length, 0);
+  const activity = c.controls["mobile-view-activity"];
+  assert.equal(activity.className, "view-active");
+  assert.equal(activity.hidden, false);
   running.response_state = "available";
   c.views.render([running, completed]);
-  assert.equal(dots("rig")[0].className, "view-completed");
-  assert.doesNotMatch(tab("rig").attributes["aria-label"], /Active work/);
-  assert.equal(c.doc.activeElement.dataset.viewId, "rig");
+  assert.equal(activity.className, "view-completed");
+  assert.equal(c.doc.activeElement, c.controls["saved-view-tabs"].children[1]);
   completed.unread_result = false; c.views.render([running, completed]);
-  assert.equal(dots("rig").length, 0);
+  assert.equal(activity.hidden, true);
 });
 
 test("reload migrates remembered named-view filters and falls back safely for a deleted view", async () => {
@@ -314,17 +313,13 @@ test("badges follow each view's filters immediately, including views with no req
   c.views.render(input);
   await c.views.activate("rig"); c.controls.repository.value = "rig";
   const rigSave = c.views.persist();
-  const tab = id => c.controls["view-tabs"].children.find(button => button.dataset.viewId === id);
-  assert.match(tab("rig").attributes["aria-label"], /0 in attention/);
-  assert.equal(tab("rig").children.some(child => child.className === "view-attention"), false);
+  assert.equal(c.controls["mobile-view-attention"].hidden, true);
   await c.views.activate("stoic"); c.controls.repository.value = "stoic";
   const stoicSave = c.views.persist();
-  assert.match(tab("all").attributes["aria-label"], /3 in attention/);
-  assert.match(tab("rig").attributes["aria-label"], /0 in attention/);
-  assert.match(tab("stoic").attributes["aria-label"], /2 in attention/);
+  assert.equal(c.controls["mobile-view-attention"].textContent, "2");
   await Promise.all([rigSave, stoicSave]);
   c.controls.search.value = "no matches"; await c.views.persist();
-  assert.match(tab("stoic").attributes["aria-label"], /0 in attention/);
+  assert.equal(c.controls["mobile-view-attention"].hidden, true);
 });
 
 test("rapid edits serialize by view and delayed responses cannot retarget a save", async () => {
@@ -409,4 +404,52 @@ test("view actions wait for automatic saves without targeting a different tab", 
   assert.equal(c.controls["view-dialog"].open, undefined);
   assert.deepEqual(c.records.map(view => view.id), ["stoic"]);
   assert.equal(c.views.activeId, "stoic"); assert.deepEqual(c.errors, []);
+});
+
+
+test("project switching isolates views and remembers each project's filters", async () => {
+  const c = setup({saved: [
+    {id: "parent", name: "Review", cwd: "/projects", filters: {phase: "validation"}},
+    {id: "child", name: "Review", cwd: "/projects/website", filters: {phase: "planning"}},
+  ]});
+  await c.views.setProject("/projects");
+  assert.deepEqual(c.views.items.map(v => v.id), ["all", "parent"]);
+  assert.deepEqual(c.controls["saved-view-tabs"].children.map(v => v.dataset.viewId), ["all", "parent"]);
+  await c.views.activate("parent");
+  await c.views.setProject("/projects/website");
+  assert.deepEqual(c.views.items.map(v => v.id), ["all", "child"]);
+  assert.deepEqual(c.controls["saved-view-tabs"].children.map(v => v.dataset.viewId), ["all", "child"]);
+  assert.equal(c.views.activeId, "all");
+  c.controls.search.value = "child filter"; c.views.remember();
+  await c.views.setProject("/projects");
+  assert.equal(c.views.activeId, "parent");
+  assert.equal(c.controls["phase-filter"].value, "validation");
+  assert.equal(c.controls.search.value, "");
+  await c.views.setProject("/projects/website");
+  assert.equal(c.controls.search.value, "child filter");
+  await c.views.openDialog("create");
+  c.controls["view-name"].value = "Only here";
+  await c.controls["view-form"].onsubmit({preventDefault() {}});
+  assert.equal(c.records.at(-1).cwd, "/projects/website");
+});
+
+test("desktop tabs switch filters by click and keyboard and disappear without saved views", async () => {
+  const c = setup({saved: [{id: "review", name: "Review", filters: {phase: "validation"}}]});
+  await c.views.start();
+  const tabs = c.controls["saved-view-tabs"];
+  assert.equal(tabs.hidden, false);
+  assert.deepEqual(tabs.children.map(tab => tab.tabIndex), [0, -1]);
+  await tabs.children[1].onclick();
+  assert.equal(c.controls["phase-filter"].value, "validation");
+  assert.deepEqual(tabs.children.map(tab => tab.tabIndex), [-1, 0]);
+  for (const [key, expected] of [["ArrowRight", "all"], ["End", "review"], ["Home", "all"], ["ArrowLeft", "review"]]) {
+    let prevented = false;
+    await tabs.onkeydown({key, preventDefault() { prevented = true; }});
+    assert.equal(prevented, true); assert.equal(c.views.activeId, expected);
+    assert.equal(c.doc.activeElement.dataset.viewId, expected);
+  }
+  await c.controls["view-delete"].onclick();
+  assert.equal(tabs.hidden, true); assert.equal(c.views.activeId, "all");
+  assert.equal(c.doc.activeElement, c.controls["add-view"]);
+  assert.deepEqual(c.errors, []);
 });

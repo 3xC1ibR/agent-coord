@@ -42,6 +42,12 @@ test('live work and commentary stay visible until the actual turn ends; accessib
   h.state.detail.thread.turns[0].status='completed';h.render();
   assert.equal(groups(h).length,1);assert.equal(groups(h)[0].open,false);
   assert.deepEqual(groups(h)[0].children.slice(1).map(n=>n.dataset.id),['thinking','command']);
+  assert.equal(groups(h)[0].children[0].children[1].textContent,'Tool calls · 1');
+  assert.equal(groups(h)[0].children[0].children[2]['aria-label'],'Completed');
+  const row=groups(h)[0].children[2].children[0];
+  assert.equal(row.children[1].textContent,'Terminal');
+  assert.equal(row.children[2].textContent,'run test');
+  assert.match(row['aria-label'],/failed/);
   assert.match(groups(h)[0].children[2].children[1].textContent,/all output\n\nExit code: 1/);
   assert.equal(h.timeline.children.at(-1)['aria-label'],'Claude');
 });
@@ -49,7 +55,7 @@ test('each terminal turn has its own group and failed/stopped outcomes and error
   const failed={...turn('failed'),error:{message:'Provider failure'}};
   const stopped=turn('interrupted','second');
   const h=harness([failed,stopped]);h.render();
-  assert.deepEqual(groups(h).map(g=>g.children[0].textContent),['Work · Failed','Work · Stopped']);
+  assert.deepEqual(groups(h).map(g=>g.children[0].children[2]['aria-label']),['Failed','Stopped']);
   assert.ok(h.timeline.children.some(n=>n.textContent==='Provider failure'));
   assert.ok(h.timeline.children.some(n=>n.textContent==='Turn stopped.'));
 });
@@ -60,7 +66,7 @@ test('sent, received and created cards remain outside Work in their timeline ord
   const cards=h.timeline.children.filter(n=>n.id?.startsWith('agent-message-'));
   assert.equal(cards.length,3);
   assert.deepEqual(cards.map(c=>c['aria-label']),['Message to Specialist','Message from Specialist','Created agent Specialist']);
-  assert.equal(cards[2].children[0].children[1].children[0].href,'/?message=3#peer');
+  assert.equal(descendants(cards[2]).find(n=>n.className==='agent-message-peer').href,'/?message=3#peer');
   assert.equal(descendants(groups(h)[0]).filter(n=>n.id?.startsWith('agent-message-')).length,0);
   assert.equal(h.timeline.children.at(-1)['aria-label'],'Claude');
 });
@@ -77,6 +83,21 @@ test('nested and outer expansion survive streaming, refreshed history, conversat
   assert.equal(groups(reload)[0].open,true);assert.equal(groups(reload)[0].children[2].open,true);
   groups(reload)[0].open=false;groups(reload)[0].listeners.toggle();reload.render();assert.equal(groups(reload)[0].open,false);
 });
+test('card-wide message disclosure survives history refresh and reload for short and long messages',()=>{
+  for(const body of ['Short reply','Detailed reply\n'.repeat(40)]) {
+    const message={id:7,direction:'received',created_at:115,body,status:'Exchange closed',
+      counterpart:{session_id:'peer',title:'Specialist',available:true}};
+    const h=harness([turn()],[message]);h.render();
+    const card=()=>h.timeline.children.find(n=>n.id==='agent-message-7');
+    const click=()=>card().onclick({button:0,target:{closest:()=>null}});
+    click();card().children[0].listeners.toggle();h.render();
+    assert.equal(card().children[0].open,true);
+    const reload=harness([turn()],[message],h.storage);reload.render();
+    assert.equal(reload.timeline.children.find(n=>n.id==='agent-message-7').children[0].open,true);
+    click();card().children[0].listeners.toggle();h.render();
+    assert.equal(card().children[0].open,false);
+  }
+});
 test('unknown or missing turn status does not prematurely hide activity',()=>{
   for(const status of [undefined,'queued','inProgress']) {const h=harness([turn(status)]);h.state.detail.thread.turns[0].status=status;h.render();assert.equal(groups(h).length,0);}
 });
@@ -86,7 +107,7 @@ test('completion event collapses immediately and retains streamed content when t
   const ctx=vm.createContext({state:h.state,renderTimeline:h.render,scheduleDetail(){scheduled++;},renderStatus(){}});
   vm.runInContext(source.slice(source.indexOf('function applyEvent('),source.indexOf('let listTimer, detailTimer;')),ctx);
   vm.runInContext('applyEvent({method:"turn/completed",params:{threadId:"test",turn:{id:"first",status:"failed",error:{message:"Failed completion"}}}})',ctx);
-  assert.equal(groups(h)[0].children[0].textContent,'Work · Failed');
+  assert.equal(groups(h)[0].children[0].children[2]['aria-label'],'Failed');
   assert.equal(groups(h)[0].children.length,3);
   assert.equal(h.state.detail.running,false);assert.equal(scheduled,1);
 });

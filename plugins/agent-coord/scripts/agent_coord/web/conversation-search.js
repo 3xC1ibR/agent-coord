@@ -3,6 +3,7 @@
   "use strict";
   function parameters(query, scope, mine, filters) {
     const params = new URLSearchParams({q: query.trim(), scope, my_messages: String(mine)});
+    if (Object.hasOwn(filters, "project_cwd")) params.set("project_cwd", filters.project_cwd);
     if (scope === "current") for (const key of ["show", "phase", "repository", "project"]) {
       if (filters[key]) params.set(key, filters[key]);
     }
@@ -73,7 +74,7 @@
       }
     }
     render(coverage) {
-      const scope = this.$("search-scope").value === "all" ? "All conversations, including closed" : "Current view";
+      const scope = this.$("search-scope").value === "all" ? "This project, including closed" : "Current view";
       let text = scope + " · " + coverage.saved_histories + " of " + coverage.threads + " conversations have saved history.";
       if (coverage.partial_histories) text += " " + coverage.partial_histories + (coverage.partial_histories === 1 ? " has" : " have") + " partial history.";
       if (coverage.missing_histories) text += " " + coverage.missing_histories + (coverage.missing_histories === 1 ? " has" : " have") + " no searchable saved history.";
@@ -86,7 +87,7 @@
         const card = this.node("article", null, "search-hit");
         const title = this.node("a", item.title, "search-title"); title.href = item.url;
         const heading = this.node("h2"); heading.append(title); card.append(heading);
-        const location = this.node("p", [item.repository_name || item.cwd?.split("/").filter(Boolean).pop(), item.client === "claude" ? "Claude" : "Codex",
+        const location = this.node("p", [item.cwd?.split("/").filter(Boolean).pop(), item.client === "claude" ? "Claude" : "Codex",
           {now: "Now", later: "Later", archived: "Closed"}[item.attention]].filter(Boolean).join(" · "), "search-meta");
         location.title = item.cwd || ""; card.append(location);
         for (const match of item.matches) {

@@ -1,11 +1,11 @@
 .filter-menu { position: relative; flex: none; }
 .closed-toggle { flex: none; min-height: 36px; padding: 8px 11px; border-color: transparent; font-size: 11px; }
-.closed-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--tint); }
+.closed-toggle[aria-pressed="true"] { border-color: var(--line-strong); color: var(--ink); background: var(--tint); }
 .filter-menu summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--surface); font-size: 12px; cursor: pointer; list-style: none; }
 .filter-menu summary::-webkit-details-marker { display: none; }
-.filter-menu summary:hover, .filter-menu[open] summary { border-color: var(--accent); }
+.filter-menu summary:hover, .filter-menu[open] summary { border-color: var(--hover-line); }
 .filter-menu summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.filter-menu .filter-panel { position: absolute; z-index: 20; top: calc(100% + 8px); left: 0; width: min(300px, calc(100vw - 44px)); padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 14px 30px #213a3224; }
+.filter-menu .filter-panel { position: absolute; z-index: 20; top: calc(100% + 8px); left: 0; width: min(300px, calc(100vw - 44px)); padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 14px 30px var(--shadow); }
 .view-filters .filter-panel > .grouping-control { display: grid; gap: 6px; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
 .filter-panel > .grouping-control select { width: 100%; min-height: 36px; }
 .filter-fields { display: grid; gap: 14px; }
@@ -13,8 +13,8 @@
 .view-filters .filter-fields label { flex: none; }
 .filter-fields select { width: 100%; min-height: 36px; color: var(--ink); }
 .filter-project-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.filter-project-heading button { padding: 2px 0; border: 0; font-size: 11px; color: var(--accent); }
-.filter-panel > button { margin-top: 16px; padding: 5px 0; border: 0; color: var(--accent); font-size: 11px; }
+.filter-project-heading button { padding: 2px 0; border: 0; font-size: 11px; color: var(--ink); }
+.filter-panel > button { margin-top: 16px; padding: 5px 0; border: 0; color: var(--ink); font-size: 11px; }
 @media (max-width: 720px) {
   .view-filters .filter-menu { flex: none; }
   .view-filters .filter-menu summary { min-height: 38px; }

@@ -48,6 +48,7 @@ function setup() {
     reset() {}, afterRender() {}, latest: () => { c.$("timeline").scrollTop = 999; },
     restore: top => { c.$("timeline").scrollTop = top; }};
   vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function reconcileAttentionSnapshot("), source.indexOf("async function markThreadHandled(")), c);
   vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function renderThread(")), c);
   vm.runInContext(source.slice(source.indexOf("function goHome("), source.indexOf('document.querySelector(".brand")')), c);
   vm.runInContext(source.slice(source.indexOf("function applyEvent("), source.indexOf("let listTimer")), c);

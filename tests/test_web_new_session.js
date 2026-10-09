@@ -69,12 +69,12 @@ test("draft uses the window folder and group rather than the previously focused 
   assert.equal(c.calls.find(call => call.path === "sessions").body.client, "codex");
 });
 
-test("repository filter supplies workspace and preserves explicit no association", async () => {
+test("repository metadata cannot override the active project directory", async () => {
   for (const value of ["repo", "__none__"]) {
     const c = setup(); c.state.organization.repositories = [{id: "repo", root: "/workspace/repo"}];
     c.$("repository").value = value; await c.newSession();
-    assert.equal(c.state.detail.session.repository_id, value === "repo" ? "repo" : null);
-    assert.equal(c.state.detail.session.cwd, value === "repo" ? "/workspace/repo" : "/workspace");
+    assert.equal(c.state.detail.session.repository_id, undefined);
+    assert.equal(c.state.detail.session.cwd, "/workspace");
   }
 });
 

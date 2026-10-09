@@ -1,6 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const state = {config: null, creatingSession: false, sessions: [], organization: {repositories: [], projects: []}, selected: null, detail: null, drafts: new Map(), closing: new Set(), pinning: new Set(), updatingThreads: new Set(), groupExpansion: new Map(), phaseScroll: new Map(), commandFeedback: new Map(), busy: false, listSignature: ""};
+state.threadActions = createThreadActions(document, window);
 let notifications;
 let savedViews;
 let navigation;
@@ -43,12 +44,13 @@ async function refreshList() {
   const [open, closed, organization, views] = await Promise.all([api("threads?archived=false"),
     view === "archived" ? api("threads?archived=true") : null, api("organization"), api("views")]);
   if (request !== listRequest || view !== $("view").value) return;
-  state.sessions = (closed || open).data;
-  state.viewThreads = open.data;
-  state.rollUp?.sync(open.data);
+  state.sessions = (closed || open).data.map(overlayPendingAttention);
+  state.viewThreads = open.data.map(overlayPendingAttention);
+  state.rollUp?.sync(threadsInProject(state.viewThreads));
   state.organization = organization;
   for (const field of ["repository", "project"]) {
-    const select = $(field), selected = select.value, choices = organization[field === "repository" ? "repositories" : "projects"];
+    const select = $(field), selected = select.value, choices = organization[field === "repository" ? "repositories" : "projects"]
+      .filter(item => field === "repository" || !item.cwd || item.cwd === state.folders?.selected?.cwd);
     const signature = JSON.stringify(choices);
     if (select.dataset.signature === signature) continue;
     select.dataset.signature = signature;
@@ -70,13 +72,49 @@ async function refreshList() {
   renderList();
 }
 function sessionContext() {
-  return newThreadContext(state.organization, {repository: $("repository").value, project: $("project").value}, state.folders?.selected);
+  return newThreadContext(state.organization, {project: $("project").value}, state.folders?.selected);
+}
+function threadsInProject(threads) { return threads.filter(thread => inProject(thread, state.folders?.selected?.cwd)); }
+function canSwitchProject() {
+  if (state.busy || state.creatingSession || state.attachments?.pending()) {
+    showError(new Error("Wait for the current message or attachment to finish before switching projects."));
+    return false;
+  }
+  return true;
+}
+async function switchProject() {
+  const cwd = state.folders.selected?.cwd || "";
+  if (state.projectCwd === cwd) { goHome(); renderFolders(); return; }
+  goHome();
+  const drafts = state.projectDrafts ||= new Map();
+  drafts.set(state.projectCwd, {detail: state.newSessionDraft, text: state.drafts.get("new-session"),
+    images: state.attachments?.drafts.get("new-session"), mentions: state.mentions?.drafts.get("new-session")});
+  const draft = drafts.get(cwd);
+  state.newSessionDraft = draft?.detail || null;
+  state.drafts.set("new-session", draft?.text || "");
+  for (const [manager, value] of [[state.attachments, draft?.images], [state.mentions, draft?.mentions]]) {
+    manager?.drafts.delete("new-session");
+    if (value) manager?.drafts.set("new-session", value);
+  }
+  state.projectCwd = cwd;
+  await savedViews.setProject(cwd);
+  await refreshList();
+  renderFolders(); navigation?.remember();
+}
+async function openProjectDirectory(cwd) {
+  if (!cwd || state.folders.selected?.cwd === cwd) return;
+  // A saved conversation remains accessible if its directory was moved/deleted.
+  // New session creation still validates the directory on the server.
+  state.folders.adopt({cwd});
+  await switchProject();
 }
 function renderFolders() {
   if (!state.folderPicker) return;
   let context;
   try { context = sessionContext(); } catch { /* Keep unavailable filters visible until the user changes them. */ }
-  state.folderPicker.render(context, !state.viewThreads?.length);
+  state.folderPicker.render(context, !state.folders.selected);
+  state.projectTabs?.render(state.viewThreads || []);
+  document.body.classList.toggle("no-project", !state.folders.selected);
 }
 function relativeTime(timestamp) {
   const minutes = Math.max(0, Math.floor((Date.now() / 1000 - Number(timestamp)) / 60));
@@ -101,24 +139,67 @@ async function toggleThreadPinned(thread) {
 }
 async function updateThreadAttention(thread, body) {
   const id = thread.thread_id;
-  if (state.updatingThreads.has(id)) return;
+  if (state.updatingThreads.has(id)) return false;
+  const patch = body.snoozed_until === undefined ? null : {snoozed_until: body.snoozed_until,
+    attention: "later", snoozed: true, snooze_due: false, needs_attention: false, attention_reason: null};
+  const current = state.sessions.find(item => item.thread_id === id) || thread;
+  const previous = Object.fromEntries(Object.keys(patch || {}).map(key => [key, current[key]]));
+  state.attentionMutations ||= new Map();
+  const revision = (state.attentionMutations.get(id)?.revision || 0) + 1;
+  state.attentionMutations.set(id, {revision, pending: patch, patch});
+  ++listRequest; // Discard list snapshots requested before the user's action.
+  if (patch) applyAttentionFields(id, patch);
   state.updatingThreads.add(id); renderList();
   try {
     const updated = await api(threadPath(id), body);
-    state.sessions = state.sessions.map(item => item.thread_id === id ? updated : item);
-    if (state.detail?.work_thread.thread_id === id) { state.detail.work_thread = updated; renderThread(); }
-    await refreshList();
+    const authoritative = patch ? Object.fromEntries(Object.keys(patch).map(key => [key, updated[key]])) : updated;
+    if (patch) applyAttentionFields(id, authoritative);
+    else {
+      state.sessions = state.sessions.map(item => item.thread_id === id ? updated : item);
+      if (state.detail?.work_thread.thread_id === id) { state.detail.work_thread = updated; renderThread(); }
+      state.viewThreads = state.viewThreads?.map(item => item.thread_id === id ? updated : item);
+    }
+    state.attentionMutations.set(id, {revision: revision + 1, patch: authoritative});
+    return true;
+  } catch (error) {
+    if (patch) applyAttentionFields(id, previous);
+    state.attentionMutations.set(id, {revision: revision + 1, patch: previous});
+    throw error;
   } finally {
+    ++listRequest; // Pending reads cannot overwrite the reconciled result or rollback.
     state.updatingThreads.delete(id);
+    if (state.snoozingThread?.thread_id === id) {
+      state.snoozingThread = state.sessions.find(item => item.thread_id === id) || state.snoozingThread;
+      $("save-snooze").disabled = false;
+    }
     if (state.detail?.work_thread.thread_id === id) renderThread();
     renderList();
   }
 }
+function applyAttentionFields(id, fields) {
+  for (const key of ["sessions", "viewThreads"]) {
+    if (state[key]) state[key] = state[key].map(item => item.thread_id === id ? {...item, ...fields} : item);
+  }
+  if (state.detail?.work_thread.thread_id === id) {
+    Object.assign(state.detail.work_thread, fields); renderThread();
+  }
+}
+function overlayPendingAttention(thread) {
+  const patch = state.attentionMutations?.get(thread.thread_id)?.pending;
+  return patch ? {...thread, ...patch} : thread;
+}
+function reconcileAttentionSnapshot(thread, revision) {
+  const mutation = state.attentionMutations?.get(thread.thread_id);
+  const patch = mutation?.pending || (mutation && mutation.revision !== revision ? mutation.patch : null);
+  return patch ? {...thread, ...patch} : thread;
+}
 async function markThreadHandled(thread) {
   if (!thread.can_handle_response || state.updatingThreads.has(thread.thread_id)) return;
   const ticket = state.rollUp?.ticket(thread.thread_id);
-  await updateThreadAttention(thread, {handled: true,
-    handled_checkpoint_id: thread.checkpoint?.id || 0, handled_completion_id: thread.turn_completion?.id || 0});
+  if (await updateThreadAttention(thread, {handled: true,
+    handled_checkpoint_id: thread.checkpoint?.id || 0, handled_completion_id: thread.turn_completion?.id || 0}) === false) return;
+  state.threadActions?.notify("dismiss:" + thread.thread_id,
+    "Update dismissed · Thread remains in " + (thread.attention === "later" ? "Later" : "Now"));
   await state.rollUp?.responded(ticket);
 }
 async function toggleThreadLater(thread) {
@@ -134,21 +215,32 @@ function snoozeTime(choice, custom, now = new Date()) {
   return date.getTime() / 1000;
 }
 function snoozeLabel(thread) {
-  return thread.snooze_due ? "Snooze ended" : thread.snoozed ? "Until " + new Date(thread.snoozed_until * 1000).toLocaleString([], {
+  return thread.snooze_due ? "Reminder" : thread.snoozed ? "Until " + new Date(thread.snoozed_until * 1000).toLocaleString([], {
     month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   }) : "";
 }
 function openThreadSnooze(thread) {
+  state.snoozeDialogRevision = (state.snoozeDialogRevision || 0) + 1;
   state.snoozingThread = thread;
   $("snooze-form").reset(); $("snooze-custom-label").hidden = true; $("snooze-custom").required = false;
   $("snooze-error").hidden = true;
+  $("save-snooze").disabled = state.updatingThreads.has(thread.thread_id);
   $("snooze-thread").textContent = thread.title;
+  $("snooze-duration").value = "none";
+  $("snooze-policy").textContent = "New results can appear in Attention. The thread stays in Later and the agent can keep working.";
+  if (thread.snoozed_until > Date.now() / 1000) {
+    const date = new Date(thread.snoozed_until * 1000);
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    $("snooze-duration").value = "custom";
+    $("snooze-custom").value = local.toISOString().slice(0, 16);
+    $("snooze-custom-label").hidden = false; $("snooze-custom").required = true;
+    $("snooze-policy").textContent = "Bring back to Attention at this time. Notifications stay quiet until then; the agent can keep working.";
+  }
   $("snooze-dialog").showModal(); $("snooze-duration").focus();
 }
 async function snoozeThread(thread, deadline) {
   const ticket = state.rollUp?.ticket(thread.thread_id);
-  await updateThreadAttention(thread, {snoozed_until: deadline});
-  await state.rollUp?.responded(ticket);
+  if (await updateThreadAttention(thread, {snoozed_until: deadline}) !== false) await state.rollUp?.responded(ticket);
 }
 async function resumeThreadSnooze(thread) {
   const ticket = state.rollUp?.ticket(thread.thread_id);
@@ -161,11 +253,14 @@ function threadCard(thread, compact = false, inAttention = false) {
   const {key: status, label: statusLabel} = threadGrouping.status(thread);
   const button = node("button", null, "session" + (compact ? " compact" : "") + (status === "running" ? " active-thread" : "") + (needsInput ? " needs-attention" : "") + (state.selected === thread.thread_id ? " selected" : ""));
   if (!compact && !inAttention) button.className += " card-age-" + threadGrouping.cardAge(thread);
+  const hasResponse = Boolean(thread.turn_completion && thread.turn_completion.status !== "interrupted");
+  if (hasResponse) {
+    button.className += thread.unread_result ? " response-unread" : " response-read";
+    button.setAttribute("aria-description", thread.unread_result ? "Unread response" : "Read response");
+  }
   button.dataset.thread = thread.thread_id;
   button.title = thread.title;
   button.setAttribute("aria-current", state.selected === thread.thread_id ? "true" : "false");
-  const project = node("span", associationLabel(thread), "project-name");
-  project.title = thread.repository_root || associationLabel(thread);
   const title = node("div", null, "session-title");
   if (compact) {
     if (status === "running") title.append(node("span", statusLabel, "sr-only"));
@@ -174,48 +269,44 @@ function threadCard(thread, compact = false, inAttention = false) {
       title.append(dot);
     }
     title.append(node("span", thread.title));
-    if (thread.unread_result) title.append(node("span", "NEW", "unread-mark"));
-    button.append(project, title);
+
+    button.append(title);
     if (snoozeLabel(thread)) button.append(node("small", snoozeLabel(thread), "placement-label"));
   } else {
-    const top = node("div", null, "card-top");
-    const badge = node("span", null, status === "running" || inAttention || thread.response_state !== "interrupted" ? "sr-only" : "status-tag " + status);
-    badge.append(node("span", statusLabel));
-    top.append(project, badge);
     title.append(node("span", thread.title));
-    const summary = thread.checkpoint?.summary || thread.original_request || "Ready for your first message.";
-    const snippet = node("p", summary, "thread-snippet"); snippet.title = summary;
+    const failed = status !== "running" && (thread.response_state === "failed" || thread.turn_completion?.status === "failed");
+    const stateLabel = failed ? "Failed" : (inAttention && status !== "running" ? reason.label : statusLabel).replace(/^✓\s*/, "");
+    title.append(node("span", stateLabel, "card-state " + (failed ? "failed" : needsInput ? "waiting" : status)));
+    const progress = thread.checkpoint?.summary || thread.original_request || "Ready for your first message.";
+    // The name identifies the conversation; this saved update describes its latest work.
+    const outcome = status === "running" ? "" : thread.turn_completion?.status === "failed" ? "Failed: " :
+      thread.turn_completion?.status === "interrupted" ? "Stopped: " : thread.work_phase === "finished" ? "Completed: " : "";
+    const summary = outcome + progress;
+    const snippet = node("p", summary, "thread-snippet work-summary"); snippet.title = summary;
     const meta = node("div", null, "card-meta");
-    meta.append(node("span", threadGrouping.phaseLabel(thread), "phase-label"));
     if (thread.attention === "later") meta.append(node("span", "Later", "placement-label"));
     if (snoozeLabel(thread)) meta.append(node("span", snoozeLabel(thread), "placement-label"));
-    if (thread.unread && !inAttention) meta.append(node("span", thread.unread_result ? "NEW RESPONSE" : "NEW", "unread-mark"));
-    if (thread.links.length) meta.append(node("span", thread.links.length + (thread.links.length === 1 ? " link" : " links")));
+    if (thread.unread && !thread.unread_result && !inAttention) meta.append(node("span", "New checkpoint", "unread-mark"));
     const activityAt = threadGrouping.activityAt(thread);
     const time = node("span", relativeTime(activityAt), "card-time");
     if (activityAt) time.title = "Last activity: " + new Date(activityAt * 1000).toLocaleString();
     meta.append(time);
-    button.append(top, title, snippet, meta);
+    const content = inAttention ? node("div", null, "attention-copy") : button;
+    if (inAttention) button.append(content);
+    content.append(title, snippet);
     if (thread.checkpoint?.next_action) {
       const next = node("div", null, "next-action"), copy = node("span", null, "next-copy");
       const actor = {user: "Your next step", agent: "Up next", external: "Waiting on"}[thread.checkpoint.next_actor] || "Next";
       copy.append(node("span", actor + " · ", "next-label"), document.createTextNode(thread.checkpoint.next_action));
-      next.append(node("span", "↳"), copy); next.title = thread.checkpoint.next_action; button.append(next);
+      next.append(node("span", "↳"), copy); next.title = thread.checkpoint.next_action; content.append(next);
     }
-    if (thread.checkpoint_stale) button.append(node("small", "New activity since this checkpoint", "stale-checkpoint"));
-    if (inAttention) {
-      const copy = node("div", null, "attention-copy");
-      meta.insertBefore(project, meta.lastChild);
-      copy.append(title, snippet, meta);
-      const label = node("div", null, "attention-reason " + reason.key);
-      label.append(node("span", reason.label));
-      if (reason.key === "done") label.append(node("small", "No action needed"));
-      button.replaceChildren(label, copy);
-    }
+    if (thread.checkpoint_stale) content.append(node("small", "New activity since this checkpoint", "stale-checkpoint"));
+    content.append(meta);
   }
   button.onclick = () => action(() => select(thread.thread_id));
   if (!compact && thread.attention !== "archived") {
     const card = node("div", null, "thread-card" + (inAttention ? " attention-card" : ""));
+    if (hasResponse) card.className += thread.unread_result ? " response-unread" : " response-read";
     const pin = node("button", null, "card-pin");
     pin.type = "button";
     pin.dataset.thread = thread.thread_id;
@@ -248,22 +339,30 @@ function threadCard(thread, compact = false, inAttention = false) {
         finally { state.listSignature = ""; renderList(); }
       }, close);
     };
-    card.append(button, pin, close);
+    card.append(button);
     const actions = node("div", null, "card-actions");
-    function addAction(label, name, callback) {
+    function addAction(label, name, callback, target = actions) {
       const control = node("button", label, "quiet");
       control.type = "button"; control.dataset.thread = thread.thread_id; control.dataset.action = name;
       control.setAttribute("aria-label", label + " · " + thread.title);
       control.disabled = state.closing.has(thread.thread_id) || state.updatingThreads.has(thread.thread_id);
       control.onclick = event => { event.stopPropagation(); action(callback); };
-      actions.append(control);
+      target.append(control);
     }
-    if (thread.can_handle_response) addAction("Dismiss", "handle", () => markThreadHandled(thread));
-    if (!inAttention) {
-      addAction(thread.attention === "later" ? "Move to Now" : "Move to Later", "later", () => toggleThreadLater(thread));
-    }
-    if (thread.snoozed || thread.snooze_due) addAction("Resume", "resume-snooze", () => resumeThreadSnooze(thread));
-    addAction(thread.snoozed ? "Change snooze…" : thread.snooze_due ? "Snooze again…" : "Snooze…", "snooze", () => openThreadSnooze(thread));
+    const endActions = node("div", null, "card-end-actions");
+    if (thread.can_handle_response) addAction("Dismiss", "handle", () => markThreadHandled(thread), endActions);
+    if (thread.snooze_due) addAction("Dismiss reminder", "resume-snooze", () => resumeThreadSnooze(thread), endActions);
+    actions.append(endActions);
+    const more = node("button", "⋮", "card-more");
+    more.type = "button"; more.title = "Thread options";
+    more.dataset.thread = thread.thread_id; more.dataset.action = "more";
+    more.setAttribute("aria-label", "Thread options · " + thread.title);
+    more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
+    more.disabled = state.closing.has(thread.thread_id) || state.updatingThreads.has(thread.thread_id);
+    const items = [{label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)}];
+    if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
+    more.onclick = event => state.threadActions.showMenu(more, thread.title, items, event);
+    actions.append(pin, more, close);
     card.append(actions);
     return card;
   }
@@ -275,8 +374,7 @@ function groupHeading(label, tag = "div") {
   return heading;
 }
 function associationLabel(thread) {
-  return [thread.repository_name ? "Repo: " + thread.repository_name : "",
-    thread.project_name ? "Group: " + thread.project_name : ""].filter(Boolean).join(" · ") || "No repository · No group";
+  return thread.project_name ? "Group: " + thread.project_name : "No group";
 }
 function renderClosedToggle() {
   const placement = $("view").value;
@@ -374,22 +472,21 @@ function createOverviewMotion() {
 function renderList() {
   if (state.paneMode) { renderStatus(); return; }
   renderClosedToggle();
-  savedViews?.render(state.viewThreads || state.sessions);
+  savedViews?.render(threadsInProject(state.viewThreads || state.sessions));
   if (conversationSearch?.update()) { renderStatus(); return; }
   const query = $("search").value.trim().toLocaleLowerCase();
-  const projectThreads = state.sessions.filter(t => threadOrganization.matches(t, $("repository").value, $("project").value));
+  const projectThreads = threadsInProject(state.sessions).filter(t => threadOrganization.matches(t, "", $("project").value));
   const threads = projectThreads.filter(t => threadViews.matches(t,
     {show: $("view").value, phase: $("phase-filter").value, search: query}));
   const archived = $("view").value === "archived";
   const groupBy = $("group-by").value;
-  const viewId = savedViews?.activeId || "all";
+  const viewId = (state.projectCwd || "") + ":" + (savedViews?.activeId || "all");
   const signature = JSON.stringify([threads, state.selected, [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
   $("home").setAttribute("aria-current", state.selected ? "false" : "page");
   $("thread-count").textContent = String(threads.length);
-  const repositories = new Set(threads.map(t => t.repository_id).filter(Boolean)).size;
   const projects = new Set(threads.map(t => t.project_id).filter(Boolean)).size;
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
-    " · " + repositories + (repositories === 1 ? " repository" : " repositories") + " · " + projects + (projects === 1 ? " group" : " groups");
+    " · " + projects + (projects === 1 ? " group" : " groups");
   if (signature === state.listSignature) { renderStatus(); return; }
   state.listSignature = signature;
   state.overviewMotion ||= createOverviewMotion();
@@ -400,9 +497,10 @@ function renderList() {
   const focusGroup = document.activeElement?.closest("[data-group]")?.dataset.group;
   const focusArea = document.activeElement?.closest("#sessions") ? $("sessions") : $("overview");
   $("sessions").replaceChildren(); $("overview").replaceChildren();
-  const groups = threadGrouping.groupThreads(threads);
+  const agentTree = agentThreadTree(threads);
+  const groups = threadGrouping.groupThreads(agentTree.roots);
   const filtered = Boolean(query || $("phase-filter").value || ["attention", "completed"].includes($("view").value) || $("repository").value || $("project").value);
-  function addGroup(key, label, items, parent, description = "") {
+  function addGroup(key, label, items, parent, description = "", sidebarItems = items) {
     const section = node("section", null, "thread-group " + key), overview = node("section", null, "thread-group " + key);
     section.setAttribute("aria-label", label); overview.setAttribute("aria-label", label);
     overview.dataset.group = key;
@@ -411,27 +509,32 @@ function renderList() {
     overview.append(groupHeading(label));
     if (description) overview.append(node("p", description, "group-description"));
     const cards = node("div", null, "thread-cards");
+    for (const thread of sidebarItems) section.append(agentThreadCard(thread, agentTree, true));
     for (const thread of items) {
-      section.append(threadCard(thread, true));
-      const card = threadCard(thread, false, key === "priority");
+      const card = agentThreadCard(thread, agentTree, false, key === "priority");
       card.dataset.cardThread = thread.thread_id;
       cards.append(card);
     }
     if (!items.length) cards.append(node("p", "—", "stage-empty"));
     overview.append(cards);
-    if (items.length) $("sessions").append(section);
+    if (sidebarItems.length) $("sessions").append(section);
     parent.append(overview);
   }
   if (archived) {
-    if (groups.closed.length) addGroup("closed", "Closed", groups.closed, $("overview"), "Finished conversations, with their context kept for reference.");
+    if (groups.closed.length) addGroup("closed", "Closed", groups.closed, $("overview"), "Conversations removed from your workspace. Reopen one whenever you need it.");
   } else if ($("view").value === "later") {
     if (groups.later.length) addGroup("later", "Later", groups.later, $("overview"), "Set aside for another time. Pick up from the last checkpoint when you’re ready.");
   } else {
+    const pinned = threads.filter(thread => thread.pinned && thread.attention === "now");
+    const pinnedIds = new Set(pinned.map(thread => thread.thread_id));
+    const attentionThreads = groups.priority.filter(thread => !pinnedIds.has(thread.thread_id));
+    if (pinned.length) addGroup("pinned", "Pinned", pinned, $("overview"), "", []);
     if (groups.priority.length) {
       const attention = node("section", null, "attention-panel");
       attention.setAttribute("aria-label", "Attention queue");
-      addGroup("priority", "Attention", groups.priority, attention);
-      $("overview").append(attention);
+      // Pinned owns the overview card; all attention items remain in navigation.
+      addGroup("priority", "Attention", attentionThreads, attention, "", groups.priority);
+      if (attentionThreads.length) $("overview").append(attention);
     }
     const board = node("div", null, groupBy === "phase" ? "phase-board" : "organization-board");
     board.setAttribute("aria-label", "Work stages");
@@ -474,6 +577,100 @@ function renderList() {
   }
   renderStatus();
 }
+function agentThreadTree(threads) {
+  // Filter first: a hidden, closed, or differently placed creator must never
+  // swallow a matching child. Keep the original records and counts untouched.
+  const visible = new Map(threads.map(thread => [thread.thread_id, thread]));
+  const parents = new Map(), children = new Map();
+  for (const thread of threads) {
+    // Group explicit orchestration creations only; provenance alone also
+    // includes dispatch and older creations whose intent was never recorded.
+    if (thread.creation_mode !== "orchestration") continue;
+    const parent = visible.get(thread.created_by_thread_id);
+    if (!parent || parent.attention !== thread.attention) continue;
+    const seen = new Set([thread.thread_id]);
+    let ancestor = parent;
+    while (ancestor && !seen.has(ancestor.thread_id)) {
+      seen.add(ancestor.thread_id);
+      ancestor = ancestor.creation_mode === "orchestration" ? visible.get(ancestor.created_by_thread_id) : null;
+    }
+    if (ancestor) continue; // Defensive against malformed historical cycles.
+    parents.set(thread.thread_id, parent.thread_id);
+    if (!children.has(parent.thread_id)) children.set(parent.thread_id, []);
+    children.get(parent.thread_id).push(thread);
+  }
+  for (const items of children.values()) items.sort((a, b) =>
+    (a.created_at || 0) - (b.created_at || 0) || a.thread_id.localeCompare(b.thread_id));
+  const requiresInput = thread => threadGrouping.awaitsUser(thread) && (
+    ["input", "action", "failed"].includes(thread.response_state) || thread.snooze_due ||
+    ["blocked", "review"].includes(thread.attention_reason) ||
+    (!thread.checkpoint_stale && thread.checkpoint?.next_actor === "user" && thread.checkpoint.next_action));
+  return {children, requiresInput,
+    roots: threads.filter(thread => !parents.has(thread.thread_id) || requiresInput(thread))};
+}
+function agentThreadCard(thread, tree, compact = false, inAttention = false) {
+  const card = threadCard(thread, compact, inAttention);
+  const children = tree.children.get(thread.thread_id) || [];
+  if (!children.length && !thread.created_by_thread_id) return card;
+  const group = node("div", null, "agent-thread-group" + (compact ? " compact-agent-group" : ""));
+  group.append(card);
+  if (thread.created_by_thread_id) {
+    const creator = thread.created_by;
+    const origin = node("button", "Created by " + (creator?.title || "another agent"), "agent-origin");
+    origin.type = "button";
+    origin.disabled = !creator?.available;
+    origin.title = origin.textContent;
+    origin.dataset.thread = thread.created_by_thread_id;
+    origin.dataset.action = "creator";
+    origin.onclick = () => action(() => select(thread.created_by_thread_id));
+    if (!compact && thread.attention !== "archived") card.append(origin);
+    else group.append(origin);
+  }
+  if (children.length) group.append(agentThreadChildren(thread, tree, compact));
+  return group;
+}
+function agentThreadChildren(parent, tree, compact) {
+  const children = tree.children.get(parent.thread_id);
+  const details = node("details", null, "agent-children");
+  const expansion = state.agentExpansion ||= new Map();
+  const key = (compact ? "sidebar:" : "overview:") + (savedViews?.activeId || "all") + ":" + parent.thread_id;
+  details.open = expansion.get(key) ?? true;
+  details.ontoggle = () => { if (details.isConnected) expansion.set(key, details.open); };
+  const working = children.filter(thread => threadGrouping.status(thread).key === "running").length;
+  const needsInput = children.filter(tree.requiresInput).length;
+  const unread = children.filter(thread => thread.unread_result).length;
+  const summary = node("summary", null, "agent-children-toggle");
+  const counts = [working && working + " working", needsInput && needsInput + " needs you"].filter(Boolean);
+  if (counts.length) summary.append(node("span", counts.join(" · "), "agent-counts"));
+  summary.dataset.thread = parent.thread_id;
+  summary.dataset.action = "agents";
+  const description = [children.length + (children.length === 1 ? " agent" : " agents"), ...counts, unread && unread + " unread"].filter(Boolean);
+  summary.setAttribute("aria-label", "Agents created by " + parent.title + " · " + description.join(" · "));
+  summary.title = "Agents created by " + parent.title;
+  details.append(summary);
+  const list = node("ul", null, "agent-rows");
+  for (const child of children) {
+    const item = node("li"), status = threadGrouping.status(child);
+    const button = node("button", null, "agent-row" + (status.key === "running" ? " working" : "") + (tree.requiresInput(child) ? " needs-attention" : "") + (child.unread_result ? " response-unread" : ""));
+    button.type = "button";
+    button.dataset.thread = child.thread_id;
+    button.setAttribute("aria-current", state.selected === child.thread_id ? "true" : "false");
+    button.title = child.checkpoint?.summary || child.title;
+    if (child.turn_completion && child.turn_completion.status !== "interrupted") {
+      button.setAttribute("aria-description", child.unread_result ? "Unread response" : "Read response");
+    }
+    button.append(node("span", child.title, "agent-row-title"));
+    const phase = threadGrouping.phaseLabel(child);
+    const labels = [phase, status.label !== phase && status.label].filter(Boolean);
+    button.append(node("span", labels.join(" · "), "agent-row-status"));
+    button.onclick = () => action(() => select(child.thread_id));
+    item.append(button);
+    if (tree.children.has(child.thread_id)) item.append(agentThreadChildren(child, tree, compact));
+    list.append(item);
+  }
+  details.append(list);
+  return details;
+}
 function conversationEntry(id) {
   const cache = state.conversations ||= new Map();
   const entry = cache.get(id) || {detail: null, nodes: null, scroll: 0, following: true, revision: 0, pending: null};
@@ -497,6 +694,10 @@ function sameConversation(first, second) {
 async function select(id, {rollUp = false} = {}) {
   state.mobileChat?.close();
   if (id === "new-session") return newSession();
+  if (!state.paneMode) {
+    const known = state.sessions?.find(thread => thread.thread_id === id) || state.conversations?.get(id)?.detail?.work_thread;
+    if (known?.project_cwd || known?.cwd) await openProjectDirectory(known.project_cwd || known.cwd);
+  }
   $("conversation").classList.remove("session-draft");
   if (!rollUp) state.rollUp?.stop();
   if (globalThis.agentCoordPanes?.active) { await globalThis.agentCoordPanes.openThread(id); return; }
@@ -547,6 +748,10 @@ async function select(id, {rollUp = false} = {}) {
   if (state.selected !== id || fresh === false) return;
   if (state.paneMode) return;
   const displayed = state.detail.work_thread;
+  if (displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
+    await openProjectDirectory(displayed.project_cwd);
+    return select(id);
+  }
   await api(threadPath(id), {seen: true, seen_checkpoint_id: displayed.checkpoint?.id || 0,
     seen_completion_id: displayed.turn_completion?.id || 0});
   await refreshList();
@@ -563,10 +768,12 @@ async function refreshDetail() {
   if (entry.pending) return entry.pending;
   entry.pending = (async () => {
     const revision = entry.revision;
+    const attentionRevision = state.attentionMutations?.get(id)?.revision || 0;
     const work = await api(threadPath(id));
     const detail = work.browser_session ? await api(sessionPath(id)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
       coordinationMessages: (await api(threadPath(id) + "/messages")).data};
     detail.work_thread ||= work;
+    detail.work_thread = reconcileAttentionSnapshot(detail.work_thread, attentionRevision);
     const changed = revision !== entry.revision;
     // A background snapshot must not erase newer streamed messages or approvals.
     if (changed && entry.detail) {
@@ -590,9 +797,10 @@ async function refreshDetail() {
 async function refreshThread() {
   const id = state.selected;
   if (!id || !state.detail || isSessionDraft()) return;
+  const revision = state.attentionMutations?.get(id)?.revision || 0;
   const thread = await api(threadPath(id));
   if (id !== state.selected || !state.detail) return;
-  state.detail.work_thread = thread; renderThread(); renderStatus();
+  state.detail.work_thread = reconcileAttentionSnapshot(thread, revision); renderThread(); renderStatus();
 }
 function renderThread() {
   const detail = state.detail, work = detail.work_thread, checkpoint = work.checkpoint;
@@ -601,8 +809,11 @@ function renderThread() {
   $("page-location").textContent = "Thread";
   $("park").textContent = work.attention === "later" ? "Move to Now" : "Move to Later";
   $("snooze-thread-button").hidden = work.attention === "archived";
-  $("snooze-thread-button").textContent = work.snoozed ? "Change snooze…" : work.snooze_due ? "Snooze again…" : "Snooze…";
+  $("snooze-thread-button").textContent = work.attention === "later" ? "Change return time…" : "Move to Later…";
+  $("park").hidden = work.attention !== "later";
   $("resume-snooze").hidden = !(work.snoozed || work.snooze_due);
+  $("resume-snooze").textContent = work.snooze_due ? "Dismiss reminder" : "Move to Now";
+  if (work.snoozed) $("park").hidden = true;
   $("snooze-status").textContent = snoozeLabel(work);
   for (const id of ["snooze-thread-button", "resume-snooze"]) $(id).disabled = state.updatingThreads.has(work.thread_id);
   $("handle-response").hidden = !work.can_handle_response;
@@ -892,17 +1103,36 @@ function renderTimeline() {
         message.append(body);
         fragment.append(message);
       } else {
-        const detail = node("details", null, "tool"); detail.dataset.id = item.id; detail.open = open.has(item.id);
-        const labels = {commandExecution: "Command", fileChange: "File changes", reasoning: "Thinking", mcpToolCall: "Tool", plan: "Plan", webSearch: "Web search"};
-        detail.append(node("summary", (labels[item.type] || item.type) + (item.status ? " · " + item.status : "")), node("pre", text));
+        const detail = node("details", null, "tool"); detail.dataset.id = item.id; detail.dataset.status = item.status || ""; detail.open = open.has(item.id);
+        const labels = {fileChange: "File changes", reasoning: "Thinking", mcpToolCall: "Tool", plan: "Plan", webSearch: "Web search"};
+        const terminal = item.type === "commandExecution" || item.type === "mcpToolCall" && ["Bash", "exec_command", "shell_command"].includes(item.tool);
+        const command = String(item.command || item.arguments?.command || item.arguments?.cmd || "");
+        const shell = command.match(/^((?:\/[^\s]+\/)?(?:bash|zsh|sh|fish|pwsh))(?:\s|$)/)?.[1];
+        const label = terminal ? "Terminal" + (shell ? " (cmd: " + shell + ")" : "") : item.tool || labels[item.type] || item.type;
+        const preview = (command || (item.type === "fileChange" ? (item.changes || []).map(c => c.path).join(", ") :
+          item.type === "mcpToolCall" ? JSON.stringify(item.arguments || {}) : text)).replace(/\s+/g, " ");
+        const summary = node("summary", null, "tool-summary");
+        const icon = node("span", null, "tool-icon" + (terminal ? " terminal" : ""));
+        icon.setAttribute("aria-hidden", "true");
+        summary.append(icon, node("span", label, "tool-label"), node("span", preview, "tool-preview"));
+        summary.setAttribute("aria-label", [label, item.status, preview].filter(Boolean).join(" · "));
+        summary.title = [label, item.status, preview].filter(Boolean).join(" · ");
+        detail.append(summary, node("pre", text));
         if (["completed", "failed", "interrupted"].includes(turn.status)) {
           let group = workGroups.get(turn);
           if (!group) {
             group = node("details", null, "turn-work");
             group.dataset.id = "turn-work:" + (turn.id || turns.indexOf(turn));
             group.open = open.has(group.dataset.id);
-            const outcome = turn.status === "failed" ? " · Failed" : turn.status === "interrupted" ? " · Stopped" : "";
-            group.append(node("summary", "Work" + outcome));
+            group.dataset.status = turn.status;
+            const count = (turn.items || []).filter(i => !["userMessage", "agentMessage", "reasoning", "plan"].includes(i.type)).length;
+            const summary = node("summary");
+            const icon = node("span", null, "tool-icon"); icon.setAttribute("aria-hidden", "true");
+            const outcome = turn.status === "failed" ? "Failed" : turn.status === "interrupted" ? "Stopped" : "Completed";
+            const completion = node("span", turn.status === "completed" ? "✓" : turn.status === "failed" ? "!" : "■", "work-state");
+            completion.setAttribute("aria-label", outcome); completion.title = outcome;
+            summary.append(icon, node("span", count ? "Tool calls · " + count : "Work", "work-label"), completion);
+            group.append(summary);
             workGroups.set(turn, group);
             // Anchor at the first work item; prose and coordination cards retain their order.
             fragment.append(group);
@@ -1113,7 +1343,7 @@ $("project-form").onsubmit = event => {
   action(async () => {
     const name = $("project-name").value.trim();
     if (!name) throw new Error("Enter a group name.");
-    const project = await api("projects", {name});
+    const project = await api("projects", {name, cwd: state.folders.selected.cwd});
     $("project-dialog").close();
     $("view").value = "active";
     $("search").value = ""; $("phase-filter").value = ""; $("repository").value = "";
@@ -1137,7 +1367,7 @@ async function fillAssignments(prefix, thread = null) {
   for (const item of state.organization.repositories) repository.append(new Option(item.name + " · " + item.root, item.id));
   repository.append(new Option("Add a repository…", "__new__"));
   project.replaceChildren(new Option("No group", ""));
-  for (const item of state.organization.projects) project.append(new Option(item.name, item.id));
+  for (const item of state.organization.projects.filter(item => !item.cwd || item.cwd === (thread?.project_cwd || state.folders?.selected?.cwd))) project.append(new Option(item.name, item.id));
   project.append(new Option("Create a group…", "__new__"));
   repository.value = thread ? thread.repository_id || "" : "__auto__";
   if (!thread) {
@@ -1153,13 +1383,13 @@ async function fillAssignments(prefix, thread = null) {
 }
 async function assignmentPayload(prefix) {
   const body = {};
-  for (const field of ["repository", "project"]) {
+  for (const field of ["project"]) {
     let value = $(prefix + "-" + field).value;
     if (value === "__auto__") continue;
     if (value === "__new__") {
       const input = $(prefix + "-" + field + "-value").value;
       const record = await api(field === "repository" ? "repositories" : "projects",
-        field === "repository" ? {path: input} : {name: input});
+        field === "repository" ? {path: input} : {name: input, cwd: state.detail?.work_thread?.project_cwd || state.folders.selected.cwd});
       value = record.id;
     }
     body[field + "_id"] = value || null;
@@ -1176,7 +1406,7 @@ $("organize-thread").onclick = () => action(async () => {
   await fillAssignments("edit", state.detail.work_thread);
   if (state.selected !== id) return;
   organizationThreadId = id;
-  $("organization-workspace").textContent = "Workspace: " + state.detail.work_thread.cwd;
+  $("organization-workspace").textContent = "Project: " + (state.detail.work_thread.project_cwd || state.detail.work_thread.cwd);
   $("organization-dialog").showModal();
   $("edit-project").focus();
 }, $("organize-thread"));
@@ -1301,7 +1531,7 @@ async function newSession() {
   goHome();
   state.newSessionDraft ||= {
     session: {...body, client: "codex", model: null, effort: null, yolo: false},
-    work_thread: {thread_id: "new-session", title: "New session", ...body, client: "codex", browser_session: true, attention: "now", links: []},
+    work_thread: {thread_id: "new-session", title: "New session", ...body, project_cwd: body.cwd, client: "codex", browser_session: true, attention: "now", links: []},
     thread: {turns: []}, requests: [], queuedMessages: [], running: false,
   };
   state.selected = "new-session";
@@ -1380,7 +1610,7 @@ $("group-by").onchange = () => {
 };
 $("search").oninput = filtersChanged;
 conversationSearch = new ConversationSearch.Search({document, api, filters: () => ({
-  show: $("view").value, phase: $("phase-filter").value,
+  show: $("view").value, phase: $("phase-filter").value, project_cwd: state.folders?.selected?.cwd || "",
   repository: $("repository").value, project: $("project").value})});
 function setChatExpanded(expanded) {
   expanded = Boolean(expanded && state.selected);
@@ -1577,10 +1807,35 @@ async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess 
   const id = thread?.thread_id || state.selected;
   if (!id || !thread || state.closing.has(id)) return;
   const reopening = thread.attention === "archived";
+  const previous = {...thread, thread_id: id};
+  const snapshot = reopening ? null : state.threadActions?.captureClose(id);
   state.closing.add(id); renderStatus();
   try {
     await api(threadPath(id) + (reopening ? "/reopen" : "/close"), {});
     onSuccess();
+    if (!reopening) {
+      let reopened = false;
+      state.threadActions?.notify("close:" + id, "Thread closed · " + (thread.title || "Available in Closed"), async () => {
+        if (state.closing.has(id)) throw new Error("Wait for the thread to finish closing.");
+        state.closing.add(id);
+        try {
+          // Do not undo a later decision made in another tab or conversation.
+          const current = await api(threadPath(id));
+          if (current.attention !== "archived" && !reopened) return;
+          await api(threadPath(id) + "/reopen", {});
+          reopened = true;
+          if (previous.attention === "later") {
+            const body = previous.snoozed_until > Date.now() / 1000
+              ? {snoozed_until: previous.snoozed_until} : {attention: "later"};
+            await api(threadPath(id), body);
+          }
+          // Reopening restores visibility only; never submit or resume work.
+          await refreshList();
+          if (state.selected === id) await refreshDetail();
+        } finally { state.closing.delete(id); renderStatus(); }
+      });
+      state.threadActions?.closed(snapshot);
+    }
     if (state.selected === id) {
       $("view").value = "active";
       if (reopening) await refreshDetail();
@@ -1596,17 +1851,30 @@ $("resume-snooze").onclick = () => action(() => resumeThreadSnooze(state.detail.
 $("snooze-duration").onchange = () => {
   const custom = $("snooze-duration").value === "custom";
   $("snooze-custom-label").hidden = !custom; $("snooze-custom").required = custom;
+  $("snooze-policy").textContent = $("snooze-duration").value === "none"
+    ? "New results can appear in Attention. The thread stays in Later and the agent can keep working."
+    : "Bring back to Attention at this time. Notifications stay quiet until then; the agent can keep working.";
   if (custom) $("snooze-custom").focus();
 };
 $("snooze-form").onsubmit = async event => {
   event.preventDefault();
   if ($("save-snooze").disabled) return;
   $("save-snooze").disabled = true; $("snooze-error").hidden = true;
+  const revision = state.snoozeDialogRevision;
   try {
-    await snoozeThread(state.snoozingThread, snoozeTime($("snooze-duration").value, $("snooze-custom").value));
+    const thread = state.snoozingThread, choice = $("snooze-duration").value;
+    const deadline = choice === "none" ? null : snoozeTime(choice, $("snooze-custom").value);
     $("snooze-dialog").close();
-  } catch (error) { $("snooze-error").textContent = error.message; $("snooze-error").hidden = false; }
-  finally { $("save-snooze").disabled = false; }
+    if (deadline === null) {
+      const ticket = state.rollUp?.ticket(thread.thread_id);
+      if (await updateThreadAttention(thread, {attention: "later"}) !== false) await state.rollUp?.responded(ticket);
+    } else await snoozeThread(thread, deadline);
+  } catch (error) {
+    if (revision !== state.snoozeDialogRevision) { showError(error); return; }
+    $("snooze-error").textContent = error.message + " Try again."; $("snooze-error").hidden = false;
+    if (!$("snooze-dialog").open) $("snooze-dialog").showModal();
+  }
+  finally { if (revision === state.snoozeDialogRevision) $("save-snooze").disabled = false; }
 };
 $("handle-response").onclick = () => action(() => markThreadHandled(state.detail.work_thread), $("handle-response"));
 $("session-name").onclick = startTitleEdit;
@@ -1720,29 +1988,51 @@ async function boot() {
   let windowStorage, preferences;
   try { windowStorage = sessionStorage; preferences = localStorage; } catch { /* Views work without browser storage. */ }
   const desktop = window.agentCoordDesktop;
+  const publishDesktopProjects = snapshot => api("desktop-projects", {
+    windowId: state.sourceWindowId, projects: snapshot.projects, active: snapshot.active,
+  });
   state.folders = new WorkingFolders({storage: desktop ? preferences : windowStorage, preferences,
-    key: desktop?.folderSlot || "browser", scope: state.config.workspaceRoot || "", api});
-  await state.folders.restore(state.config.workspaceRoot).catch(showError);
+    key: desktop?.folderSlot || "browser", scope: state.config.workspaceRoot || "", api,
+    onChange: desktop ? snapshot => publishDesktopProjects(snapshot).catch(showError) : null});
+  const projectQuery = new URLSearchParams(location.search);
+  // Browsers copy sessionStorage into a new window. Explicitly opening a
+  // project there must not duplicate the originating window's project tabs.
+  if (projectQuery.get("new_project") === "1") state.folders.reset();
+  else await state.folders.restore(state.config.workspaceRoot).catch(showError);
+  const initialDirectory = projectQuery.get("directory");
+  if (initialDirectory) await state.folders.open(initialDirectory).catch(showError);
+  if (state.config.remote) {
+    const shared = await api("desktop-projects").catch(error => { showError(error); return null; });
+    if (shared?.projects?.length) await state.folders.replace(shared.projects, shared.active).catch(showError);
+  } else if (desktop) {
+    await publishDesktopProjects(state.folders.snapshot()).catch(showError);
+    window.addEventListener("pagehide", () => fetch("/api/browser/desktop-projects", {
+      method: "POST", keepalive: true,
+      headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token},
+      body: JSON.stringify({windowId: state.sourceWindowId, projects: [], active: ""}),
+    }).catch(() => {}), {once: true});
+  }
   state.folderPicker = new FolderPicker({document, folders: state.folders, api, desktop, remote: state.config.remote,
-    onError: showError, onOpened: async () => {
-      // Open a temporary repository overview without rewriting any saved view.
-      const folder = state.folders.selected;
-      await savedViews.overview({repository: folder.repository?.id || "", project: ""});
-      goHome(); await refreshList(); navigation?.remember();
-    }});
-  savedViews = new SavedViews({document, api, storage: windowStorage, preferences, scope: state.config.workspaceRoot,
+    onError: showError, onOpened: switchProject, canSwitch: canSwitchProject});
+  state.projectTabs = new ProjectTabs({document, folders: state.folders, onSwitch: switchProject, onError: showError, canSwitch: canSwitchProject});
+  savedViews = new SavedViews({document, api, storage: windowStorage, preferences,
+    scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
     onSwitch: async () => { goHome(); await refreshList(); window.agentCoordPanes?.restoreView(); }, onError: showError});
-  await savedViews.start();
+  state.projectCwd = state.folders.selected?.cwd || "";
+  await savedViews.setProject(state.projectCwd);
   setupPaneShell({state, document, api, select, goHome, refreshList, showError, notifications: () => notifications,
-    getView: () => savedViews.activeId,
-    getThreads: () => state.sessions.filter(thread => threadViews.matches(thread, savedViews.read().filters))});
-  setupRollUp({document, state, api, select, action, markHandled: markThreadHandled});
+    getView: () => state.projectCwd + ":" + savedViews.activeId,
+    getThreads: () => threadsInProject(state.sessions).filter(thread => threadViews.matches(thread, savedViews.read().filters))});
+  setupRollUp({document, state, api: async (...args) => {
+    const result = await api(...args);
+    return args[0].startsWith("threads?") ? {...result, data: threadsInProject(result.data)} : result;
+  }, select, action, markHandled: markThreadHandled});
   window.addEventListener("agent-coord-pane-state", () => { if (window.agentCoordPanes?.active) state.rollUp.stop(); });
   await refreshList(); connect();
   savedViews.restoreScroll();
   navigation = new agentCoordNavigation.Router({api, history, location, windowId: state.sourceWindowId, onError: showError,
     blocked: () => Boolean(document.querySelector("dialog[open]") || window.agentCoordPanes?.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")),
-    capture: () => ({viewId: savedViews.activeId, ...savedViews.read(), tiled: Boolean(window.agentCoordPanes?.active),
+    capture: () => ({directory: state.projectCwd, viewId: savedViews.activeId, ...savedViews.read(), tiled: Boolean(window.agentCoordPanes?.active),
       thread: window.agentCoordPanes?.active ? window.agentCoordPanes.selected : state.selected}),
     apply: async route => {
       if (route.kind === "thread") {
@@ -1755,12 +2045,24 @@ async function boot() {
         }
       }
       else if (route.kind === "view") {
-        savedViews.sync((await api("views")).data);
+        const views = (await api("views")).data;
+        const view = views.find(item => item.id === route.id);
+        if (view?.cwd) await openProjectDirectory(view.cwd);
+        savedViews.sync(views);
         await savedViews.activate(route.id);
         goHome();
-      } else { await savedViews.overview(route.filters); goHome(); }
+      } else {
+        // Old repository links still open the corresponding directory project.
+        const repository = state.organization.repositories.find(item => item.id === route.filters.repository);
+        if (repository) await openProjectDirectory(repository.root);
+        const group = state.organization.projects.find(item => item.id === route.filters.project);
+        if (group?.cwd) await openProjectDirectory(group.cwd);
+        await savedViews.overview({...route.filters, repository: ""}); goHome();
+      }
     },
     restore: async snapshot => {
+      if (snapshot.directory) await openProjectDirectory(snapshot.directory);
+      else if (snapshot.directory === "" && state.projectCwd) { state.folders.activate(""); await switchProject(); }
       if (snapshot.viewId === "all") await savedViews.overview(snapshot.filters, snapshot.group_by);
       else await savedViews.activate(snapshot.viewId);
       if (snapshot.tiled) window.agentCoordPanes?.restoreView();

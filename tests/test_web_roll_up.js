@@ -159,7 +159,7 @@ test("controls handle empty passes, skipped work, keyboard exit, and modal prece
 function appFixture() {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const elements = new Map(), advanced = [];
-  const c = {state: {selected: "one", drafts: new Map(), commandFeedback: new Map(), updatingThreads: new Set(),
+  const c = {listRequest: 0, state: {selected: "one", drafts: new Map(), commandFeedback: new Map(), updatingThreads: new Set(),
     sessions: [], detail: {work_thread: {thread_id: "one", browser_session: true, can_handle_response: true}, requests: []},
     rollUp: {ticket: id => ({id}), responded: async (ticket, options) => advanced.push({ticket, options})}},
     $: id => { if (!elements.has(id)) elements.set(id, {value: "A reply"}); return elements.get(id); },

@@ -104,11 +104,23 @@ At the first meaningful checkpoint, include an optional `title`: a specific
 thread's purpose, not a progress report or a copy of the opening message.
 The saved context includes `title` and `title_source` (`auto`, `agent`, or
 `user`). Replace an `auto` title when you understand the work. Omit `title`
-on later checkpoints to keep the name stable, unless the purpose changes
-substantially. A user-chosen name takes precedence: agent checkpoints still
+on later checkpoints, including new assignments, to keep the conversation name
+stable. Routine checkpoints can name only an `auto` title; they preserve established
+`agent` and `user` names. Use `thread update --title` for a deliberate rename.
+A user-chosen name takes precedence: agent checkpoints still
 save progress but cannot replace a title whose source is `user`. The original
 request remains unchanged. Titles accept 1–160 characters; the word count is
 writing guidance.
+
+Use `summary` as the separate changing current/latest-work description. Its first
+sentence should concisely say what is being done now or what was delivered; use
+the second sentence for useful progress detail. Save an updated checkpoint when
+starting another assignment in the same conversation. For example, the title
+"Chat interface" stays the same while summaries change from "Adding thread
+mentions." to "Making unread responses clearer." and then "Implemented clear
+read/unread response cards." Describe failures as failed results. Do not leave
+ongoing-work wording on a completed result or rename the conversation to report
+its latest task. The full summary remains available in thread context/history.
 
 Links accept `kind`, `label`, and `target`, with an optional `workspace_id` for a
 different artifact workspace. The link field `project_id` is a legacy alias for
@@ -340,6 +352,16 @@ them when the user authorized that choice. Add `--yolo` only with explicit
 authorization for full machine access without approval prompts. Defaults do
 not inherit the dispatcher's YOLO mode. Creation does not bypass hook trust.
 Pass `-` as the prompt to read stdin without shell escaping.
+
+Use `thread create --mode orchestration` for an agent created to contribute to
+an outcome you are coordinating and delivering. Omit `--mode` for dispatch or
+ordinary app-agent creation. The mode records creation intent independently of
+reply requirements; later messages and reuse do not change it. Ribbon Field
+groups orchestration-created agents beneath their creator and displays untagged
+agents separately, including older creations without a recorded mode. Creator
+provenance remains available in both cases. This requires an updated running
+app as well as the CLI; a completed receipt's `result.mode` confirms the recorded
+mode (`null` when omitted).
 
 A `completed` receipt contains `thread_id` and `result`: session identity,
 effective settings, stable URL, and initial coordination message ID. It confirms

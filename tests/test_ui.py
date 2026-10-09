@@ -596,6 +596,34 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(self.sessions.rpc.calls, [])
         self.assertEqual(self.store.threads.list(), [])
 
+    def test_desktop_project_tabs_are_shared_with_remote_clients(self):
+        first = self.root / "first"
+        second = self.root / "second"
+        third = self.root / "third"
+        for path in (first, second, third):
+            path.mkdir()
+        route = "/api/browser/desktop-projects"
+        status, projects = self.request(route, {
+            "windowId": "window-a", "projects": [str(first), str(second)], "active": str(second),
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(projects, {"projects": [str(first), str(second)], "active": str(second)})
+        status, projects = self.request(route, {
+            "windowId": "window-b", "projects": [str(third), str(first)], "active": str(third),
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(projects, {"projects": [str(first), str(second), str(third)], "active": str(third)})
+        self.assertEqual(self.request(route)[1], projects)
+        self.assertEqual(self.request(route, {
+            "windowId": "window-b", "projects": [], "active": "",
+        })[1], {"projects": [str(first), str(second)], "active": str(second)})
+        self.assertEqual(self.request(route, {
+            "windowId": "window-a", "projects": [str(first)], "active": str(second),
+        })[0], 400)
+        self.assertEqual(self.request(route, {
+            "windowId": "window-a", "projects": [None], "active": "",
+        })[0], 400)
+
     def test_orchestrating_checkpoint_round_trips_through_api(self):
         self.store.register(session_id="dispatcher", client="codex", cwd=str(self.root))
         path = "/api/browser/threads/dispatcher"

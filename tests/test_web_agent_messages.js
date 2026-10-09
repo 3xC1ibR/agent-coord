@@ -13,15 +13,17 @@ function element(tag) {
 }
 const document = {createElement: element};
 const text = node => [node.textContent || '', ...(node.children || []).map(text)].join(' ');
+const descendants = node => [node, ...node.children.flatMap(descendants)];
+const withClass = (node, name) => descendants(node).find(n => n.className === name);
 
 test('both sides keep identity and link to the same message with safe literal text', () => {
   const visits = [];
   for (const direction of ['sent', 'received']) {
     const card = AgentMessages.card(document, sample({direction}), {open: (...args) => visits.push(args)});
     assert.equal(card.id, 'agent-message-7');
-    assert.equal(card.children[1].textContent, '<script>alert(1)</script>');
-    assert.equal(card.children[1].innerHTML, undefined);
-    const link = card.children[0].children[1].children[0];
+    assert.equal(withClass(card, 'agent-message-body').textContent, '<script>alert(1)</script>');
+    assert.equal(withClass(card, 'agent-message-body').innerHTML, undefined);
+    const link = withClass(card, 'agent-message-peer');
     assert.equal(link.textContent, '<b>Validator</b>');
     assert.equal(link.href, '/?message=7#peer%20id');
     let prevented = false;
@@ -32,16 +34,24 @@ test('both sides keep identity and link to the same message with safe literal te
   assert.deepEqual(visits, [['peer id', 7], ['peer id', 7]]);
 });
 
-test('confirmed creation labels only the initial outgoing card and preserves its link and position', () => {
+test('agent names replace message eyebrows while accessible direction and creation identity remain', () => {
   const created = sample({direction:'sent', creation_request_id:'creation-key', body:'Initial prompt'});
   const card = AgentMessages.card(document, created);
   assert.equal(card['aria-label'], 'Created agent <b>Validator</b>');
-  assert.equal(card.children[0].children[1].textContent, 'Created agent ');
-  assert.equal(card.children[0].children[1].children[0].href, '/?message=7#peer%20id');
-  assert.equal(card.children[1].textContent, 'Initial prompt');
+  assert.equal(text(withClass(card, 'agent-message-label')).trim(), '<b>Validator</b>');
+  assert.equal(withClass(card, 'agent-message-peer').href, '/?message=7#peer%20id');
+  assert.equal(withClass(card, 'agent-message-body').textContent, 'Initial prompt');
   assert.equal(card.id, 'agent-message-7');
   assert.equal(AgentMessages.card(document, {...created, direction:'received'})['aria-label'], 'Message from <b>Validator</b>');
   assert.equal(AgentMessages.card(document, {...created, creation_request_id:null})['aria-label'], 'Message to <b>Validator</b>');
+  for (const direction of ['sent', 'received']) {
+    const heading = withClass(AgentMessages.card(document, sample({direction})), 'agent-message-heading');
+    assert.doesNotMatch(text(heading), /Message (to|from)|Created agent/);
+    assert.match(text(heading), /Validator/);
+    const icon = withClass(heading, 'agent-message-icon');
+    assert.equal(icon.textContent, direction === 'sent' ? '↗' : '↙');
+    assert.equal(icon.title, direction === 'sent' ? 'Sent' : 'Received');
+  }
   const turns=[{id:'turn',startedAt:1234567900,items:[{id:'later',type:'userMessage'}]}];
   const order = messages => AgentMessages.entries(turns,messages).map(e=>e.message?.id || e.item?.id || 'end');
   assert.deepEqual(order([created]), order([{...created, creation_request_id:null}]));
@@ -52,11 +62,53 @@ test('confirmed creation labels only the initial outgoing card and preserves its
 test('long message expansion is retained and unavailable peers have no dead link', () => {
   const body = 'Full message\n'.repeat(40);
   const card = AgentMessages.card(document, sample({body, counterpart: {title: 'Elsewhere', available: false}}), {expanded: true});
-  assert.equal(card.children[0].children[1].children[0].tag, 'span');
-  const detail = card.children[1];
+  assert.equal(withClass(card, 'agent-message-peer').tag, 'span');
+  const detail = card.children[0];
   assert.equal(detail.tag, 'details');
   assert.equal(detail.open, true);
   assert.equal(detail.children[1].textContent, body);
+});
+
+test('closed status stays inside the collapsed content for both short and long exchanges', () => {
+  for (const body of ['Finished.', 'Full message\n'.repeat(40)]) {
+    const message = sample({body, status: 'Exchange closed', closed_at: 1234567900});
+    const card = AgentMessages.card(document, message);
+    const detail = card.children[0];
+    assert.equal(detail.tag, 'details');
+    assert.equal(detail.open, false);
+    assert.equal(detail.dataset.id, 'agent-message:7');
+    assert.doesNotMatch(text(detail.children[0]), /Exchange closed/);
+    assert.equal(detail.children[1].textContent, body);
+    assert.equal(text(detail.children[2]).trim(), 'Exchange closed');
+    assert.equal(card.children.length, 1, 'closed status has no visible outer footer');
+    detail.open = true;
+    assert.doesNotMatch(text(card), /Collapse message/);
+    const restored = AgentMessages.card(document, message, {expanded: true});
+    assert.equal(restored.children[0].open, true);
+  }
+});
+
+test('card clicks toggle short and long messages while summaries, links and text selection keep their behavior', () => {
+  for (const body of ['Short message.', 'Full message\n'.repeat(40)]) {
+    let selection = {isCollapsed: true};
+    const doc = {...document, defaultView: {getSelection: () => selection}};
+    const card = AgentMessages.card(doc, sample({body}));
+    const detail = card.children[0];
+    const click = (target = null, extra = {}) => card.onclick({button: 0, target: {closest: () => target}, ...extra});
+    assert.equal(detail.open, false);
+    click(); assert.equal(detail.open, true);
+    click(); assert.equal(detail.open, false);
+    for (const target of ['summary', 'a', 'button']) {
+      click(target); assert.equal(detail.open, false, 'native summary and link clicks are not toggled twice');
+    }
+    click(null, {defaultPrevented: true}); assert.equal(detail.open, false);
+    click(null, {ctrlKey: true}); assert.equal(detail.open, false);
+    click(null, {button: 1}); assert.equal(detail.open, false);
+    selection = {isCollapsed: false};
+    click(); assert.equal(detail.open, false, 'copying message text does not collapse it');
+    assert.equal(detail.children[0].tag, 'summary', 'native keyboard disclosure remains available');
+    assert.doesNotMatch(text(card), /Collapse message/);
+  }
 });
 
 const visibleOrder = (turns, messages) => AgentMessages.entries(turns, messages)

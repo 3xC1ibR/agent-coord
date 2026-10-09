@@ -75,3 +75,35 @@ class ThreadTitleAPITests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class StableConversationReuseTests(unittest.TestCase):
+    setUp = ThreadTitleAPITests.setUp
+    def test_assignments_update_latest_summary_without_replacing_established_agent_name(self):
+        tid = self.sessions.create({})['session']['thread_id']
+        self.store.threads.start_turn(tid, prompt='Add mentions', turn_id='first')
+        self.store.threads.checkpoint(tid, {'title':'Chat interface', 'phase':'implementation',
+                                         'summary':'Adding thread mentions.'})
+        self.store.threads.finish_turn(tid)
+        self.store.threads.start_turn(tid, prompt='Make unread responses clear', turn_id='second')
+        self.store.threads.checkpoint(tid, {'title':'Unread cards', 'phase':'implementation',
+                                         'summary':'Making unread responses clearer.'})
+        thread=self.sessions.work_thread(tid)
+        self.assertEqual(thread['title'],'Chat interface')
+        self.assertEqual(thread['checkpoint']['summary'],'Making unread responses clearer.')
+        self.store.threads.checkpoint(tid, {'title':'Completed cards', 'phase':'finished',
+                                         'summary':'Implemented clear read/unread response cards.'})
+        self.store.threads.finish_turn(tid,status='failed')
+        reopened=CoordinationStore(self.store.database_path)
+        saved=reopened.threads.get(tid,history=True)
+        self.assertEqual(saved['title'],'Chat interface')
+        self.assertEqual(saved['title_source'],'agent')
+        self.assertEqual(saved['turn_completion']['status'],'failed')
+        self.assertEqual(saved['checkpoint']['summary'],'Implemented clear read/unread response cards.')
+        self.assertEqual(len(saved['checkpoints']),3)
+        self.assertTrue(saved['unread_result'])
+        self.assertTrue(saved['unhandled_response'])
+        self.assertEqual(saved['original_request'],'Add mentions')
+        renamed=self.sessions.update_work_thread(tid,{'title':'My chat workspace'})
+        self.assertEqual(renamed['title_source'],'user')
+        self.store.threads.checkpoint(tid, {'title':'Another assignment','phase':'investigation','summary':'Investigating failure recovery.'})
+        self.assertEqual(self.sessions.work_thread(tid)['title'],'My chat workspace')

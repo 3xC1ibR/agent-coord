@@ -41,7 +41,7 @@ class TurnNotifications {
     this.button.setAttribute("aria-pressed", String(enabled));
     this.button.title = !supported ? "Desktop notifications are not available in this browser." : denied ?
       "Allow notifications for this site in your browser settings, then reload." : enabled ?
-      "Turn off desktop alerts for completed turns, approvals, and snooze reminders." : "Get turn-finished, approval, and snooze alerts while a UI tab is open.";
+      "Turn off desktop alerts for completed turns, approvals, and reminders." : "Get turn-finished, approval, and reminder alerts while a UI tab is open.";
   }
 
   async toggle() {
@@ -95,7 +95,7 @@ class TurnNotifications {
     const snooze = event.status === "snooze";
     if (!await (approval ? this.claimApproval(event.request_key) : snooze ? this.claimSnooze(event.id) : this.claim(event.id))) return;
     if (this.closed || !this.enabled() || quiet || this.viewing(event.thread_id)) return;
-    const label = approval ? (event.client === "claude" ? "Claude" : "Codex") + " is requesting approval" : snooze ? "Snooze ended" : event.status === "failed" ? "Turn failed" : "Turn finished";
+    const label = approval ? (event.client === "claude" ? "Claude" : "Codex") + " is requesting approval" : snooze ? "Reminder" : event.status === "failed" ? "Turn failed" : "Turn finished";
     const notification = new this.env.Notification(`${event.project_name || event.repository_name || "Ribbon Field"} · ${label}`, {
       body: event.title, tag: approval ? "agent-coord-approval-" + event.request_key : (snooze ? "agent-coord-snooze-" : "agent-coord-turn-") + event.id,
     });

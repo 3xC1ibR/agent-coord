@@ -209,7 +209,7 @@ class WebPush:
 
     def _enqueue(self, db, device, event, kind, thread, expires, context=None):
         label = {"completed": "Turn finished", "failed": "Turn failed", "approval": "Approval needed",
-                 "snooze": "Snooze ended",
+                 "snooze": "Reminder",
                  "test": "Phone notifications are working"}[kind]
         context = context or {}
         if kind == "approval":

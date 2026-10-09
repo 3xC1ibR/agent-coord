@@ -10,7 +10,7 @@ const threadViews = (() => {
   function matches(thread, values) {
     const f = filters(values);
     if ((thread.attention === "archived") !== (f.show === "archived")) return false;
-    if (f.show === "later" ? thread.attention !== "later" : f.show !== "archived" && thread.attention !== "now") return false;
+    if (f.show === "later" ? thread.attention !== "later" : f.show !== "archived" && thread.attention !== "now" && !needsYou(thread)) return false;
     for (const field of ["repository", "project"]) {
       if (f[field] && (f[field] === "__none__" ? thread[field + "_id"] != null : thread[field + "_id"] !== f[field])) return false;
     }
@@ -53,7 +53,8 @@ class SavedViews {
     this.doc = document; this.api = api; this.onSwitch = onSwitch; this.onError = onError;
     this.storage = storage; this.preferences = preferences;
     this.key = "agent-coord.views." + (scope || "all");
-    this.all = {id: "all", name: "All work", filters: threadViews.filters(), group_by: this.$("group-by").value || "phase", version: 1};
+    this.baseKey = this.key;
+    this.all = {id: "all", name: "All conversations", filters: threadViews.filters(), group_by: this.$("group-by").value || "phase", version: 1};
     this.items = [this.all]; this.activeId = "all"; this.definition = this.all;
     this.navigation = {}; this.threads = []; this.switchVersion = 0; this.busy = false; this.signature = "";
     this.saves = new Map();
@@ -66,7 +67,7 @@ class SavedViews {
     this.mobile = this.doc.defaultView?.matchMedia("(max-width: 720px)");
     if (!this.mobile) return;
     const host = this.$("mobile-overview");
-    this.doc.querySelector(".workspace-bar").insertBefore(host, this.$("connection"));
+    const hostHome = this.doc.createComment("project view selector"); host.before(hostHome);
     const homes = ["welcome-new", "view-menu", "add-view", "reset-view", "update-view"].map(id => {
       const element = this.$(id), marker = this.doc.createComment("overview control position");
       element.before(marker);
@@ -75,9 +76,11 @@ class SavedViews {
     const sync = () => {
       this.closeMenu();
       if (this.mobile.matches) {
+        this.doc.querySelector(".workspace-bar").insertBefore(host, this.$("connection"));
         host.append(this.$("welcome-new"), this.$("view-menu"));
         this.$("mobile-view-actions").append(this.$("add-view"), this.$("reset-view"), this.$("update-view"));
       } else {
+        hostHome.after(host);
         for (const {element, marker} of homes) marker.after(element);
       }
       this.changed();
@@ -86,6 +89,18 @@ class SavedViews {
     sync();
   }
   $(id) { return this.doc.getElementById(id); }
+  scoped(items) { return items.filter(view => this.cwd === undefined || !view.cwd || view.cwd === this.cwd); }
+  async setProject(cwd) {
+    this.remember();
+    await Promise.all([...this.saves.values()].map(pending => pending.promise));
+    this.cwd = cwd || "";
+    this.key = this.baseKey + ":project:" + this.cwd;
+    this.navigation = {};
+    try { this.navigation = JSON.parse(this.storage?.getItem(this.key) || "{}"); } catch { /* Optional window state. */ }
+    if (!this.navigation || typeof this.navigation !== "object" || Array.isArray(this.navigation)) this.navigation = {};
+    this.activeId = "all"; this.definition = this.all;
+    await this.start();
+  }
   current() { return this.items.find(view => view.id === this.activeId) || this.all; }
   read() {
     return {filters: threadViews.filters({repository: this.$("repository").value, project: this.$("project").value,
@@ -94,6 +109,7 @@ class SavedViews {
   }
   apply(value) {
     const f = threadViews.filters(value.filters);
+    if (this.cwd !== undefined) f.repository = "";
     for (const field of ["repository", "project"]) {
       const control = this.$(field);
       // Preserve a saved ID while choices load, or if its association disappears.
@@ -106,7 +122,7 @@ class SavedViews {
       control.value = f[field];
     }
     this.$("phase-filter").value = f.phase; this.$("view").value = f.show; this.$("search").value = f.search;
-    this.$("group-by").value = ["phase", "repository", "project", "none"].includes(value.group_by) ? value.group_by : "phase";
+    this.$("group-by").value = ["phase", "project", "none"].includes(value.group_by) ? value.group_by : "phase";
   }
   dirty() { return !threadViews.same(this.read(), this.definition); }
   remember() {
@@ -166,7 +182,7 @@ class SavedViews {
     return pending.promise;
   }
   async start() {
-    this.items = [this.all, ...(await this.api("views")).data];
+    this.items = [this.all, ...this.scoped((await this.api("views")).data)];
     let active = "all";
     try { active = this.preferences?.getItem(this.key + ".active") || active; } catch { /* Optional preference. */ }
     this.activeId = this.items.some(view => view.id === active) ? active : "all";
@@ -181,7 +197,7 @@ class SavedViews {
   }
   sync(items) {
     const dirty = this.dirty();
-    this.items = [this.all, ...items];
+    this.items = [this.all, ...this.scoped(items)];
     const exists = this.items.some(view => view.id === this.activeId);
     if (!exists || (!dirty && !this.saves.has(this.activeId) && this.definition.version !== this.current().version)) {
       if (!exists) this.activeId = "all";
@@ -227,9 +243,12 @@ class SavedViews {
     this.$("welcome").scrollTop = 0;
   }
   focusActive() {
-    if (this.mobile?.matches) { this.$("mobile-view").focus({preventScroll: true}); return; }
-    const tab = this.$("view-tabs").querySelector('[aria-selected="true"]');
-    tab?.focus({preventScroll: true}); tab?.scrollIntoView({block: "nearest", inline: "nearest"});
+    if (this.mobile?.matches) this.$("mobile-view").focus({preventScroll: true});
+    else if (!this.$("saved-view-tabs").hidden) {
+      const tab = this.$("saved-view-tabs").querySelector('[aria-selected="true"]');
+      tab?.focus({preventScroll: true});
+      tab?.scrollIntoView({block: "nearest", inline: "nearest"});
+    } else this.$("add-view").focus({preventScroll: true});
   }
   closeMenu() { this.$("view-menu").open = false; this.$("filter-menu").open = false; }
   changed() {
@@ -247,7 +266,11 @@ class SavedViews {
     this.$("filter-count").hidden = !count;
     this.$("view-move-left").disabled = this.items.indexOf(this.current()) <= 1 || this.busy;
     this.$("view-move-right").disabled = this.current() === this.items.at(-1) || this.busy;
-    this.$("back-home").textContent = this.current().name;
+    this.$("back-home").textContent = this.cwd ? this.cwd.split("/").filter(Boolean).pop() || "/" : this.cwd === "" ? "Open project" : this.current().name;
+    this.$("back-home").title = this.cwd || "";
+    this.$("add-view").disabled = this.cwd === "";
+    this.$("mobile-view").disabled = this.cwd === "";
+    this.$("saved-view-tabs").hidden = this.cwd === "" || this.items.length <= 1;
     this.$("overview-title").textContent = this.current().name + " overview";
   }
   render(threads = this.threads) {
@@ -257,6 +280,8 @@ class SavedViews {
     const signature = JSON.stringify([this.items, this.activeId, badges]);
     if (signature === this.signature) return;
     this.signature = signature;
+    const tabs = this.$("saved-view-tabs"), hadFocus = tabs.contains(this.doc.activeElement);
+    tabs.replaceChildren();
     const picker = this.$("mobile-view");
     picker.replaceChildren();
     this.items.forEach((view, index) => {
@@ -266,6 +291,25 @@ class SavedViews {
         (counts.attention ? " · " + counts.attention + " need attention" : "") +
         (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
       picker.append(option);
+      const tab = this.doc.createElement("button"), selected = view.id === this.activeId;
+      tab.type = "button"; tab.className = "saved-view-tab"; tab.dataset.viewId = view.id;
+      tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(selected));
+      tab.setAttribute("aria-controls", "welcome"); tab.tabIndex = selected ? 0 : -1;
+      tab.title = view.name;
+      tab.setAttribute("aria-label", view.name + (counts.attention ? " · " + counts.attention + " need attention" : "") +
+        (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
+      const label = this.doc.createElement("span"); label.className = "view-tab-name"; label.textContent = view.name;
+      tab.append(label);
+      if (counts.attention) {
+        const badge = this.doc.createElement("span"); badge.className = "view-attention";
+        badge.textContent = String(counts.attention); badge.setAttribute("aria-hidden", "true"); tab.append(badge);
+      }
+      if (counts.active || counts.completed) {
+        const dot = this.doc.createElement("span"); dot.className = counts.active ? "view-active" : "view-completed";
+        dot.setAttribute("aria-hidden", "true"); tab.append(dot);
+      }
+      tab.onclick = () => this.activate(view.id).catch(this.onError);
+      tabs.append(tab);
     });
     picker.value = this.activeId;
     const counts = badges[this.items.indexOf(this.current())];
@@ -275,30 +319,8 @@ class SavedViews {
     activity.hidden = !counts.active && !counts.completed;
     activity.className = counts.active ? "view-active" : "view-completed";
     activity.setAttribute("aria-label", counts.active ? "Active work" : "New responses");
-    const tabs = this.$("view-tabs"), focused = tabs.contains(this.doc.activeElement) ? this.doc.activeElement.dataset.viewId : null;
-    tabs.replaceChildren();
-    this.items.forEach((view, index) => {
-      const button = this.doc.createElement("button"), counts = badges[index];
-      button.type = "button"; button.className = "view-tab"; button.id = "saved-view-" + view.id; button.dataset.viewId = view.id;
-      button.setAttribute("role", "tab"); button.setAttribute("aria-controls", "welcome");
-      button.setAttribute("aria-selected", String(view.id === this.activeId)); button.tabIndex = view.id === this.activeId ? 0 : -1;
-      const label = this.doc.createElement("span"); label.className = "view-tab-name"; label.textContent = view.name; button.append(label);
-      button.title = view.name + " · " + counts.attention + " in attention" +
-        (counts.active ? " · Active work" : "") + (counts.completed ? " · New responses" : "");
-      button.setAttribute("aria-label", button.title);
-      if (counts.attention) {
-        const badge = this.doc.createElement("span"); badge.className = "view-attention"; badge.textContent = String(counts.attention);
-        badge.setAttribute("aria-hidden", "true"); button.append(badge);
-      }
-      if (counts.active || counts.completed) {
-        const dot = this.doc.createElement("span"); dot.className = counts.active ? "view-active" : "view-completed";
-        dot.setAttribute("aria-hidden", "true"); button.append(dot);
-      }
-      button.onclick = () => this.activate(view.id).catch(this.onError);
-      tabs.append(button);
-      if (focused === view.id) button.focus({preventScroll: true});
-    });
     this.$("welcome").setAttribute("aria-labelledby", "overview-title");
+    if (hadFocus) this.focusActive();
   }
   async mutation(fn) {
     if (this.busy) return;
@@ -314,16 +336,23 @@ class SavedViews {
     this.closeMenu();
     // Capture the target and definition so polling or navigation cannot retarget a save.
     const view = this.current();
-    this.edit = {mode, id: view.id, version: this.definition.version,
+    this.edit = {mode, id: view.id, version: this.definition.version, cwd: this.cwd,
       value: mode === "duplicate" ? {filters: view.filters, group_by: view.group_by} : this.read()};
     this.$("view-dialog-title").textContent = mode === "rename" ? "Rename view" : mode === "duplicate" ? "Duplicate view" : "Save view";
     this.$("view-dialog-description").textContent = mode === "rename" ? "Give this view a new name."
-      : mode === "duplicate" ? "Create a view with the same saved filters and grouping." : "Save the current filters and grouping as a tab.";
+      : mode === "duplicate" ? "Create a view with the same saved filters and grouping in this project." : "Save these filters and grouping within the current project.";
     this.$("view-name").value = mode === "rename" ? view.name : mode === "duplicate" ? view.name + " copy" : "";
     this.$("view-error").hidden = true;
     this.$("view-dialog").showModal(); this.$("view-name").focus();
   }
   bind() {
+    this.$("saved-view-tabs").onkeydown = event => {
+      if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+      const next = threadViews.shortcut(event, this.items.indexOf(this.current()), this.items.length, true);
+      if (next === null) return;
+      event.preventDefault();
+      return this.activate(this.items[next].id).catch(this.onError);
+    };
     this.$("mobile-view").onchange = () => this.activate(this.$("mobile-view").value).catch(this.onError);
     this.$("add-view").onclick = () => this.openDialog("create").catch(this.onError);
     this.$("reset-view").onclick = () => this.activate(this.activeId, true).catch(this.onError);
@@ -341,7 +370,7 @@ class SavedViews {
       return this.mutation(async () => {
         const result = await this.api("views/" + encodeURIComponent(id) + "/delete",
           {version: (pending?.definition || definition).version});
-        this.items = [this.all, ...result.data];
+        this.items = [this.all, ...this.scoped(result.data)];
         if (this.activeId === id) await this.activate("all");
         this.saves.delete(id); delete this.navigation[id]; this.remember();
       });
@@ -352,7 +381,7 @@ class SavedViews {
         const edit = this.edit, name = this.$("view-name").value.trim();
         if (!name) throw new Error("Enter a view name.");
         const result = await this.api(edit.mode === "rename" ? "views/" + encodeURIComponent(edit.id) : "views",
-          edit.mode === "rename" ? {name, version: edit.version} : {name, ...edit.value});
+          edit.mode === "rename" ? {name, version: edit.version} : {name, ...edit.value, ...(edit.cwd ? {cwd: edit.cwd} : {})});
         if (edit.mode === "rename") {
           this.items = this.items.map(view => view.id === result.id ? result : view);
           if (this.activeId === result.id) this.definition = {...this.definition, name: result.name, version: result.version};
@@ -364,11 +393,6 @@ class SavedViews {
     };
     this.doc.addEventListener("keydown", event => {
       if (this.doc.querySelector("dialog[open]") || this.doc.body.classList.contains("navigation-open")) return;
-      const tabs = this.$("view-tabs");
-      const index = threadViews.shortcut(event, this.items.indexOf(this.current()), this.items.length, tabs.contains(event.target));
-      if (index !== null && !event.target.closest("input, textarea, select, [contenteditable]")) {
-        event.preventDefault(); this.activate(this.items[index].id).catch(this.onError);
-      }
       if (event.key === "Escape" && this.$("view-menu").open) {
         event.preventDefault(); this.closeMenu(); this.$("view-menu-toggle").focus();
       }

@@ -86,7 +86,7 @@ class PhoneNotifications {
     this.button.disabled = this.busy || !this.info.available || (denied && !this.info.enabled);
     this.button.textContent = enabled ? "Phone notifications on" : denied ? "Phone notifications blocked" : "Enable phone notifications";
     this.button.setAttribute("aria-pressed", String(enabled));
-    this.button.title = enabled ? "Turn off background alerts on this device." : "Get background alerts for finished turns, failures, approvals, and snooze reminders.";
+    this.button.title = enabled ? "Turn off background alerts on this device." : "Get background alerts for finished turns, failures, approvals, and reminders.";
     this.testButton.hidden = !enabled;
     this.testButton.disabled = this.busy;
     this.message.textContent = this.info.error || (denied ? "Allow Ribbon Field notifications in iPhone Settings, then reload." : "");

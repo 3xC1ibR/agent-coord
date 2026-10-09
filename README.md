@@ -843,85 +843,68 @@ supports Back. Group/repository links use temporary All work filters and do
 not edit named saved views, change thread placement, or send messages.
 The existing `agent-coord ui [--port ...]` command still starts the browser UI.
 
-**Open folder** selects where new sessions start. First use offers a folder
-picker; ordinary folders, repository subdirectories, and linked worktrees work.
-The sidebar shows the effective folder and recent choices. Opening a folder
-shows a temporary All work overview for its repository, preserving saved views
-and all existing conversation directories and drafts. Ordinary folders use All
-work. Browser folder paths refer to the host running Ribbon Field.
-Each window keeps its own selection; macOS restores folder selections by window
-slot across launches. Explicit `ui --cwd` supplies the initial folder and still
-limits permitted directories. Without a selected or view-implied folder, New
-session asks for one instead of using the server process directory.
+**Open Project** selects a directory and opens it as a project tab. A project
+can be an ordinary folder, a repository, a subdirectory, or a linked worktree.
+When a project is already open, choose **New tab** or **New window**. Each window
+keeps its own open projects and selection; macOS restores them by window slot.
+Closing a project tab keeps conversations and running agents intact. On first
+use, no directory is selected; **New session** asks for a project instead of
+using the server process directory. Explicit `ui --cwd` supplies the initial
+project and still limits permitted execution directories.
 
-The UI calls optional thread initiatives **Groups**. Existing `project` CLI
-commands, API fields, deep links, and saved filter keys remain compatible.
+A conversation belongs to the exact directory it was opened from. Opening
+`~/projects` does not show conversations launched from `~/projects/website`.
+Accessing files in a child directory, changing a shell directory, or using
+`/cd` changes neither project membership nor the project's creation default.
+**New session** and **⌘N** always use the active project directory. Switching
+projects preserves separate new-session drafts, attachments, filters and views.
+Browser directory paths refer to the computer running Ribbon Field.
 
-**Views** are named, saved filters displayed as tabs above the overview.
-Start with **All work**, choose repository, group, phase, Show,
-and search filters, choose a grouping, then click **＋ View** to save them.
-Typing in **Search conversations** searches all registered conversations in the
-app's workspace, including Later and Closed. Choose **Current view** to apply the
-selected placement, repository, group and phase filters; **My messages** restricts
-matches to what you wrote. Click a matching excerpt to open that message. Search
-reports how many conversations have saved history; historical sessions outside
-Ribbon Field are not included. Saved-view attention badges retain their existing
-metadata-filter semantics, independently of the conversation search results.
-Each tab shows a count of threads that need you and a green dot for unread
-completed results. Counts follow that tab's current filters, including pinned
-threads that need you; Later threads do not add to the attention count.
+**Views** are saved filters within a project, selected below its project tabs.
+Start with **All conversations**, choose group, phase, Show and search filters,
+choose a grouping, then click **＋ View**. Views never select a directory.
+Changing a named view's filters saves them automatically; **All conversations**
+keeps temporary filters local to the window and project. **Reset filters** clears
+those temporary filters. Failed saves offer **Retry saving**; resetting reloads
+the saved definition without overwriting another window's changes. The **•••**
+menu renames, duplicates, reorders or deletes views. Deleting a view keeps its
+conversations. New views with the same name can exist in different projects.
+Legacy views without a project remain available within each opened project;
+the active project's exact directory always limits their conversations.
 
-Use **Ctrl + Shift + Left/Right** to cycle views outside text fields. When a
-view tab has focus, Left/Right, Home, and End navigate the tabs. Switching
-opens the scoped overview and sidebar, preserving each view's filters,
-grouping, and scroll position. Conversation drafts
-stay with their threads. New sessions inherit the view’s group and repository.
-A selected folder within that repository keeps its exact subdirectory or linked
-worktree; otherwise the repository root supplies the default. Views without a
-repository use the window’s selected folder. Existing drafts retain their folder
-and group when switching views, and focused conversations do not change defaults.
+**Groups** are optional named collections within a project. Use **New group**
+in the overview, or **Add to group** / **Change group** in a conversation, to
+create or select one. **No group** removes the association. New sessions inherit
+the selected group; All groups and No group start unassigned. Groups never change
+execution directories or file access. Existing unscoped groups remain available
+for compatibility. Internal `project` CLI commands, API fields and deep links
+continue to identify these groups; they retain their existing identifiers.
 
-Changing filters or grouping in a named view saves them automatically, including
-search. **All work** keeps temporary filters local to each window; **Reset filters**
-clears them. If a save fails, **Retry saving** tries again and **Reset filters**
-restores the saved definition without overwriting another window's changes.
-The **•••** menu renames, duplicates, reorders, or deletes a view. Duplicating
-uses its saved definition. Deleting a view leaves all its threads intact.
-Views can overlap; a conversation's status and read state are shared wherever
-it appears. Definitions and tab order are stored in the coordination database
-and shared by browser and native app windows. All work filters and scroll
-positions stay local to each window. A concurrent edit requires resetting
-before overwriting another window's saved changes.
+Typing in **Search conversations** searches the active project's conversations,
+including Later and Closed. **Current view** also applies its placement, group
+and phase filters; **My messages** restricts matches to your messages. Click a
+matching excerpt to open that message. Search reports saved-history coverage.
+The separate repository selector and editable repo association are no longer
+part of the UI. Legacy repository metadata and CLI links remain compatible.
 
-The UI home page keeps durable work threads, with **Needs you** first and a
-separate **Later** section. Group by phase, repository, group, or none. Filter
-by repository and group independently, including **No repository** and
-**No group**; phase and **Needs you** filters can be combined with them.
-Every card includes its assigned repository/group, title, phase, runtime state,
-latest checkpoint, and next action. Closed threads have their own view.
-Selecting a thread shows its original
-request, checkpoint history, related links, and conversation. You can edit a
-checkpoint, add/remove links, rename, park, reopen, or close a thread.
+Use **Ctrl + Shift + Left/Right** to cycle project tabs outside text fields.
+With a project tab focused, Left/Right, Home and End navigate projects. Each
+project tab shows its attention count. Views retain their own filters, grouping
+and scroll position, and their selector indicates attention and ongoing work.
 
-Repository and group are both optional. A repository identifies a Git codebase;
-a group is a named initiative that can span repositories. A thread can have
-either association, both, or neither. Use **New group** in the sidebar or
-overview to create a group without starting a session. Open an existing thread
-and choose **Add to group** (or **Change group**) to select an existing
-group, create a new one, or choose **No group** to detach it. The same dialog
-lets you assign or clear its repository independently. **New session** defaults
-to the group selected in the filter; All groups and No group start unassigned.
-Creating a group does not require a repository. New sessions detect a repository
-from their workspace by default; selecting **No repository** explicitly clears it.
-Changing either association never changes the working directory or file access.
+The overview keeps durable work threads with attention first and Now, Later
+and Closed controls. Group by phase, group or none. Cards show title, optional
+group, phase, runtime state, checkpoint and next action. Selecting a conversation
+shows its history and related links. You can edit checkpoints, add/remove links,
+rename, park, reopen or close a conversation.
 
-These features work without Beads or a Git remote. A normal folder remains a
-workspace. Git worktrees group under their main repository while each session
-retains its actual working directory. Run `agent-coord ui` without `--cwd` to
-see all workspaces together, or use `--cwd /opt/projects` to show workspaces within
-that directory. Workspace scope always follows the actual working directory,
-independently of the thread's organizational associations. Registered terminal conversations are also captured;
-delegated sessions appear under their parent instead of filling the main list.
+These features work without Beads or a Git remote. Git worktrees and nested
+folders are separate projects even when Git identifies one repository. Registered
+terminal conversations are also captured with their exact launch directories;
+delegated sessions appear under their parent. The server's optional `--cwd`
+restriction remains an execution boundary independent of the selected project.
+Existing conversations are assigned their recorded working directory once during
+migration, since older records did not retain a separate launch directory.
 A closed Codex terminal conversation can continue in the browser. Active
 terminal conversations stay with their existing client, and Claude conversations
 continue in Claude Code. Existing terminal sessions begin capturing requests
@@ -949,7 +932,7 @@ Empty stages remain visible. Within each stage, working agents come first, then
 cards sort by most recent activity; ties keep a stable order. The animated green
 border indicates a working agent. Idle cards keep their full detail for six hours,
 then show a shorter summary with fewer secondary details. After 24 hours they show
-the title, group/repository, and age, with unread indicators and controls retained.
+the title, group, and age, with unread indicators and controls retained.
 Older cards use a quieter background without dimming their titles. Running, pinned,
 and required-action cards keep their details; pins do not override activity sorting.
 New activity restores the full card, and hover previews or opening the thread
@@ -967,7 +950,7 @@ previous response only when the new turn starts.
 
 A delivered thread stays quietly visible in Done until you close it or move it.
 Pins order cards within a stage and never hide attention or override its priority.
-Search, saved views, repository/group filters, and optional association grouping
+Search, saved views, group filters, and optional association grouping
 continue to apply. The saved `completed` filter now selects Done.
 
 **Now**, **Later**, and **Closed** select deliberate placement. Use **Move to Later**
@@ -1082,7 +1065,12 @@ thread does not stop its agent or release its write scope.
 
 Checkpoints accept an optional `title` (1–160 characters). Agents choose a
 specific, short name at the first meaningful checkpoint, then omit it from
-later checkpoints unless the thread's purpose changes substantially. The
+later checkpoints, including new assignments. Checkpoints can name only an
+automatic title; established agent and user names stay unchanged. Use
+`thread update --title` or the app's Rename action for a deliberate rename.
+The separate checkpoint `summary` describes current/latest work: lead with a
+concise sentence, then preserve useful progress detail. Update it at the start
+of each assignment and describe completed/failed results as outcomes. The
 title appears on the overview; the original request remains in the detail
 view. Hook context includes the current title and its source (`auto`, `agent`,
 or `user`). User renames take precedence and survive agent checkpoints and
@@ -1091,7 +1079,7 @@ being saved. Existing custom names are preserved during migration, while
 known placeholder names and opening-prompt excerpts remain eligible for agent
 naming.
 
-Groups and repositories can also be managed from the CLI:
+Legacy group and repository associations remain available from the CLI:
 
 ```bash
 agent-coord project create --name 'Anthropic migration'
@@ -1105,6 +1093,9 @@ agent-coord thread list --repository <repository-id> --no-project
 ```
 
 Thread data lives alongside coordination data in the local SQLite database.
+`work_threads.project_cwd` stores immutable directory-project membership; saved
+views and new groups store their project directory in `cwd`. Artifact workspace
+identities and existing association IDs are preserved.
 `thread_organization` stores nullable `repository_id` and `project_id`, referencing
 `work_repositories` and `named_projects`. The additive migration detects actual
 Git repositories for existing threads and leaves named projects unset. Cleared

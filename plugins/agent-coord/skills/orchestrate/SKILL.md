@@ -37,6 +37,11 @@ Reuse app agents with relevant context unless the user requests
 fresh agents or a separate conversation would be more appropriate.
 Use known identities directly; search only when needed.
 
+When creating an app agent, always pass `thread create --mode orchestration`
+to record that it was created to contribute to this coordinated outcome.
+This is creation intent, independent of the request's reply requirement.
+Reuse existing conversations with `send`; reuse does not change their creation mode.
+
 Give each assignment its objective, necessary context, expected
 result, constraints, dependencies, and a clear reporting destination.
 
@@ -64,7 +69,7 @@ source assumptions before relying on retained context.
 Use the coordination request/reply mechanism when you need an
 answer or result. Request a reply and have the recipient answer
 the original message using `agent-coord reply --message-id <id>`.
-Use `thread create --reply-required` for a new agent
+Use `thread create --mode orchestration --reply-required` for a new agent
 and `send --reply-required` for an existing one.
 
 Apply the chosen reporting contract to initial creation assignments

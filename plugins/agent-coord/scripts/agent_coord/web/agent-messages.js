@@ -59,10 +59,11 @@
     article.dataset.messageId = String(message.id);
     article.tabIndex = -1;
     article.setAttribute("aria-label", prefix + peer.title);
-    const heading = el("div", null, "agent-message-heading");
+    const heading = el("span", null, "agent-message-heading");
     const icon = el("span", outgoing ? "↗" : "↙", "agent-message-icon");
     icon.setAttribute("aria-hidden", "true");
-    const label = el("span", prefix, "agent-message-label");
+    icon.title = outgoing ? "Sent" : "Received";
+    const label = el("span", null, "agent-message-label");
     const link = el(peer.available ? "a" : "span", peer.title, "agent-message-peer");
     if (peer.available) {
       link.href = "/?message=" + encodeURIComponent(message.id) + "#" + encodeURIComponent(peer.session_id);
@@ -75,27 +76,32 @@
     label.append(link);
     const time = el("time", new Date(message.created_at * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"}), "agent-message-time");
     time.dateTime = new Date(message.created_at * 1000).toISOString();
-    heading.append(icon, label, time); article.append(heading);
+    heading.append(icon, label, time);
     const text = message.body || "";
-    if (text.length > 240 || text.split("\n").length > 4) {
-      const details = el("details", null, "agent-message-content");
-      details.dataset.id = "agent-message:" + message.id;
-      details.open = expanded;
-      const preview = text.replace(/\s+/g, " ").slice(0, 180) + "…";
-      const summary = el("summary");
-      const updateSummary = () => { summary.textContent = details.open ? "Collapse message" : preview; };
-      updateSummary();
-      details.ontoggle = updateSummary;
-      details.append(summary, el("div", text, "agent-message-body"));
-      article.append(details);
-    } else article.append(el("div", text, "agent-message-body"));
+    const details = el("details", null, "agent-message-content");
+    details.dataset.id = "agent-message:" + message.id;
+    details.open = expanded;
+    const compactText = text.replace(/\s+/g, " ");
+    const preview = compactText.slice(0, 180) + (compactText.length > 180 ? "…" : "");
+    const summary = el("summary");
+    summary.append(heading, el("span", preview, "agent-message-preview"));
+    details.append(summary, el("div", text, "agent-message-body"));
+    article.append(details);
+    article.onclick = event => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      // The summary retains native mouse/keyboard behavior; peer links navigate independently.
+      if (event.target.closest("a, button, input, textarea, select, summary")) return;
+      const selection = document.defaultView?.getSelection?.();
+      if (selection && !selection.isCollapsed) return;
+      details.open = !details.open;
+    };
     const footer = el("div", null, "agent-message-status");
     footer.append(el("span", message.status));
     if (message.reply_required && !message.reply_id && !message.closed_at && !message.suppressed_at) footer.append(el("span", "Reply requested"));
     if (message.classification === "informational") footer.append(el("span", "Informational"));
     if (message.started_turn) footer.append(el("span", "Started this turn", "agent-message-cause"));
     if (message.wake_outcome === "failed" && !message.wake_turn_id && !message.delivered_at && !message.closed_at) footer.append(el("span", "Wake failed · Message retained"));
-    article.append(footer);
+    details.append(footer);
     return article;
   }
   root.AgentMessages = {entries, card, isWakePrompt};

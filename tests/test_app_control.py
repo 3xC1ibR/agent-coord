@@ -167,6 +167,94 @@ class AppControlTests(unittest.TestCase):
                 self.assertFalse(self.store.inbox(creator, mark_delivered=False))
                 self.assertEqual(len(self.sessions.read(thread)["thread"]["turns"]), 4)
 
+    def test_creator_projection_is_independent_of_provider_reply_contract_and_reuse(self):
+        direct = self.sessions.create(dict(cwd=str(self.root), name="User thread"))["session"]["thread_id"]
+        self.assertIsNone(self.sessions.work_thread(direct)["created_by_thread_id"])
+        self.assertIsNone(self.sessions.work_thread(direct)["creation_mode"])
+        for client in ("codex", "claude"):
+            for reply_required in (False, True):
+                with self.subTest(client=client, reply_required=reply_required):
+                    child = self.create(client, reply_required=reply_required)
+                    self.store.send_message(sender_session_id=direct, recipient_session_id=child,
+                                            body="Reuse your research", reply_required=True)
+                    detail = self.sessions.work_thread(child)
+                    self.assertEqual(detail["created_by_thread_id"], "dispatcher")
+                    self.assertEqual(detail["created_by"]["thread_id"], "dispatcher")
+                    self.assertTrue(detail["created_by"]["available"])
+                    self.assertIsNone(detail["creation_mode"])
+        with patch.object(self.sessions, "_app_agent_creators", wraps=self.sessions._app_agent_creators) as projection:
+            listed = self.sessions.list_work_threads()
+        self.assertEqual(projection.call_count, 1)
+        self.assertEqual(sum(t["created_by_thread_id"] == "dispatcher" for t in listed), 4)
+        self.store.threads.update("dispatcher", attention="archived")
+        self.assertEqual(sum(t["created_by_thread_id"] == "dispatcher"
+                             for t in self.sessions.list_work_threads()), 4)
+
+    def test_identified_creation_keeps_origin_when_delivery_is_uncertain(self):
+        request = self.request(mode="orchestration")
+        self.assertTrue(self.control.claim(request["request_id"], "test-runtime"))
+        child = self.sessions.create(dict(cwd=str(self.root), name="Identified agent"))["session"]["thread_id"]
+        self.control.identified(request["request_id"], child)
+        self.control.complete(request["request_id"], error="Delivery interrupted", uncertain=True)
+        self.assertEqual(self.sessions.work_thread(child)["created_by_thread_id"], "dispatcher")
+        self.assertEqual(self.sessions.work_thread(child)["creation_mode"], "orchestration")
+
+    def test_orchestration_mode_survives_cli_retry_restart_and_reuse_without_changing_reply_contract(self):
+        for client in ("codex", "claude"):
+            for reply_required in (False, True):
+                with self.subTest(client=client, reply_required=reply_required):
+                    args = ("create", "--client", client, "--name", "Research", "--mode", "orchestration",
+                            "--reply-required" if reply_required else "--no-reply-required",
+                            "--request-id", f"mode-{client}-{reply_required}", "--wait", "0", "Research this task.")
+                    queued = self.cli(*args)
+                    with patch.object(self.sessions, "create", wraps=self.sessions.create) as create:
+                        self.worker.process_once()
+                    self.assertNotIn("mode", create.call_args.args[0])
+                    receipt = self.cli(*args)
+                    self.assertEqual(receipt["status"], "completed")
+                    self.assertEqual(receipt["result"]["mode"], "orchestration")
+                    self.assertEqual(receipt["result"]["reply_required"], reply_required)
+                    child = receipt["thread_id"]
+                    self.assertEqual(self.sessions.work_thread(child)["creation_mode"], "orchestration")
+                    self.store.send_message(sender_session_id="dispatcher", recipient_session_id=child,
+                                            body="Answer this later request directly", reply_required=False)
+                    reopened, _ = self.runtime()
+                    projected = {t["thread_id"]: t for t in reopened.list_work_threads()}[child]
+                    self.assertEqual(projected["creation_mode"], "orchestration")
+                    self.assertEqual(projected["created_by_thread_id"], "dispatcher")
+                    control = AppControl(CoordinationStore(self.store.database_path))
+                    with self.store._connection() as db:
+                        payload = json.loads(db.execute("SELECT payload_json FROM app_control_requests WHERE request_id = ?",
+                                                        (queued["request_id"],)).fetchone()[0])
+                    payload.pop("mode")
+                    with self.assertRaisesRegex(CoordinationError, "different app request"):
+                        control.request("create", "dispatcher", payload, request_id=queued["request_id"])
+                    self.assertEqual(len(self.store.inbox(child, mark_delivered=False)), 2)
+
+    def test_creation_mode_validation_and_omission_preserve_legacy_retries(self):
+        for value in ("", "dispatch", "grouped", 0, False, [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(CoordinationError, "Creation mode"):
+                self.request(mode=value)
+        self.assertEqual(self.control.pending(), [])
+        self.assertFalse(self.sessions.rpc.calls)
+        payload = dict(cwd=str(self.root), name="Agent", prompt="Question", client="codex")
+        original = self.control.request("create", "dispatcher", payload, request_id="legacy-mode")
+        self.assertEqual(self.control.request("create", "dispatcher", {**payload, "mode": None},
+                                             request_id="legacy-mode"), original)
+        self.worker.process_once()
+        receipt = self.control.status(original["request_id"])
+        self.assertIsNone(receipt["result"]["mode"])
+        self.assertIsNone(self.sessions.work_thread(receipt["thread_id"])["creation_mode"])
+
+    def test_creator_outside_workspace_remains_labelled_but_unavailable(self):
+        other = self.root / "other"
+        other.mkdir()
+        child = self.create(cwd=str(other))
+        restricted, _ = self.runtime(cwd=other)
+        detail = restricted.work_thread(child)
+        self.assertEqual(detail["created_by_thread_id"], "dispatcher")
+        self.assertFalse(detail["created_by"]["available"])
+
     def test_cli_creation_is_queued_then_confirmed_with_identity_settings_and_link(self):
         receipt = self.cli("create", "--name", "Research specialist", "--yolo", "--model", "available-model",
                            "--effort", "high", "--request-id", "research-1", "--wait", "0", "-", stdin="Question\nwith literal $HOME and `text`.")

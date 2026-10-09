@@ -121,6 +121,7 @@ def _ensure_registered(
         session_id=session_id,
         client=_client(),
         cwd=find_repository_root(str(cwd)),
+        project_cwd=str(cwd),
     )
 
 

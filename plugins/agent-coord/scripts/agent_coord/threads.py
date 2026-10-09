@@ -104,8 +104,19 @@ class ThreadStore:
             # Serialize upgrades across independently running terminal hooks.
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(work_threads)")}
+            if "project_cwd" not in columns:
+                # Preserve the exact launch directory independently of mutable
+                # execution cwd and the legacy repository-based artifact root.
+                db.execute("ALTER TABLE work_threads ADD COLUMN project_cwd TEXT")
+                db.execute("""UPDATE work_threads SET project_cwd =
+                              (SELECT cwd FROM sessions WHERE session_id = thread_id)""")
             if "snoozed_until" not in columns:
                 db.execute("ALTER TABLE work_threads ADD COLUMN snoozed_until REAL")
+            if "deferred_at" not in columns:
+                db.execute("ALTER TABLE work_threads ADD COLUMN deferred_at REAL")
+                # Existing Later cards remain set aside; only future activity
+                # should surface when upgrading to the new attention behavior.
+                db.execute("UPDATE work_threads SET deferred_at = ? WHERE attention = 'later'", (self.store.clock(),))
             for field in ("forked_from_thread_id", "forked_from_turn_id"):
                 if field not in columns:
                     db.execute(f"ALTER TABLE work_threads ADD COLUMN {field} TEXT")
@@ -139,8 +150,9 @@ class ThreadStore:
         self.organization = OrganizationStore(store)
         self.attention = AttentionStore(store)
 
-    def ensure(self, session_id: str) -> dict:
+    def ensure(self, session_id: str, *, project_cwd: str | None = None) -> dict:
         session = self.store.get_session(session_id)
+        launch_directory = str(Path(project_cwd or session["cwd"]).expanduser().resolve())
         with self.store._connection() as db:
             existing = db.execute("SELECT project_id FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
             if not existing:
@@ -151,8 +163,11 @@ class ThreadStore:
                 now = self.store.clock()
                 title = session["name"] or "New thread"
                 source = "auto" if title in {"New thread", "New session"} else "user"
-                db.execute("INSERT OR IGNORE INTO work_threads (thread_id, project_id, title, title_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                           (session_id, project_id, title, source, now, now))
+                db.execute("INSERT OR IGNORE INTO work_threads (thread_id, project_id, title, title_source, created_at, updated_at, project_cwd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (session_id, project_id, title, source, now, now, launch_directory))
+            # Older installed clients can still create rows after migration.
+            db.execute("UPDATE work_threads SET project_cwd = ? WHERE thread_id = ? AND project_cwd IS NULL",
+                       (launch_directory, session_id))
             self.organization.ensure_thread(db, session_id, session["cwd"])
             if session["bead_id"]:
                 self._save_link(db, session_id, ("bead", session["bead_id"], session["bead_id"], existing["project_id"] if existing else project_id))
@@ -160,6 +175,7 @@ class ThreadStore:
 
     def _read(self, db, row, *, history=False):
         result = dict(row)
+        result["project_cwd"] = result["project_cwd"] or result["cwd"]
         deadline = row["snoozed_until"]
         result["snoozed"] = bool(deadline is not None and row["attention"] == "later" and deadline > self.store.clock())
         result["snooze_due"] = bool(deadline is not None and row["attention"] == "now" and deadline <= self.store.clock())
@@ -228,6 +244,8 @@ class ThreadStore:
         """Copy context and lineage, leaving all execution and receipt state fresh."""
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE work_threads SET project_cwd = ? WHERE thread_id = ?",
+                       (source["project_cwd"], thread_id))
             db.execute("""UPDATE work_threads SET forked_from_thread_id = ?, forked_from_turn_id = ?,
                           original_request = ?, title_source = 'auto' WHERE thread_id = ?""",
                        (source["thread_id"], turn_id, source["original_request"], thread_id))
@@ -330,7 +348,8 @@ class ThreadStore:
             if title is not None:
                 db.execute("UPDATE work_threads SET title = ?, title_source = 'user' WHERE thread_id = ?", (title, thread_id))
             if attention is not None:
-                db.execute("UPDATE work_threads SET attention = ?, snoozed_until = NULL WHERE thread_id = ?", (attention, thread_id))
+                db.execute("UPDATE work_threads SET attention = ?, snoozed_until = NULL, deferred_at = ? WHERE thread_id = ?",
+                           (attention, self.store.clock() if attention == "later" else None, thread_id))
             if pinned is not UNSET:
                 db.execute("UPDATE work_threads SET pinned = ? WHERE thread_id = ?", (int(pinned), thread_id))
         return self.get(thread_id, history=True)
@@ -472,7 +491,7 @@ class ThreadStore:
                            (session_id, *content, session_id, turn_id, author, now, now))
             for link in normalized:
                 self._save_link(db, session_id, link)
-            if title is not None and (author == "user" or current["title_source"] != "user"):
+            if title is not None and (author == "user" or current["title_source"] == "auto"):
                 source = "user" if author == "user" else "agent"
                 db.execute("UPDATE work_threads SET title = ?, title_source = ? WHERE thread_id = ?", (title, source, session_id))
             db.execute("UPDATE work_threads SET updated_at = ? WHERE thread_id = ?", (now, session_id))
@@ -536,9 +555,9 @@ class ThreadStore:
             'summary (1–2 factual sentences), next_action (empty if none), next_actor (user, agent, external, nobody), '
             'optional title (a concise 3–6 word thread name), and optional links [{"kind":"document","label":"Design","target":"docs/design.md"}]. '
             "Set title at the first meaningful checkpoint when title_source is auto. "
-            "Keep the name stable: omit title on later checkpoints unless the thread purpose changes substantially. "
+            "Keep established conversation names stable across assignments: omit title on later checkpoints. Use thread update --title only for a deliberate rename. "
             "User-chosen titles (title_source user) take precedence and cannot be overwritten by agent checkpoints. "
-            "Distinguish proposals, implemented changes, validation, and deployment. "
+            "Use summary for the changing current/latest work, keeping its first sentence concise and descriptive. Update it when a new assignment starts; describe completed or failed results as outcomes, never as ongoing work. Preserve useful progress detail in the following sentence. Distinguish proposals, implemented changes, validation, and deployment. "
             'Set next_actor to user only when progress or completion requires a specific user answer, approval, decision, or action; describe it in next_action. '
             "Keep optional advice, invitations to continue, and nonblocking reminders in summary. "
             'Use phase for the underlying activity, not whether you finished replying: an answered investigation stays investigation, and a completed plan stays planning. '
@@ -554,7 +573,7 @@ class ThreadStore:
         if session_id:
             thread = self.ensure(session_id)
             text += "\nThread context (saved data): " + json.dumps({
-                "repository": thread["repository_name"], "project": thread["project_name"],
+                "project": thread["project_cwd"], "group": thread["project_name"],
                 "workspace": thread["cwd"], "attention": thread["attention"],
                 "title": thread["title"], "title_source": thread["title_source"],
                 "checkpoint": thread["checkpoint"], "links": thread["links"],

@@ -11,7 +11,7 @@ const threadGrouping = (() => {
     blocked: {rank: 0, label: "Blocked"}, review: {rank: 1, label: "Review requested"},
     update: {rank: 2, label: "Update"}, findings: {rank: 3, label: "Findings ready"},
     reply: {rank: 3, label: "Reply"}, done: {rank: 4, label: "✓ Done"},
-    snooze: {rank: 2, label: "Snooze ended"},
+    snooze: {rank: 2, label: "Reminder"},
   };
   function phase(thread) {
     const value = thread.work_phase || thread.checkpoint?.phase;
@@ -23,22 +23,22 @@ const threadGrouping = (() => {
     return {key, ...(reasons[key] || reasons.reply)};
   }
   function awaitsUser(thread) {
-    return thread.attention === "now" && (typeof thread.needs_attention === "boolean"
-      ? thread.needs_attention : ["input", "action", "reply", "failed", "update"].includes(thread.response_state));
+    return thread.attention !== "archived" && !thread.snoozed && (typeof thread.needs_attention === "boolean"
+      ? thread.needs_attention : thread.attention === "now" && ["input", "action", "reply", "failed", "update"].includes(thread.response_state));
   }
   const stable = (a, b) => (a.created_at || 0) - (b.created_at || 0) || a.thread_id.localeCompare(b.thread_id);
   const activityAt = thread => thread.updated_at || thread.created_at || 0;
   const stageOrder = (a, b) => Number(status(b).key === "running") - Number(status(a).key === "running") ||
     activityAt(b) - activityAt(a) || stable(a, b);
   const attentionOrder = (a, b) => reason(a).rank - reason(b).rank ||
-    (a.attention_since || a.created_at || 0) - (b.attention_since || b.created_at || 0) || stable(a, b);
+    (b.attention_since || b.created_at || 0) - (a.attention_since || a.created_at || 0) || stable(a, b);
 
   function status(thread) {
     if (thread.attention === "archived") return {key: "idle", label: "Closed"};
     if (thread.response_state === "working" || thread.status === "running" && thread.response_state !== "input")
       return {key: "running", label: "Working"};
     if (thread.snooze_due && !["input", "action", "failed"].includes(thread.response_state))
-      return {key: "idle", label: "Snooze ended"};
+      return {key: "idle", label: "Reminder"};
     if (["input", "action", "reply", "update", "failed"].includes(thread.response_state))
       return {key: thread.response_state === "failed" ? "failed" : ["blocked", "review"].includes(reason(thread).key) ? "waiting" : "idle", label: reason(thread).label};
     return {key: "idle", label: thread.response_state === "interrupted" ? "Stopped" : phaseLabel(thread)};
@@ -55,7 +55,7 @@ const threadGrouping = (() => {
   }
   function groupThreads(threads) {
     const now = threads.filter(thread => thread.attention === "now");
-    const priority = now.filter(awaitsUser).sort(attentionOrder);
+    const priority = threads.filter(awaitsUser).sort(attentionOrder);
     return {
       priority,
       phases: phases.map(([key, label]) => ({key, label,

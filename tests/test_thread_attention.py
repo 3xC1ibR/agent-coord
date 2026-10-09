@@ -143,6 +143,58 @@ class ThreadAttentionTests(unittest.TestCase):
         self.sessions.update_work_thread("terminal", {"attention": "archived"})
         self.assertFalse(self.thread()["needs_attention"])
 
+    def test_later_hides_existing_response_but_surfaces_new_result_without_moving(self):
+        self.start()
+        self.checkpoint()
+        self.finish()
+        parked = self.sessions.update_work_thread("terminal", {"attention": "later"})
+        self.assertFalse(parked["needs_attention"])
+        self.assertTrue(parked["unhandled_response"])
+        self.start("next")
+        self.finish()
+        result = self.thread()
+        self.assertEqual(result["attention"], "later")
+        self.assertTrue(result["needs_attention"])
+        dismissed = self.sessions.update_work_thread("terminal", {"handled": True,
+            "handled_checkpoint_id": result["checkpoint"]["id"],
+            "handled_completion_id": result["turn_completion"]["id"]})
+        self.assertFalse(dismissed["needs_attention"])
+        self.assertEqual(dismissed["attention"], "later")
+
+    def test_timed_later_keeps_new_result_quiet_and_redeferral_hides_current_result(self):
+        self.start()
+        self.finish()
+        self.sessions.update_work_thread("terminal", {"snoozed_until": self.now + 100})
+        self.start("background")
+        self.finish()
+        self.assertFalse(self.thread()["needs_attention"])
+        self.assertTrue(self.thread()["snoozed"])
+        self.sessions.update_work_thread("terminal", {"attention": "later"})
+        self.assertFalse(self.thread()["needs_attention"])
+        self.assertFalse(self.thread()["snoozed"])
+
+    def test_new_question_in_later_surfaces_without_changing_placement(self):
+        self.checkpoint("planning", "user")
+        self.sessions.update_work_thread("terminal", {"attention": "later"})
+        self.now += 1
+        self.checkpoint("validation", "user")
+        self.assertTrue(self.thread()["needs_attention"])
+        self.assertEqual(self.thread()["attention"], "later")
+
+    def test_unread_finished_result_can_be_dismissed_without_opening(self):
+        self.start()
+        self.checkpoint("implementation", "agent")
+        self.checkpoint("finished", "nobody")
+        self.finish()
+        result = self.thread()
+        self.assertEqual(result["response_state"], "update")
+        self.assertTrue(result["can_handle_response"])
+        dismissed = self.sessions.update_work_thread("terminal", {"handled": True,
+            "handled_checkpoint_id": result["checkpoint"]["id"],
+            "handled_completion_id": result["turn_completion"]["id"]})
+        self.assertFalse(dismissed["needs_attention"])
+        self.assertEqual(dismissed["attention"], "now")
+
     def test_browser_approval_failure_and_interrupt_are_not_task_completion(self):
         thread_id = self.sessions.create({"name": "Browser task"})["session"]["thread_id"]
         self.sessions.send(thread_id, {"message": "Start."})
@@ -229,4 +281,6 @@ const fs = require('node:fs'); const groups = g.groupThreads(JSON.parse(fs.readF
 console.log(JSON.stringify({reply: groups.priority.map(t=>t.thread_id), stages: groups.phases.flatMap(g=>g.threads).map(t=>t.thread_id)}));"""
         result = subprocess.run([shutil.which("node"), "-e", script], input=json.dumps([reply, completed, handled]),
                                 cwd=Path(__file__).resolve().parents[1], text=True, capture_output=True, timeout=10, check=True)
-        self.assertEqual(json.loads(result.stdout), {"reply": ["terminal", "completed"], "stages": ["handled"]})
+        groups = json.loads(result.stdout)
+        self.assertCountEqual(groups["reply"], ["terminal", "completed"])
+        self.assertEqual(groups["stages"], ["handled"])

@@ -190,6 +190,8 @@ class BrowserSessions:
         self.histories: dict[str, dict] = {}
         self.dirty_histories: set[str] = set()
         self.history_lock = threading.Lock()
+        self.desktop_project_windows: dict[str, dict] = {}
+        self.desktop_project_revision = 0
         self.history_rpc = None
         self.rpc_factory = rpc_factory
         self.closed = False
@@ -561,6 +563,42 @@ class BrowserSessions:
             )]
         return workspace_choices(self.cwd or os.getcwd(), known, workspace=self.cwd)
 
+    def desktop_projects(self) -> dict:
+        """Return the live union of project tabs reported by native windows."""
+        with self.lock:
+            projects: list[str] = []
+            active = ""
+            for window in sorted(self.desktop_project_windows.values(), key=lambda item: item["revision"]):
+                for path in window["projects"]:
+                    if path not in projects:
+                        projects.append(path)
+                if window["active"] in window["projects"]:
+                    active = window["active"]
+            if active not in projects:
+                active = projects[0] if projects else ""
+            return {"projects": projects, "active": active}
+
+    def update_desktop_projects(self, window_id: str, projects: list[str], active: str) -> dict:
+        """Replace one native window's project tabs and return their live union."""
+        if not isinstance(window_id, str) or not 0 < len(window_id) <= 200:
+            raise CoordinationError("Choose a valid desktop window.")
+        if not isinstance(projects, list) or len(projects) > 128 or any(
+            not isinstance(path, str) or not path for path in projects
+        ):
+            raise CoordinationError("Desktop projects must be a list of directory paths.")
+        projects = list(dict.fromkeys(projects))
+        if not isinstance(active, str) or (active and active not in projects):
+            raise CoordinationError("The active desktop project must be one of its open tabs.")
+        with self.lock:
+            self.desktop_project_revision += 1
+            if projects:
+                self.desktop_project_windows[window_id] = {
+                    "projects": projects, "active": active, "revision": self.desktop_project_revision,
+                }
+            else:
+                self.desktop_project_windows.pop(window_id, None)
+            return self.desktop_projects()
+
     def list_sessions(self, *, archived=False) -> list[dict]:
         with self.store._connection() as connection:
             rows = connection.execute(
@@ -581,10 +619,43 @@ class BrowserSessions:
             return [{k: v for k, v in request.items() if k not in {"id", "notification_claimed"}}
                     for request in self.requests.values() if request["params"].get("threadId") == thread_id]
 
-    def work_thread(self, thread_id: str, *, history=True) -> dict:
+    def _app_agent_creators(self) -> dict:
+        # Creation provenance is independent of the assignment's reply contract.
+        # An identified creation remains valid even if later delivery is uncertain.
+        with self.store._connection() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
+                return {}
+            rows = db.execute("""SELECT r.thread_id, r.sender_session_id, r.payload_json,
+                COALESCE(t.title, s.name, r.sender_session_id) AS title, s.cwd
+                FROM app_control_requests r
+                LEFT JOIN sessions s ON s.session_id = r.sender_session_id
+                LEFT JOIN work_threads t ON t.thread_id = r.sender_session_id
+                WHERE r.operation = 'create' AND r.thread_id IS NOT NULL
+                AND r.status IN ('running', 'completed', 'uncertain')
+                ORDER BY r.created_at, r.request_id""").fetchall()
+        creators = {}
+        for row in rows:
+            if row["thread_id"] != row["sender_session_id"]:
+                try:
+                    payload = json.loads(row["payload_json"])
+                except (TypeError, ValueError):
+                    payload = {}
+                mode = payload.get("mode") if isinstance(payload, dict) else None
+                creators.setdefault(row["thread_id"], {
+                    "thread_id": row["sender_session_id"], "title": row["title"],
+                    "available": bool(row["cwd"] and matches_workspace(row["cwd"], self.cwd)),
+                    "mode": "orchestration" if mode == "orchestration" else None,
+                })
+        return creators
+
+    def work_thread(self, thread_id: str, *, history=True, _creators=None) -> dict:
         thread = self.store.threads.get(thread_id, history=history)
         if not matches_workspace(thread["cwd"], self.cwd):
             raise CoordinationError("Work thread not found in this workspace.")
+        creators = self._app_agent_creators() if _creators is None else _creators
+        thread["created_by"] = creators.get(thread_id)
+        thread["created_by_thread_id"] = thread["created_by"]["thread_id"] if thread["created_by"] else None
+        thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
         with self.store._connection() as db:
             thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
         session = self.store.get_session(thread_id)
@@ -613,7 +684,15 @@ class BrowserSessions:
             else "action" if thread["unhandled_response"] and handoff in {"blocked", "review"}
             else "reply" if thread["unhandled_response"]
             else "available" if completion or (checkpoint and not thread["turn_key"]) else None)
-        thread["needs_attention"] = (thread["attention"] == "now" and
+        # Later preserves placement, but a new result or question can still
+        # need attention. A timed deferral suppresses both until its reminder.
+        deferred_at = thread.get("deferred_at")
+        new_later_activity = (thread["attention"] == "later" and not thread["snoozed"]
+                              and deferred_at is not None and (
+                                  (completion and completion["completed_at"] > deferred_at)
+                                  or (checkpoint and checkpoint["created_at"] > deferred_at)
+                                  or any(r.get("received_at", 0) > deferred_at for r in waiting.values())))
+        thread["needs_attention"] = ((thread["attention"] == "now" or new_later_activity) and
                                      (thread["snooze_due"] or thread["response_state"] in {"input", "action", "reply", "failed", "update"}))
         input_reason = handoff if handoff in {"blocked", "review"} else (
             "review" if thread["work_phase"] in {"investigation", "planning", "validation"} else "blocked")
@@ -642,7 +721,7 @@ class BrowserSessions:
                 thread["attention_since"] = checkpoint["created_at"]
                 thread["attention_key"] = f"checkpoint:{checkpoint['id']}"
         thread["can_handle_response"] = (thread["attention"] != "archived" and thread["unhandled_response"]
-                                         and thread["response_state"] in {"action", "reply", "failed"}
+                                         and thread["response_state"] in {"action", "reply", "failed", "update"}
                                          and handoff != "blocked")
         thread["can_resume"] = bool(not thread["browser_session"] and thread["client"] == "codex" and session["presence"] == "offline")
         thread["can_fork"] = bool(thread["client"] == "codex" and thread["attention"] != "archived"
@@ -661,7 +740,8 @@ class BrowserSessions:
     def list_work_threads(self, *, archived=False) -> list[dict]:
         with self.store._connection() as db:
             children = {row[0] for row in db.execute("SELECT child_session_id FROM delegations d JOIN work_threads p ON p.thread_id = d.parent_session_id WHERE child_session_id IS NOT NULL")}
-        return [self.work_thread(t["thread_id"], history=False)
+        creators = self._app_agent_creators()
+        return [self.work_thread(t["thread_id"], history=False, _creators=creators)
                 for t in self.store.threads.list(archived=archived)
                 if t["thread_id"] not in children and matches_workspace(t["cwd"], self.cwd)]
 

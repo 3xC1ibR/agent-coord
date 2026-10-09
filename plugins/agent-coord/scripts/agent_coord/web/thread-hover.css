@@ -1,13 +1,12 @@
 .thread-hover {
   position: fixed; z-index: 80; width: min(420px, calc(100vw - 24px));
   max-height: min(620px, calc(100dvh - 24px)); overflow-y: auto;
-  box-sizing: border-box; padding: 22px; border: 1px solid #c2cbbd;
-  border-radius: 10px; background: #fffef9; color: var(--ink);
-  box-shadow: 0 12px 42px #24392c26, 0 2px 8px #24392c12;
+  box-sizing: border-box; padding: 22px; border: 1px solid var(--line-strong);
+  border-radius: 10px; background: var(--surface); color: var(--ink);
+  box-shadow: 0 12px 42px var(--shadow);
   font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow-wrap: anywhere;
 }
 .thread-hover[hidden] { display: none; }
-.thread-hover .hover-status { color: var(--accent); font: 10px/1.5 var(--mono); text-transform: uppercase; letter-spacing: .045em; }
 .thread-hover .hover-title { margin: 8px 0 10px; font-size: 19px; line-height: 1.35; font-weight: 550; }
 .thread-hover > h4, .thread-hover .hover-message > h4 { margin: 16px 0 5px; font: 10px/1.5 var(--mono); text-transform: uppercase; letter-spacing: .045em; color: var(--muted); }
 .thread-hover > p, .thread-hover .hover-message > p { margin: 0; }

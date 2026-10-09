@@ -356,7 +356,7 @@ def _handler(
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
                 return
-            if parsed.path in {"/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
+            if parsed.path in {"/thread-actions.js", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -436,11 +436,13 @@ def _handler(
 
         def _browser_get(self, parsed) -> None:
             route = parsed.path.removeprefix("/api/browser/")
-            query = parse_qs(parsed.query)
+            query = parse_qs(parsed.query, keep_blank_values=True)
             if route == "config":
                 self._json(HTTPStatus.OK, {"token": csrf_token, "cwd": browser_sessions.cwd or os.getcwd(), "workspaceRoot": browser_sessions.cwd,
                                           "remote": self._remote_request(),
                                           "completionCursor": store.threads.completion_cursor()})
+            elif route == "desktop-projects":
+                self._json(HTTPStatus.OK, browser_sessions.desktop_projects())
             elif route == "workspaces":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
             elif route == "schedules":
@@ -478,6 +480,10 @@ def _handler(
                     phase = query.get("phase", [""])[0]
                     if phase:
                         threads = [t for t in threads if (t["work_phase"] or "new") == phase]
+                if "project_cwd" in query:
+                    directory = query["project_cwd"][0]
+                    directory = str(Path(directory).expanduser().resolve()) if directory else ""
+                    threads = [t for t in threads if t["project_cwd"] == directory]
                 self._json(HTTPStatus.OK, search_threads(store, query.get("q", [""])[0],
                     limit=20, cursor=query.get("cursor", [None])[0],
                     my_messages=query.get("my_messages") == ["true"],
@@ -580,6 +586,21 @@ def _handler(
                 if len(route) == 4 and route[:3] == ["api", "browser", "files"]:
                     self._json(HTTPStatus.OK, workspace_files(route[3], body, browser_sessions.cwd))
                     return
+                if route == ["api", "browser", "desktop-projects"]:
+                    if not self._local_request():
+                        self._json(HTTPStatus.FORBIDDEN, {"error": "Only the Mac app can publish open projects."})
+                        return
+                    if set(body) != {"windowId", "projects", "active"}:
+                        raise CoordinationError("Desktop project sync requires a window, project paths, and active project.")
+                    projects = body["projects"]
+                    if (not isinstance(body["windowId"], str) or not isinstance(body["active"], str)
+                            or not isinstance(projects, list) or any(not isinstance(path, str) for path in projects)):
+                        raise CoordinationError("Desktop projects must be a list of directory paths.")
+                    resolved = [resolve_workspace(path, workspace=browser_sessions.cwd) for path in projects]
+                    active = resolve_workspace(body["active"], workspace=browser_sessions.cwd) if body["active"] else ""
+                    self._json(HTTPStatus.OK, browser_sessions.update_desktop_projects(body["windowId"], resolved, active))
+                    return
+                    return
                 if route[:3] == ["api", "browser", "push"] and web_push is not None:
                     device = remote_access.device_id(self.headers.get("Cookie", "")) if self._remote_request() else None
                     if device is None:
@@ -624,6 +645,8 @@ def _handler(
                     return
                 if route[:3] == ["api", "browser", "views"]:
                     if len(route) == 3:
+                        if body.get("cwd") is not None:
+                            body["cwd"] = resolve_workspace(body["cwd"], workspace=browser_sessions.cwd)
                         self._json(HTTPStatus.CREATED, views.create(body))
                     elif len(route) == 4:
                         self._json(HTTPStatus.OK, views.update(unquote(route[3]), body))
@@ -645,9 +668,10 @@ def _handler(
                     self._json(HTTPStatus.OK, {"cwd": directory, "repository": repository})
                     return
                 if route == ["api", "browser", "projects"]:
-                    if set(body) != {"name"}:
-                        raise CoordinationError("Group creation accepts a name.")
-                    self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.create_project(body["name"]))
+                    if set(body) - {"name", "cwd"} or "name" not in body:
+                        raise CoordinationError("Group creation accepts a name and project directory.")
+                    cwd = resolve_workspace(body["cwd"], workspace=browser_sessions.cwd) if body.get("cwd") is not None else None
+                    self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.create_project(body["name"], cwd))
                     return
                 if route == ["api", "browser", "repositories"]:
                     if set(body) != {"path"}:
