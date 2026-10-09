@@ -10,3 +10,7 @@
 @media (max-width: 700px) { .thread-mentions > button { min-height: 44px; } .thread-reference { min-height: 36px; } }
 
 .message-thread-references { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 11px; margin-top: 8px; white-space: normal; }
+
+.file-mention-preview { max-width: min(900px, 90vw); max-height: 85dvh; overflow: auto; }
+.file-mention-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.thread-mentions span, .file-mention-preview h2 { overflow-wrap: anywhere; }

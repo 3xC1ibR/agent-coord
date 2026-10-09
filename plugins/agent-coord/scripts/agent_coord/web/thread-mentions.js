@@ -5,7 +5,7 @@
     validate() { this.refs = this.refs.filter(r => Number.isInteger(r.start) && Number.isInteger(r.end) && r.start >= 0 && r.end > r.start && this.text.slice(r.start, r.end) === r.text); }
     edit(start, end, replacement) {
       const delta = replacement.length - (end - start);
-      this.refs = this.refs.filter(r => !(start === end && start === r.end && /^[\p{L}\p{N}_@]/u.test(replacement)) && !(start < r.end && end > r.start) && !(start === end && start > r.start && start < r.end))
+      this.refs = this.refs.filter(r => !(start === end && start === r.end && (r.kind === "file" ? /^[\p{L}\p{N}_@./-]/u : /^[\p{L}\p{N}_@]/u).test(replacement)) && !(start < r.end && end > r.start) && !(start === end && start > r.start && start < r.end))
         .map(r => r.start >= end ? {...r, start:r.start + delta, end:r.end + delta} : r);
       this.text = this.text.slice(0, start) + replacement + this.text.slice(end); this.validate();
     }
@@ -25,17 +25,17 @@
       this.edit(prefix, old.length-suffix, text.slice(prefix,text.length-suffix));
     }
     select(start, end, thread) {
-      const text = "@" + (thread.title || "Untitled thread").replace(/\s+/g, " ").trim();
+      const text = "@" + (thread.kind === "file" ? thread.path : (thread.title || "Untitled thread")).replace(/\s+/g, " ").trim();
       this.edit(start, end, text + " ");
-      this.refs.push({start,end:start+text.length,text,session_id:thread.thread_id});
+      this.refs.push(thread.kind === "file" ? {start,end:start+text.length,text,kind:"file",root:thread.root,path:thread.path} : {start,end:start+text.length,text,session_id:thread.thread_id});
       this.refs.sort((a,b)=>a.start-b.start);
       return start+text.length+1;
     }
     snapshot() { this.validate(); return this.refs.map(r=>({...r})); }
   }
   class ThreadMentions {
-    constructor({input, menu, references, getThread, loadThreads, canComplete = () => true, onChange = () => {}}) {
-      Object.assign(this,{input,menu,references,getThread,loadThreads,canComplete,onChange});
+    constructor({input, menu, references, getThread, loadThreads, loadFiles = null, getWorkspace = () => "", canComplete = () => true, onChange = () => {}}) {
+      Object.assign(this,{input,menu,references,getThread,loadThreads,loadFiles,getWorkspace,canComplete,onChange});
       this.drafts=new Map(); this.matches=[]; this.index=0;
       input.addEventListener("beforeinput", e=>{this.hint={start:input.selectionStart,end:input.selectionEnd,forward:e.inputType?.includes("Forward")};});
       input.addEventListener("input", e=>{
@@ -82,7 +82,7 @@
       this.references.replaceChildren();
       for(const ref of draft.refs) {
         const chip=this.input.ownerDocument.createElement('button');chip.type='button';chip.className='thread-reference';
-        chip.textContent=ref.text+' · '+ref.session_id.slice(-8)+' ×';chip.setAttribute('aria-label','Remove reference '+ref.text+' '+ref.session_id);
+        chip.textContent=ref.text+' · '+(ref.kind === 'file' ? 'File' : ref.session_id.slice(-8))+' ×';chip.setAttribute('aria-label','Remove reference '+ref.text+' '+(ref.path || ref.session_id));
         chip.onclick=()=>{draft.edit(ref.start,ref.end,'');this.input.value=draft.text;this.input.focus();this.render();this.onChange();};
         this.references.append(chip);
       }
@@ -95,7 +95,16 @@
         }
         this.close();return;
       }
-      this.matches=this.catalog.filter(t=>(t.title||'Untitled thread').toLowerCase().includes(query.prefix)).slice(0,12);
+      const fileKey=JSON.stringify([this.getWorkspace(),query.prefix]);
+      if(this.loadFiles && this.fileKey!==fileKey) {
+        this.fileKey=fileKey;this.files=[];clearTimeout(this.fileTimer);
+        this.fileTimer=setTimeout(()=>{
+          Promise.resolve().then(()=>this.loadFiles(query.prefix)).then(files=>{
+            if(this.fileKey===fileKey){this.files=files;this.render();}
+          },()=>{if(this.fileKey===fileKey){this.files=[];this.render();}});
+        },120);
+      }
+      this.matches=this.catalog.filter(t=>(t.title||'Untitled thread').toLowerCase().includes(query.prefix)).slice(0,this.files?.length ? 6 : 12).concat((this.files||[]).slice(0,6));
       if(!this.matches.length){this.close();return;}
       if(this.key!==key)this.index=0;this.key=key;this.index=Math.min(this.index,this.matches.length-1);
       this.menu.replaceChildren();this.menu.hidden=false;
@@ -104,8 +113,8 @@
       this.matches.forEach((thread,index)=>{
         const option=this.input.ownerDocument.createElement('button');option.type='button';option.id=this.menu.id+'-'+index;
         option.setAttribute('role','option');option.setAttribute('aria-selected',String(index===this.index));option.tabIndex=-1;
-        const name=this.input.ownerDocument.createElement('span');name.textContent=thread.title||'Untitled thread';
-        const context=this.input.ownerDocument.createElement('small');context.textContent=this.context(thread);option.append(name,context);
+        const name=this.input.ownerDocument.createElement('span');name.textContent=(thread.kind === 'file' ? '▤ ' + thread.path : '↗ ' + (thread.title||'Untitled thread'));
+        const context=this.input.ownerDocument.createElement('small');context.textContent=thread.kind === 'file' ? 'File · ' + thread.root : 'Thread · ' + this.context(thread);option.append(name,context);
         option.onclick=()=>this.choose(thread);this.menu.append(option);
       });
     }
@@ -124,7 +133,8 @@
     }
   }
   function displayMessage(text) {
-    const marker = "\n\n[Selected thread references; positions are UTF-16 offsets in the user text above]\n";
+    const markers = ["Selected thread references", "Selected workspace and thread references"].map(label=>"\n\n["+label+"; positions are UTF-16 offsets in the user text above]\n");
+    const marker = markers.find(value=>text.includes(value)) || markers[0];
     const index = text.lastIndexOf(marker);
     if (index < 0) return {text, refs: []};
     const original = text.slice(0, index);
@@ -133,7 +143,7 @@
       let end = 0;
       if (!Array.isArray(refs) || !refs.length || refs.length > 50 || !refs.every(ref => {
         const valid = ref && Number.isInteger(ref.start) && Number.isInteger(ref.end) && ref.start >= end && ref.end > ref.start &&
-          ref.end <= original.length && typeof ref.session_id === "string" && ref.session_id.length > 0 &&
+          ref.end <= original.length && (ref.kind === "file" ? typeof ref.root === "string" && typeof ref.path === "string" && ref.path.length > 0 : typeof ref.session_id === "string" && ref.session_id.length > 0) &&
           typeof ref.text === "string" && ref.text.startsWith("@") && original.slice(ref.start, ref.end) === ref.text;
         end = ref?.end; return valid;
       })) return {text, refs: []};

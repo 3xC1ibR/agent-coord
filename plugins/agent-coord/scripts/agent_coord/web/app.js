@@ -36,6 +36,15 @@ async function api(path, body) {
   if (!response.ok) throw new Error(result.error || "Request failed");
   return result;
 }
+async function openMentionFile(ref) {
+  const result = await api("files/preview", {root: ref.root, path: ref.path});
+  const dialog = node("dialog", null, "file-mention-preview");
+  dialog.setAttribute("aria-label", "File preview " + ref.path);
+  const close = node("button", "Close");close.type="button";close.onclick=()=>dialog.close();
+  dialog.append(node("h2", ref.path), close, node("pre", result.binary ? "Preview unavailable for this file type." : result.text));
+  if(result.truncated)dialog.append(node("p", "Preview truncated."));
+  dialog.addEventListener("close", ()=>dialog.remove());document.body.append(dialog);dialog.showModal();
+}
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
 async function refreshList() {
   if (state.paneMode) { window.parent.agentCoordPanes?.requestList(); return; }
@@ -1086,6 +1095,11 @@ function renderTimeline() {
           if (display.refs.length) {
             const references = node("div", null, "message-thread-references");
             for (const ref of display.refs) {
+              if (ref.kind === "file") {
+                const link = node("a", ref.text + " · File");link.href = "#";
+                link.onclick = event => {event.preventDefault();openMentionFile(ref).catch(showError);};
+                references.append(link);continue;
+              }
               const link = node("a", ref.text + " · " + ref.session_id.slice(-8));
               link.href = "/#" + encodeURIComponent(ref.session_id);
               link.setAttribute("aria-label", "Thread reference " + ref.text + " " + ref.session_id);
@@ -1952,6 +1966,11 @@ async function boot() {
     }});
   state.mentions = new ThreadMentions({input: $("message"), menu: $("thread-mentions"), references: $("thread-references"),
     getThread: () => state.selected,
+    getWorkspace: () => state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config.cwd,
+    loadFiles: async query => {
+      const root = state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config.cwd;
+      return root ? (await api("files/search", {root, query})).entries : [];
+    },
     loadThreads: async () => {
       const results = await Promise.all([api("threads"), api("threads?archived=true")]);
       return [...results[0].data, ...results[1].data];

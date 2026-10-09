@@ -126,3 +126,25 @@ test('first message in a new conversation carries resolved mentions and clears t
  assert.deepEqual(calls[1].body.mentions,d.refs);assert.equal(calls[1].path,'sessions/created/messages');
  assert.equal(h.mentions.snapshot('created','').length,0);assert.equal(state.newSessionDraft,null);
 });
+test('files and threads share autocomplete but keep explicit identities through draft restore and history',async()=>{
+ const h=harness();let resolveOld;
+ h.mentions.getWorkspace=()=>'/project';
+ h.mentions.loadFiles=async query=>query==='stale'?new Promise(resolve=>resolveOld=resolve):[{kind:'file',root:'/project',path:'docs/Chat UI.md'}];
+ h.edit(0,0,'Ask @Chat');await settle();await new Promise(r=>setTimeout(r,140));await settle();
+ assert.equal(h.mentions.matches.length,3);
+ assert.match(h.menu.children[2].children[1].textContent,/File.*project/);
+ h.menu.children[2].onclick();
+ const refs=h.mentions.snapshot();assert.equal(refs[0].kind,'file');assert.equal(refs[0].path,'docs/Chat UI.md');assert.equal(refs[0].session_id,undefined);
+ const restored=new ThreadMentionDraft(h.input.value,refs);assert.deepEqual(restored.snapshot(),refs);
+ const marker='\n\n[Selected workspace and thread references; positions are UTF-16 offsets in the user text above]\n';
+ assert.deepEqual(ThreadMentions.displayMessage(h.input.value+marker+JSON.stringify(refs)),{text:h.input.value,refs});
+ h.edit(refs[0].start+2,refs[0].start+3,'x');assert.equal(h.mentions.snapshot().length,0);
+ h.edit(0,h.input.value.length,'@stale');await new Promise(r=>setTimeout(r,140));await settle();
+ h.edit(0,h.input.value.length,'@Chat');await new Promise(r=>setTimeout(r,140));await settle();
+ resolveOld([{kind:'file',root:'/project',path:'stale.txt'}]);await settle();assert.equal(h.mentions.matches.some(t=>t.path==='stale.txt'),false);
+});
+
+test('extending a selected filename invalidates the original file binding',()=>{
+ const d=new ThreadMentionDraft('@');d.select(0,1,{kind:'file',path:'app.js',root:'/project'});
+ const ref=d.refs[0];d.edit(ref.end,ref.end,'.bak');assert.equal(d.snapshot().length,0);
+});

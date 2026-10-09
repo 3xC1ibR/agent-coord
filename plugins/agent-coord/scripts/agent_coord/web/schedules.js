@@ -17,6 +17,8 @@
       if (typeof ThreadMentions !== "undefined") {
         this.mentions = new ThreadMentions({input: this.$("schedule-message"), menu: this.$("schedule-mentions"), references: this.$("schedule-references"),
           getThread: () => this.requestId, canComplete: () => this.$("schedule-dialog").open && !this.saving,
+          getWorkspace: () => this.$("schedule-workspace").value,
+          loadFiles: async query => {const root=this.$("schedule-workspace").value;return root ? (await this.api("files/search", {root,query})).entries : [];},
           loadThreads: async () => { const results = await Promise.all([this.api("threads"), this.api("threads?archived=true")]); return results.flatMap(r=>r.data); }});
         this.$("schedule-message").addEventListener("keydown", event => { if (!event.isComposing) this.mentions.keydown(event); });
       }
