@@ -27,6 +27,16 @@ and notarization procedure below. Quit the old app before replacing it. When
 upgrading from `Agent Coord.app`, remove the old application bundle after moving
 Ribbon Field into Applications; user data and the internal bundle ID are shared.
 
+## Choose a working folder
+
+Use **File → Open Folder…** (`⌘O`), or the sidebar folder selector, to choose
+where new sessions start. Recent folders are shared, while each window keeps
+its own selected folder; window slots restore those selections across app
+launches. Saved repository views can supply their repository folder, retaining
+a selected subdirectory or linked worktree in the same repository. New-session
+drafts and existing conversations keep their own directories when views change.
+Optional thread **Groups** organize work independently of folders and repositories.
+
 ## Build a standalone disk image
 
 Release builders need macOS, Xcode Command Line Tools, Python 3.10+, `uv`, and

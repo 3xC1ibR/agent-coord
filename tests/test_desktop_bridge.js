@@ -60,7 +60,7 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
     }
   }
   for (const id of ["home", "new-session", "message", "composer", "conversation", "search", "send", "menu-toggle",
-    "expand-chat", "session-name", "image-drop-hint", "error", "new-cwd", "workspace-choice", "workspace-path-label",
+    "expand-chat", "session-name", "image-drop-hint", "attach-image", "image-picker", "error", "new-cwd", "workspace-choice", "workspace-path-label",
     "create-dialog", "permissions-dialog"]) nodes.set(id, new Element(id));
   nodes.get("error").hidden = true;
   Object.assign(document, {visibilityState: "hidden", hasFocus: () => false, body: new Element(),
@@ -128,6 +128,15 @@ test("session commands cycle the filtered display order with wraparound and over
   buttons.length = 0;
   assert.equal(command("previousSession"), false);
   await settle();
+});
+
+test("folder picker asks for one directory and treats cancellation as no selection", async () => {
+  const f = fixture();
+  f.replies.chooseFiles = [{path: "/work/rig"}];
+  assert.equal(await f.env.agentCoordDesktop.chooseFolder(), "/work/rig");
+  assert.deepEqual(f.messages.at(-1), {action: "chooseFiles", workspace: true});
+  f.replies.chooseFiles = [];
+  assert.equal(await f.env.agentCoordDesktop.chooseFolder(), null);
 });
 
 test("session cycling includes stacked pane tabs and respects pane dialogs", () => {

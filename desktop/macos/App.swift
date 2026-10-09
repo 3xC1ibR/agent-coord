@@ -180,6 +180,7 @@ private final class SessionWindow: NSWindow {
 
 private final class DesktopWindow {
     let id = UUID().uuidString.lowercased()
+    var folderSlot = 0
     let window: NSWindow
     let webView: WKWebView
     let status: NSStackView
@@ -319,6 +320,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         app.addItem(withTitle: "Quit Ribbon Field", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = menu("File")
         file.addItem(withTitle: "New Session", action: #selector(webCommand(_:)), keyEquivalent: "n").representedObject = "newSession"
+        file.addItem(withTitle: "Open Folder…", action: #selector(webCommand(_:)), keyEquivalent: "o").representedObject = "openFolder"
         let newWindowItem = file.addItem(withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "N")
         newWindowItem.keyEquivalentModifierMask = [.command, .shift]; newWindowItem.target = self
         let duplicate = file.addItem(withTitle: "Open Current View in New Window", action: #selector(duplicateWindow), keyEquivalent: "n")
@@ -423,6 +425,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         ])
         let item = DesktopWindow(window: window, webView: webView, status: status, label: statusLabel,
                                  spinner: spinner, retry: retry)
+        // Stable slots restore each window's folder without reusing its runtime identity.
+        while windows.contains(where: { $0.folderSlot == item.folderSlot }) { item.folderSlot += 1 }
         window.cycleSession = { [weak item] backwards in
             let command = backwards ? "previousSession" : "nextSession"
             guard let item = item, item.loaded, item.commands.contains(command) else { return false }
@@ -601,6 +605,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         controller.removeAllUserScripts()
         controller.addUserScript(WKUserScript(source: palette, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         controller.addUserScript(WKUserScript(source: source.replacingOccurrences(of: "__AGENT_COORD_PREFERENCES__", with: json)
+            .replacingOccurrences(of: "__AGENT_COORD_FOLDER_SLOT__", with: String(item(for: webView)?.folderSlot ?? 0))
             .replacingOccurrences(of: "__AGENT_COORD_WINDOW_ID__", with: item(for: webView)?.id ?? ""),
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
@@ -746,7 +751,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             panel.canChooseFiles = !workspace
             panel.canChooseDirectories = true
             panel.allowsMultipleSelection = !workspace
-            panel.prompt = workspace ? "Choose Workspace" : "Insert Paths"
+            panel.prompt = workspace ? "Open Folder" : "Insert Paths"
             panel.beginSheetModal(for: owner.window) { response in
                 guard response == .OK else { replyHandler([], nil); return }
                 do { replyHandler(try self.fileReferences(panel.urls), nil) }
@@ -967,6 +972,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         try await smokeReady(second)
         try smokeCheck("multiple_windows", windows.count == 2 && first.webView !== second.webView)
+        try await smokeWorkingFolders(first, second)
         let independent = try await smokeJS("""
             const independent = sessionStorage.getItem('desktop-smoke-window') === null;
             sessionStorage.setItem('desktop-smoke-window', 'second');
@@ -1184,6 +1190,46 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
             self.finishSmoke(error: error?.localizedDescription)
         }
+    }
+
+    @MainActor private func smokeWorkingFolders(_ first: DesktopWindow, _ second: DesktopWindow) async throws {
+        let folder = smokeDirectory!.appendingPathComponent("Working folder", isDirectory: true).resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: [folder.path, smokeDirectory!.resolvingSymlinksInPath().path])
+        let paths = String(data: data, encoding: .utf8)!
+        let opened = try await smokeJS("""
+            const paths = \(paths);
+            const expected = (await api('workspaces/open', {path: paths[0]})).cwd;
+            const original = state.folderPicker.desktop;
+            state.folderPicker.desktop = {chooseFolder: async () => paths[0]};
+            try {
+              await state.folderPicker.choose();
+              const selected = state.folders.selected.cwd;
+              const displayed = document.querySelector('#working-folder').value;
+              const welcomeHidden = document.querySelector('#folder-welcome').hidden;
+              const groupLabel = document.querySelector('#project').options[0].text;
+              return {selected, displayed, welcomeHidden, groupLabel, expected,
+                ok: selected === expected && displayed === expected && welcomeHidden && groupLabel === 'All groups'};
+            } finally { state.folderPicker.desktop = original; }
+            """, in: first.webView)
+        smokeResults["working_folder_debug"] = opened
+        try smokeCheck("working_folder_open", (opened as? [String: Any])?["ok"] as? Bool == true)
+        let independent = try await smokeJS("""
+            const paths = \(paths);
+            if (state.folders.selected) return false;
+            const folder = await state.folders.open(paths[1]); renderFolders();
+            return state.folders.selected.cwd === folder.cwd && folder.cwd.endsWith(paths[1].split('/').pop());
+            """, in: second.webView)
+        try smokeCheck("working_folder_window_isolation", independent as? Bool == true)
+        let restored = try await smokeJS("""
+            const paths = \(paths);
+            const expected = (await api('workspaces/open', {path: paths[0]})).cwd;
+            const restored = new WorkingFolders({storage: localStorage, preferences: localStorage,
+              key: window.agentCoordDesktop.folderSlot, scope: state.config.workspaceRoot || '', api});
+            await restored.restore();
+            return restored.selected.cwd === expected && state.folders.selected.cwd === expected;
+            """, in: first.webView)
+        try smokeCheck("working_folder_restored", restored as? Bool == true)
     }
 
     @MainActor private func smokeFiles(_ item: DesktopWindow, other: DesktopWindow) async throws {

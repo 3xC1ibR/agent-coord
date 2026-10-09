@@ -97,6 +97,7 @@
     if (destination()) result.push("insertFiles");
     if (dialog || !byID("home")) return result;
     result.push("workspace", "findThread", "newSession", "toggleSidebar", "toggleFiles");
+    if (byID("open-folder")) result.push("openFolder");
     if (sessionOrder().length) result.push("nextSession", "previousSession");
     if (byID("roll-up-start")) result.push("rollUp");
     if (byID("tile-threads") && window.agentCoordPanes) result.push("tileThreads");
@@ -114,6 +115,7 @@
       case "workspace": byID("home").click(); break;
       case "findThread": byID("home").click(); byID("search").focus(); byID("search").select(); break;
       case "newSession": byID("new-session").click(); break;
+      case "openFolder": byID("open-folder").click(); break;
       case "nextSession": return cycleSession(1);
       case "previousSession": return cycleSession(-1);
       case "rollUp": byID("roll-up-start").click(); break;
@@ -146,6 +148,8 @@
       catch (error) { reportError(error); return false; }
     },
     windowId: "__AGENT_COORD_WINDOW_ID__",
+    folderSlot: "native-__AGENT_COORD_FOLDER_SLOT__",
+    chooseFolder: async () => (await send({action: "chooseFiles", workspace: true}))[0]?.path || null,
     navigationReady: () => send({action: "navigationReady"}).catch(reportError),
   });
 
@@ -224,6 +228,7 @@
         const available = commands();
         const actions = [
           ["newSession", "New session", "⌘N", "create chat"],
+          ["openFolder", "Open folder", "⌘O", "working directory recent"],
           ["nextSession", "Next session in current view", "⌃Tab", "switch cycle thread"],
           ["previousSession", "Previous session in current view", "⌃⇧Tab", "switch cycle thread"],
           ["workspace", "Show workspace", "⌘1", "home overview"],
