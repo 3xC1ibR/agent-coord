@@ -52,9 +52,12 @@ class AppControlTests(unittest.TestCase):
         return result["thread_id"]
 
     def cli(self, *arguments, expected=0, stdin=None):
-        env = dict(os.environ, AGENT_COORD_SESSION_ID="dispatcher")
+        return self.coord_cli("thread", *arguments, expected=expected, stdin=stdin)
+
+    def coord_cli(self, *arguments, session_id="dispatcher", expected=0, stdin=None):
+        env = dict(os.environ, AGENT_COORD_SESSION_ID=session_id)
         result = subprocess.run([str(PLUGIN_SCRIPTS / "agent-coord"), "--db", str(self.store.database_path),
-                                 "thread", *arguments], cwd=self.root, env=env,
+                                 *arguments], cwd=self.root, env=env,
                                 input=stdin, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, expected, result.stderr)
         return json.loads(result.stdout if expected == 0 else result.stderr)
@@ -104,6 +107,66 @@ class AppControlTests(unittest.TestCase):
                 self.assertEqual(len(self.sessions.read(thread)["thread"]["turns"]), 3)
                 self.assertEqual(self.store.list_delegations(), [])
 
+    def test_initial_reply_returns_to_creator_and_later_requests_keep_their_own_contract(self):
+        for client in ("codex", "claude"):
+            with self.subTest(client=client):
+                creator = self.sessions.create(dict(cwd=str(self.root), client=client, name="Orchestrator"))["session"]["thread_id"]
+                request = self.cli("create", "--from-session", creator, "--client", client,
+                                   "--name", "Specialist", "--reply-required", "--wait", "0", "Investigate the release.")
+                self.worker.process_once()
+                receipt = self.control.status(request["request_id"])
+                self.assertEqual(receipt["status"], "completed", receipt)
+                self.assertTrue(receipt["result"]["reply_required"])
+                thread, initial_id = receipt["thread_id"], receipt["result"]["message_id"]
+                initial = self.store.inbox(thread, mark_delivered=False)[0]
+                self.assertEqual(initial["id"], initial_id)
+                self.assertTrue(initial["reply_required"])
+                self.assertNotIn("Answer the user directly", initial["body"])
+                self.assertNotIn("does not require a reply", initial["body"])
+                self.sessions.inbox_wake.process_once()
+                context = str(self.deliver(thread))
+                self.assertIn("reply_required=true", context)
+                self.assertIn("agent-coord reply --message-id", context)
+                self.finish(thread, "Findings available")
+                self.assertFalse(self.store.inbox(creator, mark_delivered=False))
+
+                reply = self.coord_cli("reply", "--message-id", str(initial_id),
+                                       "Result: reviewed release artifacts; simulated validation passed.", session_id=thread)
+                self.assertEqual(reply["in_reply_to"], initial_id)
+                self.assertEqual(reply["thread_id"], initial["thread_id"])
+                self.assertFalse(reply["reply_required"])
+                self.sessions.inbox_wake.process_once()
+                self.assertTrue(self.sessions.read(creator)["running"])
+                self.assertIn("reviewed release artifacts", str(self.deliver(creator)))
+                self.finish(creator, "Integrated result")
+
+                # A direct revision can run while new coordination waits for idle.
+                self.sessions.send(thread, {"message": "Revise the findings for me."})
+                later = self.store.send_message(sender_session_id=creator, recipient_session_id=thread,
+                                                body="Check the new evidence and return a revision.", reply_required=True)
+                self.sessions.inbox_wake.process_once()
+                self.assertEqual(len(self.sessions.read(thread)["thread"]["turns"]), 2)
+                self.finish(thread, "Direct revision finished")
+                self.sessions.inbox_wake.process_once()
+                self.assertIn("new evidence", str(self.deliver(thread)))
+                self.finish(thread, "Evidence reviewed")
+                revision = self.coord_cli("reply", "--message-id", str(later["id"]), "Revised result", session_id=thread)
+                self.assertEqual(revision["in_reply_to"], later["id"])
+                self.assertFalse(revision["reply_required"])
+                self.sessions.inbox_wake.process_once()
+                self.assertIn("Revised result", str(self.deliver(creator)))
+                self.finish(creator)
+
+                self.store.send_message(sender_session_id=creator, recipient_session_id=thread,
+                                        body="Answer this later question directly for the user.", reply_required=False)
+                self.sessions.inbox_wake.process_once()
+                context = str(self.deliver(thread))
+                self.assertIn("reply_required=false", context)
+                self.assertNotIn("Return the requested result to the creating agent", context)
+                self.finish(thread, "Later direct answer")
+                self.assertFalse(self.store.inbox(creator, mark_delivered=False))
+                self.assertEqual(len(self.sessions.read(thread)["thread"]["turns"]), 4)
+
     def test_cli_creation_is_queued_then_confirmed_with_identity_settings_and_link(self):
         receipt = self.cli("create", "--name", "Research specialist", "--yolo", "--model", "available-model",
                            "--effort", "high", "--request-id", "research-1", "--wait", "0", "-", stdin="Question\nwith literal $HOME and `text`.")
@@ -113,11 +176,48 @@ class AppControlTests(unittest.TestCase):
         receipt = self.cli("request-status", "--request-id", "research-1")
         self.assertEqual(receipt["status"], "completed")
         record = receipt["result"]
+        self.assertFalse(record["reply_required"])
         self.assertEqual((record["model"], record["effort"], record["yolo"]), ("available-model", "high", True))
         self.assertEqual(record["session_id"], receipt["thread_id"])
         self.assertTrue(record["url"].startswith("agentcoord://thread/" + record["thread_id"]))
         self.assertIn("literal $HOME", self.store.threads.get(record["thread_id"])["original_request"])
         self.assertEqual(self.cli("settings", "--session-id", record["thread_id"])["model"], "available-model")
+
+    def test_cli_explicit_no_reply_matches_default_request_on_retry(self):
+        args = ("create", "--name", "Direct specialist", "--request-id", "direct", "--wait", "0")
+        self.cli(*args, "Question")
+        self.cli(*args, "--no-reply-required", "Question")
+        self.worker.process_once()
+        receipt = self.control.status("direct")
+        self.assertFalse(receipt["result"]["reply_required"])
+        initial = self.store.inbox(receipt["thread_id"], mark_delivered=False)
+        self.assertEqual(len(initial), 1)
+        self.assertFalse(initial[0]["reply_required"])
+        self.assertIn("Answer the user directly", initial[0]["body"])
+
+    def test_initial_reply_choice_is_validated_before_queueing(self):
+        for value in (None, 0, 1, "false", "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(CoordinationError, "reply_required must be a boolean"):
+                self.request(reply_required=value)
+        self.assertEqual(self.control.pending(), [])
+        self.assertFalse(self.sessions.rpc.calls)
+
+    def test_reply_contract_survives_restart_and_cannot_change_under_same_key(self):
+        payload = dict(cwd=str(self.root), name="Agent", prompt="Question", client="codex", reply_required=True)
+        self.control.request("create", "dispatcher", payload, request_id="reply-contract")
+        control = AppControl(CoordinationStore(self.store.database_path))
+        control.request("create", "dispatcher", payload, request_id="reply-contract")
+        self.worker.process_once()
+        completed = control.request("create", "dispatcher", payload, request_id="reply-contract")
+        self.assertTrue(completed["result"]["reply_required"])
+        for changed in ({**payload, "reply_required": False}, {k: v for k, v in payload.items() if k != "reply_required"}):
+            with self.assertRaisesRegex(CoordinationError, "different app request"):
+                control.request("create", "dispatcher", changed, request_id="reply-contract")
+        self.worker.process_once()
+        messages = self.store.inbox(completed["thread_id"], mark_delivered=False)
+        self.assertEqual(len(messages), 1)
+        self.assertTrue(messages[0]["reply_required"])
+        self.assertEqual(sum(m == "thread/start" for m, _ in self.sessions.rpc.calls), 1)
 
     def test_duplicate_request_survives_restart_without_duplicate_agent_or_message(self):
         payload = dict(cwd=str(self.root), name="Agent", prompt="Question", client="codex")
@@ -125,6 +225,8 @@ class AppControlTests(unittest.TestCase):
         self.worker.process_once()
         control = AppControl(CoordinationStore(self.store.database_path))
         repeated = control.request("create", "dispatcher", payload, request_id="stable")
+        self.assertEqual(control.request("create", "dispatcher", {**payload, "reply_required": False},
+                                        request_id="stable"), repeated)
         self.worker.process_once()
         self.assertEqual(first["request_id"], repeated["request_id"])
         self.assertEqual(repeated["status"], "completed")

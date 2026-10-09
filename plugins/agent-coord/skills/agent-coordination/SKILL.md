@@ -18,6 +18,10 @@ description: Create and reuse persistent Ribbon Field app agents for direct user
 - **Terminal delegates** use Agent Coord `delegate` for scoped terminal work.
   They report to their parent and stop after a completed or failed delegation.
 
+Use [dispatch](../dispatch/SKILL.md) for ongoing routing with direct specialist
+follow-ups, or [orchestrate](../orchestrate/SKILL.md) to coordinate and deliver
+the integrated result in the initiating conversation. Both use the same app agents.
+
 ## Use the coordination CLI
 
 Use `agent-coord` on PATH. Ribbon Field and managed workers add the bundled
@@ -336,8 +340,22 @@ Pass `-` as the prompt to read stdin without shell escaping.
 A `completed` receipt contains `thread_id` and `result`: session identity,
 effective settings, stable URL, and initial coordination message ID. It confirms
 creation and inbox queueing, not completion of the agent's task. The exact
-request is saved as the original request, then sent as actionable work with no
-reply obligation to the dispatcher. The agent answers the user in its own chat.
+request is saved as the original request, then sent as actionable work. By default
+(or with `--no-reply-required`), the agent answers the user in its own chat with no
+reply obligation to the creator.
+
+Add `--reply-required` to `thread create` when the initial result must return to
+the creating agent. The recipient uses `agent-coord reply --message-id <id>` with
+the delivered initial message ID; the reply reaches the creator's inbox and wakes
+an eligible idle app conversation. The completed creation receipt includes
+`result.reply_required`, which confirms the applied contract. This flag needs an
+updated running app backend as well as the CLI; refreshing plugins alone does
+not update a running native app. A missing receipt field indicates an older backend.
+
+The contract applies to that assignment, not every later turn. Direct user
+follow-ups remain available, and later `send` requests choose their own reply
+obligation. Use new requests for questions or revisions after completion, and
+share material findings when useful without recurring check-ins.
 
 Reuse the same `--request-id` and arguments when retrying a timed-out command;
 do not create another agent. Inspect or cancel a pending request with:

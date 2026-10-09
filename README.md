@@ -295,6 +295,17 @@ an agent focused on a subject or responsibility; a **dispatcher** routes work.
 Provider-native subagents remain a separate concept. App conversations retain
 context between assignments and accept direct user follow-ups.
 
+For ongoing routing, use the [Dispatch skill](plugins/agent-coord/skills/dispatch/SKILL.md):
+it reuses relevant app agents, creates new ones when needed, and directs answers
+and follow-ups to their own conversations. Use the
+[Orchestrate skill](plugins/agent-coord/skills/orchestrate/SKILL.md) when the
+initiating conversation should own the full outcome, coordinate contributions,
+and deliver the integrated result. Both support normal discovery in Codex and
+Claude, and reuse the same agents for later discoveries, questions, and revisions.
+Workflow findings collection is off by default; enable it only with an explicit
+request for that dispatch or orchestration conversation.
+Normal task tracking, checkpoints, and result reporting remain in use.
+
 A registered dispatcher can ask the running app to create an agent:
 
 ```bash
@@ -316,10 +327,34 @@ the target repository's issue, scope, and validation rules.
 
 Creation runs inside the app's existing provider infrastructure. A completed
 receipt includes `thread_id`, `result.session_id`, effective model, effort and
-permissions, `result.url`, and the initial coordination `message_id`. The agent
-receives the request through its durable inbox and answers the user in that
-conversation. The original request is saved before the wake prompt. Creation
-completion confirms queueing, not that the requested work has finished.
+permissions, `result.url`, the initial coordination `message_id`, and
+`result.reply_required`. The agent receives the request through its durable inbox
+and, by default, answers the user in that conversation. The original request is
+saved before the wake prompt. Creation completion confirms queueing, not that the
+requested work has finished.
+
+Use `thread create --reply-required` to request the initial result back in the
+creating agent's inbox; `--no-reply-required` explicitly selects the default
+direct-user behavior. The recipient answers with
+`agent-coord reply --message-id <initial-message-id> '<result>'`. This preserves
+the coordination thread, correlates the reply, and wakes an eligible idle creator
+without another reply obligation. A final answer in the specialist's chat alone
+does not send that reply. Direct user follow-ups still work, and later assignments
+independently choose `send --reply-required` or `send --no-reply-required`.
+
+For Python callers, `AppControl.request("create", sender_session_id, payload, ...)`
+accepts an optional boolean `payload["reply_required"]`, defaulting to false.
+Reuse the same request key and reporting choice on retries; changing the contract
+under an existing key is rejected. Explicit false and omission are equivalent,
+including for requests saved before this option existed.
+
+Initial reply reporting requires the updated app backend. Plugin refresh makes
+the CLI and skills available but does not replace a running native app's backend;
+activate native changes through a separate app release. Confirm
+`result.reply_required` is true for a reply-required creation. An older backend
+omits that receipt field and uses direct-user behavior; do not assume it registered
+the requested reply or create a duplicate agent. Use the returned identity for a
+later explicit `send --reply-required` request if coordination is needed.
 
 `queued` awaits an updated app in the target workspace; `running` means claimed.
 Reuse the same request key and arguments after a timeout. `uncertain` is never
@@ -1144,6 +1179,14 @@ uv run --with pyyaml python \
 uv run --with pyyaml python \
   /Users/walle/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
   plugins/agent-coord/skills/manage-threads
+
+uv run --with pyyaml python \
+  /Users/walle/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
+  plugins/agent-coord/skills/dispatch
+
+uv run --with pyyaml python \
+  /Users/walle/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
+  plugins/agent-coord/skills/orchestrate
 
 "${CLAUDE_BIN:-claude}" plugin validate --strict plugins/agent-coord
 "${CLAUDE_BIN:-claude}" plugin validate --strict .

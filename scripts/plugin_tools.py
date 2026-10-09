@@ -47,7 +47,7 @@ def validate(plugin: Path) -> None:
             raise ValueError("Plugin descriptions must be nonempty strings.")
     if manifests[0].get("skills") != "./skills/":
         raise ValueError("Codex must use the shared ./skills/ directory.")
-    for skill in ("agent-coordination", "manage-threads"):
+    for skill in ("agent-coordination", "manage-threads", "dispatch", "orchestrate"):
         path = plugin / "skills" / skill / "SKILL.md"
         content = path.read_text(encoding="utf-8")
         if not content.startswith("---\n") or f"\nname: {skill}\n" not in content:

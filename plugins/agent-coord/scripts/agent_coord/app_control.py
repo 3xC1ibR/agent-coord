@@ -70,6 +70,11 @@ class AppControl:
             prompt = payload.get("prompt")
             if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100000:
                 raise CoordinationError("The initial request must contain 1–100000 characters.")
+            if not isinstance(payload.get("reply_required", False), bool):
+                raise CoordinationError("Initial request reply_required must be a boolean.")
+            # Keep the legacy payload shape so opt-out and pre-upgrade retries match.
+            if not payload.get("reply_required", False):
+                payload.pop("reply_required", None)
         identifier = request_id or str(uuid.uuid4())
         if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 160:
             raise CoordinationError("Request ID must contain 1–160 characters.")
@@ -79,6 +84,8 @@ class AppControl:
             if previous:
                 old_payload = json.loads(previous["payload_json"])
                 old_payload.pop("expected_settings", None)
+                if operation == "create" and old_payload.get("reply_required") is False:
+                    old_payload.pop("reply_required")
                 # thread_id on create is filled in as soon as the provider replies.
                 if (previous["operation"] != operation or previous["sender_session_id"] != sender_session_id
                         or old_payload != payload or previous["cwd"] != cwd
@@ -223,21 +230,32 @@ class AppControlWorker:
                 self.sessions.update(thread_id, payload)
                 result = self.control.settings(thread_id)
             else:
+                reply_required = payload.pop("reply_required", False)
                 # Fail invalid settings before entering the uncertain provider boundary.
                 self.sessions._creation_settings(payload)
                 provider_started = True
                 created = self.sessions.create(payload, on_created=lambda tid: self.control.identified(request["request_id"], tid))
                 thread_id = created["session"]["thread_id"]
                 self.control.store.threads.capture_request(thread_id, payload["prompt"])
+                reporting = (
+                    "Return the requested result to the creating agent using agent-coord reply --message-id "
+                    "with this message's ID from the delivered header. Include useful artifacts, validation, "
+                    "and unresolved limitations. A final answer in this conversation alone does not deliver that reply. "
+                    if reply_required else
+                    "Answer the user directly in this conversation and accept their follow-ups here. "
+                    "This initial request does not require a reply to its sender. "
+                )
                 message = self.control.store.send_message(
                     sender_session_id=request["sender_session_id"], recipient_session_id=thread_id,
-                    classification="action_required", reply_required=False,
-                    body=("Answer the user directly in this conversation and accept their follow-ups here. "
+                    classification="action_required", reply_required=reply_required,
+                    body=(reporting +
                           "You are an independent app agent; specialist describes your role. "
-                          "Follow repository work rules, release scopes after assignments, and keep this conversation available. "
-                          "Use Agent Coord messaging when coordination is needed; this request does not require a reply to its sender.\n\n"
+                          "Follow repository work rules, release scopes after assignments, and keep this conversation "
+                          "available for direct user follow-ups and later assignments. "
+                          "Use Agent Coord messaging when coordination is needed.\n\n"
                           "User request:\n" + payload["prompt"]))
-                result = {**self.control.settings(thread_id), "message_id": message["id"]}
+                result = {**self.control.settings(thread_id), "message_id": message["id"],
+                          "reply_required": message["reply_required"]}
             self.control.complete(request["request_id"], result=result)
         except Exception as exc:
             self.control.complete(request["request_id"], error=str(exc), uncertain=provider_started)
