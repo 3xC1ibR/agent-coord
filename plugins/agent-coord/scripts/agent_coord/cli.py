@@ -45,7 +45,7 @@ def find_repository_root(cwd: str) -> str:
 
 def validate_claimed_bead(bead_id: str, cwd: str) -> dict[str, Any]:
     if shutil.which("bd") is None:
-        raise CoordinationError("bd is required before beginning implementation work.")
+        raise CoordinationError("bd is required when --bead is supplied.")
     result = subprocess.run(
         ["bd", "show", bead_id, "--json"],
         cwd=cwd,
@@ -296,11 +296,13 @@ def _parser() -> argparse.ArgumentParser:
     acknowledge_target.add_argument("--all-unread", action="store_true")
 
     delegate = subcommands.add_parser(
-        "delegate", help="Launch scoped Beads work in an Agent Coord-managed terminal worker."
+        "delegate", help="Launch scoped work in an Agent Coord-managed terminal worker."
     )
     delegate.add_argument("--from-session", help="Sender; defaults to the current caller session.")
     delegate.add_argument("--cwd", default=os.getcwd())
-    delegate.add_argument("--bead", required=True)
+    delegate.add_argument(
+        "--bead", help="Optional open, ready, and unclaimed Beads issue."
+    )
     delegate.add_argument("--scope", action="append", required=True)
     delegate.add_argument(
         "--client",
@@ -595,12 +597,12 @@ def run(arguments: argparse.Namespace) -> Any:
         )
     if command == "handoff":
         sender = store.get_session(arguments.from_session)
-        target_bead_id = arguments.target_bead_id or sender["bead_id"]
-        if target_bead_id is None:
-            raise CoordinationError(
-                f"Session {arguments.from_session} has no work declaration to hand off."
-            )
-        if target_bead_id != sender["bead_id"]:
+        target_bead_id = (
+            sender["bead_id"]
+            if arguments.target_bead_id is None
+            else arguments.target_bead_id
+        )
+        if target_bead_id is not None and target_bead_id != sender["bead_id"]:
             validate_claimed_bead(target_bead_id, sender["cwd"])
         return store.handoff_work(
             sender_session_id=arguments.from_session,

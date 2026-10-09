@@ -65,3 +65,23 @@ test("failed and stalled monitor requests show an error and retry", async () => 
   assert.match(p.elements.health.textContent, /runtime healthy/);
   assert.match(p.elements.tree.innerHTML, /No delegations/);
 });
+
+test("workers without issues display their delegation identity", async () => {
+  const p = page();
+  const child = {
+    delegation_id: "direct-worker", parent_session_id: "parent", child_session_id: null,
+    client: "codex", name: null, bead_id: null, display_status: "launched",
+    instructions: "Validate the change.", write_scope: ["src/**"], runtime_kind: "managed-pty",
+    messages: [],
+  };
+  p.requests[0].resolve({ok: true, json: async () => ({process_count: 2, parents: [{
+    session_id: "parent", client: "codex", name: "Parent", display_status: "idle",
+    activity: "idle", cwd: "/tmp/repo", messages: [], children: [child],
+  }]})});
+  await p.tick();
+  assert.match(p.elements.tree.innerHTML, /codex · direct-worker/);
+  assert.match(p.elements.detail.innerHTML, /codex · direct-worker/);
+  vm.runInContext("selected = allNodes().find(n => n.kind === 'child').id; renderDetail();", p.context);
+  assert.match(p.elements.detail.innerHTML, /<small>Delegation<\/small><span>direct-worker<\/span>/);
+  assert.doesNotMatch(p.elements.detail.innerHTML, /codex · null/);
+});

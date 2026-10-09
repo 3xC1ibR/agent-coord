@@ -31,7 +31,7 @@ The plugin answers these questions:
 - Which messages require action or a reply, and which are history-only receipts?
 - How can an Agent Coord-owned worker safely start a turn when a message arrives
   while it is idle?
-- How can a session delegate ready Beads work to a new interactive Codex or
+- How can a session delegate scoped work to a new interactive Codex or
   Claude Code session without Zellij or tmux?
 - How can an operator inspect the parent, its children, and each child's current
   status and recent output?
@@ -43,10 +43,13 @@ session does not need a Beads issue or write scope. When a second session tries
 to write, the hook stops the newcomer, sends the unscoped incumbent an
 actionable scope request, and requires concurrent writers to declare scopes.
 
-Beads is optional for direct work. When `begin-work` includes `--bead`, Agent
-Coord verifies that the issue is claimed and has the `in_progress` status. It
-does not claim, update, or close issues. Delegation and atomic handoff continue
-to require Bead identity because those workflows preserve durable ownership.
+Beads is optional for direct work, delegation, and atomic handoff. Session,
+delegation, and handoff IDs provide durable identity; file scopes protect
+ownership. Without `--bead`, Agent Coord does not look up or invoke `bd`.
+When `begin-work` includes `--bead`, Agent Coord verifies that the issue is
+claimed and has the `in_progress` status. With `delegate --bead`, it verifies
+that the issue is open, ready, and unclaimed. The CLI does not claim, update,
+or close issues; an opted-in worker follows the Beads workflow.
 
 Session and message state is in a WAL-mode SQLite database at:
 
@@ -265,7 +268,7 @@ ambiguous bead target).
 
 ## Atomic handoff
 
-Use `handoff` when the current owner has a Bead-backed declaration, has reached
+Use `handoff` when the current owner has a scope declaration, has reached
 a named patch or validation boundary, and the recipient must acquire the
 complete declaration without a scope-free race:
 
@@ -283,7 +286,8 @@ The sender, recipient, scope transfer, audit record, and one actionable
 `reply_required=false` notification are updated in one SQLite transaction. The
 recipient must be registered, online, idle, and in the same repository. The
 command rejects partial scopes; optionally repeat every current `--scope` to
-assert the expected declaration. Use `--target-bead` only for a claimed
+assert the expected declaration. A Beads issue is optional; an existing issue
+link is carried with the declaration. Use `--target-bead` only for a claimed
 `in_progress` issue; the CLI revalidates a changed target immediately before the
 transaction. Beads and SQLite remain separate stores, so their updates cannot be
 one cross-database transaction.
@@ -434,7 +438,7 @@ The existing `delegate` command retains its scoped terminal-worker behavior.
 ## Delegate work to an Agent Coord-owned PTY
 
 A registered Codex or Claude parent can launch a new Codex or Claude Code worker
-for an open, ready, and unclaimed Beads issue. Codex remains the default child
+with a task prompt and explicit file scopes. Codex remains the default child
 for backward compatibility; pass `--client claude` to select Claude Code. The
 default `managed-pty` runtime does not require Zellij or tmux. First, preview and
 validate the launch without changing SQLite or starting a process:
@@ -443,7 +447,6 @@ validate the launch without changing SQLite or starting a process:
 agent-coord delegate \
   --from-session <parent-session-id> \
   --cwd /absolute/path/to/repository \
-  --bead <ready-bead-id> \
   --scope 'src/**' \
   --scope 'tests/test_feature.py' \
   --client claude \
@@ -454,6 +457,12 @@ agent-coord delegate \
   --dry-run \
   'Implement the feature, run the focused tests, and report the result.'
 ```
+
+To associate an existing issue, add `--bead <ready-bead-id>`. This opts into
+Beads validation and instructs the worker to claim and complete that issue.
+An explicit invalid issue remains an error. Omitting `--bead` works when `bd`
+is absent or its database is unavailable; progress and results are recorded in
+Agent Coord work-thread checkpoints and delegation state.
 
 Remove `--dry-run` to launch the worker. Agent Coord starts a detached
 supervisor, allocates the child a controlling PTY, captures its output, and
@@ -482,8 +491,9 @@ form an exclusive stability reservation. The generated prompt prohibits
 repository edits and remediation. It requires a compact verdict with each
 command, exit status, duration, summary, and material finding. A failed check
 completes the validation task when all required checks ran and the validator
-reported the failure. Create an implementation issue for remediation and a new
-validation issue for the next attempt. Agent Coord rejects `--yolo` with a
+reported the failure. Use a separate implementation task for remediation and a new
+validation task for the next attempt; create Beads issues only when using that
+integration. Agent Coord rejects `--yolo` with a
 validation lease.
 
 The reviewed command opens the selected interactive TUI in the owned PTY. Codex
@@ -505,9 +515,10 @@ invocation. Do not use it as a default. Claude Code has no corresponding
 An interactive Claude Code child can still show its normal repository trust
 prompt when the repository has not been trusted previously.
 
-Before launch, Agent Coord verifies the Git repository, `bd`, the selected
-client's login, issue readiness, live write-scope conflicts, and active
-delegation state. The Zellij adapter additionally verifies Zellij. Agent Coord
+Before launch, Agent Coord verifies the Git repository, the selected client's
+login, live write-scope conflicts, and active delegation state. Supplying
+`--bead` additionally requires `bd` and a ready issue. The Zellij adapter
+additionally verifies Zellij. Agent Coord
 then creates one durable delegation record and starts the child with an
 inherited delegation ID and explicit client identity. Reviewed mode adds only
 the Agent Coord database directory as an extra allowed root, so child CLI calls
@@ -515,12 +526,13 @@ can update lifecycle state outside the repository. The child SessionStart hook
 verifies the client and attaches the new session. The generated instructions
 require the child to:
 
-1. Read repository instructions and run `bd prime`.
-2. Verify and claim the ready issue.
+1. Read repository instructions.
+2. When an issue was supplied, run `bd prime`, verify it is ready, and claim it.
 3. Declare the exact scopes with the selected lease mode.
 4. Implement and run focused checks, or validate without editing.
 5. Apply repository validation, changelog, and git-authority rules.
-6. Record a compact completed or failed result before exit.
+6. Save a work-thread checkpoint and record a compact completed or failed result
+   before exit. When using Beads, also update and close the issue as appropriate.
 
 Inspect delegation state with:
 
@@ -782,7 +794,9 @@ reports.
 The result creates a durable message in the parent inbox. If the child process
 exits before it reports a result, the SessionEnd hook records the delegation as
 failed and sends that failure to the parent. A second active delegation for the
-same repository and Beads issue is rejected. The parent can use `delegation
+same repository and supplied Beads issue is rejected. Independent tasks without
+issues have separate delegation IDs and still obey scope-conflict checks.
+The parent can use `delegation
 cancel` to release an active record after a confirmed launch or attachment
 failure.
 
@@ -1108,8 +1122,8 @@ their workspace context. Link targets remain owned by their respective systems;
 Agent Coord does not poll or infer their current status.
 
 Thread placement and checkpoint phases are independent of Beads. Linking an
-issue does not import the backlog or change issue status. Legacy delegation and
-atomic handoff still require a Bead as described above.
+issue does not import the backlog or change issue status. Delegation and atomic
+handoff also work without an issue.
 
 ## Wake ordinary idle Zellij sessions (optional compatibility)
 

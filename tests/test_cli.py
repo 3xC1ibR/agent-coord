@@ -163,6 +163,39 @@ class CliTests(unittest.TestCase):
         self.assertEqual(arguments.reasoning_effort, "high")
         self.assertEqual(arguments.lease_mode, "validation")
 
+    @patch("agent_coord.cli.delegate_work")
+    @patch("agent_coord.cli.CoordinationStore")
+    def test_delegate_accepts_a_prompt_and_scope_without_beads(self, store_class, delegate) -> None:
+        arguments = _parser().parse_args([
+            "delegate", "--from-session", "parent", "--scope", "src/**",
+            "--dry-run", "Implement the feature.",
+        ])
+
+        cli_run(arguments)
+
+        self.assertIsNone(delegate.call_args.kwargs["bead_id"])
+        self.assertEqual(delegate.call_args.kwargs["scopes"], ["src/**"])
+        self.assertTrue(delegate.call_args.kwargs["dry_run"])
+
+    @patch("agent_coord.cli.validate_claimed_bead")
+    @patch("agent_coord.cli.CoordinationStore")
+    def test_handoff_accepts_a_scope_only_declaration(self, store_class, validate) -> None:
+        store = store_class.return_value
+        store.get_session.return_value = {
+            "bead_id": None, "cwd": "/tmp/repo", "write_scope": ["src/**"],
+        }
+        arguments = _parser().parse_args([
+            "handoff", "--from-session", "sender", "--to-session", "recipient",
+            "--patch-label", "feature", "--validation-boundary", "unit tests passed",
+            "--validation-responsibility", "run full suite", "--mode", "validation",
+        ])
+
+        cli_run(arguments)
+
+        validate.assert_not_called()
+        store.handoff_work.assert_called_once()
+        self.assertIsNone(store.handoff_work.call_args.kwargs["target_bead_id"])
+
     def test_delegate_defaults_to_codex_and_keeps_reasoning_effort_alias(self) -> None:
         arguments = _parser().parse_args(
             [

@@ -1,6 +1,6 @@
 ---
 name: agent-coordination
-description: Create and reuse persistent Ribbon Field app agents for direct user conversations and later requests. Coordinate Codex and Claude sessions through messaging, conflict detection, and scoped managed terminal delegates. Use when creating or routing work to an app agent, sending or receiving agent messages, checking file conflicts, before implementation when another session may be active, or delegating ready Beads work to a terminal worker.
+description: Create and reuse persistent Ribbon Field app agents for direct user conversations and later requests. Coordinate Codex and Claude sessions through messaging, conflict detection, and scoped managed terminal delegates. Use when creating or routing work to an app agent, sending or receiving agent messages, checking file conflicts, before implementation when another session may be active, or delegating scoped work to a terminal worker. Beads is optional.
 ---
 
 # Agent Coordination
@@ -46,9 +46,10 @@ Routine mutations return compact JSON receipts; add `--full` for the complete
 result, or use `status` / `thread show` to inspect saved state.
 
 Agent Coord stores ephemeral session activity, write scopes, durable local
-messages, and optional local wake state. Beads is optional for direct work. If
-the repository uses Beads, it remains the durable task source of truth; Agent
-Coord does not claim or update issues.
+messages, and optional local wake state. Beads is optional for direct work,
+delegation, and atomic handoff. Use work-thread checkpoints for progress without
+an issue tracker. When the task opts into Beads, it remains the durable issue
+source of truth; the Agent Coord CLI does not claim or update issues.
 
 For a session dedicated to reviewing or organizing the user's open threads,
 use the [Thread Manager skill](../manage-threads/SKILL.md). It discovers threads
@@ -209,7 +210,7 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
 
 ## Atomic handoff and thread closure
 
-Atomic handoff requires a Bead-backed declaration. Use one transactional
+Atomic handoff requires a scope declaration; a Beads issue is optional. Use one transactional
 handoff instead of releasing, notifying, and asking the recipient to reacquire
 the same paths:
 
@@ -223,7 +224,7 @@ agent-coord handoff \
 ```
 
 The recipient must be registered, online, idle, and in the same repository.
-The command transfers the complete declaration, stores the patch and validation
+The command transfers the complete declaration and its optional issue link, stores the patch and validation
 boundary, and sends one actionable notification with `reply_required=false` in
 the same SQLite transaction. Partial scope handoffs are rejected because glob
 subtraction is unsafe. Use `--mode write` for continued implementation and
@@ -404,8 +405,8 @@ offline queueing does not launch the app. Terminal `delegate` behavior is unchan
 ## Delegate work to a managed terminal worker
 
 Use `delegate` when a registered parent session must create a separate Codex or
-Claude Code worker. The work must have one open and ready Beads issue and
-explicit repository scopes. Codex is the default child; pass `--client claude`
+Claude Code worker. Supply a task prompt and explicit repository scopes. Beads
+is optional. Codex is the default child; pass `--client claude`
 to launch Claude Code.
 
 Run a dry-run preview first:
@@ -413,7 +414,6 @@ Run a dry-run preview first:
 ```bash
 agent-coord delegate \
   --cwd /absolute/repository/path \
-  --bead <ready-bead-id> \
   --scope 'src/**' \
   --scope 'tests/test_feature.py' \
   --client <codex-or-claude> \
@@ -424,6 +424,12 @@ agent-coord delegate \
   --dry-run \
   'Implement the specific requested change and run the focused tests.'
 ```
+
+Add `--bead <ready-bead-id>` only when the task uses Beads. The issue must be
+open, ready, and unclaimed. Without that option, the launcher does not look up
+or run `bd`, and the child uses work-thread checkpoints and delegation state.
+Do not create an issue solely to unlock delegation or handoff. An explicit
+invalid issue is an error; do not silently discard the requested issue link.
 
 Remove `--dry-run` to launch the worker. The default `managed-pty` runtime
 starts a detached Agent Coord supervisor, gives the child a controlling PTY,
@@ -445,8 +451,9 @@ scopes become an exclusive stability reservation. The generated prompt makes
 the child declare a validation lease, prohibits repository edits and
 remediation, and requires a compact verdict. A failed check is a completed
 validation result when every requested check ran and the child reported the
-failure. Use a new implementation issue for remediation and a new validation
-issue for the next attempt. Validation-only delegation rejects `--yolo`.
+failure. Use a separate implementation task for remediation and a new validation
+task for the next attempt, with issues only when using Beads. Validation-only
+delegation rejects `--yolo`.
 
 The reviewed launch opens the selected interactive TUI in the owned PTY. Codex
 uses `--approve-for-me`; Claude Code uses safety-classified auto permission mode.
@@ -463,13 +470,16 @@ not add it by default or infer permission to use it from a request to delegate
 work. Claude Code rejects this flag combination and can show its normal
 repository trust prompt in a newly opened pane.
 
-The launcher rejects a blocked, claimed, or active Beads issue. It also rejects
-live scope conflicts and a second active delegation for the same issue. The
+When `--bead` is supplied, the launcher rejects a blocked, claimed, or active
+issue and a second active delegation for the same issue. All delegations reject
+live scope conflicts. The
 child hook uses the inherited delegation ID and client identity to attach the
 new session.
 The generated prompt requires every child to read repository instructions,
-verify and claim the issue, declare the exact scopes, obey git authority, and
-report a compact result. An implementation child edits and runs focused
+declare the exact scopes, obey git authority, save work-thread checkpoints, and
+report a compact result. A child with an issue also verifies and claims it,
+records Beads progress, and closes it when its acceptance criteria are met.
+An implementation child edits and runs focused
 validation. A validation child does not edit and reports its independent
 verdict.
 

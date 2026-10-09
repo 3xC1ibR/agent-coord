@@ -121,6 +121,22 @@ class HookTests(unittest.TestCase):
         self.assertEqual(delegation["child_session_id"], "claude-child")
         self.assertEqual(self.store.get_session("claude-child")["client"], "claude")
 
+    def test_session_start_attaches_a_delegation_without_an_issue(self) -> None:
+        self.store.register(session_id="parent", client="codex", cwd=str(self.root))
+        self.store.create_delegation(
+            parent_session_id="parent", cwd=str(self.root), scopes=["src/**"],
+            instructions="Validate a change.", mode="reviewed", delegation_id="direct",
+        )
+
+        with patch.dict("os.environ", {"AGENT_COORD_DELEGATION_ID": "direct"}):
+            result = handle(self.payload("SessionStart"), self.store)
+
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("attached to delegation direct. Authorized scopes: src/**", context)
+        self.assertNotIn("for Bead", context)
+        self.assertIsNone(self.store.get_delegation("direct")["bead_id"])
+        self.assertEqual(self.store.get_delegation("direct")["child_session_id"], "codex-one")
+
     @patch(
         "agent_coord.hook.enable_from_environment",
         side_effect=CoordinationError("zellij unavailable"),

@@ -93,6 +93,13 @@ def _json_object(value: str | None) -> dict[str, Any] | None:
     return parsed
 
 
+def _delegation_label(row: sqlite3.Row) -> str:
+    label = f"Delegation {row['delegation_id']}"
+    if row["bead_id"] is not None:
+        label += f" for Bead {row['bead_id']}"
+    return label
+
+
 def normalize_scope(value: str, cwd: str) -> str:
     candidate = value.strip().replace("\\", "/")
     if not candidate:
@@ -288,7 +295,7 @@ class CoordinationStore:
                     child_session_id TEXT,
                     client TEXT NOT NULL,
                     cwd TEXT NOT NULL,
-                    bead_id TEXT NOT NULL,
+                    bead_id TEXT,
                     write_scope_json TEXT NOT NULL,
                     instructions TEXT NOT NULL,
                     name TEXT,
@@ -503,8 +510,8 @@ class CoordinationStore:
                     handoff_id TEXT PRIMARY KEY,
                     sender_session_id TEXT NOT NULL,
                     recipient_session_id TEXT NOT NULL,
-                    source_bead_id TEXT NOT NULL,
-                    target_bead_id TEXT NOT NULL,
+                    source_bead_id TEXT,
+                    target_bead_id TEXT,
                     scope_json TEXT NOT NULL,
                     patch_label TEXT NOT NULL,
                     validation_boundary TEXT NOT NULL,
@@ -523,6 +530,46 @@ class CoordinationStore:
                     ON handoffs(sender_session_id, recipient_session_id, created_at);
                 """
             )
+            self._migrate_optional_bead_links(connection)
+
+    @staticmethod
+    def _migrate_optional_bead_links(connection: sqlite3.Connection) -> None:
+        # SQLite cannot drop a NOT NULL constraint in place. Rebuild only legacy
+        # tables, keeping all columns, rows, indexes, and triggers in one transaction.
+        connection.execute("BEGIN IMMEDIATE")
+        for table, columns in (
+            ("delegations", ("bead_id",)),
+            ("handoffs", ("source_bead_id", "target_bead_id")),
+        ):
+            metadata = list(connection.execute(f"PRAGMA table_info({table})"))
+            if not any(row["name"] in columns and row["notnull"] for row in metadata):
+                continue
+            schema = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()["sql"]
+            for column in columns:
+                schema = re.sub(
+                    rf"\b{column}\s+TEXT\s+NOT\s+NULL\b",
+                    f"{column} TEXT",
+                    schema,
+                    flags=re.IGNORECASE,
+                )
+            dependencies = list(connection.execute(
+                "SELECT sql FROM sqlite_master WHERE tbl_name = ? "
+                "AND type IN ('index', 'trigger') AND sql IS NOT NULL",
+                (table,),
+            ))
+            replacement = f"{table}_optional_beads"
+            connection.execute(f"CREATE TABLE {replacement} " + schema[schema.index("("):])
+            fields = ", ".join(f'"{row["name"]}"' for row in metadata)
+            connection.execute(
+                f"INSERT INTO {replacement} ({fields}) SELECT {fields} FROM {table}"
+            )
+            connection.execute(f"DROP TABLE {table}")
+            connection.execute(f"ALTER TABLE {replacement} RENAME TO {table}")
+            for dependency in dependencies:
+                connection.execute(dependency["sql"])
 
     def _row_to_session(
         self, row: sqlite3.Row, now: float | None = None
@@ -1076,6 +1123,10 @@ class CoordinationStore:
                 delegated = delegated_rows[0]
                 delegated_scopes = _json_scopes(delegated["write_scope_json"])
                 if normalized_bead != delegated["bead_id"]:
+                    if delegated["bead_id"] is None:
+                        raise CoordinationError(
+                            f"Delegation {delegated['delegation_id']} does not use a Bead."
+                        )
                     raise CoordinationError(
                         f"Delegation {delegated['delegation_id']} requires Bead "
                         f"{delegated['bead_id']}."
@@ -1225,11 +1276,6 @@ class CoordinationStore:
                 raise CoordinationError(
                     f"Sender session {sender_session_id} must be online."
                 )
-            if sender_row["bead_id"] is None:
-                raise CoordinationError(
-                    "Atomic handoff requires a Bead-backed work declaration; "
-                    f"session {sender_session_id} has no Bead."
-                )
             sender_scopes = _json_scopes(sender_row["write_scope_json"])
             if not sender_scopes:
                 raise CoordinationError("The sender declaration has no scopes.")
@@ -1267,13 +1313,13 @@ class CoordinationStore:
                     f"Recipient session {recipient_session_id} must be idle and "
                     "have no work declaration."
                 )
-            source_bead_id = str(sender_row["bead_id"])
+            source_bead_id = sender_row["bead_id"]
             target = (
                 source_bead_id
                 if target_bead_id is None
                 else target_bead_id.strip()
             )
-            if not target:
+            if target_bead_id is not None and not target:
                 raise CoordinationError("Target Bead ID must not be empty.")
 
             connection.execute(
@@ -1311,9 +1357,15 @@ class CoordinationStore:
                     recipient_session_id,
                 ),
             )
+            bead_context = ""
+            if source_bead_id is not None:
+                bead_context = f"Bead: {source_bead_id} to {target}. "
+            elif target is not None:
+                bead_context = f"Bead: {target}. "
             notification_body = (
                 f"Handoff {identifier}: patch {patch_label.strip()} transferred "
-                f"{source_bead_id} to {target} in {mode} mode. Validation boundary: "
+                f"from {sender_session_id} to {recipient_session_id} in {mode} mode. "
+                f"{bead_context}Validation boundary: "
                 f"{validation_boundary.strip()}. Validation responsibility: "
                 f"{validation_responsibility.strip()}."
             )
@@ -1438,7 +1490,7 @@ class CoordinationStore:
         self,
         *,
         cwd: str,
-        bead_id: str,
+        bead_id: str | None = None,
         scopes: Iterable[str],
         exclude_session_id: str = "",
     ) -> list[dict[str, Any]]:
@@ -1460,7 +1512,7 @@ class CoordinationStore:
         *,
         parent_session_id: str,
         cwd: str,
-        bead_id: str,
+        bead_id: str | None = None,
         scopes: Iterable[str],
         instructions: str,
         mode: str,
@@ -1475,8 +1527,9 @@ class CoordinationStore:
     ) -> dict[str, Any]:
         self.get_session(parent_session_id)
         repository = str(Path(cwd).resolve())
-        if not bead_id.strip():
-            raise CoordinationError("Delegated Bead ID must not be empty.")
+        normalized_bead = bead_id.strip() if bead_id is not None else None
+        if bead_id is not None and not normalized_bead:
+            raise CoordinationError("Delegated Bead ID must not be empty when supplied.")
         normalized = sorted(
             {normalize_scope(scope, repository) for scope in scopes}
         )
@@ -1531,7 +1584,7 @@ class CoordinationStore:
                         parent_session_id,
                         client,
                         repository,
-                        bead_id.strip(),
+                        normalized_bead,
                         json.dumps(normalized),
                         instructions.strip(),
                         normalized_name,
@@ -1553,7 +1606,7 @@ class CoordinationStore:
                     WHERE cwd = ? AND bead_id = ?
                       AND status IN ('launching', 'launched', 'attached')
                     """,
-                    (repository, bead_id.strip()),
+                    (repository, normalized_bead),
                 ).fetchone()
             if active is not None:
                 raise CoordinationError(
@@ -1731,8 +1784,7 @@ class CoordinationStore:
                     sender_session_id=sender_id,
                     recipient_session_id=row["parent_session_id"],
                     body=(
-                        f"Delegation {delegation_id} for Bead {row['bead_id']} "
-                        f"failed: {reason}"
+                        f"{_delegation_label(row)} failed: {reason}"
                     ),
                     classification="action_required",
                     thread_id=f"delegation:{delegation_id}",
@@ -1993,8 +2045,7 @@ class CoordinationStore:
                 ),
             )
             notification = (
-                f"Delegation {delegation_id} for Bead {row['bead_id']} "
-                f"{outcome}: {message.strip()}"
+                f"{_delegation_label(row)} {outcome}: {message.strip()}"
             )
             self._insert_message(
                 connection,
@@ -2038,8 +2089,7 @@ class CoordinationStore:
                     (reason.strip(), reason.strip(), now, now, row["delegation_id"]),
                 )
                 notification = (
-                    f"Delegation {row['delegation_id']} for Bead {row['bead_id']} "
-                    f"failed: {reason.strip()}"
+                    f"{_delegation_label(row)} failed: {reason.strip()}"
                 )
                 self._insert_message(
                     connection,

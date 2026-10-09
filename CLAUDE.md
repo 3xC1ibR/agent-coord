@@ -15,10 +15,17 @@ and Claude plugin. Keep the two client manifests thin. Put shared behavior in
 `plugins/agent-coord/scripts/agent_coord/` and shared agent guidance in
 `plugins/agent-coord/skills/agent-coordination/`.
 
-Before implementation, claim a Beads issue and declare the smallest useful file
-scope with the bundled `agent-coord begin-work` command. Do not edit when the
-command reports a conflict. Release the declaration with `agent-coord end-work`
-when the session no longer owns the scope.
+Before implementation, inspect concurrent sessions and declare the smallest
+useful file scope with `agent-coord begin-work` when another session is active.
+Do not edit when the command reports a conflict. Release the declaration with
+`agent-coord end-work` when the session no longer owns the scope.
+
+Beads is optional for direct work, delegation, and handoff. Use Agent Coord
+work-thread checkpoints by default. When the user selects Beads or supplies an
+issue, follow its workflow and claim the issue before declaring it with `--bead`.
+Do not create a Beads issue solely to unlock work, and do not block work without
+an issue on an absent or uninitialized Beads installation. The Beads guidance
+below applies only when that integration is selected.
 
 Run the test suite with:
 
@@ -34,7 +41,7 @@ or reuse a session that loaded the previous plugin version.
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+This project supports **bd (beads)** as optional issue tracking. When using it, run `bd prime` to see full workflow context and commands.
 
 ### Quick Reference
 
@@ -47,8 +54,8 @@ bd close <id>         # Complete work
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
+- When Beads is selected, use `bd` for issue tracking. Otherwise use Agent Coord work-thread checkpoints; do not create markdown TODO lists.
+- When using Beads, run `bd prime` for detailed command reference and session close protocol.
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
@@ -57,7 +64,7 @@ bd close <id>         # Complete work
 
 The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
 
-- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
+- **Conservative (default)**: Use `bd` when Beads is selected. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
 - **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
 - **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
 

@@ -253,7 +253,7 @@ def handle(
             "Explicit --session-id and --from-session override it. Use the agent-coordination skill "
             "before implementation. A sole active session may write without a "
             "Beads issue or scope. When another session is active, declare the "
-            "smallest write scope; a Beads issue is optional for direct work. "
+            "smallest write scope; Beads is optional for all coordination workflows. "
             "To review or organize the user's threads across workspaces, use the "
             "manage-threads skill. Use thread list without --cwd for discovery; "
             "use a known session ID directly for a specific thread. To close "
@@ -272,9 +272,12 @@ def handle(
                 delegation_warning = str(exc)
             else:
                 scopes = ", ".join(delegation["write_scope"])
+                bead_context = (
+                    f" for Bead {delegation['bead_id']}"
+                    if delegation["bead_id"] is not None else ""
+                )
                 text += (
-                    f" This session is attached to delegation {delegation_id} "
-                    f"for Bead {delegation['bead_id']}. Authorized scopes: "
+                    f" This session is attached to delegation {delegation_id}{bead_context}. Authorized scopes: "
                     f"{scopes}."
                 )
                 if delegation["runtime_kind"] == "managed-pty":

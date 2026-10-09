@@ -12,7 +12,7 @@ PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scri
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
 from agent_coord.delegate import delegate_work, validate_ready_bead
-from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.store import ConflictError, CoordinationError, CoordinationStore
 
 
 class FakeRun:
@@ -176,6 +176,71 @@ class DelegateTests(unittest.TestCase):
         self.assertEqual(result["delegation"]["runtime_kind"], "managed-pty")
         self.assertIn("supervise", result["command"])
         self.assertIn("/mock/codex", result["client_command"])
+        self.assertEqual(self.store.list_delegations(), [])
+
+    def test_delegation_without_beads_does_not_look_up_or_run_bd(self) -> None:
+        def without_bd(name):
+            self.assertNotEqual(name, "bd", "An untracked task must not consult Beads")
+            return self.which(name)
+
+        runner = FakeRun(self.root)
+        first = self.delegate(runner, bead_id=None, pane_name=None, which=without_bd)
+        second = self.delegate(
+            runner, bead_id=None, scopes=["tests/**"], which=without_bd,
+        )
+
+        self.assertIsNone(first["delegation"]["bead_id"])
+        self.assertEqual(first["delegation"]["name"], "codex-worker")
+        self.assertNotEqual(first["delegation"]["delegation_id"], second["delegation"]["delegation_id"])
+        self.assertEqual(len(self.store.list_delegations()), 2)
+        self.assertFalse(any(call[0][0] == "/mock/bd" for call in runner.calls))
+
+    def test_prompts_without_beads_use_work_thread_checkpoints_for_both_clients(self) -> None:
+        for client in ("codex", "claude"):
+            for lease_mode in ("write", "validation"):
+                with self.subTest(client=client, lease_mode=lease_mode):
+                    result = self.delegate(
+                        FakeRun(self.root), bead_id=None, client=client,
+                        lease_mode=lease_mode, dry_run=True,
+                    )
+                    prompt = result["client_command"][-1]
+                    self.assertIsNone(result["bead"])
+                    self.assertNotIn("Bead", prompt)
+                    self.assertNotIn("`bd ", prompt)
+                    self.assertNotIn("--bead", prompt)
+                    self.assertIn("Agent Coord work-thread checkpoints", prompt)
+                    self.assertIn("begin-work --session-id <your-session-id>", prompt)
+                    self.assertIn("delegation finish", prompt)
+                    if lease_mode == "validation":
+                        self.assertIn("--lease-mode validation", prompt)
+                        self.assertIn("Do not edit repository files", prompt)
+
+    def test_explicit_bead_still_requires_bd(self) -> None:
+        with self.assertRaisesRegex(CoordinationError, "bd"):
+            self.delegate(
+                FakeRun(self.root),
+                which=lambda name: None if name == "bd" else self.which(name),
+            )
+        self.assertEqual(self.store.list_delegations(), [])
+
+    def test_explicit_bead_errors_do_not_fall_back_to_untracked_work(self) -> None:
+        runner = FakeRun(self.root)
+
+        def broken_bd(command, **options):
+            if command[0] == "/mock/bd":
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="database not initialized")
+            return runner(command, **options)
+
+        with self.assertRaisesRegex(CoordinationError, "database not initialized"):
+            self.delegate(runner, run=broken_bd)
+        self.assertEqual(self.store.list_delegations(), [])
+
+    def test_delegation_without_beads_still_rejects_live_scope_conflicts(self) -> None:
+        self.store.register(session_id="peer", client="claude", cwd=str(self.root))
+        self.store.begin_work(session_id="peer", scopes=["src/api.py"])
+
+        with self.assertRaises(ConflictError):
+            self.delegate(FakeRun(self.root), bead_id=None)
         self.assertEqual(self.store.list_delegations(), [])
 
     def test_validation_launch_records_lease_and_generates_non_editing_prompt(

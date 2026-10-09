@@ -50,6 +50,95 @@ class CoordinationStoreTests(unittest.TestCase):
             name=session_id,
         )
 
+    def test_legacy_bead_constraints_migrate_without_losing_history(self) -> None:
+        self.register("parent")
+        self.register("child")
+        message = self.store.send_message(
+            sender_session_id="parent", recipient_session_id="child", body="Legacy handoff.",
+        )
+        with self.store._connection() as connection:
+            connection.executescript("""
+                DROP TABLE handoffs;
+                DROP TABLE delegations;
+                CREATE TABLE delegations (
+                    delegation_id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL,
+                    child_session_id TEXT, client TEXT NOT NULL, cwd TEXT NOT NULL,
+                    bead_id TEXT NOT NULL, write_scope_json TEXT NOT NULL,
+                    instructions TEXT NOT NULL, status TEXT NOT NULL,
+                    zellij_session TEXT, pane_id TEXT, mode TEXT NOT NULL,
+                    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                    completed_at REAL, result_message TEXT, error TEXT,
+                    model TEXT, token_usage_json TEXT,
+                    FOREIGN KEY(parent_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(child_session_id) REFERENCES sessions(session_id)
+                );
+                CREATE INDEX legacy_delegation_model_idx ON delegations(model);
+                CREATE TABLE handoffs (
+                    handoff_id TEXT PRIMARY KEY, sender_session_id TEXT NOT NULL,
+                    recipient_session_id TEXT NOT NULL, source_bead_id TEXT NOT NULL,
+                    target_bead_id TEXT NOT NULL, scope_json TEXT NOT NULL,
+                    patch_label TEXT NOT NULL, validation_boundary TEXT NOT NULL,
+                    validation_responsibility TEXT NOT NULL, mode TEXT NOT NULL,
+                    thread_id TEXT NOT NULL, notification_message_id INTEGER NOT NULL UNIQUE,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(sender_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(recipient_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(thread_id) REFERENCES message_threads(thread_id),
+                    FOREIGN KEY(notification_message_id) REFERENCES messages(id)
+                );
+            """)
+            connection.execute("""
+                INSERT INTO delegations (
+                    delegation_id, parent_session_id, child_session_id, client, cwd,
+                    bead_id, write_scope_json, instructions, status, mode,
+                    created_at, updated_at, model, token_usage_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "legacy-delegation", "parent", "child", "codex", str(self.root.resolve()),
+                "work-a", '["src/**"]', "Existing work.", "attached", "reviewed",
+                self.clock(), self.clock(), "existing-model", '{"total_tokens":42}',
+            ))
+            connection.execute("""
+                INSERT INTO handoffs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "legacy-handoff", "parent", "child", "work-before", "work-a",
+                '["src/**"]', "existing-patch", "unit tests passed", "full suite",
+                "validation", message["thread_id"], message["id"], self.clock(),
+            ))
+
+        for _ in range(2):
+            migrated = CoordinationStore(self.store.database_path, clock=self.clock)
+            delegation = migrated.get_delegation("legacy-delegation")
+            handoff = migrated.get_handoff("legacy-handoff")
+            self.assertEqual(delegation["bead_id"], "work-a")
+            self.assertEqual(delegation["model"], "existing-model")
+            self.assertEqual(delegation["token_usage"], {"total_tokens": 42})
+            self.assertEqual(handoff["source_bead_id"], "work-before")
+            self.assertEqual(handoff["target_bead_id"], "work-a")
+            self.assertEqual(handoff["notification_message_id"], message["id"])
+            with migrated._connection() as connection:
+                for table, fields in (
+                    ("delegations", {"bead_id"}),
+                    ("handoffs", {"source_bead_id", "target_bead_id"}),
+                ):
+                    columns = list(connection.execute(f"PRAGMA table_info({table})"))
+                    self.assertFalse(any(row["notnull"] for row in columns if row["name"] in fields))
+                indexes = {row["name"] for row in connection.execute("PRAGMA index_list(delegations)")}
+                self.assertIn("legacy_delegation_model_idx", indexes)
+                self.assertIn("delegations_active_work_idx", indexes)
+                self.assertEqual(list(connection.execute("PRAGMA foreign_key_check")), [])
+
+        with self.assertRaisesRegex(CoordinationError, "active delegation"):
+            migrated.create_delegation(
+                parent_session_id="parent", cwd=str(self.root), bead_id="work-a",
+                scopes=["tests/**"], instructions="Duplicate issue.", mode="reviewed",
+            )
+        untracked = migrated.create_delegation(
+            parent_session_id="parent", cwd=str(self.root), scopes=["docs/**"],
+            instructions="Work without an issue.", mode="reviewed",
+        )
+        self.assertIsNone(untracked["bead_id"])
+
     def test_existing_database_adds_turn_activity_column(self) -> None:
         database = self.root / "legacy.sqlite3"
         with closing(sqlite3.connect(database)) as connection:
@@ -647,6 +736,41 @@ class CoordinationStoreTests(unittest.TestCase):
                 session_id="sender", bead_id="work-c", scopes=["src/api.py"]
             )
 
+    def test_atomic_scope_only_handoff_preserves_ownership_and_validation_lease(self) -> None:
+        self.register("sender")
+        self.register("recipient", "claude")
+        self.store.begin_work(session_id="sender", scopes=["src/**", "tests/**"])
+        arguments = dict(
+            sender_session_id="sender", recipient_session_id="recipient",
+            patch_label="feature", validation_boundary="unit tests passed",
+            validation_responsibility="run full suite", mode="validation",
+        )
+        with self.assertRaisesRegex(CoordinationError, "Partial scope"):
+            self.store.handoff_work(**arguments, scopes=["src/**"])
+        with self.assertRaisesRegex(CoordinationError, "Target Bead ID must not be empty"):
+            self.store.handoff_work(**arguments, target_bead_id=" ")
+        with patch.object(self.store, "_insert_message", side_effect=CoordinationError("failed notification")):
+            with self.assertRaisesRegex(CoordinationError, "failed notification"):
+                self.store.handoff_work(**arguments)
+        self.assertEqual(self.store.get_session("sender")["write_scope"], ["src/**", "tests/**"])
+        self.assertEqual(self.store.get_session("recipient")["write_scope"], [])
+
+        handoff = self.store.handoff_work(**arguments)
+
+        self.assertIsNone(handoff["source_bead_id"])
+        self.assertIsNone(handoff["target_bead_id"])
+        self.assertEqual(self.store.get_session("sender")["write_scope"], [])
+        recipient = self.store.get_session("recipient")
+        self.assertEqual(recipient["write_scope"], ["src/**", "tests/**"])
+        self.assertEqual(recipient["lease_mode"], "validation")
+        self.assertEqual(recipient["activity"], "validating")
+        inbox = self.store.inbox("recipient")
+        self.assertEqual(len(inbox), 1)
+        self.assertIn("from sender to recipient", inbox[0]["body"])
+        self.assertNotIn("None", inbox[0]["body"])
+        with self.assertRaises(ConflictError):
+            self.store.begin_work(session_id="sender", scopes=["src/app.py"])
+
     def test_handoff_rejects_partial_scope_and_non_idle_recipient_without_mutation(self) -> None:
         self.register("sender")
         self.register("recipient", "claude")
@@ -1092,6 +1216,32 @@ class CoordinationStoreTests(unittest.TestCase):
         )
         self.assertEqual(session["lease_mode"], "validation")
         self.assertEqual(session["activity"], "validating")
+
+    def test_delegation_without_beads_enforces_scope_and_reports_by_delegation_id(self) -> None:
+        self.register("parent")
+        self.register("child")
+        self.store.create_delegation(
+            parent_session_id="parent", cwd=str(self.root), scopes=["src/**"],
+            instructions="Validate the change.", mode="reviewed", lease_mode="validation",
+            delegation_id="untracked",
+        )
+        self.store.attach_delegation("untracked", "child")
+        with self.assertRaisesRegex(CoordinationError, "does not use a Bead"):
+            self.store.begin_work(session_id="child", bead_id="invented", scopes=["src/**"], lease_mode="validation")
+        with self.assertRaisesRegex(CoordinationError, "requires its exact scopes"):
+            self.store.begin_work(session_id="child", scopes=["tests/**"], lease_mode="validation")
+        with self.assertRaisesRegex(CoordinationError, "requires lease mode validation"):
+            self.store.begin_work(session_id="child", scopes=["src/**"])
+        self.store.begin_work(session_id="child", scopes=["src/**"], lease_mode="validation")
+        self.store.end_work("child")
+
+        result = self.store.finish_delegation(
+            "untracked", child_session_id="child", outcome="completed", message="All checks passed.",
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIsNone(result["bead_id"])
+        self.assertEqual(self.store.inbox("parent")[0]["body"], "Delegation untracked completed: All checks passed.")
 
     def test_claude_delegation_records_and_matches_child_client(self) -> None:
         self.register("parent")

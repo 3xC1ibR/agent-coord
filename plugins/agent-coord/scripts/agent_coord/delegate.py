@@ -116,6 +116,44 @@ def build_child_prompt(delegation: Mapping[str, Any], *, agent_coord_cli: str) -
     client_label = _CLIENT_LABELS[str(delegation["client"])]
     scopes = "\n".join(f"- {scope}" for scope in delegation["write_scope"])
     lease_mode = str(delegation.get("lease_mode", "write"))
+    bead_id = delegation.get("bead_id")
+    bead_context = f"Bead: {bead_id}\n" if bead_id is not None else ""
+    begin_command = f"{agent_coord_cli} begin-work --session-id <your-session-id>"
+    preparation = [
+        "Read all applicable repository instructions, including AGENTS.md and/or CLAUDE.md files."
+    ]
+    if bead_id is not None:
+        preparation.extend([
+            f"Run `bd prime`, `bd ready`, and `bd show {bead_id}`. Stop if the Bead is not open and ready.",
+            f"Claim the Bead with `bd update {bead_id} --claim`.",
+        ])
+        begin_command += f" --bead {bead_id}"
+    if lease_mode == "validation":
+        begin_command += " --activity validating --lease-mode validation"
+    preparation.append(
+        "Use the session ID from the Agent Coord SessionStart hook to run "
+        f"`{begin_command}` with one `--scope` argument for each exact scope above."
+    )
+    preparation.append(
+        "Validate only the requested work. Do not edit repository files or remediate findings. "
+        "Obey repository validation and git-authority rules."
+        if lease_mode == "validation"
+        else "Implement only the requested work and obey repository validation, service-boundary, "
+        "changelog, documentation, and git-authority rules. Do not commit or push unless the "
+        "repository instructions or user explicitly authorize it."
+    )
+    preparation_text = "\n".join(
+        f"{index}. {step}" for index, step in enumerate(preparation, 1)
+    )
+    tracking = "Save Agent Coord work-thread checkpoints at meaningful boundaries."
+    completion = ""
+    failure_note = "save a work-thread checkpoint with the blocker and next action"
+    details = "work-thread checkpoint or artifact path"
+    if bead_id is not None:
+        tracking += " Also record progress and findings in the Bead."
+        completion = "Close the Bead only when its acceptance criteria are complete. "
+        failure_note = "add a Beads note with the blocker and next action"
+        details = "Beads note or artifact path"
     finish_prefix = (
         f"{agent_coord_cli} delegation finish --delegation-id "
         f"{delegation['delegation_id']} --session-id <your-session-id>"
@@ -126,25 +164,19 @@ def build_child_prompt(delegation: Mapping[str, Any], *, agent_coord_cli: str) -
 Delegation ID: {delegation["delegation_id"]}
 Parent session: {delegation["parent_session_id"]}
 Repository: {delegation["cwd"]}
-Bead: {delegation["bead_id"]}
-Authorized validation scopes:
+{bead_context}Authorized validation scopes:
 {scopes}
 
 Requested validation:
 {delegation["instructions"]}
 
 Before validation, follow this sequence:
-1. Read all applicable repository instructions and run `bd prime`.
-2. Run `bd ready` and `bd show {delegation["bead_id"]}`. Stop if the Bead is not open and ready.
-3. Claim the Bead with `bd update {delegation["bead_id"]} --claim`.
-4. Use the session ID from the Agent Coord SessionStart hook to run:
-   `{agent_coord_cli} begin-work --session-id <your-session-id> --bead {delegation["bead_id"]} --activity validating --lease-mode validation` with one `--scope` argument for each exact scope above.
-5. Validate only the requested work. Do not edit repository files or remediate findings. Obey repository validation and git-authority rules.
+{preparation_text}
 
-Record a Beads checkpoint with the commands, verdict, findings, and next action. A failed check is a completed validation result when every required check ran and you reported the failure. Close the Bead when its validation acceptance criteria are complete. Release the declaration with `{agent_coord_cli} end-work --session-id <your-session-id>`, then report with:
-`{finish_prefix} --outcome completed --message "Verdict: <pass-or-fail>; Commands: <command, exit status, duration, and concise summary>; Findings: <material findings or none>; Repository changes: <none or unexpected paths>; Details: <Beads note or artifact path>"`
+{tracking} Record the commands, verdict, findings, and next action. A failed check is a completed validation result when every required check ran and you reported the failure. {completion}Release the declaration with `{agent_coord_cli} end-work --session-id <your-session-id>`, then report with:
+`{finish_prefix} --outcome completed --message "Verdict: <pass-or-fail>; Commands: <command, exit status, duration, and concise summary>; Findings: <material findings or none>; Repository changes: <none or unexpected paths>; Details: <{details}>"`
 
-Do not paste full successful logs into the result. If required validation cannot run, add a Beads note with the blocker, release the declaration, then report with:
+Do not paste full successful logs into the result. If required validation cannot run, {failure_note}, release the declaration, then report with:
 `{finish_prefix} --outcome failed --message "<exact blocker or incomplete validation>"`
 
 Always run one of the two `delegation finish` commands before your {client_label} process exits. The SessionEnd hook will record an unfinished exit as a failure."""
@@ -153,25 +185,19 @@ Always run one of the two `delegation finish` commands before your {client_label
 Delegation ID: {delegation["delegation_id"]}
 Parent session: {delegation["parent_session_id"]}
 Repository: {delegation["cwd"]}
-Bead: {delegation["bead_id"]}
-Authorized write scopes:
+{bead_context}Authorized write scopes:
 {scopes}
 
 Requested work:
 {delegation["instructions"]}
 
 Before editing, follow this sequence:
-1. Read all applicable agent instructions for this repository, including AGENTS.md and/or CLAUDE.md files, and run `bd prime`.
-2. Run `bd ready` and `bd show {delegation["bead_id"]}`. Stop and report failure if the Bead is no longer open and ready.
-3. Claim the Bead with `bd update {delegation["bead_id"]} --claim`.
-4. Use the session ID announced by the Agent Coord SessionStart hook to run:
-   `{agent_coord_cli} begin-work --session-id <your-session-id> --bead {delegation["bead_id"]}` with one `--scope` argument for each exact scope above.
-5. Implement only the requested work and obey repository validation, service-boundary, changelog, documentation, and git-authority rules. Do not commit or push unless the repository instructions or user explicitly authorize it.
+{preparation_text}
 
-At each meaningful boundary, record a Beads checkpoint. If the work succeeds, run the required validation, close the Bead only when its acceptance criteria are genuinely complete, release the declaration with `{agent_coord_cli} end-work --session-id <your-session-id>`, then report with:
+{tracking} If the work succeeds, run the required validation. {completion}Release the declaration with `{agent_coord_cli} end-work --session-id <your-session-id>`, then report with:
 `{finish_prefix} --outcome completed --message "Result: <concise outcome>; Changed paths: <paths or none>; Validation: <command, exit status, and concise summary>; Deviations or risks: <details or none>"`
 
-Do not paste full successful logs into the result. If the work cannot complete, add a Beads note with the blocker and next action, release the declaration if active, then report with:
+Do not paste full successful logs into the result. If the work cannot complete, {failure_note}, release the declaration if active, then report with:
 `{finish_prefix} --outcome failed --message "<exact blocker or failure>"`
 
 Always run one of the two `delegation finish` commands before your {client_label} process exits. The SessionEnd hook will record an unfinished exit as a failure."""
@@ -298,7 +324,7 @@ def delegate_work(
     *,
     parent_session_id: str,
     cwd: str,
-    bead_id: str,
+    bead_id: str | None = None,
     scopes: Iterable[str],
     instructions: str,
     zellij_session: str | None = None,
@@ -329,6 +355,10 @@ def delegate_work(
         )
     if not instructions.strip():
         raise CoordinationError("Delegated instructions must not be empty.")
+    if bead_id is not None:
+        bead_id = bead_id.strip()
+        if not bead_id:
+            raise CoordinationError("Delegated Bead ID must not be empty when supplied.")
     if bypass_hook_trust and target_client != "codex":
         raise CoordinationError("--bypass-hook-trust is only supported for Codex.")
     target_model = _optional_client_setting(model, f"{client_label} model")
@@ -350,7 +380,6 @@ def delegate_work(
         )
 
     git_executable = _required_executable("git", which)
-    bd_executable = _required_executable("bd", which)
     client_executable = _required_executable(target_client, which)
     zellij_executable = None
     env_executable = None
@@ -361,12 +390,14 @@ def delegate_work(
     normalized_scopes = sorted({normalize_scope(scope, repository) for scope in scopes})
     if not normalized_scopes:
         raise CoordinationError("At least one delegated scope is required.")
-    issue = validate_ready_bead(
-        bead_id,
-        repository,
-        bd_executable=bd_executable,
-        run=run,
-    )
+    issue = None
+    if bead_id is not None:
+        issue = validate_ready_bead(
+            bead_id,
+            repository,
+            bd_executable=_required_executable("bd", which),
+            run=run,
+        )
     conflicts = store.proposed_work_conflicts(
         cwd=repository,
         bead_id=bead_id,
@@ -375,7 +406,7 @@ def delegate_work(
     if conflicts:
         raise ConflictError(conflicts)
     for active in store.list_delegations(include_terminal=False):
-        if active["cwd"] == repository and active["bead_id"] == bead_id:
+        if bead_id is not None and active["cwd"] == repository and active["bead_id"] == bead_id:
             raise CoordinationError(
                 f"Bead {bead_id} already has active delegation "
                 f"{active['delegation_id']}."
@@ -416,7 +447,7 @@ def delegate_work(
         raise CoordinationError(
             "A Zellij session is required. Pass --zellij-session or run inside Zellij."
         )
-    target_name = pane_name or f"{target_client}-{bead_id}"
+    target_name = pane_name or f"{target_client}-{bead_id or 'worker'}"
     mode = "yolo" if yolo else "reviewed"
     agent_coord_cli = str(Path(__file__).resolve().parents[1] / "agent-coord")
 
