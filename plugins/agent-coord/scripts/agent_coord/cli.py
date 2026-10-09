@@ -123,6 +123,25 @@ def _parser() -> argparse.ArgumentParser:
     dispatch_history.add_argument("--session-id", help="Dispatcher; defaults to the current caller.")
     dispatch_history.add_argument("--after", type=int, default=0, help="Event cursor returned by the previous page.")
     dispatch_history.add_argument("--limit", type=int, default=20)
+    dispatch_evaluate = thread_commands.add_parser("dispatch-evaluate", help="Export local routing evidence and replay decisions without thread delivery.")
+    dispatch_evaluate.add_argument("--session-id", help="Dispatcher; defaults to the current caller.")
+    dispatch_evaluate.add_argument("--request-id", help="Inspect one stable request ID.")
+    dispatch_evaluate.add_argument("--after", type=int, default=0, help="Request cursor returned by the previous page.")
+    dispatch_evaluate.add_argument("--limit", type=int, default=20)
+    dispatch_evaluate.add_argument("--live", action="store_true", help="Re-score saved inputs with Jev; never send to app threads.")
+    dispatch_evaluate.add_argument("--policy", choices=("baseline", "continuity"), help="Prompt variant; requires --live.")
+    dispatch_evaluate.add_argument("--model", help="Jev model; requires --live.")
+    dispatch_evaluate.add_argument("--instructions-file", help="Replace classifier instructions with this UTF-8 file; requires --live.")
+    for gate in ("confidence", "probability", "margin"):
+        dispatch_evaluate.add_argument("--" + gate, type=float, help="Override the saved minimum " + gate + ".")
+    dispatch_label = thread_commands.add_parser("dispatch-label", help="Append an evaluation label without rerouting or waking a thread.")
+    dispatch_label.add_argument("--session-id", help="Dispatcher; defaults to the current caller.")
+    dispatch_label.add_argument("--request-id", required=True)
+    dispatch_label.add_argument("--action", choices=("reuse", "new", "dispatcher"), required=True)
+    dispatch_label.add_argument("--target-thread", help="Expected destination for reuse.")
+    dispatch_label.add_argument("--source", choices=("user", "review"), default="review",
+                                help="Use user only for an explicit user-confirmed destination; default review.")
+    dispatch_label.add_argument("--note", default="")
     create_agent = thread_commands.add_parser("create", help="Create an independent app agent and route its first request.")
     create_agent.add_argument("--from-session", help="Dispatcher; defaults to the current caller.")
     create_agent.add_argument("--cwd", default=os.getcwd())
@@ -490,6 +509,30 @@ def run(arguments: argparse.Namespace) -> Any:
                 flag = "--" + field.replace("_", "-")
                 raise CoordinationError(f"No caller session. Pass {flag}, or set AGENT_COORD_SESSION_ID (Codex also supports CODEX_THREAD_ID).")
             setattr(arguments, field, identity)
+    if command == "thread" and arguments.thread_command in {"dispatch-evaluate", "dispatch-label"}:
+        # Evaluation must not initialize/migrate the app store or resume a provider.
+        import sqlite3
+        from .dispatch_evaluation import evaluate, label_request
+        try:
+            if arguments.thread_command == "dispatch-label":
+                return label_request(arguments.db, arguments.session_id, arguments.request_id, arguments.action,
+                                     target_id=arguments.target_thread, source=arguments.source, note=arguments.note)
+            overrides = {"min_" + key: getattr(arguments, key) for key in ("confidence", "probability", "margin")
+                         if getattr(arguments, key) is not None}
+            if arguments.policy:
+                overrides["name"] = arguments.policy
+            if arguments.model:
+                overrides["model"] = arguments.model
+            instructions = None
+            if arguments.instructions_file:
+                with Path(arguments.instructions_file).expanduser().open(encoding="utf-8") as stream:
+                    instructions = stream.read(64001)
+                if not instructions.strip() or len(instructions) > 64000:
+                    raise CoordinationError("Classifier instructions must contain 1–64000 characters.")
+            return evaluate(arguments.db, arguments.session_id, after=arguments.after, limit=arguments.limit,
+                            request_id=arguments.request_id, overrides=overrides, live=arguments.live, instructions=instructions)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            raise CoordinationError("Cannot evaluate routing records: " + str(exc)) from exc
     store = CoordinationStore(arguments.db)
     if command == "register":
         return store.register(

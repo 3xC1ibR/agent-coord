@@ -7,6 +7,7 @@ placement and cache warmth never override continuity or execution guards.
 from __future__ import annotations
 
 import copy
+import hashlib
 import http.client
 import json
 import math
@@ -16,6 +17,9 @@ from pathlib import Path
 
 from .attention import ClassificationError, MODEL
 
+PROMPT_VERSION = 1
+RETRIEVAL_VERSION = 1
+DECISION_VERSION = 1
 STOP = set("a an and are as at be been but by can could do for from have how i if in into is it its just me my of on or our please so some that the their them then there these they this those to up us was we what when where which who will with would you your also add make support use using new thread agent request work want need existing".split())
 
 
@@ -87,7 +91,7 @@ def _recent_threads(snapshot, request):
     return list(inventory.values())
 
 
-def build_state(snapshot, request, policy=RoutingPolicy()):
+def build_state(snapshot, request, policy=RoutingPolicy(), *, retrieval=None):
     validate_request(request)
     query = terms(request["message"])
     context = request.get("context", [])[-4:]
@@ -126,6 +130,11 @@ def build_state(snapshot, request, policy=RoutingPolicy()):
         pinned = thread["thread_id"] in refs
         ranked.append((pinned, score, thread, latest_user, relevant))
     ranked.sort(key=lambda row: (row[0], row[1], row[2]["thread_id"]), reverse=True)
+    if retrieval is not None:
+        retrieval.extend({"thread_id": t["thread_id"], "title": t.get("title"),
+                          "rank": index + 1, "score": score, "pinned": pinned,
+                          "selected": index < policy.candidate_limit}
+                         for index, (pinned, score, t, _, _) in enumerate(ranked))
     candidates = []
     for index, (_, score, thread, latest_user, relevant) in enumerate(ranked[:policy.candidate_limit]):
         candidate = {key: thread.get(key) for key in (
@@ -191,9 +200,14 @@ def validate_answer(answer, choices):
     return answer
 
 
-def classify(state, config, policy=RoutingPolicy()):
+def classifier_input(state, policy=RoutingPolicy(), *, question=None):
+    return {"model": policy.model, "state": state,
+            "questions": {"destination": question if question is not None else question_for(state, policy)}}
+
+
+def classify(state, config, policy=RoutingPolicy(), *, question=None):
     """Jev Choice API; diagnostics never contain credentials or request content."""
-    question = question_for(state, policy)
+    question = question if question is not None else question_for(state, policy)
     try:
         key = Path(config["api_key_file"]).expanduser().read_text().strip()
         if not key or len(key) > 4096 or any(c.isspace() for c in key):
@@ -201,7 +215,7 @@ def classify(state, config, policy=RoutingPolicy()):
         key.encode("ascii")
     except (OSError, KeyError, TypeError, ValueError, UnicodeError):
         raise ClassificationError("credential_unavailable") from None
-    body = json.dumps({"model": policy.model, "state": state, "questions": {"destination": question}}).replace(key, "[credential redacted]")
+    body = json.dumps(classifier_input(state, policy, question=question)).replace(key, "[credential redacted]")
     connection = http.client.HTTPSConnection("api.typesafe.ai", timeout=policy.timeout)
     try:
         connection.request("POST", "/v1/systemone", body=body.encode(), headers={
@@ -263,8 +277,16 @@ def decide(state, answer, policy=RoutingPolicy()):
             "creation_request_id": candidate["creation_request_id"], "reason": "relevant_context"}
 
 
-def route(snapshot, request, config=None, policy=RoutingPolicy(), *, classifier=classify):
-    state = build_state(snapshot, request, policy)
+def route(snapshot, request, config=None, policy=RoutingPolicy(), *, classifier=classify, on_prepared=None):
+    retrieval = []
+    state = build_state(snapshot, request, policy, retrieval=retrieval)
+    evidence = {"version": 1, "prompt_version": PROMPT_VERSION, "retrieval_version": RETRIEVAL_VERSION,
+                "decision_version": DECISION_VERSION,
+                "captured_at": snapshot["captured_at"], "policy": asdict(policy),
+                "input": classifier_input(state, policy), "retrieval": retrieval}
+    evidence["input_sha256"] = hashlib.sha256(json.dumps(evidence["input"], sort_keys=True).encode()).hexdigest()
+    if on_prepared:
+        on_prepared(copy.deepcopy(evidence))
     try:
         answer = classifier(state, config, policy)
         decision = decide(state, answer, policy)
@@ -272,4 +294,5 @@ def route(snapshot, request, config=None, policy=RoutingPolicy(), *, classifier=
         answer = None
         decision = {"action": "dispatcher", "thread_id": None, "delivery": "llm",
                     "reason": str(exc), "policy": asdict(policy)}
-    return {"request_id": request["request_id"], "state": state, "answer": answer, "decision": decision}
+    return {"request_id": request["request_id"], "state": state, "answer": answer,
+            "decision": decision, "evidence": evidence}

@@ -13,6 +13,7 @@ import uuid
 from .attention import load_config
 from .dispatch_routing import route
 from .dispatch_snapshot import read_snapshot
+from .dispatch_evaluation import initialize_evaluation
 from .image_inputs import message_images
 from .store import CoordinationError
 from .thread_mentions import thread_mentions
@@ -57,6 +58,7 @@ class DispatchRuntime:
                     id INTEGER PRIMARY KEY, dispatcher_id TEXT NOT NULL, request_id INTEGER NOT NULL,
                     payload_json TEXT NOT NULL);
             """)
+            initialize_evaluation(db)
 
     def settings(self, thread_id):
         with self.store._connection() as db:
@@ -238,14 +240,31 @@ class DispatchRuntime:
                    "attachments": bool(body["images"]), "recent_routes": self.recent_routes(dispatcher),
                    "referenced_thread_ids": [m["session_id"] for m in body["mentions"] if m.get("session_id")],
                    "context": [{"role": "user", "text": r["body"]["message"]} for r in recent if r["id"] < identity][-4:]}
+        attempt_id = None
+
+        def prepared(evidence):
+            nonlocal attempt_id
+            with self.store._connection() as db:
+                attempt_id = db.execute("INSERT INTO dispatch_attempts(request_id,started_at,evidence_json) VALUES (?,?,?)",
+                                        (identity, time.time(), json.dumps(evidence))).lastrowid
+
         if body["askDispatcher"] or body["images"]:
             result = {"decision": {"action": "dispatcher", "reason": "direct_request" if body["askDispatcher"] else "attachment_context_required"}}
         else:
-            result = route(read_snapshot(self.store.database_path), request, load_config(self.store.database_path))
+            result = route(read_snapshot(self.store.database_path), request, load_config(self.store.database_path),
+                           on_prepared=prepared)
         decision = result["decision"]
-        evidence = {"candidates": [c["thread_id"] for c in result.get("state", {}).get("candidates", [])],
+        evidence = {**result.get("evidence", {}),
+                    "candidates": [c["thread_id"] for c in result.get("state", {}).get("candidates", [])],
                     "answer": result.get("answer"), "reason": decision["reason"],
+                    "decision": decision,
                     "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}
+        with self.store._connection() as db:
+            if attempt_id is None:
+                db.execute("INSERT INTO dispatch_attempts(request_id,started_at,evidence_json) VALUES (?,?,?)",
+                           (identity, time.time(), json.dumps(evidence)))
+            else:
+                db.execute("UPDATE dispatch_attempts SET evidence_json=? WHERE id=?", (json.dumps(evidence), attempt_id))
         self.update(identity, "routing", decision_json=json.dumps(decision), evidence_json=json.dumps(evidence))
         if not self.settings(dispatcher)["enabled"]:
             self.update(identity, "cancelled", error="Dispatcher mode was turned off.")
