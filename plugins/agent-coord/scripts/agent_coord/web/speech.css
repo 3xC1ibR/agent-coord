@@ -1,0 +1,15 @@
+#speech-toggle[aria-pressed="true"] { color: var(--ink, #222); background: var(--tint, #eee); border-color: var(--line-strong, #ccc); }
+#speech-toggle { flex: 0 0 auto; min-width: 36px; min-height: 36px; }
+.speech-player { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 16px; font-size: 13px; }
+.speech-player[hidden] { display: none; }
+.speech-player span { flex: 1; min-width: 120px; overflow-wrap: anywhere; }
+.speech-dialog { box-sizing: border-box; width: min(460px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; border: 1px solid var(--line, #aaa); border-radius: 12px; background: var(--surface, #fff); color: var(--ink, #222); padding: 24px; }
+.speech-dialog::backdrop { background: #0006; }
+.speech-dialog h2 { margin-top: 0; }
+.speech-dialog p { font-size: 14px; line-height: 1.5; }
+.speech-dialog label { display: grid; gap: 6px; margin: 14px 0; }
+.speech-dialog input { width: 100%; min-height: 40px; box-sizing: border-box; }
+.speech-dialog footer { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.speech-dialog audio { display: block; width: 100%; margin-top: 12px; }
+.speech-dialog a { text-decoration: underline; }
+@media (max-width: 700px) { #speech-toggle { min-width: 44px; min-height: 44px; } .speech-player button { min-height: 44px; } }

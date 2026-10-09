@@ -952,6 +952,7 @@ async function saveSessionPermissions() {
   await refreshList();
 }
 function renderStatus() {
+  globalThis.agentCoordSpeech?.update(state.selected, state.detail, state.config);
   state.rollUp?.changed();
   renderSessionSettings();
   const running = !!state.detail?.running;
@@ -1312,6 +1313,7 @@ function connect() {
   events.onerror = () => { $("connection").textContent = "Reconnecting…"; $("connection").title = "Reconnecting…"; $("connection").dataset.state = "reconnecting"; };
   events.onmessage = message => {
     const batch = JSON.parse(message.data);
+    globalThis.agentCoordSpeech?.receive(batch.completions || []);
     globalThis.agentCoordPanes?.receive(batch);
     // Completions apply to every thread, including when this tab is hidden.
     for (const notification of [...(batch.completions || []), ...(batch.approvals || [])]) {

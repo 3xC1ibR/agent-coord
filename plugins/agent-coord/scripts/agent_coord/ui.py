@@ -31,6 +31,7 @@ from .native_push import NativePush
 from .workspaces import matches_workspace, resolve_workspace
 from .organization import repository_root
 from .workspace_files import workspace_files
+from .speech import Speech, spoken_text
 
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 8765
@@ -271,6 +272,7 @@ def _handler(
 ) -> type[BaseHTTPRequestHandler]:
     views = ViewStore(store)
     navigation = NavigationStore(store)
+    speech = Speech(store.database_path)
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None) -> None:
@@ -291,7 +293,7 @@ def _handler(
                 self.send_header(
                     "Content-Security-Policy",
                     "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-                    "script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors "
+                    "script-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors "
                     + ("'self'" if pane else "'none'"),
                 )
                 self.end_headers()
@@ -365,7 +367,7 @@ def _handler(
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
                 return
-            if parsed.path in {"/thread-actions.js", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
+            if parsed.path in {"/thread-actions.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -454,6 +456,8 @@ def _handler(
                 self._json(HTTPStatus.OK, browser_sessions.desktop_projects())
             elif route == "workspaces":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
+            elif route == "speech/settings":
+                self._json(HTTPStatus.OK, speech.settings())
             elif route == "schedules":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.schedules.list()})
             elif route == "organization":
@@ -586,6 +590,32 @@ def _handler(
                 body = json.loads(raw_body)
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
+                if route == ["api", "browser", "speech", "settings"]:
+                    if not self._local_request():
+                        self._json(HTTPStatus.FORBIDDEN, {"error": "Configure Kokoro in Speech settings on your Mac."})
+                    else:
+                        self._json(HTTPStatus.OK, speech.configure(body))
+                    return
+                if route == ["api", "browser", "speech", "audio"]:
+                    if body == {"test": True}:
+                        text = "Speech is ready. Ribbon Field can read your replies aloud."
+                    else:
+                        if set(body) != {"thread_id", "turn_id"} or any(
+                            not isinstance(value, str) or not 0 < len(value) <= 200 for value in body.values()
+                        ):
+                            raise CoordinationError("Choose a completed chat reply to read aloud.")
+                        detail = browser_sessions.read(body["thread_id"])
+                        turn = next((turn for turn in detail["thread"].get("turns", []) if turn.get("id") == body["turn_id"]), None)
+                        if turn is None:
+                            raise CoordinationError("That reply is no longer available.")
+                        text = spoken_text(turn)
+                    data = speech.synthesize(text)
+                    # Device access may have expired or been revoked during generation.
+                    if not self._authorized():
+                        self._json(HTTPStatus.UNAUTHORIZED, {"error": "Pair this device again to listen."})
+                    else:
+                        self._send(HTTPStatus.OK, "audio/mpeg", data)
+                    return
                 if route == ["api", "browser", "schedules"]:
                     self._json(HTTPStatus.CREATED, browser_sessions.schedules.create(body))
                     return
