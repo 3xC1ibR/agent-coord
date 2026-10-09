@@ -26,3 +26,4 @@ braindump.txt
 .idea/
 dummy-experiment.txt
 .agent-coord/delegations/*.usage.json
+.agent-coord/deployments/
