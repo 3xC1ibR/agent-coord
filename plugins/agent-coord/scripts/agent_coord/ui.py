@@ -367,7 +367,7 @@ def _handler(
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
                 return
-            if parsed.path in {"/thread-actions.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
+            if parsed.path in {"/dispatch.js", "/dispatch.css", "/thread-actions.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -777,10 +777,14 @@ def _handler(
                 if len(route) == 4:
                     result = browser_sessions.update(thread_id, body)
                 elif len(route) == 5 and route[4] == "messages":
-                    result = browser_sessions.send(thread_id, body)
+                    result = browser_sessions.submit(thread_id, body)
                 elif len(route) == 5 and route[4] == "queue":
                     result = (browser_sessions.queue.change(thread_id, body) if "action" in body
-                              else browser_sessions.queue.enqueue(thread_id, body))
+                              else browser_sessions.submit(thread_id, body, queued=True))
+                elif len(route) == 5 and route[4] == "dispatch":
+                    browser_sessions._record(thread_id)
+                    result = (browser_sessions.dispatch.resolve(thread_id, body) if "action" in body
+                              else browser_sessions.dispatch.configure(thread_id, body))
                 elif len(route) == 5 and route[4] == "interrupt":
                     result = browser_sessions.interrupt(thread_id)
                 elif len(route) == 6 and route[4] == "requests":
@@ -877,6 +881,7 @@ def make_ui_server(
     server.app_control.start()
     sessions.schedules.start()
     sessions.inbox_wake.start()
+    sessions.dispatch.wake()
     return server
 
 

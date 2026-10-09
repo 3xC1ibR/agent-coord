@@ -119,6 +119,10 @@ def _parser() -> argparse.ArgumentParser:
             options.add_argument("--no-" + field, dest=field + "_id", action="store_const", const=None, default=argparse.SUPPRESS)
     thread_show = thread_commands.add_parser("show")
     thread_show.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
+    dispatch_history = thread_commands.add_parser("dispatch-history", help="Read saved dispatcher requests and delivery receipts.")
+    dispatch_history.add_argument("--session-id", help="Dispatcher; defaults to the current caller.")
+    dispatch_history.add_argument("--after", type=int, default=0, help="Event cursor returned by the previous page.")
+    dispatch_history.add_argument("--limit", type=int, default=20)
     create_agent = thread_commands.add_parser("create", help="Create an independent app agent and route its first request.")
     create_agent.add_argument("--from-session", help="Dispatcher; defaults to the current caller.")
     create_agent.add_argument("--cwd", default=os.getcwd())
@@ -509,6 +513,9 @@ def run(arguments: argparse.Namespace) -> Any:
             raise CoordinationError("Checkpoint must be valid JSON.") from exc
         return store.threads.checkpoint(arguments.session_id, payload)
     if command == "thread":
+        if arguments.thread_command == "dispatch-history":
+            from .dispatch_runtime import routing_history
+            return routing_history(store, arguments.session_id, after=arguments.after, limit=arguments.limit)
         if arguments.thread_command in {"create", "settings", "models", "request-status", "cancel-request"}:
             control = AppControl(store)
             operation = arguments.thread_command

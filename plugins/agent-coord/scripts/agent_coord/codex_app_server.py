@@ -232,6 +232,8 @@ class BrowserSessions:
         self.classifier = AttentionClassifier(self)
         self.schedules = ScheduledPrompts(self)
         self.inbox_wake = BrowserInboxWake(self)
+        from .dispatch_runtime import DispatchRuntime
+        self.dispatch = DispatchRuntime(self)
 
     def _thread_lock(self, thread_id: str):
         with self.lock:
@@ -658,6 +660,7 @@ class BrowserSessions:
         thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
         with self.store._connection() as db:
             thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
+        thread["dispatcher"] = self.dispatch.settings(thread_id)["enabled"] if hasattr(self, "dispatch") else False
         session = self.store.get_session(thread_id)
         with self.lock:
             waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
@@ -1158,7 +1161,16 @@ class BrowserSessions:
             return {"session": record, "thread": thread, "work_thread": work_thread, "requests": self.pending_requests(thread_id),
                     "activeTurn": active_turn, "running": running,
                     "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                    "dispatchRequests": self.dispatch.receipts(thread_id),
+                    "dispatchSettings": self.dispatch.settings(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
+
+    def submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
+        """User composer entry point. Internal deliveries bypass routing."""
+        message = body.get("message", "")
+        if self.dispatch.settings(thread_id)["enabled"] and not (isinstance(message, str) and message.strip().startswith("/")):
+            return self.dispatch.submit(thread_id, body)
+        return self.queue.enqueue(thread_id, body) if queued else self.send(thread_id, body)
 
     def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False) -> dict:
         message, images = message_images(body)
@@ -1202,11 +1214,15 @@ class BrowserSessions:
                     self.active[thread_id] = None
             inputs = ([{"type": "text", "text": provider_message(message, mentions)}] if message else [])
             inputs.extend({"type": "image", "url": image["url"]} for image in images)
+            dispatch_context = self.dispatch.prepare_context(thread_id)
+            if dispatch_context:
+                inputs.insert(0, {"type": "text", "text": dispatch_context["text"]})
             params = {"threadId": thread_id, "input": inputs}
             if turn_id:
                 # The server checks this too, covering completion during the RPC.
                 with self.navigation.sending(thread_id, source_window):
                     result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                self.dispatch.confirm_context(thread_id, dispatch_context)
                 self.store.threads.user_message(thread_id)
                 self.inbox_wake.resume(thread_id)
                 with self.store._connection() as connection:
@@ -1232,6 +1248,7 @@ class BrowserSessions:
                 with self.lock:
                     self.active.pop(thread_id, None)
                 raise
+            self.dispatch.confirm_context(thread_id, dispatch_context)
             # Some app-server versions omit input items from turn/started.
             if not automatic:
                 self.store.threads.user_message(thread_id)
@@ -1343,6 +1360,7 @@ class BrowserSessions:
             self.closed = True
             self.changed.notify_all()
         self.classifier.close()
+        self.dispatch.close()
         self.inbox_wake.close()
         self.rpc.close()
         self.claude.close()

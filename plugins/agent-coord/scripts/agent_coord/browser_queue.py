@@ -34,6 +34,11 @@ class BrowserMessageQueue:
                 db.execute("ALTER TABLE browser_message_queue ADD COLUMN mentions_json TEXT NOT NULL DEFAULT '[]'")
             if "window_id" not in columns:
                 db.execute("ALTER TABLE browser_message_queue ADD COLUMN window_id TEXT")
+            if "dispatch_id" not in columns:
+                db.execute("ALTER TABLE browser_message_queue ADD COLUMN dispatch_id INTEGER")
+            if "dispatch_reviewed" not in columns:
+                db.execute("ALTER TABLE browser_message_queue ADD COLUMN dispatch_reviewed INTEGER NOT NULL DEFAULT 0")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS browser_queue_dispatch ON browser_message_queue(dispatch_id)")
 
     def list(self, thread_id):
         self.sessions._record(thread_id)
@@ -56,23 +61,37 @@ class BrowserMessageQueue:
         if self.sessions.closed:
             raise CoordinationError("Browser sessions are closed.")
 
-    def enqueue(self, thread_id, body):
+    def enqueue(self, thread_id, body, *, dispatch_id=None):
         message, images = message_images(body)
         if body.get("mentions"):
             message = body["message"]  # Selected ranges refer to the untrimmed composer text.
         mentions = thread_mentions(message, body, self.sessions)
         source_window = window_id(body.get("windowId"))
         with self.sessions._thread_lock(thread_id):
+            if dispatch_id is not None:
+                receipt = self.sessions.dispatch.get(dispatch_id)
+                if thread_id != receipt["dispatcher_id"]:
+                    if not self.sessions.dispatch.recipient_ready(thread_id):
+                        raise CoordinationError("The routed destination is paused or closing.")
+                    if self.sessions.store.threads.get(thread_id)["attention"] == "archived":
+                        self.sessions.store.threads.update(thread_id, attention="now")
             self._open(thread_id)
             self.sessions.read(thread_id)
             item_id = str(uuid.uuid4())
             with self.sessions.store._connection() as db:
                 db.execute("BEGIN IMMEDIATE")
+                if dispatch_id is not None:
+                    existing = db.execute("SELECT id FROM browser_message_queue WHERE dispatch_id=?", (dispatch_id,)).fetchone()
+                    saved = db.execute("SELECT state FROM dispatch_requests WHERE id=?", (dispatch_id,)).fetchone()
+                    if existing or saved[0] in {"accepted", "uncertain", "dismissed", "cancelled"}:
+                        return {"queued": bool(existing), "id": existing[0] if existing else None}
                 cancel_pending(db, thread_id, self.sessions.store.clock())
                 db.execute("""INSERT INTO browser_message_queue
-                           (id, thread_id, message, state, error, owner, created_at, images_json, window_id, mentions_json)
-                           VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?)""",
-                           (item_id, thread_id, message, self.owner, time.time(), json.dumps(images), source_window, json.dumps(mentions)))
+                           (id, thread_id, message, state, error, owner, created_at, images_json, window_id, mentions_json, dispatch_id)
+                           VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?)""",
+                           (item_id, thread_id, message, self.owner, time.time(), json.dumps(images), source_window, json.dumps(mentions), dispatch_id))
+                if dispatch_id is not None:
+                    self.sessions.dispatch.transition(db, dispatch_id, "queued", target_id=thread_id, error=None)
             self.sessions._publish("browser/changed", {"threadId": thread_id})
             self.wake()
             return {"queued": True, "id": item_id}
@@ -83,10 +102,16 @@ class BrowserMessageQueue:
             if body.get("action") == "cancel":
                 item_id = self.sessions._text(body.get("id"), "Queued message ID", 200)
                 with self.sessions.store._connection() as db:
+                    row = db.execute("SELECT dispatch_id FROM browser_message_queue WHERE thread_id=? AND id=?", (thread_id, item_id)).fetchone()
+                    if row and row[0] is not None:
+                        self.sessions.dispatch.transition(db, row[0], "cancelled")
                     db.execute("DELETE FROM browser_message_queue WHERE thread_id = ? AND id = ?", (thread_id, item_id))
             elif body.get("action") == "resume":
                 with self.sessions.store._connection() as db:
-                    db.execute("UPDATE browser_message_queue SET state = 'queued', error = NULL, owner = ? WHERE thread_id = ?",
+                    if db.execute("""SELECT 1 FROM browser_message_queue q JOIN dispatch_requests d ON d.id=q.dispatch_id
+                        WHERE q.thread_id=? AND d.state IN ('sending','uncertain','dismissed')""", (thread_id,)).fetchone():
+                        raise CoordinationError("A routed send has an uncertain outcome. Inspect the conversation and cancel that queue item before sending again.")
+                    db.execute("UPDATE browser_message_queue SET state = 'queued', error = NULL, owner = ?, dispatch_reviewed = 1 WHERE thread_id = ?",
                                (self.owner, thread_id))
             else:
                 raise CoordinationError("Choose cancel or resume for queued messages.")
@@ -134,24 +159,41 @@ class BrowserMessageQueue:
                 # Re-read before delivery: another browser may have started work.
                 if sessions.read(thread_id)["running"]:
                     return
+                dispatch_id = item.get("dispatch_id")
+                if dispatch_id is not None:
+                    receipt = sessions.dispatch.get(dispatch_id)
+                    if receipt["state"] in {"sending", "uncertain", "dismissed", "cancelled", "accepted"}:
+                        raise CoordinationError("The routed request needs review before delivery.")
+                    if thread_id != receipt["dispatcher_id"] and not sessions.dispatch.recipient_ready(thread_id, reviewed=bool(item["dispatch_reviewed"])):
+                        raise CoordinationError("The routed destination is paused or closing.")
                 with sessions.store._connection() as db:
                     claimed = db.execute("UPDATE browser_message_queue SET state = 'sending' WHERE id = ? AND state = 'queued' AND owner = ?",
                                          (item["id"], self.owner)).rowcount
                 if not claimed:
                     return  # Stop/disconnect may have paused it during the read.
-                sessions.send(thread_id, {"message": item["message"], "images": item["images"],
+                if dispatch_id is not None:
+                    sessions.dispatch.update(dispatch_id, "sending")
+                result = sessions.send(thread_id, {"message": item["message"], "images": item["images"],
                                           "windowId": item["window_id"], "mentions": item["mentions"]}, start_only=True)
             except Exception as exc:
                 # Keep the message and images for review after transport failures.
                 with sessions.store._connection() as db:
                     db.execute("UPDATE browser_message_queue SET state = 'paused', error = ? WHERE id = ?", (str(exc), item["id"]))
+                    if item.get("dispatch_id") is not None:
+                        current = db.execute("SELECT state FROM dispatch_requests WHERE id=?", (item["dispatch_id"],)).fetchone()[0]
+                        sessions.dispatch.transition(db, item["dispatch_id"], "uncertain" if current == "sending" else current,
+                                                     error="Delivery needs review in the destination conversation.")
                 self.pause(thread_id, "An earlier queued message needs review. Resume when ready.")
             else:
                 with sessions.store._connection() as db:
+                    if item.get("dispatch_id") is not None:
+                        sessions.dispatch.transition(db, item["dispatch_id"], "accepted", turn_id=result.get("turn", {}).get("id"), error=None)
                     db.execute("DELETE FROM browser_message_queue WHERE id = ?", (item["id"],))
                 # Handles commands and turns that complete before turn/start replies.
                 self.ready.set()
             sessions._publish("browser/changed", {"threadId": thread_id})
+            if item.get("dispatch_id") is not None:
+                sessions.dispatch.changed(sessions.dispatch.get(item["dispatch_id"])["dispatcher_id"])
 
     def close(self):
         with self.lock:

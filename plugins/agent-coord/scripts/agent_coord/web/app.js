@@ -369,6 +369,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
     more.disabled = state.closing.has(thread.thread_id) || state.updatingThreads.has(thread.thread_id);
     const items = [{label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)}];
+    if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.dispatcher ? "Stop using as dispatcher" : "Use as dispatcher", run: () => action(() => toggleDispatcher(thread))});
     if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
     more.onclick = event => state.threadActions.showMenu(more, thread.title, items, event);
     actions.append(pin, more, close);
@@ -697,8 +698,8 @@ function retainConversation() {
   entry.following = state.timelineScroll?.following ?? true;
 }
 function sameConversation(first, second) {
-  return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.work_thread.browser_session, first.work_thread.client]) ===
-    JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.work_thread.browser_session, second.work_thread.client]);
+  return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.work_thread.browser_session, first.work_thread.client]) ===
+    JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.work_thread.browser_session, second.work_thread.client]);
 }
 async function select(id, {rollUp = false} = {}) {
   state.mobileChat?.close();
@@ -966,7 +967,14 @@ function renderStatus() {
   renderSessionSettings();
   const running = !!state.detail?.running;
   const work = state.detail?.work_thread;
-  const composerLabel = work?.client === "claude" ? "Message Claude" : "Message Codex";
+  const dispatcher = !!work?.dispatcher;
+  if ($("dispatch-direct-label")) $("dispatch-direct-label").hidden = !dispatcher;
+  if ($("toggle-dispatcher")) {
+    $("toggle-dispatcher").hidden = !work?.browser_session || isSessionDraft();
+    $("toggle-dispatcher").textContent = dispatcher ? "Stop using as dispatcher" : "Use as dispatcher";
+    $("toggle-dispatcher").disabled = work?.attention === "archived" || state.busy;
+  }
+  const composerLabel = dispatcher ? "Send a request" : work?.client === "claude" ? "Message Claude" : "Message Codex";
   $("message-label").textContent = composerLabel;
   $("message").placeholder = composerLabel + " or drop images…";
   const archived = work?.attention === "archived";
@@ -980,9 +988,9 @@ function renderStatus() {
   state.mobileChat?.status(state.detail?.requests?.length ? "Needs input" : active ? "Working" : status?.label || "Ready",
     state.detail?.requests?.length ? "input" : active ? "running" : status?.key || "idle");
   $("composer").hidden = !work?.browser_session;
-  $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (running && !state.detail.activeTurn) || archived || state.busy || !!state.attachments?.pending() || state.closing.has(state.selected);
-  $("send").textContent = running ? (work?.client === "claude" ? "Queue ↑" : "Steer ↑") : "Send ↑";
-  $("queue").hidden = !running || work?.client === "claude";
+  $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (!dispatcher && running && !state.detail.activeTurn) || archived || state.busy || !!state.attachments?.pending() || state.closing.has(state.selected);
+  $("send").textContent = dispatcher ? "Send ↑" : running ? (work?.client === "claude" ? "Queue ↑" : "Steer ↑") : "Send ↑";
+  $("queue").hidden = dispatcher || !running || work?.client === "claude";
   $("queue").disabled = $("send").disabled;
   $("message").disabled = archived;
   $("stop").hidden = !running;
@@ -996,6 +1004,7 @@ function renderStatus() {
   $("session-name").disabled = !state.detail || isSessionDraft();
   $("organize-thread").disabled = !state.detail;
   $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (work?.client === "claude" ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
+  if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
   state.attachments?.render();
   state.slashCommands?.render();
   state.mentions?.render();
@@ -1070,7 +1079,9 @@ function renderTimeline() {
     fragment.append(notice);
   }
   const messages = state.detail?.coordinationMessages || [];
-  const turns = state.detail?.thread.turns || [];
+  const sourceTurns = state.detail?.thread.turns || [];
+  const turns = globalThis.DispatchUI && (state.detail?.work_thread?.dispatcher || state.detail?.dispatchRequests?.length)
+    ? DispatchUI.turns(sourceTurns, state.detail.dispatchRequests || []) : sourceTurns;
   const entries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
   const workGroups = new Map();
   for (const entry of entries) {
@@ -1080,6 +1091,11 @@ function renderTimeline() {
     }
     const turn = entry.turn;
     for (const item of entry.item ? [entry.item] : entry.end ? [] : turn.items || []) {
+      if (item.type === "dispatchReceipt") {
+        fragment.append(DispatchUI.card(document, item.receipt, {open: id => select(id).catch(showError),
+          dismiss: id => action(async () => { await api(sessionPath(state.selected) + "/dispatch", {id, action: "dismiss"}); await refreshDetail(); })}));
+        continue;
+      }
       if (messages.length && AgentMessages.isWakePrompt(item, turn, messages)) continue;
       const text = itemText(item);
       if (item.type === "userMessage" || item.type === "agentMessage") {
@@ -1753,17 +1769,18 @@ $("search").onkeydown = event => {
 async function sendMessage(mode = "steer") {
   if (state.detail?.running && state.detail?.work_thread?.client === "claude") mode = "queue";
   const detail = state.detail;
+  const dispatcher = !!detail?.work_thread?.dispatcher;
   const id = state.selected, text = $("message").value;
   const ticket = state.rollUp?.ticket(id);
   const images = state.attachments?.snapshot(id) || [];
   if (state.busy || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
-      (detail.running && !detail.activeTurn) || state.attachments?.pending(id) || (!text.trim() && !images.length)) return;
+      (!dispatcher && detail.running && !detail.activeTurn) || state.attachments?.pending(id) || (!text.trim() && !images.length)) return;
   const mentions = state.mentions?.snapshot(id, text) || [];
   const body = {message: text};
   if (mentions.length) body.mentions = mentions;
   if (state.sourceWindowId) body.windowId = state.sourceWindowId;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
-  if (detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
+  if (!dispatcher && detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
   state.busy = true; renderStatus();
   try {
     if (isSessionDraft()) {
@@ -1788,7 +1805,15 @@ async function sendMessage(mode = "steer") {
       else await toggleThreadClosed(detail.work_thread, clearCommand);
       return;
     }
-    const result = await api(sessionPath(id) + (mode === "queue" ? "/queue" : "/messages"), body);
+    if (dispatcher && !text.trim().startsWith("/")) {
+      body.askDispatcher = !!$("dispatch-direct")?.checked;
+      body.requestId = DispatchUI.requestKey(sessionStorage, id, body);
+    }
+    const result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
+    if (result.dispatched) {
+      sessionStorage.removeItem("dispatch-request:" + id);
+      if ($("dispatch-direct")) $("dispatch-direct").checked = false;
+    }
     state.attachments?.sent(id, images);
     state.mentions?.sent(id, text, mentions);
     if (result.command) state.commandFeedback.set(id, result.command.message);
@@ -1804,6 +1829,13 @@ async function sendMessage(mode = "steer") {
   finally { state.busy = false; renderStatus(); if (state.paneMode) globalThis.agentCoordPane?.saveDraft(); }
 }
 $("composer").onsubmit = event => { event.preventDefault(); action(sendMessage); };
+async function toggleDispatcher(thread = state.detail?.work_thread) {
+  if (!thread) return;
+  await api(sessionPath(thread.thread_id) + "/dispatch", {enabled: !thread.dispatcher});
+  if (state.selected === thread.thread_id) await refreshDetail();
+  await refreshList();
+}
+if ($("toggle-dispatcher")) $("toggle-dispatcher").onclick = () => action(() => toggleDispatcher());
 function composerKeydown(event) {
   if (event.isComposing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
   if (state.mentions?.keydown(event)) return;
