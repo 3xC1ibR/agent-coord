@@ -7,7 +7,7 @@ import uuid
 from .store import CoordinationError
 
 DEFAULT_FILTERS = {"repository": "", "project": "", "phase": "", "show": "active", "search": ""}
-PHASES = {"", "new", "discussion", "investigation", "planning", "implementation", "validation", "deployment", "finished"}
+PHASES = {"", "new", "discussion", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"}
 GROUPS = {"phase", "repository", "project", "none"}
 
 
@@ -70,7 +70,8 @@ class ViewStore:
             if selected not in {"", "__none__"} and not db.execute(
                 f"SELECT 1 FROM {table} WHERE id = ?", (selected,)
             ).fetchone():
-                raise CoordinationError(f"Choose an existing {key} for this view.")
+                label = "group" if key == "project" else key
+                raise CoordinationError(f"Choose an existing {label} for this view.")
         group = body.get("group_by", "phase")
         if not isinstance(group, str) or group not in GROUPS:
             raise CoordinationError("Choose a supported view grouping.")

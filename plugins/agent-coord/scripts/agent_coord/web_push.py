@@ -207,10 +207,18 @@ class WebPush:
             self._enqueue(db, device, "test", "test", "", self.clock() + 300)
         return {"queued": True}
 
-    def _enqueue(self, db, device, event, kind, thread, expires):
+    def _enqueue(self, db, device, event, kind, thread, expires, context=None):
         label = {"completed": "Turn finished", "failed": "Turn failed", "approval": "Approval needed",
+                 "snooze": "Snooze ended",
                  "test": "Phone notifications are working"}[kind]
-        payload = {"title": "Ribbon Field", "body": label,
+        context = context or {}
+        if kind == "approval":
+            label = ("Claude" if context.get("client") == "claude" else "Codex") + " is requesting approval"
+        # Match desktop alerts using notification metadata, never turn contents
+        # or approval commands. Bound the encrypted Web Push payload size.
+        group = str(context.get("project_name") or context.get("repository_name") or "Ribbon Field")[:160]
+        title = str(context.get("title") or "")[:160]
+        payload = {"title": group + " · " + label if thread else "Ribbon Field", "body": title or label,
                    "tag": "agent-coord-" + hashlib.sha256(event.encode()).hexdigest()[:24],
                    "url": "/#" + quote(thread, safe="") if thread else "/"}
         db.execute("INSERT OR IGNORE INTO outbox (device,event,payload,expires,next_attempt) VALUES (?,?,?,?,?)",
@@ -226,7 +234,9 @@ class WebPush:
         if not self.transport.available:
             return
         approvals = self.sessions.approval_notifications(include_claimed=True)
+        snoozes = self.sessions.snooze_notifications(include_claimed=True)
         active_approvals = {"approval:" + item["request_key"] for item in approvals}
+        active_snoozes = {"snooze:" + str(item["id"]) for item in snoozes}
         now = self.clock()
         with self.lock, self.connection() as db:
             for row in db.execute("SELECT device,origin FROM subscriptions").fetchall():
@@ -241,18 +251,32 @@ class WebPush:
                 for sub in subscribers:
                     if event["id"] > sub["since"]:
                         self._enqueue(db, sub["device"], "turn:" + str(event["id"]), event["status"],
-                                      event["thread_id"], event["completed_at"] + 3600)
+                                      event["thread_id"], event["completed_at"] + 3600, event)
             db.execute("UPDATE settings SET value=? WHERE name='cursor'", (str(batch["seq"]),))
             for event in approvals:
                 for sub in subscribers:
                     self._enqueue(db, sub["device"], "approval:" + event["request_key"], "approval",
-                                  event["thread_id"], now + 900)
+                                  event["thread_id"], now + 900, event)
+            for event in snoozes:
+                key = "snooze:" + str(event["id"])
+                for sub in subscribers:
+                    self._enqueue(db, sub["device"], key, "snooze", event["thread_id"], now + 3600, event)
+                    # If the runtime stopped before an unsent reminder's TTL,
+                    # allow its bounded retry after restart. Delivered receipts
+                    # stay done, including after their TTL has elapsed.
+                    db.execute("""UPDATE outbox SET expires=?, next_attempt=?
+                                  WHERE device=? AND event=? AND done=0 AND expires<=?""",
+                               (now + 3600, now, sub["device"], key, now))
             for row in db.execute("SELECT DISTINCT event FROM outbox WHERE event LIKE 'approval:%'").fetchall():
                 if row[0] not in active_approvals:
                     db.execute("DELETE FROM outbox WHERE event=?", (row[0],))
+            for row in db.execute("SELECT DISTINCT event FROM outbox WHERE event LIKE 'snooze:%'").fetchall():
+                if row[0] not in active_snoozes:
+                    db.execute("DELETE FROM outbox WHERE event=?", (row[0],))
             # Keep approval tombstones while the request exists; never replay an
             # unanswered approval every time its delivery TTL expires.
-            db.execute("DELETE FROM outbox WHERE expires < ? AND event NOT LIKE 'approval:%'", (now - 86400,))
+            db.execute("""DELETE FROM outbox WHERE expires < ?
+                          AND event NOT LIKE 'approval:%' AND event NOT LIKE 'snooze:%'""", (now - 86400,))
             due = db.execute("SELECT device,event FROM outbox WHERE done=0 AND next_attempt<=? AND expires>? ORDER BY next_attempt LIMIT 20",
                              (now, now)).fetchall()
         for row in due:
@@ -269,6 +293,11 @@ class WebPush:
             return
         if event.startswith("approval:") and not any("approval:" + item["request_key"] == event
                                                      for item in self.sessions.approval_notifications(include_claimed=True)):
+            with self.lock, self.connection() as db:
+                db.execute("DELETE FROM outbox WHERE device=? AND event=?", (device, event))
+            return
+        if event.startswith("snooze:") and not any("snooze:" + str(item["id"]) == event
+                                                   for item in self.sessions.snooze_notifications(include_claimed=True)):
             with self.lock, self.connection() as db:
                 db.execute("DELETE FROM outbox WHERE device=? AND event=?", (device, event))
             return

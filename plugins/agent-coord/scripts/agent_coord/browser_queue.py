@@ -46,8 +46,8 @@ class BrowserMessageQueue:
         return result
 
     def _open(self, thread_id):
-        record = self.sessions._record(thread_id)
-        if record["archived"] or self.sessions.store.threads.get(thread_id)["attention"] == "archived":
+        self.sessions._record(thread_id)
+        if self.sessions.store.threads.get(thread_id)["attention"] == "archived":
             raise CoordinationError("Reopen this thread before changing its queued messages.")
         if self.sessions.closed:
             raise CoordinationError("Browser sessions are closed.")

@@ -33,6 +33,13 @@ class SavedViewTests(unittest.TestCase):
         self.repository = self.store.threads.organization.add_repository(str(self.repo))
         self.project = self.store.threads.organization.create_project("Migration")
 
+    def test_orchestrating_filter_survives_restart_and_retains_associations(self):
+        view = self.views.create({"name": "Dispatchers", "filters": {
+            "phase": "orchestrating", "repository": self.repository["id"], "project": self.project["id"]}})
+        reopened = ViewStore(CoordinationStore(self.store.database_path))
+        self.assertEqual(next(v for v in reopened.list() if v["id"] == view["id"])["filters"], view["filters"])
+        self.assertEqual(view["filters"]["phase"], "orchestrating")
+
     def test_round_trip_uses_stable_associations_and_survives_restart(self):
         original = self.views.create({"name": " Rig ", "filters": {
             "repository": self.repository["id"], "project": self.project["id"],

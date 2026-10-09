@@ -13,7 +13,7 @@ from .store import CoordinationError
 from .organization import OrganizationStore, UNSET
 from .attention import AttentionStore
 
-PHASES = {"discussion", "investigation", "planning", "implementation", "validation", "deployment", "finished"}
+PHASES = {"discussion", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"}
 ATTENTION_STATES = {"now", "later", "archived"}
 NEXT_ACTORS = {"user", "agent", "external", "nobody"}
 LINK_KINDS = {"pull_request", "document", "issue", "bead", "branch", "other"}
@@ -93,6 +93,12 @@ class ThreadStore:
                     turn_key TEXT NOT NULL, status TEXT NOT NULL,
                     completed_at REAL NOT NULL, notified_at REAL,
                     UNIQUE(thread_id, turn_key)
+                );
+                CREATE TABLE IF NOT EXISTS snooze_notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL REFERENCES work_threads(thread_id),
+                    snoozed_until REAL NOT NULL, notified_at REAL,
+                    UNIQUE(thread_id, snoozed_until)
                 );
             """)
             # Serialize upgrades across independently running terminal hooks.
@@ -176,7 +182,7 @@ class ThreadStore:
                                      AND phase != 'finished' ORDER BY id DESC LIMIT 1""", (row["thread_id"],)).fetchone()
             prior = previous["phase"] if previous else "new"
             if choice == "findings":
-                phase = prior if prior in {"discussion", "investigation", "planning"} else "investigation"
+                phase = prior if prior in {"discussion", "investigation", "planning", "orchestrating"} else "investigation"
             elif choice in {"update", "blocked", "review"}:
                 phase = prior
             elif choice != "done" and latest["author"] != "user" and prior not in {"implementation", "validation", "deployment"}:
@@ -230,8 +236,46 @@ class ThreadStore:
     def _wake_snoozes(self, db):
         # Persist wake-up on observation, including the first read after restart.
         # Keep the deadline until an explicit user action acknowledges the reminder.
+        now = self.store.clock()
+        # The reminder and placement change commit together. Include already
+        # returned reminders from older runtimes; the unique receipt survives
+        # rereads, competing processes and restarts without creating fake turns.
+        db.execute("""INSERT OR IGNORE INTO snooze_notifications (thread_id, snoozed_until)
+                      SELECT thread_id, snoozed_until FROM work_threads
+                      WHERE attention IN ('now', 'later') AND snoozed_until <= ?
+                        AND NOT EXISTS (SELECT 1 FROM snooze_notifications n
+                                        WHERE n.thread_id = work_threads.thread_id
+                                          AND n.snoozed_until = work_threads.snoozed_until)""", (now,))
         db.execute("""UPDATE work_threads SET attention = 'now'
-                      WHERE attention = 'later' AND snoozed_until <= ?""", (self.store.clock(),))
+                      WHERE attention = 'later' AND snoozed_until <= ?""", (now,))
+
+    def snooze_notifications(self, *, include_claimed=False) -> list[dict]:
+        self.organization.backfill()
+        with self.store._connection() as db:
+            self._wake_snoozes(db)
+            rows = db.execute("""SELECT n.id, n.thread_id, n.snoozed_until, 'snooze' AS status,
+                                         t.title, p.name AS project_name, r.name AS repository_name, s.cwd
+                                  FROM snooze_notifications n JOIN work_threads t ON t.thread_id = n.thread_id
+                                  LEFT JOIN thread_organization o ON o.thread_id = t.thread_id
+                                  LEFT JOIN named_projects p ON p.id = o.project_id
+                                  LEFT JOIN work_repositories r ON r.id = o.repository_id
+                                  JOIN sessions s ON s.session_id = n.thread_id
+                                  WHERE t.attention = 'now' AND t.snoozed_until = n.snoozed_until
+                                    AND n.snoozed_until <= ?
+                                    AND (? OR n.notified_at IS NULL) ORDER BY n.id""", (self.store.clock(), include_claimed)).fetchall()
+            return [dict(row) for row in rows]
+
+    def claim_snooze_notification(self, notification_id: int) -> bool:
+        with self.store._connection() as db:
+            # Check the current snooze inside the atomic claim: a replacement,
+            # resume, placement change or user message invalidates old receipts.
+            return db.execute("""UPDATE snooze_notifications SET notified_at = ?
+                                  WHERE id = ? AND notified_at IS NULL AND snoozed_until <= ? AND EXISTS (
+                                      SELECT 1 FROM work_threads t
+                                      WHERE t.thread_id = snooze_notifications.thread_id
+                                        AND t.attention = 'now'
+                                        AND t.snoozed_until = snooze_notifications.snoozed_until)""",
+                              (self.store.clock(), notification_id, self.store.clock())).rowcount == 1
 
     def update(self, thread_id: str, *, title=None, attention=None, pinned=UNSET, seen=False,
                seen_checkpoint_id=None, seen_completion_id=None, handled=False,
@@ -488,7 +532,7 @@ class ThreadStore:
             "Maintain the Agent Coord work-thread checkpoint before returning control to the user, "
             "at a phase change, or after a significant result. Run " + command +
             " checkpoint" + identity + " --json '<object>'. "
-            'The object has phase (discussion, investigation, planning, implementation, validation, deployment, finished), '
+            'The object has phase (discussion, investigation, planning, orchestrating, implementation, validation, deployment, finished), '
             'summary (1–2 factual sentences), next_action (empty if none), next_actor (user, agent, external, nobody), '
             'optional title (a concise 3–6 word thread name), and optional links [{"kind":"document","label":"Design","target":"docs/design.md"}]. '
             "Set title at the first meaningful checkpoint when title_source is auto. "
@@ -498,6 +542,7 @@ class ThreadStore:
             'Set next_actor to user only when progress or completion requires a specific user answer, approval, decision, or action; describe it in next_action. '
             "Keep optional advice, invitations to continue, and nonblocking reminders in summary. "
             'Use phase for the underlying activity, not whether you finished replying: an answered investigation stays investigation, and a completed plan stays planning. '
+            'Use orchestrating for ongoing routing and coordination of specialist agents, including while a specialist implements or deploys; it does not itself require user action. '
             'Use finished only after actually delivering the requested implementation or execution, including validation/deployment if requested, with nothing remaining; use next_action "" and next_actor nobody. '
             'For a status question during deployment, keep deployment. Required user review belongs in validation with next_actor user. '
             "If work remains, keep its actual phase and assign any required next step to its actual owner. Ending an agent turn does not create a required user action. "

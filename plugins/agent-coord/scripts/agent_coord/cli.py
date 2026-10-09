@@ -23,8 +23,9 @@ from .store import (
     InboxTimeoutError,
 )
 from .ui import serve_ui
-from .threads import ATTENTION_STATES
+from .threads import ATTENTION_STATES, PHASES
 from .thread_control import ThreadControl
+from .app_control import AppControl
 from .zellij_wake import enable_zellij_wake, watch_zellij
 
 
@@ -94,20 +95,56 @@ def _parser() -> argparse.ArgumentParser:
 
     checkpoint = subcommands.add_parser("checkpoint", help="Save a factual work-thread checkpoint and optional links.")
     checkpoint.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
-    checkpoint.add_argument("--json", dest="checkpoint_json", required=True, help="Checkpoint JSON object, or - to read stdin.")
+    checkpoint.add_argument("--json", dest="checkpoint_json", required=True,
+                           help="Checkpoint JSON object, or - to read stdin. Phases: " + ", ".join(sorted(PHASES)) + ".")
 
-    thread = subcommands.add_parser("thread", help="Inspect or organize durable work threads without an issue tracker.")
+    thread = subcommands.add_parser("thread", help="Create app agents; find and manage durable work threads.")
     thread_commands = thread.add_subparsers(dest="thread_command", required=True)
     thread_list = thread_commands.add_parser("list")
     thread_list.add_argument("--cwd")
     thread_list.add_argument("--archived", action="store_true")
-    for command in (thread_list,):
+    thread_search = thread_commands.add_parser("search", help="Search routing context across open and closed threads, ranked by relevance then work recency.")
+    thread_search.add_argument("query", help="Up to 10 keywords; each must match title, request, latest checkpoint, or artifacts.")
+    thread_search.add_argument("--cwd")
+    thread_search.add_argument("--limit", type=int, default=10)
+    thread_search.add_argument("--cursor", help="Continue with the same query and filters using next_cursor.")
+    thread_search.add_argument("--app-only", action="store_true", help="Return only app conversations that support automatic inbox wake.")
+    for command in (thread_list, thread_search):
         for field in ("repository", "project"):
             options = command.add_mutually_exclusive_group()
             options.add_argument("--" + field, dest=field + "_id", default=argparse.SUPPRESS, metavar="ID")
             options.add_argument("--no-" + field, dest=field + "_id", action="store_const", const=None, default=argparse.SUPPRESS)
     thread_show = thread_commands.add_parser("show")
     thread_show.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
+    create_agent = thread_commands.add_parser("create", help="Create an independent app agent and route its first request.")
+    create_agent.add_argument("--from-session", help="Dispatcher; defaults to the current caller.")
+    create_agent.add_argument("--cwd", default=os.getcwd())
+    create_agent.add_argument("--name", required=True)
+    create_agent.add_argument("--client", choices=["codex", "claude"], default="codex")
+    create_agent.add_argument("--model")
+    create_agent.add_argument("--effort")
+    create_agent.add_argument("--yolo", action="store_true", help="Explicitly authorize full machine access without approval prompts.")
+    create_agent.add_argument("prompt", help="Exact initial user request; use - to read stdin.")
+    settings = thread_commands.add_parser("settings", help="Inspect app settings or queue an idle settings change.")
+    settings.add_argument("--session-id", required=True, help="Target app conversation.")
+    settings.add_argument("--from-session", help="Requester; defaults to the current caller.")
+    settings.add_argument("--model")
+    settings.add_argument("--effort")
+    permissions = settings.add_mutually_exclusive_group()
+    permissions.add_argument("--yolo", dest="yolo", action="store_const", const=True, default=None)
+    permissions.add_argument("--default-permissions", dest="yolo", action="store_const", const=False)
+    models = thread_commands.add_parser("models", help="Query the running app for supported provider models and effort levels.")
+    models.add_argument("--from-session", help="Requester; defaults to the current caller.")
+    models.add_argument("--cwd", default=os.getcwd())
+    models.add_argument("--client", choices=["codex", "claude"], default="codex")
+    for control in (create_agent, settings, models):
+        control.add_argument("--request-id", help="Stable idempotency key; reuse the same key when retrying this request.")
+        control.add_argument("--wait", type=float, default=5, help="Wait up to 0–30 seconds for confirmation (default 5).")
+    request_status = thread_commands.add_parser("request-status", help="Inspect an app request without repeating it.")
+    request_status.add_argument("--request-id", required=True)
+    request_status.add_argument("--wait", type=float, default=0)
+    cancel_request = thread_commands.add_parser("cancel-request", help="Cancel an app request that has not started.")
+    cancel_request.add_argument("--request-id", required=True)
     thread_close = thread_commands.add_parser("close", help="Request lifecycle closure through the Ribbon Field runtime.")
     thread_close.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     thread_close.add_argument("--after-turn", action="store_true", help="Wait for this turn to end; new input cancels a queued close. Use for your own session.")
@@ -182,17 +219,26 @@ def _parser() -> argparse.ArgumentParser:
         choices=["action_required", "informational", "closure"],
         default="action_required",
     )
-    send.add_argument(
+    reply_choice = send.add_mutually_exclusive_group(required=True)
+    reply_choice.add_argument(
         "--reply-required",
-        action=argparse.BooleanOptionalAction,
-        default=None,
+        action="store_true",
         help=(
-            "Require a conversational reply. Defaults to true for action-required "
-            "messages and false for informational or closure messages."
+            "Choose --reply-required or --no-reply-required explicitly. "
+            "To answer an existing message, use reply --message-id <id> instead."
         ),
+    )
+    reply_choice.add_argument(
+        "--no-reply-required", dest="reply_required", action="store_false",
+        help="Deliver the message without requesting a conversational reply.",
     )
     send.add_argument("--thread-id")
     send.add_argument("message")
+
+    reply = subcommands.add_parser("reply", help="Answer a message without requesting another reply.")
+    reply.add_argument("--from-session", help="Sender; defaults to the current caller session.")
+    reply.add_argument("--message-id", type=int, required=True, help="Message being answered; recipient and thread are derived from it.")
+    reply.add_argument("message")
 
     handoff = subcommands.add_parser(
         "handoff", help="Atomically transfer a whole work declaration."
@@ -245,7 +291,7 @@ def _parser() -> argparse.ArgumentParser:
     acknowledge_target.add_argument("--all-unread", action="store_true")
 
     delegate = subcommands.add_parser(
-        "delegate", help="Launch ready Beads work in a persistent child agent."
+        "delegate", help="Launch scoped Beads work in an Agent Coord-managed terminal worker."
     )
     delegate.add_argument("--from-session", help="Sender; defaults to the current caller session.")
     delegate.add_argument("--cwd", default=os.getcwd())
@@ -412,7 +458,7 @@ def _parser() -> argparse.ArgumentParser:
         if name == "open":
             target.add_argument("--from-session", help="Target the window that sent this session's latest message.")
             target.add_argument("--wait", type=float, default=5, metavar="SECONDS", help="Wait up to 0–30 seconds for display acknowledgement (default 5).")
-    for mutation in (register, activity, checkpoint, thread_update, begin, end_work, unregister, send, acknowledge):
+    for mutation in (register, activity, checkpoint, thread_update, begin, end_work, unregister, send, reply, acknowledge):
         mutation.add_argument("--full", action="store_true", help="Return the complete result instead of a compact receipt.")
     return parser
 
@@ -425,7 +471,9 @@ def run(arguments: argparse.Namespace) -> Any:
         if hasattr(arguments, field) and not getattr(arguments, field):
             # ui open's origin is an optional window hint, not a required caller.
             identity = caller_session()
-            if not identity and command != "ui":
+            settings_read = (command == "thread" and arguments.thread_command == "settings"
+                             and all(getattr(arguments, key) is None for key in ("model", "effort", "yolo")))
+            if not identity and command != "ui" and not settings_read:
                 flag = "--" + field.replace("_", "-")
                 raise CoordinationError(f"No caller session. Pass {flag}, or set AGENT_COORD_SESSION_ID (Codex also supports CODEX_THREAD_ID).")
             setattr(arguments, field, identity)
@@ -451,9 +499,35 @@ def run(arguments: argparse.Namespace) -> Any:
             raise CoordinationError("Checkpoint must be valid JSON.") from exc
         return store.threads.checkpoint(arguments.session_id, payload)
     if command == "thread":
+        if arguments.thread_command in {"create", "settings", "models", "request-status", "cancel-request"}:
+            control = AppControl(store)
+            operation = arguments.thread_command
+            if operation == "cancel-request":
+                return control.cancel(arguments.request_id)
+            if not 0 <= arguments.wait <= 30:
+                raise CoordinationError("Wait must be between 0 and 30 seconds.")
+            if operation == "request-status":
+                return control.status(arguments.request_id, wait=arguments.wait)
+            if operation == "settings":
+                payload = {key: getattr(arguments, key) for key in ("model", "effort", "yolo") if getattr(arguments, key) is not None}
+                if not payload:
+                    return control.settings(arguments.session_id)
+            else:
+                payload = {"cwd": arguments.cwd, "client": arguments.client}
+                if operation == "create":
+                    prompt = sys.stdin.read(100001) if arguments.prompt == "-" else arguments.prompt
+                    payload.update(name=arguments.name, prompt=prompt, yolo=arguments.yolo)
+                    payload.update({key: getattr(arguments, key) for key in ("model", "effort") if getattr(arguments, key) is not None})
+            receipt = control.request(operation, arguments.from_session, payload,
+                                      thread_id=getattr(arguments, "session_id", None), request_id=arguments.request_id)
+            return control.status(receipt["request_id"], wait=arguments.wait)
         associations = {key: getattr(arguments, key) for key in ("repository_id", "project_id") if hasattr(arguments, key)}
         if arguments.thread_command == "list":
             return store.threads.list(archived=arguments.archived, cwd=arguments.cwd, **associations)
+        if arguments.thread_command == "search":
+            from .thread_search import search_threads
+            return search_threads(store, arguments.query, limit=arguments.limit, cursor=arguments.cursor,
+                                  cwd=arguments.cwd, app_only=arguments.app_only, **associations)
         store.threads.ensure(arguments.session_id)
         if arguments.thread_command == "show":
             return store.threads.get(arguments.session_id, history=True)
@@ -505,6 +579,12 @@ def run(arguments: argparse.Namespace) -> Any:
             classification=arguments.classification,
             thread_id=arguments.thread_id,
             reply_required=arguments.reply_required,
+        )
+    if command == "reply":
+        return store.reply_message(
+            sender_session_id=arguments.from_session,
+            message_id=arguments.message_id,
+            body=arguments.message,
         )
     if command == "handoff":
         sender = store.get_session(arguments.from_session)
@@ -663,7 +743,7 @@ def mutation_receipt(arguments, result):
     if isinstance(result, dict):
         fields = ("session_id", "thread_id", "id", "activity", "bead_id", "write_scope", "lease_mode",
                   "title", "attention", "project_id", "repository_id", "recipient_session_id",
-                  "classification", "reply_required", "acknowledged_at", "acknowledged", "message_ids", "sender_session_id")
+                  "classification", "reply_required", "in_reply_to", "acknowledged_at", "acknowledged", "message_ids", "sender_session_id")
         receipt.update({key: result[key] for key in fields if key in result})
         if arguments.command == "checkpoint":
             checkpoint = result["checkpoint"]

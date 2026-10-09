@@ -22,10 +22,13 @@ from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
 from .store import CoordinationError, CoordinationStore
 from .thread_control import ThreadControlWorker
+from .app_control import AppControlWorker
+from .message_timeline import message_timeline, message_cursor, message_changes
 from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
-from .workspaces import matches_workspace
+from .workspaces import matches_workspace, resolve_workspace
+from .organization import repository_root
 from .workspace_files import workspace_files
 
 DEFAULT_UI_HOST = "127.0.0.1"
@@ -353,7 +356,11 @@ def _handler(
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
                 return
-            if parsed.path in {"/theme.js", "/theme.css", "/app.js", "/model-picker.js", "/conversation-scroll.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css"}:
+            if parsed.path in {"/agent-messages.js", "/agent-messages.css"}:
+                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                return
+            if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/conversation-scroll.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -436,6 +443,8 @@ def _handler(
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "workspaces":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
+            elif route == "schedules":
+                self._json(HTTPStatus.OK, {"data": browser_sessions.schedules.list()})
             elif route == "organization":
                 self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.list())
             elif route == "views":
@@ -448,6 +457,8 @@ def _handler(
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_work_threads(archived=query.get("archived") == ["true"])})
             elif route.startswith("threads/") and route.endswith("/preview"):
                 self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
+            elif route.startswith("threads/") and route.endswith("/messages"):
+                self._json(HTTPStatus.OK, {"data": message_timeline(store, unquote(route[8:-9]), browser_sessions.cwd)})
             elif route.startswith("threads/"):
                 self._json(HTTPStatus.OK, browser_sessions.work_thread(unquote(route[8:])))
             elif route.startswith("sessions/"):
@@ -472,6 +483,7 @@ def _handler(
                 try:
                     self.wfile.write(b"retry: 1500\n\n")
                     self.wfile.flush()
+                    message_sequence = message_cursor(store)
                     while not browser_sessions.closed:
                         # Terminal hooks run in separate processes. Read their durable
                         # events even when no app-server event wakes this connection.
@@ -481,7 +493,10 @@ def _handler(
                         completions = browser_sessions.completions_after(completion_sequence)
                         sequence = batch["seq"]
                         completion_sequence = completions["seq"]
+                        message_sequence, coordination_events = message_changes(store, message_sequence, browser_sessions.cwd)
+                        batch["events"].extend(coordination_events)
                         batch.update(completions=completions["events"], completionSeq=completion_sequence,
+                                     snoozes=browser_sessions.snooze_notifications(),
                                      approvals=browser_sessions.approval_notifications())
                         self.wfile.write(f"id: {sequence}:{completion_sequence}\ndata: {json.dumps(batch)}\n\n".encode())
                         self.wfile.flush()
@@ -517,7 +532,8 @@ def _handler(
             try:
                 route = urlparse(self.path).path.split("/")[1:]
                 image_route = len(route) == 5 and route[:3] == ["api", "browser", "sessions"] and route[4] in {"messages", "queue"}
-                max_body = MAX_MESSAGE_BODY_BYTES if image_route else _MAX_BODY_BYTES
+                schedule_route = route[:3] == ["api", "browser", "schedules"]
+                max_body = MAX_MESSAGE_BODY_BYTES if image_route else 1024 * 1024 if schedule_route else _MAX_BODY_BYTES
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= max_body:
                     self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "Request body is empty or too large."})
@@ -528,6 +544,12 @@ def _handler(
                 body = json.loads(raw_body)
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
+                if route == ["api", "browser", "schedules"]:
+                    self._json(HTTPStatus.CREATED, browser_sessions.schedules.create(body))
+                    return
+                if len(route) == 4 and route[:3] == ["api", "browser", "schedules"]:
+                    self._json(HTTPStatus.OK, browser_sessions.schedules.change(unquote(route[3]), body))
+                    return
                 if len(route) == 4 and route[:3] == ["api", "browser", "files"]:
                     self._json(HTTPStatus.OK, workspace_files(route[3], body, browser_sessions.cwd))
                     return
@@ -587,9 +609,17 @@ def _handler(
                     else:
                         raise CoordinationError("Unknown view action.")
                     return
+                if route == ["api", "browser", "workspaces", "open"]:
+                    if set(body) != {"path"}:
+                        raise CoordinationError("Opening a folder accepts a path.")
+                    directory = resolve_workspace(body["path"], workspace=browser_sessions.cwd)
+                    repository = (browser_sessions.store.threads.organization.add_repository(directory)
+                                  if repository_root(directory) else None)
+                    self._json(HTTPStatus.OK, {"cwd": directory, "repository": repository})
+                    return
                 if route == ["api", "browser", "projects"]:
                     if set(body) != {"name"}:
-                        raise CoordinationError("Project creation accepts a name.")
+                        raise CoordinationError("Group creation accepts a name.")
                     self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.create_project(body["name"]))
                     return
                 if route == ["api", "browser", "repositories"]:
@@ -602,8 +632,10 @@ def _handler(
                         claimed = browser_sessions.claim_notification(body["completion_id"])
                     elif set(body) == {"request_key"}:
                         claimed = browser_sessions.claim_approval_notification(body["request_key"])
+                    elif set(body) == {"snooze_id"}:
+                        claimed = browser_sessions.claim_snooze_notification(body["snooze_id"])
                     else:
-                        raise CoordinationError("Notification claim requires a completion ID or approval request key.")
+                        raise CoordinationError("Notification claim requires a completion ID, approval request key, or snooze ID.")
                     self._json(HTTPStatus.OK, {"claimed": claimed})
                     return
                 if route[:3] == ["api", "browser", "threads"]:
@@ -670,8 +702,11 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     remote_access: RemoteAccess | None = None
     web_push: WebPush | None = None
     thread_control: ThreadControlWorker | None = None
+    app_control: AppControlWorker | None = None
 
     def server_close(self) -> None:
+        if self.app_control is not None:
+            self.app_control.close()
         if self.thread_control is not None:
             self.thread_control.close()
         if self.web_push is not None:
@@ -722,11 +757,15 @@ def make_ui_server(
     server.remote_access = remote
     server.web_push = push
     server.thread_control = ThreadControlWorker(sessions)
+    server.app_control = AppControlWorker(sessions)
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
     remote.restore(f"http://{target_host}:{bound_port}")
     push.start()
     server.thread_control.start()
+    server.app_control.start()
+    sessions.schedules.start()
+    sessions.inbox_wake.start()
     return server
 
 

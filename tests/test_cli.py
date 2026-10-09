@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import subprocess
 import sys
 import tempfile
@@ -48,11 +50,10 @@ class CliTests(unittest.TestCase):
 
     def test_send_reply_required_boolean_option_parses(self) -> None:
         parser = _parser()
-        self.assertIsNone(
-            parser.parse_args(
-                ["send", "--from-session", "one", "--session", "two", "hello"]
-            ).reply_required
-        )
+        for flags in ([], ["--reply-required", "--no-reply-required"]):
+            with self.subTest(flags=flags), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                parser.parse_args(["send", "--session", "two", *flags, "hello"])
+            self.assertEqual(error.exception.code, 2)
         self.assertFalse(
             parser.parse_args(
                 [
@@ -305,7 +306,7 @@ class CliTests(unittest.TestCase):
                 directory,
             )
             self._run(
-                database, "send", "--from-session", "one", "--session", "two", "hi"
+                database, "send", "--from-session", "one", "--session", "two", "--reply-required", "hi"
             )
             result = self._run(
                 database, "inbox", "--session-id", "two", "--wait", "--timeout", "5"
@@ -395,10 +396,11 @@ class CliTests(unittest.TestCase):
                 "two",
                 "--classification",
                 "informational",
+                "--no-reply-required",
                 "FYI",
             )
             self._run(
-                database, "send", "--from-session", "one", "--session", "two", "act"
+                database, "send", "--from-session", "one", "--session", "two", "--reply-required", "act"
             )
             self._run(database, "inbox", "--session-id", "two")
 
@@ -444,6 +446,48 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(json.loads(result.stdout)["reply_required"])
+
+    def test_ambiguous_send_creates_no_message(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            for session in ("one", "two"):
+                self._run(database, "register", "--session-id", session, "--client", "codex", "--cwd", directory)
+            for classification in ("action_required", "informational", "closure"):
+                result = self._run(database, "send", "--from-session", "one", "--session", "two",
+                                   "--classification", classification, "Received, thanks!")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--reply-required", result.stderr)
+                self.assertIn("--no-reply-required", result.stderr)
+            inbox = self._run(database, "inbox", "--session-id", "two", "--all", "--peek")
+            self.assertEqual(json.loads(inbox.stdout), [])
+
+    def test_reply_derives_target_and_reports_original_message(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            for session in ("one", "two"):
+                self._run(database, "register", "--session-id", session, "--client", "codex", "--cwd", directory)
+            sent = self._run(database, "send", "--from-session", "one", "--session", "two",
+                             "--reply-required", "Please confirm receipt")
+            original = json.loads(sent.stdout)
+            reply = self._run(database, "reply", "--from-session", "two", "--message-id",
+                              str(original["id"]), "Received, thanks!")
+            self.assertEqual(reply.returncode, 0, reply.stderr)
+            receipt = json.loads(reply.stdout)
+            self.assertEqual(receipt["command"], "reply")
+            self.assertEqual(receipt["recipient_session_id"], "one")
+            self.assertEqual(receipt["thread_id"], original["thread_id"])
+            self.assertEqual(receipt["in_reply_to"], original["id"])
+            self.assertFalse(receipt["reply_required"])
+            self.assertEqual(receipt["classification"], "action_required")
+            inbox = self._run(database, "inbox", "--session-id", "one", "--peek")
+            self.assertEqual(json.loads(inbox.stdout)[0]["body"], "Received, thanks!")
+            invalid = self._run(database, "reply", "--from-session", "one", "--message-id",
+                                str(receipt["id"]), "Thanks again")
+            self.assertEqual(invalid.returncode, 2, invalid.stderr)
+            self.assertIn("does not request a reply", invalid.stderr)
+            override = self._run(database, "reply", "--from-session", "two", "--message-id",
+                                 str(original["id"]), "--reply-required", "Another request")
+            self.assertEqual(override.returncode, 2)
 
 
 if __name__ == "__main__":

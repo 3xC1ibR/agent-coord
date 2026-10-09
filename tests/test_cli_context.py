@@ -43,13 +43,13 @@ class CliContextTests(unittest.TestCase):
         with patch.dict(os.environ, {"AGENT_COORD_SESSION_ID": "two"}):
             self.assertEqual(self.invoke("status")[1]["session_id"], "two")
             self.assertEqual(self.invoke("status", "--session-id", "three")[1]["session_id"], "three")
-            code, receipt = self.invoke("send", "--session", "one", "hello")
+            code, receipt = self.invoke("send", "--session", "one", "--reply-required", "hello")
             self.assertEqual(code, 0)
             messages = self.store.inbox("one", mark_delivered=False)
             self.assertEqual(messages[0]["sender_session_id"], "two")
             self.assertEqual(receipt["id"], messages[0]["id"])
             self.assertNotIn("body", receipt)
-            self.invoke("send", "--from-session", "three", "--session", "one", "override")
+            self.invoke("send", "--from-session", "three", "--session", "one", "--no-reply-required", "override")
             self.assertEqual(self.store.inbox("one", mark_delivered=False)[-1]["sender_session_id"], "three")
 
     def test_missing_identity_fails_even_with_registered_sessions(self):
@@ -59,6 +59,17 @@ class CliContextTests(unittest.TestCase):
         self.assertIn("--session-id", result["error"])
         self.assertIn("AGENT_COORD_SESSION_ID", result["error"])
         self.assertIsNone(self.store.threads.get("one")["checkpoint"])
+
+    def test_reply_uses_caller_identity_and_cannot_impersonate_recipient(self):
+        original = self.store.send_message(sender_session_id="two", recipient_session_id="one", body="Confirm receipt")
+        code, receipt = self.invoke("reply", "--message-id", str(original["id"]), "Received")
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt["sender_session_id"], "one")
+        self.assertEqual(receipt["in_reply_to"], original["id"])
+        code, error = self.invoke("reply", "--from-session", "three", "--message-id", str(original["id"]), "Wrong sender")
+        self.assertEqual(code, 2)
+        self.assertIn("Only the recipient", error["error"])
+        self.assertEqual(len(self.store.inbox("two", mark_delivered=False)), 1)
 
     def test_database_override_and_xdg_default(self):
         alternate = self.root / "agent-coord/state.sqlite3"

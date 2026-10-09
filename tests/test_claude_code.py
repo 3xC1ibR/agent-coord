@@ -21,7 +21,9 @@ for line in sys.stdin:
             break
         response = {"args": sys.argv[1:], "parent": "CODEX_THREAD_ID" in os.environ,
                     "client": os.environ.get("AGENT_COORD_CLIENT"),
-                    "session": os.environ.get("AGENT_COORD_SESSION_ID"), "path": os.environ.get("PATH")}
+                    "session": os.environ.get("AGENT_COORD_SESSION_ID"), "path": os.environ.get("PATH"),
+                    "auth_env": {name: os.environ[name] for name in (
+                        "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR") if name in os.environ}}
         print(json.dumps({"type": "control_response", "response": {
             "subtype": "success", "request_id": message["request_id"], "response": response}}), flush=True)
     elif message.get("type") == "user":
@@ -76,6 +78,16 @@ class ClaudeTransportTests(unittest.TestCase):
         self.assertIn("--allow-dangerously-skip-permissions", args)
         self.assertEqual(args[args.index("--model") + 1], "sonnet")
         self.assertEqual(args[args.index("--effort") + 1], "high")
+
+    def test_shell_api_key_cannot_override_subscription_authentication(self):
+        subscription_env = {"CLAUDE_CODE_OAUTH_TOKEN": "subscription-token",
+                            "CLAUDE_CONFIG_DIR": str(self.root / "claude-config")}
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "shell-api-key", **subscription_env}):
+            for options in ({}, {"resume": True}, {"probe": True}):
+                with self.subTest(options=options):
+                    connection = self.connection(**options)
+                    self.assertEqual(connection.control("initialize")["auth_env"], subscription_env)
+                    self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "shell-api-key")
 
     def test_eof_releases_pending_control_request_and_notifies(self):
         event = threading.Event()

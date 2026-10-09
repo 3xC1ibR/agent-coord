@@ -41,7 +41,7 @@ class WorkThreadTests(unittest.TestCase):
 
     def test_work_phase_retains_inquiries_and_requires_evidence_of_delivery(self):
         self.assertEqual(self.threads.get("conversation")["work_phase"], "new")
-        for activity in ("discussion", "investigation", "planning", "implementation", "validation", "deployment"):
+        for activity in ("discussion", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment"):
             with self.subTest(activity=activity):
                 self.save(phase=activity, next_actor="nobody", next_action="")
                 done = self.save(phase="finished", next_actor="nobody", next_action="")
@@ -50,6 +50,27 @@ class WorkThreadTests(unittest.TestCase):
                 self.assertEqual(done["checkpoint"]["phase"], "finished")
                 self.assertEqual(done["attention"], "now")
                 self.assertEqual(CoordinationStore(self.store.database_path).threads.get("conversation")["work_phase"], expected)
+
+    def test_orchestrating_cli_persists_without_changing_placement_or_requiring_user_action(self):
+        self.threads.update("conversation", attention="later", title="Dispatcher")
+        payload = dict(phase="orchestrating", summary="Routing specialist work.", next_action="", next_actor="nobody")
+        args = _parser().parse_args(["--db", str(self.store.database_path), "checkpoint", "--session-id",
+                                    "conversation", "--json", json.dumps(payload)])
+        result = run(args)
+        reopened = CoordinationStore(self.store.database_path).threads.get("conversation")
+        for thread in (result, reopened):
+            self.assertEqual(thread["work_phase"], "orchestrating")
+            self.assertEqual(thread["checkpoint"]["next_actor"], "nobody")
+            self.assertEqual(thread["checkpoint"]["next_action"], "")
+            self.assertEqual(thread["title"], "Dispatcher")
+            self.assertEqual(thread["attention"], "later")
+        instructions = self.threads.instructions("conversation")
+        self.assertIn("planning, orchestrating, implementation", instructions)
+        self.assertIn("including while a specialist implements or deploys", instructions)
+        with self.assertRaises(SystemExit) as help_exit, patch("sys.stdout") as stdout:
+            _parser().parse_args(["checkpoint", "--help"])
+        self.assertEqual(help_exit.exception.code, 0)
+        self.assertIn("orchestrating", "".join(call.args[0] for call in stdout.write.call_args_list))
 
     def test_finished_without_an_activity_does_not_invent_delivery(self):
         saved = self.save(phase="finished", next_actor="nobody", next_action="")

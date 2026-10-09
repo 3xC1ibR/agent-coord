@@ -665,6 +665,44 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["turns"], turns)
         self.assertFalse(result["historyUnavailable"])
 
+    def test_unchanged_large_history_reads_skip_persistence_and_keep_response_isolated(self):
+        thread_id = self.create()
+        turns = [{"id": "saved", "status": "completed", "items": [
+            {"id": "answer", "type": "agentMessage", "text": "long transcript " * 100000}]}]
+        self.sessions.rpc.threads[thread_id].update(turns=turns, status={"type": "idle"})
+        self.sessions.read(thread_id)
+        with patch.object(self.sessions, "_save_history", wraps=self.sessions._save_history) as save:
+            result = self.sessions.read(thread_id)
+            self.sessions.read(thread_id)
+            save.assert_not_called()
+        result["thread"]["turns"][0]["items"][0]["text"] = "caller edit"
+        self.assertEqual(self.sessions._history(thread_id)["turns"], turns)
+        self.sessions.rpc.threads[thread_id]["turns"][0]["items"][0]["text"] = "changed answer"
+        with patch.object(self.sessions, "_save_history", wraps=self.sessions._save_history) as save:
+            self.sessions.read(thread_id)
+            save.assert_called_once_with(thread_id)
+        with self.store._connection() as db:
+            persisted = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        self.assertEqual(persisted["turns"][0]["items"][0]["text"], "changed answer")
+
+    def test_read_flushes_unsaved_stream_deltas_even_when_provider_matches_mirror(self):
+        thread_id = self.create()
+        turns = [{"id": "live", "status": "inProgress", "items": [
+            {"id": "answer", "type": "agentMessage", "text": "Partial"}]}]
+        self.sessions.rpc.threads[thread_id].update(turns=turns, status={"type": "active"})
+        self.sessions.read(thread_id)
+        self.sessions._event({"method": "item/agentMessage/delta", "params": {
+            "threadId": thread_id, "turnId": "live", "itemId": "answer", "delta": " update"}})
+        self.sessions.rpc.threads[thread_id]["turns"][0]["items"][0]["text"] = "Partial update"
+        with patch.object(self.sessions, "_save_history", wraps=self.sessions._save_history) as save:
+            self.sessions.read(thread_id)
+            save.assert_called_once_with(thread_id)
+            self.sessions.read(thread_id)
+            save.assert_called_once_with(thread_id)
+        with self.store._connection() as db:
+            persisted = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        self.assertEqual(persisted["turns"][0]["items"][0]["text"], "Partial update")
+
     def test_failed_history_read_keeps_cached_messages_and_can_recover(self):
         thread_id = self.create()
         turns = [{"id": "cached", "status": "completed", "items": [

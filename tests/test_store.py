@@ -102,6 +102,7 @@ class CoordinationStoreTests(unittest.TestCase):
         self.assertEqual(legacy_message["classification"], "action_required")
         self.assertEqual(legacy_message["thread_id"], f"legacy:{legacy_message['id']}")
         self.assertTrue(legacy_message["reply_required"])
+        self.assertIsNone(legacy_message["in_reply_to"])
 
         with closing(sqlite3.connect(database)) as connection:
             connection.execute(
@@ -459,6 +460,52 @@ class CoordinationStoreTests(unittest.TestCase):
         self.assertFalse(optional["reply_required"])
         self.assertFalse(informational["reply_required"])
         self.assertFalse(closure["reply_required"])
+
+    def test_reply_is_actionable_without_reply_obligation_or_transport_ack(self) -> None:
+        self.register("one")
+        self.register("two", "claude")
+        original = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Please confirm")
+        reply = self.store.reply_message(sender_session_id="two", message_id=original["id"], body="  Received, thanks!  ")
+        self.assertEqual(reply["recipient_session_id"], "one")
+        self.assertEqual(reply["thread_id"], original["thread_id"])
+        self.assertEqual(reply["in_reply_to"], original["id"])
+        self.assertEqual(reply["body"], "Received, thanks!")
+        self.assertEqual(reply["classification"], "action_required")
+        self.assertFalse(reply["reply_required"])
+        self.assertIsNone(reply["delivered_at"])
+        original_record = self.store.inbox("two", include_delivered=True, mark_delivered=False)[0]
+        self.assertIsNone(original_record["acknowledged_at"])
+        self.assertIsNone(original_record["delivered_at"])
+        with self.assertRaisesRegex(CoordinationError, "does not request a reply"):
+            self.store.reply_message(sender_session_id="one", message_id=reply["id"], body="Thanks again")
+        self.assertEqual(len(self.store.inbox("two", include_delivered=True, mark_delivered=False)), 1)
+
+    def test_invalid_replies_do_not_write_messages(self) -> None:
+        for session in ("one", "two", "three"):
+            self.register(session)
+        original = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Please confirm")
+        cases = [("three", original["id"], "Wrong recipient"), ("one", original["id"], "Own message"),
+                 ("two", 99999, "Unknown"), ("two", 0, "Zero"), ("two", -1, "Negative"),
+                 ("two", True, "Boolean"), ("two", "1", "String"), ("two", original["id"], " ")]
+        for sender, message_id, body in cases:
+            with self.subTest(sender=sender, message_id=message_id, body=body), self.assertRaises(CoordinationError):
+                self.store.reply_message(sender_session_id=sender, message_id=message_id, body=body)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
+
+    def test_reply_cannot_reopen_closed_or_superseded_exchange(self) -> None:
+        self.register("one")
+        self.register("two")
+        original = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Please confirm")
+        self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Finished",
+                                classification="closure", thread_id=original["thread_id"])
+        with self.assertRaisesRegex(CoordinationError, "closed or superseded"):
+            self.store.reply_message(sender_session_id="two", message_id=original["id"], body="Too late")
+        self.store.send_message(sender_session_id="one", recipient_session_id="two", body="New work",
+                                thread_id=original["thread_id"])
+        with self.assertRaisesRegex(CoordinationError, "closed or superseded"):
+            self.store.reply_message(sender_session_id="two", message_id=original["id"], body="Stale request")
+        self.assertEqual(self.store.inbox("one", include_delivered=True, mark_delivered=False), [])
 
     def test_closure_delivers_older_pending_action_and_later_action_reopens(self) -> None:
         self.register("one")

@@ -114,7 +114,7 @@ class OrganizationStore:
 
     def create_project(self, name: str) -> dict:
         if not isinstance(name, str) or not name.strip() or len(name) > 160:
-            raise CoordinationError("Project name must contain 1–160 characters.")
+            raise CoordinationError("Group name must contain 1–160 characters.")
         name = name.strip()
         key = name.casefold()
         with self.store._connection() as db:
@@ -139,7 +139,7 @@ class OrganizationStore:
     @staticmethod
     def validate(db, *, repository_id=UNSET, project_id=UNSET):
         for value, table, label in ((repository_id, "work_repositories", "Repository"),
-                                    (project_id, "named_projects", "Project")):
+                                    (project_id, "named_projects", "Group")):
             if value is UNSET or value is None:
                 continue
             if not isinstance(value, str) or not db.execute(f"SELECT 1 FROM {table} WHERE id = ?", (value,)).fetchone():

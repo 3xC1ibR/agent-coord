@@ -236,6 +236,7 @@ class CoordinationStore:
                     classification TEXT NOT NULL DEFAULT 'action_required',
                     thread_id TEXT NOT NULL DEFAULT '',
                     reply_required INTEGER NOT NULL DEFAULT 1,
+                    in_reply_to INTEGER REFERENCES messages(id),
                     FOREIGN KEY(sender_session_id) REFERENCES sessions(session_id),
                     FOREIGN KEY(recipient_session_id) REFERENCES sessions(session_id)
                 );
@@ -367,6 +368,10 @@ class CoordinationStore:
                     "ALTER TABLE messages ADD COLUMN reply_required "
                     "INTEGER NOT NULL DEFAULT 1"
                 )
+            if "in_reply_to" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN in_reply_to INTEGER REFERENCES messages(id)"
+                )
             connection.execute(
                 """
                 UPDATE messages
@@ -374,6 +379,30 @@ class CoordinationStore:
                 WHERE thread_id IS NULL OR thread_id = ''
                 """
             )
+            for column, definition in (("sender_turn_id", "TEXT"), ("recipient_turn_id", "TEXT"),
+                                       ("wake_turn_id", "TEXT"), ("suppressed_at", "REAL")):
+                if column not in message_columns:
+                    connection.execute(f"ALTER TABLE messages ADD COLUMN {column} {definition}")
+            connection.executescript("""
+                CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_session_id, id);
+                CREATE INDEX IF NOT EXISTS messages_exchange_idx ON messages(thread_id, id);
+                CREATE TABLE IF NOT EXISTS message_changes (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender_session_id TEXT NOT NULL, recipient_session_id TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS message_inserted AFTER INSERT ON messages BEGIN
+                    INSERT INTO message_changes(sender_session_id, recipient_session_id)
+                    VALUES (NEW.sender_session_id, NEW.recipient_session_id);
+                END;
+                CREATE TRIGGER IF NOT EXISTS message_updated AFTER UPDATE ON messages
+                WHEN OLD.delivered_at IS NOT NEW.delivered_at OR OLD.acknowledged_at IS NOT NEW.acknowledged_at
+                    OR OLD.wake_turn_id IS NOT NEW.wake_turn_id OR OLD.recipient_turn_id IS NOT NEW.recipient_turn_id
+                    OR OLD.suppressed_at IS NOT NEW.suppressed_at
+                BEGIN
+                    INSERT INTO message_changes(sender_session_id, recipient_session_id)
+                    VALUES (NEW.sender_session_id, NEW.recipient_session_id);
+                END;
+            """)
             delegation_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(delegations)")
@@ -465,6 +494,8 @@ class CoordinationStore:
 
                 CREATE INDEX IF NOT EXISTS messages_thread_idx
                     ON messages(thread_id, id);
+                CREATE INDEX IF NOT EXISTS messages_reply_idx
+                    ON messages(in_reply_to) WHERE in_reply_to IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS messages_actionable_recipient_idx
                     ON messages(recipient_session_id, classification, delivered_at);
 
@@ -577,6 +608,7 @@ class CoordinationStore:
             "classification": row["classification"],
             "thread_id": row["thread_id"],
             "reply_required": bool(row["reply_required"]),
+            "in_reply_to": row["in_reply_to"],
             "terminal": row["classification"] == "closure",
             "created_at": _iso(row["created_at"]),
             "delivered_at": _iso(
@@ -596,6 +628,7 @@ class CoordinationStore:
         thread_id: str,
         reply_required: bool,
         now: float,
+        in_reply_to: int | None = None,
     ) -> tuple[sqlite3.Row, bool]:
         if classification not in MESSAGE_CLASSIFICATIONS:
             raise CoordinationError(
@@ -671,8 +704,8 @@ class CoordinationStore:
             """
             INSERT INTO messages (
                 sender_session_id, recipient_session_id, body, created_at,
-                delivered_at, classification, thread_id, reply_required
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                delivered_at, classification, thread_id, reply_required, in_reply_to
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sender_session_id,
@@ -683,21 +716,34 @@ class CoordinationStore:
                 classification,
                 normalized_thread,
                 int(reply_required),
+                in_reply_to,
             ),
         )
+        if classification == "action_required" and connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'browser_sessions'"
+        ).fetchone():
+            # Routing new work reopens app UI placement atomically with message
+            # insertion, even when a busy recipient consumes it before a wake
+            # tick. Provider archival and Stop/failure state remain independent.
+            # Re-reading, acknowledging or retrying delivery never repeats this.
+            connection.execute("""UPDATE work_threads
+                SET attention = 'now', snoozed_until = NULL, updated_at = ?
+                WHERE thread_id = ? AND attention = 'archived'
+                AND EXISTS (SELECT 1 FROM browser_sessions WHERE thread_id = ?)""",
+                (now, recipient_session_id, recipient_session_id))
         if classification == "closure":
             # Closure suppresses every older pending actionable notification in
             # this conversation before any wake or hook can observe it.
             connection.execute(
                 """
                 UPDATE messages
-                SET delivered_at = ?
+                SET delivered_at = ?, suppressed_at = ?
                 WHERE thread_id = ?
                   AND classification = 'action_required'
                   AND delivered_at IS NULL
                   AND id < ?
                 """,
-                (now, normalized_thread, int(cursor.lastrowid)),
+                (now, now, normalized_thread, int(cursor.lastrowid)),
             )
             connection.execute(
                 """
@@ -707,6 +753,10 @@ class CoordinationStore:
                 """,
                 (now, now, normalized_thread),
             )
+        connection.execute("""UPDATE messages SET sender_turn_id = (
+            SELECT t.turn_id FROM work_threads t JOIN sessions s ON s.session_id = t.thread_id
+            WHERE t.thread_id = ? AND s.turn_active = 1) WHERE id = ?""",
+            (sender_session_id, int(cursor.lastrowid)))
         row = connection.execute(
             "SELECT * FROM messages WHERE id = ?", (int(cursor.lastrowid),)
         ).fetchone()
@@ -2426,6 +2476,50 @@ class CoordinationStore:
         )
         return result
 
+    def reply_message(
+        self, *, sender_session_id: str, message_id: int, body: str
+    ) -> dict[str, Any]:
+        """Answer exactly one request without creating another reply obligation."""
+        if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
+            raise CoordinationError("Reply message ID must be a positive integer.")
+        if not body.strip():
+            raise CoordinationError("Message body must not be empty.")
+        self.get_session(sender_session_id)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            original = connection.execute(
+                "SELECT m.*, t.closed_at, s.name AS recipient_name, s.bead_id AS recipient_bead_id "
+                "FROM messages m JOIN message_threads t ON t.thread_id = m.thread_id "
+                "JOIN sessions s ON s.session_id = m.sender_session_id WHERE m.id = ?",
+                (message_id,),
+            ).fetchone()
+            if original is None:
+                raise CoordinationError(f"Unknown message: {message_id}.")
+            if original["recipient_session_id"] != sender_session_id:
+                raise CoordinationError(f"Only the recipient of message {message_id} can reply to it.")
+            if original["closed_at"] is not None or original["suppressed_at"] is not None or original["classification"] == "closure":
+                raise CoordinationError("Cannot reply to a closed or superseded exchange. Use send with an explicit reply choice for new work.")
+            if not original["reply_required"]:
+                raise CoordinationError(f"Message {message_id} does not request a reply. Use send with an explicit reply choice for new work.")
+            row, _ = self._insert_message(
+                connection,
+                sender_session_id=sender_session_id,
+                recipient_session_id=original["sender_session_id"],
+                body=body.strip(),
+                classification="action_required",
+                thread_id=original["thread_id"],
+                reply_required=False,
+                in_reply_to=message_id,
+                now=self.clock(),
+            )
+        result = self._row_to_message(row)
+        result.update(
+            recipient_name=original["recipient_name"],
+            recipient_bead_id=original["recipient_bead_id"],
+            idempotent=False,
+        )
+        return result
+
     def inbox(
         self,
         session_id: str,
@@ -2503,7 +2597,11 @@ class CoordinationStore:
                 connection.executemany(
                     """
                     UPDATE messages
-                    SET delivered_at = COALESCE(delivered_at, ?)
+                    SET recipient_turn_id = CASE WHEN delivered_at IS NULL THEN (
+                        SELECT t.turn_id FROM work_threads t JOIN sessions s ON s.session_id = t.thread_id
+                        WHERE t.thread_id = messages.recipient_session_id AND s.turn_active = 1
+                    ) ELSE recipient_turn_id END,
+                        delivered_at = COALESCE(delivered_at, ?)
                     WHERE id = ?
                     """,
                     [(now, row["id"]) for row in rows],

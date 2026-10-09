@@ -285,6 +285,30 @@ class NotificationHTTPTests(unittest.TestCase):
             with urllib.request.urlopen(request, timeout=3) as response:
                 self.assertEqual(json.load(response)["claimed"], expected)
 
+    def test_stream_includes_snooze_expiry_and_claims_it_once_with_existing_permissions(self):
+        now = [1000.0]
+        self.store.clock = lambda: now[0]
+        self.store.threads.update("terminal", snoozed_until=1200)
+        now[0] = 1200
+        batch = self.event_batch("/api/browser/events")
+        event, = batch["snoozes"]
+        self.assertEqual(event["thread_id"], "terminal")
+        self.assertEqual(event["status"], "snooze")
+        self.assertEqual(batch["completions"], [])
+        self.assertEqual(self.sessions.rpc.calls, [])
+        url = self.url + "/api/browser/notifications/claim"
+        body = json.dumps({"snooze_id": event["id"]}).encode()
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}), timeout=3)
+        self.assertEqual(denied.exception.code, 403)
+        denied.exception.close()
+        for expected in (True, False):
+            request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "X-Agent-Coord-Token": self.config["token"]})
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(json.load(response)["claimed"], expected)
+        resumed = self.event_batch("/api/browser/events", f'{batch["seq"]}:{batch["completionSeq"]}')
+        self.assertEqual(resumed["snoozes"], [])
+
     def test_invalid_stream_cursors_fail_before_stream_headers(self):
         for cursor in ("bad", "-1", "1:bad", "1:-1", "1:2:3"):
             request = urllib.request.Request(self.url + "/api/browser/events", headers={"Last-Event-ID": cursor})

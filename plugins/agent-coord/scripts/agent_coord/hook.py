@@ -54,7 +54,13 @@ def _deny(event: str, reason: str, context: str | None = None) -> dict[str, Any]
 def _format_messages(messages: list[dict[str, Any]]) -> str:
     if not messages:
         return ""
-    lines = ["Unread actionable agent-coordination messages:"]
+    lines = [
+        "Delivered actionable agent-coordination messages (full requests below). "
+        "These requests are already included in your context; handle them directly "
+        "without fetching the inbox again. If needed request text is missing, "
+        "recover it with agent-coord inbox --unread (plain inbox only returns "
+        "undelivered messages)."
+    ]
     for message in messages:
         sender = message["sender_name"] or message["sender_session_id"]
         bead = f" for {message['sender_bead_id']}" if message["sender_bead_id"] else ""
@@ -64,8 +70,12 @@ def _format_messages(messages: list[dict[str, Any]]) -> str:
             f"{sender}{bead}: {message['body']}"
         )
     lines.append(
-        "Reply conversationally only where reply_required=true. Transport "
-        "acknowledgements are silent."
+        "Acknowledge each handled message silently with agent-coord ack --message-id <id>. "
+        "Answer the user directly when requested; keep receipt bookkeeping out of "
+        "the answer unless asked. Reply to the sender only where reply_required=true, "
+        "using agent-coord reply --message-id <id> '<response>'; this delivers the "
+        "reply without requesting another. "
+        "For new messages, send requires --reply-required or --no-reply-required."
     )
     return "\n".join(lines)
 

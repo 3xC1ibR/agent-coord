@@ -48,6 +48,9 @@ class ClaudeConnection:
             "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID", "AGENT_COORD_SESSION_ID",
             "AGENT_COORD_DELEGATION_ID", "AGENT_COORD_ZELLIJ_WAKE",
         }}
+        # Print mode accepts a shell API key even when interactive Claude has
+        # rejected it. Browser conversations should use the user's Claude login.
+        env.pop("ANTHROPIC_API_KEY", None)
         env = client_environment(env, store.database_path, "claude", session_id=options["threadId"])
         try:
             self.process = subprocess.Popen(args, cwd=options["cwd"], env=env,

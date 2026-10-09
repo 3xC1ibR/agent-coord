@@ -9,7 +9,8 @@ from unittest.mock import patch
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
-from agent_coord.workspaces import matches_workspace, workspace_choices
+from agent_coord.workspaces import matches_workspace, workspace_choices, resolve_workspace
+from agent_coord.store import CoordinationError
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -40,6 +41,7 @@ class WorkspaceTests(unittest.TestCase):
         (worktree / ".git").write_text("gitdir: " + str(gitdir))
         self.assertTrue(matches_workspace(str(worktree), str(repo)))
         self.assertTrue(matches_workspace(str(repo), str(worktree)))
+        self.assertEqual(resolve_workspace(str(worktree), workspace=str(repo)), str(worktree))
 
     def test_unrelated_plain_folders_do_not_match_each_other(self):
         one, two = self.projects / "one", self.projects / "two"
@@ -67,6 +69,8 @@ class WorkspaceTests(unittest.TestCase):
         (self.projects / "alias").symlink_to(inside, target_is_directory=True)
         (self.projects / "loop").symlink_to(self.projects / "loop")
         self.assertFalse(matches_workspace(str(self.projects / "escape"), str(self.projects)))
+        with self.assertRaises(CoordinationError):
+            resolve_workspace(str(self.projects / "escape"), workspace=str(self.projects))
         choices = workspace_choices(str(self.projects), [str(outside)], workspace=str(self.projects))
         self.assertEqual([item["cwd"] for item in choices], [str(self.projects), str(inside)])
         self.assertIn(str(outside), [item["cwd"] for item in workspace_choices(str(self.projects))])

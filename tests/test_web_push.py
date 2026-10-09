@@ -91,8 +91,10 @@ class WebPushTests(unittest.TestCase):
         self.store.threads.claim_notification(self.store.threads.completion_cursor())
         self.push.tick()
         self.assertEqual(len(self.transport.sent), 2)
-        self.assertTrue(all(item["payload"]["body"] == "Turn finished" for item in self.transport.sent))
-        self.assertNotIn("Secret", json.dumps(self.transport.sent))
+        for item in self.transport.sent:
+            self.assertEqual(item["payload"]["title"], "Ribbon Field · Turn finished")
+            self.assertEqual(item["payload"]["body"], "Secret project content")
+            self.assertEqual(item["payload"]["url"], "/#terminal")
         self.push.tick()
         self.assertEqual(len(self.transport.sent), 2)
         self.assertEqual(self.push.path.stat().st_mode & 0o777, 0o600)
@@ -112,7 +114,8 @@ class WebPushTests(unittest.TestCase):
         self.now += 31
         restarted.tick()
         self.assertEqual(len(self.transport.sent), 2)
-        self.assertEqual(self.transport.sent[-1]["payload"]["body"], "Turn failed")
+        self.assertEqual(self.transport.sent[-1]["payload"]["title"], "Ribbon Field · Turn failed")
+        self.assertEqual(self.transport.sent[-1]["payload"]["body"], "Secret project content")
         restarted.tick()
         self.assertEqual(len(self.transport.sent), 2)
 
@@ -138,7 +141,9 @@ class WebPushTests(unittest.TestCase):
         self.transport.response = (429, "30")
         self.push.tick()
         self.assertEqual(len(self.transport.sent), 1)
-        self.assertEqual(self.transport.sent[0]["payload"]["body"], "Approval needed")
+        self.assertEqual(self.transport.sent[0]["payload"]["title"], "Ribbon Field · Codex is requesting approval")
+        self.assertEqual(self.transport.sent[0]["payload"]["body"], "Secret title")
+        self.assertEqual(self.transport.sent[0]["payload"]["url"], "/#" + thread)
         self.sessions.answer(thread, key, {"decision": "decline"})
         self.now += 31
         self.push.tick()
@@ -191,6 +196,37 @@ class WebPushTests(unittest.TestCase):
             value = subscription()
             value["keys"][key] = "bad"
             with self.assertRaises(CoordinationError): validate_subscription(value)
+
+    def test_notification_context_uses_project_then_repository_and_bounds_metadata(self):
+        for context, title in (
+            ({"project_name": "Launch", "repository_name": "repo"}, "Launch · Turn finished"),
+            ({"repository_name": "repo"}, "repo · Turn finished"),
+            ({}, "Ribbon Field · Turn finished"),
+        ):
+            with self.subTest(context=context), self.push.connection() as db:
+                self.push.subscribe(self.device, subscription())
+                self.push._enqueue(db, self.device, title, "completed", "thread_one.2", self.now + 3600,
+                                   {**context, "title": "Thread title", "command": "private command"})
+                payload = json.loads(db.execute("SELECT payload FROM outbox WHERE event=?", (title,)).fetchone()[0])
+                self.assertEqual(payload["title"], title)
+                self.assertEqual(payload["body"], "Thread title")
+                self.assertEqual(payload["url"], "/#thread_one.2")
+                self.assertNotIn("private command", json.dumps(payload))
+        with self.push.connection() as db:
+            self.push._enqueue(db, self.device, "long", "approval", "thread", self.now + 900,
+                               {"client": "claude", "project_name": "\U0001f600" * 5000, "title": "\U0001f600" * 5000})
+            payload = json.loads(db.execute("SELECT payload FROM outbox WHERE event='long'").fetchone()[0])
+            self.assertTrue(payload["title"].endswith(" · Claude is requesting approval"))
+            self.assertLess(len(json.dumps(payload).encode()), 4096)
+
+    def test_test_notification_has_a_useful_fallback_without_a_thread(self):
+        self.push.subscribe(self.device, subscription())
+        self.push.test(self.device)
+        self.push.tick()
+        payload = self.transport.sent[0]["payload"]
+        self.assertEqual(payload["title"], "Ribbon Field")
+        self.assertEqual(payload["body"], "Phone notifications are working")
+        self.assertEqual(payload["url"], "/")
 
 
 class WebPushHTTPTests(unittest.TestCase):
