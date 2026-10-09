@@ -68,7 +68,7 @@ default 30-minute stale threshold.
 agent-coord inbox --unread
 agent-coord status
 agent-coord begin-work --scope 'src/**'
-agent-coord send --session <recipient-id> 'Ready for review.'
+agent-coord send --session <recipient-id> --reply-required 'Ready for review.'
 agent-coord end-work
 ```
 
@@ -184,12 +184,14 @@ agent-coord conflicts
 agent-coord send \
   --session <peer-session-id> \
   --classification action_required \
+  --reply-required \
   --thread-id <thread-id> \
   'Can you release src/api/**?'
 
 agent-coord send \
   --bead <bead-id> \
   --classification informational \
+  --no-reply-required \
   'I need to coordinate a shared interface change.'
 
 agent-coord inbox
@@ -197,6 +199,7 @@ agent-coord inbox --unread
 agent-coord inbox --all
 agent-coord inbox --wait
 agent-coord inbox --wait --timeout 120
+agent-coord reply --message-id <message-id> 'Received, thanks!'
 agent-coord ack --message-id <message-id>
 agent-coord ack --all-unread
 agent-coord end-work
@@ -209,10 +212,21 @@ only when exactly one live session declares that issue.
 Messages are classified as `action_required`, `informational`, or `closure`.
 Only undelivered `action_required` messages enter hook context or wake an idle
 agent. `reply_required` is separate: an actionable message may require work but
-no conversational reply, as with an atomic handoff. The default is true for
-`action_required` and false for the other classifications; use
-`--no-reply-required` to opt out explicitly. Transport acknowledgement is
-silent and never creates another message.
+no conversational reply, as with an atomic handoff. Every CLI `send` must choose
+`--reply-required` or `--no-reply-required`; an omitted or contradictory choice
+is rejected before a message is created. Use `--no-reply-required` for
+informational and closure messages. Transport acknowledgement is silent and
+never creates another message.
+
+Answer a request with `agent-coord reply --message-id <id> '<response>'`.
+The command derives the recipient and exchange from the original message,
+records that message ID as `in_reply_to`, and sets `reply_required=false`.
+Replies remain `action_required` so they enter hook context and wake the
+recipient to process the answer. Only the original recipient can reply; replies
+to messages requesting no reply, closed exchanges, or superseded requests are
+rejected. Replying does not acknowledge the original message; use `ack`
+independently. Starting new work or asking a follow-up question uses `send`
+with an explicit reply choice.
 
 Continue a conversation with the same `--thread-id`. A thread accepts only the
 same pair of sessions, in either direction. Close it with one terminal message:
@@ -221,6 +235,7 @@ same pair of sessions, in either direction. Close it with one terminal message:
 agent-coord send \
   --session <peer-session-id> \
   --classification closure \
+  --no-reply-required \
   --thread-id <thread-id> \
   'Validation complete; no further coordination action is needed.'
 ```
@@ -273,6 +288,106 @@ assert the expected declaration. Use `--target-bead` only for a claimed
 transaction. Beads and SQLite remain separate stores, so their updates cannot be
 one cross-database transaction.
 
+## Create persistent app agents
+
+An **agent** is an independent Ribbon Field conversation. A **specialist** is
+an agent focused on a subject or responsibility; a **dispatcher** routes work.
+Provider-native subagents remain a separate concept. App conversations retain
+context between assignments and accept direct user follow-ups.
+
+A registered dispatcher can ask the running app to create an agent:
+
+```bash
+agent-coord thread models --client codex --cwd /absolute/workspace --wait 30
+agent-coord thread create \
+  --cwd /absolute/workspace --client codex --name 'Release specialist' \
+  --model <advertised-model> --effort <supported-level> \
+  --request-id <unique-request-key> --wait 30 \
+  'Explain the release process. Investigate only; do not deploy.'
+agent-coord thread request-status --request-id <unique-request-key> --wait 30
+```
+
+Use `--client claude` for Claude Code. Model and effort are optional. Add
+`--yolo` only with explicit user authorization; defaults use normal app
+permissions and do not inherit the dispatcher's permission mode. Hook trust
+and provider authentication still apply. Use `-` as the prompt to read stdin.
+No Bead or scope is required to create a conversation. Coding assignments follow
+the target repository's issue, scope, and validation rules.
+
+Creation runs inside the app's existing provider infrastructure. A completed
+receipt includes `thread_id`, `result.session_id`, effective model, effort and
+permissions, `result.url`, and the initial coordination `message_id`. The agent
+receives the request through its durable inbox and answers the user in that
+conversation. The original request is saved before the wake prompt. Creation
+completion confirms queueing, not that the requested work has finished.
+
+`queued` awaits an updated app in the target workspace; `running` means claimed.
+Reuse the same request key and arguments after a timeout. `uncertain` is never
+automatically replayed: inspect the saved identity and inventory before retrying.
+`thread cancel-request --request-id <key>` cancels a request that has not started.
+The bridge uses the shared database; no browser window, port discovery, or HTTP
+token is required.
+
+Find existing specialists across open and closed conversations before creating
+another. Search returns compact pages (10 results by default, maximum 50):
+
+```bash
+agent-coord thread search 'release validation' --app-only --limit 10
+agent-coord thread search 'release validation' --app-only --limit 10 --cursor <next_cursor>
+agent-coord thread show --session-id <agent-id>
+```
+
+Each keyword must match the title, original request, latest checkpoint, or
+artifact labels/paths. Results rank relevance first and meaningful work recency
+second, and include the stable identity, app link, placement, provider, summary,
+and wake pause state. `last_work_at` uses turns, completions, and new checkpoints;
+moving/renaming a thread or refreshing an identical checkpoint does not make its
+context fresh. Search globally by default, or select `--repository`, `--project`,
+`--no-repository`, `--no-project`, or an explicit `--cwd`. Omit `--app-only` to
+also find terminal conversation context. Search does not scan full transcripts.
+Continue with the same query and filters until `next_cursor` is null; pages are
+live, so restart discovery if conversations change during paging.
+
+Inspect promising matches and current source before routing. Old context is a
+lead, not proof of how today's application works; ask the specialist to verify
+its assumptions. There is no automatic age cutoff or requirement to create a
+replacement. Reuse the selected app conversation with:
+
+```bash
+agent-coord thread settings --session-id <agent-id>
+agent-coord thread settings --session-id <agent-id> \
+  --model <advertised-model> --effort <supported-level> \
+  --request-id <unique-settings-key> --wait 30
+agent-coord ui link --thread <agent-id>
+agent-coord send --session <agent-id> --classification action_required \
+  --no-reply-required 'The next request; answer the user in your conversation.'
+```
+
+Settings accept `--yolo` or `--default-permissions`. Changes wait for idle and
+queued user follow-ups, and reject closed or pending-close conversations. A user
+settings change supersedes a pending agent settings change. Confirm the receipt
+before sending work that requires the new settings. Completing an assignment
+and releasing its file scopes leaves the conversation available.
+
+Direct user follow-ups steer Codex or queue for Claude; dispatcher messages may
+arrive through tool hooks during a turn. Automatic inbox wake waits for idle and
+prioritizes queued user prompts. Native history and settings survive restarts,
+although active work is interrupted and uncertain submissions are not retried.
+Ordinary actionable messages also wake closed app conversations, restoring the
+same provider identity, context, model, effort, and permissions. Saving new
+actionable work automatically moves a closed app conversation into Now, even
+when execution is paused or the app is offline. Now/Later placement and snoozes
+are otherwise preserved. Closing alone does not cancel older pending work;
+an eligible wake for that work also reopens the conversation. Informational and
+closure messages neither reopen conversations nor wake agents.
+Stop, failed/uncertain submissions, pending Close, and queued user prompts remain
+separate gates. Stopped or failed conversations need accepted direct user input
+to resume automatic wake. Automatically reopened conversations accept direct
+user follow-ups without a separate Reopen action. An updated running app is
+required to execute pending work; messages queue while it is offline.
+
+The existing `delegate` command retains its scoped terminal-worker behavior.
+
 ## Delegate work to an Agent Coord-owned PTY
 
 A registered Codex or Claude parent can launch a new Codex or Claude Code worker
@@ -299,7 +414,9 @@ agent-coord delegate \
 
 Remove `--dry-run` to launch the worker. Agent Coord starts a detached
 supervisor, allocates the child a controlling PTY, captures its output, and
-keeps the interactive client alive at its prompt between turns. The supervisor
+keeps the interactive client alive at its prompt between turns while the
+delegation is unfinished. After a completed or failed result, it disables wake,
+sends EOF, and terminates the child if necessary. The supervisor
 does not run inside the parent's PTY, so it survives the parent process and does
 not compete with the parent's terminal input or rendering.
 
@@ -408,6 +525,33 @@ answer approvals and questions, stop a running turn, rename sessions, and
 close or reopen conversations. Creating a session requires neither a parent
 agent nor a Beads issue. Different sessions can run concurrently; an individual
 session accepts one active turn at a time.
+
+Choose **Schedule…** beside Send to save a one-time text prompt. Set its
+workspace, date and time (with your browser's time zone shown), model, reasoning
+effort, and permissions. Each run creates a new thread, so include the context
+the agent needs in the prompt. **Full access** uses the same unrestricted,
+no-approval settings as session YOLO mode; workspace access can pause for approval.
+Saving a schedule does not start a model turn. Attachments and recurrence are
+not supported.
+
+Open **Scheduled prompts** in the sidebar to edit or cancel a pending run and
+open its result thread. The saved model and reasoning are checked again at
+launch; an unavailable setting fails visibly instead of choosing a substitute.
+The Mac must remain awake and Ribbon Field must remain running. Future schedules
+survive restarts. A time already past when the backend starts, or over one minute
+late during operation, becomes **Missed** and waits for **Run now** or rescheduling.
+The one-minute allowance covers ordinary dispatch delays, not a promise to wake
+the computer. Closing the browser tab does not stop the backend scheduler.
+
+Schedules persist in the coordination database. Atomic claims prevent concurrent
+runtimes from launching the same prompt; a retried save uses the same request ID.
+An interrupted dispatch is never automatically sent again. After a stopped
+runtime's lease expires (up to two minutes after a crash), the worker reads the
+original turn's history and records its result when known; otherwise it shows
+**Needs review**, with a thread link when available. **Completed** means the
+scheduled agent turn ended successfully, not that every requested deployment or
+business outcome was independently verified. Subsequent conversation turns do
+not change the original scheduled run's result.
 
 Use the **Expand chat** icon beside the thread actions to fill the window with
 the title, conversation, and input bar. **Collapse chat** or Escape restores the
@@ -599,7 +743,7 @@ same repository and Beads issue is rejected. The parent can use `delegation
 cancel` to release an active record after a confirmed launch or attachment
 failure.
 
-### Work threads across repositories and projects
+### Work threads across repositories and groups
 
 To dedicate a fresh agent session to managing threads, start it in any directory
 and ask **Help me manage my open threads**. The installed **Thread Manager**
@@ -623,7 +767,7 @@ agent-coord ui open --thread <session-id>
 
 Use the installed plugin's absolute CLI path when it is not on PATH. Names match
 exactly, ignoring case; IDs also work, and ambiguous repository names require an
-ID or root path. Project and repository filters can be combined; `--no-project`
+ID or root path. Group and repository filters can be combined; `--no-project`
 and `--no-repository` select unassigned threads. A saved view or thread is a
 separate destination. With no selection the command opens the All work overview.
 
@@ -638,12 +782,26 @@ produces an error instead of showing unrelated work.
 `--from-session` selects the native window that submitted the session's latest
 message, including queued messages when dispatched. If that window has closed,
 the app uses its current window. Navigation preserves conversation drafts and
-supports Back. Project/repository links use temporary All work filters and do
+supports Back. Group/repository links use temporary All work filters and do
 not edit named saved views, change thread placement, or send messages.
 The existing `agent-coord ui [--port ...]` command still starts the browser UI.
 
+**Open folder** selects where new sessions start. First use offers a folder
+picker; ordinary folders, repository subdirectories, and linked worktrees work.
+The sidebar shows the effective folder and recent choices. Opening a folder
+shows a temporary All work overview for its repository, preserving saved views
+and all existing conversation directories and drafts. Ordinary folders use All
+work. Browser folder paths refer to the host running Ribbon Field.
+Each window keeps its own selection; macOS restores folder selections by window
+slot across launches. Explicit `ui --cwd` supplies the initial folder and still
+limits permitted directories. Without a selected or view-implied folder, New
+session asks for one instead of using the server process directory.
+
+The UI calls optional thread initiatives **Groups**. Existing `project` CLI
+commands, API fields, deep links, and saved filter keys remain compatible.
+
 **Views** are named, saved filters displayed as tabs above the overview.
-Start with **All work**, choose repository, project, phase, Show,
+Start with **All work**, choose repository, group, phase, Show,
 and search filters, choose a grouping, then click **＋ View** to save them.
 Each tab shows a count of threads that need you and a green dot for unread
 completed results. Counts follow that tab's current filters, including pinned
@@ -653,8 +811,11 @@ Use **Ctrl + Shift + Left/Right** to cycle views outside text fields. When a
 view tab has focus, Left/Right, Home, and End navigate the tabs. Switching
 opens the scoped overview and sidebar, preserving each view's filters,
 grouping, and scroll position. Conversation drafts
-stay with their threads. New sessions prefill the selected project/repository
-and use the repository directory when it is an available workspace choice.
+stay with their threads. New sessions inherit the view’s group and repository.
+A selected folder within that repository keeps its exact subdirectory or linked
+worktree; otherwise the repository root supplies the default. Views without a
+repository use the window’s selected folder. Existing drafts retain their folder
+and group when switching views, and focused conversations do not change defaults.
 
 Changing filters or grouping in a named view saves them automatically, including
 search. **All work** keeps temporary filters local to each window; **Reset filters**
@@ -669,24 +830,24 @@ positions stay local to each window. A concurrent edit requires resetting
 before overwriting another window's saved changes.
 
 The UI home page keeps durable work threads, with **Needs you** first and a
-separate **Later** section. Group by phase, repository, project, or none. Filter
-by repository and project independently, including **No repository** and
-**No project**; phase and **Needs you** filters can be combined with them.
-Every card includes its assigned repository/project, title, phase, runtime state,
+separate **Later** section. Group by phase, repository, group, or none. Filter
+by repository and group independently, including **No repository** and
+**No group**; phase and **Needs you** filters can be combined with them.
+Every card includes its assigned repository/group, title, phase, runtime state,
 latest checkpoint, and next action. Closed threads have their own view.
 Selecting a thread shows its original
 request, checkpoint history, related links, and conversation. You can edit a
 checkpoint, add/remove links, rename, park, reopen, or close a thread.
 
-Repository and project are both optional. A repository identifies a Git codebase;
-a project is a named initiative that can span repositories. A thread can have
-either association, both, or neither. Use **New project** in the sidebar or
-overview to create a project without starting a session. Open an existing thread
-and choose **Add to project** (or **Change project**) to select an existing
-project, create a new one, or choose **No project** to detach it. The same dialog
-lets you assign or clear its repository independently. **New session** also
-offers these associations and defaults to the project selected in the filter.
-Creating a project does not require a repository. New sessions detect a repository
+Repository and group are both optional. A repository identifies a Git codebase;
+a group is a named initiative that can span repositories. A thread can have
+either association, both, or neither. Use **New group** in the sidebar or
+overview to create a group without starting a session. Open an existing thread
+and choose **Add to group** (or **Change group**) to select an existing
+group, create a new one, or choose **No group** to detach it. The same dialog
+lets you assign or clear its repository independently. **New session** defaults
+to the group selected in the filter; All groups and No group start unassigned.
+Creating a group does not require a repository. New sessions detect a repository
 from their workspace by default; selecting **No repository** explicitly clears it.
 Changing either association never changes the working directory or file access.
 
@@ -707,7 +868,7 @@ the same history. Saved Codex terminal threads can also be forked into the
 browser. Reopen closed threads first; running threads and pending input must
 finish before forking. The new thread has an editable title and a **Forked
 from** link, and appears independently in the overview. Its workspace,
-repository, project, model, and reasoning effort carry over. Browser permission
+repository, group, model, and reasoning effort carry over. Browser permission
 settings carry over too; terminal forks use the browser's default workspace
 permissions. File claims, queued messages, approvals, checkpoints, pins, and
 read markers start fresh. Both threads share the same files; forking does not
@@ -716,15 +877,15 @@ message. This version forks through the latest available turn; selecting an
 earlier turn and launching terminal forks are not included.
 
 The overview keeps one **Attention** queue above fixed work stages:
-**Getting started → Investigating → Planning → Implementing → Validating →
+**New → Investigating → Planning → Orchestrating → Implementing → Validating →
 Deploying → Done**. Discussion and debugging belong in Investigating. Answering
 an investigation leaves it in Investigating; Done means the requested change or
-execution was delivered. Reading a response does not change its underlying stage.
+execution was delivered. Orchestrating identifies ongoing routing and coordination of specialist agents, including while they implement or deploy. Reading a response does not change its underlying stage.
 Empty stages remain visible. Within each stage, working agents come first, then
 cards sort by most recent activity; ties keep a stable order. The animated green
 border indicates a working agent. Idle cards keep their full detail for six hours,
 then show a shorter summary with fewer secondary details. After 24 hours they show
-the title, project/repository, and age, with unread indicators and controls retained.
+the title, group/repository, and age, with unread indicators and controls retained.
 Older cards use a quieter background without dimming their titles. Running, pinned,
 and required-action cards keep their details; pins do not override activity sorting.
 New activity restores the full card, and hover previews or opening the thread
@@ -742,7 +903,7 @@ previous response only when the new turn starts.
 
 A delivered thread stays quietly visible in Done until you close it or move it.
 Pins order cards within a stage and never hide attention or override its priority.
-Search, saved views, repository/project filters, and optional association grouping
+Search, saved views, repository/group filters, and optional association grouping
 continue to apply. The saved `completed` filter now selects Done.
 
 **Now**, **Later**, and **Closed** select deliberate placement. Use **Move to Later**
@@ -750,7 +911,8 @@ on a card to set it aside, or **Move to Now** to return it. Later stays out of t
 current workspace and attention counts, with checkpoint summaries visible in its
 own view. Parking preserves the pending response and does not stop work. Closed
 conversations retain their history and can be reopened. No completion, read receipt,
-classification, or grouping operation changes saved placement.
+attention classification, or grouping operation changes saved placement. New
+actionable Agent Coord messages to closed app conversations reopen them into Now.
 
 New-result markers track completed turns independently of progress checkpoints,
 so opening a thread while an agent is working does not consume its future reply.
@@ -807,6 +969,16 @@ Codex command, file-change, and permission approval requests also produce a
 are checked on connection and reconnection; answered requests stay quiet, and
 each request alerts once across tabs without changing its approval decision.
 
+When a snooze expires, the thread returns to **Now** and produces a **Snooze
+ended** alert through the same desktop/browser notifications and enabled phone
+push notifications. Each snooze alerts once per delivery channel; phone delivery
+is independent of the desktop claim. Reading or reconnecting does not repeat an
+alert. Re-snoozing, resuming, changing placement, or sending a message cancels a
+pending reminder. The reminder remains in Now until you explicitly resume it.
+Desktop/browser alerts require an open UI, and phone push requires the Mac app
+or remote-access service to be running. If expiry happens while the runtime is
+stopped, an overdue reminder is delivered when it next runs.
+
 Completion events are saved in the shared database, so short turns and stream
 reconnections do not lose them. Alerts respect the UI server's workspace scope
 and exclude archived threads. Opening or reloading the UI starts with new
@@ -831,7 +1003,7 @@ agent-coord thread list
 agent-coord thread update --session-id <id> --attention later
 ```
 
-Phases are `discussion`, `investigation`, `planning`, `implementation`,
+Phases are `discussion`, `investigation`, `planning`, `orchestrating`, `implementation`,
 `validation`, `deployment`, and `finished`. Keep the activity phase when answering questions or completing
 investigations and plans. Use `finished` for delivered implementation or execution,
 including requested validation/deployment. The UI exposes a separate `work_phase`
@@ -855,7 +1027,7 @@ being saved. Existing custom names are preserved during migration, while
 known placeholder names and opening-prompt excerpts remain eligible for agent
 naming.
 
-Projects and repositories can also be managed from the CLI:
+Groups and repositories can also be managed from the CLI:
 
 ```bash
 agent-coord project create --name 'Anthropic migration'

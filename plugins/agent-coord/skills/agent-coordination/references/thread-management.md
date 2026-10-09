@@ -30,6 +30,31 @@ Use `thread list --archived` for closed history. Use `--repository <id>`,
 the manager's directory. The coordination command `list --relevant` is for
 working-session conflicts and is not a complete work-thread inventory.
 
+For topic discovery or specialist routing, use bounded search across **all**
+placements instead of dumping the inventory:
+
+```bash
+<agent-coord> thread search 'topic keywords' --limit 10
+<agent-coord> thread search 'topic keywords' --limit 10 --cursor <next_cursor>
+```
+
+Add `--app-only` for agents that support app inbox wake. The same association
+filters are available. Each keyword matches saved routing context (title,
+original request, latest checkpoint, or artifacts), not full transcripts.
+Results include identity, URL, summary, placement, provider, and `last_work_at`,
+ranked by relevance then meaningful-work recency. Metadata edits and identical
+checkpoint refreshes do not refresh that date. Inspect older matches and current
+source before relying on their context; there is no hard age cutoff. Follow
+pages with the same query/filters until `next_cursor` is null. Results are live;
+restart search if threads change during discovery.
+
+Saving actionable work to a closed app agent automatically moves it into Now.
+Wake restores the same provider context; no new send flag is needed. Older work
+queued before Close also reopens the conversation when eligible to dispatch.
+Stop/failure, queued user input, and pending Close remain independent gates.
+The reopened composer accepts direct user continuation. Informational and closure
+messages do not reopen threads; terminal delegates and Later placement are unchanged.
+
 The inventory includes titles, original requests, repository/project/workspace
 associations, latest checkpoints, links, turn activity, unread results, unhandled responses, and a
 `checkpoint_stale` flag. Inspect selected threads more closely with:
@@ -62,8 +87,10 @@ Interpret the saved evidence carefully:
   Reading updates, findings, and success clears attention and returns the thread
   to its stage. Required answers and approvals stay until resolved. Mark reviewed
   acknowledges a classified review; a follow-up consumes the prior response.
-- Stages are Getting started, Investigating, Planning, Implementing, Validating,
-  Deploying, and Done. Discussion/debugging map to Investigating. An answered
+- Stages are New, Investigating, Planning, Orchestrating, Implementing, Validating,
+  Deploying, and Done. Discussion/debugging map to Investigating.
+  Orchestrating describes ongoing routing and coordination of specialists, even
+  while they implement or deploy, without implying a required user action. An answered
   investigation retains that stage; Done indicates delivered implementation or
   execution. `work_phase` retains the activity of older inquiry checkpoints
   marked finished. A stopped process or completed turn alone is not delivery.

@@ -1,9 +1,24 @@
 ---
 name: agent-coordination
-description: Coordinate concurrent Claude Code and Codex sessions through conflict detection, durable local communication, Agent Coord-owned PTY delegation, and an optional local operator UI. Use before implementation when another coding-agent session may be active, when checking file conflicts, when sending or receiving agent messages, or when delegating ready Beads work to a new Codex or Claude Code worker.
+description: Create and reuse persistent Ribbon Field app agents for direct user conversations and later requests. Coordinate Codex and Claude sessions through messaging, conflict detection, and scoped managed terminal delegates. Use when creating or routing work to an app agent, sending or receiving agent messages, checking file conflicts, before implementation when another session may be active, or delegating ready Beads work to a terminal worker.
 ---
 
 # Agent Coordination
+
+## Choose the agent mechanism
+
+- **App agents** are persistent, independently addressable Ribbon Field
+  conversations. For a conversation the user can address directly and return to
+  later, search existing app agents with `thread search --app-only`, reuse one
+  with `send`, or create one with `thread create`.
+- **Provider-native subagents** use the provider's tools and follow its context
+  and lifecycle rules. Use them only when permitted by the active instructions,
+  and follow those instructions on when and how to delegate. Creating one does
+  not fulfill a request for a Ribbon Field app conversation.
+- **Terminal delegates** use Agent Coord `delegate` for scoped terminal work.
+  They report to their parent and stop after a completed or failed delegation.
+
+## Use the coordination CLI
 
 Use `agent-coord` on PATH. Ribbon Field and managed workers add the bundled
 scripts directory to PATH; Claude's SessionStart hook also exports it for Bash.
@@ -39,7 +54,8 @@ across workspaces from any directory and uses the same installed CLI and databas
 
 Threads preserve the user's open conversations across stopped processes and
 repositories. They do not require Beads. A thread's Now/Later/Closed placement
-is the user's choice; changing coordination activity does not change placement.
+is the user's choice; checkpoints and activity do not change placement. Routing
+new actionable work to a closed app conversation automatically moves it into Now.
 
 Before returning control to the user, at a phase change, or after a significant
 result, save a short factual checkpoint with the bundled CLI:
@@ -55,9 +71,11 @@ agent-coord checkpoint --json '{
 }'
 ```
 
-Use phases `discussion`, `investigation`, `planning`, `implementation`,
+Use phases `discussion`, `investigation`, `planning`, `orchestrating`, `implementation`,
 `validation`, `deployment`, or `finished`. Describe what was established or
-changed in one or two sentences. Distinguish proposals, implemented changes,
+changed in one or two sentences. Use `orchestrating` for ongoing routing and coordination of specialist agents,
+including while a specialist implements or deploys. Coordination does not itself
+require a user action. Distinguish proposals, implemented changes,
 validation results, and deployment. Record the next required action and its
 actual owner (`user`, `agent`, or `external`). Set `next_actor: "user"` only when
 progress or completion requires a specific user answer, approval, decision, or
@@ -160,12 +178,19 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
 - Recheck the current declaration with `agent-coord status`.
 - Check overlap with `agent-coord conflicts`.
 - Send actionable work with `agent-coord send --session
-  <peer-id> --classification action_required '<message>'`.
-- Send to the one live owner of a bead with `agent-coord send --bead <bead-id> --classification action_required '<message>'`.
+  <peer-id> --classification action_required --reply-required '<message>'`.
+- Send to the one live owner of a bead with `agent-coord send --bead <bead-id> --classification action_required --reply-required '<message>'`.
+- Every `send` must explicitly choose `--reply-required` or
+  `--no-reply-required`; omission is an error before a message is created.
+- Answer a requested reply with `agent-coord reply --message-id <id> '<response>'`.
+  It derives the recipient and thread from that message, records exactly which
+  request it answers, and sets `reply_required=false`. The response still enters
+  hook context and wakes an idle recipient. Do not use generic `send` for a
+  confirmation or answer, and do not reply to a message that requests no reply.
 - Continue a conversation by passing its `--thread-id`. Threads permit the same
   two sessions in either direction and reject unrelated participants.
 - Use `--no-reply-required` when work is actionable but a conversational reply
-  is unnecessary. Informational and closure messages default to no reply.
+  is unnecessary, and for informational and closure messages.
 - Read the compact unacknowledged inbox with `agent-coord inbox --unread`. Use `--all` only for complete history.
 - Block for a peer handoff without polling with
   `agent-coord inbox --wait`. It returns immediately if a
@@ -206,6 +231,7 @@ Close a finished coordination thread with one terminal message:
 agent-coord send \
   --session <peer-id> \
   --classification closure \
+  --no-reply-required \
   --thread-id <thread-id> \
   'No further coordination action is needed.'
 ```
@@ -235,12 +261,126 @@ resulting prompt hook performs normal inbox delivery. Informational and closure
 messages remain in history without waking the agent. Do not manually inject
 input into another pane as a substitute for this guard.
 
-Hook-delivered messages include their thread and `reply_required` value. Reply
-conversationally only when `reply_required=true`, reuse the same thread, and use
+Hook-delivered messages include their ID, thread and `reply_required` value. Reply
+conversationally only when `reply_required=true`, using `reply --message-id`, and use
 transport acknowledgement independently. Never reply to or acknowledge an
 acknowledgement; acknowledgements do not create messages.
 
-## Delegate work to a managed agent
+## Wake idle app conversations
+
+While Ribbon Field is running, open and closed app conversations automatically start a
+turn for undelivered `action_required` messages. This works for both Codex and
+Claude, including conversations not currently displayed. Pending messages are
+combined into one generic inbox prompt; normal hooks deliver the durable bodies
+and thread metadata. Informational and closure messages do not wake recipients.
+
+The dispatcher waits for running turns and gives queued user prompts priority.
+Now/Later placement and snoozes are preserved. Saving actionable work to a closed
+app specialist moves it into Now immediately, including while busy or offline.
+Eligible wake restores its provider context; older work queued before Close also
+reopens the conversation when dispatched. Closing alone does not cancel pending
+messages. A pending Close still blocks wake. Stop, failed turns, and uncertain submissions
+pause inbox wake until the user sends another message in that conversation.
+Claims persist across app restarts so an uncertain turn submission is not
+automatically retried. Reopening visibility does not clear these execution guards.
+Messages remain in the inbox for normal delivery. Informational and closure
+messages do not reopen closed conversations.
+
+## Create and reuse app agents
+
+An **app agent** is an independent app conversation with its own context. A
+**specialist** is an agent focused on a subject or responsibility; a
+**dispatcher** routes work. Reserve **subagent** for provider-native subagents.
+The existing `delegate` command creates a terminal worker for a scoped task.
+
+Prefer an existing relevant app conversation, including Closed. Discover with
+`thread search 'topic keywords' --app-only --limit 10` without `--cwd` unless
+the user selected a workspace. Search title, original request, latest checkpoint,
+and artifacts; each keyword must match. Follow `next_cursor` with `--cursor`
+using the same query and filters. Pages are bounded (maximum 50), ordered by
+relevance then meaningful-work recency, and include identity, stable URL,
+placement, provider, summary, `last_work_at`, and wake pause state.
+
+Use `thread show --session-id <id>` on promising matches. Inspect current code
+and ask older specialists to recheck assumptions against it; age is evidence
+about context freshness, not an automatic reason to discard that identity.
+Renaming, moving, or refreshing an unchanged checkpoint does not count as fresh
+work. Search pages are live; repeat discovery when the inventory changes.
+Use global `thread list` for general open-thread management, not a full dump for
+each routing decision. Inspect settings or obtain a stable link separately with:
+
+```bash
+agent-coord thread settings --session-id <agent-id>
+agent-coord ui link --thread <agent-id>
+```
+
+When a new conversation is needed, ask the running Ribbon Field app to create
+it. Creation needs no Bead or scope; editing assignments still follow the
+repository's work rules. Model discovery and creation use the app's provider:
+
+```bash
+agent-coord thread models --client codex --cwd /absolute/workspace --wait 30
+agent-coord thread create \
+  --cwd /absolute/workspace --client codex --name 'Release specialist' \
+  --model <advertised-model> --effort <supported-level> \
+  --request-id <unique-request-key> --wait 30 \
+  'The exact user request, including its scope and constraints.'
+```
+
+Use `--client claude` for Claude Code. Model and effort are optional; select
+them when the user authorized that choice. Add `--yolo` only with explicit
+authorization for full machine access without approval prompts. Defaults do
+not inherit the dispatcher's YOLO mode. Creation does not bypass hook trust.
+Pass `-` as the prompt to read stdin without shell escaping.
+
+A `completed` receipt contains `thread_id` and `result`: session identity,
+effective settings, stable URL, and initial coordination message ID. It confirms
+creation and inbox queueing, not completion of the agent's task. The exact
+request is saved as the original request, then sent as actionable work with no
+reply obligation to the dispatcher. The agent answers the user in its own chat.
+
+Reuse the same `--request-id` and arguments when retrying a timed-out command;
+do not create another agent. Inspect or cancel a pending request with:
+
+```bash
+agent-coord thread request-status --request-id <key> --wait 30
+agent-coord thread cancel-request --request-id <key>
+```
+
+`queued` requires an updated running app in the target workspace. `running` is
+not confirmation. `uncertain` means the provider may have accepted the request;
+inspect the returned identity and thread inventory before creating anything
+else. Uncertain operations are never replayed automatically. Only queued
+requests can be cancelled.
+
+Change an existing app agent's settings through the app-owned path:
+
+```bash
+agent-coord thread settings --session-id <agent-id> \
+  --model <advertised-model> --effort <supported-level> \
+  --request-id <unique-settings-key> --wait 30
+```
+
+Add `--yolo` or `--default-permissions` to change permissions. Changes wait for
+idle and queued user follow-ups, reject closed/pending-close conversations,
+and fail if settings changed after queueing. Confirm completion before sending
+work that requires those settings. A session active in another app runtime
+must be handled there.
+
+Route later requests with `send --session <agent-id> --classification
+action_required --no-reply-required`. Request a reply only when coordination
+requires one. Messages can reach busy agents through tool hooks; automatic
+wake waits for idle and prioritizes queued user input. Save checkpoints and
+release scopes after assignments; completing work does not close the chat.
+
+Closing preserves identity, context, and settings. The same ordinary `send`
+wakes a closed app specialist and automatically returns it to Now, restoring
+its direct user composer. No reopen flag or separate reopen command is needed.
+Stop, failure, and uncertain wake attempts may also require direct user input
+to resume automatic wake. An updated running app services pending messages;
+offline queueing does not launch the app. Terminal `delegate` behavior is unchanged.
+
+## Delegate work to a managed terminal worker
 
 Use `delegate` when a registered parent session must create a separate Codex or
 Claude Code worker. The work must have one open and ready Beads issue and
@@ -267,7 +407,9 @@ agent-coord delegate \
 Remove `--dry-run` to launch the worker. The default `managed-pty` runtime
 starts a detached Agent Coord supervisor, gives the child a controlling PTY,
 captures bounded output, and keeps the interactive client alive at its prompt
-between turns. It does not require Zellij or tmux and does not use the parent's
+between turns while the delegation is unfinished. After a completed or failed
+result, the supervisor stops wake-up and shuts down the child. It does not
+require Zellij or tmux and does not use the parent's
 PTY. Use `--runtime zellij --zellij-session <name>` only when the user requests
 the compatibility pane adapter; `--floating` is optional for that runtime.
 
@@ -323,8 +465,9 @@ agent-coord ui --cwd /absolute/repository/path
 
 The managed supervisor wakes an inactive child only for undelivered actionable
 messages and submits one generic prompt through its owned PTY. The prompt hook
-then supplies the durable body and thread metadata. This keeps delegated agents
-long-lived and lets children coordinate with their parent or with one another.
+then supplies the durable body and thread metadata. This keeps terminal workers
+alive while their delegation is unfinished and lets them coordinate with their
+parent or with one another.
 The loopback-only UI home page creates and manages independent Codex and Claude Code browser
 sessions through `codex app-server` or Claude's stream-json protocol: streamed conversations, approvals and
 questions, stop, rename, close, reopen, and resume. Browser sessions do not
