@@ -49,6 +49,24 @@ The CLI prints the private address. Create a pairing link through the local
 browser UI. `--tailscale-serve` is an alias for `--tailscale`.
 Without these flags, the local UI still offers the Remote access controls.
 
+## Swift iPhone app
+
+The [iOS companion](../mobile/ios/README.md) contains this same mobile interface
+in a SwiftUI and WKWebView app. Build and install it from Xcode, then paste a
+fresh pairing link from your Mac into its connection screen. It uses the same
+Tailscale HTTPS connection and device permissions as the Home Screen web app.
+Safari and the native app have separate sessions, so pair the app separately.
+
+The app remembers your Mac's address and keeps its own pairing cookies between
+launches. The one-time invitation is not saved as the connection address. Your
+Mac must still be awake, online, and running Ribbon Field. Disconnecting in the
+iOS app clears its local connection data; revoke its entry under **Remote
+access** on the Mac to invalidate the server-side device grant immediately.
+
+This initial native version does not support background push notifications.
+The Home Screen web app's notification instructions below apply only to that
+web app; installing the Swift app does not transfer a browser subscription.
+
 ## Background phone notifications
 
 Open the installed Home Screen app, then tap **Enable phone notifications** and

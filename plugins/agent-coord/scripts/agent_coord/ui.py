@@ -27,6 +27,7 @@ from .message_timeline import message_timeline, message_cursor, message_changes
 from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
+from .native_push import NativePush
 from .workspaces import matches_workspace, resolve_workspace
 from .organization import repository_root
 from .workspace_files import workspace_files
@@ -266,6 +267,7 @@ def _handler(
     csrf_token: str = "",
     remote_access: RemoteAccess | None = None,
     web_push: WebPush | None = None,
+    native_push: NativePush | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     views = ViewStore(store)
     navigation = NavigationStore(store)
@@ -334,6 +336,13 @@ def _handler(
                 return
             if not self._authorized():
                 self._json(HTTPStatus.UNAUTHORIZED, {"error": "Pair this device using a fresh link from your Mac."})
+                return
+            if parsed.path == "/api/browser/native-push/status" and native_push is not None:
+                device = remote_access.device_id(self.headers.get("Cookie", "")) if self._remote_request() else None
+                if device is None:
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "Enable notifications on a paired remote device."})
+                else:
+                    self._json(HTTPStatus.OK, native_push.status(device))
                 return
             if parsed.path == "/api/browser/push/status" and web_push is not None:
                 device = remote_access.device_id(self.headers.get("Cookie", "")) if self._remote_request() else None
@@ -600,6 +609,20 @@ def _handler(
                     active = resolve_workspace(body["active"], workspace=browser_sessions.cwd) if body["active"] else ""
                     self._json(HTTPStatus.OK, browser_sessions.update_desktop_projects(body["windowId"], resolved, active))
                     return
+                if route[:3] == ["api", "browser", "native-push"] and native_push is not None:
+                    device = remote_access.device_id(self.headers.get("Cookie", "")) if self._remote_request() else None
+                    if device is None:
+                        self._json(HTTPStatus.FORBIDDEN, {"error": "Enable notifications on a paired remote device."})
+                        return
+                    if route == ["api", "browser", "native-push", "subscribe"] and set(body) == {"registration"}:
+                        result = native_push.subscribe(device, body["registration"])
+                    elif route == ["api", "browser", "native-push", "unsubscribe"] and not body:
+                        result = native_push.unsubscribe(device)
+                    elif route == ["api", "browser", "native-push", "test"] and not body:
+                        result = native_push.test(device)
+                    else:
+                        raise CoordinationError("Unknown native notification action or invalid fields.")
+                    self._json(HTTPStatus.OK, result)
                     return
                 if route[:3] == ["api", "browser", "push"] and web_push is not None:
                     device = remote_access.device_id(self.headers.get("Cookie", "")) if self._remote_request() else None
@@ -752,6 +775,7 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     browser_sessions: BrowserSessions | None = None
     remote_access: RemoteAccess | None = None
     web_push: WebPush | None = None
+    native_push: NativePush | None = None
     thread_control: ThreadControlWorker | None = None
     app_control: AppControlWorker | None = None
 
@@ -762,6 +786,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
             self.thread_control.close()
         if self.web_push is not None:
             self.web_push.close()
+        if self.native_push is not None:
+            self.native_push.close()
         if self.remote_access is not None:
             self.remote_access.close()
         if self.browser_sessions is not None:
@@ -798,21 +824,25 @@ def make_ui_server(
     sessions = browser_sessions or BrowserSessions(store, cwd)
     remote = remote_access or RemoteAccess(store.database_path)
     push = WebPush(store, sessions, remote)
+    native = NativePush(store, sessions, remote)
     try:
-        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push))
+        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native))
     except Exception:
         push.close()
+        native.close()
         sessions.close()
         raise
     server.browser_sessions = sessions
     server.remote_access = remote
     server.web_push = push
+    server.native_push = native
     server.thread_control = ThreadControlWorker(sessions)
     server.app_control = AppControlWorker(sessions)
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
     remote.restore(f"http://{target_host}:{bound_port}")
     push.start()
+    native.start()
     server.thread_control.start()
     server.app_control.start()
     sessions.schedules.start()

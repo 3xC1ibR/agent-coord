@@ -111,11 +111,14 @@ class PushTransport:
 
 
 class WebPush:
+    database_suffix = ".push.sqlite3"
+    validate_subscription = staticmethod(validate_subscription)
+
     def __init__(self, store, sessions, remote, *, transport=None, clock=time.time):
         self.store, self.sessions, self.remote = store, sessions, remote
         self.transport = transport or PushTransport()
         self.clock = clock
-        self.path = Path(str(store.database_path) + ".push.sqlite3")
+        self.path = Path(str(store.database_path) + self.database_suffix)
         self.lock = threading.RLock()
         self.stopping = threading.Event()
         self.worker = None
@@ -171,7 +174,7 @@ class WebPush:
     def subscribe(self, device, value):
         if not self.transport.available:
             raise CoordinationError("Web Push is unavailable in this server. Use the updated Mac app.")
-        subscription = validate_subscription(value)
+        subscription = self.validate_subscription(value)
         self.transport.validate_key(subscription)
         with self.remote.lock, self.lock, self.connection() as db:
             if not self.remote.origin or device not in self.remote.active_device_ids():
@@ -313,7 +316,7 @@ class WebPush:
                 return
             private = self._keys(db)[0]
             try:
-                subscription = validate_subscription(json.loads(row["subscription"]))
+                subscription = self.validate_subscription(json.loads(row["subscription"]))
                 status, retry_after = self.transport.send(subscription, json.loads(row["payload"]), private,
                                                           row["origin"], max(1, int(row["expires"] - self.clock())))
             except Exception:
