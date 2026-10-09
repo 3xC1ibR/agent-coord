@@ -1,0 +1,7 @@
+.folder-control { display: grid; gap: 6px; }
+.folder-control label { color: var(--muted); font-size: 12px; margin: 0; }
+.folder-control select { width: 100%; min-width: 0; text-overflow: ellipsis; color-scheme: dark; color: #f2f3e9; background: #213a32; border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12px; }
+.folder-control button { justify-self: start; }
+.folder-welcome { padding: 24px; margin-bottom: 20px; border: 1px solid var(--line); border-radius: 12px; }
+.folder-welcome h2 { margin: 0 0 8px; }
+.folder-welcome p { color: var(--muted); max-width: 48ch; }

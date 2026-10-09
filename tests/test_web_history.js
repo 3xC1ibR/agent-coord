@@ -15,6 +15,8 @@ function setup(thread) {
   const context = {state: {detail: {thread, work_thread: {browser_session: true}}},
     $: () => timeline, node: element, document: {createDocumentFragment: () => element("fragment")},
     messageMarkdown: {render: text => text}, timeline};
+  const disclosureEntry = {};
+  context.conversationEntry = () => disclosureEntry;
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function itemText("), source.indexOf("function requestButton(")), context);
   return context;
@@ -42,8 +44,8 @@ test("history failure preserves cached messages and the notice clears on recover
   const c = setup(thread);
   c.renderTimeline();
   assert.equal(c.timeline.childNodes.length, 3);
-  assert.equal(c.timeline.childNodes[1].childNodes[1].textContent, "Existing request");
-  assert.equal(c.timeline.childNodes[2].childNodes[1].innerHTML, "Cached answer");
+  assert.equal(c.timeline.childNodes[1].childNodes[0].textContent, "Existing request");
+  assert.equal(c.timeline.childNodes[2].childNodes[0].innerHTML, "Cached answer");
   thread.historyUnavailable = false;
   c.renderTimeline();
   assert.equal(c.timeline.childNodes.length, 2);

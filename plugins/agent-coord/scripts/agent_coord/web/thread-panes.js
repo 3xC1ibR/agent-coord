@@ -308,9 +308,16 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     onExit: () => goHome(), onTile: () => shell.toggleCurrent(), onError: showError});
   window.agentCoordPanes = shell;
   shell.requestList = () => refreshList().catch(showError);
-  shell.openThread = async id => {
+  shell.openThread = async (id, {messageId} = {}) => {
     if (!shell.active) return select(id);
-    try { shell.open(await api("threads/" + encodeURIComponent(id))); } catch (error) { showError(error); }
+    try {
+      shell.open(await api("threads/" + encodeURIComponent(id)));
+      if (messageId != null) {
+        const record = shell.records.get(id);
+        if (record.api) record.api.focusMessage?.(messageId);
+        else record.messageTarget = messageId;
+      }
+    } catch (error) { showError(error); }
   };
   const show = () => {
     document.body.classList.remove("chat-expanded"); document.body.classList.add("panes-visible");
@@ -412,6 +419,7 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
   };
   const pane = window.agentCoordPane = {
     exportDraft,
+    focusMessage: id => window.agentCoordFocusMessage?.(id),
     saveDraft: () => {
       if (!state.selected) return;
       host.draft(window, exportDraft());
@@ -465,6 +473,11 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
     if (restoredScroll !== null) state.timelineScroll.restore(restoredScroll);
     else state.timelineScroll.latest();
   } else $("timeline").scrollTop = restoredScroll ?? $("timeline").scrollHeight;
+  const record = host.from(window);
+  if (record?.messageTarget != null) {
+    pane.focusMessage(record.messageTarget);
+    delete record.messageTarget;
+  }
 }
 
 if (typeof module !== "undefined" && module.exports) module.exports = {paneLayout, ThreadPanes, setupPaneShell, setupPaneConversation};

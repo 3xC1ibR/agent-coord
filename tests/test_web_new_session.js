@@ -3,6 +3,7 @@ const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), vm = require("node:vm");
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+const {newThreadContext} = require("../plugins/agent-coord/scripts/agent_coord/web/folders.js");
 function setup() {
   const elements = new Map(), calls = [];
   const element = () => ({value: "", dataset: {}, children: [], classList: {add() {}, remove() {}},
@@ -11,7 +12,7 @@ function setup() {
     $: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); },
     node: (tag, text) => Object.assign(element(), {tag, textContent: text}),
     Option: function(text, value) { return {text, value}; }, navigation: null,
-    state: {config: {cwd: "/workspace"}, organization: {repositories: [], projects: []}, drafts: new Map(), commandFeedback: new Map()},
+    state: {config: {cwd: "/server-process"}, folders: {selected: {cwd: "/workspace"}}, organization: {repositories: [], projects: []}, drafts: new Map(), commandFeedback: new Map()},
     threadOrganization: {NONE: "__none__"}, action: fn => fn(), sessionPath: id => "sessions/" + id,
     api: async (path, body) => {
       calls.push({path, body});
@@ -22,6 +23,9 @@ function setup() {
     select: async id => { c.state.selected = id; c.$("message").value = c.state.drafts.get(id) || ""; },
     renderTitle() {}, renderQueuedMessages() {}, renderStatus() { c.renderModelPicker(); }, refreshList: async () => {}, calls,
   };
+  c.sessionContext = () => newThreadContext(c.state.organization,
+    {repository: c.$("repository").value, project: c.$("project").value}, c.state.folders.selected);
+  c.renderFolders = () => {};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function filtersChanged()")), c);
   return c;
@@ -52,12 +56,12 @@ test("New session opens a draft with both model groups before creating any provi
   assert.equal(c.state.newSessionDraft, null);
 });
 
-test("draft retains directory and project context and can return to Codex", async () => {
+test("draft uses the window folder and group rather than the previously focused thread", async () => {
   const c = setup();
   c.state.detail = {work_thread: {cwd: "/workspace/current"}};
   c.state.organization.projects = [{id: "project"}]; c.$("project").value = "project";
   await c.newSession();
-  assert.equal(c.state.detail.session.cwd, "/workspace/current");
+  assert.equal(c.state.detail.session.cwd, "/workspace");
   assert.equal(c.state.detail.session.project_id, "project");
   c.$("model-picker").value = c.modelValue("claude", "sonnet"); await c.changeSessionModel();
   c.$("model-picker").value = c.modelValue("codex", "gpt-test"); await c.changeSessionModel();
@@ -89,10 +93,29 @@ test("repeat New session restores the same draft and chosen model", async () => 
   const c = setup(); await c.newSession();
   c.$("message").value = "Keep this";
   c.$("model-picker").value = c.modelValue("claude", "sonnet"); await c.changeSessionModel();
-  c.goHome(); await c.newSession();
+  c.goHome();
+  c.state.folders.selected = {cwd: "/other"};
+  c.state.organization.repositories = [{id: "different", root: "/different"}];
+  c.$("repository").value = "different";
+  await c.newSession();
+  assert.equal(c.state.detail.session.cwd, "/workspace");
+  assert.equal(c.state.detail.session.project_id, null);
   assert.equal(c.$("message").value, "Keep this");
   assert.equal(c.state.detail.session.model, "sonnet");
   assert.equal(c.calls.filter(call => call.path.startsWith("models?")).length, 2);
+});
+
+test("first session requires a folder, retains its group, and cancellation starts nothing", async () => {
+  const c = setup(); c.state.folders.selected = null;
+  c.state.organization.projects = [{id: "evaluation"}]; c.$("project").value = "evaluation";
+  c.state.folderPicker = {choose: async () => false};
+  await c.newSession();
+  assert.equal(c.state.newSessionDraft, undefined);
+  assert.equal(c.calls.length, 0);
+  c.state.folderPicker.choose = async () => { c.state.folders.selected = {cwd: "/chosen"}; return true; };
+  await c.newSession();
+  assert.equal(c.state.detail.session.cwd, "/chosen");
+  assert.equal(c.state.detail.session.project_id, "evaluation");
 });
 
 test("failed first send preserves the draft and retries the already-created session", async () => {
@@ -143,4 +166,61 @@ test("established conversations keep their provider and save model changes", asy
   await c.changeSessionModel();
   assert.equal(c.calls.at(-1).path, "sessions/existing");
   assert.equal(c.calls.at(-1).body.model, "sonnet");
+});
+
+async function effortSetup(client = "codex") {
+  const c = setup(); await c.newSession();
+  c.state.modelCatalogs.set(client, [{model: "reasoner", supportedReasoningEfforts:
+    [{reasoningEffort: "low"}, {reasoningEffort: "high"}]}]);
+  c.$("model-picker").value = c.modelValue(client, "reasoner"); await c.changeSessionModel();
+  return c;
+}
+
+test("effort menu follows model capabilities and sends the selected draft effort for either provider", async () => {
+  for (const client of ["codex", "claude"]) {
+    const c = await effortSetup(client);
+    assert.equal(c.$("effort-picker").disabled, false);
+    assert.deepEqual(c.$("effort-picker").children.map(option => option.value), ["", "low", "high"]);
+    c.$("effort-picker").value = "high"; await c.changeSessionEffort();
+    assert.equal(c.state.detail.session.effort, "high");
+    await c.sendSessionDraft("Hello", []);
+    assert.equal(c.calls.find(call => call.path === "sessions").body.effort, "high");
+  }
+});
+
+test("effort disables for unknown models, unsupported models, running and closed sessions", async () => {
+  const c = await effortSetup();
+  c.state.selected = "existing"; c.state.newSessionDraft = null;
+  for (const mode of ["running", "archived", "unknown", "unsupported"]) {
+    c.state.detail = {session: {client: "codex", model: "reasoner"}, work_thread: {attention: "now"}};
+    if (mode === "running") c.state.detail.running = true;
+    if (mode === "archived") c.state.detail.work_thread.attention = "archived";
+    if (mode === "unknown") c.state.detail.session.model = null;
+    if (mode === "unsupported") c.state.modelCatalogs.set("codex", [{model: "reasoner"}]);
+    c.renderModelPicker(); assert.equal(c.$("effort-picker").disabled, true, mode);
+    c.api = async () => assert.fail("Disabled effort must not save");
+    await c.changeSessionEffort();
+  }
+});
+
+test("effort saves or resets existing settings, preserves errors and ignores replies after navigation", async () => {
+  const c = await effortSetup(); c.state.selected = "existing"; c.state.newSessionDraft = null;
+  c.api = async (path, body) => {
+    assert.equal(path, "sessions/existing");
+    return {...c.state.detail.session, effort: body.effort};
+  };
+  c.$("effort-picker").value = "high"; await c.changeSessionEffort();
+  assert.equal(c.state.detail.session.effort, "high");
+  c.$("effort-picker").value = ""; await c.changeSessionEffort();
+  assert.equal(c.state.detail.session.effort, null);
+  c.api = async () => { throw new Error("Save failed"); };
+  c.$("effort-picker").value = "low";
+  await assert.rejects(c.changeSessionEffort(), /Save failed/);
+  assert.equal(c.$("effort-picker").value, ""); assert.equal(c.state.busy, false);
+  c.api = async () => {
+    c.state.selected = "other"; c.state.detail.session = {model: "reasoner", effort: "low"};
+    return {model: "reasoner", effort: "high"};
+  };
+  c.$("effort-picker").value = "high"; await c.changeSessionEffort();
+  assert.equal(c.state.detail.session.effort, "low");
 });

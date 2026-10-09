@@ -25,7 +25,7 @@ class ConversationScroll {
     this.resize = new view.ResizeObserver(() => this.layout());
   }
 
-  // Narrow layouts scroll the header, transcript, and requests together.
+  // Prefer the transcript's scroll area; retain support for older page layouts.
   scroller() {
     return this.view.getComputedStyle(this.timeline).overflowY === "visible" ? this.content : this.timeline;
   }

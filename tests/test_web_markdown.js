@@ -74,19 +74,22 @@ test("conversation renders and refreshes agent Markdown while user text stays li
   const element = (tag, text, className) => ({tag, textContent: text, className, childNodes: [],
     append(...children) { this.childNodes.push(...children); },
     replaceChildren(fragment) { this.childNodes = fragment.childNodes; },
+    setAttribute(name, value) { this[name] = value; },
     querySelectorAll() { return []; }, scrollHeight: 100, scrollTop: 0, clientHeight: 100});
   const timeline = element("div"), user = {type: "userMessage", content: [{text: "**literal**"}]};
   const agent = {type: "agentMessage", text: "**Result**\n\n```js\nconst x = 1;"};
   const context = {state: {detail: {thread: {turns: [{items: [user, agent]}]}}},
     $: () => timeline, node: element, document: {createDocumentFragment: () => element("fragment")}, messageMarkdown: {render}};
+  const disclosureEntry = {};
+  context.conversationEntry = () => disclosureEntry;
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function itemText("), source.indexOf("function requestButton(")), context);
   vm.runInContext("renderTimeline()", context);
-  assert.equal(timeline.childNodes[0].childNodes[1].textContent, "**literal**");
-  assert.equal(timeline.childNodes[0].childNodes[1].innerHTML, undefined);
-  assert.match(timeline.childNodes[1].childNodes[1].innerHTML, /<strong>Result<\/strong>/);
+  assert.equal(timeline.childNodes[0].childNodes[0].textContent, "**literal**");
+  assert.equal(timeline.childNodes[0].childNodes[0].innerHTML, undefined);
+  assert.match(timeline.childNodes[1].childNodes[0].innerHTML, /<strong>Result<\/strong>/);
   agent.text += "\n```\n\nFinished.";
   vm.runInContext("renderTimeline()", context);
-  assert.match(timeline.childNodes[1].childNodes[1].innerHTML, /<\/pre><p>Finished\.<\/p>/);
+  assert.match(timeline.childNodes[1].childNodes[0].innerHTML, /<\/pre><p>Finished\.<\/p>/);
   assert.equal(timeline.scrollTop, 100);
 });

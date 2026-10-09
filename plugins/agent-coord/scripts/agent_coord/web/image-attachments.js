@@ -66,6 +66,7 @@
     render() {
       const area = this.document.getElementById("image-attachments"), items = this.items();
       const id = this.getThread(), enabled = this.canAttach();
+      this.document.getElementById("attach-image").disabled = !enabled;
       if (!enabled) this.highlight(false);
       const previous = this.rendered;
       if (previous?.id === id && previous.enabled === enabled && previous.items.length === items.length &&
@@ -96,6 +97,20 @@
 
     bind() {
       const doc = this.document, zone = doc.getElementById("conversation");
+      const picker = doc.getElementById("image-picker"), button = doc.getElementById("attach-image");
+      let pickerThread = null;
+      button.onclick = () => {
+        if (!this.canAttach()) return;
+        pickerThread = this.getThread();
+        picker.value = "";
+        picker.click();
+      };
+      picker.onchange = () => {
+        const files = Array.from(picker.files || []);
+        picker.value = ""; // Allow selecting the same image again after removing it.
+        if (pickerThread === this.getThread() && this.canAttach()) this.add(files);
+        pickerThread = null;
+      };
       const hasFiles = event => Array.from(event.dataTransfer?.types || []).includes("Files") ||
         Array.from(event.dataTransfer?.items || []).some(item => item.kind === "file");
       const accepts = event => !zone.hidden && zone.contains(event.target) && this.canAttach();

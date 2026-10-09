@@ -9,11 +9,11 @@
 .thread-hover[hidden] { display: none; }
 .thread-hover .hover-status { color: var(--accent); font: 10px/1.5 var(--mono); text-transform: uppercase; letter-spacing: .045em; }
 .thread-hover .hover-title { margin: 8px 0 10px; font-size: 19px; line-height: 1.35; font-weight: 550; }
-.thread-hover h4 { margin: 16px 0 5px; font: 10px/1.5 var(--mono); text-transform: uppercase; letter-spacing: .045em; color: var(--muted); }
-.thread-hover p { margin: 0; }
+.thread-hover > h4, .thread-hover .hover-message > h4 { margin: 16px 0 5px; font: 10px/1.5 var(--mono); text-transform: uppercase; letter-spacing: .045em; color: var(--muted); }
+.thread-hover > p, .thread-hover .hover-message > p { margin: 0; }
 .thread-hover .hover-facts { white-space: pre-line; color: var(--muted); font-size: 11px; }
-.thread-hover .hover-summary { white-space: pre-wrap; }
+.thread-hover .markdown { white-space: normal; }
 .thread-hover .hover-muted { color: var(--muted); font-size: 11px; }
 .thread-hover .hover-message { margin-top: 18px; padding-top: 2px; border-top: 1px solid var(--line); }
-.thread-hover .hover-message h4 { margin-top: 12px; }
-.thread-hover .hover-message-text { margin-top: 7px; white-space: pre-wrap; }
+.thread-hover .hover-message > h4 { margin-top: 12px; }
+.thread-hover .hover-message-text { margin-top: 7px; }

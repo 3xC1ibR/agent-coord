@@ -13,7 +13,7 @@ const threadOrganization = (() => {
       const id = thread[dimension + "_id"] ?? NONE;
       if (!groups.has(id)) groups.set(id, {
         key: dimension + "-" + id, id,
-        label: thread[dimension + "_name"] || (dimension === "repository" ? "No repository" : "No project"),
+        label: thread[dimension + "_name"] || (dimension === "repository" ? "No repository" : "No group"),
         detail: dimension === "repository" ? thread.repository_root || "" : "",
         threads: [],
       });

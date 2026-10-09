@@ -20,7 +20,7 @@ test("independent filters intersect and distinguish all from none", () => {
 });
 test("projects span repositories while missing associations remain visible", () => {
   const groups = groupThreads(threads, "project");
-  assert.deepEqual(groups.map(g => g.label), ["Migration", "No project"]);
+  assert.deepEqual(groups.map(g => g.label), ["Migration", "No group"]);
   assert.deepEqual(groups[0].threads.map(t => t.thread_id), ["both", "project", "other"]);
   assert.deepEqual(groupThreads(threads, "repository").map(g => g.label), ["Backend", "Frontend", "No repository"]);
 });

@@ -19,10 +19,38 @@
 .view-menu-panel button { padding: 9px 10px; text-align: left; border: 0; font-size: 12px; }
 .view-menu-panel small { padding: 6px 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .view-menu-panel #view-delete { color: var(--warm); border-top: 1px solid var(--line); border-radius: 0; margin-top: 4px; }
+.view-menu-panel > div { display: grid; gap: 3px; }
+.mobile-overview, .mobile-new-label { display: none; }
 @media (max-width: 1100px) { .views-bar { padding-inline: 27px; gap: 10px; } }
 @media (max-width: 720px) {
-  .views-bar { padding-inline: 16px; flex-wrap: wrap; gap: 0; }
-  .view-tabs { flex-basis: 100%; }
-  .view-actions { width: 100%; justify-content: flex-end; padding: 6px 0; }
-  .view-tab { max-width: 180px; padding-inline: 10px; }
+  .views-bar { display: none; }
+  main:has(> .welcome:not([hidden])) .workspace-bar { min-height: 60px; padding: 8px 12px; gap: 4px; }
+  main:has(> .welcome:not([hidden])) .breadcrumb > span { display: none; }
+  main:has(> .welcome:not([hidden])) #menu-toggle { width: 44px; height: 44px; border: 0; }
+  main:has(> .welcome:not([hidden])) .connection { font-size: 0; gap: 0; }
+  main:has(> .welcome:not([hidden])) .mobile-overview { display: flex; flex: 1; min-width: 0; align-items: center; gap: 4px; }
+  .mobile-view-picker { display: flex; flex: 1; min-width: 0; align-items: center; gap: 5px; }
+  .mobile-view-picker select { width: 100%; min-width: 0; min-height: 44px; border: 0; padding: 6px 20px 6px 4px; font-size: 16px; background-color: transparent; text-overflow: ellipsis; }
+  .mobile-view-picker .view-attention { flex-shrink: 0; }
+  .mobile-overview #welcome-new { min-height: 44px; flex-shrink: 0; gap: 6px; padding: 8px 10px; font-size: 14px; }
+  .mobile-overview .new-session-label { display: none; }
+  .mobile-overview .mobile-new-label { display: inline; }
+  .mobile-overview .view-menu > summary { display: grid; place-items: center; min-width: 44px; min-height: 44px; }
+  .mobile-overview .view-menu-panel { max-width: calc(100vw - 24px); }
+  .mobile-overview .view-menu-panel button { min-height: 44px; }
+  .mobile-overview #view-move-left, .mobile-overview #view-move-right,
+  .mobile-overview #view-move-right + small { display: none; }
+  main > .welcome { padding: 12px; }
+  .welcome .workspace-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 8px; padding-bottom: 12px; margin-bottom: 16px; }
+  .welcome .search-field { grid-column: 1; width: 100%; min-height: 44px; }
+  .welcome .search-field input { font-size: 16px; width: 100%; }
+  .welcome .search-field kbd { display: none; }
+  .welcome .view-filters { display: contents; }
+  .welcome .filter-menu { grid-column: 2; }
+  .welcome .filter-menu summary { min-height: 44px; gap: 6px; font-size: 14px; }
+  .welcome .filter-menu .filter-panel { left: auto; right: 0; width: min(300px, calc(100vw - 24px)); }
+  .welcome .filter-panel select { min-height: 44px; font-size: 16px; }
+  .welcome .placement-switch { grid-column: 1 / -1; border: 0; border-radius: 0; padding: 0; }
+  .welcome .placement-switch button { flex: 1; min-height: 44px; font-size: 14px; border-radius: 5px; }
+  .welcome .workspace-actions:has(> #welcome-project[hidden]) { display: none; }
 }

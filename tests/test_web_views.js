@@ -20,6 +20,14 @@ test("filters intersect, include unassigned threads, and separate closed threads
   assert.deepEqual(ids({phase: "validation"}), []);
 });
 
+test("orchestrating filters select coordinating threads independently of specialist phases", () => {
+  const dispatcher=thread("dispatcher",{work_phase:"orchestrating"});
+  const specialist=thread("specialist",{work_phase:"implementation"});
+  assert.equal(threadViews.matches(dispatcher,{phase:"orchestrating"}),true);
+  assert.equal(threadViews.matches(specialist,{phase:"orchestrating"}),false);
+  assert.equal(threadViews.matches(dispatcher,{phase:"orchestrating",repository:"other"}),false);
+});
+
 test("tab badges share handled attention, include pins, and exclude Later", () => {
   const input = [thread("reply", {response_state: "reply", pinned: true}), thread("approval", {response_state: "input"}),
     thread("failure", {response_state: "failed"}), thread("later", {response_state: "reply", attention: "later"}),
@@ -82,7 +90,8 @@ function setup({saved = [], windowStorage = storage(), preferences = storage()} 
   const ids = ["repository", "project", "phase-filter", "view", "search", "group-by", "welcome", "view-tabs", "view-menu",
     "filter-menu", "reset-view", "update-view", "view-move-left", "view-move-right", "back-home", "overview-title", "add-view",
     "save-view", "view-dialog-title", "view-dialog-description", "view-name", "view-error", "view-dialog", "view-form",
-    "view-rename", "view-duplicate", "view-delete", "view-menu-toggle"];
+    "view-rename", "view-duplicate", "view-delete", "view-menu-toggle", "view-custom-actions", "filter-count",
+    "mobile-view", "mobile-view-attention", "mobile-view-activity"];
   const controls = Object.fromEntries(ids.map(id => [id, new Element(id)]));
   controls.view.value = "active"; controls["group-by"].value = "phase";
   doc.getElementById = id => controls[id]; doc.createElement = () => new Element();
@@ -110,6 +119,31 @@ function setup({saved = [], windowStorage = storage(), preferences = storage()} 
     onSwitch: async () => { switches++; controls.welcome.hidden = false; }});
   return {views, controls, doc, calls, records, errors, windowStorage, preferences, switches: () => switches};
 }
+
+test("mobile picker switches saved filters, keeps counts current, and falls back after deletion", async () => {
+  const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}},
+    {id: "stoic", name: "Stoic", filters: {repository: "stoic"}}]});
+  await c.views.start();
+  c.views.render([thread("approval", {response_state: "input"})]);
+  const picker = c.controls["mobile-view"];
+  assert.match(picker.children.find(option => option.value === "rig").textContent, /1 need attention/);
+  picker.value = "rig";
+  await picker.onchange();
+  assert.equal(c.views.activeId, "rig");
+  assert.equal(c.controls.repository.value, "rig");
+  assert.equal(c.controls["mobile-view-attention"].textContent, "1");
+  assert.equal(c.controls["mobile-view-attention"].hidden, false);
+  assert.equal(c.controls["filter-count"].textContent, "1");
+  c.controls["phase-filter"].value = "validation";
+  await c.views.persist();
+  assert.equal(c.controls["filter-count"].textContent, "2");
+  assert.equal(c.controls["mobile-view-attention"].hidden, true);
+  await c.controls["view-delete"].onclick();
+  assert.equal(picker.value, "all");
+  assert.equal(c.controls["filter-count"].hidden, true);
+  assert.equal(c.controls["view-custom-actions"].hidden, true);
+  assert.deepEqual(c.errors, []);
+});
 
 test("an agent project link resets temporary filters without saving over the active named view", async () => {
   const c = setup({saved: [{id: "review", name: "Review", filters: {project: "other", search: "invoice"}}]});

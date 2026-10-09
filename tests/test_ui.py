@@ -21,10 +21,25 @@ from agent_coord.managed_pty import output_log_path
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import _handler, build_snapshot, make_ui_server
 from agent_coord.codex_app_server import BrowserSessions
+from agent_coord.message_timeline import message_changes, message_cursor
 from test_codex_app_server import FakeCodex
 
 
 class MonitorBrowserTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required for folder tests")
+    def test_folder_selection(self):
+        result = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_web_folders.js"))],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for mobile chat tests")
+    def test_mobile_chat_behavior(self) -> None:
+        result = subprocess.run(
+            ["node", "--test", str(Path(__file__).with_name("test_mobile_chat.js"))],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node is required for slash command browser tests")
     def test_slash_command_autocomplete(self) -> None:
         result = subprocess.run(
@@ -392,6 +407,32 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(self.request(path + "/messages", {"message": "/effort medium"})[0], 409)
         self.assertEqual(self.request("/api/browser/sessions", {"yolo": "true"})[0], 400)
 
+    def test_routed_closed_thread_appears_in_now_and_can_receive_direct_input(self):
+        thread = self.request("/api/browser/sessions", {"name": "Specialist"})[1]["session"]["thread_id"]
+        self.sessions.close_work_thread(thread)
+        self.sessions.inbox_wake.pause(thread, "Keep provider execution paused")
+        self.store.register(session_id="dispatcher", client="codex", cwd=str(self.root))
+        cursor = message_cursor(self.store)
+        self.store.send_message(sender_session_id="dispatcher", recipient_session_id=thread,
+                                body="Please take the next request", classification="action_required")
+        # The ordinary message event refreshes the overview even without a turn.
+        _, events = message_changes(self.store, cursor, str(self.root))
+        self.assertIn({"method": "coordination/messages", "params": {"threadId": thread}}, events)
+        visible = self.request("/api/browser/threads")[1]["data"]
+        self.assertEqual(next(t for t in visible if t["thread_id"] == thread)["attention"], "now")
+        self.assertEqual(self.request("/api/browser/threads?archived=true")[1]["data"], [])
+        self.assertEqual([t["thread_id"] for t in self.sessions.list_sessions()], [thread])
+        self.assertEqual(self.sessions.list_sessions(archived=True), [])
+        path = "/api/browser/sessions/" + thread
+        detail = self.request(path)[1]
+        self.assertEqual(detail["work_thread"]["attention"], "now")
+        self.assertTrue(detail["session"]["archived"])
+        self.assertFalse(detail["running"])
+        self.assertEqual(self.request(path + "/messages", {"message": "My revision"})[0], 200)
+        detail = self.request(path)[1]
+        self.assertFalse(detail["session"]["archived"])
+        self.assertTrue(detail["running"])
+
     def test_fork_over_http_preserves_parent_and_rejects_invalid_requests(self):
         parent = self.request("/api/browser/sessions", {"name": "Source"})[1]["session"]["thread_id"]
         path = "/api/browser/threads/" + parent + "/fork"
@@ -458,6 +499,8 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertIn('src="/slash-commands.js"', shell)
         self.assertIn('aria-controls="slash-commands"', shell)
         self.assertEqual(self.request("/styles.css")[0], 200)
+        self.assertEqual(self.request("/mobile-chat.js")[0], 200)
+        self.assertIn('src="/mobile-chat.js"', shell)
         self.assertEqual(self.request("/filter-menu.js")[0], 200)
         self.assertEqual(self.request("/filter-menu.css")[0], 200)
         self.assertIn('id="filter-menu"', shell)
@@ -510,6 +553,41 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("/api/browser/sessions", [], {})[0], 400)
         self.assertEqual(self.request("/api/browser/sessions", {}, {"Content-Type": "text/plain"})[0], 415)
         self.assertEqual(self.request("/api/browser/sessions", {"name": "x" * 140000})[0], 413)
+        self.assertEqual(self.sessions.rpc.calls, [])
+
+    def test_open_folder_validates_path_and_detects_repository_without_starting_a_session(self):
+        repo = self.root / "repo"
+        (repo / ".git").mkdir(parents=True)
+        nested = repo / "src"
+        nested.mkdir()
+        status, result = self.request("/api/browser/workspaces/open", {"path": str(nested)})
+        self.assertEqual(status, 200)
+        self.assertEqual(result["cwd"], str(nested))
+        self.assertEqual(result["repository"]["root"], str(repo))
+        status, plain = self.request("/api/browser/workspaces/open", {"path": str(self.root)})
+        self.assertEqual(status, 200)
+        self.assertIsNone(plain["repository"])
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        for path in (outside.name, str(repo / "missing"), "repo", "", None):
+            self.assertEqual(self.request("/api/browser/workspaces/open", {"path": path})[0], 400)
+        self.assertEqual(self.request("/api/browser/workspaces/open", {"path": str(repo)},
+                                     {"X-Agent-Coord-Token": "bad"})[0], 403)
+        self.assertEqual(self.sessions.rpc.calls, [])
+        self.assertEqual(self.store.threads.list(), [])
+
+    def test_orchestrating_checkpoint_round_trips_through_api(self):
+        self.store.register(session_id="dispatcher", client="codex", cwd=str(self.root))
+        path = "/api/browser/threads/dispatcher"
+        payload = {"phase": "orchestrating", "summary": "Coordinating release specialists.",
+                   "next_actor": "external", "next_action": "Wait for specialist validation."}
+        status, saved = self.request(path + "/checkpoint", payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["work_phase"], "orchestrating")
+        current = next(t for t in self.request("/api/browser/threads")[1]["data"] if t["thread_id"] == "dispatcher")
+        self.assertEqual(current["checkpoint"]["phase"], "orchestrating")
+        self.assertEqual(current["checkpoint"]["next_actor"], "external")
+        self.assertEqual(current["attention"], "now")
         self.assertEqual(self.sessions.rpc.calls, [])
 
     def test_thread_metadata_checkpoint_links_and_attention_over_http(self):

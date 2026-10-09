@@ -6,6 +6,8 @@ class PhoneNotifications {
     this.busy = false;
     this.info = {};
     this.subscription = null;
+    this.navigationReady = false;
+    this.pendingThread = null;
     this.button.onclick = () => this.toggle().catch(onError);
     this.testButton = env.document.createElement("button");
     this.testButton.type = "button";
@@ -20,13 +22,31 @@ class PhoneNotifications {
       if (event.data?.type !== "agent-coord-open-notification") return;
       try {
         const url = new URL(event.data.url, env.location.origin);
-        if (url.origin === env.location.origin && url.pathname === "/" && /^#[a-zA-Z0-9-]{1,160}$/.test(url.hash)) {
-          Promise.resolve(openThread(url.hash.slice(1))).catch(onError);
+        if (url.origin === env.location.origin && url.pathname === "/" && !url.search &&
+            (!url.hash || /^#[a-zA-Z0-9_.~-]{1,200}$/.test(url.hash))) {
+          // Queue until saved views and the initial route have finished loading,
+          // so startup cannot overwrite a notification selection.
+          if (url.hash) this.pendingThread = url.hash.slice(1);
+          event.ports?.[0]?.postMessage({type: "agent-coord-notification-received"});
+          if (this.navigationReady) this.openPendingThread();
         }
       } catch { /* Ignore malformed worker messages. */ }
     };
     env.navigator.serviceWorker?.addEventListener("message", this.messageHandler);
     env.addEventListener("pagehide", () => this.destroy(), {once: true});
+  }
+
+  ready() {
+    this.navigationReady = true;
+    return this.openPendingThread();
+  }
+
+  async openPendingThread() {
+    const thread = this.pendingThread;
+    this.pendingThread = null;
+    if (thread) {
+      try { await this.openThread(thread); } catch (error) { this.onError(error); }
+    }
   }
 
   supported() {
@@ -66,7 +86,7 @@ class PhoneNotifications {
     this.button.disabled = this.busy || !this.info.available || (denied && !this.info.enabled);
     this.button.textContent = enabled ? "Phone notifications on" : denied ? "Phone notifications blocked" : "Enable phone notifications";
     this.button.setAttribute("aria-pressed", String(enabled));
-    this.button.title = enabled ? "Turn off background alerts on this device." : "Get background alerts for finished turns, failures, and approvals.";
+    this.button.title = enabled ? "Turn off background alerts on this device." : "Get background alerts for finished turns, failures, approvals, and snooze reminders.";
     this.testButton.hidden = !enabled;
     this.testButton.disabled = this.busy;
     this.message.textContent = this.info.error || (denied ? "Allow Ribbon Field notifications in iPhone Settings, then reload." : "");

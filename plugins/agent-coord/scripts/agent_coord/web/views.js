@@ -60,6 +60,30 @@ class SavedViews {
     try { this.navigation = JSON.parse(storage?.getItem(this.key) || "{}"); } catch { /* Optional window state. */ }
     if (!this.navigation || typeof this.navigation !== "object" || Array.isArray(this.navigation)) this.navigation = {};
     this.bind();
+    this.setupMobile();
+  }
+  setupMobile() {
+    this.mobile = this.doc.defaultView?.matchMedia("(max-width: 720px)");
+    if (!this.mobile) return;
+    const host = this.$("mobile-overview");
+    this.doc.querySelector(".workspace-bar").insertBefore(host, this.$("connection"));
+    const homes = ["welcome-new", "view-menu", "add-view", "reset-view", "update-view"].map(id => {
+      const element = this.$(id), marker = this.doc.createComment("overview control position");
+      element.before(marker);
+      return {element, marker};
+    });
+    const sync = () => {
+      this.closeMenu();
+      if (this.mobile.matches) {
+        host.append(this.$("welcome-new"), this.$("view-menu"));
+        this.$("mobile-view-actions").append(this.$("add-view"), this.$("reset-view"), this.$("update-view"));
+      } else {
+        for (const {element, marker} of homes) marker.after(element);
+      }
+      this.changed();
+    };
+    this.mobile.addEventListener("change", sync);
+    sync();
   }
   $(id) { return this.doc.getElementById(id); }
   current() { return this.items.find(view => view.id === this.activeId) || this.all; }
@@ -76,7 +100,7 @@ class SavedViews {
       // Falling back to "All" would silently broaden a saved view.
       if (f[field] && ![...control.options].some(option => option.value === f[field])) {
         const option = this.doc.createElement("option"); option.value = f[field];
-        option.textContent = f[field] === "__none__" ? "No " + field : "Selected " + field;
+        option.textContent = f[field] === "__none__" ? "No " + (field === "project" ? "group" : field) : "Selected " + (field === "project" ? "group" : field);
         control.append(option);
       }
       control.value = f[field];
@@ -203,6 +227,7 @@ class SavedViews {
     this.$("welcome").scrollTop = 0;
   }
   focusActive() {
+    if (this.mobile?.matches) { this.$("mobile-view").focus({preventScroll: true}); return; }
     const tab = this.$("view-tabs").querySelector('[aria-selected="true"]');
     tab?.focus({preventScroll: true}); tab?.scrollIntoView({block: "nearest", inline: "nearest"});
   }
@@ -214,7 +239,12 @@ class SavedViews {
     this.$("update-view").hidden = !dirty || !custom;
     this.$("update-view").textContent = pending?.promise ? "Saving…" : pending?.error ? "Retry saving" : "Save filters";
     this.$("update-view").disabled = this.busy || Boolean(pending?.promise);
-    this.$("view-menu").hidden = !custom;
+    this.$("view-menu").hidden = !custom && !this.mobile?.matches;
+    this.$("view-custom-actions").hidden = !custom;
+    const f = this.read().filters;
+    const count = [f.repository, f.project, f.phase, ["attention", "completed"].includes(f.show)].filter(Boolean).length;
+    this.$("filter-count").textContent = String(count);
+    this.$("filter-count").hidden = !count;
     this.$("view-move-left").disabled = this.items.indexOf(this.current()) <= 1 || this.busy;
     this.$("view-move-right").disabled = this.current() === this.items.at(-1) || this.busy;
     this.$("back-home").textContent = this.current().name;
@@ -227,6 +257,24 @@ class SavedViews {
     const signature = JSON.stringify([this.items, this.activeId, badges]);
     if (signature === this.signature) return;
     this.signature = signature;
+    const picker = this.$("mobile-view");
+    picker.replaceChildren();
+    this.items.forEach((view, index) => {
+      const option = this.doc.createElement("option"), counts = badges[index];
+      option.value = view.id;
+      option.textContent = view.name + (view.id === this.activeId ? "" :
+        (counts.attention ? " · " + counts.attention + " need attention" : "") +
+        (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
+      picker.append(option);
+    });
+    picker.value = this.activeId;
+    const counts = badges[this.items.indexOf(this.current())];
+    const attention = this.$("mobile-view-attention"), activity = this.$("mobile-view-activity");
+    attention.textContent = String(counts.attention); attention.hidden = !counts.attention;
+    attention.setAttribute("aria-label", counts.attention + " need attention");
+    activity.hidden = !counts.active && !counts.completed;
+    activity.className = counts.active ? "view-active" : "view-completed";
+    activity.setAttribute("aria-label", counts.active ? "Active work" : "New responses");
     const tabs = this.$("view-tabs"), focused = tabs.contains(this.doc.activeElement) ? this.doc.activeElement.dataset.viewId : null;
     tabs.replaceChildren();
     this.items.forEach((view, index) => {
@@ -250,7 +298,7 @@ class SavedViews {
       tabs.append(button);
       if (focused === view.id) button.focus({preventScroll: true});
     });
-    this.$("welcome").setAttribute("aria-labelledby", "saved-view-" + this.activeId);
+    this.$("welcome").setAttribute("aria-labelledby", "overview-title");
   }
   async mutation(fn) {
     if (this.busy) return;
@@ -276,6 +324,7 @@ class SavedViews {
     this.$("view-dialog").showModal(); this.$("view-name").focus();
   }
   bind() {
+    this.$("mobile-view").onchange = () => this.activate(this.$("mobile-view").value).catch(this.onError);
     this.$("add-view").onclick = () => this.openDialog("create").catch(this.onError);
     this.$("reset-view").onclick = () => this.activate(this.activeId, true).catch(this.onError);
     this.$("update-view").onclick = () => this.persist();

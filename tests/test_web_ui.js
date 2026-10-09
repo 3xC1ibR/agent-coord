@@ -7,13 +7,24 @@ const thread = (id, work_phase = "investigation", extra = {}) => ({thread_id: id
 const ids = items => items.map(t => t.thread_id);
 const lane = (groups, key) => groups.phases.find(g => g.key === key);
 
-test("all seven lifecycle columns have a fixed order, including empty stages", () => {
-  const expected = ["Getting started", "Investigating", "Planning", "Implementing", "Validating", "Deploying", "Done"];
+test("all eight lifecycle columns have a fixed order, including empty stages", () => {
+  const expected = ["New", "Investigating", "Planning", "Orchestrating", "Implementing", "Validating", "Deploying", "Done"];
   assert.deepEqual(groupThreads([]).phases.map(g => g.label), expected);
   const groups = groupThreads([thread("deploy", "deployment"), thread("findings"), thread("done", "finished")]);
   assert.deepEqual(groups.phases.map(g => g.label), expected);
   assert.deepEqual(ids(lane(groups, "investigation").threads), ["findings"]);
   assert.deepEqual(ids(lane(groups, "finished").threads), ["done"]);
+});
+
+test("orchestrating occupies its own column and does not itself require user attention", () => {
+  const dispatcher = thread("dispatcher", "orchestrating", {checkpoint:{phase:"orchestrating",next_actor:"external"}});
+  const specialist = thread("specialist", "deployment");
+  const groups = groupThreads([dispatcher,specialist]);
+  assert.deepEqual(ids(lane(groups,"orchestrating").threads), ["dispatcher"]);
+  assert.deepEqual(ids(lane(groups,"deployment").threads), ["specialist"]);
+  assert.equal(awaitsUser(dispatcher), false);
+  assert.equal(status(dispatcher).label, "Orchestrating");
+  assert.equal(phase({checkpoint:{phase:"orchestrating"}}), "orchestrating");
 });
 
 test("blocked deployment outranks requested review, healthy rollout, findings, and routine success", () => {
@@ -196,13 +207,13 @@ test("saved views retain independent horizontal positions even with identical fi
 test("Attention appears only while it contains a thread and never hides the lifecycle board", () => {
   const c = overview(), attention = () => c.$("overview").children.filter(el => el.className === "attention-panel");
   assert.equal(attention().length, 0);
-  assert.equal(c.board().children.length, 7);
+  assert.equal(c.board().children.length, 8);
   c.state.sessions[0].response_state = "reply"; c.renderList();
   assert.equal(attention().length, 1);
-  assert.equal(c.board().children.length, 7);
+  assert.equal(c.board().children.length, 8);
   c.state.sessions[0].response_state = "available"; c.renderList();
   assert.equal(attention().length, 0);
-  assert.equal(c.board().children.length, 7);
+  assert.equal(c.board().children.length, 8);
 });
 
 function motionHarness() {

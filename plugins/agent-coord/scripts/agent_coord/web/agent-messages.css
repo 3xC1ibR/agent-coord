@@ -1,0 +1,15 @@
+.agent-message { margin: 18px 0 24px; padding: 14px 16px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; background: color-mix(in srgb, var(--accent) 4%, transparent); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.agent-message.sent { border-left-color: var(--muted); background: color-mix(in srgb, var(--muted) 3%, transparent); }
+.agent-message-heading { display: flex; align-items: baseline; gap: 9px; margin-bottom: 9px; }
+.agent-message-icon { color: var(--accent); font-size: 17px; line-height: 1; }
+.agent-message-label { flex: 1; min-width: 0; color: var(--muted); }
+.agent-message-peer { color: var(--ink); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+span.agent-message-peer { text-decoration: none; }
+.agent-message-time { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.agent-message-body { white-space: pre-wrap; }
+.agent-message-content summary { cursor: pointer; color: var(--ink); }
+.agent-message-content[open] summary { color: var(--muted); margin-bottom: 10px; }
+.agent-message-status { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 10px; margin-top: 11px; }
+.agent-message-cause { color: var(--accent); font-weight: 600; }
+.agent-message:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 600px) { .agent-message { padding: 12px; } .agent-message-heading { flex-wrap: wrap; gap: 4px 8px; } .agent-message-time { margin-left: 25px; flex-basis: 100%; } }

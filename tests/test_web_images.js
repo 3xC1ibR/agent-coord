@@ -117,6 +117,8 @@ function appSetup() {
   Object.assign(c, {ChatImageAttachments, node: element, renderSessionSettings() {},
     threadGrouping: {status: () => ({label: "Idle"})}, messageMarkdown: {render: text => text},
     refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id});
+  const disclosureEntry = {};
+  c.conversationEntry = () => disclosureEntry;
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function requestButton(")), c);
@@ -180,7 +182,7 @@ test("history and queued messages render image thumbnails without loading remote
     {type: "image", url: "https://example.com/private.png"}, {type: "image", url: "data:image/svg+xml;base64,PHN2Zz4="},
   ]}]}];
   c.renderTimeline();
-  const body = c.$("timeline").childNodes[0].childNodes[1];
+  const body = c.$("timeline").childNodes[0].childNodes[0];
   assert.match(body.textContent, /Compare/);
   const gallery = body.childNodes[0];
   assert.equal(gallery.childNodes.length, 1);
@@ -189,4 +191,23 @@ test("history and queued messages render image thumbnails without loading remote
   c.renderQueuedMessages();
   const queued = c.$("queued-messages").childNodes[1];
   assert.equal(queued.childNodes[1].childNodes[0].src, url);
+});
+
+test("mobile chooser reuses attachment validation, supports reselection, and ignores a stale thread", async () => {
+  const c = setup(); c.attachments.bind();
+  const picker = c.$("image-picker"), button = c.$("attach-image");
+  let clicks = 0; picker.click = () => { clicks++; };
+  button.onclick(); assert.equal(clicks, 1);
+  picker.files = [file("photo.png")]; picker.value = "photo.png"; picker.onchange();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(c.attachments.snapshot()[0].name, "photo.png");
+  assert.equal(picker.value, "");
+  c.attachments.sent("one", c.attachments.snapshot());
+  button.onclick(); picker.onchange();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(c.attachments.snapshot().length, 1);
+  button.onclick(); c.selected = "two"; picker.onchange();
+  assert.equal(c.attachments.items().length, 0);
+  c.enabled = false; c.attachments.render(); button.onclick();
+  assert.equal(button.disabled, true); assert.equal(clicks, 3);
 });

@@ -2,6 +2,7 @@
 
 // Kept separate from card rendering so list refreshes need no per-card listeners.
 function createThreadHover({overview, document, window, getThread, loadPreview, statusLabel, relativeTime,
+  markdown = typeof module !== "undefined" && module.exports ? require("./markdown.js") : globalThis.messageMarkdown,
   schedule = setTimeout, cancel = clearTimeout}) {
   const panel = document.createElement("aside");
   panel.id = "thread-hover"; panel.className = "thread-hover"; panel.hidden = true;
@@ -11,6 +12,11 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   const cache = new Map();
   function element(tag, text, className) {
     const el = document.createElement(tag); el.textContent = text; el.className = className || ""; return el;
+  }
+  function markdownBody(text, className) {
+    const el = element("div", "", className + " markdown");
+    el.innerHTML = markdown.render(text);
+    return el;
   }
   function hide() {
     cancel(openTimer); cancel(closeTimer); request++;
@@ -32,7 +38,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   }
   function render(thread, message, loading = false, failed = false) {
     panel.replaceChildren();
-    panel.append(element("div", [statusLabel(thread), thread.checkpoint?.phase || "Getting started"].filter(Boolean).join(" · "), "hover-status"),
+    panel.append(element("div", [statusLabel(thread), thread.checkpoint?.phase || "New"].filter(Boolean).join(" · "), "hover-status"),
       element("h3", thread.title, "hover-title"));
     const facts = [thread.project_name && "Project: " + thread.project_name,
       thread.repository_name && "Repository: " + thread.repository_name,
@@ -40,12 +46,12 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
       thread.updated_at && "Updated " + relativeTime(thread.updated_at)].filter(Boolean);
     panel.append(element("p", facts.join("\n"), "hover-facts"));
     if (thread.checkpoint?.summary) {
-      panel.append(element("h4", "Where things stand"), element("p", thread.checkpoint.summary, "hover-summary"));
+      panel.append(element("h4", "Where things stand"), markdownBody(thread.checkpoint.summary, "hover-summary"));
       if (thread.checkpoint_stale) panel.append(element("small", "New activity since this checkpoint", "hover-muted"));
     }
     if (thread.checkpoint?.next_action) {
       const actor = {user: "Your next step", agent: "Agent’s next step", external: "Waiting on"}[thread.checkpoint.next_actor] || "Next step";
-      panel.append(element("h4", actor), element("p", thread.checkpoint.next_action, "hover-summary"));
+      panel.append(element("h4", actor), markdownBody(thread.checkpoint.next_action, "hover-summary"));
     }
     const section = element("section", "", "hover-message");
     section.append(element("h4", "Most recent message"));
@@ -56,7 +62,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
         if (!Number.isNaN(date.getTime())) speaker += " · " + date.toLocaleString();
       }
       section.append(element("small", speaker, "hover-muted"),
-        element("p", message.text + (message.truncated ? "…" : ""), "hover-message-text"));
+        markdownBody(message.text + (message.truncated ? "…" : ""), "hover-message-text"));
       if (message.truncated) section.append(element("small", "Open the thread to read more.", "hover-muted"));
     } else section.append(element("p", loading ? "Loading latest message…" : failed ? "Latest message unavailable. Open the thread to try again." : "No conversation message available yet.", "hover-muted"));
     panel.append(section);

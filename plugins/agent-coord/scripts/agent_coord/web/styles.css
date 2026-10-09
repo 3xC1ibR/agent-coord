@@ -62,7 +62,6 @@ button:disabled { opacity: .45; cursor: default; }
 .sidebar .thread-group { margin-bottom: 22px; }
 .sidebar .group-heading { margin: 8px 7px; color: #a7b8aa; }
 .sidebar h2 { font-size: 11px; font-weight: 400; }
-.sidebar .group-count { font-size: 10px; color: #a7b8aa; }
 .sidebar .empty { font-size: 11px; padding: 5px 8px; }
 .session { position: relative; display: block; width: 100%; text-align: left; min-width: 0; }
 @property --thread-border-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
@@ -134,7 +133,6 @@ kbd { font: 10px var(--mono); border: 1px solid var(--line); border-radius: 3px;
 #overview { display: flex; flex-direction: column; align-items: stretch; gap: 30px; }
 .group-heading { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
 .group-heading h2 { font-size: 15px; font-weight: 550; margin: 0; letter-spacing: -.02em; }
-.group-count { font: 11px var(--mono); color: var(--muted); }
 .group-description { font-size: 11px; line-height: 1.6; color: var(--muted); margin: 0 0 19px; }
 .thread-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(290px, 100%), 1fr)); gap: 14px; }
 .thread-card { position: relative; display: flex; flex-direction: column; min-width: 0; }
@@ -282,6 +280,12 @@ main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; pad
 .markdown table { border-collapse: collapse; width: 100%; }
 .markdown th, .markdown td { padding: .55em .8em; border: 1px solid var(--line); }
 .markdown th { background: var(--tint); font-weight: 600; }
+@media (max-width: 720px), (max-width: 1100px) and (hover: none) and (pointer: coarse) {
+  /* Keep columns readable; wide tables scroll inside their existing wrapper. */
+  .markdown-table { max-width: 100%; min-width: 0; }
+  .markdown table { overflow-wrap: normal; }
+  .markdown th, .markdown td { min-width: 8em; }
+}
 .markdown hr { margin: 1.25em 0; border: 0; border-top: 1px solid var(--line); }
 .message-meta { color: var(--muted); font: 11px/1.6 var(--mono); margin-bottom: 1em; overflow-wrap: anywhere; }
 .message.user { background: #e9ede1; border-radius: 7px; padding: 18px 21px; }
@@ -293,6 +297,8 @@ pre { font: 11px/1.7 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px #2f624b12; }
 .composer-model { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 11px; }
 .model-trigger { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; padding: 5px 7px; margin-left: -7px; border-color: transparent; background: transparent; font-size: 12px; font-weight: 500; }
+.effort-trigger { color: var(--muted); margin-left: 0; }
+#effort-menu .model-option { padding-left: 10px; }
 .model-trigger-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-chevron { color: var(--muted); font-size: 14px; margin-left: 3px; }
 .provider-logo { width: 16px; height: 16px; flex-shrink: 0; fill: currentColor; }
@@ -387,16 +393,16 @@ dialog p { font-size: 11px; margin-top: 0; }
   .later .thread-cards .session { padding-inline: 0; }
   .overview-footer > span:last-child { display: none; }
   .conversation-head { padding: 10px 22px; }
-  .conversation-content { display: block; }
+  .conversation-content { overflow: hidden; }
   .conversation-head h1, .title-editor input { font-size: 18px; }
   .session-statusbar { padding-inline: 15px; }
   .session-actions { justify-content: flex-start; }
   .session-actions button, .context-actions button { min-height: 34px; }
   .thread-context { padding: 15px 22px; }
-  .timeline { padding: 24px 22px; min-height: 0; overflow: visible; }
+  .timeline { padding: 24px 22px; min-height: 0; overflow: auto; }
   .composer { margin: 0 15px 15px; }
   .composer-footer > span { font-size: 9px; }
-  .requests { margin: 0 15px; max-height: none; }
+  .requests { margin: 0 15px; max-height: 35%; }
   .settings { grid-template-columns: 1fr; gap: 0; }
 }
 /* iOS zooms focused text fields below 16px, including on touch devices in landscape. */
@@ -505,13 +511,11 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 .attention-reason.done { color: var(--accent); }
 .attention-card .next-action { margin-top: 8px; }
 .attention-card .card-actions { justify-content: flex-end; }
-.stage-empty, .stage-attention { color: var(--muted); font-size: 11px; margin: 0; padding: 8px 0; }
-.stage-attention { margin: -8px 0 10px; }
-.phase-board { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.stage-empty { color: var(--muted); font-size: 11px; margin: 0; padding: 8px 0; }
+.phase-board { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 14px; align-items: start; }
 .phase-board > .thread-group { min-width: 0; }
 .phase-board .group-heading { padding-bottom: 12px; margin-bottom: 14px; border-bottom: 1px solid var(--line); gap: 5px; }
 .phase-board .group-heading h2 { font-size: 11px; letter-spacing: 0; text-transform: none; }
-.phase-board .group-count { font-size: 10px; }
 .phase-board .thread-cards { grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .phase-board .thread-cards .session { padding: 14px; }
 .phase-board .card-top { padding-right: 38px; margin-bottom: 12px; }
@@ -541,6 +545,9 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 .session.card-age-old .card-meta { padding-top: 6px; }
 .thread-cards .session.card-age-settled:hover,
 .thread-cards .session.card-age-old:hover { background: var(--surface); }
+@media (max-width: 720px) {
+  #overview .thread-group[data-empty="true"] { display: none; }
+}
 @container (max-width: 1150px) { .phase-board { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @container (max-width: 620px) {
   .phase-board {
@@ -567,3 +574,76 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 .dialog-error { color: #962c27; font-size: 13px; }
 .session-actions, .view-filters { flex-wrap: wrap; }
 @media (max-width: 720px) { .organization-fields { grid-template-columns: 1fr; } }
+/* One-time prompt scheduling uses the same dialogs on desktop and phones. */
+#schedule-dialog, #schedules-dialog { width: min(640px, calc(100vw - 32px)); }
+.schedule-settings { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; }
+.schedule-settings select { width: 100%; min-width: 0; }
+#schedule-list { display: grid; gap: 12px; max-height: 55vh; overflow: auto; }
+.schedule-card { border: 1px solid var(--line); border-radius: 10px; padding: 14px; overflow-wrap: anywhere; }
+.schedule-card h3 { margin: 0 0 8px; font-size: 14px; white-space: pre-wrap; max-height: 8em; overflow: auto; }
+.schedule-card p { margin: 6px 0; font-size: 12px; }
+.schedule-meta { font-weight: 600; }
+.schedule-error { color: var(--warm); }
+.composer-footer > div { flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 520px) { .schedule-settings { grid-template-columns: minmax(0, 1fr); } }
+
+/* Mobile chat is a fixed frame: one header, a scrolling transcript, and a composer. */
+.mobile-chat-control { display: none; }
+body.mobile-chat:has(#conversation:not([hidden])) {
+  display: block; position: fixed; inset: var(--mobile-viewport-top, 0px) 0 auto;
+  height: var(--mobile-viewport-height, 100dvh); overflow: hidden;
+}
+body.mobile-chat:has(#conversation:not([hidden])) > main { height: 100%; }
+body.mobile-chat:has(#conversation:not([hidden])) .sidebar,
+body.mobile-chat:has(#conversation:not([hidden])) .workspace-bar { display: none; }
+body.mobile-chat .conversation { display: flex; flex-direction: column; }
+body.mobile-chat .conversation-main { flex: 1; overflow: hidden; }
+body.mobile-chat .conversation-content { display: flex; overflow: hidden; }
+body.mobile-chat .conversation-head { flex-shrink: 0; flex-wrap: nowrap; gap: 8px; padding: 6px 12px; min-height: 56px; }
+body.mobile-chat .conversation-heading { flex: 1; min-width: 0; }
+body.mobile-chat .conversation-head h1 { font: 550 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+body.mobile-chat .thread-title { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-block: 8px; }
+body.mobile-chat #fork-origin { display: none; }
+body.mobile-chat .title-editor input { font-size: 16px; }
+body.mobile-chat .title-editor-actions small { display: none; }
+body.mobile-chat .conversation-controls { flex-shrink: 0; }
+body.mobile-chat .mobile-chat-control { display: inline-flex; align-items: center; justify-content: center; }
+body.mobile-chat button.mobile-chat-control { min-width: 44px; min-height: 44px; padding: 6px; font-size: 24px; }
+body.mobile-chat .mobile-chat-status { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
+body.mobile-chat .mobile-chat-status[data-status="running"] { background: var(--accent); }
+body.mobile-chat .mobile-chat-status[data-status="input"] { background: var(--warm); }
+body.mobile-chat #toggle-context, body.mobile-chat #expand-chat { display: none; }
+body.mobile-chat .timeline { min-height: 0; overflow: auto; overscroll-behavior-y: contain; padding: 16px; }
+body.mobile-chat .requests { margin: 0 12px; max-height: 35%; overflow: auto; }
+body.mobile-chat .composer { margin: 0 12px max(8px, env(safe-area-inset-bottom)); }
+body.mobile-chat .composer-draft { max-height: min(160px, calc(var(--mobile-viewport-height, 100dvh) * .35)); overflow-y: auto; }
+body.mobile-chat .composer textarea { font-size: 16px; max-height: 96px; resize: none; }
+body.mobile-chat .composer-model { margin-top: 6px; gap: 6px; }
+body.mobile-chat .composer-footer > span { display: none; }
+body.mobile-chat .composer-footer { justify-content: flex-end; }
+body.mobile-chat .composer-footer button { min-height: 36px; }
+body.mobile-chat .mobile-thread-sheet {
+  position: fixed; inset: auto 0 max(0px, calc(100dvh - var(--mobile-viewport-height, 100dvh) - var(--mobile-viewport-top, 0px)));
+  margin: 0; width: 100%; max-width: none; max-height: calc(var(--mobile-viewport-height, 100dvh) - 24px);
+  padding: 16px 18px max(18px, env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0; overflow: hidden;
+}
+body.mobile-chat .mobile-thread-sheet[open] { display: flex; flex-direction: column; }
+.mobile-sheet-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-shrink: 0; }
+#mobile-sheet-context, #mobile-sheet-actions { min-height: 0; overflow-y: auto; }
+.mobile-thread-sheet #mobile-show-context, #mobile-sheet-info { flex-shrink: 0; }
+.mobile-sheet-heading h2 { flex: 1; font: 600 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; margin: 0; }
+.mobile-sheet-heading button { min-width: 44px; min-height: 44px; }
+body.mobile-chat .mobile-thread-sheet .session-actions { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.mobile-thread-sheet .session-actions button, .mobile-thread-sheet #mobile-show-context { min-height: 48px; width: 100%; text-align: left; padding: 12px; font-size: 15px; }
+.mobile-thread-sheet .status, .mobile-thread-sheet #snooze-status { margin: 0; padding: 8px 12px; font-size: 12px; }
+.mobile-thread-sheet #mobile-show-context { margin-top: 8px; }
+body.mobile-chat .mobile-thread-sheet .context-panel { max-height: none; border: 0; background: transparent; overflow: visible; }
+.mobile-thread-sheet .thread-context { padding: 8px 0; }
+.mobile-thread-sheet .context-actions button { min-height: 44px; font-size: 13px; }
+body.mobile-chat .mobile-thread-sheet .session-statusbar { display: flex; padding: 12px 0 0; margin-top: 16px; background: transparent; }
+.mobile-thread-sheet .session-settings { gap: 8px; }
+.mobile-thread-sheet .session-settings > button { min-height: 44px; }
+
+.turn-work { border: 1px solid var(--line); border-radius: 5px; margin-bottom: 18px; color: var(--muted); font-size: 11px; }
+.turn-work > summary { padding: 12px 14px; cursor: pointer; }
+.turn-work > .tool { margin: 0 12px 12px; }

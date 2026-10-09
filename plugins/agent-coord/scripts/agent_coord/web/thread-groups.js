@@ -3,8 +3,8 @@
 // Stage, attention reason, and saved placement are independent.
 const threadGrouping = (() => {
   const phases = [
-    ["new", "Getting started"], ["investigation", "Investigating"],
-    ["planning", "Planning"], ["implementation", "Implementing"],
+    ["new", "New"], ["investigation", "Investigating"],
+    ["planning", "Planning"], ["orchestrating", "Orchestrating"], ["implementation", "Implementing"],
     ["validation", "Validating"], ["deployment", "Deploying"], ["finished", "Done"],
   ];
   const reasons = {
