@@ -256,8 +256,8 @@ function threadCard(thread, compact = false, inAttention = false) {
       control.onclick = event => { event.stopPropagation(); action(callback); };
       actions.append(control);
     }
+    if (thread.can_handle_response) addAction("Dismiss", "handle", () => markThreadHandled(thread));
     if (!inAttention) {
-      if (thread.can_handle_response) addAction(reason.key === "review" ? "Mark reviewed" : "Mark handled", "handle", () => markThreadHandled(thread));
       addAction(thread.attention === "later" ? "Move to Now" : "Move to Later", "later", () => toggleThreadLater(thread));
     }
     if (thread.snoozed || thread.snooze_due) addAction("Resume", "resume-snooze", () => resumeThreadSnooze(thread));
