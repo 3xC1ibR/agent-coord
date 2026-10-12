@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -387,6 +388,27 @@ class BrowserHTTPTests(unittest.TestCase):
         with response:
             content = response.read().decode()
             return response.status, json.loads(content) if response.headers.get_content_type() == "application/json" else content
+
+    def test_database_contention_returns_json_without_replaying_operations(self):
+        for operation, path, body in (
+            ("list_work_threads", "/api/browser/threads?archived=false", None),
+            ("submit", "/api/browser/sessions/example/messages", {"message": "Keep this draft"}),
+        ):
+            with self.subTest(operation=operation):
+                with patch.object(self.sessions, operation, side_effect=sqlite3.OperationalError("database is locked")) as call:
+                    status, result = self.request(path, body)
+                self.assertEqual(status, 503)
+                self.assertIn("busy", result["error"])
+                if body is not None:
+                    self.assertIn("before sending again", result["error"])
+                self.assertEqual(call.call_count, 1)
+
+    def test_database_contention_closes_event_stream_without_second_http_response(self):
+        with patch.object(self.sessions, "snooze_notifications", side_effect=sqlite3.OperationalError("database is locked")):
+            with urllib.request.urlopen(self.url + "/api/browser/events", timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers.get_content_type(), "text/event-stream")
+                self.assertEqual(response.read().decode(), "retry: 1500\n\n")
 
     def test_conversation_search_scope_and_no_provider_resume(self):
         for identity, directory, placement in (("here", self.root, "now"), ("closed", self.root, "archived"),

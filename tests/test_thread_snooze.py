@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
@@ -27,6 +28,29 @@ class ThreadSnoozeTests(unittest.TestCase):
 
     def thread(self):
         return self.sessions.work_thread("thread")
+
+    def test_observation_does_not_need_writer_lock_without_pending_reminders(self):
+        connect = self.store._connect
+
+        def impatient_connection():
+            db = connect()
+            db.execute("PRAGMA busy_timeout = 20")
+            return db
+
+        for stage in ("no snooze", "future snooze", "delivered reminder"):
+            with self.subTest(stage=stage):
+                if stage == "future snooze":
+                    self.update(snoozed_until=1200)
+                elif stage == "delivered reminder":
+                    self.now = 1200
+                    self.store.threads.snooze_notifications()
+                with self.store._connection() as writer:
+                    writer.execute("BEGIN IMMEDIATE")
+                    with patch.object(self.store, "_connect", side_effect=impatient_connection):
+                        self.assertEqual(self.thread()["thread_id"], "thread")
+                        self.assertEqual(len(self.sessions.list_work_threads()), 1)
+                        self.assertEqual(len(self.store.threads.snooze_notifications()),
+                                         int(stage == "delivered reminder"))
 
     def update(self, **body):
         return self.sessions.update_work_thread("thread", body)

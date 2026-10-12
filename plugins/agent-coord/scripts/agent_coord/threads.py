@@ -255,6 +255,16 @@ class ThreadStore:
         # Persist wake-up on observation, including the first read after restart.
         # Keep the deadline until an explicit user action acknowledges the reminder.
         now = self.store.clock()
+        # Most overview refreshes only observe existing state. Even a no-op
+        # INSERT/UPDATE takes SQLite's sole writer lock, once for every thread
+        # read; streaming refreshes must not compete with active agent writes.
+        pending = db.execute("""SELECT 1 FROM work_threads t
+            WHERE t.attention IN ('now', 'later') AND t.snoozed_until <= ?
+              AND (t.attention = 'later' OR NOT EXISTS (
+                SELECT 1 FROM snooze_notifications n WHERE n.thread_id = t.thread_id
+                  AND n.snoozed_until = t.snoozed_until)) LIMIT 1""", (now,)).fetchone()
+        if pending is None:
+            return
         # The reminder and placement change commit together. Include already
         # returned reminders from older runtimes; the unique receipt survives
         # rereads, competing processes and restarts without creating fake turns.

@@ -7,6 +7,7 @@ import os
 import secrets
 import socket
 import socketserver
+import sqlite3
 import threading
 import webbrowser
 from http import HTTPStatus
@@ -387,6 +388,8 @@ def _handler(
                     self._browser_get(parsed)
                 except CoordinationError as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                except sqlite3.OperationalError as exc:
+                    self._database_busy(exc)
                 return
             if parsed.path == "/api/snapshot":
                 query = parse_qs(parsed.query)
@@ -423,6 +426,16 @@ def _handler(
 
         def _json(self, status: HTTPStatus, payload: Any) -> None:
             self._send(status, "application/json; charset=utf-8", json.dumps(payload).encode())
+
+        def _database_busy(self, error: sqlite3.OperationalError) -> None:
+            if "locked" not in str(error).lower() and "busy" not in str(error).lower():
+                raise error
+            # A mutation may have committed before its result was read. Never
+            # replay it here or describe an unknown delivery as a failed send.
+            message = "Ribbon Field is busy. " + (
+                "Check the conversation before sending again." if self.command == "POST"
+                else "Try again shortly.")
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": message})
 
         def _valid_host(self) -> bool:
             return self._local_request() or self._remote_request()
@@ -546,6 +559,12 @@ def _handler(
                                      approvals=browser_sessions.approval_notifications())
                         self.wfile.write(f"id: {sequence}:{completion_sequence}\ndata: {json.dumps(batch)}\n\n".encode())
                         self.wfile.flush()
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                        raise
+                    # Headers are already sent. Let EventSource reconnect;
+                    # never append an HTTP error response inside the stream.
+                    self.close_connection = True
                 except (OSError, ValueError):
                     self.close_connection = True
             else:
@@ -795,6 +814,8 @@ def _handler(
                 self._json(HTTPStatus.OK, result)
             except BrowserBusyError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
+            except sqlite3.OperationalError as exc:
+                self._database_busy(exc)
             except (CoordinationError, ValueError, OSError) as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
