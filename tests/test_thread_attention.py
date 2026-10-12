@@ -143,6 +143,56 @@ class ThreadAttentionTests(unittest.TestCase):
         self.sessions.update_work_thread("terminal", {"attention": "archived"})
         self.assertFalse(self.thread()["needs_attention"])
 
+    def test_loaded_session_does_not_mask_live_activity_with_saved_blocker(self):
+        thread_id = self.sessions.create({"name": "Calendar editing"})["session"]["thread_id"]
+        self.store.threads.checkpoint(thread_id, {
+            "phase": "deployment", "summary": "Waiting for credentials.",
+            "next_actor": "user", "next_action": "Run aws login.",
+        })
+        self.assertEqual(self.sessions.work_thread(thread_id)["response_state"], "input")
+        # Hooks can report live work before this runtime receives the turn event.
+        self.store.touch(thread_id, turn_active=True)
+        running = self.sessions.work_thread(thread_id)
+        self.assertEqual(running["status"], "running")
+        self.assertEqual(running["response_state"], "working")
+        self.assertFalse(running["needs_attention"])
+        self.assertIsNone(running["attention_reason"])
+        # A real pending approval still needs attention even while the turn is active.
+        self.sessions._event({"id": 42, "method": "item/commandExecution/requestApproval",
+                              "params": {"threadId": thread_id}})
+        self.assertEqual(self.sessions.work_thread(thread_id)["response_state"], "input")
+        self.assertTrue(self.sessions.work_thread(thread_id)["needs_attention"])
+        self.sessions._event({"method": "serverRequest/resolved", "params": {"requestId": 42}})
+        self.store.touch(thread_id, turn_active=False)
+        self.assertEqual(self.sessions.work_thread(thread_id)["response_state"], "input")
+
+    def test_recovered_running_turn_returns_consistent_work_thread_status(self):
+        thread_id = self.sessions.create({"name": "Calendar editing"})["session"]["thread_id"]
+        self.sessions.send(thread_id, {"message": "Deploy."})
+        self.store.threads.checkpoint(thread_id, {
+            "phase": "deployment", "summary": "Waiting for credentials.",
+            "next_actor": "user", "next_action": "Run aws login.",
+        })
+        self.sessions.active.pop(thread_id)
+        self.store.touch(thread_id, turn_active=False)
+        result = self.sessions.read(thread_id)
+        self.assertTrue(result["running"])
+        self.assertEqual(result["work_thread"]["response_state"], "working")
+        self.assertFalse(result["work_thread"]["needs_attention"])
+
+    def test_resuming_blocked_turn_invalidates_old_request(self):
+        self.start()
+        self.checkpoint("deployment", "user")
+        self.finish()
+        self.assertEqual(self.thread()["attention_reason"], "blocked")
+        self.start("resumed")
+        self.assertTrue(self.thread()["checkpoint_stale"])
+        self.assertEqual(self.thread()["response_state"], "working")
+        self.assertFalse(self.thread()["needs_attention"])
+        self.finish()
+        self.assertEqual(self.thread()["response_state"], "reply")
+        self.assertNotEqual(self.thread()["attention_reason"], "blocked")
+
     def test_later_hides_existing_response_but_surfaces_new_result_without_moving(self):
         self.start()
         self.checkpoint()

@@ -381,6 +381,19 @@ class ClaudeRPC:
                         self._item(thread_id, {**item, "result": block.get("content"),
                             "status": "failed" if block.get("is_error") else "completed"}, completed=True)
         elif kind == "result":
+            # A resumed CLI can finish queued background notifications before
+            # answering our new prompt. Match the consumed input UUIDs, not
+            # merely the session: otherwise an empty notification result ends
+            # the visible turn and all subsequent research/output is dropped.
+            prompt_id = turn["items"][0]["id"]
+            prompt_ids = message.get("user_message_uuids") or []
+            prompt_ids = [*prompt_ids, message.get("user_message_uuid")]
+            if any(prompt_ids):
+                if prompt_id not in prompt_ids:
+                    return
+            elif (message.get("origin") or {}).get("kind") in {"task-notification", "auto-continuation"} or message.get("resume_reason"):
+                return
+            # Older CLIs and startup failures can omit attribution entirely.
             failed = message.get("is_error") or message.get("subtype") != "success"
             error = "\n".join(message.get("errors") or []) or message.get("result") if failed else None
             self._finish(thread_id, "failed" if failed else "completed", error)

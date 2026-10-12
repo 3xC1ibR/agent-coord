@@ -197,6 +197,58 @@ class ProviderTests(unittest.TestCase):
         self.start(thread)
         self.assertTrue(self.sessions.claude.connections[thread].options["resume"])
 
+    def test_stop_enable_yolo_resume_ignores_background_task_results(self):
+        thread = self.create()
+        self.start(thread)
+        self.sessions.interrupt(thread)
+        self.sessions.update(thread, {"yolo": True})
+        self.sessions.send(thread, {"message": "continue"})
+        connection = self.sessions.claude.connections[thread]
+        self.assertTrue(connection.options["resume"])
+        self.assertTrue(connection.options["yolo"])
+        prompt_id = connection.writes[-1]["uuid"]
+        # Resume drains stopped background-task notifications before consuming
+        # the new prompt. Those empty results do not answer "continue".
+        for result in (
+            {"subtype": "success", "result": "", "num_turns": 0},
+            {"subtype": "error_during_execution", "is_error": True, "errors": ["Task stopped"]},
+        ):
+            self.emit(thread, {"type": "result", "origin": {"kind": "task-notification"}, **result})
+            self.assertTrue(self.sessions.read(thread)["running"])
+            self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1]["status"], "inProgress")
+        self.emit(thread, {"type": "assistant", "user_message_uuid": prompt_id,
+                           "message": {"content": [{"type": "text", "text": "Resumed research"}]}})
+        self.emit(thread, {"type": "result", "subtype": "success", "user_message_uuid": prompt_id})
+        read = self.sessions.read(thread)
+        self.assertFalse(read["running"])
+        self.assertEqual(read["thread"]["turns"][-1]["status"], "completed")
+        self.assertEqual(read["thread"]["turns"][-1]["items"][-1]["text"], "Resumed research")
+        self.sessions.close()
+        saved = self.make_sessions().read(thread)["thread"]["turns"]
+        self.assertEqual([t["status"] for t in saved], ["interrupted", "completed"])
+        self.assertEqual(saved[-1]["items"][-1]["text"], "Resumed research")
+
+    def test_results_match_any_consumed_prompt_uuid(self):
+        thread = self.create()
+        self.start(thread)
+        prompt_id = self.sessions.claude.connections[thread].writes[-1]["uuid"]
+        for result in (
+            {"subtype": "success", "user_message_uuid": "previous-prompt"},
+            {"subtype": "error_during_execution", "user_message_uuids": ["previous-prompt"],
+             "is_error": True, "errors": ["Previous turn failed"]},
+            {"subtype": "success", "origin": {"kind": "auto-continuation"}},
+            {"subtype": "success", "resume_reason": "interrupted_turn"},
+        ):
+            self.emit(thread, {"type": "result", **result})
+            self.assertTrue(self.sessions.read(thread)["running"])
+        # Claude can absorb a new prompt into a synthetic turn. UUID ownership
+        # takes precedence over its origin and the last consumed prompt alone.
+        self.emit(thread, {"type": "result", "subtype": "success",
+                           "origin": {"kind": "task-notification"},
+                           "user_message_uuid": "later-prompt",
+                           "user_message_uuids": [prompt_id, "later-prompt"]})
+        self.assertFalse(self.sessions.read(thread)["running"])
+
     @unittest.skipUnless(shutil.which("node"), "Node required")
     def test_provider_browser_controls(self):
         result = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_web_providers.js"))], capture_output=True, text=True)

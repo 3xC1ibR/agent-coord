@@ -664,9 +664,12 @@ class BrowserSessions:
         session = self.store.get_session(thread_id)
         with self.lock:
             waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
-            thread["status"] = ("needs input" if waiting else "running" if thread_id in self.active
+            # Loading provider context does not establish idleness. A live hook
+            # heartbeat can precede this runtime's turn notification.
+            running = thread_id in self.active or (session["turn_active"] and session["presence"] == "online")
+            thread["status"] = ("needs input" if waiting else "running" if running
                                 else "idle" if thread_id in self.loaded else "saved" if session["presence"] == "offline"
-                                else "running" if session["turn_active"] and session["presence"] == "online" else session["presence"])
+                                else session["presence"])
         checkpoint = thread["checkpoint"] if not thread["checkpoint_stale"] else None
         completion = thread["turn_completion"]
         classification = thread["response_classification"]
@@ -1158,7 +1161,9 @@ class BrowserSessions:
                             self.active.pop(thread_id, None)
                 active_turn = self.active.get(thread_id)
                 running = thread_id in self.active
-            return {"session": record, "thread": thread, "work_thread": work_thread, "requests": self.pending_requests(thread_id),
+            # Read-side recovery may have changed the live turn. Project the card
+            # after reconciliation so it agrees with the conversation status.
+            return {"session": record, "thread": thread, "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
                     "activeTurn": active_turn, "running": running,
                     "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                     "dispatchRequests": self.dispatch.receipts(thread_id),
