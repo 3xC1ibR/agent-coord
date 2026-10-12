@@ -661,10 +661,10 @@ history retention, and separation between closure and task completion apply.
 
 The backend starts `codex app-server` lazily and communicates over stdio using
 the [Codex App Server protocol](https://developers.openai.com/codex/app-server).
-Open **New session**, then choose a model from the **Codex** or **Claude Code**
+Open **New session**, then choose a model from the **Codex**, **Claude Code**, or **Google Antigravity**
 groups in the composer’s **Model** picker. The provider session starts when you send.
-Install and authenticate the selected CLI first (`codex login` or
-`claude auth login`). Existing conversations retain their provider. Codex sessions use
+For Codex or Claude, install and authenticate the selected CLI first (`codex login` or
+`claude auth login`). Antigravity setup is described below. Existing conversations retain their provider. Codex sessions use
 workspace-write sandboxing and on-request approvals routed to the developer by
 default. **New session** and native **⌘N** open a draft conversation in the current
 workspace. You can change providers and models before sending the first message.
@@ -685,6 +685,45 @@ for resume; Agent Coord retains the display history across restarts. While Claud
 is working, **Enter** queues a follow-up. **Stop** ends that conversation's process
 and pauses its queue; the next message resumes its saved transcript. Importing
 terminal Claude conversations and forking Claude threads are not yet supported.
+
+Google Antigravity conversations use Google's official ACP runtime. Install and
+sign in on the machine running Ribbon Field:
+
+```bash
+agent-coord antigravity install
+agent-coord antigravity login
+agent-coord antigravity status
+```
+
+The installer downloads a pinned Google release and verifies the archive's
+SHA-256 and file sizes before publishing the executable and its matching helper.
+It supports macOS, Linux, and Windows on x64 and ARM64. For a manual installation,
+download the pair from the [official ACP registry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json),
+make both files executable, and set `AGENT_COORD_ANTIGRAVITY_BIN` to the ACP
+executable when launching Ribbon Field. The Antigravity IDE and Gemini CLI are
+different programs and cannot be used as this executable.
+
+`login` opens Google sign-in and checks account access. Its credentials and native
+sessions stay in a private Antigravity profile beside the Agent Coord database,
+separate from the IDE and other ACP clients. Personal Google sign-in is supported;
+API-key and enterprise authentication are not yet exposed. When using Ribbon
+Field remotely, run these setup commands in a terminal on its host machine and
+complete sign-in in a browser on that machine. Model discovery never opens a
+sign-in browser automatically. After setup, reopen the model picker to retry it.
+
+Select **Google Antigravity** in the Model picker to start a conversation. Models
+come from the signed-in account; no model IDs or reasoning levels are assumed.
+Text, thinking, tools, images, native approvals, and fixed-choice questions use
+the existing chat interface. Default permissions use Antigravity's native tool
+approval mode; YOLO selects its native `yolo` mode. This is not an OS sandbox.
+Enter queues follow-ups while a turn runs. Stop terminates that conversation's
+agent and helper; the next message resumes its native session. Saved display
+history opens offline. Forking and steering are not supported. Agent Coord
+identity, CLI access, and coordination instructions are supplied to the agent;
+the Codex/Claude plugin hooks are not installed into Antigravity.
+
+The integration follows [T3 Code's Antigravity ACP support](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/acp/AntigravityAcpSupport.ts)
+and [runtime setup](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/antigravityAuthSupport.ts).
 
 The provider lifecycle and permission mapping were informed by
 [T3 Code's Claude adapter](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts)
@@ -726,7 +765,7 @@ stores browser-created session names, workspaces, and model settings, plus a
 display copy of streamed conversation items. The display copy supports Codex
 builds that cannot yet query stored turns through app-server.
 Reloading or closing the browser does not stop work while the UI server runs.
-Stopping the UI server stops its Codex app-server and Claude processes; saved conversations can be
+Stopping the UI server stops its Codex app-server, Claude, and Antigravity processes; saved conversations can be
 reopened after restarting the UI. Browser sessions register in the same
 coordination store as terminal sessions. Existing terminal/delegated sessions
 remain visible in the coordination monitor and are not taken over by the chat

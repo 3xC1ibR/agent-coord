@@ -80,9 +80,12 @@ def _parser() -> argparse.ArgumentParser:
     installer = subcommands.add_parser("install-cli", help="Install or refresh the stable agent-coord launcher.")
     installer.add_argument("--bin-dir", help="Executable directory; defaults to ~/.local/bin.")
 
+    antigravity = subcommands.add_parser("antigravity", help="Install or sign in to Google Antigravity.")
+    antigravity.add_argument("antigravity_command", choices=["install", "login", "status"])
+
     register = subcommands.add_parser("register", help="Register or refresh a session.")
     register.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
-    register.add_argument("--client", required=True, choices=["claude", "codex"])
+    register.add_argument("--client", required=True, choices=["claude", "codex", "antigravity"])
     register.add_argument("--cwd", default=os.getcwd())
     register.add_argument("--name")
 
@@ -146,7 +149,7 @@ def _parser() -> argparse.ArgumentParser:
     create_agent.add_argument("--from-session", help="Dispatcher; defaults to the current caller.")
     create_agent.add_argument("--cwd", default=os.getcwd())
     create_agent.add_argument("--name", required=True)
-    create_agent.add_argument("--client", choices=["codex", "claude"], default="codex")
+    create_agent.add_argument("--client", choices=["codex", "claude", "antigravity"], default="codex")
     create_agent.add_argument("--mode", choices=["orchestration"],
                               help="Record orchestration intent for this creation (default: unspecified).")
     create_agent.add_argument("--model")
@@ -166,7 +169,7 @@ def _parser() -> argparse.ArgumentParser:
     models = thread_commands.add_parser("models", help="Query the running app for supported provider models and effort levels.")
     models.add_argument("--from-session", help="Requester; defaults to the current caller.")
     models.add_argument("--cwd", default=os.getcwd())
-    models.add_argument("--client", choices=["codex", "claude"], default="codex")
+    models.add_argument("--client", choices=["codex", "claude", "antigravity"], default="codex")
     for control in (create_agent, settings, models):
         control.add_argument("--request-id", help="Stable idempotency key; reuse the same key when retrying this request.")
         control.add_argument("--wait", type=float, default=5, help="Wait up to 0–30 seconds for confirmation (default 5).")
@@ -499,6 +502,9 @@ def run(arguments: argparse.Namespace) -> Any:
     command = arguments.command
     if command == "install-cli":
         return install_cli(arguments.bin_dir)
+    if command == "antigravity":
+        from .antigravity_setup import run_setup
+        return run_setup(CoordinationStore(arguments.db), arguments.antigravity_command)
     for field in ("session_id", "from_session"):
         if hasattr(arguments, field) and not getattr(arguments, field):
             # ui open's origin is an optional window hint, not a required caller.

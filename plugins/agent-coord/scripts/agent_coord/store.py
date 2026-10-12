@@ -29,7 +29,7 @@ WAKEABLE_ACTIVITIES = {"idle", "waiting"}
 WAKE_TRANSPORTS = {"managed-pty", "zellij"}
 LEASE_MODES = {"write", "validation"}
 MESSAGE_CLASSIFICATIONS = {"action_required", "informational", "closure"}
-CLIENTS = {"claude", "codex"}
+CLIENTS = {"claude", "codex", "antigravity"}
 SCOPE_REQUEST_THREAD_PREFIX = "scope-request:"
 _WILDCARD = re.compile(r"[*?[]")
 
@@ -839,7 +839,7 @@ class CoordinationStore:
         if not session_id.strip():
             raise CoordinationError("Session ID must not be empty.")
         if client not in CLIENTS:
-            raise CoordinationError("Client must be claude or codex.")
+            raise CoordinationError("Client must be claude, codex, or antigravity.")
         repository = str(Path(cwd).resolve())
         now = self.clock()
         with self._connection() as connection:
@@ -1538,7 +1538,7 @@ class CoordinationStore:
             raise CoordinationError("At least one delegated scope is required.")
         if not instructions.strip():
             raise CoordinationError("Delegated instructions must not be empty.")
-        if client not in CLIENTS:
+        if client not in {"claude", "codex"}:
             raise CoordinationError("Delegated client must be claude or codex.")
         if runtime_kind not in {"managed-pty", "zellij"}:
             raise CoordinationError(

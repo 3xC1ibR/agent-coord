@@ -64,8 +64,8 @@ class AppControl:
             if not Path(cwd).is_dir():
                 raise CoordinationError("Choose an existing workspace directory.")
             payload["cwd"] = cwd
-            if payload.get("client", "codex") not in {"codex", "claude"}:
-                raise CoordinationError("Choose Codex or Claude Code as the session provider.")
+            if payload.get("client", "codex") not in {"codex", "claude", "antigravity"}:
+                raise CoordinationError("Choose Codex, Claude Code, or Google Antigravity as the session provider.")
         if operation == "create":
             if payload.get("mode") not in (None, "orchestration"):
                 raise CoordinationError("Creation mode must be orchestration or omitted.")

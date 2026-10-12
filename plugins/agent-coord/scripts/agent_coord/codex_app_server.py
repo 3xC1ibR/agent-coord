@@ -26,6 +26,7 @@ from .message_timeline import message_timeline
 from .timeline_clock import preserve_timing, restore_timing, set_time
 from .schedules import ScheduledPrompts
 from .claude_code import ClaudeRPC
+from .antigravity import AntigravityRPC
 from .attention import AttentionClassifier
 from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
@@ -175,7 +176,7 @@ class CodexRPC:
 
 
 class BrowserSessions:
-    def __init__(self, store: CoordinationStore, cwd: str | None = None, *, rpc_factory=CodexRPC, claude_factory=ClaudeRPC):
+    def __init__(self, store: CoordinationStore, cwd: str | None = None, *, rpc_factory=CodexRPC, claude_factory=ClaudeRPC, antigravity_factory=AntigravityRPC):
         self.store = store
         self.cwd = str(Path(cwd).expanduser().resolve()) if cwd else None
         self.lock = threading.RLock()
@@ -213,6 +214,7 @@ class BrowserSessions:
         self.queue = BrowserMessageQueue(self)
         self.rpc = rpc_factory(store, self._event)
         self.claude = claude_factory(store, self._event)
+        self.antigravity = antigravity_factory(store, self._event)
         # Upgrade browser conversations created before work threads existed.
         threads = self.store.threads
         with self.store._connection() as connection:
@@ -249,9 +251,9 @@ class BrowserSessions:
         return dict(row)
 
     def _provider(self, client: str):
-        if not isinstance(client, str) or client not in {"codex", "claude"}:
-            raise CoordinationError("Choose Codex or Claude Code as the session provider.")
-        return self.claude if client == "claude" else self.rpc
+        if not isinstance(client, str) or client not in {"codex", "claude", "antigravity"}:
+            raise CoordinationError("Choose Codex, Claude Code, or Google Antigravity as the session provider.")
+        return {"codex": self.rpc, "claude": self.claude, "antigravity": self.antigravity}[client]
 
     def _rpc(self, thread_id: str):
         # Saved terminal Codex threads can be read before browser adoption/fork.
@@ -1025,9 +1027,10 @@ class BrowserSessions:
         command = parts[0].lower()
         if command not in {"/cd", "/permissions", "/model", "/effort", "/help"}:
             return None
-        default_permissions = ("Claude Code configured permissions with tool approval prompts"
-                               if self._record(thread_id)["client"] == "claude"
-                               else "workspace access with approval prompts")
+        client = self._record(thread_id)["client"]
+        default_permissions = {"claude": "Claude Code configured permissions with tool approval prompts",
+                               "antigravity": "Antigravity native permissions with tool approval prompts"}.get(
+                                   client, "workspace access with approval prompts")
         if command == "/help":
             reply = ("Commands: /cd [directory], /model [model-id] [effort], /effort [level], "
                      "/permissions [default|yolo], /help. Changes apply to your next message. "
@@ -1052,7 +1055,7 @@ class BrowserSessions:
             record = self._record(thread_id)
             models = self.models(record["client"])
             if command == "/model":
-                reply = "Current model: " + (record["model"] or ("Claude default" if record["client"] == "claude" else "Codex default")) + ". Available: " + ", ".join(m["model"] for m in models) + ". Use /model <model-id> [effort]."
+                reply = "Current model: " + (record["model"] or record["client"].capitalize() + " default") + ". Available: " + ", ".join(m["model"] for m in models) + ". Use /model <model-id> [effort]."
             else:
                 selected = next((m for m in models if m["model"] == record["model"]), {})
                 reply = "Current effort: " + (record["effort"] or "Model default") + ". Available: " + ", ".join(e["reasoningEffort"] for e in selected.get("supportedReasoningEfforts", [])) + ". Use /effort <level>."
@@ -1369,9 +1372,10 @@ class BrowserSessions:
         self.inbox_wake.close()
         self.rpc.close()
         self.claude.close()
+        self.antigravity.close()
         self.schedules.close()
         for thread_id in list(self.loaded):
-            if self._record(thread_id)["client"] == "claude":
+            if self._record(thread_id)["client"] != "codex":
                 self._event({"method": "thread/closed", "params": {"threadId": thread_id}})
         self.queue.close()
         with self.history_lock:
