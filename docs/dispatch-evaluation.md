@@ -113,3 +113,32 @@ it does not establish task success or routing correctness.
 
 Compare a fixed labeled set across variants. Use held-out cases before changing
 production thresholds; agreement with an LLM alone is not proof of correctness.
+
+## Latency measurements
+
+New attempts include `evidence.timings_ms`: request-context reads, index refresh,
+workspace snapshot loading, configuration loading, ranking/input construction,
+pre-call evidence persistence, classifier round trip, and decision evaluation.
+These timings stay outside the Jev input. `elapsed_ms` still measures planning
+through the decision; it excludes final persistence, creation, and delivery.
+Direct dispatcher/image bypasses record request-context time without index or
+classifier stages. The classifier stage includes HTTP and response parsing; it
+is not a measurement of model inference alone.
+
+Receipts now store a separate `transition_at` timestamp. Evaluation exposes
+`lifecycle_timings_ms` for intake wait, queue wait, provider submission, and total
+intake-to-accept time when those transitions are available and unambiguous. Exact
+single LLM handoffs also expose intake-to-handoff time. Acceptance is not a first
+answer or task completion. Old events without timestamps and ambiguous retries
+are omitted instead of being counted as zero. `summary.stage_latency_ms` gives
+per-stage sample counts and p50/p95 over the returned page.
+
+The runtime refreshes the existing conversation index only for changed histories
+in the request workspace. Its bounded routing projection preserves message order,
+duplicate IDs, and the previous 200-message/6,000-character limits. Independent
+history triggers invalidate this projection even when an older runtime writes
+history or refreshes its search index. Metadata and delivery guards remain live.
+Standalone snapshots stay read-only and parse saved history for missing or stale
+cache entries. The first index backfill can still be slower than warm routing;
+no threads are excluded for age, and policy thresholds and shortlist size are
+unchanged.

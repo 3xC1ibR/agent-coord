@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coor
 import test_dispatch_runtime as runtime_tests
 from agent_coord import cli
 from agent_coord.attention import ClassificationError
-from agent_coord.dispatch_evaluation import evaluate, label_request, read_records, replay_record
+from agent_coord.dispatch_evaluation import evaluate, label_request, lifecycle_timings, read_records, replay_record
 from agent_coord.dispatch_routing import RoutingPolicy, route
 from agent_coord.store import CoordinationError
 
@@ -50,6 +50,47 @@ class EvaluationTests(unittest.TestCase):
 
     def records(self, **kwargs):
         return read_records(self.store.database_path, self.dispatcher, **kwargs)
+
+    def test_stage_timings_survive_without_changing_classifier_input(self):
+        self.captured()
+        self.drain(self.dispatcher)
+        report = evaluate(self.store.database_path, self.dispatcher)
+        record = report["records"][0]
+        expected = {"request_context", "index_refresh", "snapshot", "configuration",
+                    "ranking", "evidence_persist", "classifier", "decision"}
+        self.assertEqual(set(record["evidence"]["timings_ms"]), expected)
+        self.assertTrue(all(t >= 0 for t in record["evidence"]["timings_ms"].values()))
+        self.assertNotIn("timings_ms", record["evidence"]["input"])
+        self.assertEqual(record["attempts"][0]["evidence"], record["evidence"])
+        for name in expected | {"intake_wait", "queue_wait", "provider_submit", "intake_to_accept"}:
+            self.assertEqual(report["summary"]["stage_latency_ms"][name]["count"], 1)
+        events = record["outcome"]["events"]
+        self.assertTrue(all(e["transition_at"] for e in events))
+        self.assertEqual([e["transition_at"] for e in events], sorted(e["transition_at"] for e in events))
+
+    def test_direct_bypass_does_not_refresh_or_classify(self):
+        self.submit(askDispatcher=True)
+        with patch("agent_coord.dispatch_runtime.sync_messages", side_effect=AssertionError("Refreshed bypass")):
+            self.runtime.process_once()
+        evidence = self.records()["records"][0]["evidence"]
+        self.assertEqual(set(evidence["timings_ms"]), {"request_context"})
+        self.assertNotIn("input", evidence)
+
+    def test_lifecycle_intervals_use_transition_times_and_skip_ambiguous_or_old_events(self):
+        record = {"created_at": 100, "outcome": {"events": [
+            {"state": "routing", "transition_at": 101},
+            {"state": "routing", "transition_at": 103},
+            {"state": "queued", "transition_at": 104},
+            {"state": "sending", "transition_at": 110},
+            {"state": "accepted", "transition_at": 111}]}}
+        self.assertEqual(lifecycle_timings(record), {"intake_wait": 1000, "queue_wait": 6000,
+                                                   "provider_submit": 1000, "intake_to_accept": 11000})
+        record["outcome"]["events"].append({"state": "sending", "transition_at": 112})
+        self.assertNotIn("provider_submit", lifecycle_timings(record))
+        self.assertNotIn("queue_wait", lifecycle_timings(record))
+        for e in record["outcome"]["events"]:
+            del e["transition_at"]
+        self.assertEqual(lifecycle_timings(record), {})
 
     def test_complete_input_and_all_ranks_survive_history_changes(self):
         for n in range(10):

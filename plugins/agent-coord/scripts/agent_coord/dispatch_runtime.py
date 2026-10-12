@@ -11,6 +11,7 @@ import time
 import uuid
 
 from .attention import load_config
+from .conversation_search import sync_messages
 from .dispatch_routing import route
 from .dispatch_snapshot import read_snapshot
 from .dispatch_evaluation import initialize_evaluation
@@ -162,6 +163,7 @@ class DispatchRuntime:
         row = db.execute("SELECT * FROM dispatch_requests WHERE id=?", (identity,)).fetchone()
         if row:
             event = self.receipt(row)
+            event["transition_at"] = time.time()
             # Images remain durable with the request; catch-up carries text and metadata.
             event["body"] = {"message": event["body"]["message"], "has_images": bool(event["body"]["images"])}
             db.execute("INSERT INTO dispatch_events(dispatcher_id,request_id,payload_json) VALUES (?,?,?)",
@@ -241,9 +243,11 @@ class DispatchRuntime:
                    "referenced_thread_ids": [m["session_id"] for m in body["mentions"] if m.get("session_id")],
                    "context": [{"role": "user", "text": r["body"]["message"]} for r in recent if r["id"] < identity][-4:]}
         attempt_id = None
+        timings = {"request_context": round((time.perf_counter() - started) * 1000, 1)}
 
         def prepared(evidence):
             nonlocal attempt_id
+            evidence["timings_ms"] = {**timings, **evidence.get("timings_ms", {})}
             with self.store._connection() as db:
                 attempt_id = db.execute("INSERT INTO dispatch_attempts(request_id,started_at,evidence_json) VALUES (?,?,?)",
                                         (identity, time.time(), json.dumps(evidence))).lastrowid
@@ -251,10 +255,20 @@ class DispatchRuntime:
         if body["askDispatcher"] or body["images"]:
             result = {"decision": {"action": "dispatcher", "reason": "direct_request" if body["askDispatcher"] else "attachment_context_required"}}
         else:
-            result = route(read_snapshot(self.store.database_path), request, load_config(self.store.database_path),
-                           on_prepared=prepared)
+            stage = time.perf_counter()
+            with self.store._connection() as db:
+                sync_messages(db, cwd=item["cwd"])
+            timings["index_refresh"] = round((time.perf_counter() - stage) * 1000, 1)
+            stage = time.perf_counter()
+            snapshot = read_snapshot(self.store.database_path, cwd=item["cwd"])
+            timings["snapshot"] = round((time.perf_counter() - stage) * 1000, 1)
+            stage = time.perf_counter()
+            config = load_config(self.store.database_path)
+            timings["configuration"] = round((time.perf_counter() - stage) * 1000, 1)
+            result = route(snapshot, request, config, on_prepared=prepared)
         decision = result["decision"]
         evidence = {**result.get("evidence", {}),
+                    "timings_ms": {**timings, **result.get("evidence", {}).get("timings_ms", {})},
                     "candidates": [c["thread_id"] for c in result.get("state", {}).get("candidates", [])],
                     "answer": result.get("answer"), "reason": decision["reason"],
                     "decision": decision,

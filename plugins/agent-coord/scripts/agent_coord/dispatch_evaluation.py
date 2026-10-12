@@ -82,7 +82,7 @@ def read_records(path, dispatcher_id, *, after=0, limit=20, request_id=None):
             if "dispatch_events" in tables:
                 for event in db.execute("SELECT id,payload_json FROM dispatch_events WHERE request_id=? ORDER BY id", (row["id"],)):
                     payload = json.loads(event[1])
-                    events.append({"event_id": event[0], **{k: payload.get(k) for k in ("state", "target_id", "turn_id", "error")}})
+                    events.append({"event_id": event[0], **{k: payload.get(k) for k in ("state", "target_id", "turn_id", "error", "transition_at")}})
             records.append({"id": row["id"], "request_id": row["request_id"], "dispatcher_id": dispatcher_id,
                             "created_at": row["created_at"], "cwd": row["cwd"],
                             "request": {"message": body["message"], "mentions": body.get("mentions", []),
@@ -175,6 +175,35 @@ def replay_record(record, *, overrides=None, live=False, config=None, instructio
     return result
 
 
+def lifecycle_timings(record):
+    """Observed wall-clock intervals; old or ambiguous events stay unavailable."""
+    events = record["outcome"].get("events", [])
+    stages = {}
+    for event in events:
+        stages.setdefault(event["state"], []).append(event.get("transition_at"))
+    result = {}
+
+    def interval(name, start, end):
+        if start is not None and end is not None and end >= start:
+            result[name] = round((end - start) * 1000, 1)
+
+    routing = stages.get("routing", [])
+    if routing:
+        interval("intake_wait", record["created_at"], routing[0])
+    # Do not turn retries or partial legacy traces into misleading stage times.
+    queued, sending, accepted = (stages.get(s, []) for s in ("queued", "sending", "accepted"))
+    if len(accepted) == 1:
+        interval("intake_to_accept", record["created_at"], accepted[0])
+    if len(queued) == len(sending) == 1:
+        interval("queue_wait", queued[0], sending[0])
+    if len(sending) == len(accepted) == 1:
+        interval("provider_submit", sending[0], accepted[0])
+    handoffs = [h for h in record["outcome"].get("llm_handoffs", []) if not h.get("suppressed_at")]
+    if record["outcome"].get("handoff_attribution") == "exact_turn" and len(handoffs) == 1:
+        interval("intake_to_llm_handoff", record["created_at"], handoffs[0]["created_at"])
+    return result
+
+
 def summarize(records):
     replayed = [r["replay"] for r in records if r["replay"]["status"] == "replayed"]
     timings = [r["replay"].get("live_elapsed_ms") for r in records]
@@ -192,6 +221,15 @@ def summarize(records):
                "recorded_latency_p95_ms": original[min(len(original) - 1, int(len(original) * .95))] if original else None,
                "llm_comparisons": sum(r["llm_choice_agrees"] is not None for r in replayed),
                "llm_agreements": sum(r["llm_choice_agrees"] is True for r in replayed), "labels": {}}
+    stages = {}
+    for record in records:
+        values = {**(record.get("evidence") or {}).get("timings_ms", {}), **lifecycle_timings(record)}
+        for name, value in values.items():
+            stages.setdefault(name, []).append(value)
+    summary["stage_latency_ms"] = {
+        name: {"count": len(values), "p50": statistics.median(values),
+               "p95": sorted(values)[min(len(values) - 1, int(len(values) * .95))]}
+        for name, values in sorted(stages.items())}
     for source in ("user", "review"):
         labeled = [r for r in replayed if source in r["labels"]]
         labels = [r["labels"][source] for r in labeled]
@@ -217,5 +255,6 @@ def evaluate(path, dispatcher_id, *, after=0, limit=20, request_id=None, overrid
         raise CoordinationError("Live evaluation requires enabled Jev configuration.")
     for record in page["records"]:
         record["replay"] = replay_record(record, overrides=overrides, live=live, config=config, instructions=instructions)
+        record["lifecycle_timings_ms"] = lifecycle_timings(record)
     return {"version": 1, "live_jev": live, "delivered_messages": 0, "read_only": True,
             "summary": summarize(page["records"]), **page}

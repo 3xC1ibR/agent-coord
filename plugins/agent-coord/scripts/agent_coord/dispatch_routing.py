@@ -12,6 +12,7 @@ import http.client
 import json
 import math
 import re
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -278,6 +279,7 @@ def decide(state, answer, policy=RoutingPolicy()):
 
 
 def route(snapshot, request, config=None, policy=RoutingPolicy(), *, classifier=classify, on_prepared=None):
+    started = time.perf_counter()
     retrieval = []
     state = build_state(snapshot, request, policy, retrieval=retrieval)
     evidence = {"version": 1, "prompt_version": PROMPT_VERSION, "retrieval_version": RETRIEVAL_VERSION,
@@ -285,11 +287,20 @@ def route(snapshot, request, config=None, policy=RoutingPolicy(), *, classifier=
                 "captured_at": snapshot["captured_at"], "policy": asdict(policy),
                 "input": classifier_input(state, policy), "retrieval": retrieval}
     evidence["input_sha256"] = hashlib.sha256(json.dumps(evidence["input"], sort_keys=True).encode()).hexdigest()
+    timings = evidence["timings_ms"] = {"ranking": round((time.perf_counter() - started) * 1000, 1)}
+    started = time.perf_counter()
     if on_prepared:
         on_prepared(copy.deepcopy(evidence))
+    timings["evidence_persist"] = round((time.perf_counter() - started) * 1000, 1)
+    started = time.perf_counter()
     try:
-        answer = classifier(state, config, policy)
+        try:
+            answer = classifier(state, config, policy)
+        finally:
+            timings["classifier"] = round((time.perf_counter() - started) * 1000, 1)
+        started = time.perf_counter()
         decision = decide(state, answer, policy)
+        timings["decision"] = round((time.perf_counter() - started) * 1000, 1)
     except ClassificationError as exc:
         answer = None
         decision = {"action": "dispatcher", "thread_id": None, "delivery": "llm",

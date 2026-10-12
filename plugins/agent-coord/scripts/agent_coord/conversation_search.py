@@ -41,7 +41,16 @@ def messages(history):
                        text, text.casefold())
 
 
-def sync_messages(db):
+def routing_history(history, records=None):
+    """The lossless, bounded prose view used by routing (including duplicate IDs)."""
+    records = list(messages(history)) if records is None else records
+    return {"history_status": "partial" if history.get("historyUnavailable") else "saved",
+            "messages": [{"turn_id": r[0], "item_id": r[1], "role": r[2], "timestamp": r[3],
+                          "text": r[4][:6000], "truncated": len(r[4]) > 6000} for r in records[-200:]],
+            "history_truncated": len(records) > 200}
+
+
+def sync_messages(db, *, cwd=None):
     """Backfill once, then rebuild only changed histories in this transaction."""
     db.execute("""CREATE TABLE IF NOT EXISTS conversation_search_messages (
         thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, item_id TEXT NOT NULL,
@@ -51,6 +60,10 @@ def sync_messages(db):
     db.execute("CREATE TABLE IF NOT EXISTS conversation_search_dirty (thread_id TEXT PRIMARY KEY)")
     db.execute("""CREATE TABLE IF NOT EXISTS conversation_search_histories (
         thread_id TEXT PRIMARY KEY, status TEXT NOT NULL)""")
+    # Separate table keeps older search runtimes compatible. Independent
+    # invalidation remains effective even if an older runtime drains dirty.
+    db.execute("""CREATE TABLE IF NOT EXISTS conversation_search_routing (
+        thread_id TEXT PRIMARY KEY, evidence_json TEXT NOT NULL)""")
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_history'").fetchone():
         return
     for event in ("INSERT", "UPDATE", "DELETE"):
@@ -59,28 +72,44 @@ def sync_messages(db):
             AFTER {event} ON browser_history BEGIN
             INSERT OR REPLACE INTO conversation_search_dirty VALUES ({ref}.thread_id);
             END""")
+        db.execute(f"""CREATE TRIGGER IF NOT EXISTS conversation_routing_{event.lower()}
+            AFTER {event} ON browser_history BEGIN
+            DELETE FROM conversation_search_routing WHERE thread_id={ref}.thread_id;
+            END""")
     db.execute("""INSERT OR IGNORE INTO conversation_search_dirty
         SELECT thread_id FROM browser_history WHERE thread_id NOT IN
-        (SELECT thread_id FROM conversation_search_histories)""")
+        (SELECT thread_id FROM conversation_search_histories)
+        OR thread_id NOT IN (SELECT thread_id FROM conversation_search_routing)""")
     # Acquire the write lock before reading the dirty queue; a concurrent history
     # update must not have its invalidation removed by this rebuild.
+    scope, params = "", ()
+    if cwd is not None:
+        columns = {r[1] for r in db.execute("PRAGMA table_info(browser_sessions)")}
+        source = "b.cwd" if "cwd" in columns else "s.cwd"
+        scope = f""" WHERE d.thread_id IN (SELECT b.thread_id FROM browser_sessions b
+            JOIN sessions s ON s.session_id=b.thread_id WHERE {source}=?)"""
+        params = (cwd,)
     for row in db.execute("""SELECT d.thread_id, h.history_json FROM conversation_search_dirty d
-                             LEFT JOIN browser_history h ON h.thread_id=d.thread_id""").fetchall():
+                             LEFT JOIN browser_history h ON h.thread_id=d.thread_id""" + scope, params).fetchall():
         identity = row["thread_id"]
         db.execute("DELETE FROM conversation_search_messages WHERE thread_id=?", (identity,))
         db.execute("DELETE FROM conversation_search_histories WHERE thread_id=?", (identity,))
+        db.execute("DELETE FROM conversation_search_routing WHERE thread_id=?", (identity,))
         if row["history_json"] is not None:
+            routing = {"messages": [], "history_status": "unavailable"}
             try:
                 history = json.loads(row["history_json"])
+                records = list(messages(history))
+                routing = routing_history(history, records)
                 if not isinstance(history, dict) or not isinstance(history.get("turns", []), list):
                     raise ValueError("Invalid conversation history")
-                records = list(messages(history))
                 status = "partial" if history.get("historyUnavailable") else "saved"
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 records, status = [], "unavailable"
             db.executemany("INSERT OR REPLACE INTO conversation_search_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                            [(identity, *record, position) for position, record in enumerate(records)])
             db.execute("INSERT INTO conversation_search_histories VALUES (?, ?)", (identity, status))
+            db.execute("INSERT INTO conversation_search_routing VALUES (?, ?)", (identity, json.dumps(routing)))
         db.execute("DELETE FROM conversation_search_dirty WHERE thread_id=?", (identity,))
 
 
