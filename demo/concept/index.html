@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ribbon Field · Ideas in motion</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="stage" aria-label="An idealized Ribbon Field dispatch workflow">
+  <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 24V11a5 5 0 0 1 5-5h13M7 15h17M17 15v11"/></svg>Ribbon Field</div>
+  <h1 id="headline">Three ideas.<br><span>One place to start.</span></h1>
+  <div id="agents">
+    <article class="agent" id="chat" style="--tone:#778a72; --tint:#e9eee6">
+      <header><span class="agent-icon"><svg viewBox="0 0 24 24"><path d="M6 4h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 4V6a2 2 0 0 1 2-2Z"/><path d="M8 9h8M8 13h5"/></svg></span><h2>Chat</h2><span class="agent-status"><i></i><span>Working</span></span></header>
+      <div class="preview chat-preview">
+        <div class="chat-app light-app"><div class="chat-top"><span class="avatar"></span><strong>Design club</strong><i></i></div><div class="bubble received">Something worth making.</div><div class="bubble sent">Let’s build it.</div><div class="chat-input"><span>Message…</span><b>↑</b></div></div>
+        <div class="chat-app dark-app"><div class="chat-top"><span class="avatar"></span><strong>Design club</strong><i></i></div><div class="bubble received">Something worth making.</div><div class="bubble sent">Let’s build it.</div><div class="chat-input"><span>Message…</span><b>↑</b></div></div>
+      </div>
+      <footer><span class="work-glyph"></span><span class="work-text">Building the conversation.</span></footer>
+      <div class="arrival"></div>
+    </article>
+    <article class="agent" id="snake" style="--tone:#8271a6; --tint:#eee9f4">
+      <header><span class="agent-icon"><svg viewBox="0 0 24 24"><path d="M4 7h11a4 4 0 0 1 0 8h-4a3 3 0 0 0 0 6M4 4v6M18 6h.01"/></svg></span><h2>Snake</h2><span class="agent-status"><i></i><span>Working</span></span></header>
+      <div class="preview snake-preview"><div class="game-board"><div class="game-score"><span>SNAKE</span><span>024</span></div><svg class="snake-grid" viewBox="0 0 320 170"><defs><pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="10" cy="10" r="1" fill="#d6d3db"/></pattern></defs><rect width="320" height="170" fill="url(#grid)"/><g id="snake-body"></g><circle cx="230" cy="50" r="6" fill="#cc897b"/></svg><div class="phone-home"></div></div><div class="swipe"><svg viewBox="0 0 60 60"><path d="M10 31h39m-10-10 10 10-10 10"/></svg><span>Swipe to turn</span></div></div>
+      <footer><span class="work-glyph"></span><span class="work-text">Building the game loop.</span></footer>
+      <div class="arrival"></div>
+    </article>
+    <article class="agent" id="pong" style="--tone:#ad8153; --tint:#f4ecdf">
+      <header><span class="agent-icon"><svg viewBox="0 0 24 24"><path d="M5 5v14M19 5v14M11 12h2"/><circle cx="12" cy="12" r="2"/></svg></span><h2>Pong</h2><span class="agent-status"><i></i><span>Working</span></span></header>
+      <div class="preview pong-preview"><div class="court"><div class="court-score"><span>03</span><span>02</span></div><div class="midline"></div><div class="paddle left"></div><div class="paddle right"></div><div class="ball"></div><div class="rematch"><span>Good game.</span><button>Play again <span>↗</span></button></div></div></div>
+      <footer><span class="work-glyph"></span><span class="work-text">Building two-player mode.</span></footer>
+      <div class="arrival"></div>
+    </article>
+  </div>
+  <svg id="connections" viewBox="0 0 1920 1080" aria-hidden="true"><g id="routes"></g><g id="packets"></g></svg>
+  <section id="dispatcher" aria-label="Dispatcher">
+    <div class="dispatch-header"><span class="dispatch-icon">↗</span><strong>Dispatcher</strong><span id="route-label"></span></div>
+    <div class="prompt-row"><div id="prompt"></div><div id="send"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></div></div>
+  </section>
+  <p id="context-note"></p>
+  <div class="film-note">Concept animation · Simulated activity</div>
+</main>
+<script src="scenes.js"></script>
+</body>
+</html>

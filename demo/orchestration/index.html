@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ribbon Field — One dispatcher, many models</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="stage" aria-label="Animated illustration of one Ribbon Field dispatcher coordinating agents across model providers">
+  <div id="brand"><img src="assets/ribbon-field.png" alt=""><span>Ribbon Field</span></div>
+  <h1 id="headline"></h1>
+  <div id="story">
+    <div id="request"><span class="quote">“</span><span id="request-text"></span><span class="quote">”</span></div>
+    <p id="caption"></p>
+    <div id="report"><strong>Checkout flow is live.</strong><span>Four agents. One result. Back in your conversation.</span></div>
+    <svg id="network" viewBox="0 0 1080 1080" aria-hidden="true">
+      <path id="input-link" d="M540 392 V430"/><circle id="input-packet" cx="540" cy="392" r="4.5"/>
+      <g id="links"></g><g id="peers"></g><g id="packets"></g>
+    </svg>
+    <div id="hub" style="--tone:#587052">
+      <span class="hub-mark"><svg viewBox="0 0 40 40"><path d="M20 5v11m0 0L7 28m13-12 13 12M7 28v7m13-19v19m13-7v7"/><circle cx="20" cy="5" r="3"/><circle cx="7" cy="35" r="3"/><circle cx="20" cy="35" r="3"/><circle cx="33" cy="35" r="3"/></svg></span>
+      <span class="hub-label">Your dispatcher</span>
+      <span class="chip">OpenAI</span>
+    </div>
+    <div class="agent" id="ui" style="--tone:#4f7a8a;--tint:#e3ebee">
+      <div class="orb"><svg class="orbit" viewBox="0 0 144 144"><circle class="orbit-track" cx="72" cy="72" r="66"/><circle class="orbit-progress" cx="72" cy="72" r="66"/></svg><div class="symbol"><svg viewBox="0 0 64 64"><rect x="12" y="12" width="40" height="40" rx="6"/><path d="M20 24h24M20 32h14"/><rect x="20" y="40" width="24" height="6" rx="3"/></svg></div><span class="sub"></span><span class="sub"></span><span class="sub"></span><span class="arrival"></span></div>
+      <h2>Checkout UI</h2><span class="chip">Gemini</span>
+      <div class="memory"><span class="initial"></span><span class="revision"></span></div><p class="status"></p>
+    </div>
+    <div class="agent" id="api" style="--tone:#9c7949;--tint:#f1eadd">
+      <div class="orb"><svg class="orbit" viewBox="0 0 144 144"><circle class="orbit-track" cx="72" cy="72" r="66"/><circle class="orbit-progress" cx="72" cy="72" r="66"/></svg><div class="symbol"><svg viewBox="0 0 64 64"><rect x="10" y="17" width="44" height="30" rx="5"/><path d="M10 27h44M18 39h10"/></svg></div><span class="sub"></span><span class="sub"></span><span class="sub"></span><span class="arrival"></span></div>
+      <h2>Payments API</h2><span class="chip">Anthropic</span>
+      <div class="memory"><span class="initial"></span><span class="revision"></span></div><p class="status"></p>
+    </div>
+    <div class="agent" id="tests" style="--tone:#847099;--tint:#efebf4">
+      <div class="orb"><svg class="orbit" viewBox="0 0 144 144"><circle class="orbit-track" cx="72" cy="72" r="66"/><circle class="orbit-progress" cx="72" cy="72" r="66"/></svg><div class="symbol"><svg viewBox="0 0 64 64"><path d="M14 21l5 5 9-9M14 39l5 5 9-9M34 23h16M34 41h16"/></svg></div><span class="sub"></span><span class="sub"></span><span class="sub"></span><span class="arrival"></span></div>
+      <h2>Test suite</h2><span class="chip illustrative">Kimi · illustrative</span>
+      <div class="memory"><span class="initial"></span><span class="revision"></span></div><p class="status"></p>
+    </div>
+    <div class="agent" id="release" style="--tone:#3f7062;--tint:#e4eee8">
+      <div class="orb"><svg class="orbit" viewBox="0 0 144 144"><circle class="orbit-track" cx="72" cy="72" r="66"/><circle class="orbit-progress" cx="72" cy="72" r="66"/></svg><div class="symbol"><svg viewBox="0 0 64 64"><path d="M32 50V16M18 30l14-14 14 14"/></svg></div><span class="sub"></span><span class="sub"></span><span class="sub"></span><span class="arrival"></span></div>
+      <h2>Release</h2><span class="chip">OpenAI</span>
+      <div class="memory"><span class="initial"></span><span class="revision"></span></div><p class="status"></p>
+      <div class="bar"><i></i></div>
+    </div>
+    <div id="pills"></div>
+  </div>
+  <div id="endcard"><img src="assets/ribbon-field.png" alt="Ribbon Field app icon"><h2>Ribbon Field</h2><p class="end-promise">One dispatcher.<br><span>Many models. One team.</span></p><p class="end-detail">Agents on OpenAI, Anthropic, and Google models<br>work as one team in one place.<br>Follow-ups return to the agent that remembers.</p></div>
+  <p id="film-note">Workflow illustration · Activity condensed · Kimi shown for illustration</p>
+</main>
+<script src="scenes.js"></script>
+</body>
+</html>

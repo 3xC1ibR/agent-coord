@@ -1,0 +1,13 @@
+body, #stage { background: #101013; color: #efeff3; }
+.dispatch-demo { background: #101013; }
+.dispatch-demo .frame { box-shadow: 0 22px 64px #0006, 0 0 0 1px #ffffff1a; border-radius: 12px; }
+.dispatch-demo .titlebar { background: #202025; border-bottom: 1px solid #34343b; }
+.dispatch-demo .titlebar .title { color: #a9a9b3; }
+.demo-heading { left: 120px; top: 36px; margin: 0; font-size: 34px; font-weight: 500; letter-spacing: -.8px; }
+.demo-footnote { left: 120px; bottom: 26px; font-size: 17px; color: #81818e; }
+.demo-step { right: 120px; bottom: 26px; font-size: 17px; color: #a4a4b2; }
+.demo-type { white-space: pre-wrap; overflow: hidden; box-sizing: border-box; border-radius: 3px; }
+.demo-type .typing-caret { display: inline-block; height: 1em; width: 1px; background: currentColor; vertical-align: -.1em; }
+.demo-highlight { position: absolute; border: 2px solid #d3b8ff; border-radius: 9px; pointer-events: none; box-shadow: 0 0 20px #c8a5ff18; }
+.demo-flight { position: absolute; width: 29px; height: 29px; display: grid; place-items: center; border-radius: 50%; background: #d3b8ff; color: #222; font-size: 21px; }
+.demo-handoff { position: absolute; font-size: 14px; padding: 6px 10px; border-radius: 5px; background: #292631; color: #e5d5ff; border: 1px solid #685577; white-space: nowrap; }

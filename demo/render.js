@@ -17,10 +17,11 @@ const os = require("node:os");
 const path = require("node:path");
 
 const HERE = __dirname;
-const OUT = path.join(HERE, "out");
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => { const i = argv.indexOf("--" + name); return i >= 0 ? argv[i + 1] : fallback; };
 const flag = name => argv.includes("--" + name);
+const OUT = path.resolve(opt("out", path.join(HERE, "out")));
+const composition = path.resolve(opt("composition", path.join(HERE, "video", "index.html")));
 const preview = flag("preview");
 const stillsEvery = opt("stills", null);
 const fps = Number(opt("fps", preview ? 24 : 60));
@@ -29,23 +30,28 @@ const from = Number(opt("from", 0));
 const toArg = opt("to", null);
 const workers = Math.max(1, Number(opt("workers", Math.min(4, Math.max(1, os.cpus().length - 2)))));
 const quality = Number(opt("quality", 93));
+const width = Number(opt("width", 1920));
+const height = Number(opt("height", 1080));
 
 async function openPage(browser) {
-  const context = await browser.newContext({viewport: {width: 1920, height: 1080}, deviceScaleFactor: scale});
+  const context = await browser.newContext({viewport: {width, height}, deviceScaleFactor: scale});
   const page = await context.newPage();
   page.on("pageerror", error => console.error("page error:", error.message));
   page.on("console", message => { if (message.type() === "error") console.error("console:", message.text()); });
-  const boxes = fs.readFileSync(path.join(OUT, "shots", "boxes.json"), "utf8");
+  const boxesPath = path.join(OUT, "shots", "boxes.json");
+  const boxes = fs.existsSync(boxesPath) ? fs.readFileSync(boxesPath, "utf8") : "{}";
   await page.addInitScript({content: "window.BOXES = " + boxes + ";"});
-  await page.goto("file://" + path.join(HERE, "video", "index.html"));
+  await page.goto("file://" + composition);
   await page.evaluate(() => window.__ready);
   return page;
 }
 
 function encoder(outputPath) {
   return spawn("ffmpeg", ["-y", "-loglevel", "error", "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", String(fps), "-i", "-",
+    "-vf", "scale=in_range=full:out_range=limited:in_color_matrix=bt601:out_color_matrix=bt709",
     "-c:v", "libx264", "-preset", preview ? "veryfast" : "medium", "-crf", preview ? "23" : "17",
-    "-pix_fmt", "yuv420p", "-g", String(fps * 2), "-movflags", "+faststart", outputPath], {stdio: ["pipe", "inherit", "inherit"]});
+    "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+    "-g", String(fps * 2), "-movflags", "+faststart", outputPath], {stdio: ["pipe", "inherit", "inherit"]});
 }
 
 async function renderRange(browser, index, startFrame, endFrame, segmentPath, progress) {
@@ -119,6 +125,13 @@ async function main() {
   fs.writeFileSync(listPath, segments.map(p => `file '${p}'`).join("\n") + "\n");
   const concat = spawnSync("ffmpeg", ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", videoPath], {stdio: "inherit"});
   if (concat.status !== 0) throw new Error("concat failed");
+
+  if (flag("silent")) {
+    const finalPath = path.join(OUT, opt("name", preview ? "preview.mp4" : "ribbon-field-demo.mp4"));
+    fs.copyFileSync(videoPath, finalPath);
+    console.log("wrote", finalPath);
+    return;
+  }
 
   const wav = path.join(OUT, "soundtrack.wav");
   const audio = spawnSync("node", [path.join(HERE, "audio.js"), String(duration), path.join(OUT, "cues.json"), wav], {stdio: "inherit"});

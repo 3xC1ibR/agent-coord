@@ -1,0 +1,59 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 1080px; height: 1080px; overflow: hidden; }
+body { color: #253d35; font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased; }
+#stage { position: relative; width: 1080px; height: 1080px; overflow: hidden; background: #f6f5ef; }
+#brand { position: absolute; top: 47px; left: 60px; display: flex; align-items: center; gap: 12px; font-size: 27px; font-weight: 550; letter-spacing: -.7px; }
+#brand img { width: 47px; height: 47px; border-radius: 11px; }
+#headline { position: absolute; top: 122px; left: 60px; right: 60px; margin: 0; text-align: center; font-weight: 550; font-size: 64px; letter-spacing: -2.6px; line-height: 1.08; }
+#headline span { color: #879086; }
+#story { position: absolute; inset: 0; }
+#request { position: absolute; top: 282px; left: 70px; right: 70px; min-height: 100px; text-align: center; font-size: 39px; letter-spacing: -1.2px; line-height: 1.23; display: flex; justify-content: center; align-items: start; gap: 4px; }
+.quote { color: #a0aaa0; }
+#request-text { max-width: 830px; }
+#caption { position: absolute; top: 290px; left: 100px; right: 100px; margin: 0; text-align: center; font-size: 31px; line-height: 1.38; color: #7f8d7a; letter-spacing: -.7px; }
+#report { position: absolute; top: 284px; left: 120px; right: 120px; text-align: center; }
+#report strong { display: block; font-size: 42px; font-weight: 550; letter-spacing: -1.4px; line-height: 1.15; }
+#report span { display: block; margin-top: 8px; font-size: 28px; color: #7f8d7a; letter-spacing: -.6px; }
+#network { position: absolute; inset: 0; width: 1080px; height: 1080px; }
+#input-link { fill: none; stroke: #d7dcd1; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 2 7; }
+#input-packet { fill: #587052; }
+.route { fill: none; stroke: #d7dcd1; stroke-width: 2; }
+.active-route { fill: none; stroke-width: 3; stroke-linecap: round; }
+.peer { fill: none; stroke: #cfd5c9; stroke-width: 2; stroke-dasharray: 2 7; }
+.peer-active { fill: none; stroke-width: 3; stroke-linecap: round; }
+#hub { position: absolute; top: 438px; left: 415px; width: 250px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.hub-mark { width: 64px; height: 64px; display: grid; place-items: center; background: #e7eadf; border-radius: 50%; }
+.hub-mark svg { width: 30px; height: 30px; fill: #e7eadf; stroke: #587052; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.hub-label { font-size: 24px; color: #65755e; letter-spacing: -.45px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border-radius: 15px; border: 1.5px solid #d3d8cc; font-size: 21px; letter-spacing: -.3px; color: #5f6d59; background: #fbfbf7; white-space: nowrap; }
+.chip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--tone); flex-shrink: 0; }
+.chip.illustrative { border-style: dashed; color: #7f8d7a; }
+.agent { position: absolute; top: 684px; width: 240px; text-align: center; transform-origin: 50% 60px; }
+#ui { left: 30px; } #api { left: 290px; } #tests { left: 550px; } #release { left: 810px; }
+.orb { position: relative; height: 120px; width: 120px; margin: 0 auto; display: grid; place-items: center; }
+.orbit { position: absolute; inset: 0; width: 120px; height: 120px; fill: none; stroke: var(--tone); stroke-width: 1.9; }
+.orbit-track { opacity: .13; }
+.orbit-progress { stroke-dasharray: 52 363; stroke-linecap: round; transform-origin: 72px 72px; }
+.symbol { width: 92px; height: 92px; border-radius: 50%; background: var(--tint); color: var(--tone); display: grid; place-items: center; }
+.symbol svg { width: 48px; height: 48px; fill: none; stroke: currentColor; stroke-width: 2.3; stroke-linecap: round; stroke-linejoin: round; }
+.sub { position: absolute; top: 54px; left: 54px; width: 12px; height: 12px; border-radius: 50%; background: var(--tone); }
+.arrival { position: absolute; top: -38px; left: 50%; transform: translateX(-50%); white-space: nowrap; color: var(--tone); font-size: 25px; letter-spacing: -.5px; background: #f6f5ef; padding: 0 6px; }
+.arrival.edge-right { left: auto; right: -10px; transform: none; }
+.arrival.edge-left { left: -10px; transform: none; }
+.agent h2 { margin: 14px 0 8px; font-size: 32px; font-weight: 550; letter-spacing: -.9px; white-space: nowrap; }
+.memory { height: 32px; margin-top: 8px; font-size: 26px; color: #8b9185; position: relative; line-height: 32px; letter-spacing: -.55px; }
+.memory span { position: absolute; inset: 0; white-space: nowrap; }
+.revision { color: var(--tone); }
+.status { margin: 4px 0 0; font-size: 23px; line-height: 27px; color: #8b9185; white-space: nowrap; }
+.status.done { color: var(--tone); }
+.status.conflict { color: #a87f32; }
+.bar { position: relative; margin: 8px auto 0; width: 150px; height: 5px; border-radius: 3px; background: #e2e5db; overflow: hidden; }
+.bar i { position: absolute; top: 0; bottom: 0; left: 0; width: 0; background: var(--tone); border-radius: 3px; }
+.pill { position: absolute; top: 588px; transform: translateX(-50%); white-space: nowrap; padding: 7px 16px; border-radius: 22px; background: #fbfbf7; border: 1.5px solid #d3d8cc; font-size: 24px; line-height: 28px; letter-spacing: -.4px; color: #3f5047; box-shadow: 0 2px 6px #25332d12; }
+#film-note { position: absolute; bottom: 27px; left: 0; width: 100%; margin: 0; text-align: center; font-size: 20px; letter-spacing: -.25px; color: #899181; }
+#endcard { position: absolute; inset: 0; text-align: center; background: #f6f5ef; }
+#endcard img { position: absolute; top: 173px; left: 464px; width: 152px; height: 152px; border-radius: 34px; }
+#endcard h2 { position: absolute; top: 350px; left: 0; right: 0; margin: 0; font-size: 40px; font-weight: 550; letter-spacing: -1.2px; }
+.end-promise { position: absolute; top: 468px; left: 50px; right: 50px; margin: 0; font-size: 72px; font-weight: 550; letter-spacing: -3.4px; line-height: 1.07; }
+.end-promise span { color: #879086; }
+.end-detail { position: absolute; top: 712px; left: 50px; right: 50px; margin: 0; font-size: 31px; line-height: 1.4; letter-spacing: -.65px; color: #65755e; }

@@ -18,6 +18,7 @@ dist/
 # Demo video build artifacts
 demo/node_modules/
 demo/out/
+demo/*/out/
 top_of_mind.md
 purpose.md
 braindump.txt
