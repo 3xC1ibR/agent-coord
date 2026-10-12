@@ -93,6 +93,17 @@ test("switching conversations restores each retained transcript", async () => {
   assert.equal(c.renders, 2);
 });
 
+test("opening loads model controls even when a streamed update invalidates its first snapshot", async () => {
+  const c = setup(); let catalogs = 0;
+  c.loadSessionModels = () => { catalogs++; };
+  const {opening, gate} = await startRefresh(c, "one");
+  c.applyEvent({method: "turn/completed", params: {threadId: "one", turn: {id: "new"}}});
+  gate.resolve(fixture("one")); await opening;
+  assert.equal(c.state.detailRefreshing, true);
+  assert.ok(c.scheduled > 0);
+  assert.equal(catalogs, 1, "Reasoning choices must not depend on an uninterrupted snapshot");
+});
+
 test("a draft placeholder cannot be mistaken for the retained conversation's nodes", async () => {
   const c = setup(); await c.select("one"); c.goHome();
   const original = c.$("timeline").childNodes[0];

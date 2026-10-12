@@ -31,12 +31,22 @@ test('completed, failed and interrupted results never imply ongoing execution',(
 test('old conversations without checkpoints retain a useful original-request fallback',()=>{
  assert.equal(card({checkpoint:null,original_request:'Help with the chat interface'}).summary.textContent,'Help with the chat interface');
 });
-test('Attention preserves the required next action and checkpoint freshness warning',()=>{
- const result=card({response_state:'action',attention_reason:'review',checkpoint_stale:true,
+test('Attention preserves a current required next action',()=>{
+ const result=card({response_state:'action',attention_reason:'review',checkpoint_stale:false,
   checkpoint:{summary:'Installer is staged.',next_actor:'user',next_action:'Approve the staged installer.'}});
  assert.equal(result.nodes.find(n=>n.className==='next-label').textContent,'Your next step · ');
  assert.equal(result.nodes.find(n=>n.className==='next-action').title,'Approve the staged installer.');
- assert.equal(result.nodes.find(n=>n.className==='stale-checkpoint').textContent,'New activity since this checkpoint');
+ assert.equal(result.nodes.find(n=>n.className==='stale-checkpoint'),undefined);
+});
+test('resumed work hides the old user next step while retaining checkpoint context',()=>{
+ const checkpoint={summary:'Waiting for credentials.',next_actor:'user',next_action:'Run aws login.'};
+ for(const response_state of ['working','reply']) {
+  const result=card({response_state,needs_attention:response_state==='reply',checkpoint_stale:true,checkpoint});
+  assert.equal(result.nodes.find(n=>n.className==='next-action'),undefined);
+  assert.equal(result.nodes.find(n=>n.className==='stale-checkpoint').textContent,'New activity since this checkpoint');
+  assert.equal(result.summary.textContent,checkpoint.summary);
+  if(response_state==='working') assert.equal(result.nodes.find(n=>n.className.split(' ').includes('card-state')).textContent,'Working');
+ }
 });
 test('Attention explains why a response is present, including failures and reminders',()=>{
  for(const [extra,label] of [
@@ -55,7 +65,7 @@ test('Attention explains why a response is present, including failures and remin
 test('card actions share one group and remain outside the navigation button',()=>{
  const result=card({can_handle_response:true});
  const controls=result.root.children.find(n=>n.className==='card-actions');
- assert.ok(controls.children.some(n=>n.className==='card-pin'));
+ assert.ok(!controls.children.some(n=>n.className==='card-pin'));
  assert.ok(controls.children.some(n=>n.className==='card-close'));
  assert.ok(controls.children.some(n=>n.dataset.action==='more'));
  const walk=n=>[n,...n.children.flatMap(walk)];

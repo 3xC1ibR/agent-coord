@@ -203,6 +203,87 @@ test("only owned conversation frames may attach or claim focus", () => {
   record.frame.hidden = false; panes.focused(source); assert.equal(panes.selected, "a");
 });
 
+test("explicitly opening a loading pane focuses it once after its draft is restored", () => {
+  const {panes} = setup();
+  panes.tile("dispatcher", [thread("a")]);
+  const source = {}, record = panes.records.get("a"), calls = [];
+  const draft = {text: "Follow up on these findings", images: [], scroll: 120};
+  record.frame = {contentWindow: source, hidden: false}; record.initialDraft = draft;
+  const api = {restoreDraft: value => calls.push(["draft", value]),
+    setActive() {}, focus: () => calls.push(["focus"])};
+
+  assert.equal(panes.focus("a"), true);
+  assert.deepEqual(calls, [], "opening must wait for the conversation API to attach");
+  assert.equal(panes.attach(source, api), true);
+  assert.deepEqual(calls, [["draft", draft], ["focus"]]);
+  panes.attach(source, api);
+  assert.deepEqual(calls, [["draft", draft], ["focus"]], "reattaching must not repeat the original focus request");
+});
+
+test("automatic tiles never steal focus when their conversation frames attach", () => {
+  const {panes} = setup(), focused = [];
+  panes.tile("dispatcher", [thread("a"), thread("b")]);
+  for (const id of ["a", "b"]) {
+    const source = {};
+    panes.records.get(id).frame = {contentWindow: source, hidden: false};
+    assert.equal(panes.attach(source, {setActive() {}, focus: () => focused.push(id)}), true);
+  }
+  assert.equal(panes.selected, "a");
+  assert.deepEqual(focused, [], "even the selected automatic tile leaves focus with the dispatcher input");
+});
+
+test("leaving a loading pane cancels its deferred focus when it attaches", async t => {
+  for (const destination of ["another pane", "overview"]) {
+    await t.test(destination, () => {
+      const {panes} = setup();
+      panes.tile("dispatcher", [thread("a"), thread("b")]);
+      const source = {}, record = panes.records.get("a");
+      record.frame = {contentWindow: source, hidden: false};
+      let focused = 0;
+      const api = {setActive() {}, focus: () => focused++};
+      panes.focus("a");
+      if (destination === "another pane") panes.focus("b", false);
+      else panes.hide();
+
+      assert.equal(panes.attach(source, api), true);
+      assert.equal(focused, 0, "a late-loading conversation must not pull focus back from the destination");
+      panes.show("dispatcher"); panes.focus("a", false);
+      panes.attach(source, api);
+      assert.equal(focused, 0, "the abandoned focus request must not survive a later return");
+    });
+  }
+});
+
+test("workspace pane dismissal delegates visibility without closing the session or losing its draft", () => {
+  const {panes, exits} = setup(), removed = [];
+  const a = thread("a"), b = thread("b");
+  panes.tile("dispatcher", [a, b]);
+  const record = panes.records.get("a");
+  const draft = {text: "Keep this follow-up", mentions: [{id: "reference"}], images: [{id: "image"}], scroll: 260};
+  record.frame = {contentWindow: {}, hidden: false};
+  record.api = {setActive() {}, focus() {}, exportDraft: () => draft};
+  const frame = record.frame, api = record.api;
+  panes.focus("b", false);
+  panes.workspaceClose = id => {
+    removed.push(id);
+    panes.tile("dispatcher", [b]);
+  };
+
+  panes.close(0);
+  assert.deepEqual(removed, ["a"], "dismissal targets the requested pane, not the currently focused conversation");
+  assert.deepEqual(panes.layout.order, ["b"]);
+  assert.equal(panes.active, true); assert.deepEqual(exits, []);
+  assert.equal(a.attention, "now");
+  assert.equal(panes.records.get("a"), record);
+  assert.equal(record.frame, frame); assert.equal(record.api, api);
+  assert.deepEqual(panes.exportDraft("a"), draft);
+
+  panes.tile("dispatcher", [a, b]);
+  assert.equal(panes.records.get("a"), record);
+  assert.equal(record.frame, frame);
+  assert.deepEqual(panes.exportDraft("a"), draft, "reopening the tile preserves its text, images, references, and scroll position");
+});
+
 test("background conversations keep unread results until actual focus and consume shared events", async () => {
   const vm = require("node:vm"), fs = require("node:fs");
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/thread-panes.js"), "utf8");

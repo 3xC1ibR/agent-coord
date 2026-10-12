@@ -23,6 +23,7 @@ function setup(t) {
   const catalogs = {
     codex: [{model: "luna", displayName: "Luna", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{reasoningEffort: "medium"}, {reasoningEffort: "high"}]}],
     claude: [{model: "sonnet", defaultReasoningEffort: "low", supportedReasoningEfforts: [{reasoningEffort: "low"}]}],
+    antigravity: [{model: "gemini-test", displayName: "Gemini Test", supportedReasoningEfforts: []}],
   };
   let draft = {source: "source-thread", message: "Run the backfill", settings: {cwd: "/repo", model: "luna", effort: "high", yolo: true}};
   const ui = new ScheduledPromptsUI({document, getDraft: () => draft, onSaved: item => saved.push(item),

@@ -39,7 +39,7 @@ class Element {
   focus() { this.focused = true; }
 }
 
-function setup(mobile = true) {
+function setup(mobile = true, pane = false) {
   const ids = ["mobile-thread-sheet", "mobile-chat-actions", "context-panel", "mobile-chat-back", "mobile-show-context",
     "mobile-sheet-back", "mobile-sheet-actions", "mobile-sheet-context", "mobile-sheet-info", "mobile-sheet-title",
     "thread-context", "conversation", "mobile-chat-status"];
@@ -53,12 +53,23 @@ function setup(mobile = true) {
   const media = {matches:mobile, addEventListener: (_, callback) => { media.change = callback; }};
   const viewport = {height:800, offsetTop:0, scale:1, events:{}, addEventListener: (type, callback) => { viewport.events[type]=callback; }};
   let back = 0, layouts = 0, desktopContext = 0, frame;
-  const view = {matchMedia: () => media, visualViewport:viewport,
+  const view = {matchMedia: query => {media.query = query; return media;}, visualViewport:viewport,
+    frameElement: pane ? {classList: {contains: name => name === "conversation-pane-frame"}} : null,
+    parent: {document: {body: {classList: {contains: name => name === "dispatcher-workspace"}}}},
     requestAnimationFrame: callback => {frame=callback; return 1;}, cancelAnimationFrame: () => {frame=null;}};
   const chat = new MobileChat({document:doc, view, onBack: () => {back++;}, onLayout: () => {layouts++;}, onContextLayout: () => {desktopContext++;}});
   return {chat, elements, body, header, actions, info, media, viewport,
     counts: () => ({back,layouts,desktopContext}), flush: () => {const callback=frame; frame=null; callback?.();}};
 }
+
+test("a dispatcher pane keeps mobile back navigation through the 800px breakpoint", () => {
+  const s = setup(true, true);
+  assert.match(s.media.query, /max-width: 800px/);
+  assert.equal(s.elements["mobile-chat-back"].attributes["aria-label"], "Back to dispatcher");
+  s.elements["mobile-chat-back"].onclick();
+  assert.equal(s.counts().back, 1);
+  assert.match(setup().media.query, /max-width: 720px/, "Standalone conversation behavior is unchanged");
+});
 
 test("mobile sheets reuse original controls and restore their desktop positions and handlers", () => {
   const s=setup(), original=s.actions;

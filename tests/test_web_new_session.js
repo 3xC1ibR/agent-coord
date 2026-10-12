@@ -31,13 +31,13 @@ function setup() {
   return c;
 }
 
-test("New session opens a draft with both model groups before creating any provider session", async () => {
+test("New session opens a draft with all provider groups before creating any provider session", async () => {
   const c = setup();
   await c.$("new-session").onclick();
   assert.equal(c.state.selected, "new-session");
   assert.equal(c.$("conversation").hidden, false);
   assert.equal(c.calls.filter(call => call.path === "sessions").length, 0);
-  assert.deepEqual(c.$("model-picker").children.map(group => group.label), ["Codex", "Claude Code"]);
+  assert.deepEqual(c.$("model-picker").children.map(group => group.label), ["Codex", "Claude Code", "Google Antigravity"]);
   assert.equal(c.$("new-session").onclick, c.$("welcome-new").onclick);
   c.$("model-picker").value = c.modelValue("claude", "sonnet");
   await c.changeSessionModel();
@@ -54,6 +54,21 @@ test("New session opens a draft with both model groups before creating any provi
   assert.equal(send.body.images[0].name, "proof.png");
   assert.equal(c.state.selected, "created");
   assert.equal(c.state.newSessionDraft, null);
+});
+
+test("Antigravity selection is sent to the backend and its setup error is visible", async () => {
+  const c = setup();
+  const api = c.api;
+  c.api = async (path, body) => {
+    if (path === "models?client=antigravity") throw new Error("Run agent-coord antigravity login");
+    return api(path, body);
+  };
+  await c.newSession();
+  c.$("model-picker").value = c.modelValue("antigravity", "");
+  await c.changeSessionModel();
+  assert.match(c.$("model-picker-status").textContent, /antigravity login/);
+  await c.sendSessionDraft("Hello", []);
+  assert.equal(c.calls.find(call => call.path === "sessions").body.client, "antigravity");
 });
 
 test("draft uses the window folder and group rather than the previously focused thread", async () => {
@@ -102,7 +117,7 @@ test("repeat New session restores the same draft and chosen model", async () => 
   assert.equal(c.state.detail.session.project_id, null);
   assert.equal(c.$("message").value, "Keep this");
   assert.equal(c.state.detail.session.model, "sonnet");
-  assert.equal(c.calls.filter(call => call.path.startsWith("models?")).length, 2);
+  assert.equal(c.calls.filter(call => call.path.startsWith("models?")).length, 3);
 });
 
 test("first session requires a folder, retains its group, and cancellation starts nothing", async () => {

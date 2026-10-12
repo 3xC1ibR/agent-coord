@@ -31,7 +31,18 @@ async function api(path, body) {
   if (body !== undefined) Object.assign(options, {method: "POST", headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token}, body: JSON.stringify(body)});
   const response = await fetch(base + path, options);
   if (response.status === 401 && location.protocol === "https:") location.reload();
-  const result = await response.json();
+  let result;
+  try { result = await response.json(); }
+  catch (error) {
+    console.warn("Unreadable API response", {path, status: response.status,
+      contentType: response.headers?.get("Content-Type")}, error);
+    const sending = body !== undefined && /^sessions\/[^/]+\/(messages|queue)$/.test(path) && !body.action;
+    throw new Error(sending
+      ? "Could not confirm whether the message was accepted. Your draft is still here; check the conversation before sending again."
+      : body !== undefined
+        ? "Could not confirm the change. Check the current state before trying again."
+        : "Could not refresh the workspace: the server returned an unreadable response. Try again shortly.");
+  }
   if (viewMutation) ++listRequest;
   if (!response.ok) throw new Error(result.error || "Request failed");
   return result;
@@ -46,15 +57,26 @@ async function openMentionFile(ref) {
   dialog.addEventListener("close", ()=>dialog.remove());document.body.append(dialog);dialog.showModal();
 }
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
-async function refreshList() {
-  if (state.paneMode) { window.parent.agentCoordPanes?.requestList(); return; }
-  const view = $("view").value, request = ++listRequest;
+async function refreshList({background = false} = {}) {
+  if (state.paneMode) { window.parent.agentCoordPanes?.requestList({background}); return; }
+  const view = $("view").value, pending = state.listRefresh;
+  // Polls and streamed events must not keep superseding a slow inventory read.
+  // Explicit refreshes after user actions still invalidate earlier snapshots.
+  if (background && pending?.view === view && pending.request === listRequest) return pending.promise;
+  const refresh = {view, request: ++listRequest};
+  state.listRefresh = refresh;
+  refresh.promise = loadThreadList(view, refresh.request);
+  try { return await refresh.promise; }
+  finally { if (state.listRefresh === refresh) state.listRefresh = null; }
+}
+async function loadThreadList(view, request) {
   // Open threads feed every tab's badges, including while browsing a Closed view.
   const [open, closed, organization, views] = await Promise.all([api("threads?archived=false"),
     view === "archived" ? api("threads?archived=true") : null, api("organization"), api("views")]);
   if (request !== listRequest || view !== $("view").value) return;
   state.sessions = (closed || open).data.map(overlayPendingAttention);
   state.viewThreads = open.data.map(overlayPendingAttention);
+  state.dispatchWorkspace?.update(state.viewThreads, state.detail);
   state.rollUp?.sync(threadsInProject(state.viewThreads));
   state.organization = organization;
   for (const field of ["repository", "project"]) {
@@ -80,6 +102,55 @@ async function refreshList() {
   if (view !== $("view").value) return refreshList();
   renderList();
 }
+function currentProjectDispatcher() {
+  const cwd = state.folders?.selected?.cwd;
+  return DispatchUI.chooseDispatcher(state.viewThreads || state.sessions, cwd, state.dispatchDock?.preference(cwd).id);
+}
+function syncDispatcherOverview() {
+  if (state.paneMode || !state.dispatchDock) return;
+  const thread = currentProjectDispatcher(), cwd = state.folders?.selected?.cwd;
+  const button = $("start-dispatcher");
+  button.textContent = state.dispatchStarting ? "Starting dispatcher…" : thread ? "Open dispatcher ↗" : "Start dispatcher ↗";
+  button.disabled = !state.dispatchReady || !!state.dispatchStarting || !cwd;
+  button.title = cwd ? "Send work to the right conversation in this project" : "Open a project to start a dispatcher";
+  // Dispatcher mode is an explicit destination; visiting the overview never
+  // opens it implicitly or changes the user's saved overview filters.
+}
+async function startDispatcher() {
+  if (!state.dispatchReady || state.dispatchStarting || state.busy || !state.folders?.selected?.cwd) return;
+  const cwd = state.folders.selected.cwd, revision = state.navigationRevision;
+  state.dispatchStarting = true; syncDispatcherOverview();
+  try {
+    let thread = currentProjectDispatcher();
+    if (!thread) {
+      // Keep a successfully created identity if configuring it fails, so retrying
+      // this action does not create another conversation.
+      const pending = state.dispatcherCreates ||= new Map();
+      let id = pending.get(cwd);
+      if (!id) {
+        const created = await api("sessions", {...sessionContext(), name: "Dispatcher", client: "codex", yolo: false});
+        id = created.session.thread_id; pending.set(cwd, id);
+      }
+      await api(sessionPath(id) + "/dispatch", {enabled: true});
+      thread = {thread_id: id}; pending.delete(cwd);
+    }
+    state.dispatchDock.remember(cwd, {id: thread.thread_id, hidden: false});
+    // Creating a dispatcher must not pull the user back after navigation.
+    if (cwd === state.folders.selected?.cwd && revision === state.navigationRevision) {
+      await select(thread.thread_id, {dock: true});
+    }
+    await refreshList();
+  } finally { state.dispatchStarting = false; syncDispatcherOverview(); }
+}
+$("start-dispatcher").onclick = () => action(startDispatcher);
+$("dispatcher-hide").onclick = () => {
+  state.dispatchDock.remember(state.projectCwd, {hidden: true}); goHome();
+};
+$("dispatcher-open").onclick = () => {
+  if (state.dispatchWorkspace?.active) state.dispatchDock.expand(true);
+  else action(() => select(state.selected));
+};
+$("dispatcher-permissions").onclick = () => openSessionPermissions();
 function sessionContext() {
   return newThreadContext(state.organization, {project: $("project").value}, state.folders?.selected);
 }
@@ -94,7 +165,7 @@ function canSwitchProject() {
 async function switchProject() {
   const cwd = state.folders.selected?.cwd || "";
   if (state.projectCwd === cwd) { goHome(); renderFolders(); return; }
-  goHome();
+  goHome({restoreDispatcher: false});
   const drafts = state.projectDrafts ||= new Map();
   drafts.set(state.projectCwd, {detail: state.newSessionDraft, text: state.drafts.get("new-session"),
     images: state.attachments?.drafts.get("new-session"), mentions: state.mentions?.drafts.get("new-session")});
@@ -106,6 +177,7 @@ async function switchProject() {
     if (value) manager?.drafts.set("new-session", value);
   }
   state.projectCwd = cwd;
+  state.dispatchRestore = true;
   await savedViews.setProject(cwd);
   await refreshList();
   renderFolders(); navigation?.remember();
@@ -303,7 +375,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     const content = inAttention ? node("div", null, "attention-copy") : button;
     if (inAttention) button.append(content);
     content.append(title, snippet);
-    if (thread.checkpoint?.next_action) {
+    if (!thread.checkpoint_stale && thread.checkpoint?.next_action) {
       const next = node("div", null, "next-action"), copy = node("span", null, "next-copy");
       const actor = {user: "Your next step", agent: "Up next", external: "Waiting on"}[thread.checkpoint.next_actor] || "Next";
       copy.append(node("span", actor + " · ", "next-label"), document.createTextNode(thread.checkpoint.next_action));
@@ -312,29 +384,14 @@ function threadCard(thread, compact = false, inAttention = false) {
     if (thread.checkpoint_stale) content.append(node("small", "New activity since this checkpoint", "stale-checkpoint"));
     content.append(meta);
   }
+  if (thread.dispatcher) {
+    const designation = node("span", "Dispatcher", "dispatcher-designation");
+    (compact ? title : button.querySelector(".card-meta")).append(designation);
+  }
   button.onclick = () => action(() => select(thread.thread_id));
   if (!compact && thread.attention !== "archived") {
     const card = node("div", null, "thread-card" + (inAttention ? " attention-card" : ""));
     if (hasResponse) card.className += thread.unread_result ? " response-unread" : " response-read";
-    const pin = node("button", null, "card-pin");
-    pin.type = "button";
-    pin.dataset.thread = thread.thread_id;
-    pin.dataset.action = "pin";
-    pin.title = (thread.pinned ? "Unpin " : "Pin ") + thread.title;
-    pin.setAttribute("aria-label", pin.title);
-    pin.setAttribute("aria-pressed", String(Boolean(thread.pinned)));
-    pin.disabled = state.closing.has(thread.thread_id);
-    pin.setAttribute("aria-disabled", String(state.pinning.has(thread.thread_id) || pin.disabled));
-    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    icon.setAttribute("viewBox", "0 0 24 24");
-    icon.setAttribute("aria-hidden", "true");
-    const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    shape.setAttribute("d", "M9 3h6l-1 6 4 4v2H6v-2l4-4-1-6ZM12 15v6");
-    icon.append(shape); pin.append(icon);
-    pin.onclick = event => {
-      event.stopPropagation();
-      action(() => toggleThreadPinned(thread));
-    };
     const close = node("button", "×", "card-close");
     const label = (["running", "needs input"].includes(thread.status) ? "Stop and close " : "Close ") + thread.title;
     close.type = "button";
@@ -368,11 +425,14 @@ function threadCard(thread, compact = false, inAttention = false) {
     more.setAttribute("aria-label", "Thread options · " + thread.title);
     more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
     more.disabled = state.closing.has(thread.thread_id) || state.updatingThreads.has(thread.thread_id);
-    const items = [{label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)}];
+    const items = [
+      {label: thread.pinned ? "Unpin" : "Pin", run: () => action(() => toggleThreadPinned(thread))},
+      {label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)},
+    ];
     if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.dispatcher ? "Stop using as dispatcher" : "Use as dispatcher", run: () => action(() => toggleDispatcher(thread))});
     if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
     more.onclick = event => state.threadActions.showMenu(more, thread.title, items, event);
-    actions.append(pin, more, close);
+    actions.append(more, close);
     card.append(actions);
     return card;
   }
@@ -403,10 +463,12 @@ function createOverviewMotion() {
   window.addEventListener("resize", stop, {passive: true});
   reduced.addEventListener("change", stop);
   function cards() {
-    return [...$("overview").querySelectorAll("[data-card-thread]")].map(card => ({
-      card, id: card.dataset.cardThread, group: card.closest("[data-group]").dataset.group,
-      rect: card.getBoundingClientRect(),
-    }));
+    return [...$("overview").querySelectorAll("[data-card-thread]")].map(card => {
+      const group = card.closest("[data-group]").dataset.group;
+      // A pin is a separate card; the other copy can move between work stages.
+      return {card, id: JSON.stringify([card.dataset.cardThread, group === "pinned"]), group,
+        rect: card.getBoundingClientRect()};
+    });
   }
   function visible(item) {
     const r = item.rect, board = item.card.closest(".phase-board"), clip = board?.getBoundingClientRect();
@@ -481,6 +543,7 @@ function createOverviewMotion() {
 }
 function renderList() {
   if (state.paneMode) { renderStatus(); return; }
+  if (state.dispatchDock) syncDispatcherOverview();
   renderClosedToggle();
   savedViews?.render(threadsInProject(state.viewThreads || state.sessions));
   if (conversationSearch?.update()) { renderStatus(); return; }
@@ -492,12 +555,12 @@ function renderList() {
   const groupBy = $("group-by").value;
   const viewId = (state.projectCwd || "") + ":" + (savedViews?.activeId || "all");
   const signature = JSON.stringify([threads, state.selected, [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
-  $("home").setAttribute("aria-current", state.selected ? "false" : "page");
+  $("home").setAttribute("aria-current", state.selected && !state.dispatchDock?.active ? "false" : "page");
   $("thread-count").textContent = String(threads.length);
   const projects = new Set(threads.map(t => t.project_id).filter(Boolean)).size;
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
     " · " + projects + (projects === 1 ? " group" : " groups");
-  if (signature === state.listSignature) { renderStatus(); return; }
+  if (signature === state.listSignature) { renderStatus(); state.dispatchDock?.flush(); return; }
   state.listSignature = signature;
   state.overviewMotion ||= createOverviewMotion();
   const motionBefore = state.overviewMotion.capture(JSON.stringify([viewId, groupBy, query,
@@ -580,6 +643,7 @@ function renderList() {
     $("overview").append(empty);
   }
   state.overviewMotion.play(motionBefore);
+  state.dispatchDock?.flush();
   if (focused) {
     const candidates = [...focusArea.querySelectorAll("[data-thread]")].filter(el => el.dataset.thread === focused && el.dataset.action === focusAction);
     const target = candidates.find(el => el.closest("[data-group]")?.dataset.group === focusGroup) || candidates[0];
@@ -671,8 +735,14 @@ function agentThreadChildren(parent, tree, compact) {
     }
     button.append(node("span", child.title, "agent-row-title"));
     const phase = threadGrouping.phaseLabel(child);
-    const labels = [phase, status.label !== phase && status.label].filter(Boolean);
-    button.append(node("span", labels.join(" · "), "agent-row-status"));
+    const provider = child.client === "codex" ? "Codex" : child.client === "claude" ? "Claude Code"
+      : child.client === "antigravity" ? "Antigravity" : "Unknown provider";
+    const logoLabel = child.client === "codex" ? "OpenAI · Codex" : child.client === "claude" ? "Anthropic · Claude Code" : "Google · Antigravity";
+    const logo = globalThis.providerLogo?.(child.client, logoLabel);
+    const labels = [!logo && provider, phase, status.label !== phase && status.label].filter(Boolean);
+    const metadata = node("span", labels.join(" · "), "agent-row-status");
+    if (logo) metadata.replaceChildren(logo, node("span", labels.join(" · ")));
+    button.append(metadata);
     button.onclick = () => action(() => select(child.thread_id));
     item.append(button);
     if (tree.children.has(child.thread_id)) item.append(agentThreadChildren(child, tree, compact));
@@ -701,7 +771,8 @@ function sameConversation(first, second) {
   return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.work_thread.browser_session, first.work_thread.client]) ===
     JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.work_thread.browser_session, second.work_thread.client]);
 }
-async function select(id, {rollUp = false} = {}) {
+async function select(id, {rollUp = false, dock = false, focus = true} = {}) {
+  state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.mobileChat?.close();
   if (id === "new-session") return newSession();
   if (!state.paneMode) {
@@ -710,6 +781,8 @@ async function select(id, {rollUp = false} = {}) {
   }
   $("conversation").classList.remove("session-draft");
   if (!rollUp) state.rollUp?.stop();
+  if (dock && globalThis.agentCoordPanes?.active) globalThis.agentCoordPanes.leave();
+  if (dock) state.dispatchWorkspace?.hide();
   if (globalThis.agentCoordPanes?.active) { await globalThis.agentCoordPanes.openThread(id); return; }
   if (state.paneMode && state.selected && state.selected !== id) { await window.parent.agentCoordPanes.openThread(id); return; }
   savedViews?.remember();
@@ -717,6 +790,13 @@ async function select(id, {rollUp = false} = {}) {
   if (state.selected) state.drafts.set(state.selected, $("message").value);
   retainConversation();
   state.selected = id;
+  state.dispatchDock?.hide();
+  if (dock) {
+    setChatExpanded(false);
+    state.dispatchDock.show(id, state.folders.selected.cwd);
+    state.dispatchDock.remember(state.folders.selected.cwd, {id, hidden: false});
+    state.dispatchWorkspace?.show(id, state.folders.selected.cwd);
+  }
   $("message").value = state.drafts.get(id) || "";
   const cached = conversationEntry(id);
   notifications?.syncFocus();
@@ -732,7 +812,7 @@ async function select(id, {rollUp = false} = {}) {
   $("requests").replaceChildren();
   $("thread-context").hidden = true;
   renderTitle();
-  $("page-location").textContent = "Thread";
+  $("page-location").textContent = dock ? "Dispatcher" : "Thread";
   delete $("requests").dataset.signature;
   if (cached.detail) {
     renderThread();
@@ -755,20 +835,23 @@ async function select(id, {rollUp = false} = {}) {
   }
   renderList();
   const fresh = await refreshDetail();
-  if (state.selected !== id || fresh === false) return;
+  if (state.selected !== id) return;
+  // Streamed updates can invalidate the snapshot without changing the provider.
+  // Load its controls even when another detail refresh is already scheduled.
+  if (state.detail?.work_thread.browser_session) loadSessionModels();
+  if (fresh === false) return;
   if (state.paneMode) return;
   const displayed = state.detail.work_thread;
   if (displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
     await openProjectDirectory(displayed.project_cwd);
     return select(id);
   }
-  await api(threadPath(id), {seen: true, seen_checkpoint_id: displayed.checkpoint?.id || 0,
+  if (!dock) await api(threadPath(id), {seen: true, seen_checkpoint_id: displayed.checkpoint?.id || 0,
     seen_completion_id: displayed.turn_completion?.id || 0});
   await refreshList();
   if (state.selected !== id) return;
   if (state.detail?.work_thread.browser_session) {
-    (state.mobileChat?.matches ? $("timeline") : $("message")).focus({preventScroll: true});
-    loadSessionModels();
+    if (focus) (state.mobileChat?.matches && !dock ? $("timeline") : $("message")).focus({preventScroll: true});
   } else $("session-name").focus({preventScroll: true});
 }
 async function refreshDetail() {
@@ -796,6 +879,10 @@ async function refreshDetail() {
     if (id !== state.selected || state.conversations.get(id) !== entry) return true;
     state.detail = detail;
     state.detailRefreshing = changed;
+    if (state.dispatchDock?.active === id && (!detail.work_thread.dispatcher || detail.work_thread.attention === "archived")) {
+      for (const key of ["sessions", "viewThreads"]) if (state[key]) state[key] = state[key].map(t => t.thread_id === id ? detail.work_thread : t);
+      goHome(); return true;
+    }
     renderThread();
     if (!same || state.timelineThread !== id) renderTimeline();
     renderRequests(); renderQueuedMessages(); renderStatus();
@@ -816,7 +903,7 @@ function renderThread() {
   const detail = state.detail, work = detail.work_thread, checkpoint = work.checkpoint;
   $("thread-context").hidden = false;
   renderTitle();
-  $("page-location").textContent = "Thread";
+  $("page-location").textContent = state.dispatchDock?.active ? "Dispatcher" : "Thread";
   $("park").textContent = work.attention === "later" ? "Move to Now" : "Move to Later";
   $("snooze-thread-button").hidden = work.attention === "archived";
   $("snooze-thread-button").textContent = work.attention === "later" ? "Change return time…" : "Move to Later…";
@@ -929,7 +1016,8 @@ function renderSessionSettings() {
   $("workspace").textContent = session?.cwd || state.detail?.work_thread?.cwd || "";
   $("workspace").title = $("workspace").textContent;
   $("session-settings").hidden = !browserSession;
-  $("session-model").textContent = "Model · " + ((session?.client === "claude" ? "Claude Code · " : "") + (session?.model || (session?.client === "claude" ? "Claude default" : "Codex default")));
+  const providerName = session?.client === "antigravity" ? "Antigravity" : session?.client === "claude" ? "Claude Code" : "Codex";
+  $("session-model").textContent = "Model · " + providerName + " · " + (session?.model || "Default");
   $("session-effort").textContent = "Reasoning · " + (session?.effort || "Model default");
   $("session-yolo").hidden = !session?.yolo;
   $("edit-permissions").disabled = !browserSession || state.detailRefreshing || !!state.detail?.running || state.detail?.work_thread?.attention === "archived" || state.busy || state.closing.has(state.selected);
@@ -946,6 +1034,8 @@ function openSessionPermissions() {
   $("edit-yolo").checked = !!detail.session?.yolo;
   $("permissions-description").textContent = detail.session?.client === "claude"
     ? "With YOLO off, Claude Code uses its configured permissions and asks before restricted tool actions. Changes apply to the next turn."
+    : detail.session?.client === "antigravity"
+    ? "With YOLO off, Antigravity uses its native permissions and tool approval prompts. Changes apply to the next turn."
     : "With YOLO off, Codex uses workspace access and asks for additional permissions. Changes apply to the next turn.";
   $("permissions-error").hidden = true;
   dialog.showModal();
@@ -968,13 +1058,21 @@ function renderStatus() {
   const running = !!state.detail?.running;
   const work = state.detail?.work_thread;
   const dispatcher = !!work?.dispatcher;
+  const docked = !!state.dispatchDock?.active;
+  $("dispatcher-permissions").hidden = !docked;
+  $("dispatcher-permissions").disabled = $("edit-permissions").disabled;
+  $("dispatcher-permissions").textContent = state.detail?.session?.yolo ? "Permissions · Full access" : "Permissions";
+  if (docked && state.detail && !state.detailRefreshing) {
+    state.dispatchDock.update(state.detail);
+    state.dispatchWorkspace?.update(state.viewThreads, state.detail);
+  }
   if ($("dispatch-direct-label")) $("dispatch-direct-label").hidden = !dispatcher;
   if ($("toggle-dispatcher")) {
     $("toggle-dispatcher").hidden = !work?.browser_session || isSessionDraft();
     $("toggle-dispatcher").textContent = dispatcher ? "Stop using as dispatcher" : "Use as dispatcher";
     $("toggle-dispatcher").disabled = work?.attention === "archived" || state.busy;
   }
-  const composerLabel = dispatcher ? "Send a request" : work?.client === "claude" ? "Message Claude" : "Message Codex";
+  const composerLabel = dispatcher ? "Send a request" : work?.client === "antigravity" ? "Message Antigravity" : work?.client === "claude" ? "Message Claude" : "Message Codex";
   $("message-label").textContent = composerLabel;
   $("message").placeholder = composerLabel + " or drop images…";
   const archived = work?.attention === "archived";
@@ -989,8 +1087,8 @@ function renderStatus() {
     state.detail?.requests?.length ? "input" : active ? "running" : status?.key || "idle");
   $("composer").hidden = !work?.browser_session;
   $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (!dispatcher && running && !state.detail.activeTurn) || archived || state.busy || !!state.attachments?.pending() || state.closing.has(state.selected);
-  $("send").textContent = dispatcher ? "Send ↑" : running ? (work?.client === "claude" ? "Queue ↑" : "Steer ↑") : "Send ↑";
-  $("queue").hidden = dispatcher || !running || work?.client === "claude";
+  $("send").textContent = dispatcher ? "Send ↑" : running ? (work?.client !== "codex" ? "Queue ↑" : "Steer ↑") : "Send ↑";
+  $("queue").hidden = dispatcher || !running || work?.client !== "codex";
   $("queue").disabled = $("send").disabled;
   $("message").disabled = archived;
   $("stop").hidden = !running;
@@ -1003,7 +1101,7 @@ function renderStatus() {
   $("add-link").disabled = !state.detail;
   $("session-name").disabled = !state.detail || isSessionDraft();
   $("organize-thread").disabled = !state.detail;
-  $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (work?.client === "claude" ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
+  $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (work?.client !== "codex" ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
   state.attachments?.render();
   state.slashCommands?.render();
@@ -1130,7 +1228,7 @@ function renderTimeline() {
           const images = (item.content || []).filter(c => c.type === "image");
           if (images.length) ChatImageAttachments.appendPreviews(document, body, images);
         }
-        message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
+        message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
         message.append(body);
         fragment.append(message);
       } else {
@@ -1227,6 +1325,7 @@ async function refreshAgentMessages() {
   state.detail.coordinationMessages = result.data;
   entry.detail = state.detail; entry.nodes = null;
   renderTimeline();
+  state.dispatchDock?.update(state.detail);
 }
 function requestButton(label, decision, request, form) {
   const id = state.selected;
@@ -1253,12 +1352,18 @@ function renderRequests() {
     const box = node("section", null, "request"), params = request.params;
     const actions = node("div", null, "actions");
     if (request.method === "item/tool/requestUserInput") {
-      box.append(node("h3", (state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " has a question"));
+      box.append(node("h3", (state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " has a question"));
       const fields = [];
       for (const question of params.questions || []) {
         const label = node("label", question.question);
-        const input = node("input"); input.type = question.isSecret ? "password" : "text";
-        if (question.options?.length) {
+        const fixed = question.allowCustomAnswer === false && question.options?.length;
+        const input = node(fixed ? "select" : "input");
+        if (fixed) {
+          for (const option of question.options) {
+            const choice = node("option", option.label); choice.value = option.value || option.label; input.append(choice);
+          }
+        } else input.type = question.isSecret ? "password" : "text";
+        if (!fixed && question.options?.length) {
           const options = node("datalist"); options.id = "options-" + request.key + "-" + fields.length;
           for (const option of question.options) options.append(node("option", option.label));
           input.setAttribute("list", options.id); label.append(options);
@@ -1282,7 +1387,7 @@ function renderRequests() {
       }
       actions.append(requestButton("Continue", "accept", request, () => ({content: Object.fromEntries(fields.map(([key, schema, input]) => [key, schema.type === "boolean" ? input.checked : ["number", "integer"].includes(schema.type) ? Number(input.value) : input.value]))})), requestButton("Cancel", "cancel", request));
     } else if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(request.method)) {
-      box.append(node("h3", (state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " is requesting approval"));
+      box.append(node("h3", (state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " is requesting approval"));
       if (params.reason) box.append(node("p", params.reason));
       box.append(node("pre", params.command || (params.permissions || params.networkApprovalContext ? JSON.stringify(params.permissions || params.networkApprovalContext, null, 2) : params.grantRoot || "Apply the file changes shown above.")));
       const choices = params.availableDecisions || (request.method === "item/permissions/requestApproval" ? ["accept", "decline"] : ["accept", "acceptForSession", "decline", "cancel"]);
@@ -1335,7 +1440,7 @@ function applyEvent(event) {
   renderTimeline(); renderStatus();
 }
 let listTimer, detailTimer;
-function scheduleList() { clearTimeout(listTimer); listTimer = setTimeout(() => refreshList().catch(showError), 150); }
+function scheduleList() { clearTimeout(listTimer); listTimer = setTimeout(() => refreshList({background: true}).catch(showError), 150); }
 function scheduleDetail() { clearTimeout(detailTimer); detailTimer = setTimeout(() => refreshDetail().catch(showError), 100); }
 function connect() {
   const events = new EventSource(base + "events?completion_after=" + state.config.completionCursor);
@@ -1356,7 +1461,7 @@ function connect() {
     if (batch.completions?.length || batch.snoozes?.length) { scheduleList(); if (state.selected) scheduleDetail(); }
     if (batch.reset) { for (const entry of state.conversations?.values() || []) entry.revision++; scheduleDetail(); }
     for (const event of batch.events) {
-      if (event.method === "bridge/disconnected") { for (const entry of state.conversations?.values() || []) entry.revision++; showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail?.work_thread?.client !== "claude" && state.detail) { state.detail.running = false; state.detailRefreshing = true; renderRequests(); } renderStatus(); }
+      if (event.method === "bridge/disconnected") { for (const entry of state.conversations?.values() || []) entry.revision++; showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail?.work_thread?.client === "codex" && state.detail) { state.detail.running = false; state.detailRefreshing = true; renderRequests(); } renderStatus(); }
       else applyEvent(event);
       if (!event.method.endsWith("/delta") && !event.method.endsWith("/outputDelta")) scheduleList();
     }
@@ -1458,14 +1563,14 @@ function renderModelPicker() {
   const session = state.detail?.session, picker = $("model-picker");
   if (!session) { picker.disabled = true; globalThis.modelPicker?.sync(); renderEffortPicker(); return; }
   const draft = isSessionDraft(), client = session.client || "codex";
-  const clients = draft ? ["codex", "claude"] : [client];
+  const clients = draft ? ["codex", "claude", "antigravity"] : [client];
   const catalogs = state.modelCatalogs ||= new Map();
   const signature = JSON.stringify([clients, session.model, [...catalogs]]);
   if (picker.dataset.signature !== signature) {
     picker.dataset.signature = signature;
     picker.replaceChildren();
     for (const provider of clients) {
-      const group = node("optgroup"); group.label = provider === "claude" ? "Claude Code" : "Codex";
+      const group = node("optgroup"); group.label = provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude Code" : "Codex";
       if (draft || !session.model) group.append(new Option(group.label + " default", modelValue(provider, "")));
       const models = catalogs.get(provider) || [];
       for (const model of models) group.append(new Option(model.displayName || model.model, modelValue(provider, model.model)));
@@ -1478,7 +1583,8 @@ function renderModelPicker() {
   picker.value = modelValue(client, session.model);
   picker.disabled = state.busy || state.detailRefreshing || !!state.detail.running || state.detail.work_thread?.attention === "archived" || !!state.newSessionDraft?.createdId && draft;
   const errors = clients.filter(provider => state.modelErrors?.has(provider));
-  $("model-picker-status").textContent = errors.length ? errors.map(provider => (provider === "claude" ? "Claude Code" : "Codex") + " models unavailable").join(" · ") : "";
+  $("model-picker-status").textContent = errors.length ? errors.map(provider => (provider === "antigravity" ? "Antigravity" : provider === "claude" ? "Claude Code" : "Codex") + " models unavailable").join(" · ") : "";
+  if (client === "antigravity" && state.modelErrors?.has(client)) $("model-picker-status").textContent = state.modelErrors.get(client);
   globalThis.modelPicker?.sync();
   renderEffortPicker();
 }
@@ -1517,7 +1623,7 @@ async function changeSessionEffort() {
 $("effort-picker").onchange = () => action(changeSessionEffort);
 $("effort-picker").onfocus = () => { loadSessionModels(); };
 async function loadSessionModels() {
-  const clients = isSessionDraft() ? ["codex", "claude"] : [state.detail?.session?.client || "codex"];
+  const clients = isSessionDraft() ? ["codex", "claude", "antigravity"] : [state.detail?.session?.client || "codex"];
   const catalogs = state.modelCatalogs ||= new Map(), loading = state.modelLoading ||= new Set();
   const errors = state.modelErrors ||= new Map();
   await Promise.all(clients.map(async client => {
@@ -1560,7 +1666,7 @@ async function newSession() {
       } finally { state.choosingSessionFolder = false; }
     }
   }
-  goHome();
+  goHome({restoreDispatcher: false});
   state.newSessionDraft ||= {
     session: {...body, client: "codex", model: null, effort: null, yolo: false},
     work_thread: {thread_id: "new-session", title: "New session", ...body, project_cwd: body.cwd, client: "codex", browser_session: true, attention: "now", links: []},
@@ -1654,7 +1760,9 @@ function setChatExpanded(expanded) {
   button.title = expanded ? label + " (Esc)" : label;
 }
 $("expand-chat").onclick = () => setChatExpanded(!document.body.classList.contains("chat-expanded"));
-function goHome() {
+function goHome({restoreDispatcher = true} = {}) {
+  state.navigationRevision = (state.navigationRevision || 0) + 1;
+  state.dispatchRestore = restoreDispatcher;
   state.mobileChat?.close();
   state.rollUp?.stop();
   if (state.paneMode) {
@@ -1663,10 +1771,12 @@ function goHome() {
     if (index >= 0) host.close(index);
     return;
   }
+  state.dispatchWorkspace?.hide();
   globalThis.agentCoordPanes?.leave();
   setChatExpanded(false);
   if (state.selected) state.drafts.set(state.selected, $("message").value);
   retainConversation();
+  state.dispatchDock?.hide();
   state.selected = null; state.detail = null; state.titleEdit = null;
   state.detailRefreshing = false;
   if (navigation) navigation.remember();
@@ -1744,8 +1854,14 @@ $("thread-context").addEventListener("toggle", () => {
 compactContext.addEventListener("change", layoutContext);
 layoutContext();
 state.mobileChat = new MobileChat({onBack: goHome, onLayout: () => state.timelineScroll?.layout(), onContextLayout: layoutContext});
+window.agentCoordFindThreads = () => { goHome({restoreDispatcher: false}); $("search").focus(); $("search").select(); };
 document.addEventListener("keydown", event => {
   if (event.defaultPrevented || document.querySelector("dialog[open]")) return;
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f" &&
+      (state.dispatchWorkspace?.active || state.paneMode && window.parent.document.body.classList.contains("dispatcher-workspace"))) {
+    event.preventDefault();
+    (state.paneMode ? window.parent : window).agentCoordFindThreads(); return;
+  }
   if (event.key === "Escape" && document.body.classList.contains("chat-expanded")) {
     event.preventDefault(); setChatExpanded(false); $("expand-chat").focus(); return;
   }
@@ -1767,7 +1883,7 @@ $("search").onkeydown = event => {
   if (event.key === "Escape") { $("search").value = ""; filtersChanged(); }
 };
 async function sendMessage(mode = "steer") {
-  if (state.detail?.running && state.detail?.work_thread?.client === "claude") mode = "queue";
+  if (state.detail?.running && ["claude", "antigravity"].includes(state.detail?.work_thread?.client)) mode = "queue";
   const detail = state.detail;
   const dispatcher = !!detail?.work_thread?.dispatcher;
   const id = state.selected, text = $("message").value;
@@ -1782,6 +1898,7 @@ async function sendMessage(mode = "steer") {
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
   if (!dispatcher && detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
   state.busy = true; renderStatus();
+  let dispatchReceived = false;
   try {
     if (isSessionDraft()) {
       if (text.trim() === "/close") {
@@ -1810,8 +1927,10 @@ async function sendMessage(mode = "steer") {
       body.requestId = DispatchUI.requestKey(sessionStorage, id, body);
     }
     const result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
+    dispatchReceived = !!result.dispatched;
     if (result.dispatched) {
       sessionStorage.removeItem("dispatch-request:" + id);
+      if (body.askDispatcher && state.dispatchDock?.active === id) state.dispatchDock.expand(true);
       if ($("dispatch-direct")) $("dispatch-direct").checked = false;
     }
     state.attachments?.sent(id, images);
@@ -1826,12 +1945,20 @@ async function sendMessage(mode = "steer") {
     await refreshList();
     if (!result.command) await state.rollUp?.responded(ticket, {pending: !!state.detail?.requests?.length});
   }
+  catch (error) {
+    if (dispatchReceived) {
+      console.warn("Dispatcher accepted request before UI refresh failed", error);
+      throw new Error("Your request was received, but the view could not refresh. Do not send it again.");
+    }
+    throw error;
+  }
   finally { state.busy = false; renderStatus(); if (state.paneMode) globalThis.agentCoordPane?.saveDraft(); }
 }
 $("composer").onsubmit = event => { event.preventDefault(); action(sendMessage); };
 async function toggleDispatcher(thread = state.detail?.work_thread) {
   if (!thread) return;
   await api(sessionPath(thread.thread_id) + "/dispatch", {enabled: !thread.dispatcher});
+  if (!thread.dispatcher) state.dispatchDock?.remember(thread.project_cwd || thread.cwd, {id: thread.thread_id, hidden: false});
   if (state.selected === thread.thread_id) await refreshDetail();
   await refreshList();
 }
@@ -1969,8 +2096,27 @@ async function forkThread(onSuccess = () => {}) {
 }
 async function boot() {
   state.timelineScroll = new ConversationScroll($("timeline"), $("jump-to-latest"));
+  if (!state.paneMode) {
+    let storage; try { storage = localStorage; } catch { /* Optional preference. */ }
+    state.dispatchDock = new DispatchUI.Dock({document, view: window, storage,
+      open: id => action(() => select(id)), dismiss: receipt => action(async () => {
+        await api(sessionPath(state.selected) + "/dispatch", {action: "dismiss", id: receipt});
+        await refreshDetail();
+      }), onExpand: expanded => {
+        notifications?.syncFocus();
+        if (expanded) {
+          state.timelineScroll?.layout();
+          const work = state.detail?.work_thread;
+          if (work && !state.detailRefreshing && state.dispatchDock?.active === work.thread_id) {
+            action(() => api(threadPath(work.thread_id), {seen: true, seen_checkpoint_id: work.checkpoint?.id || 0,
+              seen_completion_id: work.turn_completion?.id || 0}));
+          }
+        }
+      }});
+  }
   const initialNavigation = agentCoordNavigation.initialLink(location);
   const initialThread = decodeURIComponent(location.hash.slice(1));
+  const initialDispatcher = new URLSearchParams(location.search).get("dispatcher");
   const initialMessage = new URLSearchParams(location.search).get("message");
   if (initialThread && /^\d+$/.test(initialMessage || "")) state.messageTarget = {thread: initialThread, id: initialMessage};
   // Consume the jump once; new tiled frames inherit the remaining page query.
@@ -2032,7 +2178,8 @@ async function boot() {
     claim: async completion_id => (await api("notifications/claim", {completion_id})).claimed,
     claimApproval: async request_key => (await api("notifications/claim", {request_key})).claimed,
     claimSnooze: async snooze_id => (await api("notifications/claim", {snooze_id})).claimed,
-    selected: () => window.agentCoordPanes?.active ? window.agentCoordPanes.selected : state.selected,
+    selected: () => window.agentCoordPanes?.active ? window.agentCoordPanes.selected :
+      state.dispatchDock?.active && !state.dispatchDock.expanded ? null : state.selected,
     openThread: select,
     onError: showError,
   });
@@ -2076,6 +2223,13 @@ async function boot() {
   setupPaneShell({state, document, api, select, goHome, refreshList, showError, notifications: () => notifications,
     getView: () => state.projectCwd + ":" + savedViews.activeId,
     getThreads: () => threadsInProject(state.sessions).filter(thread => threadViews.matches(thread, savedViews.read().filters))});
+  state.dispatchWorkspace = new DispatcherWorkspace.Workspace({document, view: window, storage: preferences,
+    panes: window.agentCoordPanes, fetchThread: id => api(threadPath(id)), onError: showError,
+    dismissThread: async thread => {
+      await markThreadHandled(thread);
+      state.dispatchWorkspace.update(state.viewThreads, state.detail);
+    },
+    openDispatcher: () => state.dispatchDock.expand(true)});
   setupRollUp({document, state, api: async (...args) => {
     const result = await api(...args);
     return args[0].startsWith("threads?") ? {...result, data: threadsInProject(result.data)} : result;
@@ -2085,8 +2239,10 @@ async function boot() {
   savedViews.restoreScroll();
   navigation = new agentCoordNavigation.Router({api, history, location, windowId: state.sourceWindowId, onError: showError,
     blocked: () => Boolean(document.querySelector("dialog[open]") || window.agentCoordPanes?.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")),
-    capture: () => ({directory: state.projectCwd, viewId: savedViews.activeId, ...savedViews.read(), tiled: Boolean(window.agentCoordPanes?.active),
-      thread: window.agentCoordPanes?.active ? window.agentCoordPanes.selected : state.selected}),
+    capture: () => ({directory: state.projectCwd, viewId: savedViews.activeId, ...savedViews.read(),
+      ...(state.dispatchWorkspace?.active ? {dispatcher: state.dispatchWorkspace.id} : {}),
+      tiled: Boolean(window.agentCoordPanes?.active && !state.dispatchWorkspace?.active),
+      thread: window.agentCoordPanes?.active ? window.agentCoordPanes.selected : state.dispatchDock?.active ? null : state.selected}),
     apply: async route => {
       if (route.kind === "thread") {
         // Message results open a full conversation so an exact target is visible
@@ -2118,7 +2274,8 @@ async function boot() {
       else if (snapshot.directory === "" && state.projectCwd) { state.folders.activate(""); await switchProject(); }
       if (snapshot.viewId === "all") await savedViews.overview(snapshot.filters, snapshot.group_by);
       else await savedViews.activate(snapshot.viewId);
-      if (snapshot.tiled) window.agentCoordPanes?.restoreView();
+      if (snapshot.dispatcher) await select(snapshot.dispatcher, {dock: true, focus: false});
+      else if (snapshot.tiled) window.agentCoordPanes?.restoreView();
       else goHome();
       if (snapshot.thread) await select(snapshot.thread);
     },
@@ -2133,14 +2290,17 @@ async function boot() {
     navigation.open(link.getAttribute("href"));
   });
   if (initialNavigation) await navigation.open(initialNavigation, {push: false});
-  if (initialThread) await select(initialThread);
+  if (initialDispatcher) await select(initialDispatcher, {dock: true, focus: false});
+  if (initialThread && initialThread !== initialDispatcher) await select(initialThread);
   if (initialThread && /^\d+$/.test(initialMessage || "")) focusAgentMessage(initialMessage);
+  state.dispatchReady = true;
+  syncDispatcherOverview();
   navigation.remember();
   window.agentCoordDesktop?.navigationReady();
   if (state.config.remote) await notifications.ready();
   // Checkpoints written by terminal agents arrive through the shared database.
   const metadataTimer = setInterval(() => {
-    if (!document.hidden) { refreshList().catch(showError); refreshThread().catch(showError); window.agentCoordPanes?.refresh(); }
+    if (!document.hidden) { refreshList({background: true}).catch(showError); refreshThread().catch(showError); window.agentCoordPanes?.refresh(); }
   }, 5000);
   window.addEventListener("pagehide", () => clearInterval(metadataTimer), {once: true});
   window.addEventListener("pagehide", () => savedViews.remember());

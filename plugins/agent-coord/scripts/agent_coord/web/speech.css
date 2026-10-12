@@ -1,5 +1,6 @@
 #speech-toggle[aria-pressed="true"] { color: var(--ink, #222); background: var(--tint, #eee); border-color: var(--line-strong, #ccc); }
 #speech-toggle { flex: 0 0 auto; min-width: 36px; min-height: 36px; }
+@media (min-width: 721px) { .conversation-controls #speech-toggle { display: none; } }
 .speech-player { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 16px; font-size: 13px; }
 .speech-player[hidden] { display: none; }
 .speech-player span { flex: 1; min-width: 120px; overflow-wrap: anywhere; }

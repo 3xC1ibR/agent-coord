@@ -1,9 +1,15 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const {parse, safe, initialLink, Router} = require("../plugins/agent-coord/scripts/agent_coord/web/navigation.js");
+const {parse, safe, initialLink, pageURL, Router} = require("../plugins/agent-coord/scripts/agent_coord/web/navigation.js");
 const markdown = require("../plugins/agent-coord/scripts/agent_coord/web/markdown.js");
 const request = "11111111-1111-4111-8111-111111111111";
+
+test("dispatcher URLs retain the opt-in page and selected worker without changing overview URLs", () => {
+  const base = {directory: "/work", viewId: "all", filters: {}, thread: null};
+  assert.equal(pageURL(base), "/?directory=%2Fwork");
+  assert.equal(pageURL({...base, dispatcher: "entry", thread: "worker"}), "/?directory=%2Fwork&dispatcher=entry#worker");
+});
 
 test("message links preserve exact turn and item and reject incomplete destinations", () => {
   assert.deepEqual(parse("agentcoord://thread/t?turn=turn%2Fid&item=item%3A1").route,

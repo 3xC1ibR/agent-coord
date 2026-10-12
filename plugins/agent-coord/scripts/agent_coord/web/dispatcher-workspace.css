@@ -1,0 +1,358 @@
+/* The opt-in dispatcher has its own canvas. The standard workspace keeps its layout. */
+body.dispatcher-workspace {
+  grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+body.dispatcher-workspace > .sidebar,
+body.dispatcher-workspace > .sidebar-backdrop,
+body.dispatcher-workspace > main > .views-bar,
+body.dispatcher-workspace > main > #welcome,
+body.dispatcher-workspace > main > #roll-up-bar,
+body.dispatcher-workspace #menu-toggle {
+  display: none !important;
+}
+
+body.dispatcher-workspace > main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  height: 100%;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+body.dispatcher-workspace > main > .workspace-bar {
+  display: flex;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-height: 48px;
+  padding-inline: 24px;
+  background: var(--surface);
+}
+
+body.dispatcher-workspace > main > .projects-bar {
+  display: flex;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  padding-inline: 24px;
+  background: var(--surface);
+}
+
+body.dispatcher-workspace #back-home,
+body.dispatcher-workspace #back-home + span {
+  display: inline-flex;
+}
+
+body.dispatcher-workspace #thread-panes {
+  grid-column: 1;
+  grid-row: 3;
+  background: var(--paper);
+}
+
+body.dispatcher-workspace .pane-layout { padding: 12px; }
+body.dispatcher-workspace .thread-pane { border-radius: 9px; }
+body.dispatcher-workspace .thread-pane.pane-focused {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+body.dispatcher-workspace .pane-header {
+  height: 39px;
+  padding: 5px 6px;
+  background: color-mix(in srgb, var(--surface) 65%, var(--panel));
+}
+body.dispatcher-workspace .pane-tabs button[aria-selected=true] {
+  box-shadow: none;
+  border-color: var(--line);
+}
+
+body.dispatcher-workspace #dispatcher-empty {
+  z-index: 1;
+  pointer-events: none;
+  grid-column: 1;
+  grid-row: 3;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 32px;
+  text-align: center;
+}
+
+body.dispatcher-workspace #dispatcher-empty h1,
+body.dispatcher-workspace #dispatcher-empty h2 {
+  max-width: 460px;
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(21px, 2.2vw, 30px);
+  line-height: 1.25;
+  letter-spacing: -.035em;
+  font-weight: 550;
+}
+
+body.dispatcher-workspace #dispatcher-empty p {
+  max-width: 360px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+/* Result entries summarize the outcome; the conversation stays a click away. */
+body.dispatcher-workspace #dispatcher-workspace {
+  grid-column: 2;
+  grid-row: 3;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  padding: 22px 14px;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+}
+
+body.dispatcher-workspace > main:has(> #dispatcher-workspace[hidden]) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body.dispatcher-workspace .dispatch-section + .dispatch-section { margin-top: 24px; }
+body.dispatcher-workspace .dispatch-section h2 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 6px 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+body.dispatcher-workspace .dispatch-section h2 small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+body.dispatcher-workspace .dispatch-work-card {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+body.dispatcher-workspace .dispatch-work-card .dispatch-work-item { flex: 1; min-width: 0; margin-bottom: 0; }
+body.dispatcher-workspace .dispatch-dismiss { flex-shrink: 0; min-width: 44px; min-height: 44px; padding: 8px; }
+body.dispatcher-workspace .dispatch-work-item {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 11px 12px;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+}
+body.dispatcher-workspace .dispatch-work-item:hover:not(:disabled) {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--panel) 55%, var(--surface));
+}
+body.dispatcher-workspace .dispatch-work-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+body.dispatcher-workspace .dispatch-work-item[aria-current=true] {
+  border-color: var(--line-strong);
+  background: var(--paper);
+}
+body.dispatcher-workspace .dispatch-item-title {
+  padding-right: 10px;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 550;
+}
+body.dispatcher-workspace .dispatch-item-state {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+body.dispatcher-workspace .dispatch-item-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+body.dispatcher-workspace .dispatch-work-item.is-unread {
+  border-color: var(--line);
+  background: var(--paper);
+}
+body.dispatcher-workspace .dispatch-work-item.is-unread::after {
+  content: "";
+  position: absolute;
+  top: 16px;
+  right: 11px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+body.dispatcher-workspace .dispatch-work-item[data-kind=needs] {
+  border-color: color-mix(in srgb, var(--warm) 25%, var(--line));
+  background: color-mix(in srgb, var(--warm) 4%, var(--surface));
+}
+body.dispatcher-workspace .dispatch-work-item[data-kind=needs] .dispatch-item-state { color: var(--warm); }
+body.dispatcher-workspace .dispatch-work-item[data-kind=running] .dispatch-item-state { color: var(--accent); }
+body.dispatcher-workspace #dispatcher-rail-empty {
+  margin: 0;
+  padding: 8px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Keep the dispatcher composer available while independent conversation frames stay mounted. */
+body.dispatcher-workspace #dispatcher-dock {
+  display: flex;
+  grid-column: 1 / -1;
+  grid-row: 4;
+  max-height: min(55dvh, 580px);
+  min-width: 0;
+  border-top-color: var(--line);
+  box-shadow: none;
+}
+body.dispatcher-workspace .dispatcher-dock-head {
+  padding: 12px 24px 3px;
+}
+body.dispatcher-workspace .dispatcher-latest {
+  padding: 4px 24px 9px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+body.dispatcher-workspace #dispatcher-dock .composer {
+  margin: 0 24px 16px;
+  border-radius: 10px;
+}
+body.dispatcher-workspace #dispatcher-dock .composer:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+body.dispatcher-workspace #dispatcher-dock.expanded .conversation-content {
+  max-height: min(28dvh, 300px);
+}
+
+@media (max-width: 1000px) and (min-width: 801px) {
+  body.dispatcher-workspace > main { grid-template-columns: minmax(0, 1fr) 260px; }
+}
+
+/* These disclosures belong only to the phone dispatcher, not ordinary chats. */
+.dispatcher-mobile-nav, #dispatcher-options-toggle { display: none; }
+
+@media (max-width: 800px) {
+  body.dispatcher-workspace { display: block; }
+  body.dispatcher-workspace > main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  }
+  body.dispatcher-workspace > main > .workspace-bar { padding-inline: 12px; gap: 4px; }
+  body.dispatcher-workspace .workspace-bar .breadcrumb { min-width: 0; flex: 1; }
+  body.dispatcher-workspace #back-home { min-width: 0; min-height: 44px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+  body.dispatcher-workspace #back-home + span,
+  body.dispatcher-workspace #page-location { display: none; }
+  body.dispatcher-workspace .dispatcher-mobile-nav { display: flex; flex-shrink: 0; gap: 4px; }
+  body.dispatcher-workspace .dispatcher-mobile-nav button { min-width: 44px; min-height: 44px; padding: 8px; }
+  body.dispatcher-workspace #dispatcher-mobile-conversation.has-reply { color: var(--accent); }
+  body.dispatcher-workspace > main > .projects-bar { display: none; padding-inline: 12px; }
+  body.dispatcher-workspace.dispatcher-projects-open > main > .projects-bar { display: flex; }
+  body.dispatcher-workspace .project-tab-close,
+  body.dispatcher-workspace #open-project-tab { min-width: 44px; min-height: 44px; }
+  body.dispatcher-workspace .pane-layout { padding: 6px; }
+  body.dispatcher-workspace:not(.panes-visible) #thread-panes { visibility: hidden; }
+  body.dispatcher-workspace #dispatcher-empty { padding: 20px; }
+  body.dispatcher-workspace #dispatcher-empty h1 { font-size: 22px; }
+  body.dispatcher-workspace #dispatcher-empty p { font-size: 13px; }
+  body.dispatcher-workspace.dispatcher-has-activity #dispatcher-empty { display: none; }
+  body.dispatcher-workspace #dispatcher-workspace {
+    grid-column: 1;
+    grid-row: 3;
+    display: block;
+    padding: 16px 12px;
+    border: 0;
+  }
+  body.dispatcher-workspace:not(.dispatcher-has-activity) #dispatcher-workspace { visibility: hidden; }
+  /* An open conversation is the whole mobile screen. Its own back button
+     returns to the dispatcher without closing the session or losing drafts. */
+  body.dispatcher-workspace.panes-visible > main { grid-template-rows: minmax(0, 1fr); }
+  body.dispatcher-workspace.panes-visible > main > .workspace-bar,
+  body.dispatcher-workspace.panes-visible > main > .projects-bar,
+  body.dispatcher-workspace.panes-visible #dispatcher-workspace,
+  body.dispatcher-workspace.panes-visible #dispatcher-dock,
+  body.dispatcher-workspace.panes-visible .pane-header { display: none !important; }
+  body.dispatcher-workspace.panes-visible #thread-panes { grid-row: 1; }
+  body.dispatcher-workspace.panes-visible .pane-layout { padding: 0; }
+  body.dispatcher-workspace.panes-visible .thread-pane { border: 0; border-radius: 0; box-shadow: none; }
+  body.dispatcher-workspace .dispatch-section + .dispatch-section { margin-top: 18px; }
+  body.dispatcher-workspace .dispatch-section h2 { margin-bottom: 6px; font-size: 14px; }
+  body.dispatcher-workspace .dispatch-work-item { padding: 10px; gap: 3px; min-height: 44px; }
+  body.dispatcher-workspace .dispatch-item-title { font-size: 14px; }
+  body.dispatcher-workspace .dispatch-item-state { font-size: 12px; }
+  body.dispatcher-workspace .dispatch-item-summary { -webkit-line-clamp: 2; }
+  body.dispatcher-workspace #dispatcher-dock { grid-row: 5; max-height: calc(var(--mobile-viewport-height, 100dvh) - 64px); padding-top: 8px; }
+  body.dispatcher-workspace .dispatcher-dock-head,
+  body.dispatcher-workspace #dispatcher-receipt { display: none; }
+  body.dispatcher-workspace #dispatcher-dock.expanded #dispatcher-receipt { display: block; padding: 4px 12px 8px; }
+  body.dispatcher-workspace #dispatcher-dock.expanded .conversation-content {
+    max-height: min(32dvh, calc(var(--mobile-viewport-height, 100dvh) * .32));
+  }
+  body.dispatcher-workspace #dispatcher-dock .composer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 4px;
+    padding: 8px;
+    margin: 0 12px max(8px, env(safe-area-inset-bottom));
+  }
+  body.dispatcher-workspace #dispatcher-dock .composer-draft,
+  body.dispatcher-workspace #dispatcher-dock #thread-references { flex-basis: 100%; order: 0; }
+  body.dispatcher-workspace #dispatcher-dock .composer textarea {
+    font-size: 16px;
+    max-height: min(96px, calc(var(--mobile-viewport-height, 100dvh) * .2));
+    resize: none;
+  }
+  body.dispatcher-workspace #dispatcher-dock .composer-model,
+  body.dispatcher-workspace #dispatcher-dock .composer-footer,
+  body.dispatcher-workspace #dispatcher-dock .composer-footer > div { display: contents; }
+  body.dispatcher-workspace #dispatcher-dock .composer:not(.dispatcher-options-open) .composer-model > :not(#attach-image),
+  body.dispatcher-workspace #dispatcher-dock #dispatch-direct-label,
+  body.dispatcher-workspace #dispatcher-dock #dispatcher-permissions,
+  body.dispatcher-workspace #dispatcher-dock #composer-hint { display: none; }
+  body.dispatcher-workspace #dispatcher-dock #attach-image,
+  body.dispatcher-workspace #dispatcher-options-toggle,
+  body.dispatcher-workspace #dispatcher-dock .composer-footer button { order: 3; min-width: 44px; min-height: 44px; margin: 0; }
+  body.dispatcher-workspace #dispatcher-options-toggle { display: inline-flex; align-items: center; }
+  body.dispatcher-workspace #dispatcher-dock #send { margin-left: auto; }
+  body.dispatcher-workspace #dispatcher-dock .dispatcher-options-open .composer-model {
+    display: flex; flex-basis: 100%; order: 2; margin: 0; gap: 6px;
+  }
+  body.dispatcher-workspace #dispatcher-dock .dispatcher-options-open .composer-model > button { min-height: 44px; margin: 0; }
+  body.dispatcher-workspace #dispatcher-dock .dispatcher-options-open #attach-image { order: 0; }
+  body.dispatcher-workspace #dispatcher-dock .dispatcher-options-open #dispatch-direct-label,
+  body.dispatcher-workspace #dispatcher-dock .composer:has(#dispatch-direct:checked) #dispatch-direct-label {
+    display: inline-flex; order: 1; flex-basis: 100%; min-height: 44px; margin: 0; font-size: 13px;
+  }
+  body.dispatcher-workspace #dispatcher-dock .dispatcher-options-open #dispatcher-permissions { display: inline-flex; align-items: center; }
+  body.dispatcher-workspace #dispatcher-options-toggle:focus-visible,
+  body.dispatcher-workspace .dispatcher-mobile-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+}

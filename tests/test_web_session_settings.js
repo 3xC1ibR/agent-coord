@@ -25,13 +25,13 @@ function setup() {
 test("status line shows effective settings and YOLO only for that session", () => {
   const c = setup();
   c.renderSessionSettings();
-  assert.equal(c.$("session-model").textContent, "Model · test-model");
+  assert.equal(c.$("session-model").textContent, "Model · Codex · test-model");
   assert.equal(c.$("session-effort").textContent, "Reasoning · high");
   assert.equal(c.$("session-yolo").hidden, false);
   assert.equal(c.$("edit-permissions").disabled, false);
   c.state.detail.session = {model: "another", effort: "low", yolo: 0};
   c.renderSessionSettings();
-  assert.equal(c.$("session-model").textContent, "Model · another");
+  assert.equal(c.$("session-model").textContent, "Model · Codex · another");
   assert.equal(c.$("session-yolo").hidden, true);
   c.state.detail.work_thread.browser_session = false;
   c.renderSessionSettings();

@@ -42,7 +42,7 @@ class ThreadPanes {
     this.deck = this.el("div", "pane-deck");
     container.append(this.chrome, this.deck);
     const Resize = document.defaultView?.ResizeObserver;
-    if (Resize) { this.observer = new Resize(() => this.position()); this.observer.observe(container); }
+    if (Resize) { this.observer = new Resize(() => { this.position(); this.onResize?.(); }); this.observer.observe(container); }
     document.defaultView?.addEventListener("resize", () => this.position());
   }
   el(tag, className, text) {
@@ -111,7 +111,10 @@ class ThreadPanes {
     record.api = api;
     if (record.initialDraft) { api.restoreDraft(record.initialDraft); record.initialDraft = null; }
     api.setActive(this.active && this.selected === record.thread.thread_id && this.document.hasFocus());
-    this.position(); return true;
+    this.position();
+    if (record.focusOnAttach && this.active && this.selected === record.thread.thread_id && !record.frame.hidden) api.focus();
+    delete record.focusOnAttach;
+    return true;
   }
   from(source) { return [...this.records.values()].find(r => r.frame?.contentWindow === source); }
   focused(source) {
@@ -146,7 +149,11 @@ class ThreadPanes {
     if (changed) this.render(); else this.position();
     for (const record of this.records.values()) record.api?.setActive(record.thread.thread_id === id);
     for (const pane of this.chrome.querySelectorAll(".thread-pane")) pane.classList.toggle("pane-focused", Number(pane.dataset.slot) === index);
-    if (moveFocus) this.records.get(id)?.api?.focus();
+    if (moveFocus) {
+      const record = this.records.get(id);
+      if (record?.api) record.api.focus();
+      else if (record) record.focusOnAttach = true;
+    }
     this.onFocus?.(id); return true;
   }
   open(thread) {
@@ -168,6 +175,7 @@ class ThreadPanes {
   }
   close(index) {
     const layout = this.layout, id = layout.tabs[index];
+    if (this.workspaceClose) { this.workspaceClose(id); return; }
     const group = layout.groups[index]; group.splice(group.indexOf(id), 1);
     if (group.length) layout.tabs[index] = group[0];
     else {
@@ -309,8 +317,17 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     onFocus: () => { notifications()?.syncFocus(); window.dispatchEvent(new Event("agent-coord-pane-state")); },
     onExit: () => goHome(), onTile: () => shell.toggleCurrent(), onError: showError});
   window.agentCoordPanes = shell;
-  shell.requestList = () => refreshList().catch(showError);
+  shell.requestList = options => refreshList(options).catch(showError);
   shell.openThread = async (id, {messageId} = {}) => {
+    if (state.dispatchWorkspace?.active) {
+      await state.dispatchWorkspace.open(id);
+      if (messageId != null) {
+        const record = shell.records.get(id);
+        if (record?.api) record.api.focusMessage?.(messageId);
+        else if (record) record.messageTarget = messageId;
+      }
+      return;
+    }
     if (!shell.active) return select(id);
     try {
       shell.open(await api("threads/" + encodeURIComponent(id)));
@@ -364,6 +381,7 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
   let toggling = false;
   shell.toggleCurrent = async () => {
     if (toggling || !canChangeLayout()) return false;
+    if (state.dispatchWorkspace?.active) { goHome({restoreDispatcher: false}); return true; }
     toggling = true;
     try {
       if (shell.active) {
@@ -446,7 +464,7 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
     receive: batch => {
       if (batch.reset || batch.completions?.some(event => event.thread_id === state.selected)) scheduleDetail();
       for (const event of batch.events || []) {
-        if (event.method === "bridge/disconnected") { showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail && state.detail.work_thread?.client !== "claude") state.detail.running = false; renderStatus(); }
+        if (event.method === "bridge/disconnected") { showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail && state.detail.work_thread?.client === "codex") state.detail.running = false; renderStatus(); }
         else applyEvent(event);
       }
     },

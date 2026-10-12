@@ -9,7 +9,10 @@ class MobileChat {
     this.onLayout = onLayout;
     this.onContextLayout = onContextLayout;
     this.$ = id => doc.getElementById(id);
-    this.media = view.matchMedia("(max-width: 720px), (max-width: 1100px) and (hover: none) and (pointer: coarse)");
+    // Pane documents share the dispatcher's compact layout breakpoint, so the
+    // conversation still provides its own back button when pane chrome is hidden.
+    const pane = view.frameElement?.classList.contains("conversation-pane-frame");
+    this.media = view.matchMedia(`(max-width: ${pane ? 800 : 720}px), (max-width: 1100px) and (hover: none) and (pointer: coarse)`);
     this.dialog = this.$("mobile-thread-sheet");
     this.trigger = this.$("mobile-chat-actions");
     this.panel = this.$("context-panel");
@@ -21,6 +24,9 @@ class MobileChat {
       return {element, marker};
     });
     this.$("mobile-chat-back").onclick = onBack;
+    if (pane && view.parent.document.body.classList.contains("dispatcher-workspace")) {
+      this.$("mobile-chat-back").setAttribute("aria-label", "Back to dispatcher");
+    }
     this.trigger.onclick = () => this.open("actions");
     this.$("mobile-show-context").onclick = () => this.open("context");
     this.$("mobile-sheet-back").onclick = () => this.open("actions");

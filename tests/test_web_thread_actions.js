@@ -4,10 +4,22 @@ const assert = require("node:assert/strict");
 const createThreadActions = require("../plugins/agent-coord/scripts/agent_coord/web/thread-actions.js");
 
 function setup(reduced = false) {
-  const handlers = {}, timers = [], animations = [];
+  const handlers = {}, timers = new Map(), animations = [];
+  let now = 0, nextTimer = 0;
+  function advance(milliseconds) {
+    const until = now + milliseconds;
+    while (true) {
+      const next = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      const [id, timer] = next; now = timer.at; timers.delete(id); timer.run();
+    }
+    now = until;
+  }
   class Element {
     constructor(tag) { this.tagName = tag; this.children = []; this.attributes = {}; this.style = {}; this.dataset = {}; this.isConnected = true; this.classes = new Set(); this.classList = {add: key => this.classes.add(key), remove: key => this.classes.delete(key)}; }
     append(...items) { for (const item of items) { this.children.push(item); item.parent = this; } }
+    addEventListener(name, callback) { (this.listeners ||= {})[name] = callback; }
+    emit(name, event = {}) { this.listeners?.[name]?.(event); }
     setAttribute(key, value) { this.attributes[key] = value; }
     removeAttribute(key) { delete this.attributes[key]; }
     remove() { this.isConnected = false; if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
@@ -24,9 +36,10 @@ function setup(reduced = false) {
     getElementById: id => body.children.find(item => item.id === id),
     querySelectorAll: () => [], addEventListener: (name, fn) => { handlers["doc:" + name] = fn; }};
   const win = {innerWidth: 390, innerHeight: 500, matchMedia: () => ({matches: reduced}),
-    setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
+    setTimeout: (run, delay) => { const id = ++nextTimer; timers.set(id, {run, at: now + delay}); return id; },
+    clearTimeout: id => timers.delete(id),
     addEventListener: (name, fn) => { handlers[name] = fn; }};
-  return {ui: createThreadActions(doc, win), doc, handlers, timers, animations, tab, Element};
+  return {ui: createThreadActions(doc, win), doc, handlers, timers, advance, animations, tab, Element};
 }
 const event = key => ({key, preventDefault() {}, stopPropagation() {}});
 
@@ -46,10 +59,10 @@ test("overflow menu opens without opening the card, supports keyboard navigation
 });
 
 test("close notices retain independent Undo actions and a failed undo remains retryable", async () => {
-  const {ui, doc, timers} = setup(); let failures = true, restored = 0;
+  const {ui, doc, timers, advance} = setup(); let failures = true, restored = 0;
   ui.notify("one", "First closed", async () => { if (failures) throw new Error("Offline"); restored++; });
   ui.notify("two", "Second closed", async () => { restored++; });
-  assert.equal(timers.length, 0, "Undo must not silently expire");
+  advance(9000);
   const region = doc.getElementById("thread-feedback"), first = region.children[0], second = region.children[1];
   await first.children[1].onclick();
   assert.equal(first.children[1].disabled, false);
@@ -57,6 +70,59 @@ test("close notices retain independent Undo actions and a failed undo remains re
   await second.children[1].onclick(); assert.equal(region.children.length, 1);
   failures = false; await first.children[1].onclick();
   assert.equal(region.children.length, 0); assert.equal(restored, 2);
+  assert.equal(timers.size, 0);
+});
+
+test("close notifications expire independently after a usable Undo interval", () => {
+  const {ui, doc, advance} = setup();
+  const undo = () => assert.fail("expiration must not undo the close");
+  ui.notify("one", "First closed", undo);
+  const region = doc.getElementById("thread-feedback");
+  advance(4000); ui.notify("two", "Second closed", undo);
+  advance(5999); assert.equal(region.children.length, 2);
+  advance(1); assert.equal(region.children.length, 1);
+  assert.equal(region.firstChild.firstChild.textContent, "Second closed");
+  advance(4000); assert.equal(region.children.length, 0);
+});
+
+test("hover and keyboard focus pause Undo expiration until interaction ends", () => {
+  const {ui, doc, advance, tab} = setup();
+  ui.notify("one", "Closed", () => {});
+  const region = doc.getElementById("thread-feedback"), notice = region.firstChild;
+  advance(9000); notice.emit("pointerenter"); advance(20000);
+  assert.equal(region.children.length, 1);
+  notice.emit("focusin"); notice.emit("pointerleave"); advance(20000);
+  assert.equal(region.children.length, 1);
+  notice.emit("focusout", {relatedTarget: notice.children[1]}); advance(20000);
+  assert.equal(region.children.length, 1);
+  notice.emit("focusout", {relatedTarget: tab}); advance(9999);
+  assert.equal(region.children.length, 1);
+  advance(1); assert.equal(region.children.length, 0);
+});
+
+test("an in-flight Undo survives its deadline and a failure gets a fresh retry interval", async () => {
+  const {ui, doc, advance} = setup(); let rejectUndo;
+  ui.notify("one", "Closed", () => new Promise((_, reject) => { rejectUndo = reject; }));
+  const region = doc.getElementById("thread-feedback"), notice = region.firstChild, undo = notice.children[1];
+  advance(9000); const pending = undo.onclick(); advance(20000);
+  assert.equal(region.children.length, 1); assert.equal(undo.disabled, true);
+  rejectUndo(new Error("Offline")); await pending;
+  assert.equal(undo.disabled, false); assert.match(notice.firstChild.textContent, /Try Undo again/);
+  advance(9999); assert.equal(region.children.length, 1);
+  advance(1); assert.equal(region.children.length, 0);
+});
+
+test("replacing a notice cancels its timer and a late Undo result cannot affect the replacement", async () => {
+  const {ui, doc, advance, timers} = setup(); let rejectUndo;
+  ui.notify("one", "Original", () => new Promise((_, reject) => { rejectUndo = reject; }));
+  const region = doc.getElementById("thread-feedback"), pending = region.firstChild.children[1].onclick();
+  ui.notify("one", "Replacement", () => {});
+  rejectUndo(new Error("Offline")); await pending;
+  assert.equal(timers.size, 1);
+  advance(9000); ui.notify("one", "Latest", () => {});
+  assert.equal(region.children.length, 1); assert.equal(region.firstChild.firstChild.textContent, "Latest");
+  advance(1000); assert.equal(region.children.length, 1);
+  advance(9000); assert.equal(region.children.length, 0); assert.equal(timers.size, 0);
 });
 
 test("close feedback indicates Closed without motion under reduced-motion preferences", () => {

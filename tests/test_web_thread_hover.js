@@ -88,6 +88,18 @@ test("checkpoint and message bodies render safe Markdown with truncation preserv
   assert.match(section.text, /Open the thread to read more/);
 });
 
+test("stale checkpoint requests are not presented as the current user next step", async () => {
+  const s = setup(); s.enter(s.first); await s.flush();
+  s.requests[0].resolve({thread: {title: "Calendar editing", checkpoint_stale: true,
+    checkpoint: {summary: "Waiting for credentials.", next_actor: "user", next_action: "Run aws login."}},
+    latest_message: null});
+  await Promise.resolve();
+  assert.match(s.panel.html, /Waiting for credentials/);
+  assert.match(s.panel.text, /New activity since this checkpoint/);
+  assert.doesNotMatch(s.panel.text, /Your next step/);
+  assert.doesNotMatch(s.panel.html, /Run aws login/);
+});
+
 test("preview stays open while moving onto it and closes after leaving", async () => {
   const s = setup(); s.enter(s.first); await s.flush();
   s.leave(s.first); s.panel.handlers.pointerenter(); await s.flush();

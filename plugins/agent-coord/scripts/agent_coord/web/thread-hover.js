@@ -48,14 +48,14 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
       panel.append(element("h4", "Where things stand"), markdownBody(thread.checkpoint.summary, "hover-summary"));
       if (thread.checkpoint_stale) panel.append(element("small", "New activity since this checkpoint", "hover-muted"));
     }
-    if (thread.checkpoint?.next_action) {
+    if (!thread.checkpoint_stale && thread.checkpoint?.next_action) {
       const actor = {user: "Your next step", agent: "Agent’s next step", external: "Waiting on"}[thread.checkpoint.next_actor] || "Next step";
       panel.append(element("h4", actor), markdownBody(thread.checkpoint.next_action, "hover-summary"));
     }
     const section = element("section", "", "hover-message");
     section.append(element("h4", "Most recent message"));
     if (message) {
-      let speaker = message.role === "user" ? "You" : thread.client === "claude" ? "Claude" : "Codex";
+      let speaker = message.role === "user" ? "You" : thread.client === "antigravity" ? "Antigravity" : thread.client === "claude" ? "Claude" : "Codex";
       if (message.timestamp) {
         const date = new Date(message.timestamp);
         if (!Number.isNaN(date.getTime())) speaker += " · " + date.toLocaleString();

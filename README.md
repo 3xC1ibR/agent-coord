@@ -299,6 +299,11 @@ an agent focused on a subject or responsibility; a **dispatcher** routes work.
 Provider-native subagents remain a separate concept. App conversations retain
 context between assignments and accept direct user follow-ups.
 
+The project overview's opt-in **Start dispatcher** action opens a bottom composer
+that routes requests to these conversations. See the
+[Dispatcher reference](docs/dispatch.md) for quick start, UI controls, Jev and LLM
+routing, delivery/history semantics, commands, and source locations.
+
 For ongoing routing, use the [Dispatch skill](plugins/agent-coord/skills/dispatch/SKILL.md):
 it reuses relevant app agents, creates new ones when needed, and directs answers
 and follow-ups to their own conversations. Use the

@@ -95,7 +95,7 @@ class TurnNotifications {
     const snooze = event.status === "snooze";
     if (!await (approval ? this.claimApproval(event.request_key) : snooze ? this.claimSnooze(event.id) : this.claim(event.id))) return;
     if (this.closed || !this.enabled() || quiet || this.viewing(event.thread_id)) return;
-    const label = approval ? (event.client === "claude" ? "Claude" : "Codex") + " is requesting approval" : snooze ? "Reminder" : event.status === "failed" ? "Turn failed" : "Turn finished";
+    const label = approval ? (event.client === "antigravity" ? "Antigravity" : event.client === "claude" ? "Claude" : "Codex") + " is requesting approval" : snooze ? "Reminder" : event.status === "failed" ? "Turn failed" : "Turn finished";
     const notification = new this.env.Notification(`${event.project_name || event.repository_name || "Ribbon Field"} · ${label}`, {
       body: event.title, tag: approval ? "agent-coord-approval-" + event.request_key : (snooze ? "agent-coord-snooze-" : "agent-coord-turn-") + event.id,
     });

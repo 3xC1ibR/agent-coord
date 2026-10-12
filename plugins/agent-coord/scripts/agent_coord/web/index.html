@@ -51,6 +51,8 @@
   <script src="/thread-actions.js" defer></script>
   <script src="/dispatch.js" defer></script>
   <link rel="stylesheet" href="/dispatch.css">
+  <script src="/dispatcher-workspace.js" defer></script>
+  <link rel="stylesheet" href="/dispatcher-workspace.css">
   <script src="/app.js" defer></script>
   <script src="/thread-hover.js" defer></script>
   <script src="/filter-menu.js" defer></script>
@@ -70,8 +72,8 @@
     <div class="sidebar-footer"><label class="theme-control">Appearance<select data-theme-select aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button id="notifications" class="notification-toggle" type="button" aria-pressed="false">Enable notifications</button><a id="monitor" href="/monitor"><span aria-hidden="true">⌁</span> Coordination monitor <span aria-hidden="true">↗</span></a></div>
   </aside>
   <main id="main" tabindex="-1">
-    <header class="workspace-bar"><div class="breadcrumb"><button id="menu-toggle" class="icon-button" type="button" aria-label="Hide sidebar" title="Hide sidebar" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path></svg></button><button id="back-home" class="quiet">Workspace</button><span aria-hidden="true">/</span><span id="page-location">Overview</span></div><span id="connection" class="connection" role="status">Connecting…</span></header>
-    <div class="projects-bar"><div id="view-tabs" class="view-tabs" role="tablist" aria-label="Projects"></div><button id="open-project-tab" class="quiet" type="button" aria-label="Open project" title="Open project">＋</button></div>
+    <header class="workspace-bar"><div class="breadcrumb"><button id="menu-toggle" class="icon-button" type="button" aria-label="Hide sidebar" title="Hide sidebar" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path></svg></button><button id="back-home" class="quiet">Workspace</button><span aria-hidden="true">/</span><span id="page-location">Overview</span></div><div class="dispatcher-mobile-nav"><button id="dispatcher-projects-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="project-navigation">Projects</button><button id="dispatcher-mobile-conversation" class="quiet" type="button" aria-label="Dispatcher conversation" aria-expanded="false" aria-controls="dispatcher-body">Chat</button></div><span id="connection" class="connection" role="status">Connecting…</span></header>
+    <div id="project-navigation" class="projects-bar"><div id="view-tabs" class="view-tabs" role="tablist" aria-label="Projects"></div><button id="open-project-tab" class="quiet" type="button" aria-label="Open project" title="Open project">＋</button></div>
     <div class="views-bar">
       <div id="saved-view-tabs" class="saved-view-tabs" role="tablist" aria-label="Saved views" hidden></div>
     <div id="mobile-overview" class="mobile-overview">
@@ -125,7 +127,7 @@
           </details>
           <div class="placement-switch" role="group" aria-label="Thread placement"><button id="show-now" type="button" class="quiet" aria-pressed="true">Now</button><button id="show-later" type="button" class="quiet" aria-pressed="false">Later</button><button id="show-closed" type="button" class="quiet closed-toggle" aria-pressed="false" title="Show closed threads">Closed</button></div>
         </div>
-        <div class="workspace-actions"><button id="welcome-project" class="quiet" hidden>New group</button><button id="welcome-new" class="primary" aria-label="New session"><span class="new-session-label">New session</span><span class="mobile-new-label">New</span> <span aria-hidden="true">＋</span></button></div>
+        <div class="workspace-actions"><button id="welcome-project" class="quiet" hidden>New group</button><button id="start-dispatcher" class="quiet dispatcher-entry" type="button" title="Send work to the right conversation" disabled>Start dispatcher <span aria-hidden="true">↗</span></button><button id="welcome-new" class="primary" aria-label="New session"><span class="new-session-label">New session</span><span class="mobile-new-label">New</span> <span aria-hidden="true">＋</span></button></div>
       </div>
       <div id="search-options" class="search-options" hidden>
         <label for="search-scope">Search in<select id="search-scope"><option value="all">This project, including closed</option><option value="current">Current view</option></select></label>
@@ -139,6 +141,21 @@
       </section>
       <div id="overview" aria-label="Thread overview"></div>
       <footer class="overview-footer"><span id="results-count" role="status"></span></footer>
+    </section>
+    <section id="dispatcher-empty" aria-label="Dispatcher canvas" hidden><div><h1>What would you like to work on?</h1><p>Send a request below. Your conversations will open here.</p></div></section>
+    <aside id="dispatcher-workspace" aria-label="Dispatcher activity and results" hidden>
+      <section id="dispatcher-attention" class="dispatch-section" hidden><h2>Needs you <small></small></h2><div class="dispatch-items"></div></section>
+      <section id="dispatcher-running" class="dispatch-section" hidden><h2>In progress <small></small></h2><div class="dispatch-items"></div></section>
+      <section id="dispatcher-results" class="dispatch-section" hidden><h2>Results <small></small></h2><div class="dispatch-items"></div></section>
+      <p id="dispatcher-rail-empty">Results and questions will appear here.</p>
+    </aside>
+    <section id="dispatcher-dock" class="dispatcher-dock" aria-label="Project dispatcher" hidden>
+      <header class="dispatcher-dock-head">
+        <div class="dispatcher-identity"><span class="dispatcher-mark" aria-hidden="true">↗</span><strong>Dispatcher</strong><span id="dispatcher-project"></span></div>
+        <div class="dispatcher-dock-actions"><button id="dispatcher-expand" class="quiet" type="button" aria-expanded="false" aria-controls="dispatcher-body">Conversation <span aria-hidden="true">⌃</span></button><button id="dispatcher-open" class="quiet" type="button" aria-label="Open dispatcher chat" title="Open dispatcher chat">↗</button><button id="dispatcher-hide" class="quiet" type="button" aria-label="Hide dispatcher" title="Hide dispatcher">×</button></div>
+      </header>
+      <div id="dispatcher-receipt" class="dispatcher-latest" role="status" aria-live="polite"></div>
+      <div id="dispatcher-body"></div>
     </section>
     <section id="thread-panes" class="thread-panes" aria-label="Tiled conversations" hidden></section>
     <section id="conversation" class="conversation" hidden>
@@ -182,8 +199,8 @@
         <textarea id="message" placeholder="Message Codex or drop images…" rows="1" maxlength="100000" role="combobox" aria-multiline="true" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="slash-commands" aria-expanded="false"></textarea>
         </div>
         <div id="thread-references" class="thread-references" aria-label="Selected file and thread references"></div>
-        <div class="composer-model"><button id="attach-image" class="attach-image" type="button" aria-label="Attach images" title="Attach images"><span aria-hidden="true">+</span></button><input id="image-picker" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><select id="model-picker" aria-label="Model" hidden tabindex="-1"></select><button id="model-trigger" class="model-trigger" type="button" aria-label="Choose model" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" disabled>Model <span aria-hidden="true">⌄</span></button><div id="model-menu" class="model-menu" role="listbox" aria-label="Models" hidden></div><select id="effort-picker" aria-label="Reasoning effort" hidden tabindex="-1"></select><button id="effort-trigger" class="model-trigger effort-trigger" type="button" aria-label="Choose reasoning effort" aria-haspopup="listbox" aria-controls="effort-menu" aria-expanded="false" disabled>Effort <span aria-hidden="true">⌄</span></button><div id="effort-menu" class="model-menu" role="listbox" aria-label="Reasoning effort" hidden></div><span id="model-picker-status" class="muted" role="status"></span></div>
-        <div class="composer-footer"><span id="composer-hint">Enter to send · Shift + Enter for a new line</span><div><button id="stop" type="button" class="quiet" hidden>Stop</button><button id="queue" type="button" class="quiet" hidden>Queue ⇥</button><button id="schedule-prompt" type="button" class="quiet">Schedule…</button><button id="send" class="primary" type="submit">Send ↑</button></div></div>
+        <div id="composer-model-controls" class="composer-model"><button id="attach-image" class="attach-image" type="button" aria-label="Attach images" title="Attach images"><span aria-hidden="true">+</span></button><input id="image-picker" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><select id="model-picker" aria-label="Model" hidden tabindex="-1"></select><button id="model-trigger" class="model-trigger" type="button" aria-label="Choose model" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" disabled>Model <span aria-hidden="true">⌄</span></button><div id="model-menu" class="model-menu" role="listbox" aria-label="Models" hidden></div><select id="effort-picker" aria-label="Reasoning effort" hidden tabindex="-1"></select><button id="effort-trigger" class="model-trigger effort-trigger" type="button" aria-label="Choose reasoning effort" aria-haspopup="listbox" aria-controls="effort-menu" aria-expanded="false" disabled>Effort <span aria-hidden="true">⌄</span></button><div id="effort-menu" class="model-menu" role="listbox" aria-label="Reasoning effort" hidden></div><span id="model-picker-status" class="muted" role="status"></span></div>
+        <div class="composer-footer"><span id="composer-hint">Enter to send · Shift + Enter for a new line</span><div><button id="dispatcher-options-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="dispatch-direct-label composer-model-controls dispatcher-permissions">Options</button><button id="dispatcher-permissions" type="button" class="quiet" hidden>Permissions</button><button id="stop" type="button" class="quiet" hidden>Stop</button><button id="queue" type="button" class="quiet" hidden>Queue ⇥</button><button id="schedule-prompt" type="button" class="quiet">Schedule…</button><button id="send" class="primary" type="submit">Send ↑</button></div></div>
       </form>
       </div>
       <aside id="context-panel" class="context-panel" aria-label="Thread context">

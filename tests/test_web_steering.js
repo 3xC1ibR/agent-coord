@@ -10,7 +10,7 @@ function setup() {
   const context = {
     $: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
     state: {selected: "one", sessions: [], closing: new Set(), commandFeedback: new Map(), drafts: new Map(),
-      detail: {running: true, activeTurn: "turn-one", work_thread: {browser_session: true, attention: "now"}}},
+      detail: {running: true, activeTurn: "turn-one", work_thread: {client: "codex", browser_session: true, attention: "now"}}},
     renderSessionSettings() {}, threadGrouping: {status: () => ({label: "Idle"})},
     refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id,
   };

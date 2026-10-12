@@ -74,20 +74,34 @@ function createThreadActions(doc, win) {
     }
     const notice = make("div", "", "thread-notice"), copy = make("span", message);
     copy.setAttribute("role", "status"); notice.append(copy);
-    let timer;
-    const remove = () => { win.clearTimeout(timer); notice.remove(); notices.delete(key); };
+    let timer, hovered = false, focused = false, pending = false, removed = false;
+    const pause = () => win.clearTimeout(timer);
+    const remove = () => {
+      if (removed) return;
+      removed = true; pause(); notice.remove(); notices.delete(key);
+    };
+    const resume = () => {
+      pause();
+      if (!removed && !hovered && !focused && !pending) timer = win.setTimeout(remove, undo ? 10000 : 6000);
+    };
+    notice.addEventListener("pointerenter", () => { hovered = true; pause(); });
+    notice.addEventListener("pointerleave", () => { hovered = false; resume(); });
+    notice.addEventListener("focusin", () => { focused = true; pause(); });
+    notice.addEventListener("focusout", event => { focused = notice.contains(event.relatedTarget); resume(); });
     if (undo) {
       const button = make("button", "Undo", "quiet"); button.type = "button";
       button.onclick = async () => {
-        button.disabled = true;
+        if (pending || removed) return;
+        pending = true; pause(); button.disabled = true;
         try { await undo(); remove(); }
         catch (error) { copy.textContent = error.message + " Try Undo again."; button.disabled = false; }
+        finally { pending = false; resume(); }
       };
       notice.append(button);
-    } else timer = win.setTimeout(remove, 6000);
+    }
     const dismiss = make("button", "×", "quiet notice-dismiss"); dismiss.type = "button";
     dismiss.setAttribute("aria-label", "Dismiss notification"); dismiss.onclick = remove;
-    notice.append(dismiss); region.append(notice); notices.set(key, remove);
+    notice.append(dismiss); region.append(notice); notices.set(key, remove); resume();
   }
 
   function captureClose(id) {

@@ -275,6 +275,33 @@ test("motion skips metadata changes, view switches, hidden boards, and reduced m
   }
 });
 
+test("pinned and stage copies stay still during metadata refreshes", () => {
+  const h = motionHarness();
+  const cards = () => [h.card("one", "pinned", 10), h.card("one", "implementation", 300, 300)];
+  h.render(cards());
+  h.render(cards());
+  h.render(cards());
+  assert.equal(h.animations.length, 0);
+  assert.equal(h.copies.length, 0);
+});
+
+test("a pinned thread's stage copy moves independently and continues from its own position", () => {
+  const h = motionHarness();
+  h.render([h.card("one", "pinned", 10), h.card("one", "planning", 300, 300)]);
+  h.render([h.card("one", "pinned", 10), h.card("one", "implementation", 600, 300)]);
+  assert.equal(h.copies.length, 1);
+  assert.equal(h.animations.length, 3);
+  assert.equal(h.animations[0].frames[0].transform, "translate(-300px, 0px) scale(1, 1)");
+  h.copies[0].rect = {...h.copies[0].rect, left: 450, right: 650};
+  h.render([h.card("one", "pinned", 10), h.card("one", "implementation", 600, 300)]);
+  assert.equal(h.copies.length, 2);
+  assert.equal(h.animations.length, 6);
+  assert.equal(h.animations[3].frames[0].transform, "translate(-150px, 0px) scale(1, 1)");
+  assert.equal(h.copies[0].removed, true);
+  h.listeners.scroll();
+  assert.ok(h.copies.every(copy => copy.removed));
+});
+
 test("interrupted movement continues from its visible position and removes previous copies", () => {
   const h = motionHarness();
   h.render([h.card("one", "planning", 10)]);
