@@ -8,6 +8,7 @@ class PhoneNotifications {
     this.subscription = null;
     this.navigationReady = false;
     this.pendingThread = null;
+    this.receivedDestinations = new Set();
     this.button.onclick = () => this.toggle().catch(onError);
     this.testButton = env.document.createElement("button");
     this.testButton.type = "button";
@@ -26,19 +27,40 @@ class PhoneNotifications {
             (!url.hash || /^#[a-zA-Z0-9_.~-]{1,200}$/.test(url.hash))) {
           // Queue until saved views and the initial route have finished loading,
           // so startup cannot overwrite a notification selection.
-          if (url.hash) this.pendingThread = url.hash.slice(1);
+          const duplicate = event.data.id && this.receivedDestinations.has(event.data.id);
+          if (!duplicate && url.hash) this.pendingThread = url.hash.slice(1);
+          if (event.data.id) {
+            this.receivedDestinations.add(event.data.id);
+            if (this.receivedDestinations.size > 32) this.receivedDestinations.delete(this.receivedDestinations.values().next().value);
+          }
           event.ports?.[0]?.postMessage({type: "agent-coord-notification-received"});
           if (this.navigationReady) this.openPendingThread();
         }
       } catch { /* Ignore malformed worker messages. */ }
     };
     env.navigator.serviceWorker?.addEventListener("message", this.messageHandler);
-    env.addEventListener("pagehide", () => this.destroy(), {once: true});
+    this.recoverHandler = () => {
+      if (this.navigationReady && !env.document.hidden) this.recoverDestination();
+    };
+    this.hideHandler = event => { if (!event.persisted) this.destroy(); };
+    env.navigator.serviceWorker?.addEventListener("controllerchange", this.recoverHandler);
+    env.addEventListener("pageshow", this.recoverHandler);
+    env.document.addEventListener("visibilitychange", this.recoverHandler);
+    env.addEventListener("pagehide", this.hideHandler);
   }
 
   ready() {
     this.navigationReady = true;
+    this.recoverDestination();
     return this.openPendingThread();
+  }
+
+  async recoverDestination() {
+    try {
+      const worker = this.env.navigator.serviceWorker;
+      const active = worker?.controller || (await worker?.ready)?.active;
+      active?.postMessage({type: "agent-coord-notification-ready"});
+    } catch { /* A later foreground/controller change can retry recovery. */ }
   }
 
   async openPendingThread() {
@@ -138,7 +160,13 @@ class PhoneNotifications {
   // The background sender owns remote alerts; never claim desktop events.
   syncFocus() {}
   receive() { return Promise.resolve(); }
-  destroy() { this.env.navigator.serviceWorker?.removeEventListener("message", this.messageHandler); }
+  destroy() {
+    this.env.navigator.serviceWorker?.removeEventListener("message", this.messageHandler);
+    this.env.navigator.serviceWorker?.removeEventListener("controllerchange", this.recoverHandler);
+    this.env.removeEventListener("pageshow", this.recoverHandler);
+    this.env.document.removeEventListener("visibilitychange", this.recoverHandler);
+    this.env.removeEventListener("pagehide", this.hideHandler);
+  }
 }
 
 if (typeof module !== "undefined" && module.exports) module.exports = PhoneNotifications;

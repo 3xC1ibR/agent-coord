@@ -4,21 +4,26 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {MessageChannel} = require('node:worker_threads');
+const crypto = require('node:crypto').webcrypto;
 const PhoneNotifications = require('../plugins/agent-coord/scripts/agent_coord/web/push-notifications.js');
 
 function fixture() {
   const element = () => ({disabled: false, hidden: false, textContent: '', setAttribute() {}, after() {}});
-  const calls = [], opened = [], listeners = new Map();
+  const calls = [], opened = [], listeners = new Map(), pageListeners = new Map(), documentListeners = new Map();
   let permissionRequests = 0, subscription = null, enabled = false;
   const env = {
-    document: {createElement: element}, isSecureContext: true, PushManager: {}, atob,
+    document: {createElement: element, hidden: false,
+      addEventListener: (name, handler) => documentListeners.set(name, handler),
+      removeEventListener: name => documentListeners.delete(name)}, isSecureContext: true, PushManager: {}, atob,
     location: {origin: 'https://mac.test.ts.net'},
-    addEventListener() {},
+    addEventListener: (name, handler) => pageListeners.set(name, handler),
+    removeEventListener: name => pageListeners.delete(name),
     Notification: {permission: 'default', async requestPermission() {
       permissionRequests++; this.permission = 'granted'; return 'granted';
     }},
     navigator: {serviceWorker: {
-      addEventListener: (name, handler) => listeners.set(name, handler), removeEventListener() {},
+      addEventListener: (name, handler) => listeners.set(name, handler),
+      removeEventListener: name => listeners.delete(name),
       register: async () => calls.push('register'),
     }},
   };
@@ -41,7 +46,8 @@ function fixture() {
   };
   const button = element();
   const phone = new PhoneNotifications({button, api, openThread: id => opened.push(id), onError: error => {throw error;}}, env);
-  return {phone, button, env, calls, opened, listeners, permissionRequests: () => permissionRequests};
+  return {phone, button, env, calls, opened, listeners, pageListeners, documentListeners,
+    permissionRequests: () => permissionRequests};
 }
 
 test('permission is requested only on a tap; subscriptions go to authenticated API', async () => {
@@ -119,7 +125,34 @@ test('notification is acknowledged and queued until app startup finishes', async
   assert.deepEqual(f.opened, ['thread_one.2']);
 });
 
-function worker() {
+// A shared backing object survives VM/worker recreation, like IndexedDB does.
+function destinationDB() {
+  const records = new Map();
+  return {records, open() {
+    const request = {};
+    queueMicrotask(() => {
+      request.result = {close() {}, transaction() {
+        const transaction = {objectStore: () => ({
+          get(key) {
+            const read = {};
+            queueMicrotask(() => {
+              read.result = records.get(key);
+              read.onsuccess();
+              transaction.oncomplete();
+            });
+            return read;
+          },
+          put: (value, key) => records.set(key, value), delete: key => records.delete(key),
+        })};
+        return transaction;
+      }};
+      request.onsuccess();
+    });
+    return request;
+  }};
+}
+
+function worker(indexedDB = destinationDB()) {
   const handlers = new Map(), notifications = [], opened = [], messages = [];
   let windows = [], openedClient = null;
   const self = {location: {origin: 'https://mac.test.ts.net'},
@@ -129,14 +162,14 @@ function worker() {
       openWindow: async url => {opened.push(url); return openedClient;}},
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../plugins/agent-coord/scripts/agent_coord/web/push-worker.js'), 'utf8'),
-    {self, URL, MessageChannel, setTimeout, clearTimeout});
+    {self, URL, MessageChannel, setTimeout, clearTimeout, crypto, indexedDB});
   const dispatch = async (name, event) => {
     let promise;
     handlers.get(name)({...event, waitUntil: value => {promise = value;}});
     await promise;
   };
   return {handlers, dispatch, notifications, opened, messages, setWindows: value => {windows = value;},
-    setOpenedClient: value => {openedClient = value;}};
+    setOpenedClient: value => {openedClient = value;}, indexedDB};
 }
 
 test('push displays thread context and safely falls back for malformed payloads; never caches requests', async () => {
@@ -212,5 +245,106 @@ test('Home Screen launch restoring the root receives the clicked destination', a
   await w.dispatch('notificationclick', {notification: {close() {}, data: {url: '/#thread-one'}}});
   assert.deepEqual(f.opened, []);
   await f.phone.ready();
+  assert.deepEqual(f.opened, ['thread-one']);
+});
+
+test('cold launch recovers the tapped thread after the worker restarts, once only', async () => {
+  const w = worker();
+  // WebKit opens the start URL and returns no usable WindowClient.
+  await w.dispatch('notificationclick', {notification: {close() {}, data: {url: '/#thread-one'}}});
+  const restarted = worker(w.indexedDB), f = fixture();
+  const source = {url: 'https://mac.test.ts.net/',
+    postMessage: (data, ports) => f.listeners.get('message')({data, ports})};
+  let recovery;
+  f.env.navigator.serviceWorker.controller = {postMessage: data => {
+    recovery = restarted.dispatch('message', {data, source});
+  }};
+  await f.phone.ready();
+  await recovery;
+  assert.deepEqual(f.opened, ['thread-one']);
+  assert.equal(w.indexedDB.records.size, 0);
+  await f.phone.recoverDestination();
+  await recovery;
+  assert.deepEqual(f.opened, ['thread-one']);
+});
+
+test('successful URL navigation without a listener retains destination until the page claims it', async () => {
+  const w = worker(), f = fixture();
+  w.setWindows([{url: 'https://mac.test.ts.net/', focus: async () => {}, postMessage() {},
+    navigate: async () => ({url: 'https://mac.test.ts.net/'})}]);
+  await w.dispatch('notificationclick', {notification: {close() {}, data: {url: '/#thread-delayed'}}});
+  await f.phone.ready();
+  await w.dispatch('message', {data: {type: 'agent-coord-notification-ready'},
+    source: {url: 'https://mac.test.ts.net/', postMessage: (data, ports) => f.listeners.get('message')({data, ports})}});
+  assert.deepEqual(f.opened, ['thread-delayed']);
+  assert.equal(w.indexedDB.records.size, 0);
+});
+
+test('duplicate delivery is acknowledged without reopening the thread', async () => {
+  const f = fixture(), replies = [];
+  await f.phone.ready();
+  const event = {data: {type: 'agent-coord-open-notification', id: 'click-one', url: '/#thread-one'},
+    ports: [{postMessage: data => replies.push(data)}]};
+  f.listeners.get('message')(event);
+  f.listeners.get('message')(event);
+  assert.deepEqual(f.opened, ['thread-one']);
+  assert.equal(replies.length, 2);
+});
+
+test('a late receipt for an earlier tap cannot clear a newer destination', async () => {
+  const w = worker();
+  await w.dispatch('notificationclick', {notification: {close() {}, data: {url: '/#older'}}});
+  let receipt;
+  const recovery = w.dispatch('message', {data: {type: 'agent-coord-notification-ready'},
+    source: {url: 'https://mac.test.ts.net/', postMessage: (_data, ports) => {receipt = ports[0];}}});
+  await new Promise(resolve => setImmediate(resolve));
+  await w.dispatch('notificationclick', {notification: {close() {}, data: {url: '/#newer'}}});
+  receipt.postMessage({type: 'agent-coord-notification-received'});
+  await recovery;
+  assert.equal(w.indexedDB.records.get('pending').url, 'https://mac.test.ts.net/#newer');
+});
+
+test('recovery ignores unrelated clients and expires old tapped destinations', async () => {
+  const w = worker();
+  await w.dispatch('notificationclick', {notification: {close() {}, data: {url: '/#thread-one'}}});
+  for (const url of ['https://evil.test/', 'https://mac.test.ts.net/pair']) {
+    await w.dispatch('message', {data: {type: 'agent-coord-notification-ready'},
+      source: {url, postMessage() {assert.fail('unrelated client');}}});
+  }
+  const destination = w.indexedDB.records.get('pending');
+  destination.createdAt = Date.now() - 6 * 60 * 1000;
+  await w.dispatch('message', {data: {type: 'agent-coord-notification-ready'},
+    source: {url: 'https://mac.test.ts.net/', postMessage() {assert.fail('expired destination');}}});
+  assert.equal(w.indexedDB.records.size, 0);
+});
+
+test('restoring a cached page retains its listener and retries on foreground and controller changes', async () => {
+  const f = fixture(), requests = [];
+  f.env.navigator.serviceWorker.controller = {postMessage: data => requests.push(data)};
+  f.pageListeners.get('pageshow')({persisted: true});
+  assert.equal(requests.length, 0);
+  await f.phone.ready();
+  f.pageListeners.get('pagehide')({persisted: true});
+  assert.ok(f.listeners.has('message'));
+  f.pageListeners.get('pageshow')({persisted: true});
+  f.env.document.hidden = true;
+  f.documentListeners.get('visibilitychange')();
+  f.env.document.hidden = false;
+  f.documentListeners.get('visibilitychange')();
+  f.listeners.get('controllerchange')();
+  assert.equal(requests.length, 4);
+  assert.ok(requests.every(data => data.type === 'agent-coord-notification-ready'));
+  f.pageListeners.get('pagehide')({persisted: false});
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.pageListeners.size, 0);
+  assert.equal(f.documentListeners.size, 0);
+});
+
+test('storage failure still delivers notification taps directly', async () => {
+  const w = worker({open() {throw Error('storage unavailable');}}), f = fixture();
+  await f.phone.ready();
+  w.setWindows([{url: 'https://mac.test.ts.net/', focus: async () => {},
+    postMessage: (data, ports) => f.listeners.get('message')({data, ports})}]);
+  await w.dispatch('notificationclick', {notification: {close() {}, data: {url: '/#thread-one'}}});
   assert.deepEqual(f.opened, ['thread-one']);
 });
