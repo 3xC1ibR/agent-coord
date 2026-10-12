@@ -199,6 +199,9 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
 - Send to the one live owner of a bead with `agent-coord send --bead <bead-id> --classification action_required --reply-required '<message>'`.
 - Every `send` must explicitly choose `--reply-required` or
   `--no-reply-required`; omission is an error before a message is created.
+- For multiline `send` or `reply` bodies, pass `-` as the message and supply
+  the text on stdin, for example with a quoted heredoc (`<<'MESSAGE'`). Empty
+  input is rejected without sending a message.
 - Answer a requested reply with `agent-coord reply --message-id <id> '<response>'`.
   It derives the recipient and thread from that message, records exactly which
   request it answers, and sets `reply_required=false`. The response still enters

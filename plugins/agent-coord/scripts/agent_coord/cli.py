@@ -263,12 +263,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Deliver the message without requesting a conversational reply.",
     )
     send.add_argument("--thread-id")
-    send.add_argument("message")
+    send.add_argument("message", help="Message body; use - to read stdin.")
 
     reply = subcommands.add_parser("reply", help="Answer a message without requesting another reply.")
     reply.add_argument("--from-session", help="Sender; defaults to the current caller session.")
     reply.add_argument("--message-id", type=int, required=True, help="Message being answered; recipient and thread are derived from it.")
-    reply.add_argument("message")
+    reply.add_argument("message", help="Reply body; use - to read stdin.")
 
     handoff = subcommands.add_parser(
         "handoff", help="Atomically transfer a whole work declaration."
@@ -637,7 +637,7 @@ def run(arguments: argparse.Namespace) -> Any:
             sender_session_id=arguments.from_session,
             recipient_session_id=arguments.session,
             recipient_bead_id=arguments.bead,
-            body=arguments.message,
+            body=sys.stdin.read() if arguments.message == "-" else arguments.message,
             classification=arguments.classification,
             thread_id=arguments.thread_id,
             reply_required=arguments.reply_required,
@@ -646,7 +646,7 @@ def run(arguments: argparse.Namespace) -> Any:
         return store.reply_message(
             sender_session_id=arguments.from_session,
             message_id=arguments.message_id,
-            body=arguments.message,
+            body=sys.stdin.read() if arguments.message == "-" else arguments.message,
         )
     if command == "handoff":
         sender = store.get_session(arguments.from_session)

@@ -306,13 +306,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["session_id"], "integration")
 
     @staticmethod
-    def _run(database: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    def _run(database: Path, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         wrapper = PLUGIN_SCRIPTS / "agent-coord"
         return subprocess.run(
             [str(wrapper), "--db", str(database), *args],
             check=False,
             capture_output=True,
             text=True,
+            input=input_text,
         )
 
     def test_inbox_wait_delivers_existing_message_immediately(self) -> None:
@@ -479,6 +480,48 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(json.loads(result.stdout)["reply_required"])
+
+    def test_send_and_reply_read_multiline_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            for session, client in (("one", "codex"), ("two", "claude")):
+                self._run(database, "register", "--session-id", session, "--client", client, "--cwd", directory)
+            body = 'First line\n\nLiteral `code`, $(text), "quotes", and café.\n'
+            sent = self._run(database, "send", "--from-session", "one", "--session", "two",
+                             "--reply-required", "-", input_text=body)
+            self.assertEqual(sent.returncode, 0, sent.stderr)
+            original = json.loads(sent.stdout)
+            inbox = self._run(database, "inbox", "--session-id", "two", "--all", "--peek")
+            self.assertEqual(json.loads(inbox.stdout)[0]["body"], body.strip())
+            reply_body = "Findings:\n- Works across providers.\n- Keeps newlines.\n"
+            reply = self._run(database, "reply", "--from-session", "two", "--message-id",
+                              str(original["id"]), "-", input_text=reply_body)
+            self.assertEqual(reply.returncode, 0, reply.stderr)
+            self.assertEqual(json.loads(reply.stdout)["in_reply_to"], original["id"])
+            inbox = self._run(database, "inbox", "--session-id", "one", "--all", "--peek")
+            self.assertEqual(json.loads(inbox.stdout)[0]["body"], reply_body.strip())
+
+    def test_empty_stdin_creates_neither_message_nor_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            for session in ("one", "two"):
+                self._run(database, "register", "--session-id", session, "--client", "claude", "--cwd", directory)
+            for body in ("", " \n\t"):
+                sent = self._run(database, "send", "--from-session", "one", "--session", "two",
+                                 "--no-reply-required", "-", input_text=body)
+                self.assertEqual(sent.returncode, 2, sent.stderr)
+                self.assertIn("Message body must not be empty", sent.stderr)
+            inbox = self._run(database, "inbox", "--session-id", "two", "--all", "--peek")
+            self.assertEqual(json.loads(inbox.stdout), [])
+            sent = self._run(database, "send", "--from-session", "one", "--session", "two",
+                             "--reply-required", "Please reply")
+            for body in ("", " \n\t"):
+                reply = self._run(database, "reply", "--from-session", "two", "--message-id",
+                                  str(json.loads(sent.stdout)["id"]), "-", input_text=body)
+                self.assertEqual(reply.returncode, 2, reply.stderr)
+                self.assertIn("Message body must not be empty", reply.stderr)
+            inbox = self._run(database, "inbox", "--session-id", "one", "--all", "--peek")
+            self.assertEqual(json.loads(inbox.stdout), [])
 
     def test_ambiguous_send_creates_no_message(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
