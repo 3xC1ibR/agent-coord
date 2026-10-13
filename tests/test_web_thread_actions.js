@@ -43,6 +43,27 @@ function setup(reduced = false) {
 }
 const event = key => ({key, preventDefault() {}, stopPropagation() {}});
 
+test("overflow menu skips disabled fork actions when focusing and navigating", () => {
+  const {ui, doc} = setup();
+  const trigger = ui.menu("Working thread", [
+    {label: "Fork", disabled: true, run() {}},
+    {label: "Add to group", run() {}},
+    {label: "Pin", run() {}},
+  ]);
+  trigger.onclick(event());
+  const panel = doc.body.children.find(item => item.className === "thread-action-menu");
+  assert.equal(panel.children[0].disabled, true);
+  assert.equal(doc.activeElement, panel.children[1]);
+  panel.onkeydown(event("ArrowUp"));
+  assert.equal(doc.activeElement, panel.children[2]);
+  panel.onkeydown(event("ArrowDown"));
+  assert.equal(doc.activeElement, panel.children[1]);
+  panel.onkeydown(event("End"));
+  assert.equal(doc.activeElement, panel.children[2]);
+  panel.onkeydown(event("Home"));
+  assert.equal(doc.activeElement, panel.children[1]);
+});
+
 test("overflow menu opens without opening the card, supports keyboard navigation and restores focus", () => {
   const {ui, doc, handlers} = setup(); let called = 0;
   const trigger = ui.menu("HPA", [{label: "Move to Later…", run: () => called++}, {label: "Move to Now", run() {}}]);

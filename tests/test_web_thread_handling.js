@@ -62,7 +62,7 @@ test("Dismiss on attention and ordinary overview cards handles the displayed res
     let menu;
     c.state.threadActions = {notify() {}, showMenu: (trigger, title, items) => { menu = items; }};
     more.onclick({stopPropagation() {}});
-    assert.deepEqual(Array.from(menu, item => item.label), ["Pin", "Move to Later…"]);
+    assert.deepEqual(Array.from(menu, item => item.label), ["Add to group", "Pin", "Move to Later…"]);
     assert.ok(dismiss);
     assert.equal(dismiss.textContent, "Dismiss");
     assert.equal(dismiss.attributes["aria-label"], "Dismiss · Recommendation");

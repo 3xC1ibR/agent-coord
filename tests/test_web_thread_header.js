@@ -274,3 +274,26 @@ test("fork action prevents duplicate requests and does not steal changed selecti
   await next;
   assert.equal(c.navigated, "fork-two");
 });
+
+test("card fork uses its source and opens the result unless the user navigates away", async () => {
+  for (const initial of [null, "another"]) {
+    for (const navigate of [false, true]) {
+      const c = setup();
+      c.state.selected = initial;
+      c.select = async id => { c.navigated = id; };
+      let finish;
+      c.api = (path, body) => {
+        assert.equal(path, "threads/card/fork");
+        assert.equal(Object.keys(body).length, 0);
+        return new Promise(resolve => { finish = resolve; });
+      };
+      vm.runInContext(source.slice(source.indexOf("async function forkThread("), source.indexOf("async function boot(")), c);
+      const pending = c.forkThread(undefined, "card");
+      if (navigate) c.state.selected = "elsewhere";
+      finish({thread_id: "fork"});
+      await pending;
+      assert.equal(c.navigated, navigate ? undefined : "fork");
+      assert.equal(c.state.forking, false);
+    }
+  }
+});

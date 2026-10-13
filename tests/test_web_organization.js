@@ -2,6 +2,70 @@
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const {NONE, matches, groupThreads} = require("../plugins/agent-coord/scripts/agent_coord/web/organization.js");
+const fs = require("node:fs"), vm = require("node:vm");
+const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+
+function assignmentHarness() {
+  const elements = new Map(), calls = [];
+  const c = {
+    $: id => {
+      if (!elements.has(id)) elements.set(id, {value: "", children: [],
+        replaceChildren(...items) { this.children = items; }, append(item) { this.children.push(item); },
+        showModal() { this.open = true; }, close() { this.open = false; }, focus() {},
+      });
+      return elements.get(id);
+    },
+    Option: function(text, value) { return {text, value}; },
+    state: {selected: "other", folders: {selected: {cwd: "/other"}},
+      detail: {work_thread: {thread_id: "other", project_cwd: "/other"}}},
+    action: fn => fn(), threadPath: id => "threads/" + id,
+    refreshThread: async () => assert.fail("Must not refresh the other conversation"), refreshList: async () => {},
+    api: async (path, body) => {
+      calls.push({path, body});
+      if (path === "organization") return {repositories: [], projects: [
+        {id: "card-group", name: "Card group", cwd: "/card"}, {id: "other-group", name: "Other", cwd: "/other"}]};
+      if (path === "projects") return {id: "new-group"};
+      return {};
+    },
+  };
+  vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function assignmentFields("), source.indexOf("function isSessionDraft()")), c);
+  c.calls = calls;
+  return c;
+}
+
+test("card group dialog uses the target group and workspace without changing selection", async () => {
+  const c = assignmentHarness();
+  await c.organizeThread({thread_id: "card", project_cwd: "/card", project_id: "card-group"});
+  assert.equal(c.state.selected, "other");
+  assert.equal(c.$("organization-dialog").open, true);
+  assert.equal(c.$("organization-workspace").textContent, "Project: /card");
+  assert.equal(c.$("edit-project").value, "card-group");
+  assert.equal(c.$("edit-project").children.some(item => item.value === "other-group"), false);
+  c.$("edit-project").value = "__new__";
+  c.$("edit-project-value").value = "New group";
+  c.$("organization-form").onsubmit({preventDefault() {}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(c.calls.slice(1))), [
+    {path: "projects", body: {name: "New group", cwd: "/card"}},
+    {path: "threads/card", body: {project_id: "new-group"}},
+  ]);
+  assert.equal(c.$("organization-dialog").open, false);
+  assert.equal(c.state.selected, "other");
+});
+
+test("card group assignment supports an existing group and removing the association", async () => {
+  for (const project of ["card-group", ""]) {
+    const c = assignmentHarness();
+    await c.organizeThread({thread_id: "card", project_cwd: "/card"});
+    c.$("edit-project").value = project;
+    c.$("organization-form").onsubmit({preventDefault() {}});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(JSON.parse(JSON.stringify(c.calls.slice(1))), [
+      {path: "threads/card", body: {project_id: project || null}},
+    ]);
+  }
+});
 
 const threads = [
   {thread_id: "both", repository_id: "api", repository_name: "Backend", repository_root: "/api", project_id: "migration", project_name: "Migration"},

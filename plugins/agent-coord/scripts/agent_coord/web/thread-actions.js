@@ -44,17 +44,18 @@ function createThreadActions(doc, win) {
     for (const item of items) {
       const button = make("button", item.label); button.type = "button";
       button.setAttribute("role", "menuitem");
+      button.disabled = Boolean(item.disabled);
       button.onclick = event => { event.stopPropagation(); closeMenu(true); item.run(); };
       panel.append(button);
     }
     panel.onkeydown = event => {
-      const buttons = [...panel.children], index = buttons.indexOf(doc.activeElement);
+      const buttons = [...panel.children].filter(button => !button.disabled), index = buttons.indexOf(doc.activeElement);
       let next;
       if (event.key === "ArrowDown") next = (index + 1) % buttons.length;
       if (event.key === "ArrowUp") next = (index - 1 + buttons.length) % buttons.length;
       if (event.key === "Home") next = 0;
       if (event.key === "End") next = buttons.length - 1;
-      if (next !== undefined) { event.preventDefault(); buttons[next].focus(); }
+      if (next !== undefined) { event.preventDefault(); buttons[next]?.focus(); }
       if (event.key === "Tab") closeMenu(true);
     };
     doc.body.append(panel);
@@ -62,7 +63,8 @@ function createThreadActions(doc, win) {
     panel.style.left = Math.max(8, Math.min(rect.right - size.width, win.innerWidth - size.width - 8)) + "px";
     panel.style.top = Math.max(8, rect.bottom + size.height + 8 > win.innerHeight
       ? rect.top - size.height - 4 : rect.bottom + 4) + "px";
-    activeMenu = {trigger, panel}; trigger.setAttribute("aria-expanded", "true"); panel.firstChild.focus();
+    activeMenu = {trigger, panel}; trigger.setAttribute("aria-expanded", "true");
+    [...panel.children].find(button => !button.disabled)?.focus();
   }
 
   function notify(key, message, undo) {

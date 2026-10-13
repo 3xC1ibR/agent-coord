@@ -58,6 +58,42 @@ test("only explicit orchestration creations nest across phases without changing 
   assert.equal(withClass(c.$("overview"), "agent-origin")[0].textContent, "Created by parent");
 });
 
+test("card menu exposes fork and group actions for the card rather than the selected conversation", async () => {
+  const card = thread("card", null, {client: "codex", can_fork: true}), c = harness([card]);
+  c.state.selected = "another";
+  let items, forked, organized;
+  c.state.threadActions = {showMenu: (_trigger, _title, choices) => { items = choices; }};
+  c.forkThread = async (_onSuccess, id) => { forked = id; };
+  c.organizeThread = async target => { organized = target; };
+  const menu = () => {
+    const element = c.threadCard(card);
+    withClass(element, "card-more")[0].onclick({stopPropagation() {}});
+    return items;
+  };
+  menu();
+  assert.equal(Boolean(items.find(item => item.label === "Fork").disabled), false);
+  await items.find(item => item.label === "Fork").run();
+  await items.find(item => item.label === "Add to group").run();
+  assert.equal(forked, "card");
+  assert.equal(organized, card);
+  assert.equal(c.state.selected, "another");
+  assert.deepEqual(c.selected, []);
+  card.project_id = "existing";
+  assert.ok(menu().some(item => item.label === "Change group"));
+  for (const client of ["codex", "claude"]) {
+    card.client = client; card.can_fork = false;
+    assert.equal(menu().find(item => item.label === "Fork").disabled, true);
+  }
+  card.can_fork = true; c.state.forking = true;
+  assert.equal(menu().find(item => item.label === "Fork").disabled, true);
+  const existingMenu = withClass(c.threadCard(card), "card-more")[0];
+  c.state.forking = false;
+  existingMenu.onclick({stopPropagation() {}});
+  assert.equal(items.find(item => item.label === "Fork").disabled, false);
+  card.client = "kimi";
+  assert.equal(menu().some(item => item.label === "Fork"), false);
+});
+
 test("untagged and unknown creation modes stay separate regardless of reply or parent phase", () => {
   for (const creation_mode of [undefined, null, "dispatch", "unknown"]) {
     const c = harness([thread("parent", null, {work_phase: "orchestrating"}),

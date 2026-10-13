@@ -434,13 +434,18 @@ function threadCard(thread, compact = false, inAttention = false) {
     more.setAttribute("aria-label", "Thread options · " + thread.title);
     more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
     more.disabled = state.closing.has(thread.thread_id) || state.updatingThreads.has(thread.thread_id);
-    const items = [
-      {label: thread.pinned ? "Unpin" : "Pin", run: () => action(() => toggleThreadPinned(thread))},
-      {label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)},
-    ];
-    if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.dispatcher ? "Stop using as dispatcher" : "Use as dispatcher", run: () => action(() => toggleDispatcher(thread))});
-    if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
-    more.onclick = event => state.threadActions.showMenu(more, thread.title, items, event);
+    more.onclick = event => {
+      const items = [
+        {label: thread.project_id ? "Change group" : "Add to group", run: () => action(() => organizeThread(thread))},
+        {label: thread.pinned ? "Unpin" : "Pin", run: () => action(() => toggleThreadPinned(thread))},
+        {label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)},
+      ];
+      if (["codex", "claude"].includes(thread.client)) items.unshift({label: "Fork", disabled: !thread.can_fork || state.forking,
+        run: () => action(() => forkThread(undefined, thread.thread_id))});
+      if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.dispatcher ? "Stop using as dispatcher" : "Use as dispatcher", run: () => action(() => toggleDispatcher(thread))});
+      if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
+      state.threadActions.showMenu(more, thread.title, items, event);
+    };
     titleActions.append(more, close);
     card.append(titleActions);
     if (actions.children.length) card.append(actions);
@@ -1592,7 +1597,7 @@ async function fillAssignments(prefix, thread = null) {
   $(prefix + "-organization-error").hidden = true;
   assignmentFields(prefix);
 }
-async function assignmentPayload(prefix) {
+async function assignmentPayload(prefix, thread) {
   const body = {};
   for (const field of ["project"]) {
     let value = $(prefix + "-" + field).value;
@@ -1600,7 +1605,7 @@ async function assignmentPayload(prefix) {
     if (value === "__new__") {
       const input = $(prefix + "-" + field + "-value").value;
       const record = await api(field === "repository" ? "repositories" : "projects",
-        field === "repository" ? {path: input} : {name: input, cwd: state.detail?.work_thread?.project_cwd || state.folders.selected.cwd});
+        field === "repository" ? {path: input} : {name: input, cwd: thread?.project_cwd || thread?.cwd || state.folders.selected.cwd});
       value = record.id;
     }
     body[field + "_id"] = value || null;
@@ -1610,21 +1615,22 @@ async function assignmentPayload(prefix) {
 for (const prefix of ["edit"]) {
   for (const field of ["repository", "project"]) $(prefix + "-" + field).onchange = () => assignmentFields(prefix);
 }
-let organizationThreadId = null;
-$("organize-thread").onclick = () => action(async () => {
-  const id = state.selected;
-  if (!id || !state.detail) return;
-  await fillAssignments("edit", state.detail.work_thread);
-  if (state.selected !== id) return;
-  organizationThreadId = id;
-  $("organization-workspace").textContent = "Project: " + (state.detail.work_thread.project_cwd || state.detail.work_thread.cwd);
+let organizationThread = null;
+$("organize-thread").onclick = () => action(() => organizeThread(state.detail?.work_thread), $("organize-thread"));
+async function organizeThread(thread) {
+  if (!thread) return;
+  const selected = state.selected;
+  await fillAssignments("edit", thread);
+  if (state.selected !== selected) return;
+  organizationThread = thread;
+  $("organization-workspace").textContent = "Project: " + (thread.project_cwd || thread.cwd);
   $("organization-dialog").showModal();
   $("edit-project").focus();
-}, $("organize-thread"));
+}
 $("organization-form").onsubmit = event => {
   event.preventDefault();
   action(async () => {
-    const id = organizationThreadId, values = await assignmentPayload("edit");
+    const thread = organizationThread, id = thread.thread_id, values = await assignmentPayload("edit", thread);
     await api(threadPath(id), values);
     $("organization-dialog").close();
     if (state.selected === id) await refreshThread();
@@ -2185,8 +2191,8 @@ $("resume-browser").onclick = () => action(async () => {
   await api(threadPath(state.selected) + "/resume", {}); await refreshDetail(); await refreshList();
 }, $("resume-browser"));
 $("fork-thread").onclick = () => action(forkThread);
-async function forkThread(onSuccess = () => {}) {
-  const source = state.selected;
+async function forkThread(onSuccess = () => {}, source = state.selected) {
+  const selected = state.selected;
   if (state.forking) return;
   state.forking = true; renderStatus();
   try {
@@ -2194,7 +2200,7 @@ async function forkThread(onSuccess = () => {}) {
     onSuccess();
     await refreshList();
     // A response must not pull the user away from another thread they opened.
-    if (state.selected === source) await select(fork.thread_id);
+    if (state.selected === selected) await select(fork.thread_id);
   } finally { state.forking = false; renderStatus(); }
 }
 function setupComposerSizing(input) {
