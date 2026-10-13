@@ -827,7 +827,9 @@ function retainConversation() {
   if (!state.selected || !state.detail || isSessionDraft()) return;
   const entry = conversationEntry(state.selected);
   entry.detail = state.detail;
-  entry.nodes = [...$("timeline").childNodes];
+  // A streamed update may be waiting for its paint. Do not retain older DOM
+  // beside the newer model and later mistake it for an up-to-date transcript.
+  entry.nodes = state.timelineRender?.id === state.selected ? null : [...$("timeline").childNodes];
   entry.scroll = state.timelineScroll?.position() ?? $("timeline").scrollTop;
   entry.following = state.timelineScroll?.following ?? true;
   // Keep lightweight reading positions even after the bounded transcript cache evicts a tab.
@@ -1260,11 +1262,16 @@ function rememberDisclosure(detail, open, thread = state.selected) {
   catch { /* Expansion still survives updates when storage is unavailable. */ }
 }
 function renderTimeline() {
+  if (state.timelineRender) { clearTimeout(state.timelineRender.timer); state.timelineRender = null; }
   const el = $("timeline");
   const atBottom = state.timelineScroll?.beforeRender() ?? (el.scrollHeight - el.scrollTop - el.clientHeight < 100);
   const open = timelineDisclosures();
   if (state.timelineThread === state.selected) {
-    for (const detail of el.querySelectorAll("details[data-id]")) rememberDisclosure(detail, open);
+    for (const detail of el.querySelectorAll("details[data-id]")) {
+      if (detail.open) open.add(detail.dataset.id); else open.delete(detail.dataset.id);
+    }
+    try { sessionStorage.setItem("timeline-disclosures:" + state.selected, JSON.stringify([...open])); }
+    catch { /* Expansion still survives updates when storage is unavailable. */ }
   }
   state.timelineThread = state.selected;
   const fragment = document.createDocumentFragment();
@@ -1279,6 +1286,9 @@ function renderTimeline() {
     ? DispatchUI.turns(sourceTurns, state.detail.dispatchRequests || []) : sourceTurns;
   const entries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
   const workGroups = new Map();
+  const conversation = conversationEntry(state.selected);
+  const previousTools = conversation.toolNodes || new Map(), toolNodes = new Map();
+  const disclosureListeners = conversation.disclosureListeners ||= new WeakSet();
   for (const entry of entries) {
     if (entry.message) {
       fragment.append(AgentMessages.card(document, entry.message, {open: openAgentMessage, expanded: open.has("agent-message:" + entry.message.id)}));
@@ -1329,21 +1339,29 @@ function renderTimeline() {
         message.append(body);
         fragment.append(message);
       } else {
-        const detail = node("details", null, "tool"); detail.dataset.id = item.id; detail.dataset.status = item.status || ""; detail.open = open.has(item.id);
-        const labels = {fileChange: "File changes", reasoning: "Thinking", mcpToolCall: "Tool", plan: "Plan", webSearch: "Web search"};
-        const terminal = item.type === "commandExecution" || item.type === "mcpToolCall" && ["Bash", "exec_command", "shell_command"].includes(item.tool);
-        const command = String(item.command || item.arguments?.command || item.arguments?.cmd || "");
-        const shell = command.match(/^((?:\/[^\s]+\/)?(?:bash|zsh|sh|fish|pwsh))(?:\s|$)/)?.[1];
-        const label = terminal ? "Terminal" + (shell ? " (cmd: " + shell + ")" : "") : item.tool || labels[item.type] || item.type;
-        const preview = (command || (item.type === "fileChange" ? (item.changes || []).map(c => c.path).join(", ") :
-          item.type === "mcpToolCall" ? JSON.stringify(item.arguments || {}) : text)).replace(/\s+/g, " ");
-        const summary = node("summary", null, "tool-summary");
-        const icon = node("span", null, "tool-icon" + (terminal ? " terminal" : ""));
-        icon.setAttribute("aria-hidden", "true");
-        summary.append(icon, node("span", label, "tool-label"), node("span", preview, "tool-preview"));
-        summary.setAttribute("aria-label", [label, item.status, preview].filter(Boolean).join(" · "));
-        summary.title = [label, item.status, preview].filter(Boolean).join(" · ");
-        detail.append(summary, node("pre", text));
+        // Streaming changes one item at a time. Reuse unchanged tool rows,
+        // including their disclosure state, instead of churning the full history.
+        const key = JSON.stringify([turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
+        const signature = JSON.stringify(item), cached = previousTools.get(key);
+        const detail = cached?.signature === signature ? cached.node : node("details", null, "tool");
+        toolNodes.set(key, {signature, node: detail});
+        detail.dataset.id = item.id; detail.dataset.status = item.status || ""; detail.open = open.has(item.id);
+        if (detail !== cached?.node) {
+          const labels = {fileChange: "File changes", reasoning: "Thinking", mcpToolCall: "Tool", plan: "Plan", webSearch: "Web search"};
+          const terminal = item.type === "commandExecution" || item.type === "mcpToolCall" && ["Bash", "exec_command", "shell_command"].includes(item.tool);
+          const command = String(item.command || item.arguments?.command || item.arguments?.cmd || "");
+          const shell = command.match(/^((?:\/[^\s]+\/)?(?:bash|zsh|sh|fish|pwsh))(?:\s|$)/)?.[1];
+          const label = terminal ? "Terminal" + (shell ? " (cmd: " + shell + ")" : "") : item.tool || labels[item.type] || item.type;
+          const preview = (command || (item.type === "fileChange" ? (item.changes || []).map(c => c.path).join(", ") :
+            item.type === "mcpToolCall" ? JSON.stringify(item.arguments || {}) : text)).replace(/\s+/g, " ");
+          const summary = node("summary", null, "tool-summary");
+          const icon = node("span", null, "tool-icon" + (terminal ? " terminal" : ""));
+          icon.setAttribute("aria-hidden", "true");
+          summary.append(icon, node("span", label, "tool-label"), node("span", preview, "tool-preview"));
+          summary.setAttribute("aria-label", [label, item.status, preview].filter(Boolean).join(" · "));
+          summary.title = [label, item.status, preview].filter(Boolean).join(" · ");
+          detail.append(summary, node("pre", text));
+        }
         if (["completed", "failed", "interrupted"].includes(turn.status)) {
           let group = workGroups.get(turn);
           if (!group) {
@@ -1371,9 +1389,13 @@ function renderTimeline() {
     if (!entry.item && turn.status === "interrupted") fragment.append(node("p", "Turn stopped.", "empty"));
   }
   el.replaceChildren(fragment);
+  conversation.toolNodes = toolNodes;
   const disclosureThread = state.selected;
   for (const detail of el.querySelectorAll("details[data-id]")) {
-    detail.addEventListener("toggle", () => rememberDisclosure(detail, open, disclosureThread));
+    if (!disclosureListeners.has(detail)) {
+      detail.addEventListener("toggle", () => rememberDisclosure(detail, open, disclosureThread));
+      disclosureListeners.add(detail);
+    }
   }
   if (!el.childNodes.length) el.append(node("p", state.detail?.work_thread.browser_session ? "This is the beginning of your session. What would you like to work on?" : "This conversation is in a terminal session. Its checkpoint and related links are saved here." + (state.detail?.work_thread.client === "codex" ? " Close that session to continue it in the browser." : " Continue the conversation in Claude Code."), "empty"));
   if (state.timelineScroll) state.timelineScroll.afterRender(atBottom);
@@ -1499,6 +1521,21 @@ function renderRequests() {
     box.append(actions); area.append(box);
   }
 }
+function scheduleTimelineRender() {
+  const pending = state.timelineRender;
+  if (pending?.id === state.selected && pending.detail === state.detail) return;
+  if (pending) clearTimeout(pending.timer);
+  const render = {id: state.selected, detail: state.detail};
+  state.timelineRender = render;
+  // Bound both large SSE replay batches and individual provider chunks. A
+  // timer also flushes hidden panes, where animation frames may be suspended.
+  render.timer = setTimeout(() => {
+    if (state.timelineRender !== render) return;
+    state.timelineRender = null;
+    if (state.selected !== render.id || state.detail !== render.detail) return;
+    renderTimeline(); renderStatus();
+  }, 50);
+}
 function applyEvent(event) {
   const cached = state.conversations?.get(event.params.threadId);
   if (cached) cached.revision++;
@@ -1536,7 +1573,7 @@ function applyEvent(event) {
     if (item && method === "item/agentMessage/delta") item.text = (item.text || "") + params.delta;
     if (item && method === "item/commandExecution/outputDelta") item.aggregatedOutput = (item.aggregatedOutput || "") + params.delta;
   }
-  renderTimeline(); renderStatus();
+  scheduleTimelineRender();
 }
 let listTimer, detailTimer;
 function scheduleList() { clearTimeout(listTimer); listTimer = setTimeout(() => refreshList({background: true}).catch(showError), 150); }

@@ -194,7 +194,7 @@ test('an anchored outgoing card cannot jump over an earlier unanchored incoming 
 test('live turn-start events retain timing before the first streamed user item', () => {
   const state={selected:'thread',detail:{thread:{turns:[{id:'old',items:[{id:'old-user'}]}]},
     coordinationMessages:[sample({id:1,created_at:150})]}};
-  const context={state,renderTimeline:()=>{},renderStatus:()=>{}};
+  const context={state,renderTimeline:()=>{},scheduleTimelineRender:()=>{},renderStatus:()=>{}};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function applyEvent('),source.indexOf('let listTimer')),context);
   context.applyEvent({method:'turn/started',params:{threadId:'thread',turn:{id:'new',startedAt:200,items:[]}}});

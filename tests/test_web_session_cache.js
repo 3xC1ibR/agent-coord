@@ -36,6 +36,7 @@ function setup() {
       c.state.timelineThread = c.state.selected;
       c.$("timeline").replaceChildren(element("article", c.state.detail.thread.turns[0]?.items[0]?.text));
     },
+    scheduleTimelineRender() { c.renderTimeline(); c.renderStatus(); },
     api: async (path, body) => {
       calls.push({path, body});
       if (body) return {};
