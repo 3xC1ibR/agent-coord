@@ -40,3 +40,11 @@
 .thread-hover .hover-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .thread-hover .hover-foot button { font-size: 12px; padding: 6px 10px; }
 .thread-hover .hover-message-text { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Peek is for phones and touch, where there is no hover; desktop opens the lens by hovering. */
+.card-actions .card-peek, .agent-rows .agent-peek { display: none; }
+@media (hover: none), (max-width: 720px) {
+  .card-actions .card-peek { display: inline-block; color: var(--ink); }
+  .agent-rows > li { position: relative; }
+  .agent-rows .agent-peek { display: inline-block; position: absolute; right: 6px; top: 7px; padding: 3px 7px; font-size: 10px; border-radius: 5px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
+}

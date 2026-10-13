@@ -1094,6 +1094,24 @@ and required-action cards keep their details; pins do not override activity sort
 New activity restores the full card, and hover previews or opening the thread
 retain access to its full context. The Attention queue does not decay.
 
+### Peek at a thread without opening it
+
+Hovering a card or a sub-agent row opens a lens beside it (on phones and touch
+screens, where there is no hover, cards and sub-agent rows show a **Peek** button
+instead):
+what the agent is doing right now, where things stand, its next step, what the
+previous checkpoint said, the sub-agents it created or delegated to, and the
+latest message. Clicking inside the lens pins it so it stays while you read,
+survives list refreshes, and can be closed with **×** or Escape. Each listed
+sub-agent can be peeked in turn, with a back link to its creator, and **Open
+thread** jumps into the conversation.
+
+The "now" line comes from tool calls the runtime already observes: the
+coordination hook records Claude Code commands and edits as they happen, and
+the app server records Codex command, file-change, and tool-call items. The
+agent reports nothing extra for it. Threads whose provider exposes no tool
+events show their work phase instead.
+
 Attention shows the reason each thread surfaced. With Jev enabled, the order is
 **Blocked**, **Review requested**, **Update** about execution, **Findings ready**,
 then routine **✓ Done · No action needed**. Required input and failed turns take

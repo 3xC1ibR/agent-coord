@@ -766,3 +766,30 @@ class HookTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolActivityHookTests(HookTests):
+    """Tool events leave a best-effort activity record for the overview lens."""
+
+    def test_tool_events_record_what_the_session_is_doing(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        handle(self.payload("PreToolUse", tool_name="Bash",
+                            tool_input={"command": "python3 -m unittest   -q\necho done"}), self.store)
+        tool = self.store.get_session("codex-one")["last_tool"]
+        self.assertEqual((tool["name"], tool["kind"], tool["label"]), ("Bash", "run", "python3 -m unittest -q"))
+        self.assertIsInstance(tool["at"], float)
+        (self.root / "notes.md").write_text("draft")
+        handle(self.payload("PostToolUse", tool_name="Edit",
+                            tool_input={"file_path": str(self.root / "notes.md"), "old_string": "a", "new_string": "b"}), self.store)
+        tool = self.store.get_session("codex-one")["last_tool"]
+        self.assertEqual((tool["name"], tool["kind"]), ("Edit", "edit"))
+        self.assertTrue(tool["label"].endswith("notes.md"))
+        self.assertNotIn(str(self.root), tool["label"])
+
+    def test_activity_recording_never_blocks_a_tool_call(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        with patch.object(CoordinationStore, "record_tool", side_effect=RuntimeError("disk full")):
+            result = handle(self.payload("PostToolUse", tool_name="Bash", tool_input={"command": "ls"}), self.store)
+        self.assertIsInstance(result, dict)
+        self.assertNotIn("decision", json.dumps(result))
+        self.assertIsNone(self.store.get_session("codex-one")["last_tool"])

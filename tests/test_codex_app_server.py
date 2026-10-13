@@ -1068,3 +1068,34 @@ for line in sys.stdin:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolActivityTests(unittest.TestCase):
+    """Streamed Codex items record what a browser thread is doing right now."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.store = CoordinationStore(self.root / "state.sqlite3")
+        self.sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(self.sessions.close)
+
+    def test_command_and_file_items_become_the_thread_activity(self):
+        thread_id = self.sessions.create({"name": "Worker"})["session"]["thread_id"]
+        self.assertIsNone(self.sessions.work_thread(thread_id, history=False)["last_tool"])
+        turn = self.sessions.send(thread_id, {"message": "Run the suite"})["turn"]
+        params = {"threadId": thread_id, "turnId": turn["id"]}
+        self.sessions._event({"method": "item/started", "params": {**params, "item": {
+            "id": "cmd-1", "type": "commandExecution", "command": "python3 -m unittest  -q", "status": "inProgress"}}})
+        tool = self.sessions.work_thread(thread_id, history=False)["last_tool"]
+        self.assertEqual((tool["name"], tool["kind"], tool["label"]), ("commandExecution", "run", "python3 -m unittest -q"))
+        self.sessions._event({"method": "item/completed", "params": {**params, "item": {
+            "id": "cmd-1", "type": "commandExecution", "command": "python3 -m unittest  -q", "status": "completed"}}})
+        self.sessions._event({"method": "item/started", "params": {**params, "item": {
+            "id": "patch-1", "type": "fileChange", "changes": [{"path": "web/app.js", "kind": "update"}, {"path": "web/styles.css", "kind": "update"}]}}})
+        tool = self.store.get_session(thread_id)["last_tool"]
+        self.assertEqual((tool["kind"], tool["label"]), ("edit", "web/app.js, web/styles.css"))
+        # Messages and reasoning are not activity; the last tool stays.
+        self.sessions._event({"method": "item/started", "params": {**params, "item": {"id": "answer", "type": "agentMessage", "text": "Done"}}})
+        self.assertEqual(self.store.get_session(thread_id)["last_tool"]["label"], "web/app.js, web/styles.css")

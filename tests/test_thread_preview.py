@@ -97,3 +97,36 @@ class ThreadPreviewTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             worker.join(5)
+
+
+class LensPreviewTests(ThreadPreviewTests):
+    """The preview carries what the lens needs beyond the latest message."""
+
+    def test_preview_includes_orchestrated_children_and_the_previous_checkpoint(self):
+        parent = self.sessions.create({"name": "Parent"})["session"]["thread_id"]
+        child = self.sessions.create({"name": "Child"})["session"]["thread_id"]
+        other = self.sessions.create({"name": "Unrelated"})["session"]["thread_id"]
+        with self.store._connection() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS app_control_requests (
+                    request_id TEXT PRIMARY KEY, operation TEXT NOT NULL,
+                    sender_session_id TEXT NOT NULL, cwd TEXT NOT NULL,
+                    thread_id TEXT, payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL, owner TEXT, result_json TEXT,
+                    error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
+                );""")
+            db.execute("INSERT INTO app_control_requests (request_id, operation, sender_session_id, cwd, thread_id, payload_json, status, created_at, updated_at) VALUES (?, 'create', ?, ?, ?, ?, 'completed', 1, 1)",
+                       ("req-1", parent, str(self.root), child, json.dumps({"mode": "orchestration"})))
+        before = thread_preview(self.sessions, parent)
+        self.assertEqual([c["thread_id"] for c in before["children"]], [child])
+        self.assertIsNone(before["previous_checkpoint"])
+        self.assertEqual(thread_preview(self.sessions, other)["children"], [])
+        self.store.threads.checkpoint(parent, {"phase": "planning", "summary": "Planned the change."})
+        self.store.threads.checkpoint(parent, {"phase": "implementation", "summary": "Implementing it."})
+        self.store.record_tool(child, "commandExecution", "pytest -q", kind="run")
+        after = thread_preview(self.sessions, parent)
+        self.assertEqual(after["previous_checkpoint"]["summary"], "Planned the change.")
+        self.assertEqual(after["previous_checkpoint"]["phase"], "planning")
+        self.assertEqual(after["thread"]["checkpoint"]["summary"], "Implementing it.")
+        self.assertEqual(after["children"][0]["last_tool"]["label"], "pytest -q")
+        self.assertIn("last_tool", after["thread"])

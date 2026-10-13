@@ -1396,3 +1396,35 @@ class CoordinationStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolActivityStoreTests(unittest.TestCase):
+    """The latest tool call is a small, best-effort record on the session."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.store = CoordinationStore(self.root / "state.sqlite3")
+
+    def test_record_tool_is_serialized_with_the_session(self) -> None:
+        self.store.register(session_id="one", client="claude", cwd=str(self.root), name="One")
+        self.assertIsNone(self.store.get_session("one")["last_tool"])
+        self.assertTrue(self.store.record_tool("one", "Bash", "  python3   -m unittest\n-q "))
+        tool = self.store.get_session("one")["last_tool"]
+        self.assertEqual((tool["name"], tool["kind"], tool["label"]), ("Bash", "run", "python3 -m unittest -q"))
+        self.assertIsInstance(tool["at"], float)
+        self.assertTrue(self.store.record_tool("one", "fileChange", "x" * 500, kind="edit"))
+        self.assertEqual(len(self.store.get_session("one")["last_tool"]["label"]), 200)
+        self.assertEqual(self.store.get_session("one")["last_tool"]["kind"], "edit")
+
+    def test_unknown_sessions_and_empty_names_are_ignored(self) -> None:
+        self.assertFalse(self.store.record_tool("missing", "Bash", "ls"))
+        self.store.register(session_id="one", client="codex", cwd=str(self.root))
+        self.assertFalse(self.store.record_tool("one", "   ", "ls"))
+        self.assertIsNone(self.store.get_session("one")["last_tool"])
+
+    def test_tool_kinds_cover_both_providers(self) -> None:
+        from agent_coord.store import tool_kind
+        self.assertEqual([tool_kind(n) for n in ("Bash", "commandExecution", "Edit", "fileChange", "Read", "webSearch", "mcpToolCall")],
+                         ["run", "run", "edit", "edit", "read", "read", "tool"])

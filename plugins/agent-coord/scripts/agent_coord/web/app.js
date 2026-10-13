@@ -417,6 +417,12 @@ function threadCard(thread, compact = false, inAttention = false) {
       control.onclick = event => { event.stopPropagation(); action(callback); };
       target.append(control);
     }
+    // Peek is shown only where hover is unavailable (phones and touch); see thread-hover.css.
+    const peek = node("button", "Peek", "quiet card-peek");
+    peek.type = "button"; peek.dataset.thread = thread.thread_id; peek.dataset.action = "peek";
+    peek.setAttribute("aria-label", "Peek · " + thread.title);
+    peek.onclick = event => { event.stopPropagation(); globalThis.threadHover?.open(peek, thread.thread_id); };
+    actions.append(peek);
     const endActions = node("div", null, "card-end-actions");
     if (thread.can_handle_response) addAction("Dismiss", "handle", () => markThreadHandled(thread), endActions);
     if (thread.snooze_due) addAction("Dismiss reminder", "resume-snooze", () => resumeThreadSnooze(thread), endActions);
@@ -794,6 +800,13 @@ function agentThreadChildren(parent, tree, compact) {
     if (status.key === "running") button.append(node("span", status.label, "sr-only"));
     button.onclick = () => action(() => select(child.thread_id));
     item.append(button);
+    if (!compact) {
+      const peek = node("button", "Peek", "quiet agent-peek");
+      peek.type = "button"; peek.dataset.thread = child.thread_id; peek.dataset.action = "peek";
+      peek.setAttribute("aria-label", "Peek · " + child.title);
+      peek.onclick = event => { event.stopPropagation(); globalThis.threadHover?.open(peek, child.thread_id, {thread: child}); };
+      item.append(peek);
+    }
     if (tree.children.has(child.thread_id)) item.append(agentThreadChildren(child, tree, compact));
     list.append(item);
   }

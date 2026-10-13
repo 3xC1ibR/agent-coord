@@ -24,13 +24,14 @@ function setup() {
   window.MutationObserver = class { observe() {} };
   const first = new Element(), second = new Element(); first.dataset.thread = "first"; second.dataset.thread = "second";
   overview.append(first, second);
-  let tasks = new Map(), sequence = 0, requests = [];
+  let tasks = new Map(), sequence = 0, requests = [], opened = [];
+  const threads = {};
   const result = createThreadHover({overview, document, window,
     schedule: fn => { tasks.set(++sequence, fn); return sequence; }, cancel: id => tasks.delete(id),
-    getThread: id => ({thread_id: id, title: id, cwd: "/workspace", checkpoint: {summary: "Saved progress"}}),
-    relativeTime: () => "Just now",
+    getThread: id => threads[id] || ({thread_id: id, title: id, cwd: "/workspace", checkpoint: {summary: "Saved progress"}}),
+    relativeTime: () => "Just now", select: id => opened.push(id),
     loadPreview: id => new Promise((resolve, reject) => requests.push({id, resolve, reject}))});
-  return {...result, overview, document, window, first, second, requests,
+  return {...result, overview, document, window, first, second, requests, threads, opened,
     async flush() { const pending = [...tasks.values()]; tasks.clear(); for (const fn of pending) fn(); await Promise.resolve(); },
     enter(target, type = "pointerover") { overview.handlers[type]({target, type, pointerType: "mouse"}); },
     leave(target) { overview.handlers.pointerout({target, relatedTarget: null}); }};
@@ -111,4 +112,55 @@ test("failed requests retain useful context without global errors; click dismiss
   const s = setup(); s.enter(s.first); await s.flush(); s.requests[0].reject(new Error("offline")); await Promise.resolve();
   assert.match(s.panel.html, /<p>Saved progress<\/p>/); assert.match(s.panel.text, /Latest message unavailable/);
   s.overview.handlers.click({target: s.overview}); assert.equal(s.panel.hidden, true);
+});
+
+const find = (el, cls) => (el.className || "").split(" ").includes(cls) ? el : el.children.map(child => find(child, cls)).find(Boolean);
+const findAll = (el, cls) => ((el.className || "").split(" ").includes(cls) ? [el] : []).concat(...el.children.map(child => findAll(child, cls)));
+
+test("the lens says what the agent is doing now, what came earlier, and lists its agents; a child can be peeked", async () => {
+  const s = setup(); s.enter(s.first); await s.flush();
+  s.requests[0].resolve({
+    thread: {thread_id: "first", title: "Parent", client: "claude", status: "running", response_state: "working", updated_at: 10,
+      checkpoint: {summary: "Halfway there.", next_action: "Run the suite", next_actor: "agent"}, last_tool: {name: "Bash", kind: "run", label: "python3 -m unittest", at: 11}},
+    latest_message: null, previous_checkpoint: {phase: "planning", summary: "Planned the change.", created_at: 5},
+    children: [{thread_id: "kid", title: "Explorer", client: "codex", status: "idle", response_state: "available", checkpoint: {summary: "Mapped the files.", phase: "finished"}, last_tool: null}]});
+  await Promise.resolve();
+  assert.equal(s.panel.children[0].className, "hover-title");
+  assert.match(s.panel.text, /Running python3 -m unittest · Just now/);
+  assert.match(s.panel.text, /Earlier/); assert.match(s.panel.text, /Planned the change/);
+  assert.match(s.panel.text, /Agents · 1/); assert.match(s.panel.text, /Explorer/);
+  assert.equal(s.isPinned(), false); assert.equal(s.panel.attributes.role, "tooltip");
+  find(s.panel, "hover-agent").onclick({stopPropagation() {}});
+  assert.equal(s.isPinned(), true); assert.equal(s.panel.attributes.role, "dialog");
+  assert.equal(s.requests[1].id, "kid");
+  assert.match(s.panel.text, /Explorer/); assert.match(s.panel.html, /Mapped the files/); // Markdown bodies render into innerHTML
+  const back = find(s.panel, "hover-back"); assert.match(back.textContent, /Parent/);
+  back.onclick({stopPropagation() {}});
+  assert.equal(s.panel.children[0].textContent, "Parent");
+});
+
+test("clicking inside pins the lens, Peek opens it pinned, and a refresh re-renders fresh list data", async () => {
+  const s = setup(); s.enter(s.first); await s.flush(); s.requests[0].resolve(response("first")); await Promise.resolve();
+  s.leave(s.first); await s.flush(); assert.equal(s.panel.hidden, true);
+  s.enter(s.first); await s.flush(); await Promise.resolve(); // served from the short-lived cache
+  assert.equal(s.requests.length, 1);
+  s.panel.handlers.pointerdown({}); s.leave(s.first); await s.flush();
+  assert.equal(s.panel.hidden, false); assert.equal(s.panel.attributes.role, "dialog");
+  assert.ok(find(s.panel, "hover-close"));
+  s.threads.first = {thread_id: "first", title: "first", status: "running", response_state: "working", checkpoint: {summary: "Saved progress"}, last_tool: {kind: "edit", label: "app.js", at: 1}};
+  s.refresh(); assert.match(s.panel.text, /Editing app.js/);
+  find(s.panel, "hover-close").onclick({stopPropagation() {}});
+  assert.equal(s.panel.hidden, true); assert.equal(s.isPinned(), false);
+  const button = s.document.createElement("button"); button.dataset.thread = "second"; s.overview.append(button);
+  s.open(button, "second"); assert.equal(s.isPinned(), true); assert.equal(s.panel.hidden, false);
+  assert.equal(s.requests.at(-1).id, "second");
+  s.overview.handlers.click({target: {closest: () => button}}); assert.equal(s.panel.hidden, false);
+  s.overview.handlers.click({target: {closest: () => null}}); assert.equal(s.panel.hidden, true);
+});
+
+test("Open thread hands off to the app and closes the lens", async () => {
+  const s = setup(); s.enter(s.first); await s.flush(); s.requests[0].resolve(response("first")); await Promise.resolve();
+  const foot = find(s.panel, "hover-foot"); assert.ok(foot);
+  foot.children[0].onclick({stopPropagation() {}});
+  assert.deepEqual(s.opened, ["first"]); assert.equal(s.panel.hidden, true);
 });

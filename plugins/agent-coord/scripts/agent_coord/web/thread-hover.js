@@ -159,11 +159,20 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
       cache.set(thread.thread_id, {data, expires: Date.now() + cacheMs});
       if (cache.size > 30) cache.delete(cache.keys().next().value);
       if (token !== request || anchor !== button || !button.isConnected) return;
-      current = {thread_id: thread.thread_id, thread: data.thread || thread};
+      // The preview's record is fresher, but the list record carries the id and runtime fields.
+      current = {thread_id: thread.thread_id, thread: {...thread, ...(data.thread || {}), thread_id: thread.thread_id}};
       render(current.thread, data);
     } catch (_) {
       if (token === request && anchor === button) render(thread, saved?.data || null, {failed: true});
     }
+  }
+  function open(button, id, {thread} = {}) {
+    // Phones and touch screens have no hover: a Peek button opens the lens already pinned.
+    cancel(openTimer); cancel(closeTimer);
+    if (anchor && anchor !== button) hide();
+    pinned = true; trail = [];
+    button.removeAttribute?.("title");
+    show(button, id, {thread});
   }
   function pin() {
     if (pinned || panel.hidden || !current) return;
@@ -206,7 +215,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   overview.addEventListener("pointerout", leave);
   overview.addEventListener("focusin", enter);
   overview.addEventListener("focusout", leave);
-  overview.addEventListener("click", () => hide());
+  overview.addEventListener("click", event => { if (event.target?.closest?.('[data-action="peek"]')) return; hide(); });
   panel.addEventListener("pointerenter", () => { pointerInside = true; cancel(closeTimer); });
   panel.addEventListener("pointerleave", () => { pointerInside = false; leave({relatedTarget: null}); });
   panel.addEventListener("pointerdown", () => pin());
@@ -222,7 +231,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     hide();
   });
   observer.observe(overview, {childList: true, subtree: true});
-  return {hide, panel, pin, refresh, get pinned() { return pinned; }};
+  return {hide, panel, open, pin, refresh, isPinned: () => pinned};
 }
 
 if (typeof module !== "undefined" && module.exports) module.exports = {createThreadHover};
