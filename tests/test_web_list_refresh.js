@@ -87,6 +87,31 @@ test("mutation invalidation rejects a stale snapshot even when the view is uncha
   assert.equal(c.state.sessions[0].snoozed, true);
 });
 
+test("closing during inventory reads cannot resurrect a confirmed closed card", async () => {
+  const {c, reads} = setup();
+  Object.assign(c, {renderStatus() {}, threadPath: id => "threads/" + id, showError(error) { throw error; }});
+  Object.assign(c.state, {selected: null, closing: new Set()});
+  vm.runInContext(source.slice(source.indexOf("async function toggleThreadClosed("), source.indexOf('$("close-thread").onclick')), c);
+  const read = c.api;
+  let finishClose;
+  c.api = (path, body) => path.endsWith("/close") ? new Promise(resolve => { finishClose = resolve; }) : read(path, body);
+  const before = c.refreshList({background: true});
+  const closing = c.toggleThreadClosed(thread());
+  const during = c.refreshList({background: true});
+  finishClose({attention: "archived"});
+  await closing;
+  assert.equal(c.state.sessions.length, 0);
+  // Both snapshots still contain the thread, but predate the confirmed close.
+  reads[0].resolve({data: [thread()]});
+  reads[1].resolve({data: [thread()]});
+  await Promise.all([before, during]);
+  assert.equal(c.state.sessions.length, 0);
+  assert.equal(reads.length, 3, "confirmation refresh runs independently");
+  reads[2].resolve({data: [thread({thread_id: "other"})]});
+  await c.state.listRefresh.promise;
+  assert.equal(c.state.sessions[0].thread_id, "other", "post-close refresh is not invalidated");
+});
+
 test("a failed shared refresh releases the request so the next poll can recover", async () => {
   const {c, reads} = setup();
   const first = c.refreshList({background: true}), second = c.refreshList({background: true});

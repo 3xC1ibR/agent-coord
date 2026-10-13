@@ -150,7 +150,13 @@ function overview() {
       get clientWidth() { return this.isConnected && !controls.welcome.hidden ? 346 : 0; },
       setAttribute() {},
       append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } },
-      replaceChildren(...items) { for (const item of this.children) item.parent = null; this.children = []; this.append(...items); },
+      replaceChildren(...items) {
+        for (const item of this.children) item.parent = null;
+        this.children = []; this.append(...items);
+        // Model the browser clamping an emptied scrolling region during layout.
+        this.scrollTop = 0;
+        if (this === controls.overview && controls.welcome) controls.welcome.scrollTop = 0;
+      },
     };
   }
   const c = {conversationSearch: null, node: element, $: id => controls[id] ||= Object.assign(element("div"), {root: true}),
@@ -181,6 +187,23 @@ test("mobile board keeps its horizontal position when a checkpoint refresh rebui
   oldBoard.scrollLeft = 0; oldBoard.onscroll(); // A queued event from the detached board must not reset it.
   c.state.sessions[0].updated_at = 2; c.renderList();
   assert.equal(c.board().scrollLeft, 930);
+});
+
+test("closing a card and later polling preserve the overview and sidebar scroll positions", () => {
+  const c = overview();
+  c.state.sessions.push(thread("two")); c.renderList();
+  c.$("welcome").scrollTop = 780; c.$("sessions").scrollTop = 320;
+  c.state.pendingCloses = new Set(["one"]);
+  c.renderList();
+  assert.equal(c.$("welcome").scrollTop, 780);
+  assert.equal(c.$("sessions").scrollTop, 320);
+  assert.equal(c.$("thread-count").textContent, "1");
+  c.$("welcome").scrollTop = 910;
+  c.state.sessions[1].updated_at = 2; c.renderList();
+  assert.equal(c.$("welcome").scrollTop, 910, "polling preserves the user's latest position");
+  c.state.pendingCloses.clear(); c.renderList();
+  assert.equal(c.$("thread-count").textContent, "2", "rollback restores the closing card");
+  assert.equal(c.$("welcome").scrollTop, 910);
 });
 
 test("opening a thread and refreshing its hidden overview does not forget the mobile column", () => {

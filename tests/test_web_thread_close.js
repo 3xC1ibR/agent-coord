@@ -8,9 +8,11 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 
 function setup() {
   const elements = new Map();
-  const c = {$: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
+  const c = {listRequest: 0, $: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
     state: {selected: "one", detail: {work_thread: {browser_session: true, attention: "now"}}, sessions: [{thread_id: "one"}], closing: new Set()},
     threadGrouping: grouping, renderSessionSettings() {}, refreshDetail: async () => {}, refreshList: async () => {},
+    renderList() { c.rendered = c.state.sessions.filter(thread => !c.state.pendingCloses?.has(thread.thread_id)); },
+    showError(error) { c.error = error; },
     threadPath: id => "threads/" + id, goHome() { c.state.selected = null; c.state.detail = null; c.home = true; }};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
@@ -46,6 +48,57 @@ test("a failed close keeps the thread and releases the busy indicator", async ()
   await assert.rejects(c.toggleThreadClosed(), /Shutdown failed/);
   assert.equal(c.state.selected, "one");
   assert.equal(c.state.sessions.length, 1);
+  assert.equal(c.state.closing.size, 0);
+});
+
+test("a slow close immediately hides the card and a failure restores it", async () => {
+  const c = setup(); let rejectClose;
+  c.state.selected = null;
+  c.api = () => new Promise((resolve, reject) => { rejectClose = reject; });
+  const closing = c.toggleThreadClosed({thread_id: "one", attention: "now"});
+  assert.equal(c.rendered.length, 0, "render before waiting for shutdown");
+  assert.equal(c.state.closing.has("one"), true);
+  assert.equal(c.listRequest, 1, "invalidate inventory reads started before the click");
+  rejectClose(new Error("Still stopping"));
+  await assert.rejects(closing, /Still stopping/);
+  assert.equal(c.rendered[0].thread_id, "one");
+  assert.equal(c.state.closing.size, 0);
+  assert.equal(c.listRequest, 2, "invalidate inventory reads started during shutdown");
+});
+
+test("a confirmed close updates cards and badges without waiting for an inventory refresh", async () => {
+  const c = setup(); let rejectRefresh;
+  c.state.selected = null;
+  c.state.viewThreads = [...c.state.sessions];
+  c.api = async () => ({});
+  c.refreshList = () => new Promise((resolve, reject) => { rejectRefresh = reject; });
+  let completed = false;
+  const closing = c.toggleThreadClosed({thread_id: "one", attention: "now"}).then(() => { completed = true; });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(completed, true);
+  assert.equal(c.state.sessions.length, 0);
+  assert.equal(c.state.viewThreads.length, 0);
+  assert.equal(c.state.closing.size, 0);
+  rejectRefresh(new Error("Inventory unavailable"));
+  await closing;
+  assert.equal(c.error.message, "Inventory unavailable");
+  assert.equal(c.state.sessions.length, 0, "refresh failure must not undo a successful close");
+});
+
+test("concurrent closes reconcile independently and suppress duplicate requests", async () => {
+  const c = setup(), pending = new Map();
+  c.state.selected = null;
+  c.state.sessions.push({thread_id: "two"}, {thread_id: "three"});
+  c.api = path => new Promise((resolve, reject) => { pending.set(path, {resolve, reject}); });
+  const one = c.toggleThreadClosed({thread_id: "one", attention: "now"});
+  const two = c.toggleThreadClosed({thread_id: "two", attention: "now"});
+  await c.toggleThreadClosed({thread_id: "one", attention: "now"});
+  assert.equal(pending.size, 2);
+  assert.deepEqual(c.rendered.map(t => t.thread_id), ["three"]);
+  pending.get("threads/two/close").resolve({}); await two;
+  pending.get("threads/one/close").reject(new Error("Offline"));
+  await assert.rejects(one, /Offline/);
+  assert.deepEqual(c.rendered.map(t => t.thread_id), ["one", "three"]);
   assert.equal(c.state.closing.size, 0);
 });
 

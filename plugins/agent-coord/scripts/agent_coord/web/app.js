@@ -405,10 +405,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     close.disabled = state.closing.has(thread.thread_id);
     close.onclick = event => {
       event.stopPropagation();
-      action(async () => {
-        try { await toggleThreadClosed(thread); }
-        finally { state.listSignature = ""; renderList(); }
-      }, close);
+      action(() => toggleThreadClosed(thread), close);
     };
     card.append(button);
     const actions = node("div", null, "card-actions");
@@ -557,10 +554,11 @@ function renderList() {
   if (state.paneMode) { renderStatus(); return; }
   if (state.dispatchDock) syncDispatcherOverview();
   renderClosedToggle();
-  savedViews?.render(threadsInProject(state.viewThreads || state.sessions));
+  savedViews?.render(threadsInProject(state.viewThreads || state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)));
   if (conversationSearch?.update()) { renderStatus(); return; }
   const query = $("search").value.trim().toLocaleLowerCase();
-  const projectThreads = threadsInProject(state.sessions).filter(t => threadOrganization.matches(t, "", $("project").value));
+  const projectThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)
+    && threadOrganization.matches(t, "", $("project").value));
   const threads = projectThreads.filter(t => threadViews.matches(t,
     {show: $("view").value, phase: $("phase-filter").value, search: query}));
   const upcoming = upcomingSchedules(query);
@@ -584,6 +582,9 @@ function renderList() {
   const focusAction = document.activeElement?.dataset.action;
   const focusGroup = document.activeElement?.closest("[data-group]")?.dataset.group;
   const focusArea = document.activeElement?.closest("#sessions") ? $("sessions") : $("overview");
+  // Rebuilding the board can clamp the scrollers while their content is empty.
+  // Capture the current position on every render, including background updates.
+  const scrollPositions = [$("welcome"), $("sessions")].map(el => ({el, top: el.scrollTop, left: el.scrollLeft}));
   $("sessions").replaceChildren(); $("overview").replaceChildren();
   const agentTree = agentThreadTree(threads);
   const groups = threadGrouping.groupThreads(agentTree.roots);
@@ -676,6 +677,7 @@ function renderList() {
     }
     $("overview").append(empty);
   }
+  for (const {el, top, left} of scrollPositions) { el.scrollTop = top; el.scrollLeft = left; }
   state.overviewMotion.play(motionBefore);
   state.dispatchDock?.flush();
   if (focused) {
@@ -2078,11 +2080,20 @@ async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess 
   const reopening = thread.attention === "archived";
   const previous = {...thread, thread_id: id};
   const snapshot = reopening ? null : state.threadActions?.captureClose(id);
+  // Hide closing cards immediately, but keep their records for rollback. Polls
+  // may still return the open thread while the provider finishes stopping it.
+  state.pendingCloses ||= new Set();
+  if (!reopening) state.pendingCloses.add(id);
+  ++listRequest;
   state.closing.add(id); renderStatus();
+  renderList();
   try {
     await api(threadPath(id) + (reopening ? "/reopen" : "/close"), {});
+    ++listRequest;
     onSuccess();
     if (!reopening) {
+      state.sessions = state.sessions.filter(item => item.thread_id !== id);
+      state.viewThreads = state.viewThreads?.filter(item => item.thread_id !== id);
       let reopened = false;
       state.threadActions?.notify("close:" + id, "Thread closed · " + (thread.title || "Available in Closed"), async () => {
         if (state.closing.has(id)) throw new Error("Wait for the thread to finish closing.");
@@ -2108,10 +2119,16 @@ async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess 
     if (state.selected === id) {
       $("view").value = "active";
       if (reopening) await refreshDetail();
-      else { state.sessions = state.sessions.filter(thread => thread.thread_id !== id); goHome(); }
+      else goHome();
     }
-    await refreshList();
-  } finally { state.closing.delete(id); renderStatus(); }
+  } finally {
+    ++listRequest;
+    state.pendingCloses.delete(id);
+    state.closing.delete(id); renderStatus(); renderList();
+  }
+  // The close response is authoritative. A slow inventory refresh must not
+  // delay local feedback or keep the action busy after shutdown succeeds.
+  refreshList().catch(showError);
 }
 $("close-thread").onclick = () => action(toggleThreadClosed, $("close-thread"));
 $("park").onclick = () => action(() => toggleThreadLater(state.detail.work_thread), $("park"));

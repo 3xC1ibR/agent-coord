@@ -7,10 +7,10 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 
 function setup() {
   const elements = new Map();
-  const context = {$: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
+  const context = {listRequest: 0, $: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
     state: {selected: "one", sessions: [{thread_id: "one"}], detail: {session: {model: "test-model", effort: "high", yolo: 1}, work_thread: {thread_id: "one", browser_session: true, attention: "now", title: "One"}, running: false}, commandFeedback: new Map(), drafts: new Map(), closing: new Set()},
     renderModelPicker() {}, renderStatus() {}, refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id,
-    threadPath: id => "threads/" + id,
+    threadPath: id => "threads/" + id, renderList() {}, showError(error) { throw error; },
     select: async id => { context.state.selected = id; },
     goHome: () => { context.state.selected = null; context.state.detail = null; }};
   vm.createContext(context);
