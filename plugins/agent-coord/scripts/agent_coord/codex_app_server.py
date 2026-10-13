@@ -1211,9 +1211,9 @@ class BrowserSessions:
             return self.dispatch.submit(thread_id, body)
         return self.queue.enqueue(thread_id, body) if queued else self.send(thread_id, body)
 
-    def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False) -> dict:
+    def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False, preserve_text: bool = False) -> dict:
         message, images = message_images(body)
-        if body.get("mentions"):
+        if preserve_text or body.get("mentions"):
             message = body["message"]  # Selected ranges refer to the untrimmed composer text.
         mentions = thread_mentions(message, body, self)
         source_window = window_id(body.get("windowId"))

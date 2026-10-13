@@ -24,8 +24,9 @@ function setup(t) {
     codex: [{model: "luna", displayName: "Luna", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{reasoningEffort: "medium"}, {reasoningEffort: "high"}]}],
     claude: [{model: "sonnet", defaultReasoningEffort: "low", supportedReasoningEfforts: [{reasoningEffort: "low"}]}],
     antigravity: [{model: "gemini-test", displayName: "Gemini Test", supportedReasoningEfforts: []}],
+    kimi: [{model: "k3", displayName: "K3", defaultReasoningEffort: "high", supportedReasoningEfforts: [{reasoningEffort: "low"}, {reasoningEffort: "high"}, {reasoningEffort: "max"}]}],
   };
-  let draft = {source: "source-thread", message: "Run the backfill", settings: {cwd: "/repo", model: "luna", effort: "high", yolo: true}};
+  let draft = {message: "Run the backfill", settings: {cwd: "/repo", model: "luna", effort: "high", yolo: true}};
   const ui = new ScheduledPromptsUI({document, getDraft: () => draft, onSaved: item => saved.push(item),
     openThread: async id => opened.push(id), onError: error => { throw error; },
     api: async (path, body) => {
@@ -59,10 +60,42 @@ test("saving snapshots selected model, effort, workspace, permission, and date w
   assert.deepEqual(post.body.settings, {cwd: "/repo", client: "codex", model: "luna", effort: "high", yolo: true});
   assert.equal(post.body.timezone, Intl.DateTimeFormat().resolvedOptions().timeZone);
   assert.ok(post.body.run_at > Date.now() / 1000);
-  assert.equal(c.saved[0].source, "source-thread");
+  assert.equal(post.body.target_thread_id, undefined);
   assert.equal(c.$("schedule-dialog").open, false);
   assert.equal(c.$("schedules-dialog").open, true);
   assert.equal(c.calls.some(call => call.path.startsWith("sessions")), false);
+});
+
+test("existing-thread schedules save the original destination and exact draft without settings", async t => {
+  const c = setup(t);
+  c.setDraft({source: "source-thread", message: "  continue\n ", settings: {cwd: "/repo", model: "removed"}});
+  await c.ui.open();
+  assert.match(c.$("schedule-destination").textContent, /existing thread/);
+  assert.equal(c.$("schedule-settings").hidden, true);
+  assert.equal(c.$("schedule-model").disabled, true);
+  assert.equal(c.$("schedule-save").disabled, false);
+  assert.equal(c.calls.length, 0);
+  c.setDraft({source: "different-thread", message: "Different", settings: {cwd: "/elsewhere"}});
+  await c.ui.save();
+  const post = c.calls.find(call => call.path === "schedules" && call.body);
+  assert.equal(post.body.target_thread_id, "source-thread");
+  assert.equal(post.body.message, "  continue\n ");
+  assert.equal(post.body.settings, undefined);
+  assert.equal(c.saved[0].source, "source-thread");
+});
+
+test("editing an existing-thread schedule preserves destination independently of selected conversation", async t => {
+  const c = setup(t);
+  await c.ui.open({id: "saved-id", target_thread_id: "original-thread", thread_id: "original-thread", version: 2,
+    message: "continue", run_at: Date.now() / 1000 + 86400, settings: {cwd: "/repo"}});
+  await c.ui.save();
+  const post = c.calls.find(call => call.path === "schedules/saved-id");
+  assert.equal(post.body.target_thread_id, "original-thread");
+  assert.equal(post.body.settings, undefined);
+  c.setDraft({settings: {cwd: "/repo"}});
+  await c.ui.open();
+  assert.equal(c.$("schedule-settings").hidden, false);
+  assert.equal(c.$("schedule-model").disabled, false);
 });
 
 test("model selection updates supported reasoning and permissions stay opt-in", async t => {
@@ -71,6 +104,12 @@ test("model selection updates supported reasoning and permissions stay opt-in", 
   c.$("schedule-model").value = JSON.stringify(["claude", "sonnet"]); c.ui.efforts("high");
   assert.deepEqual(c.$("schedule-effort").options.map(option => option.value), ["low"]);
   assert.equal(c.$("schedule-effort").value, "low");
+  c.$("schedule-model").value = JSON.stringify(["kimi", "k3"]); c.ui.efforts("max");
+  assert.deepEqual(c.$("schedule-effort").options.map(option => option.value), ["low", "high", "max"]);
+  await c.ui.save();
+  const post = c.calls.find(call => call.path === "schedules" && call.body);
+  assert.equal(post.body.settings.client, "kimi");
+  assert.equal(post.body.settings.effort, "max");
 });
 
 test("unavailable saved model requires a new explicit selection", async t => {

@@ -220,13 +220,13 @@
   <dialog id="folder-dialog" aria-labelledby="folder-title"><form id="folder-form"><h2 id="folder-title">Open project</h2><p id="folder-description" class="muted">Choose the directory for this project.</p><label>Folder path<input id="folder-path" required maxlength="4000" autocomplete="off" list="folder-choices" placeholder="/path/to/folder"></label><datalist id="folder-choices"></datalist><p id="folder-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="folder-dialog">Cancel</button><button id="folder-submit" class="primary" type="submit">Open project</button></div></form></dialog>
   <dialog id="schedule-dialog" aria-labelledby="schedule-title"><form id="schedule-form">
     <h2 id="schedule-title">Schedule prompt</h2>
-    <p class="muted">Starts a new thread. Include everything the agent needs to work independently.</p>
+    <p id="schedule-destination" class="muted">Starts a new thread. Include everything the agent needs to work independently.</p>
     <div class="mention-editor"><label>Prompt<textarea id="schedule-message" required maxlength="100000" rows="4" role="combobox" aria-multiline="true" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="schedule-mentions" aria-expanded="false"></textarea></label><div id="schedule-mentions" class="thread-mentions" role="listbox" aria-label="File and thread references" hidden></div><div id="schedule-references" class="thread-references" aria-label="Selected file and thread references"></div></div>
-    <label>Workspace<input id="schedule-workspace" required autocomplete="off" placeholder="/path/to/repository"></label>
+    <label id="schedule-workspace-field">Workspace<input id="schedule-workspace" required autocomplete="off" placeholder="/path/to/repository"></label>
     <label>Date and time · <span id="schedule-timezone"></span><input id="schedule-time" type="datetime-local" required></label>
     <p id="schedule-preview" class="muted"></p>
-    <div class="schedule-settings"><label>Model<select id="schedule-model" required></select></label><label>Reasoning<select id="schedule-effort"></select></label></div>
-    <label class="yolo-option"><input id="schedule-full-access" type="checkbox"><span>Full access<small>Run without sandbox restrictions or approval prompts.</small></span></label>
+    <div id="schedule-settings" class="schedule-settings"><label>Model<select id="schedule-model" required></select></label><label>Reasoning<select id="schedule-effort"></select></label></div>
+    <label id="schedule-permissions" class="yolo-option"><input id="schedule-full-access" type="checkbox"><span>Full access<small>Run without sandbox restrictions or approval prompts.</small></span></label>
     <p class="muted">Keep your Mac awake and Ribbon Field running. Missed prompts wait for you to choose Run now.</p>
     <p id="schedule-error" class="dialog-error" role="alert" hidden></p>
     <div class="dialog-actions"><button type="button" class="quiet" data-close="schedule-dialog">Cancel</button><button id="schedule-save" class="primary" type="submit">Save schedule</button></div>

@@ -588,17 +588,24 @@ close or reopen conversations. Creating a session requires neither a parent
 agent nor a Beads issue. Different sessions can run concurrently; an individual
 session accepts one active turn at a time.
 
-Choose **Schedule…** beside Send to save a one-time text prompt. Set its
-workspace, date and time (with your browser's time zone shown), model, reasoning
-effort, and permissions. Each run creates a new thread, so include the context
-the agent needs in the prompt. **Full access** uses the same unrestricted,
+Choose **Schedule…** beside Send to save a one-time text prompt. In an existing
+conversation, it sends your exact message back into that thread, preserving its
+history and using its workspace, model, reasoning, and permissions at delivery.
+A busy thread shows **Waiting for thread** until its current turn and queued
+messages finish; waiting schedules can still be edited or cancelled. A closed
+or unavailable destination fails visibly instead of creating another thread.
+
+Scheduling from a new-conversation draft creates a new thread. Set its workspace,
+date and time (with your browser's time zone shown), model, reasoning effort,
+and permissions, and include the context the agent needs. **Full access** uses the same unrestricted,
 no-approval settings as session YOLO mode; workspace access can pause for approval.
 Saving a schedule does not start a model turn. Attachments and recurrence are
 not supported.
 
 Open **Scheduled prompts** in the sidebar to edit or cancel a pending run and
-open its result thread. The saved model and reasoning are checked again at
-launch; an unavailable setting fails visibly instead of choosing a substitute.
+open its result thread. For new-thread schedules, the saved model and reasoning
+are checked again at launch; an unavailable setting fails visibly instead of
+choosing a substitute.
 The Mac must remain awake and Ribbon Field must remain running. Future schedules
 survive restarts. A time already past when the backend starts, or over one minute
 late during operation, becomes **Missed** and waits for **Run now** or rescheduling.

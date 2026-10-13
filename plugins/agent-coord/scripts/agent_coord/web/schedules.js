@@ -49,6 +49,7 @@
         this.editing = item;
         this.requestId = item?.id || crypto.randomUUID();
         this.draft = draft;
+        this.targetThread = item ? item.target_thread_id || null : draft.source || null;
         this.$("schedules-dialog").close();
         this.$("schedule-title").textContent = item ? "Edit scheduled prompt" : "Schedule prompt";
         this.error("schedule-error", null);
@@ -56,6 +57,11 @@
         this.mentions?.restore(this.requestId, draft.message || "", draft.mentions || []);
         this.$("schedule-workspace").value = draft.settings.cwd || "";
         this.$("schedule-full-access").checked = !!draft.settings.yolo;
+        this.$("schedule-destination").textContent = this.targetThread ?
+          "Sends your message in this existing thread, using its settings at delivery. If busy, it waits for the current turn and queued messages." :
+          "Starts a new thread. Include everything the agent needs to work independently.";
+        for (const id of ["schedule-workspace-field", "schedule-settings", "schedule-permissions"]) this.$(id).hidden = !!this.targetThread;
+        for (const id of ["schedule-workspace", "schedule-model", "schedule-effort", "schedule-full-access"]) this.$(id).disabled = !!this.targetThread;
         const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(0, 0, 0, 0);
         this.$("schedule-time").value = localInput(item ? new Date(item.run_at * 1000) : tomorrow);
         this.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -65,16 +71,17 @@
         this.$("schedule-model").replaceChildren();
         this.$("schedule-effort").replaceChildren();
         this.$("schedule-dialog").showModal();
-        const results = await Promise.allSettled(["codex", "claude", "antigravity"].map(async client => {
+        if (this.targetThread) return;
+        const results = await Promise.allSettled(["codex", "claude", "antigravity", "kimi"].map(async client => {
           const models = (await this.api("models?client=" + client)).data;
           this.catalogs.set(client, models);
         }));
-        for (const [index, client] of ["codex", "claude", "antigravity"].entries()) {
+        for (const [index, client] of ["codex", "claude", "antigravity", "kimi"].entries()) {
           if (results[index].status === "rejected") this.catalogs.delete(client);
         }
         const picker = this.$("schedule-model");
         for (const [client, models] of this.catalogs) {
-          const group = this.node("optgroup"); group.label = client === "antigravity" ? "Google Antigravity" : client === "codex" ? "Codex" : "Claude Code";
+          const group = this.node("optgroup"); group.label = client === "kimi" ? "Kimi Code" : client === "antigravity" ? "Google Antigravity" : client === "codex" ? "Codex" : "Claude Code";
           for (const model of models) {
             const option = this.node("option", model.displayName || model.model);
             option.value = JSON.stringify([client, model.model]); group.append(option);
@@ -96,7 +103,7 @@
         }
       } finally {
         this.opening = false;
-        this.$("schedule-save").disabled = !this.$("schedule-model").value;
+        this.$("schedule-save").disabled = !this.targetThread && !this.$("schedule-model").value;
       }
     }
 
@@ -123,13 +130,14 @@
       this.saving = true; this.$("schedule-save").disabled = true; this.error("schedule-error", null);
       try {
         const [client, model] = JSON.parse(this.$("schedule-model").value || "[]");
-        if (!model) throw new Error("Choose a model.");
+        if (!this.targetThread && !model) throw new Error("Choose a model.");
         const settings = {cwd: this.$("schedule-workspace").value, client, model,
           effort: this.$("schedule-effort").value || null, yolo: this.$("schedule-full-access").checked};
         for (const key of ["repository_id", "project_id"]) {
           if (Object.hasOwn(this.draft.settings, key)) settings[key] = this.draft.settings[key];
         }
-        const body = {message: this.$("schedule-message").value, run_at: scheduledTime(this.$("schedule-time").value), timezone: this.timezone, settings};
+        const body = {message: this.$("schedule-message").value, run_at: scheduledTime(this.$("schedule-time").value), timezone: this.timezone,
+          ...(this.targetThread ? {target_thread_id: this.targetThread} : {settings})};
         const mentions = this.mentions?.snapshot() || [];
         if (mentions.length) body.mentions = mentions;
         if (this.editing) await this.api("schedules/" + encodeURIComponent(this.editing.id), {...body, action: "edit", version: this.editing.version});
@@ -155,13 +163,13 @@
       const items = (await this.api("schedules")).data;
       const list = this.$("schedule-list"); list.replaceChildren();
       if (!items.length) list.append(this.node("p", "No scheduled prompts yet.", "muted"));
-      const labels = {scheduled: "Scheduled", starting: "Starting", running: "Running", completed: "Completed", failed: "Failed", missed: "Missed", cancelled: "Cancelled", review: "Needs review"};
+      const labels = {scheduled: "Scheduled", waiting: "Waiting for thread", starting: "Starting", running: "Running", completed: "Completed", failed: "Failed", missed: "Missed", cancelled: "Cancelled", review: "Needs review"};
       for (const item of items) {
         const card = this.node("article", null, "schedule-card");
         const title = this.node("h3", item.message);
         const time = new Date(item.run_at * 1000).toLocaleString(undefined, {timeZone: item.timezone, dateStyle: "medium", timeStyle: "short"});
         card.append(title, this.node("p", `${labels[item.state] || item.state} · ${time} · ${item.timezone}`, "schedule-meta"),
-          this.node("p", `${item.settings.model} · ${item.settings.effort || "Model default"} · ${item.settings.yolo ? "Full access" : "Workspace access"}`, "muted"),
+          this.node("p", item.target_thread_id ? "Existing thread · Uses its settings at delivery" : `${item.settings.model} · ${item.settings.effort || "Model default"} · ${item.settings.yolo ? "Full access" : "Workspace access"}`, "muted"),
           this.node("p", item.cwd, "muted"));
         if (item.error) card.append(this.node("p", item.error, "schedule-error"));
         const actions = this.node("div", null, "dialog-actions");
@@ -174,7 +182,7 @@
             finally { this.mutating = false; node.disabled = false; }
           }; actions.append(node);
         };
-        if (["scheduled", "missed"].includes(item.state)) {
+        if (["scheduled", "missed", "waiting"].includes(item.state)) {
           button("Edit", () => this.open(item));
           button("Cancel", async () => { await this.api("schedules/" + item.id, {action: "cancel", version: item.version}); await this.refresh(); });
         }

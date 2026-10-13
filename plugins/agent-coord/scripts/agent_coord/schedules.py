@@ -41,6 +41,8 @@ class ScheduledPrompts:
             columns = {row[1] for row in db.execute("PRAGMA table_info(scheduled_prompts)")}
             if "mentions_json" not in columns:
                 db.execute("ALTER TABLE scheduled_prompts ADD COLUMN mentions_json TEXT NOT NULL DEFAULT '[]'")
+            if "target_thread_id" not in columns:
+                db.execute("ALTER TABLE scheduled_prompts ADD COLUMN target_thread_id TEXT")
 
     @staticmethod
     def _describe(row):
@@ -63,12 +65,12 @@ class ScheduledPrompts:
         return [self._describe(row) for row in rows if matches_workspace(row["cwd"], self.sessions.cwd)]
 
     def _validate(self, body):
-        if set(body) - {"id", "version", "message", "run_at", "timezone", "settings", "mentions"}:
+        if set(body) - {"id", "version", "message", "run_at", "timezone", "settings", "mentions", "target_thread_id"}:
             raise CoordinationError("Unknown scheduled prompt setting.")
         message = body.get("message")
         self.sessions._text(message, "Prompt", 100000)
         mentions = thread_mentions(message, body, self.sessions)
-        if message.startswith("/"):
+        if message.lstrip().startswith("/"):
             raise CoordinationError("Schedule a prompt, not a slash command.")
         run_at = body.get("run_at")
         if (type(run_at) not in (int, float) or not 0 < run_at < 253402300800
@@ -79,6 +81,16 @@ class ScheduledPrompts:
             ZoneInfo(timezone)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise CoordinationError("Choose a valid time zone.") from exc
+        target = body.get("target_thread_id")
+        if target is not None:
+            target = self.sessions._text(target, "Destination thread", 200)
+            record = self.sessions._record(target)
+            if self.store.threads.get(target)["attention"] == "archived":
+                raise CoordinationError("Reopen this thread before scheduling a message.")
+            if "settings" in body:
+                raise CoordinationError("Existing-thread schedules use the thread's current settings.")
+            settings = {key: record[key] for key in ("cwd", "client", "model", "effort", "yolo")}
+            return message, run_at, timezone, settings, mentions, target
         settings = body.get("settings")
         if not isinstance(settings, dict) or set(settings) - {"cwd", "client", "model", "effort", "yolo", "repository_id", "project_id"}:
             raise CoordinationError("Choose workspace, model, reasoning, and permissions.")
@@ -88,7 +100,7 @@ class ScheduledPrompts:
         selected = self.sessions._validate_settings(record["model"], record["effort"], record["client"])
         if record["effort"] is None:
             record["effort"] = selected.get("defaultReasoningEffort")
-        return message, run_at, timezone, {**record, **associations}, mentions
+        return message, run_at, timezone, {**record, **associations}, mentions, None
 
     def create(self, body):
         try:
@@ -104,14 +116,14 @@ class ScheduledPrompts:
                 if row["request_json"] != request:
                     raise CoordinationError("This prompt was already saved. Reopen it from Scheduled prompts to edit it.")
                 return self._describe(row)
-        message, run_at, timezone, settings, mentions = self._validate(body)
+        message, run_at, timezone, settings, mentions, target = self._validate(body)
         now = self.store.clock()
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("""INSERT OR IGNORE INTO scheduled_prompts
-                (id, cwd, settings_json, message, run_at, timezone, state, request_json, created_at, updated_at, mentions_json)
-                VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?)""",
-                (schedule_id, settings["cwd"], json.dumps(settings), message, run_at, timezone, request, now, now, json.dumps(mentions)))
+                (id, cwd, settings_json, message, run_at, timezone, state, request_json, created_at, updated_at, mentions_json, target_thread_id, thread_id)
+                VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)""",
+                (schedule_id, settings["cwd"], json.dumps(settings), message, run_at, timezone, request, now, now, json.dumps(mentions), target, target))
             row = self._get(db, schedule_id)
             if row["request_json"] != request:
                 raise CoordinationError("This scheduled prompt ID has already been used.")
@@ -130,11 +142,13 @@ class ScheduledPrompts:
             row = self._get(db, schedule_id)
             if type(body.get("version")) is not int or row["version"] != body["version"]:
                 raise CoordinationError("This schedule changed. Reopen Scheduled prompts and try again.")
-            if row["state"] not in {"scheduled", "missed"}:
+            if row["state"] not in {"scheduled", "missed", "waiting"}:
                 raise CoordinationError("This prompt has already started or was cancelled. Open its thread to review it.")
             now = self.store.clock()
             if action == "edit":
-                message, run_at, timezone, settings, mentions = values
+                message, run_at, timezone, settings, mentions, target = values
+                if target != row["target_thread_id"]:
+                    raise CoordinationError("A schedule's destination cannot be changed. Create a new schedule instead.")
                 db.execute("""UPDATE scheduled_prompts SET cwd = ?, settings_json = ?, message = ?, run_at = ?,
                     timezone = ?, mentions_json = ?, state = 'scheduled', error = NULL, version = version + 1, updated_at = ? WHERE id = ?""",
                     (settings["cwd"], json.dumps(settings), message, run_at, timezone, json.dumps(mentions), now, schedule_id))
@@ -154,7 +168,7 @@ class ScheduledPrompts:
     def _set_state(self, schedule_id, state, error=None):
         with self.store._connection() as db:
             db.execute("""UPDATE scheduled_prompts SET state = ?, error = ?, version = version + 1,
-                updated_at = ? WHERE id = ? AND state IN ('starting', 'running', 'review')""",
+                updated_at = ? WHERE id = ? AND state IN ('waiting', 'starting', 'running', 'review')""",
                 (state, error, self.store.clock(), schedule_id))
         self._changed()
 
@@ -166,7 +180,9 @@ class ScheduledPrompts:
             return
         with self.store._connection() as db:
             row = db.execute("""SELECT * FROM scheduled_prompts WHERE thread_id = ?
-                AND state IN ('starting', 'running', 'review')""", (thread_id,)).fetchone()
+                AND state IN ('starting', 'running', 'review')
+                AND (turn_id = ? OR (state = 'starting' AND turn_id IS NULL AND ?))""",
+                (thread_id, turn["id"], method == "turn/started")).fetchone()
             if not row or (row["turn_id"] is not None and row["turn_id"] != turn["id"]):
                 return
             state = "running" if method == "turn/started" else "completed" if turn.get("status") == "completed" else "failed"
@@ -198,11 +214,18 @@ class ScheduledPrompts:
         with self.store._connection() as db:
             db.execute("INSERT OR REPLACE INTO schedule_runtimes VALUES (?, ?)", (self.owner, now))
             abandoned = db.execute("""SELECT s.* FROM scheduled_prompts s LEFT JOIN schedule_runtimes r ON r.id = s.owner
-                WHERE s.state IN ('starting', 'running') AND s.owner != ?
+                WHERE s.state IN ('waiting', 'starting', 'running') AND s.owner != ?
                 AND (r.heartbeat IS NULL OR r.heartbeat < ?)""", (self.owner, now - RUNTIME_LEASE_SECONDS)).fetchall()
         for row in abandoned:
             if matches_workspace(row["cwd"], self.sessions.cwd):
-                self._recover(row)
+                if row["state"] == "waiting":
+                    # No send was attempted, so another runtime can safely
+                    # reclaim this job after its previous owner's lease ends.
+                    with self.store._connection() as db:
+                        db.execute("""UPDATE scheduled_prompts SET owner = ? WHERE id = ?
+                            AND state = 'waiting' AND owner = ?""", (self.owner, row["id"], row["owner"]))
+                else:
+                    self._recover(row)
         with self.store._connection() as db:
             due = db.execute("SELECT * FROM scheduled_prompts WHERE state = 'scheduled' AND run_at <= ? ORDER BY run_at, id", (self.store.clock(),)).fetchall()
         for row in due:
@@ -218,39 +241,63 @@ class ScheduledPrompts:
             with self.store._connection() as db:
                 claimed = db.execute("""UPDATE scheduled_prompts SET state = ?, error = ?, owner = ?,
                     version = version + 1, updated_at = ? WHERE id = ? AND state = 'scheduled' AND version = ?""",
-                    ("missed" if missed else "starting", "The scheduled time passed while Ribbon Field was unavailable." if missed else None,
+                    ("missed" if missed else "waiting" if item["target_thread_id"] else "starting", "The scheduled time passed while Ribbon Field was unavailable." if missed else None,
                      self.owner, now, item["id"], item["version"])).rowcount
             if not claimed:
                 continue
             self._changed()
-            if not missed:
+            if not missed and not item["target_thread_id"]:
                 self._dispatch(item)
+        with self.store._connection() as db:
+            waiting = db.execute("SELECT * FROM scheduled_prompts WHERE state = 'waiting' AND owner = ? ORDER BY run_at, id", (self.owner,)).fetchall()
+        for row in waiting:
+            if matches_workspace(row["cwd"], self.sessions.cwd):
+                self._dispatch(self._describe(row))
 
     def _dispatch(self, item):
         sending = False
         try:
             if self.stopped.is_set() or self.sessions.closed:
                 raise CoordinationError("Ribbon Field stopped before this prompt could start.")
-            settings = item["settings"]
-            # Recheck the saved path, model and effort at launch, without fallback.
-            if str(Path(settings["cwd"]).resolve()) != settings["cwd"]:
-                raise CoordinationError("The saved workspace path changed. Review this schedule.")
-            result = self.sessions.create(settings)
-            thread_id = result["session"]["thread_id"]
+            target = item["target_thread_id"]
+            if target:
+                thread_id = target
+            else:
+                settings = item["settings"]
+                # Recheck the saved path, model and effort at launch, without fallback.
+                if str(Path(settings["cwd"]).resolve()) != settings["cwd"]:
+                    raise CoordinationError("The saved workspace path changed. Review this schedule.")
+                result = self.sessions.create(settings)
+                thread_id = result["session"]["thread_id"]
             with self.sessions._thread_lock(thread_id):
-                # A person may open the newly created thread immediately. Never
-                # associate their turn with this schedule or append to it.
-                with self.sessions.lock:
-                    occupied = thread_id in self.sessions.active or bool(self.sessions._history(thread_id).get("turns"))
-                if occupied:
-                    raise CoordinationError("The new thread received other input before this prompt could start.")
+                if target:
+                    self.sessions._record(thread_id)
+                    if self.store.threads.get(thread_id)["attention"] == "archived":
+                        raise CoordinationError("The destination thread is closed. Reopen it before sending the message.")
+                    detail = self.sessions.read(thread_id)
+                    if detail["running"] or detail["queuedMessages"]:
+                        return
+                    with self.store._connection() as db:
+                        claimed = db.execute("""UPDATE scheduled_prompts SET state = 'starting', version = version + 1,
+                            updated_at = ? WHERE id = ? AND state = 'waiting' AND owner = ? AND version = ?
+                            AND NOT EXISTS (SELECT 1 FROM scheduled_prompts WHERE thread_id = ?
+                                AND state IN ('starting', 'running'))""",
+                            (self.store.clock(), item["id"], self.owner, item["version"], thread_id)).rowcount
+                    if not claimed:
+                        return
+                else:
+                    # A person may open the newly created thread immediately.
+                    with self.sessions.lock:
+                        occupied = thread_id in self.sessions.active or bool(self.sessions._history(thread_id).get("turns"))
+                    if occupied:
+                        raise CoordinationError("The new thread received other input before this prompt could start.")
                 with self.store._connection() as db:
                     db.execute("UPDATE scheduled_prompts SET thread_id = ? WHERE id = ?", (thread_id, item["id"]))
                 self._changed()
                 if self.stopped.is_set() or self.sessions.closed:
                     raise CoordinationError("Ribbon Field stopped before this prompt could start.")
                 sending = True
-                result = self.sessions.send(thread_id, {"message": item["message"], "mentions": item["mentions"]}, start_only=True)
+                result = self.sessions.send(thread_id, {"message": item["message"], "mentions": item["mentions"]}, start_only=True, preserve_text=True)
             # Also supports providers that return before emitting turn/started.
             with self.store._connection() as db:
                 db.execute("""UPDATE scheduled_prompts SET state = 'running', turn_id = ?, updated_at = ?,

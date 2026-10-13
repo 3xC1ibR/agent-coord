@@ -54,6 +54,228 @@ class ScheduledPromptTests(unittest.TestCase):
         self.schedules.process_once()
         return self.item(item)
 
+    def existing_thread(self, **settings):
+        return self.sessions.create({"cwd": str(self.root), "model": "available-model", **settings})["session"]["thread_id"]
+
+    def target_body(self, thread_id, **changes):
+        body = self.body(target_thread_id=thread_id, **changes)
+        body.pop("settings")
+        return body
+
+    def complete_turn(self, thread_id, status="completed"):
+        turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
+        turn["status"] = status
+        self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
+
+    def test_existing_thread_receives_verbatim_message_with_current_settings(self):
+        thread_id = self.existing_thread()
+        self.sessions.rpc.fast_turn = True
+        self.sessions.send(thread_id, {"message": "Earlier context"})
+        message = "  continue\n\nKeep this indentation.\n  "
+        item = self.schedules.create(self.target_body(thread_id, message=message))
+        self.assertEqual(item["thread_id"], thread_id)
+        self.assertEqual(len(self.starts()), 1)
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_sessions SET effort = 'high', yolo = 1 WHERE thread_id = ?", (thread_id,))
+        self.now = item["run_at"]
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "completed")
+        self.assertEqual(len(self.sessions.rpc.threads), 1)
+        start = self.starts()[-1]
+        self.assertEqual(start["threadId"], thread_id)
+        self.assertEqual(start["input"], [{"type": "text", "text": message}])
+        self.assertEqual(start["effort"], "high")
+        self.assertEqual(start["approvalPolicy"], "never")
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 2)
+        self.schedules.process_once()
+        self.assertEqual(len(self.starts()), 2)
+
+    def test_busy_target_waits_without_steering_or_becoming_missed(self):
+        thread_id = self.existing_thread()
+        self.sessions.send(thread_id, {"message": "Current work"})
+        item = self.schedules.create(self.target_body(thread_id))
+        self.now = item["run_at"]
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "waiting")
+        self.assertEqual(len(self.starts()), 1)
+        self.assertFalse(any(method == "turn/steer" for method, _ in self.sessions.rpc.calls))
+        self.now += 300
+        self.complete_turn(thread_id)
+        self.assertEqual(self.item(item)["state"], "waiting")
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "running")
+        self.assertEqual(len(self.starts()), 2)
+
+    def test_waiting_schedule_can_be_cancelled_or_rescheduled(self):
+        thread_id = self.existing_thread()
+        self.sessions.send(thread_id, {"message": "Current work"})
+        cancelled = self.schedules.create(self.target_body(thread_id))
+        edited = self.schedules.create(self.target_body(thread_id))
+        self.now += 60
+        self.schedules.process_once()
+        self.schedules.change(cancelled["id"], {"action": "cancel", "version": self.item(cancelled)["version"]})
+        changed = self.schedules.change(edited["id"], {**self.target_body(thread_id, message="Later"),
+            "action": "edit", "version": self.item(edited)["version"]})
+        self.assertEqual(changed["target_thread_id"], thread_id)
+        self.complete_turn(thread_id)
+        self.schedules.process_once()
+        self.assertEqual(len(self.starts()), 1)
+        self.assertEqual(self.item(cancelled)["state"], "cancelled")
+        self.assertEqual(self.item(edited)["state"], "scheduled")
+
+    def test_multiple_schedules_in_one_thread_track_only_their_own_turns(self):
+        thread_id = self.existing_thread()
+        first = self.schedules.create(self.target_body(thread_id, message="First", run_at=self.now + 50))
+        second = self.schedules.create(self.target_body(thread_id, message="Second"))
+        self.now += 60
+        self.schedules.process_once()
+        self.assertEqual(self.item(first)["state"], "running")
+        self.assertEqual(self.item(second)["state"], "waiting")
+        self.complete_turn(thread_id)
+        self.schedules.process_once()
+        self.assertEqual(self.item(first)["state"], "completed")
+        self.assertEqual(self.item(second)["state"], "running")
+        self.complete_turn(thread_id, "failed")
+        self.assertEqual(self.item(first)["state"], "completed")
+        self.assertEqual(self.item(second)["state"], "failed")
+
+    def test_existing_target_validation_and_destination_immutability(self):
+        thread_id = self.existing_thread()
+        for body in (self.target_body("missing"), self.target_body([]),
+                     self.target_body(thread_id, message="  /permissions yolo"), self.body(target_thread_id=thread_id)):
+            with self.subTest(body=body), self.assertRaises(CoordinationError):
+                self.schedules.create(body)
+        item = self.schedules.create(self.target_body(thread_id))
+        with self.assertRaisesRegex(CoordinationError, "destination"):
+            self.schedules.change(item["id"], {**self.body(), "action": "edit", "version": item["version"]})
+        child = self.root / "child"; child.mkdir()
+        other = self.runtime(child)
+        with self.assertRaisesRegex(CoordinationError, "workspace"):
+            other.schedules.create(self.target_body(thread_id))
+
+    def test_closed_or_deleted_target_never_creates_a_replacement(self):
+        for deleted in (False, True):
+            thread_id = self.existing_thread()
+            item = self.schedules.create(self.target_body(thread_id))
+            if deleted:
+                with self.store._connection() as db:
+                    db.execute("DELETE FROM browser_sessions WHERE thread_id = ?", (thread_id,))
+                self.sessions.loaded.discard(thread_id)
+            else:
+                self.store.threads.update(thread_id, attention="archived")
+            self.now = item["run_at"]
+            self.schedules.process_once()
+            self.assertEqual(self.item(item)["state"], "failed")
+            self.assertEqual(self.item(item)["thread_id"], thread_id)
+        self.assertFalse(self.starts())
+        self.assertEqual(len(self.sessions.rpc.threads), 2)
+
+    def test_waiting_target_survives_restart_without_replaying_a_send(self):
+        thread_id = self.existing_thread()
+        self.sessions.send(thread_id, {"message": "Current work"})
+        item = self.schedules.create(self.target_body(thread_id))
+        self.now = item["run_at"]
+        self.schedules.process_once()
+        self.complete_turn(thread_id)
+        saved_threads = copy.deepcopy(self.sessions.rpc.threads)
+        self.sessions.close()
+        self.now += 300
+        restarted = self.runtime()
+        restarted.rpc.threads = saved_threads
+        restarted.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "running")
+        self.assertEqual(len(self.starts(restarted)), 1)
+        self.assertEqual(self.starts(restarted)[0]["threadId"], thread_id)
+
+    def test_waiting_schedule_gives_existing_queue_priority(self):
+        thread_id = self.existing_thread()
+        with patch.object(self.sessions.queue, "wake"):
+            queued = self.sessions.queue.enqueue(thread_id, {"message": "Earlier queued message"})
+        item = self.schedules.create(self.target_body(thread_id))
+        self.now = item["run_at"]
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "waiting")
+        self.assertFalse(self.starts())
+        with patch.object(self.sessions.queue, "wake"):
+            self.sessions.queue.change(thread_id, {"action": "cancel", "id": queued["id"]})
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "running")
+
+    def test_two_runtimes_cannot_deliver_the_same_existing_thread_schedule(self):
+        thread_id = self.existing_thread()
+        item = self.schedules.create(self.target_body(thread_id))
+        other = self.runtime()
+        other.rpc.threads = self.sessions.rpc.threads
+        self.now = item["run_at"]
+        entered, release = threading.Event(), threading.Event()
+        original = self.sessions.read
+        def delayed(thread_id):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return original(thread_id)
+        with patch.object(self.sessions, "read", delayed), ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(self.schedules.process_once)
+            self.assertTrue(entered.wait(5))
+            try:
+                other.schedules.process_once()
+            finally:
+                release.set()
+            pending.result(5)
+        self.assertEqual(len(self.starts()) + len(self.starts(other)), 1)
+
+    def test_cancel_during_destination_read_prevents_delivery(self):
+        thread_id = self.existing_thread()
+        item = self.schedules.create(self.target_body(thread_id))
+        original = self.sessions.read
+        def cancel_during_read(thread_id):
+            self.schedules.change(item["id"], {"action": "cancel", "version": self.item(item)["version"]})
+            return original(thread_id)
+        self.now = item["run_at"]
+        with patch.object(self.sessions, "read", cancel_during_read):
+            self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "cancelled")
+        self.assertFalse(self.starts())
+
+    def test_old_database_migration_preserves_new_thread_schedule(self):
+        from agent_coord.schedules import ScheduledPrompts
+        item = self.schedules.create(self.body())
+        with self.store._connection() as db:
+            db.execute("ALTER TABLE scheduled_prompts DROP COLUMN target_thread_id")
+        self.sessions.schedules = self.schedules = ScheduledPrompts(self.sessions)
+        self.assertIsNone(self.item(item)["target_thread_id"])
+        self.now = item["run_at"]
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "running")
+        self.assertEqual(len(self.starts()), 1)
+
+    def test_existing_target_lost_response_does_not_rebind_to_later_user_turn(self):
+        thread_id = self.existing_thread()
+        item = self.schedules.create(self.target_body(thread_id))
+        self.now = item["run_at"]
+        with patch.object(self.sessions, "send", side_effect=CoordinationError("Unknown transport outcome")):
+            self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "review")
+        self.sessions.rpc.fast_turn = True
+        self.sessions.send(thread_id, {"message": "Separate user message"})
+        self.assertEqual(self.item(item)["state"], "review")
+        self.schedules.process_once()
+        self.assertEqual(len(self.starts()), 1)
+
+    def test_scheduled_user_message_resumes_failed_claude_thread(self):
+        thread_id = self.existing_thread(client="claude", model="sonnet", effort="high")
+        self.sessions.send(thread_id, {"message": "Earlier context"})
+        self.sessions.claude.connections[thread_id].callback({"type": "result", "subtype": "error_during_execution", "is_error": True})
+        item = self.schedules.create(self.target_body(thread_id, message="continue"))
+        self.now = item["run_at"]
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "running")
+        self.assertEqual(self.item(item)["thread_id"], thread_id)
+        history = self.sessions.read(thread_id)["thread"]["turns"]
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[-1]["items"][0]["content"], [{"type": "text", "text": "continue"}])
+        self.sessions.claude.connections[thread_id].callback({"type": "result", "subtype": "success"})
+        self.assertEqual(self.item(item)["state"], "completed")
+
     def test_waiting_uses_no_turn_and_dispatch_preserves_settings(self):
         item = self.schedules.create(self.body())
         self.schedules.process_once()
