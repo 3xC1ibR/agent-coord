@@ -1019,6 +1019,13 @@ conversations. New views with the same name can exist in different projects.
 Legacy views without a project remain available within each opened project;
 the active project's exact directory always limits their conversations.
 
+Drag an overview card onto a saved view tab to assign it to that view’s group
+(or remove its group for a **No group** view). Valid destinations highlight while
+dragging; the thread must already match the view’s other filters. Drops change
+only the group, keep the current view open, and offer **Undo**. Views without a
+group filter, Closed views, and views containing a search do not accept drops.
+The card menu’s **Add to group** / **Change group** remains available without dragging.
+
 **Groups** are optional named collections within a project. Use **New group**
 in the overview, or **Add to group** / **Change group** in a conversation, to
 create or select one. **No group** removes the association. New sessions inherit

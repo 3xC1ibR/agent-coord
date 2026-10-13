@@ -392,6 +392,7 @@ function threadCard(thread, compact = false, inAttention = false) {
   }
   button.onclick = () => action(() => select(thread.thread_id));
   if (!compact && thread.attention !== "archived") {
+    button.draggable = true; button.dataset.dragThread = thread.thread_id;
     const card = node("div", null, "thread-card" + (inAttention ? " attention-card" : ""));
     if (hasResponse) card.className += thread.unread_result ? " response-unread" : " response-read";
     const close = node("button", "×", "card-close");
@@ -2355,6 +2356,17 @@ async function boot() {
     onSwitch: async () => { goHome(); await refreshList(); window.agentCoordPanes?.restoreView(); }, onError: showError});
   state.projectCwd = state.folders.selected?.cwd || "";
   await savedViews.setProject(state.projectCwd);
+  state.viewDrops = ViewDrops.create({document, api,
+    getThread: id => state.closing.has(id) || state.updatingThreads.has(id) ? null
+      : state.sessions.find(thread => thread.thread_id === id),
+    getViews: () => savedViews.items.filter(view => view.id !== "all").map(view => ({...view,
+      ...savedViews.effective(view), cwd: savedViews.cwd, pending: savedViews.saves.has(view.id)})),
+    getProjects: () => state.organization.projects,
+    onChanged: async thread => {
+      await refreshList();
+      if (state.selected === thread.thread_id) await refreshThread();
+    },
+    notify: (...args) => state.threadActions.notify(...args), onError: showError});
   state.threadTabs = new ThreadTabs({document, container: $("conversation-tabs"), storage: windowStorage,
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
     canNavigate: canSwitchProject, onError: showError,

@@ -201,13 +201,14 @@ class SavedViewTests(unittest.TestCase):
         self.store.register(session_id="outside", client="codex", cwd=str(self.root))
         self.assertEqual([t["thread_id"] for t in request("threads")["data"]], ["inside"])
         self.assertEqual(sessions.rpc.calls, [])
-        for path in ("/views.js", "/views.css"):
+        for path in ("/views.js", "/views.css", "/view-drops.js"):
             with urllib.request.urlopen(origin + path) as response:
                 self.assertTrue(response.read())
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for view interaction tests")
     def test_browser_views(self):
         result = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_web_views.js")),
+                                 str(Path(__file__).with_name("test_web_view_drops.js")),
                                  str(Path(__file__).with_name("test_web_domain_grouping.js"))],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
