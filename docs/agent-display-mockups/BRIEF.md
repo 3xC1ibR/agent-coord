@@ -395,3 +395,9 @@ dot size from how many messages the user exchanged with the agent (`userTurns`,
 a runtime signal added to the fixture), and dot color from age (full accent for
 recent activity, fading over a day). State moved to a ring so color can carry
 age. Positions are shared by all levels so the far view is a true overview.
+
+Real data: `export-threads.py` snapshots the live threads (now carrying
+`domain`, `domain_source`, and `scope_cluster`) into `shared/real-threads.js`;
+`AgentField.create({scale: "real", workspace})` maps them into the same agent
+shape, and the shell offers the snapshot and a workspace selector when the
+script is loaded. The count line above cluster titles was removed on request.

@@ -63,11 +63,13 @@ const Mockup = (() => {
   function mount({number, title, spectrum = "moderate", summary = "", signals = {current: [], proposed: []}, render, fullBleed = false, showChrome = true, defaultScale = "small", notes = "", domainScenarios = false}) {
     const q = params();
     const theme = q.get("theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    const scale = ["small", "medium", "large"].includes(q.get("scale")) ? q.get("scale") : defaultScale;
+    const snapshot = globalThis.AGENT_COORD_SNAPSHOT;
+    const scale = ["small", "medium", "large"].includes(q.get("scale")) || (q.get("scale") === "real" && snapshot) ? q.get("scale") : defaultScale;
+    const workspace = q.get("workspace") || "all";
     const domains = domainScenarios && Object.hasOwn(AgentField.DOMAIN_SCENARIOS, q.get("domains") || "") ? q.get("domains") : "clean";
     document.documentElement.dataset.theme = theme; document.documentElement.style.colorScheme = theme;
     document.title = "Ribbon Field mockup " + String(number).padStart(2, "0") + " · " + title;
-    let field = AgentField.create({scale, domains});
+    let field = AgentField.create({scale, domains, workspace});
     const state = {selected: null, playing: false, timer: null, speed: 1200};
     const api = {get field() { return field; }, get selected() { return state.selected; }, get peeked() { return state.peeked; }, select, note, close: closeDrawer, peek, unpeek, scale: () => field.scale, rerender: () => draw()};
 
@@ -85,10 +87,18 @@ const Mockup = (() => {
     sig.append(pop); shell.append(sig);
     shell.append($("span", "mock-spacer"));
     const clock = $("span", "mock-id"); shell.append(clock);
-    const scaleSel = $("select"); for (const [v, l] of [["small", "16 agents"], ["medium", "≈45 agents"], ["large", "≈160 agents"]]) { const o = $("option", null, l); o.value = v; o.selected = v === scale; scaleSel.append(o); }
-    scaleSel.title = "Fixture scale"; scaleSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {scale: scaleSel.value}); };
+    const scaleOptions = [["small", "16 agents"], ["medium", "≈45 agents"], ["large", "≈160 agents"]];
+    if (snapshot?.threads?.length) scaleOptions.push(["real", "Real snapshot · " + snapshot.threads.length + " threads"]);
+    const scaleSel = $("select"); for (const [v, l] of scaleOptions) { const o = $("option", null, l); o.value = v; o.selected = v === scale; scaleSel.append(o); }
+    let workspaceSel = null;
+    if (scale === "real" && snapshot) {
+      workspaceSel = $("select"); const all = $("option", null, "All workspaces · " + snapshot.threads.length); all.value = "all"; all.selected = workspace === "all"; workspaceSel.append(all);
+      for (const w of snapshot.workspaces || []) { const o = $("option", null, w.cwd.replace(/^\/opt\/projects\//, "") + " · " + w.count); o.value = w.cwd; o.selected = w.cwd === workspace; workspaceSel.append(o); }
+      workspaceSel.title = "Workspace"; workspaceSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {workspace: workspaceSel.value === "all" ? null : workspaceSel.value}); };
+    }
+    scaleSel.title = "Data source"; scaleSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {scale: scaleSel.value, workspace: null}); };
     let domainSel = null;
-    if (domainScenarios) {
+    if (domainScenarios && scale !== "real") {
       domainSel = $("select"); for (const [v, l] of Object.entries(AgentField.DOMAIN_SCENARIOS)) { const o = $("option", null, l); o.value = v; o.selected = v === domains; domainSel.append(o); }
       domainSel.title = "How well the model reports domains"; domainSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {domains: domainSel.value === "clean" ? null : domainSel.value}); };
     }
@@ -101,7 +111,7 @@ const Mockup = (() => {
     const nav = $("nav");
     const link = (href, label, t) => { const a = $("a", "btn", label); a.href = withParams(href); a.title = t; return a; };
     nav.append(link("../index.html", "Index", "All mockups"), link(prev[0], "←", prev[1]), link(next[0], "→", next[1]));
-    shell.append(scaleSel); if (domainSel) shell.append(domainSel); shell.append(themeBtn, transport, nav);
+    shell.append(scaleSel); if (workspaceSel) shell.append(workspaceSel); if (domainSel) shell.append(domainSel); shell.append(themeBtn, transport, nav);
     const noteLine = $("p", "mock-note"); shell.append(noteLine);
     document.body.prepend(shell);
     if (showChrome) shell.after(chrome());
@@ -110,14 +120,14 @@ const Mockup = (() => {
 
     function note(text) { noteLine.textContent = text; noteLine.hidden = !text; }
     note(notes ? "" : ""); noteLine.hidden = true;
-    function tickClock() { const d = new Date(field.now); clock.textContent = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) + " · simulated" + (field.tickCount ? " +" + field.tickCount + "m" : ""); }
+    function tickClock() { const d = new Date(field.now); clock.textContent = (field.scale === "real" ? d.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) + " · snapshot" : d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) + " · simulated") + (field.tickCount ? " +" + field.tickCount + "m" : ""); }
     function setPlaying(on) {
       state.playing = on; play.textContent = on ? "❚❚ Pause" : "▶ Play"; play.setAttribute("aria-pressed", String(on));
       clearInterval(state.timer); if (on) state.timer = setInterval(() => field.tick(), state.speed);
     }
     play.onclick = () => setPlaying(!state.playing);
     step.onclick = () => field.tick();
-    reset.onclick = () => { setPlaying(false); field = AgentField.create({scale, domains}); field.subscribe(draw); state.selected = null; closeDrawer(); unpeek(); draw(); };
+    reset.onclick = () => { setPlaying(false); field = AgentField.create({scale, domains, workspace}); field.subscribe(draw); state.selected = null; closeDrawer(); unpeek(); draw(); };
     document.addEventListener("keydown", e => {
       if (e.target?.matches?.("input, textarea, select, [contenteditable]")) return;
       if (e.key === "[") location.href = withParams(prev[0]); else if (e.key === "]") location.href = withParams(next[0]);
@@ -220,7 +230,7 @@ const Mockup = (() => {
       if (kids.length) { drawer.append($("h3", null, "Agents · " + kids.length)); const ul = $("div", "kids"); for (const k of kids) { const b = $("button", "btn quiet small"); b.type = "button"; b.append(AgentField.statusDot(k), " ", k.title, " · ", field.statusLabel(k)); b.onclick = () => select(k.id); ul.append(b); } drawer.append(ul); }
       if (a.scope.length) { drawer.append($("h3", null, "Scope")); const sc = $("div", "scope"); for (const s of a.scope) sc.append($("code", null, s)); drawer.append(sc); }
       if (a.links.length) { drawer.append($("h3", null, "Links")); const ul = $("div", "kids"); for (const l of a.links) ul.append($("span", null, l.kind.replaceAll("_", " ") + " · " + l.label + " · " + l.target)); drawer.append(ul); }
-      drawer.append($("h3", null, "Cost"), $("p", "muted", field.duration(a.cost.minutes * 60000) + " · " + Math.round(a.cost.tokens / 1000) + "k tokens · $" + a.cost.usd.toFixed(2) + " · confidence " + Math.round(a.confidence * 100) + "%"));
+      drawer.append($("h3", null, a.cost.tokens ? "Cost" : "Run"), $("p", "muted", a.cost.tokens ? field.duration(a.cost.minutes * 60000) + " · " + Math.round(a.cost.tokens / 1000) + "k tokens · $" + a.cost.usd.toFixed(2) + " · confidence " + Math.round(a.confidence * 100) + "%" : field.duration(a.cost.minutes * 60000) + " since created · " + (a.turns || 0) + " turns" + (a.workspace ? " · " + a.workspace : "")));
       drawer.append($("h3", null, "Checkpoint history · " + a.history.length)); const h = $("div", "history");
       for (const e of [...a.history].reverse()) { const art = $("article"); art.append($("small", null, (e.actor === "user" ? "You · " : "") + AgentField.PHASE_LABELS[e.phase] + " · " + field.relativeTime(e.at)), $("span", null, e.summary)); h.append(art); }
       drawer.append(h);

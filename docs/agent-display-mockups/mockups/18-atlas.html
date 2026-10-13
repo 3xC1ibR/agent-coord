@@ -100,6 +100,7 @@
 </head>
 <body>
 <main id="stage"></main>
+<script src="../shared/real-threads.js"></script>
 <script src="../shared/fixture.js"></script>
 <script src="../shared/mockup.js"></script>
 <script>
@@ -109,8 +110,9 @@
   const svgEl = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) if (v != null) e.setAttribute(k, v); if (parent) parent.append(e); return e; };
   const MIN = 60000;
   const hash01 = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
-  const scenario = new URLSearchParams(location.search).get("domains") || "clean";
-  const storeKey = "atlas:" + scenario;
+  const params = new URLSearchParams(location.search);
+  const scenario = params.get("scale") === "real" ? "real" : (params.get("domains") || "clean");
+  const storeKey = "atlas:" + scenario + (params.get("workspace") ? ":" + params.get("workspace") : "");
   let saved = {}; try { saved = JSON.parse(localStorage.getItem(storeKey) || "{}"); } catch { saved = {}; }
   const clusterPos = new Map(Object.entries(saved.clusters || {})), pins = new Map(Object.entries(saved.pins || {}));
   const persist = () => { try { localStorage.setItem(storeKey, JSON.stringify({clusters: Object.fromEntries(clusterPos), pins: Object.fromEntries(pins)})); } catch { /* private mode */ } };
@@ -134,14 +136,16 @@
     const map = new Map();
     const add = (key, a, raw) => { if (!map.has(key)) map.set(key, {key, members: [], raw: new Map(), secondary: new Map()}); const c = map.get(key); c.members.push(a); if (raw) c.raw.set(raw, (c.raw.get(raw) || 0) + 1); return c; };
     for (const a of field.roots()) { const ds = field.domainsOf(a); const c = add(ds[0] ? clusterKey(ds[0]) : "∅", a, ds[0] || null); if (ds[1]) c.secondary.set(a.id, clusterKey(ds[1])); }
-    const odd = c => c.members.length === 1 && c.key !== "∅" && !c.key.includes("/") && !AgentField.DOMAINS.includes(c.key) && scenario !== "none";
+    const odd = c => c.members.length === 1 && c.key !== "∅" && !c.key.includes("/") && !AgentField.DOMAINS.includes(c.key) && scenario !== "none" && c.members.every(a => a.domainSource !== "derived");
     const singles = [...map.values()].filter(odd);
     if (singles.length >= 3) { const other = {key: "other", members: [], raw: new Map(), secondary: new Map(), merged: singles.map(c => c.key)}; for (const c of singles) { map.delete(c.key); other.members.push(...c.members); for (const [r, n] of c.raw) other.raw.set(r, n); } map.set("other", other); }
     for (const c of map.values()) {
       const top = [...c.raw.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
-      c.label = c.key === "∅" ? "No domain reported" : c.key === "other" ? "Other" : (AgentField.DOMAIN_LABELS[c.key] || top || c.key);
+      const pretty = text => text.includes("/") ? text : text.replace(/\b[a-z]/g, ch => ch.toUpperCase());
+      c.derived = c.key !== "∅" && c.members.length > 0 && c.members.every(a => a.domainSource === "derived");
+      c.label = c.key === "∅" ? "No domain reported" : c.key === "other" ? "Other" : (AgentField.DOMAIN_LABELS[c.key] || (top ? pretty(top) : pretty(c.key)));
       c.aliases = [...new Set([...c.raw.keys()].filter(r => clusterKey(r) === c.key && norm(r) !== norm(c.label) && norm(r) !== c.key))];
-      c.source = scenario === "none" && c.key !== "∅" ? "from write scope" : c.key === "other" ? c.merged.length + " labels" : c.aliases.length ? "also " + c.aliases.slice(0, 3).join(", ") : "";
+      c.source = c.derived ? "from write scope" : c.key === "other" ? c.merged.length + " labels" : c.aliases.length ? "also " + c.aliases.slice(0, 3).join(", ") : "";
       c.needs = c.members.reduce((n, a) => n + (field.needsUser(a) ? 1 : 0) + field.descendantsNeedingUser(a.id).length, 0);
       c.working = c.members.filter(a => a.status === "working").length;
       c.r = 64 + 24 * Math.sqrt(c.members.length) + Math.min(18, c.members.reduce((n, a) => n + field.children(a.id).length, 0) * 1.6);
@@ -308,15 +312,14 @@
       const focused = state.focus === c.key;
       const g = svgEl("g", {class: "cluster" + (focused ? " focused" : state.level ? " dim" : "") + (c.needs ? " needs" : "")}, gBlobs);
       const path = svgEl("path", {class: "blob", d: blobPath(c, field, focused)}, g);
-      const title = svgEl("title", {}, path); title.textContent = c.label + " · " + c.members.length + (c.members.length === 1 ? " agent" : " agents") + (c.working ? " · " + c.working + " working" : "") + (c.needs ? " · " + c.needs + " need you" : "") + (c.aliases.length ? "\nAlso reported as: " + c.aliases.join(", ") : "") + (c.merged ? "\nSingle-agent labels: " + c.merged.join(", ") : "") + (c.key === "∅" ? "\nThese agents reported no domain." : "") + (scenario === "none" && c.key !== "∅" ? "\nDerived from the write scope." : "");
+      const title = svgEl("title", {}, path); title.textContent = c.label + " · " + c.members.length + (c.members.length === 1 ? " agent" : " agents") + (c.working ? " · " + c.working + " working" : "") + (c.needs ? " · " + c.needs + " need you" : "") + (c.aliases.length ? "\nAlso reported as: " + c.aliases.join(", ") : "") + (c.merged ? "\nSingle-agent labels: " + c.merged.join(", ") : "") + (c.key === "∅" ? "\nThese agents reported no domain." : "") + (c.derived ? "\nDerived from the write scope." : "");
       Mockup.drag(path, {onMove: ({mx, my}) => { if (state.level) return; const {dx, dy} = toCanvas(mx, my); clusterPos.set(c.key, {x: (clusterPos.get(c.key)?.x ?? c.x) + dx, y: (clusterPos.get(c.key)?.y ?? c.y) + dy}); layout(field); drawCanvas(field); }, onEnd: ({dragged}) => { if (dragged) persist(); else if (!focused) focusCluster(c.key); else if (state.level === 2) focusCluster(c.key); }});
       path.addEventListener("pointerdown", e => e.stopPropagation());
       const ly = c.y - c.r * 0.64;
       if (!focused) {
         const label = svgEl("text", {class: "cluster-label", x: c.x, y: ly, "text-anchor": "middle", style: "font-size:" + (13 * k).toFixed(1) + "px"}, g); label.textContent = c.label;
         if (c.source) { const sub = svgEl("text", {class: "cluster-sub", x: c.x, y: ly + 12 * k, "text-anchor": "middle", style: "font-size:" + (9.5 * k).toFixed(1) + "px"}, g); sub.textContent = c.source; }
-        const cnt = svgEl("text", {class: "cluster-count", x: c.x, y: ly - 14 * k, "text-anchor": "middle", style: "font-size:" + (10.5 * k).toFixed(1) + "px"}, g); cnt.textContent = String(c.members.length) + (c.working ? " · " + c.working + " working" : "");
-        if (c.needs) { const nd = svgEl("text", {class: "cluster-needs", x: c.x, y: ly - 27 * k, "text-anchor": "middle", style: "font-size:" + (10 * k).toFixed(1) + "px"}, g); nd.textContent = c.needs + " need you"; }
+        if (c.needs) { const nd = svgEl("text", {class: "cluster-needs", x: c.x, y: ly - 14 * k, "text-anchor": "middle", style: "font-size:" + (10 * k).toFixed(1) + "px"}, g); nd.textContent = c.needs + " need you"; }
       }
       for (const a of c.members) {
         const sec = c.secondary.get(a.id) && clusters.get(c.secondary.get(a.id));
@@ -337,7 +340,7 @@
     svgEl("circle", {class: "state", r: r + 2 * k}, g);
     svgEl("circle", {class: "core", r, style: "fill:" + fillFor(field, a)}, g);
     const doing = a.status === "working" ? (a.activity || field.toolLabel(a)) : a.status === "done" ? "done " + field.relativeTime(a.updatedAt) : field.statusLabel(a);
-    const title = svgEl("title", {}, g); title.textContent = (a.name ? a.name + " · " : "") + a.title + "\n" + doing + "\n" + (a.turns || 0) + " messages · " + (a.userTurns || 0) + " from you · last activity " + field.relativeTime(field.lastActivity(a)) + (kids.length ? "\n" + kids.length + " sub-agents" : "") + (a.domainReported && a.domainReported !== a.domain ? "\nReported domain: " + (a.domains?.join(", ") || "none") : "");
+    const title = svgEl("title", {}, g); title.textContent = (a.name ? a.name + " · " : "") + a.title + "\n" + doing + "\n" + (a.turns || 0) + " messages · " + (a.userTurns || 0) + " from you · last activity " + field.relativeTime(field.lastActivity(a)) + (kids.length ? "\n" + kids.length + " sub-agents" : "") + (a.domainReported && a.domainReported !== a.domain ? "\nReported domain: " + (a.domains?.join(", ") || "none") : "") + (a.workspace ? "\n" + a.workspace : "");
     if (kids.length && !hubView) { // compact spokes; a count past six
       const shown = kids.slice(0, 6), sr = r + 8 * k;
       shown.forEach((kid, i) => { const ang = -Math.PI / 2 + i * (2 * Math.PI / Math.max(6, shown.length)) + hash01(a.id) * 0.4; const x = Math.cos(ang) * sr, y = Math.sin(ang) * sr;
@@ -387,9 +390,9 @@
   }
   Mockup.mount({
     number: 18, title: "Atlas", spectrum: "synthesis", fullBleed: true, domainScenarios: true,
-    summary: "One canvas, three zoom levels: all domains, one domain as a scatter, one orchestrator with its sub-agents. Size is messages with you, color is age, a ring is state; a quiet panel lists what needs you.",
+    summary: "One canvas, three zoom levels: all domains, one domain as a scatter, one orchestrator with its sub-agents. Size is messages with you, color is age, a ring is state; a quiet panel lists what needs you. Choose the real snapshot to see your actual threads.",
     signals: {current: ["status", "tool_activity", "age", "messages", "pending_approval", "created_by", "client", "title", "write_scope", "scope_cluster", "phase", "summary", "next_action"], proposed: ["domain", "ask", "name", "activity"]},
-    notes: "Positions are the same at every zoom level, so the far view is a true overview of the scatter. The Domains selector varies how many domains the model reports and how messy they are; cluster positions persist per scenario.",
+    notes: "Positions are the same at every zoom level, so the far view is a true overview of the scatter. The Real snapshot option loads shared/real-threads.js (regenerate with export-threads.py) with the domains your threads actually carry; the Domains selector varies the simulated fixture instead.",
     render,
   });
 })();

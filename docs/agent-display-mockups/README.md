@@ -31,6 +31,29 @@ open "docs/agent-display-mockups/mockups/03-needs-you-inbox.html?scale=large&the
   need to add.
 - Keys: `[` previous mockup, `]` next, `.` step, `Esc` close the drawer.
 
+## Real data
+
+Threads now carry `domain`, `domain_source`, and `scope_cluster`. The Atlas
+mockup can run on a read-only snapshot of your actual threads:
+
+```
+python3 docs/agent-display-mockups/export-threads.py            # Now and Later threads
+python3 docs/agent-display-mockups/export-threads.py --archived # include closed threads
+```
+
+This writes `shared/real-threads.js` from the coordination database (the same
+SQLite file the app and CLI use), joining each thread with its latest
+checkpoint and history, lineage (app-agent creations and terminal delegations),
+live session state (write scope, last tool call, whether a turn is active),
+completed-turn counts, and links. Open Atlas and choose **Real snapshot** in the
+top strip, then pick a workspace. The snapshot is generated output and is not
+committed; regenerate it whenever you want the map to reflect the present.
+
+In the snapshot, dot size comes from completed turns (the closest free proxy
+for messages with you), color from the last update or tool call, and asks from
+checkpoints whose next actor is the user. Threads with no domain fall back to
+their scope cluster, and clusters built only from scope clusters say so.
+
 ## Render screenshots
 
 ```

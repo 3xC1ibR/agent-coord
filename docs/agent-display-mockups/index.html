@@ -42,7 +42,7 @@
 <header><h1>Agent display mockups</h1><span class="muted">Ten ways to show what agents exist, what they are doing, who they spawned, and what they need from you.</span></header>
 <p class="lede">Every mockup renders the same simulated field of agents at three scales and shares one thread drawer. The first ones keep today's layout and use only signals the checkpoint already carries. The later ones assume richer checkpoints: a stable identity, a role, structured asks, a plan, live activity, and dependency edges. Open a mockup, press <strong>Play</strong> to let the simulation run, answer an ask, and click any agent to open its thread.</p>
 <div class="controls">
-  <label>Scale <select id="scale"><option value="small">16 agents</option><option value="medium">≈45 agents</option><option value="large">≈160 agents</option></select></label>
+  <label>Scale <select id="scale"><option value="small">16 agents</option><option value="medium">≈45 agents</option><option value="large">≈160 agents</option><option value="real">Real snapshot (Atlas)</option></select></label>
   <label>Theme <select id="theme"><option value="">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
   <span>Keyboard inside a mockup: <code>[</code> previous · <code>]</code> next · <code>.</code> step the simulation · <code>Esc</code> close the drawer</span>
 </div>
@@ -100,7 +100,7 @@
     "17-breathing-grid.html": {what: "A dense grid of small cells, one per agent, that breathe at their activity rate. Fresh cells sit in the top rows, old cells sink. Sub-agents are inset sub-cells.",
       answers: {who: "A cell", doing: "Breathing cadence and tool on hover", subs: "Inset sub-cells, expand in place", needs: "Warm glowing cells with a button on hover"}},
     "18-atlas.html": {what: "The synthesis. One canvas, three zoom levels: all domains as amorphous clusters that keep their place; one domain as a scatter; one orchestrator with its sub-agents bloomed out. Dot size is how much you have talked to the agent, color is age (full blue now, faded later), a ring is state. A quiet panel lists everything that needs you and flies you to it. The Domains selector varies how many domains the model reports and how messy they are.",
-      answers: {who: "A dot in its domain; hub with spokes for an orchestrator", doing: "Label and tool at the domain level; lens on click", subs: "Click the hub: they bloom out with labels", needs: "The panel, answered there; blinking rings on the map"}},
+      answers: {who: "A dot in its domain; hub with spokes for an orchestrator", doing: "Label and tool at the domain level; lens on click", subs: "Click the hub: they bloom out with labels", needs: "The panel, answered there; blinking rings on the map", real: "Choose the Real snapshot scale to see your own threads and the domains they carry"}},
   };
   const grid = document.getElementById("grid");
   const scaleSel = document.getElementById("scale"), themeSel = document.getElementById("theme");
@@ -125,7 +125,7 @@
       const h = document.createElement("h2"); h.textContent = title;
       const p = document.createElement("p"); p.textContent = d.what;
       const ans = document.createElement("div"); ans.className = "answers";
-      for (const [k, label] of [["who", "who"], ["doing", "doing"], ["subs", "sub-agents"], ["needs", "needs me"]]) { const b = document.createElement("b"); b.textContent = label; const s = document.createElement("span"); s.textContent = d.answers[k] || ""; ans.append(b, s); }
+      for (const [k, label] of [["who", "who"], ["doing", "doing"], ["subs", "sub-agents"], ["needs", "needs me"], ["real", "real data"]]) { if (!d.answers[k]) continue; const b = document.createElement("b"); b.textContent = label; const s = document.createElement("span"); s.textContent = d.answers[k]; ans.append(b, s); }
       tile.append(top, thumb, h, p, ans); grid.append(tile);
     }
   }

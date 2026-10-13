@@ -319,15 +319,71 @@ const AgentField = (() => {
     return agents;
   }
 
-  function create({scale = "small", seed = 7, domains = "clean"} = {}) {
+  function create({scale = "small", seed = 7, domains = "clean", workspace = "all"} = {}) {
     const rand = mulberry32(seed);
+    if (scale === "real") {
+      const snapshot = globalThis.AGENT_COORD_SNAPSHOT;
+      if (snapshot?.threads?.length) return fromSnapshot(snapshot, {workspace, rand});
+      console.warn("No snapshot loaded (shared/real-threads.js); falling back to the small fixture.");
+      scale = "small";
+    }
     const agents = smallSet(rand);
     const extra = scale === "large" ? 140 : scale === "medium" ? 26 : 0;
     if (extra) agents.push(...generated(rand, extra, 0));
     const scenario = Object.hasOwn(DOMAIN_SCENARIOS, domains) ? domains : "clean";
     applyDomainScenario(agents, scenario, new Map(agents.map(a => [a.id, a])));
+    return assemble(agents, {now: BASE_NOW, scale, seed, scenario, rand});
+  }
+  /* Real threads from export-threads.py: the same agent shape, built from what the runtime actually has. */
+  function fromSnapshot(snapshot, {workspace = "all", rand = mulberry32(7)} = {}) {
+    const now = Math.round((snapshot.exported_at || Date.now() / 1000) * 1000);
+    const threads = snapshot.threads.filter(t => workspace === "all" || t.cwd === workspace);
+    const ids = new Set(threads.map(t => t.id));
+    const ms = v => v ? Math.round(v * 1000) : null;
+    const agents = threads.map(t => {
+      const cp = t.checkpoint, s = t.session || {};
+      const phase = cp && PHASES.includes(cp.phase) ? cp.phase : "discussion";
+      const active = !!s.turn_active;
+      const needs = !!(cp && cp.next_actor === "user" && cp.next_action);
+      const failed = !active && t.last_completion === "failed";
+      const status = active ? "working" : needs ? "waiting" : failed ? "failed" : phase === "finished" ? "done" : "idle";
+      const createdAt = ms(t.created_at), updatedAt = ms(t.updated_at) || createdAt, lastSeen = ms(s.last_seen_at) || updatedAt;
+      const tool = s.last_tool ? {kind: ["read", "edit", "run", "search"].includes(s.last_tool.kind) ? s.last_tool.kind : "run", label: String(s.last_tool.label || s.last_tool.name || "").slice(0, 72), at: ms(s.last_tool.at) || lastSeen} : null;
+      const parentId = t.parent && ids.has(t.parent.thread_id) ? t.parent.thread_id : null;
+      const a = {
+        id: t.id, title: t.title, name: null, role: t.dispatcher ? "dispatcher" : "implementer", kind: t.parent?.mode === "delegate" ? "delegate" : "app",
+        client: CLIENTS.includes(t.client) ? t.client : "codex", parentId, phase, status,
+        summary: cp?.summary || (t.original_request ? t.original_request.slice(0, 300) : "No checkpoint yet."),
+        activity: active ? (tool ? null : s.activity && s.activity !== "idle" ? "Agent is " + s.activity : null) : null,
+        next: {actor: cp?.next_actor || "nobody", action: cp?.next_action || ""},
+        ask: needs ? {kind: t.classification === "review" ? "review" : "decision", question: cp.next_action, options: [], freeText: true, blocking: true, askedAt: ms(cp.created_at) || updatedAt} : null,
+        scope: s.write_scope?.length ? s.write_scope : (t.scope_cluster ? [t.scope_cluster] : []),
+        domain: t.domain || t.scope_cluster || null, domains: t.domain ? [t.domain] : (t.scope_cluster ? [t.scope_cluster] : []),
+        domainReported: t.domain || null, domainSource: t.domain ? (t.domain_source || "agent") : (t.scope_cluster ? "derived" : "missing"),
+        target: null, plan: [], waitingOn: [], links: t.links || [], cost: {tokens: 0, usd: 0, minutes: Math.max(1, Math.round((updatedAt - createdAt) / MIN))}, confidence: 0,
+        createdAt, updatedAt, checkpointAt: ms(cp?.created_at) || updatedAt, stale: !!(cp && t.turn_id && cp.turn_id && cp.turn_id !== t.turn_id),
+        unread: false, pinned: !!t.pinned, failure: failed ? "The last turn failed" : null,
+        history: (t.history || []).map(h => ({at: ms(h.at), phase: PHASES.includes(h.phase) ? h.phase : "discussion", summary: h.summary, actor: h.author === "user" ? "user" : "agent"})),
+        pulses: active ? [lastSeen] : (tool && tool.at > updatedAt ? [tool.at] : []), lastTool: tool,
+        userTurns: Math.min(40, t.completions || 0), turns: (t.completions || 0) * 2 + (t.checkpoints || 0),
+        workspace: t.cwd, attention: t.attention, real: true,
+      };
+      a._rand2 = mulberry32(hashSeed(a.id));
+      if (!a.history.length && cp) a.history.push({at: a.checkpointAt, phase, summary: a.summary, actor: "agent"});
+      return a;
+    });
+    const kids = new Map(); for (const a of agents) if (a.parentId) kids.set(a.parentId, (kids.get(a.parentId) || 0) + 1);
+    for (const a of agents) {
+      if (a.role === "dispatcher") continue;
+      a.role = kids.get(a.id) ? "orchestrator" : ["investigation", "discussion"].includes(a.phase) ? "researcher" : a.phase === "deployment" ? "releaser" : a.phase === "validation" && /review/i.test(a.title) ? "reviewer" : "implementer";
+    }
+    const field = assemble(agents, {now, scale: "real", seed: 7, scenario: "real", rand});
+    field.workspace = workspace; field.workspaces = snapshot.workspaces || []; field.exportedAt = now;
+    return field;
+  }
+  function assemble(agents, {now, scale, seed, scenario, rand}) {
     const listeners = new Set();
-    const field = {agents, now: BASE_NOW, scale, seed, scenario, events: [], rand, tickCount: 0};
+    const field = {agents, now, scale, seed, scenario, events: [], rand, tickCount: 0};
     const index = () => { field._byId = new Map(agents.map(a => [a.id, a])); field._kids = new Map(); for (const a of agents) { if (!a.parentId) continue; if (!field._kids.has(a.parentId)) field._kids.set(a.parentId, []); field._kids.get(a.parentId).push(a); } for (const list of field._kids.values()) list.sort((x, y) => x.createdAt - y.createdAt); };
     index();
     const emit = () => { index(); for (const fn of listeners) fn(field); };
@@ -402,7 +458,8 @@ const AgentField = (() => {
       for (const a of [...agents]) {
         const r = rand();
         if (a.status === "working") {
-          if (r < 0.12) {
+          if (r < 0.12 && !a.plan.length) { a.updatedAt = field.now; }
+          else if (r < 0.12) {
             const active = a.plan.findIndex(s => s.state === "active");
             if (active >= 0) a.plan[active].state = "done";
             const next = a.plan.findIndex(s => s.state === "todo");
@@ -461,6 +518,6 @@ const AgentField = (() => {
   }
   function statusDot(agent) { const d = el("span", "dot " + agent.status); d.title = STATUS_LABELS[agent.status]; return d; }
 
-  return {create, PHASES, PHASE_LABELS, DOMAINS, DOMAIN_LABELS, DOMAIN_SCENARIOS, ROLES, ROLE_LABELS, CLIENTS, PROVIDER_NAMES, STATUS_LABELS, providerLogo, el, phaseSteps, statusDot, BASE_NOW};
+  return {create, fromSnapshot, PHASES, PHASE_LABELS, DOMAINS, DOMAIN_LABELS, DOMAIN_SCENARIOS, ROLES, ROLE_LABELS, CLIENTS, PROVIDER_NAMES, STATUS_LABELS, providerLogo, el, phaseSteps, statusDot, BASE_NOW};
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = AgentField;
