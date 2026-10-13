@@ -14,6 +14,7 @@ import threading
 import uuid
 from collections import deque
 from concurrent.futures import Future, TimeoutError
+from pathlib import Path
 
 from .context import client_environment
 from .store import CoordinationError
@@ -29,7 +30,10 @@ class ClaudeConnection:
         args = list(command or ["claude"])
         args += ["--print", "--input-format", "stream-json", "--output-format", "stream-json",
                  "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio"]
-        args += ["--resume" if options.get("resume") else "--session-id", options["threadId"]]
+        if options.get("forkPath"):
+            args += ["--resume", options["forkPath"], "--fork-session", "--session-id", options["threadId"]]
+        else:
+            args += ["--resume" if options.get("resume") else "--session-id", options["threadId"]]
         if options.get("probe"):
             # Capability discovery sends no prompts and must not register a
             # phantom work thread through SessionStart/SessionEnd hooks.
@@ -149,6 +153,9 @@ class ClaudeRPC:
         self.closed = False
         with store._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS claude_sessions (thread_id TEXT PRIMARY KEY, started INTEGER NOT NULL DEFAULT 0)")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(claude_sessions)")}
+            if "fork_path" not in columns:
+                db.execute("ALTER TABLE claude_sessions ADD COLUMN fork_path TEXT")
 
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
@@ -168,9 +175,10 @@ class ClaudeRPC:
             current = None
         if current is None:
             with self.store._connection() as db:
-                row = db.execute("SELECT started FROM claude_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+                row = db.execute("SELECT started, fork_path FROM claude_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
             current = self.connection_factory(self.store, lambda m: self._message(thread_id, m),
-                {**options, "threadId": thread_id, "resume": bool(row and row[0])})
+                {**options, "threadId": thread_id, "resume": bool(row and row["started"]),
+                 "forkPath": row["fork_path"] if row and not row["started"] else None})
             self.connections[thread_id] = current
             self.options[thread_id] = dict(options)
             try:
@@ -184,6 +192,69 @@ class ClaudeRPC:
     def _history(self, thread_id):
         with self.lock:
             return self._read_history(thread_id)
+
+    def _fork(self, thread_id, params):
+        with self.lock:
+            if thread_id in self.turns or any(r[0] == thread_id for r in self.requests.values()):
+                raise CoordinationError("Wait for the running Claude turn and pending input to finish before forking.")
+            history = self._read_history(thread_id)
+            with self.store._connection() as db:
+                source = db.execute("SELECT * FROM claude_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+            if source is None:
+                raise CoordinationError("Fork requires a Claude conversation created in Ribbon Field.")
+            child_id = str(uuid.uuid4())
+            snapshot = None
+            snapshot_created = False
+            if source["started"] or source["fork_path"]:
+                # Freeze the native transcript now, including tool/context data
+                # absent from display history. Claude performs the actual branch
+                # on first input; --resume <snapshot> never follows later parent
+                # turns, even after restart or when forking an unused fork.
+                try:
+                    if source["started"]:
+                        session_id = str(uuid.UUID(thread_id))
+                        root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+                        paths = list((root / "projects").glob(f"*/{session_id}.jsonl"))
+                        if len(paths) != 1:
+                            raise ValueError("Native transcript is missing or ambiguous")
+                        path = paths[0]
+                    else:
+                        path = Path(source["fork_path"])
+                    content = path.read_bytes()
+                    entries = [json.loads(line) for line in content.splitlines() if line.strip()]
+                    if not any(isinstance(e, dict) and e.get("type") in {"user", "assistant"}
+                               and not e.get("isSidechain") for e in entries):
+                        raise ValueError("Native transcript has no conversation messages")
+                    latest = history.get("turns", [])[-1:] or [{}]
+                    prompt = next((i for i in latest[0].get("items", []) if i.get("type") == "userMessage"), None)
+                    if prompt and not any(isinstance(e, dict) and e.get("uuid") == prompt["id"] for e in entries):
+                        raise ValueError("Native transcript has not saved the latest turn yet")
+                    directory = self.store.database_path.parent / "claude-forks"
+                    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    snapshot = directory / f"{child_id}.jsonl"
+                    with snapshot.open("xb") as stream:
+                        snapshot_created = True
+                        os.chmod(snapshot, 0o600)
+                        stream.write(content)
+                except (OSError, ValueError) as exc:
+                    if snapshot_created:
+                        snapshot.unlink(missing_ok=True)
+                    raise CoordinationError(f"Cannot fork Claude history: {exc}. Retry after its transcript is saved.") from exc
+            elif history.get("turns"):
+                raise CoordinationError("Cannot fork Claude history before its native transcript has been saved.")
+            history["id"] = child_id
+            try:
+                with self.store._connection() as db:
+                    db.execute("INSERT INTO claude_sessions (thread_id, fork_path) VALUES (?, ?)",
+                               (child_id, str(snapshot) if snapshot else None))
+                    db.execute("INSERT INTO browser_history (thread_id, history_json) VALUES (?, ?)",
+                               (child_id, json.dumps(history)))
+            except Exception:
+                if snapshot is not None:
+                    snapshot.unlink(missing_ok=True)
+                raise
+            options = self._options(params)
+            return {"thread": history, "model": options["model"], "reasoningEffort": options["effort"]}
 
     def _read_history(self, thread_id):
         with self.store._connection() as db:
@@ -234,6 +305,8 @@ class ClaudeRPC:
             self.options[thread_id] = self._options(params)
             return {"thread": self._history(thread_id), "model": self.options[thread_id]["model"],
                     "reasoningEffort": self.options[thread_id]["effort"]}
+        if method == "thread/fork":
+            return self._fork(thread_id, params)
         if method == "thread/read":
             return {"thread": self._history(thread_id)}
         if method in {"thread/archive", "thread/unarchive", "thread/name/set"}:

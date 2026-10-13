@@ -691,7 +691,8 @@ choices come from the installed Claude CLI. Claude retains its native transcript
 for resume; Agent Coord retains the display history across restarts. While Claude
 is working, **Enter** queues a follow-up. **Stop** ends that conversation's process
 and pauses its queue; the next message resumes its saved transcript. Importing
-terminal Claude conversations and forking Claude threads are not yet supported.
+terminal Claude conversations is not yet supported. Idle Claude conversations
+can be forked into independent threads with the same history and settings.
 
 Google Antigravity conversations use Google's official ACP runtime. Install and
 sign in on the machine running Ribbon Field:
@@ -852,7 +853,7 @@ next message and persist across server restarts. Wait for a running turn to
 finish before changing settings. When switching models, an unsupported effort
 falls back to the new model's advertised default.
 The slash menu completes model names and supported effort levels. In the UI,
-`/fork` opens a new thread from the current idle Codex conversation. `/close`
+`/fork` opens a new thread from the current idle Codex or Claude conversation. `/close`
 stops any running turn and closes the current thread, keeping its history and
 returning to the overview. These two commands take no arguments or images and
 run immediately, including when submitted with the queue shortcut.
@@ -1049,7 +1050,7 @@ terminal conversations stay with their existing client, and Claude conversations
 continue in Claude Code. Existing terminal sessions begin capturing requests
 when they load the refreshed plugin; earlier prompts are not reconstructed.
 
-Choose **Fork** on an idle Codex thread to open a separate conversation with
+Choose **Fork** on an idle Codex or Claude app thread to open a separate conversation with
 the same history. Saved Codex terminal threads can also be forked into the
 browser. Reopen closed threads first; running threads and pending input must
 finish before forking. The new thread has an editable title and a **Forked
@@ -1060,7 +1061,9 @@ permissions. File claims, queued messages, approvals, checkpoints, pins, and
 read markers start fresh. Both threads share the same files; forking does not
 create a Git worktree. Opening a fork starts no model turn until you send a
 message. This version forks through the latest available turn; selecting an
-earlier turn and launching terminal forks are not included.
+earlier turn and launching terminal forks are not included. Claude forks snapshot
+the native transcript immediately and branch through Claude Code on their first
+message, preserving the snapshot even if the original thread continues first.
 
 The overview keeps one **Attention** queue above fixed work stages:
 **New → Investigating → Planning → Orchestrating → Implementing → Validating →

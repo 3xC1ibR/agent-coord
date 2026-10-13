@@ -79,6 +79,16 @@ class ClaudeTransportTests(unittest.TestCase):
         self.assertEqual(args[args.index("--model") + 1], "sonnet")
         self.assertEqual(args[args.index("--effort") + 1], "high")
 
+    def test_native_fork_uses_snapshot_and_child_identity(self):
+        connection = self.connection(forkPath=str(self.root / "snapshot.jsonl"))
+        result = connection.control("initialize")
+        args = result["args"]
+        self.assertEqual(args[args.index("--resume") + 1], str(self.root / "snapshot.jsonl"))
+        self.assertIn("--fork-session", args)
+        self.assertEqual(args[args.index("--session-id") + 1], "test-session")
+        self.assertEqual(result["session"], "test-session")
+        self.assertNotIn("--allow-dangerously-skip-permissions", args)
+
     def test_shell_api_key_cannot_override_subscription_authentication(self):
         subscription_env = {"CLAUDE_CODE_OAUTH_TOKEN": "subscription-token",
                             "CLAUDE_CONFIG_DIR": str(self.root / "claude-config")}

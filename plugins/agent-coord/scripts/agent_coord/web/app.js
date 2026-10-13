@@ -1096,7 +1096,7 @@ function renderStatus() {
   $("stop").hidden = !running;
   $("close-thread").textContent = archived ? "Reopen" : running || ["running", "needs input"].includes(work?.status) ? "Stop and close" : "Close thread";
   $("close-thread").disabled = !state.detail || state.closing.has(state.selected);
-  $("fork-thread").hidden = work?.client !== "codex";
+  $("fork-thread").hidden = !["codex", "claude"].includes(work?.client);
   $("fork-thread").disabled = state.detailRefreshing || !work?.can_fork || active || !!state.detail?.requests?.length || state.forking || state.closing.has(state.selected);
   $("park").disabled = !state.detail || archived || state.closing.has(state.selected);
   $("edit-checkpoint").disabled = !state.detail;

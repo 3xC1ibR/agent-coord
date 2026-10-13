@@ -5,7 +5,7 @@
     {name: "/model", arguments: "[model-id] [effort]", description: "List models or choose one for the next message"},
     {name: "/effort", arguments: "[level]", description: "Show or change reasoning effort"},
     {name: "/permissions", arguments: "[default|yolo]", description: "Show or change session permissions"},
-    {name: "/fork", arguments: "", description: "Fork this Codex conversation into a new thread"},
+    {name: "/fork", arguments: "", description: "Fork this Codex or Claude conversation into a new thread"},
     {name: "/close", arguments: "", description: "Stop and close this thread, keeping its history"},
     {name: "/help", arguments: "", description: "Show available commands and usage"},
   ];

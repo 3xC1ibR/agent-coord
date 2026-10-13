@@ -143,6 +143,14 @@ test("fork availability follows backend eligibility and live activity", () => {
   c.renderStatus();
   assert.equal(c.$("fork-thread").disabled, true);
   c.state.detail.work_thread.client = "claude";
+  c.state.detail.work_thread.can_fork = true;
+  c.renderStatus();
+  assert.equal(c.$("fork-thread").hidden, false);
+  assert.equal(!!c.$("fork-thread").disabled, false);
+  c.state.detail.running = true;
+  c.renderStatus();
+  assert.equal(c.$("fork-thread").disabled, true);
+  c.state.detail.work_thread.client = "kimi";
   c.renderStatus();
   assert.equal(c.$("fork-thread").hidden, true);
 });

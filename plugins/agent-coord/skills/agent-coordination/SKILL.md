@@ -543,7 +543,9 @@ Claude uses the installed
 CLI and its configured permission rules; approvals and questions appear in the
 chat. Claude follow-ups queue while a turn runs, and Stop ends only that
 conversation's process. The next message resumes its native transcript. Claude
-terminal import and thread forking are not supported. Codex sessions default to workspace-write
+terminal import is not supported. Idle Claude app conversations support **Fork**
+and `/fork`, preserving history and settings without starting a model turn.
+Codex sessions default to workspace-write
 sandboxing and on-request approvals. `/permissions yolo` enables full machine
 access without approval prompts; `/permissions default` restores workspace access.
 Idle browser sessions can also change this setting through **Permissions**
@@ -558,7 +560,7 @@ Directory changes stay within the UI workspace filter. `/model` lists
 models, `/model <model-id> [effort]` changes the next turn's model, and `/effort
 <level>` changes its reasoning effort. The slash menu completes model names and
 supported effort levels. `/effort` lists supported levels and `/help` lists commands.
-In the UI, `/fork` opens a new thread from the current idle Codex conversation;
+In the UI, `/fork` opens a new thread from the current idle Codex or Claude conversation;
 `/close` stops and closes the current thread, preserving its history and returning
 to the overview. These thread commands take no arguments or images and run
 immediately, even when submitted with the queue shortcut.

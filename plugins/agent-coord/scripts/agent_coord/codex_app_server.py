@@ -759,7 +759,8 @@ class BrowserSessions:
                                          and thread["response_state"] in {"action", "reply", "failed", "update"}
                                          and handoff != "blocked")
         thread["can_resume"] = bool(not thread["browser_session"] and thread["client"] == "codex" and session["presence"] == "offline")
-        thread["can_fork"] = bool(thread["client"] == "codex" and thread["attention"] != "archived"
+        fork_supported = thread["client"] == "codex" or (thread["client"] == "claude" and thread["browser_session"])
+        thread["can_fork"] = bool(fork_supported and thread["attention"] != "archived"
                                   and thread["status"] in {"idle", "saved"}
                                   and (thread["browser_session"] or session["presence"] == "offline"))
         thread["forked_from"] = None
@@ -913,7 +914,7 @@ class BrowserSessions:
             if source["status"] in {"running", "needs input"}:
                 raise BrowserBusyError("Wait for the running turn and pending input to finish before forking.")
             if not source["can_fork"]:
-                raise CoordinationError("Fork requires an open, idle Codex thread or a saved Codex terminal thread.")
+                raise CoordinationError("Fork requires an open, idle Codex or Claude app thread, or a saved Codex terminal thread.")
             # Read without resuming or taking ownership of the source. Also check
             # native state, which may have advanced since our last notification.
             original = self._read_thread(thread_id)
@@ -929,19 +930,19 @@ class BrowserSessions:
             params = {"threadId": thread_id, **self._options(record)}
             if latest.get("id"):
                 params["lastTurnId"] = latest["id"]
-            result = self.rpc.request("thread/fork", params)
+            result = self._rpc(thread_id).request("thread/fork", params)
             child_id = result["thread"]["id"]
             # thread.sessionId may identify the shared Codex tree root. Only the
             # new thread.id is an independent Agent Coord checkpoint identity.
-            self.store.register(session_id=child_id, client="codex", cwd=record["cwd"], name=name)
+            self.store.register(session_id=child_id, client=source["client"], cwd=record["cwd"], name=name)
             self.store.threads.record_fork(child_id, source, turn_id=latest.get("id"))
             with self.store._connection() as db:
                 now = self.store.clock()
                 db.execute("""INSERT INTO browser_sessions
-                              (thread_id, cwd, name, model, effort, yolo, created_at, updated_at)
-                              VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                              (thread_id, cwd, name, model, effort, yolo, created_at, updated_at, client)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                            (child_id, record["cwd"], name, result.get("model") or record.get("model"),
-                            result.get("reasoningEffort", record.get("effort")), int(record["yolo"]), now, now))
+                            result.get("reasoningEffort", record.get("effort")), int(record["yolo"]), now, now, source["client"]))
             with self.lock:
                 self._remember_thread(result["thread"])
             self.store.end_session(child_id)
@@ -1067,7 +1068,7 @@ class BrowserSessions:
                      "Use /cd with a relative, absolute, or ~ path. "
                      "Permissions: default uses " + default_permissions + "; "
                      "yolo gives full machine access without approval prompts. "
-                     "In the UI, /fork opens a new thread from an idle Codex conversation; "
+                     "In the UI, /fork opens a new thread from an idle Codex or Claude conversation; "
                      "/close stops and closes the current thread, keeping its history.")
         elif command == "/cd":
             argument = message[len(parts[0]):].strip()
