@@ -163,7 +163,9 @@ bd update <bead-id> --claim
 
 `begin-work` rejects a declaration when another live session owns the same
 non-null Beads issue or an overlapping scope in the same repository. Scope-only
-declarations receive the same overlap protection.
+declarations receive the same overlap protection. Repeat `--scope` for each
+path. A comma-separated list is rejected before the declaration changes. For
+a filename that contains a comma, declare its parent directory.
 
 If a newcomer finds an unscoped incumbent, its structured write is denied and
 the incumbent receives one actionable, `reply_required=false` request to
@@ -666,10 +668,10 @@ history retention, and separation between closure and task completion apply.
 
 The backend starts `codex app-server` lazily and communicates over stdio using
 the [Codex App Server protocol](https://developers.openai.com/codex/app-server).
-Open **New session**, then choose a model from the **Codex**, **Claude Code**, or **Google Antigravity**
+Open **New session**, then choose a model from the **Codex**, **Claude Code**, **Google Antigravity**, or **Kimi Code**
 groups in the composer’s **Model** picker. The provider session starts when you send.
 For Codex or Claude, install and authenticate the selected CLI first (`codex login` or
-`claude auth login`). Antigravity setup is described below. Existing conversations retain their provider. Codex sessions use
+`claude auth login`). Antigravity and Kimi setup are described below. Existing conversations retain their provider. Codex sessions use
 workspace-write sandboxing and on-request approvals routed to the developer by
 default. **New session** and native **⌘N** open a draft conversation in the current
 workspace. You can change providers and models before sending the first message.
@@ -724,11 +726,104 @@ approval mode; YOLO selects its native `yolo` mode. This is not an OS sandbox.
 Enter queues follow-ups while a turn runs. Stop terminates that conversation's
 agent and helper; the next message resumes its native session. Saved display
 history opens offline. Forking and steering are not supported. Agent Coord
-identity, CLI access, and coordination instructions are supplied to the agent;
-the Codex/Claude plugin hooks are not installed into Antigravity.
+identity, the installed skill path, current scope state, and CLI examples are
+supplied at startup and resume. Codex, Claude, Kimi, and Antigravity use the same
+startup guidance and structured-write policy.
+
+Before a native conversation starts, the adapter installs a `PreToolUse` hook
+in the private ACP profile at `profile/config/hooks.json`. It preserves other
+hook entries. The hook uses the Ribbon Field session identity and checks file
+creation and edits against the current scopes,
+validation leases, activity, and live conflicts. It recognizes the ACP names
+`create_file`, `edit_file`, and `multi_edit_file`, and their documented aliases.
+Malformed hook inputs return a denial. These checks apply in default and YOLO
+modes. ACP tool notifications are not used to veto writes.
+
+These are coordination guards, not a filesystem sandbox. Shell-mediated writes,
+including `rm` and `mv`, and targets outside the registered repository are not
+covered. The same shell limitation applies to Codex, Claude, and Kimi. Do not
+interpret a scope declaration as OS-level write isolation. The native hook
+contract is described in [Google's hook documentation](https://www.antigravity.google/docs/hooks).
+
+After refreshing installed plugins, run the opt-in native regression probe with
+an authenticated ACP runtime. It checks allowed and forbidden file creation,
+single- and multiple-occurrence edits, and resumed conversations in both modes.
+It writes only disposable fixtures and prints the result directory:
+
+```bash
+python3 scripts/probe_antigravity_writes.py \
+  --plugin-root '<verified-installed-plugin>' \
+  --runtime-dir '<installed-runtime-directory>'
+```
+
+The probe uses the existing private provider profile. Use `--provider-dir` when
+that profile is stored at a different path. It does not test shell isolation.
+
+Antigravity receives actionable coordination messages in its native prompt.
+During an active turn, Ribbon Field checks the durable inbox every half second.
+It waits at least five seconds between delivery attempts. When a new message
+arrives, it cancels the native turn, waits for the prompt response, and reconnects
+to the same saved session. This is required because ACP 1.3.0 ignores hook
+`injectSteps` and cannot reliably continue in the same process after cancellation.
+The resumed agent must check interrupted tool results before it repeats an action.
+User Stop, pending Close, and queued user input prevent automatic continuation.
+A cancellation timeout stops the turn and leaves the messages unread.
+
+Each prompt contains at most eight messages and 16,000 characters of message data.
+Messages that do not fit remain queued. A large message includes a retrieval
+command instead of a partial body. Use `agent-coord message --message-id <id>`
+to read up to 8,000 characters. Use its `next_offset` with `--offset` to read the
+next page. The sender and recipient can use this command to inspect submission
+state, pending age, delivery errors, wake blockers, and recipient activity.
+Reading a page does not acknowledge the message. The agent must acknowledge each
+read message by ID. Submission is evidence of transport, not task completion.
+Unacknowledged messages can be delivered again on a later user turn. Stable IDs
+prevent repeated delivery attempts within one app turn. Native output and tool
+events refresh the agent's activity timestamp.
 
 The integration follows [T3 Code's Antigravity ACP support](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/acp/AntigravityAcpSupport.ts)
 and [runtime setup](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/antigravityAuthSupport.ts).
+
+Kimi conversations use the current [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code)
+through `kimi acp`. Install and authenticate it on the machine running Ribbon Field:
+
+```bash
+brew install kimi-code
+kimi login
+```
+
+The npm alternative is `npm install -g @moonshot-ai/kimi-code`; use a Node.js
+version supported by that package (2.1.1 requires Node 22.19 or newer). The archived
+Python `kimi-cli` package is not supported. Set `AGENT_COORD_KIMI_BIN` to the
+executable path if the app cannot discover it. `KIMI_CODE_HOME` is honored, so
+login and the app must use the same data directory. Ribbon Field reuses Kimi's
+own authentication and configuration; model discovery never starts login.
+
+Select **Kimi Code** in the Model picker. Models and their thinking choices come
+from Kimi's ACP configuration, including K3 when configured and available to
+your account. Text, thinking, tools, images, approvals, and multiple-choice
+questions appear in the existing conversation UI. Default permissions select
+Kimi's manual approval mode; YOLO selects its native `yolo` mode. Kimi executes
+its tools with native permissions, not an OS sandbox. Follow-ups queue while a
+turn runs. Stop cancels and closes that conversation's process; the next message
+resumes its native session. Display history is available without starting Kimi.
+Native sessions keep their original workspace, so use a new conversation to
+change directories. Importing terminal sessions, forking, and steering are not
+exposed in this first integration.
+
+When a Kimi conversation starts, Ribbon Field maintains a marked hook block in
+`~/.kimi-code/config.toml` (or `$KIMI_CODE_HOME/config.toml`), preserving other
+settings and hooks. These hooks are inert outside processes launched with a
+Ribbon Field Kimi session identity. They deliver coordination context and inbox
+messages at prompt submission and check structured writes against declared
+scopes. The app owns turn lifecycle and checkpoints retain the Ribbon Field identity across native
+restarts. As with other providers, scope checks are coordination guards, not
+shell sandboxing. Model discovery uses and removes a disposable native session
+without installing hooks or changing an existing conversation's model.
+
+The adapter follows Kimi's [ACP reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp.html)
+and [hook contract](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html),
+and shares the dependency-free ACP subprocess transport with Antigravity.
 
 The provider lifecycle and permission mapping were informed by
 [T3 Code's Claude adapter](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts)

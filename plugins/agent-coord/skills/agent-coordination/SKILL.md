@@ -350,7 +350,8 @@ agent-coord thread create \
   'The exact user request, including its scope and constraints.'
 ```
 
-Use `--client claude` for Claude Code. Model and effort are optional; select
+Use `--client claude` for Claude Code, `--client antigravity` for Google
+Antigravity, or `--client kimi` for Kimi Code. Model and effort are optional; select
 them when the user authorized that choice. Add `--yolo` only with explicit
 authorization for full machine access without approval prompts. Defaults do
 not inherit the dispatcher's YOLO mode. Creation does not bypass hook trust.
@@ -524,14 +525,21 @@ messages and submits one generic prompt through its owned PTY. The prompt hook
 then supplies the durable body and thread metadata. This keeps terminal workers
 alive while their delegation is unfinished and lets them coordinate with their
 parent or with one another.
-The loopback-only UI home page creates and manages independent Codex and Claude Code browser
-sessions through `codex app-server` or Claude's stream-json protocol: streamed conversations, approvals and
+The loopback-only UI home page creates and manages independent Codex, Claude Code,
+Google Antigravity, and Kimi Code sessions through their native protocols: streamed conversations, approvals and
 questions, stop, rename, close, reopen, and resume. Browser sessions do not
 require a parent or Bead. **New session** and native **⌘N** open a draft conversation
-in the current workspace. Choose a Codex or Claude Code model in the composer’s
+in the current workspace. Choose a provider's model in the composer’s
 **Model** picker; the provider session starts when the first message is sent.
 Existing conversations offer models from their current provider.
-Each conversation retains its provider across restarts. Claude uses the installed
+Each conversation retains its provider across restarts. Kimi uses the current
+Kimi Code CLI (`kimi acp`) and its existing authentication; run `kimi login`
+before creating a Kimi conversation. Its configured models and thinking levels,
+including K3 when available, come from the runtime. Kimi uses native approvals,
+queues follow-ups, and resumes the same native session after Stop. Its workspace
+is fixed when created; changing directories requires a new conversation. Native
+Kimi permissions are not an OS sandbox. The archived Python `kimi-cli` is unsupported.
+Claude uses the installed
 CLI and its configured permission rules; approvals and questions appear in the
 chat. Claude follow-ups queue while a turn runs, and Stop ends only that
 conversation's process. The next message resumes its native transcript. Claude

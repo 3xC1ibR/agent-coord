@@ -8,25 +8,25 @@ from pathlib import Path
 from typing import Any
 
 from .cli import find_repository_root
-from .context import command_prefix, persist_claude_environment
+from .context import command_prefix, coordination_bootstrap, persist_claude_environment
 from .store import (
     CoordinationError,
     CoordinationStore,
     normalize_target_path,
-    path_is_in_scope,
 )
 from .usage import capture_delegation_usage
+from .write_policy import check_write
 from .zellij_wake import WAKE_PROMPT, enable_from_environment
 
 WRITE_TOOLS = {"apply_patch", "Edit", "Write"}
 PATCH_PATH = re.compile(
-    r"^\*\*\* (?:Add|Update|Delete|Move to) File: (.+)$", re.MULTILINE
+    r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.MULTILINE
 )
 
 
 def _client() -> str:
     configured = os.environ.get("AGENT_COORD_CLIENT")
-    if configured in {"claude", "codex"}:
+    if configured in {"claude", "codex", "kimi", "antigravity"}:
         return configured
     return "codex" if os.environ.get("PLUGIN_ROOT") else "claude"
 
@@ -80,7 +80,11 @@ def _format_messages(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _actionable_context(store: CoordinationStore, session_id: str) -> str:
+def _actionable_context(store: CoordinationStore, session_id: str, event: str = "UserPromptSubmit") -> str:
+    # Kimi consumes appended context only at prompt submission. Its tool hooks
+    # enforce denials or send notifications, but ignore appended messages.
+    if _client() == "kimi" and event != "UserPromptSubmit":
+        return ""
     return _format_messages(
         store.inbox(session_id, classifications={"action_required"})
     )
@@ -110,10 +114,37 @@ def _extract_paths(payload: dict[str, Any], cwd: str) -> tuple[list[str], bool]:
     return sorted(in_repo), has_outside
 
 
+def _tool_label(payload: dict[str, Any], cwd: str, tool_name: str) -> str:
+    """A short, path-relative description of a tool call for the overview."""
+    tool_input = payload.get("tool_input")
+    if tool_name in WRITE_TOOLS or tool_name == "NotebookEdit":
+        paths, _ = _extract_paths(payload, cwd)
+        if paths:
+            return paths[0]
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("command", "file_path", "notebook_path", "path", "pattern", "query", "url"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            first = value.strip().splitlines()[0]
+            return " ".join(first.split())
+    return ""
+
+
+def _record_tool(
+    store: CoordinationStore, session_id: str, cwd: str, tool_name: str, payload: dict[str, Any]
+) -> None:
+    # Activity is a free signal for the overview; it must never block a tool call.
+    try:
+        store.record_tool(session_id, tool_name, _tool_label(payload, cwd, tool_name))
+    except Exception:  # noqa: BLE001 -- best effort by design.
+        return
+
+
 def _ensure_registered(
     store: CoordinationStore, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    session_id = payload.get("session_id")
+    session_id = (os.environ.get("AGENT_COORD_SESSION_ID") if _client() == "kimi" else None) or payload.get("session_id")
     cwd = payload.get("cwd") or os.getcwd()
     if not isinstance(session_id, str) or not session_id:
         raise CoordinationError("Hook input does not contain a session_id.")
@@ -237,7 +268,7 @@ def handle(
         else:
             coordination.touch(session_id, turn_active=True)
         text = coordination.threads.instructions(session_id)
-        messages = _actionable_context(coordination, session_id)
+        messages = _actionable_context(coordination, session_id, event)
         if messages:
             text += "\n\n" + messages
         return _context(event, text) if text else {}
@@ -248,20 +279,7 @@ def handle(
             shell_context_ready = persist_claude_environment(coordination.database_path, session_id)
         coordination.touch(session_id, turn_active=False)
         cli_path = "agent-coord" if shell_context_ready else command_prefix(coordination.database_path)
-        text = (
-            f"This session is registered with agent-coord as {session_id}. "
-            f"Use {cli_path}; caller identity is inferred from AGENT_COORD_SESSION_ID or CODEX_THREAD_ID. "
-            "Explicit --session-id and --from-session override it. Use the agent-coordination skill "
-            "before implementation. A sole active session may write without a "
-            "Beads issue or scope. When another session is active, declare the "
-            "smallest write scope; Beads is optional for all coordination workflows. "
-            "To review or organize the user's threads across workspaces, use the "
-            "manage-threads skill. Use thread list without --cwd for discovery; "
-            "use a known session ID directly for a specific thread. To close "
-            "your own thread after an explicit user request, save the checkpoint, "
-            "then run thread close --session-id <your-session-id> --after-turn. "
-            "A queued receipt is not confirmation that the thread has closed."
-        )
+        text = ""
         delegation_warning = None
         delegation_id = os.environ.get("AGENT_COORD_DELEGATION_ID")
         if delegation_id:
@@ -301,109 +319,62 @@ def handle(
             )
         elif wake_warning:
             text += f" Zellij wake could not start: {wake_warning}"
-        formatted = _actionable_context(coordination, session_id)
-        text += "\n\n" + coordination.threads.instructions(session_id, caller_context=shell_context_ready)
+        # Attach inherited scopes first so startup reports the effective state.
+        text = coordination_bootstrap(
+            coordination, session_id, caller_context=shell_context_ready, command=cli_path
+        ) + text
+        formatted = _actionable_context(coordination, session_id, event)
         if formatted:
             text += "\n\n" + formatted
         return _context(event, text)
 
     coordination.touch(session_id, turn_active=True)
     tool_name = payload.get("tool_name")
+    if event in {"PreToolUse", "PostToolUse"} and isinstance(tool_name, str) and tool_name.strip():
+        _record_tool(coordination, session_id, session["cwd"], tool_name, payload)
 
     if event == "PreToolUse" and tool_name in WRITE_TOOLS:
-        session = coordination.get_session(session_id)
         paths, has_outside = _extract_paths(payload, session["cwd"])
-        if not paths and has_outside:
-            # Every target is outside the registered repository, which Agent
-            # Coord does not own; the write passes through uncoordinated.
-            message_context = _actionable_context(coordination, session_id)
-            if message_context:
-                return _context(event, message_context)
-            return {}
+        reason = check_write(coordination, session_id, paths, has_outside=has_outside)
+        message_context = _actionable_context(coordination, session_id, event)
+        if reason:
+            return _deny(event, reason, message_context or None)
+        return _context(event, message_context) if message_context else {}
 
-        if not session["write_scope"]:
-            blockers = coordination.scope_blocking_peers(session_id)
-            if not blockers:
-                if session["scope_required"]:
-                    coordination.clear_scope_requirement(session_id)
-                coordination.touch(session_id, "implementing", turn_active=True)
-                message_context = _actionable_context(coordination, session_id)
-                return _context(event, message_context) if message_context else {}
-
-            unscoped_blockers = [peer for peer in blockers if not peer["write_scope"]]
-            if not session["scope_required"]:
-                coordination.request_scope_declarations(
-                    session_id,
-                    [peer["session_id"] for peer in unscoped_blockers],
-                )
-            coordination.touch(session_id, "waiting", turn_active=True)
-            owners = ", ".join(
-                peer["name"] or peer["session_id"] for peer in blockers
-            )
-            message_context = _actionable_context(coordination, session_id)
-            next_action = (
-                "Wait for the unscoped incumbent(s) to declare, then run "
-                if unscoped_blockers
-                else "Run "
-            )
-            return _deny(
-                event,
-                "Another active session requires write-scope coordination: "
-                f"{owners}. {next_action}agent-coord begin-work --session-id "
-                f"{session_id} "
-                "--scope '<path-or-glob>' before editing. --bead is optional. "
-                "Unscoped blocking peers have been asked to declare their scopes.",
-                message_context or None,
-            )
-        message_context = _actionable_context(coordination, session_id)
-        if session["lease_mode"] == "validation":
-            return _deny(
-                event,
-                "This declaration is a validation lease; explicit write tools "
-                "are disabled until a write lease is acquired.",
-                message_context or None,
-            )
-        if session["activity"] not in {"implementing", "validating"}:
-            return _deny(
-                event,
-                f"Session activity is {session['activity']}; set it to implementing or validating before editing.",
-                message_context or None,
-            )
-        if not paths:
-            return _deny(
-                event,
-                "The write target could not be determined from the tool input.",
-                message_context or None,
-            )
-        out_of_scope = [
-            path
-            for path in paths
-            if not any(
-                path_is_in_scope(path, scope) for scope in session["write_scope"]
-            )
-        ]
-        if out_of_scope:
-            return _deny(
-                event,
-                "Write target is outside the declared scope: "
-                + ", ".join(out_of_scope),
-                message_context or None,
-            )
-        conflicts = coordination.check_conflicts(session_id)
-        if conflicts:
-            owners = ", ".join(
-                conflict["name"] or conflict["session_id"] for conflict in conflicts
-            )
-            return _deny(
-                event,
-                f"Declared work conflicts with live session(s): {owners}.",
-                message_context or None,
-            )
-
-    message_context = _actionable_context(coordination, session_id)
+    message_context = _actionable_context(coordination, session_id, event)
     if message_context:
         return _context(event, message_context)
     return {}
+
+
+ANTIGRAVITY_WRITE_TOOLS = {
+    "write_to_file", "replace_file_content", "multi_replace_file_content",
+    "create_file", "edit_file", "multi_edit_file",
+}
+
+
+def handle_antigravity(payload, store=None):
+    """Translate Google's vetoable PreToolUse hook, never ACP notifications."""
+    coordination = store or CoordinationStore()
+    session_id = os.environ.get("AGENT_COORD_SESSION_ID")
+    if not session_id:
+        raise CoordinationError("Antigravity hook has no Ribbon Field session identity.")
+    session = coordination.get_session(session_id)
+    if session["client"] != "antigravity":
+        raise CoordinationError("Antigravity hook identity belongs to another provider.")
+    call = payload.get("toolCall")
+    if not isinstance(call, dict) or call.get("name") not in ANTIGRAVITY_WRITE_TOOLS:
+        raise CoordinationError("Antigravity write hook received an unknown tool.")
+    args = call.get("args")
+    target = args.get("TargetFile") if isinstance(args, dict) else None
+    # Validate before the sole-writer fast path; malformed native inputs must fail closed.
+    if not isinstance(target, str) or not target.strip():
+        raise CoordinationError("Antigravity write hook has no TargetFile.")
+    paths, has_outside = _extract_paths({"tool_input": {"path": target}}, session["cwd"])
+    reason = check_write(coordination, session_id, paths, has_outside=has_outside)
+    _record_tool(coordination, session_id, session["cwd"], call["name"], {"tool_input": {"path": target}})
+    # Native PreToolUse does not inject inbox context. The adapter owns message delivery.
+    return {"decision": "deny", "reason": reason} if reason else {"decision": "allow"}
 
 
 def main() -> int:
@@ -412,17 +383,24 @@ def main() -> int:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise CoordinationError("Hook input must be a JSON object.")
-        result = handle(payload)
+        result = handle_antigravity(payload) if _client() == "antigravity" else handle(payload)
     except Exception as exc:  # noqa: BLE001 -- Hooks must return JSON, not a traceback.
         event = "PreToolUse"
         tool_name = None
         if isinstance(payload, dict):
             event = str(payload.get("hook_event_name") or event)
             tool_name = payload.get("tool_name")
-        if event == "PreToolUse" and tool_name in WRITE_TOOLS:
+        if _client() == "antigravity":
+            result = {"decision": "deny", "reason": f"Agent coordination check failed closed: {exc}"}
+        elif event == "PreToolUse" and tool_name in WRITE_TOOLS:
             result = _deny(event, f"Agent coordination check failed closed: {exc}")
         else:
             result = {"systemMessage": f"Agent coordination hook warning: {exc}"}
+    if _client() == "kimi":
+        # Kimi consumes `message`, while Claude/Codex consume additionalContext.
+        context = result.get("hookSpecificOutput", {}).get("additionalContext")
+        if context:
+            result["message"] = context
     print(json.dumps(result, separators=(",", ":")))
     return 0
 

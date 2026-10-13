@@ -114,6 +114,8 @@ class AntigravityTests(unittest.TestCase):
         prompt = provider.connections[thread].calls[-1][1]["prompt"]
         self.assertIn(thread, prompt[0]["text"])
         self.assertIn("AGENTS.md", prompt[0]["text"])
+        self.assertIn("skills/agent-coordination/SKILL.md", prompt[0]["text"])
+        self.assertIn("never comma-join", prompt[0]["text"])
         self.assertEqual(prompt[-1], {"type": "image", "mimeType": "image/png", "data": "YQ=="})
 
     def test_streaming_tools_restart_and_native_resume(self):
@@ -137,6 +139,7 @@ class AntigravityTests(unittest.TestCase):
         connection = self.start(thread)
         resume = next(p for m, p in connection.calls if m == "session/resume")
         self.assertEqual(resume["sessionId"], native)
+        self.assertIn("skills/agent-coordination/SKILL.md", connection.calls[-1][1]["prompt"][0]["text"])
         selections = [p for m, p in connection.calls if m == "session/set_config_option"]
         self.assertIn({"sessionId": native, "configId": "model", "value": "gemini-test"}, selections)
 
@@ -223,6 +226,202 @@ class AntigravityTests(unittest.TestCase):
         self.assertFalse((self.root / "unexpected").exists())
 
 
+class AntigravityDeliveryTests(unittest.TestCase):
+    make_sessions = AntigravityTests.make_sessions
+    create = AntigravityTests.create
+    start = AntigravityTests.start
+    update = AntigravityTests.update
+    permission = AntigravityTests.permission
+
+    def setUp(self):
+        AntigravityTests.setUp(self)
+        self.store.register(session_id="sender", client="codex", cwd=str(self.root))
+        # Exercise the worker synchronously; lifecycle races are controlled below.
+        self.worker_patch = patch.object(AntigravityRPC, "_start_delivery_worker")
+        self.worker_patch.start()
+        self.addCleanup(self.worker_patch.stop)
+
+    def send_correction(self, thread, body="Use the revised interface"):
+        return self.store.send_message(sender_session_id="sender", recipient_session_id=thread, body=body)["id"]
+
+    def deliver(self, thread):
+        state = self.sessions.antigravity.delivery_turns.get(thread)
+        if state:
+            state["next_check"] = 0
+        self.sessions.antigravity.deliver_pending()
+
+    def test_initial_prompt_delivers_without_manual_inbox(self):
+        thread = self.create()
+        ident = self.send_correction(thread)
+        connection = self.start(thread)
+        self.assertIn('Use the revised interface', connection.calls[-1][1]['prompt'][-1]['text'])
+        self.assertIsNone(self.store.inbox(thread, mark_delivered=False)[0]['delivered_at'])
+        self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Received"})
+        receipt = self.sessions.antigravity.delivery.read('sender', ident)
+        self.assertEqual(receipt['delivery']['state'], 'submitted')
+        self.assertIsNone(receipt['acknowledged_at'])
+        self.deliver(thread)
+        self.assertFalse(connection.writes)
+
+    def test_cancel_waits_then_reconnects_same_session_with_correction(self):
+        thread = self.create()
+        connection = self.start(thread)
+        native = self.sessions.antigravity.native[thread]
+        app_turn = self.sessions.active[thread]
+        self.update(thread, sessionUpdate='tool_call', toolCallId='tool', title='command', status='in_progress')
+        ident = self.send_correction(thread)
+        self.deliver(thread)
+        self.assertEqual(connection.writes[-1]['method'], 'session/cancel')
+        self.assertFalse(connection.closed)
+        self.deliver(thread)
+        self.assertEqual(len(connection.writes), 1)
+        connection.future.set_result({'stopReason': 'cancelled'})
+        self.assertTrue(self.sessions.read(thread)['running'])
+        self.deliver(thread)
+        resumed = self.sessions.antigravity.connections[thread]
+        self.assertIsNot(resumed, connection)
+        self.assertTrue(connection.closed)
+        self.assertEqual(self.sessions.active[thread], app_turn)
+        self.assertIn(('session/resume', {'cwd': str(self.root), 'mcpServers': [], 'sessionId': native}), resumed.calls)
+        self.assertIn(f'"id": {ident}', resumed.calls[-1][1]['prompt'][-1]['text'])
+        tool = next(i for i in self.sessions.read(thread)['thread']['turns'][-1]['items'] if i['id'] == 'tool')
+        self.assertEqual(tool['status'], 'interrupted')
+        self.deliver(thread)
+        self.assertFalse(resumed.writes)
+        resumed.future.set_result({'stopReason': 'end_turn'})
+        self.assertFalse(self.sessions.read(thread)['running'])
+
+    def test_user_stop_during_delivery_never_resumes(self):
+        thread = self.create()
+        connection = self.start(thread)
+        ident = self.send_correction(thread)
+        self.deliver(thread)
+        self.sessions.interrupt(thread)
+        self.deliver(thread)
+        self.sessions.inbox_wake.process_once()
+        self.assertTrue(connection.closed)
+        self.assertNotIn(thread, self.sessions.antigravity.connections)
+        self.assertFalse(self.sessions.read(thread)['running'])
+        receipt = self.sessions.antigravity.delivery.read('sender', ident)
+        self.assertIsNone(receipt['delivered_at'])
+        self.assertIn('stopped', receipt['delivery']['blocked_reason'].lower())
+        self.assertIn('Use the revised interface', self.start(thread).calls[-1][1]['prompt'][-1]['text'])
+
+    def test_stop_during_reconnect_does_not_submit_a_prompt(self):
+        thread = self.create()
+        original = self.start(thread)
+        self.send_correction(thread)
+        self.deliver(thread)
+        original.future.set_result({'stopReason': 'cancelled'})
+        provider = self.sessions.antigravity
+        factory = provider.connection_factory
+        def stopping_factory(*args):
+            connection = factory(*args)
+            request = connection.request
+            def stopping_request(method, params, **kwargs):
+                result = request(method, params, **kwargs)
+                if method == 'session/resume':
+                    self.sessions.interrupt(thread)
+                return result
+            connection.request = stopping_request
+            return connection
+        provider.connection_factory = stopping_factory
+        self.deliver(thread)
+        self.assertNotIn(thread, provider.connections)
+        self.assertFalse(self.sessions.read(thread)['running'])
+
+    def test_cancellation_timeout_is_visible_and_does_not_restart(self):
+        thread = self.create()
+        connection = self.start(thread)
+        ident = self.send_correction(thread)
+        self.deliver(thread)
+        self.sessions.antigravity.delivery_turns[thread]['cancel_at'] -= 31
+        self.deliver(thread)
+        self.assertTrue(connection.closed)
+        receipt = self.sessions.antigravity.delivery.read('sender', ident)
+        self.assertEqual(receipt['delivery']['state'], 'uncertain')
+        self.assertIn('timed out', receipt['delivery']['error'])
+        self.assertIsNone(receipt['delivered_at'])
+        self.assertFalse(self.sessions.read(thread)['running'])
+
+    def test_old_continuation_cannot_close_a_new_user_turn(self):
+        thread = self.create()
+        original = self.start(thread)
+        self.send_correction(thread)
+        self.deliver(thread)
+        original.future.set_result({'stopReason': 'cancelled'})
+        provider = self.sessions.antigravity
+        stale = provider.delivery_turns[thread]
+        self.sessions.interrupt(thread)
+        current = self.start(thread)
+        provider._resume_delivery(thread, stale)
+        self.assertIs(provider.connections[thread], current)
+        self.assertFalse(current.closed)
+        self.assertTrue(self.sessions.read(thread)['running'])
+
+    def test_pending_permissions_are_cancelled_before_continuation(self):
+        thread = self.create()
+        connection = self.start(thread)
+        self.permission(thread)
+        self.send_correction(thread)
+        self.deliver(thread)
+        self.assertEqual(connection.writes[-2]['result']['outcome']['outcome'], 'cancelled')
+        self.assertFalse(self.sessions.pending_requests(thread))
+
+    def test_user_queue_takes_priority_over_inbox_interrupt(self):
+        thread = self.create()
+        connection = self.start(thread)
+        self.send_correction(thread)
+        with self.store._connection() as db:
+            db.execute("INSERT INTO browser_message_queue (id, thread_id, message, state, owner, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                       ('queue-item', thread, 'user followup', 'queued', 'test', self.store.clock()))
+        self.deliver(thread)
+        self.assertFalse(connection.writes)
+
+    def test_restart_retries_unacknowledged_delivery_without_new_identity(self):
+        thread = self.create()
+        ident = self.send_correction(thread)
+        connection = self.start(thread)
+        native = self.sessions.antigravity.native[thread]
+        self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Received"})
+        self.sessions.close()
+        self.sessions = self.make_sessions()
+        self.sessions.inbox_wake.process_once()
+        self.assertNotIn(thread, self.sessions.antigravity.connections)
+        connection = self.start(thread)
+        self.assertEqual(self.sessions.antigravity.native[thread], native)
+        self.assertIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][-1]['text'])
+        self.store.acknowledge(thread, ident)
+        connection.future.set_result({'stopReason': 'end_turn'})
+        self.assertNotIn('Coordination messages from other agents', str(self.start(thread).calls[-1]))
+
+    def test_idle_wake_includes_message_body(self):
+        thread = self.create()
+        self.send_correction(thread)
+        self.sessions.inbox_wake.process_once()
+        connection = self.sessions.antigravity.connections[thread]
+        self.assertIn('Use the revised interface', connection.calls[-1][1]['prompt'][-1]['text'])
+
+    def test_natural_completion_can_win_cancel_race(self):
+        thread = self.create()
+        connection = self.start(thread)
+        self.send_correction(thread)
+        self.deliver(thread)
+        connection.future.set_result({'stopReason': 'end_turn'})
+        self.deliver(thread)
+        self.assertIsNot(self.sessions.antigravity.connections[thread], connection)
+        self.assertTrue(self.sessions.read(thread)['running'])
+
+    def test_provider_activity_refreshes_liveness(self):
+        thread = self.create()
+        self.start(thread)
+        with self.store._connection() as db:
+            db.execute('UPDATE sessions SET last_seen_at = last_seen_at - 7200 WHERE session_id = ?', (thread,))
+        self.assertEqual(self.store.get_session(thread)['presence'], 'stale')
+        self.update(thread, sessionUpdate='tool_call', toolCallId='tool', status='in_progress')
+        self.assertEqual(self.store.get_session(thread)['presence'], 'online')
+
+
 class AntigravityTransportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -256,6 +455,27 @@ for line in sys.stdin:
         temporary = Path(connection.temporary.name)
         connection.close()
         self.assertFalse(temporary.exists())
+
+    def test_private_hook_setup_preserves_other_hooks_and_rejects_corrupt_config(self):
+        from agent_coord.antigravity import ensure_coordination_hooks
+        profile = self.root / "profile"
+        path = profile / "config/hooks.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"user-hook": {"enabled": False}}))
+        ensure_coordination_hooks(profile)
+        config = json.loads(path.read_text())
+        self.assertEqual(config["user-hook"], {"enabled": False})
+        rule = config["ribbon-field-coordination"]["PreToolUse"][0]
+        self.assertIn("create_file", rule["matcher"])
+        self.assertIn("multi_edit_file", rule["matcher"])
+        self.assertIn("agent-coord-hook", rule["hooks"][0]["command"])
+        first = path.read_bytes()
+        ensure_coordination_hooks(profile)
+        self.assertEqual(path.read_bytes(), first)
+        path.write_text("not-json")
+        with self.assertRaisesRegex(CoordinationError, "Cannot parse"):
+            ensure_coordination_hooks(profile)
+        self.assertEqual(path.read_text(), "not-json")
 
     def test_probe_login_request_fails_without_opening_browser(self):
         source = 'import sys,time\nsys.stdin.readline()\nprint(' + repr(AUTH_PREFIX + "https://accounts.google.com/o/oauth2/auth?state=abc") + ',flush=True)\ntime.sleep(5)\n'

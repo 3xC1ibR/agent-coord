@@ -312,6 +312,10 @@ test("background conversations keep unread results until actual focus and consum
   assert.equal(requests.length, 1);
   pane.receive({events: [{method: "item/agentMessage/delta", params: {threadId: "a"}}], completions: [{thread_id: "a"}]});
   assert.equal(events.length, 1); assert.equal(refreshed, 1);
+  pane.receive({events: [], approvals: [{thread_id: "other", request_key: "unrelated"}]});
+  assert.equal(refreshed, 1, "another conversation's approval does not refresh this pane");
+  pane.receive({events: [], approvals: [{thread_id: "a", request_key: "approval"}]});
+  assert.equal(refreshed, 2, "approval notifications recover controls even without their item event");
   assert.deepEqual(JSON.parse(JSON.stringify(pane.exportDraft())), {text: "Draft A", mentions: [], images: [], scroll: 123});
   pane.restoreDraft({text: "New", images: [], scroll: null});
   assert.equal(controls.timeline.scrollTop, 123, "new panes retain the transcript's initial scroll position");

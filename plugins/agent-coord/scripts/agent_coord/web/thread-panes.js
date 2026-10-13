@@ -462,7 +462,12 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
     setActive: value => { active = value; markSeen(); },
     focus: () => { if (!document.querySelector("dialog[open]")) ($("message").disabled || $("composer").hidden ? $("session-name") : $("message")).focus(); },
     receive: batch => {
-      if (batch.reset || batch.completions?.some(event => event.thread_id === state.selected)) scheduleDetail();
+      const approvals = batch.approvals?.some(event => event.thread_id === state.selected);
+      if (approvals) {
+        const entry = state.conversations?.get(state.selected);
+        if (entry) entry.revision++;
+      }
+      if (batch.reset || approvals || batch.completions?.some(event => event.thread_id === state.selected)) scheduleDetail();
       for (const event of batch.events || []) {
         if (event.method === "bridge/disconnected") { showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail && state.detail.work_thread?.client === "codex") state.detail.running = false; renderStatus(); }
         else applyEvent(event);

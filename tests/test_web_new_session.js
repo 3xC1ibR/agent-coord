@@ -37,7 +37,7 @@ test("New session opens a draft with all provider groups before creating any pro
   assert.equal(c.state.selected, "new-session");
   assert.equal(c.$("conversation").hidden, false);
   assert.equal(c.calls.filter(call => call.path === "sessions").length, 0);
-  assert.deepEqual(c.$("model-picker").children.map(group => group.label), ["Codex", "Claude Code", "Google Antigravity"]);
+  assert.deepEqual(c.$("model-picker").children.map(group => group.label), ["Codex", "Claude Code", "Google Antigravity", "Kimi Code"]);
   assert.equal(c.$("new-session").onclick, c.$("welcome-new").onclick);
   c.$("model-picker").value = c.modelValue("claude", "sonnet");
   await c.changeSessionModel();
@@ -69,6 +69,21 @@ test("Antigravity selection is sent to the backend and its setup error is visibl
   assert.match(c.$("model-picker-status").textContent, /antigravity login/);
   await c.sendSessionDraft("Hello", []);
   assert.equal(c.calls.find(call => call.path === "sessions").body.client, "antigravity");
+});
+
+test("Kimi selection is sent to the backend and its setup error is visible", async () => {
+  const c = setup();
+  const api = c.api;
+  c.api = async (path, body) => {
+    if (path === "models?client=kimi") throw new Error("Run kimi login");
+    return api(path, body);
+  };
+  await c.newSession();
+  c.$("model-picker").value = c.modelValue("kimi", "");
+  await c.changeSessionModel();
+  assert.match(c.$("model-picker-status").textContent, /kimi login/);
+  await c.sendSessionDraft("Hello", []);
+  assert.equal(c.calls.find(call => call.path === "sessions").body.client, "kimi");
 });
 
 test("draft uses the window folder and group rather than the previously focused thread", async () => {
@@ -117,7 +132,7 @@ test("repeat New session restores the same draft and chosen model", async () => 
   assert.equal(c.state.detail.session.project_id, null);
   assert.equal(c.$("message").value, "Keep this");
   assert.equal(c.state.detail.session.model, "sonnet");
-  assert.equal(c.calls.filter(call => call.path.startsWith("models?")).length, 3);
+  assert.equal(c.calls.filter(call => call.path.startsWith("models?")).length, 4);
 });
 
 test("first session requires a folder, retains its group, and cancellation starts nothing", async () => {

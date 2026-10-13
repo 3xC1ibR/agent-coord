@@ -7,21 +7,21 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import shlex
-import signal
-import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
-from collections import deque
-from concurrent.futures import Future, TimeoutError
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .acp import ACPConnection
 from .antigravity_setup import model_catalog, provider_directory, resolve_runtime
-from .context import client_environment
+from .context import client_environment, cli_path, coordination_bootstrap
+from .message_delivery import MessageDelivery
 from .store import CoordinationError
 
 AUTH_PREFIX = "Open the following link to authenticate the ACP server: "
@@ -29,19 +29,63 @@ BROWSER_MARKER = "RIBBON_FIELD_AUTH_URL="
 SIGN_IN = "Sign in to Antigravity with agent-coord antigravity login on this machine, then try again."
 
 
-class AntigravityConnection:
+def ensure_coordination_hooks(profile):
+    """Install only our entry in the ACP private profile; preserve user hooks."""
+    import fcntl
+    from .hook import ANTIGRAVITY_WRITE_TOOLS
+
+    hook = cli_path().with_name("agent-coord-hook")
+    if not hook.is_file():
+        raise CoordinationError(f"Antigravity coordination hook is missing: {hook}. Reinstall or rebuild Ribbon Field.")
+    path = profile / "config/hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Separate locks cover concurrent app processes as well as threads.
+    with (path.parent / ".agent-coord-hooks.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        original = path.read_text(encoding="utf-8") if path.exists() else ""
+        try:
+            config = json.loads(original) if original else {}
+        except ValueError as exc:
+            raise CoordinationError(f"Cannot parse Antigravity hooks at {path}; repair that JSON before starting.") from exc
+        if not isinstance(config, dict):
+            raise CoordinationError(f"Antigravity hooks must be a JSON object: {path}")
+        config["ribbon-field-coordination"] = {"PreToolUse": [{
+            "matcher": "|".join(sorted(ANTIGRAVITY_WRITE_TOOLS)),
+            "hooks": [{"type": "command", "timeout": 10,
+                "command": shlex.join(["env", "AGENT_COORD_CLIENT=antigravity", sys.executable, str(hook)])}],
+        }]}
+        updated = json.dumps(config, indent=2) + "\n"
+        if updated == original:
+            return path
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as output:
+                temporary = Path(output.name)
+                output.write(updated)
+            temporary.chmod(0o600)
+            if (path.read_text(encoding="utf-8") if path.exists() else "") != original:
+                raise CoordinationError("Antigravity hooks changed during setup. Try again.")
+            os.replace(temporary, path)
+        finally:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+    return path
+
+
+class AntigravityConnection(ACPConnection):
+    label = "Antigravity"
+    sign_in = SIGN_IN
+
     def __init__(self, store, callback, options, *, command=None):
         self.callback, self.options = callback, options
-        self.lock = threading.RLock()
-        self.pending = {}
-        self.errors = deque(maxlen=12)
-        self.closed = False
         self.auth_urls = set()
         root = provider_directory(store)
         profile = root / "profile"
         acp = profile / "antigravity-acp"
         acp.mkdir(parents=True, exist_ok=True, mode=0o700)
         profile.chmod(0o700)
+        if options.get("threadId"):
+            ensure_coordination_hooks(profile)
         acp.chmod(0o700)
         (acp / "settings.json").write_text('{"auth":{"type":"oauth-personal"}}\n', encoding="utf-8")
         if command is None:
@@ -64,47 +108,10 @@ class AntigravityConnection:
         self.temporary = tempfile.TemporaryDirectory(prefix="process-", dir=root)
         env.update({key: self.temporary.name for key in ("TMPDIR", "TMP", "TEMP")})
         try:
-            self.process = subprocess.Popen(command, cwd=options["cwd"], env=env,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True)
-        except OSError as exc:
-            self.temporary.cleanup()
-            raise CoordinationError(f"Cannot start Antigravity: {exc}") from exc
-        self.readers = [threading.Thread(target=self._read, daemon=True), threading.Thread(target=self._stderr, daemon=True)]
-        for reader in self.readers:
-            reader.start()
-
-    def write(self, message):
-        with self.lock:
-            if self.closed or self.process.poll() is not None:
-                raise CoordinationError("Antigravity disconnected. Send again to resume.")
-            try:
-                self.process.stdin.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n")
-                self.process.stdin.flush()
-            except (OSError, ValueError) as exc:
-                raise CoordinationError("Connection to Antigravity was lost.") from exc
-
-    def submit(self, method, params):
-        request_id, future = str(uuid.uuid4()), Future()
-        with self.lock:
-            self.pending[request_id] = future
-        try:
-            self.write({"id": request_id, "method": method, "params": params})
+            super().__init__(callback, command=command, cwd=options["cwd"], env=env)
         except Exception:
-            with self.lock:
-                self.pending.pop(request_id, None)
+            self.temporary.cleanup()
             raise
-        return future
-
-    def request(self, method, params, *, timeout=60):
-        future = self.submit(method, params)
-        try:
-            return future.result(timeout=timeout)
-        except TimeoutError as exc:
-            raise CoordinationError(f"Antigravity did not respond to {method}.") from exc
-        finally:
-            with self.lock:
-                self.pending = {k: v for k, v in self.pending.items() if v is not future}
 
     def initialize(self):
         result = self.request("initialize", {"protocolVersion": 1,
@@ -115,13 +122,6 @@ class AntigravityConnection:
             raise CoordinationError("Unsupported Antigravity ACP protocol. Update the runtime and Ribbon Field.")
         self.capabilities = result["agentCapabilities"]
         return result
-
-    def _fail(self, error):
-        with self.lock:
-            pending, self.pending = list(self.pending.values()), {}
-        for future in pending:
-            if not future.done():
-                future.set_exception(error)
 
     def _authorization(self, line):
         prefix = next((p for p in (AUTH_PREFIX, BROWSER_MARKER) if line.startswith(p)), None)
@@ -138,71 +138,14 @@ class AntigravityConnection:
             self.options["authorize"](url)
         return True
 
-    def _stderr(self):
-        for line in self.process.stderr:
-            if not self._authorization(line):
-                self.errors.append(line.rstrip()[-1000:])
-
-    def _read(self):
-        try:
-            for line in self.process.stdout:
-                if self._authorization(line):
-                    continue
-                try:
-                    message = json.loads(line)
-                except ValueError:
-                    continue  # The official runtime also emits startup diagnostics.
-                if not isinstance(message, dict):
-                    continue
-                if "method" in message:
-                    self.callback(message)
-                elif "id" in message:
-                    with self.lock:
-                        future = self.pending.pop(message["id"], None)
-                    if future and not future.done():
-                        if "error" in message:
-                            error = message["error"]
-                            detail = error.get("message", "Request failed")
-                            if error.get("code") == -32000:
-                                detail += ". " + SIGN_IN
-                            future.set_exception(CoordinationError("Antigravity: " + detail))
-                        else:
-                            future.set_result(message.get("result") or {})
-        except (OSError, ValueError, TypeError, KeyError) as exc:
-            self.errors.append(str(exc))
-        finally:
-            error = CoordinationError("Antigravity disconnected. " + "\n".join(self.errors))
-            self._fail(error)
-            if not self.closed:
-                self.callback({"method": "disconnected", "params": {"error": str(error)}})
+    def _consume_line(self, line):
+        return self._authorization(line)
 
     def close(self):
-        if self.closed:
-            return
-        self.closed = True
-        self._fail(CoordinationError("Antigravity connection closed."))
-        # The ACP process owns a harness subprocess; Stop must stop both.
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                if os.name == "posix":
-                    os.killpg(self.process.pid, sig)
-                elif self.process.poll() is None:
-                    self.process.terminate() if sig == signal.SIGTERM else self.process.kill()
-            except (ProcessLookupError, PermissionError):
-                # A just-exited process group may no longer be signalable on
-                # macOS. Reap the owned process; never target a different PID.
-                if self.process.poll() is None:
-                    self.process.terminate() if sig == signal.SIGTERM else self.process.kill()
-            try:
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                continue
-        for reader in self.readers:
-            if reader is not threading.current_thread():
-                reader.join(timeout=3)
-        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
-            stream.close()
-        self.temporary.cleanup()
+        try:
+            super().close()
+        finally:
+            self.temporary.cleanup()
 
 
 class AntigravityRPC:
@@ -214,6 +157,12 @@ class AntigravityRPC:
         self.closed = False
         self.lock = threading.RLock()
         self.catalog_lock = threading.Lock()
+        self.delivery = MessageDelivery(store)
+        self.delivery_turns = {}
+        self.delivery_stop = threading.Event()
+        self.delivery_worker = None
+        self.last_activity = {}
+        self.prompt_locks = {}
         with store._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS antigravity_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL)")
 
@@ -293,7 +242,19 @@ class AntigravityRPC:
             connection.close()
             raise
 
+    def _prompt_lock(self, thread_id):
+        with self.lock:
+            return self.prompt_locks.setdefault(thread_id, threading.RLock())
+
     def request(self, method, params=None):
+        if method == "turn/start":
+            # A new user turn must not reuse a half-initialized connection from
+            # an interrupted inbox continuation. Stop itself never waits here.
+            with self._prompt_lock(params["threadId"]):
+                return self._request(method, params)
+        return self._request(method, params)
+
+    def _request(self, method, params=None):
         if self.closed:
             raise CoordinationError("Antigravity connection is closed. Restart Ribbon Field.")
         params = params or {}
@@ -335,9 +296,7 @@ class AntigravityRPC:
             if thread_id in self.turns:
                 raise CoordinationError("An Antigravity turn is already running.")
             connection = self._connection(thread_id, self._options(params))
-            prompt = [{"type": "text", "text": f"Your Ribbon Field session ID is {thread_id}. The agent-coord CLI inherits this identity.\n"
-                       + self.store.threads.instructions(thread_id, caller_context=True)
-                       + "\nRead workspace AGENTS.md before editing. Use agent-coord for checkpoints and concurrent write scopes."}]
+            prompt = [{"type": "text", "text": coordination_bootstrap(self.store, thread_id)}]
             for part in params["input"]:
                 if part["type"] == "text":
                     prompt.append({"type": "text", "text": part["text"]})
@@ -347,10 +306,13 @@ class AntigravityRPC:
             turn = {"id": str(uuid.uuid4()), "status": "inProgress", "items": [
                 {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}]}
             self.turns[thread_id] = turn
+            self.delivery_turns[thread_id] = {"id": turn["id"], "batch": None, "accepted": False,
+                "cancel_at": None, "ready": False, "next_check": time.monotonic() + 5,
+                "reconnecting": False, "pending_batch": None}
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
             try:
-                future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
-                future.add_done_callback(lambda result: self._prompt_done(thread_id, turn["id"], result))
+                self._submit_prompt(thread_id, turn["id"], connection, prompt)
+                self._start_delivery_worker()
             except Exception as exc:
                 self._finish(thread_id, "failed", str(exc))
                 raise
@@ -375,15 +337,165 @@ class AntigravityRPC:
         try:
             result = future.result()
             reason = result.get("stopReason", "end_turn")
+            state = self.delivery_turns.get(thread_id)
+            if state and state["cancel_at"] is not None:
+                # The original prompt response is the cancellation barrier. A
+                # normal end_turn can win the race with our cancel notification.
+                if reason in {"cancelled", "canceled", "end_turn"}:
+                    state["ready"] = True
+                    return
+            if reason not in {"cancelled", "canceled"}:
+                self._confirm_delivery(thread_id)
             self._finish(thread_id, "interrupted" if reason in {"cancelled", "canceled"} else "completed")
         except Exception as exc:
             self._finish(thread_id, "failed", str(exc))
+
+    def _submit_prompt(self, thread_id, turn_id, connection, prompt, *, batch=None):
+        prepared = batch is not None
+        batch = batch or self.delivery.prepare(thread_id, turn_id)
+        if batch:
+            prompt = [*prompt, {"type": "text", "text": batch["text"]}]
+        with self.lock:
+            state = self.delivery_turns.get(thread_id)
+            if self.closed or not state or state["id"] != turn_id:
+                return  # Stop won while the provider reconnected.
+            if not prepared:
+                self.delivery.attempted(turn_id, batch)
+            state.update(batch=batch, accepted=False, cancel_at=None, ready=False,
+                         reconnecting=False, next_check=time.monotonic() + 5, pending_batch=None)
+            future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
+        future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
+
+    def _confirm_delivery(self, thread_id):
+        state = self.delivery_turns.get(thread_id)
+        if state and not state["accepted"] and not state["reconnecting"]:
+            self.delivery.submitted(thread_id, state["id"], state["batch"])
+            state["accepted"] = True
+
+    def _start_delivery_worker(self):
+        with self.lock:
+            if self.delivery_worker is None:
+                self.delivery_worker = threading.Thread(target=self._delivery_loop,
+                    name="antigravity-inbox", daemon=True)
+                self.delivery_worker.start()
+
+    def _delivery_loop(self):
+        while not self.delivery_stop.wait(.5):
+            try:
+                self.deliver_pending()
+            except Exception:
+                logging.getLogger(__name__).exception("Antigravity inbox delivery failed")
+
+    def deliver_pending(self):
+        """Interrupt only for new actionable IDs, at most once every five seconds.
+
+        No provider process is started for an idle/stopped conversation here.
+        The shared idle wake worker retains its Stop and user-queue guards.
+        """
+        with self.lock:
+            active = list(self.delivery_turns.items())
+        for thread_id, state in active:
+            if self.closed or self.delivery_turns.get(thread_id) is not state:
+                continue
+            try:
+                if state["cancel_at"] is not None:
+                    if state["ready"]:
+                        self._resume_delivery(thread_id, state)
+                    elif time.monotonic() - state["cancel_at"] >= 30:
+                        self._finish(thread_id, "failed", "Coordination delivery timed out waiting for Antigravity cancellation. Send a message to resume.")
+                        connection = self.connections.pop(thread_id, None)
+                        if connection:
+                            connection.close()
+                    continue
+                if time.monotonic() < state["next_check"] or not self._delivery_allowed(thread_id):
+                    continue
+                batch = self.delivery.prepare(thread_id, state["id"])
+                if not batch:
+                    continue
+                with self.lock:
+                    if self.delivery_turns.get(thread_id) is not state:
+                        continue
+                    self.delivery.attempted(state["id"], batch)
+                    state["pending_batch"] = batch
+                    state["cancel_at"] = time.monotonic()
+                    connection = self.connections[thread_id]
+                    pending = [(key, value) for key, value in self.requests.items() if value[0] == thread_id]
+                    for key, (_, request_id, _) in pending:
+                        connection.write({"id": request_id, "result": {"outcome": {"outcome": "cancelled"}}})
+                        self.requests.pop(key, None)
+                    connection.write({"method": "session/cancel", "params": {"sessionId": self.native[thread_id]}})
+                for key, _ in pending:
+                    self._emit("serverRequest/resolved", thread_id, requestId=key)
+            except Exception as exc:
+                if self.delivery_turns.get(thread_id) is state:
+                    self._finish(thread_id, "failed", str(exc))
+                    connection = self.connections.pop(thread_id, None)
+                    if connection:
+                        connection.close()
+
+    def _delivery_allowed(self, thread_id):
+        with self.store._connection() as db:
+            if db.execute("SELECT 1 FROM browser_message_queue WHERE thread_id = ?", (thread_id,)).fetchone():
+                return False
+            if db.execute("SELECT 1 FROM browser_inbox_wake WHERE thread_id = ? AND paused = 1", (thread_id,)).fetchone():
+                return False
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone():
+                if db.execute("SELECT 1 FROM thread_close_requests WHERE thread_id = ? AND status IN ('queued', 'closing')",
+                              (thread_id,)).fetchone():
+                    return False
+        return True
+
+    def _resume_delivery(self, thread_id, state):
+        with self._prompt_lock(thread_id):
+            self._resume_delivery_locked(thread_id, state)
+
+    def _resume_delivery_locked(self, thread_id, state):
+        # ACP 1.3.0 cannot reliably rebuild its agent in-process after cancel.
+        # Reconnect only after the prompt response, retaining the saved native ID.
+        with self.lock:
+            if self.delivery_turns.get(thread_id) is not state or self.closed:
+                return
+            state["reconnecting"] = True
+            connection = self.connections.pop(thread_id, None)
+        if connection:
+            connection.close()
+        if self.delivery_turns.get(thread_id) is not state or self.closed:
+            return
+        if not self._delivery_allowed(thread_id):
+            self.delivery.failed(state["id"], state["pending_batch"], "Continuation deferred to queued user input or Stop/Close.")
+            self._finish(thread_id, "completed")
+            return
+        connection = self._connection(thread_id, self.options[thread_id])
+        if self.delivery_turns.get(thread_id) is not state or self.closed:
+            self.connections.pop(thread_id, None)
+            connection.close()
+            return
+        with self.lock:
+            turn = self.turns.get(thread_id)
+            if not turn or turn["id"] != state["id"]:
+                return
+            interrupted = []
+            for item in turn["items"]:
+                if item.get("status") == "inProgress":
+                    item["status"] = "interrupted"
+                    interrupted.append(copy.deepcopy(item))
+        for item in interrupted:
+            self._emit("item/completed", thread_id, turnId=state["id"], item=item)
+        self._submit_prompt(thread_id, state["id"], connection, [{"type": "text", "text":
+            coordination_bootstrap(self.store, thread_id) + "\n\nRibbon Field paused the native turn to deliver coordination messages. Continue the existing user request "
+            "in this same conversation, taking the messages below into account. A tool may have been interrupted: "
+            "inspect its result and current state before retrying any side effect. User Stop did not cause this continuation."}],
+            batch=state["pending_batch"])
 
     def _finish(self, thread_id, status, error=None):
         with self.lock:
             turn = self.turns.pop(thread_id, None)
             if not turn:
                 return
+            state = self.delivery_turns.pop(thread_id, None)
+            if state and status != "completed":
+                self.delivery.failed(turn["id"], state["batch"], error or "The turn was stopped; receipt is not acknowledgment.")
+                self.delivery.failed(turn["id"], state["pending_batch"], error or "Stopped before coordination delivery.")
             turn["status"] = status
             for item in turn["items"]:
                 if item.get("status") == "inProgress":
@@ -413,6 +525,15 @@ class AntigravityRPC:
             return
         if method != "session/update":
             return
+        state = self.delivery_turns.get(thread_id)
+        if state and state["reconnecting"]:
+            return  # Resuming the same native transcript must not replay display items.
+        if state:
+            self._confirm_delivery(thread_id)
+            now = time.monotonic()
+            if now - self.last_activity.get(thread_id, -30) >= 15:
+                self.store.touch(thread_id)
+                self.last_activity[thread_id] = now
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
         if kind == "config_option_update":
@@ -461,6 +582,10 @@ class AntigravityRPC:
         return value if len(encoded) <= 64000 else encoded[:64000] + "…"
 
     def _permission(self, thread_id, message):
+        state = self.delivery_turns.get(thread_id)
+        if state and state["cancel_at"] is not None:
+            self.connections[thread_id].write({"id": message["id"], "result": {"outcome": {"outcome": "cancelled"}}})
+            return
         request = message["params"]
         tool = request.get("toolCall", {})
         options = [o for o in request.get("options", []) if isinstance(o.get("optionId"), str) and o["optionId"]]
@@ -504,7 +629,11 @@ class AntigravityRPC:
 
     def close(self):
         self.closed = True
-        for thread_id, connection in list(self.connections.items()):
+        self.delivery_stop.set()
+        for thread_id in list(self.turns):
             self._finish(thread_id, "interrupted")
+        for thread_id, connection in list(self.connections.items()):
             connection.close()
         self.connections.clear()
+        if self.delivery_worker and self.delivery_worker is not threading.current_thread():
+            self.delivery_worker.join(timeout=5)

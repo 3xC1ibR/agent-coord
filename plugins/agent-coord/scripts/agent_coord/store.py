@@ -29,7 +29,7 @@ WAKEABLE_ACTIVITIES = {"idle", "waiting"}
 WAKE_TRANSPORTS = {"managed-pty", "zellij"}
 LEASE_MODES = {"write", "validation"}
 MESSAGE_CLASSIFICATIONS = {"action_required", "informational", "closure"}
-CLIENTS = {"claude", "codex", "antigravity"}
+CLIENTS = {"claude", "codex", "antigravity", "kimi"}
 SCOPE_REQUEST_THREAD_PREFIX = "scope-request:"
 _WILDCARD = re.compile(r"[*?[]")
 
@@ -84,6 +84,22 @@ def _json_scopes(value: str) -> list[str]:
     return parsed
 
 
+TOOL_KINDS = {
+    "run": {"bash", "commandexecution", "shell", "command", "localshell"},
+    "edit": {"edit", "write", "apply_patch", "notebookedit", "filechange", "multiedit"},
+    "read": {"read", "grep", "glob", "websearch", "webfetch", "ls"},
+}
+
+
+def tool_kind(name: str) -> str:
+    """Classify a provider tool name into run, edit, read, or tool."""
+    key = str(name or "").strip().lower()
+    for kind, names in TOOL_KINDS.items():
+        if key in names:
+            return kind
+    return "tool"
+
+
 def _json_object(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -100,7 +116,7 @@ def _delegation_label(row: sqlite3.Row) -> str:
     return label
 
 
-def normalize_scope(value: str, cwd: str) -> str:
+def _normalize_path(value: str, cwd: str) -> str:
     candidate = value.strip().replace("\\", "/")
     if not candidate:
         raise CoordinationError("Write scopes must not be empty.")
@@ -119,8 +135,18 @@ def normalize_scope(value: str, cwd: str) -> str:
     return candidate
 
 
+def normalize_scope(value: str, cwd: str) -> str:
+    if "," in value:
+        raise CoordinationError(
+            "A write scope must contain one path or glob, not a comma-separated list. "
+            "Repeat --scope for each path. For filenames containing commas, scope their parent directory."
+        )
+    return _normalize_path(value, cwd)
+
+
 def normalize_target_path(value: str, cwd: str) -> str:
-    return normalize_scope(value, cwd)
+    # Actual filenames can contain commas; only declarations reject the ambiguous syntax.
+    return _normalize_path(value, cwd)
 
 
 def path_is_in_scope(path: str, scope: str) -> bool:
@@ -225,7 +251,8 @@ class CoordinationStore:
                     ended_at REAL,
                     turn_active INTEGER NOT NULL DEFAULT 0,
                     lease_mode TEXT NOT NULL DEFAULT 'write',
-                    scope_requested_at REAL
+                    scope_requested_at REAL,
+                    last_tool_json TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS sessions_bead_idx
@@ -354,6 +381,10 @@ class CoordinationStore:
             if "scope_requested_at" not in session_columns:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN scope_requested_at REAL"
+                )
+            if "last_tool_json" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN last_tool_json TEXT"
                 )
             message_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(messages)")
@@ -595,6 +626,7 @@ class CoordinationStore:
             "write_scope": _json_scopes(row["write_scope_json"]),
             "scope_required": row["scope_requested_at"] is not None,
             "scope_requested_at": _iso(row["scope_requested_at"]),
+            "last_tool": _json_object(row["last_tool_json"]) if "last_tool_json" in row.keys() else None,
             "started_at": _iso(row["started_at"]),
             "last_seen_at": _iso(row["last_seen_at"]),
             "ended_at": _iso(ended_at),
@@ -839,7 +871,7 @@ class CoordinationStore:
         if not session_id.strip():
             raise CoordinationError("Session ID must not be empty.")
         if client not in CLIENTS:
-            raise CoordinationError("Client must be claude, codex, or antigravity.")
+            raise CoordinationError("Client must be claude, codex, antigravity, or kimi.")
         repository = str(Path(cwd).resolve())
         now = self.clock()
         with self._connection() as connection:
@@ -897,6 +929,28 @@ class CoordinationStore:
             if cursor.rowcount != 1:
                 raise CoordinationError(f"Session {session_id} is not registered.")
         return self.get_session(session_id)
+
+    def record_tool(
+        self, session_id: str, name: str, label: str = "", *, kind: str | None = None
+    ) -> bool:
+        """Remember a session's latest tool call so the overview can say what it is doing.
+
+        Activity is best effort: an unknown session returns False and nothing raises.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return False
+        record = {
+            "name": name.strip()[:60],
+            "kind": kind or tool_kind(name),
+            "label": " ".join(str(label or "").split())[:200],
+            "at": self.clock(),
+        }
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE sessions SET last_tool_json = ? WHERE session_id = ?",
+                (json.dumps(record), session_id),
+            )
+            return cursor.rowcount == 1
 
     def _live_rows(self, connection: sqlite3.Connection, cwd: str) -> list[sqlite3.Row]:
         cutoff = self.clock() - self.stale_after_seconds

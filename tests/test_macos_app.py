@@ -150,6 +150,34 @@ class DesktopPackagingTests(unittest.TestCase):
             for relative in snapshot:
                 self.assertEqual((root / "backend" / relative).read_bytes(), (build.SCRIPTS / relative).read_bytes())
 
+    def test_packaged_kimi_hook_runs_and_prompt_guidance_exists(self):
+        for standalone in (False, True):
+            with self.subTest(standalone=standalone), tempfile.TemporaryDirectory(prefix="Kimi app ") as directory:
+                root = Path(directory)
+                resources = root / "Ribbon Field.app/Contents/Resources"
+                snapshot = build.copy_backend(resources, standalone=standalone)
+                self.assertIn("agent-coord-hook", snapshot)
+                self.assertIn("../skills/agent-coordination/SKILL.md", snapshot)
+                env = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("AGENT_COORD_", "CODEX_", "CLAUDE"))}
+                env.update(PYTHONPATH=str(resources / "backend"),
+                           AGENT_COORD_DB=str(root / "state.sqlite3"),
+                           AGENT_COORD_CLIENT="kimi", AGENT_COORD_SESSION_ID="packaged-kimi",
+                           KIMI_CODE_HOME=str(root / "kimi home"))
+                setup = subprocess.run([sys.executable, "-c",
+                    "from agent_coord.kimi_setup import ensure_hooks; ensure_hooks()"],
+                    env=env, cwd=root, text=True, capture_output=True, check=True)
+                self.assertEqual(setup.stderr, "")
+                config = (root / "kimi home/config.toml").read_text()
+                command = json.loads(next(line[10:] for line in config.splitlines() if line.startswith('command = "if ')))
+                result = subprocess.run(command, shell=True, env=env, cwd=root, text=True, capture_output=True,
+                    input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "native-kimi",
+                                      "cwd": str(root), "prompt": "Hello"}), check=True)
+                self.assertEqual(result.stderr, "")
+                self.assertIn("agent-coord checkpoint", json.loads(result.stdout)["message"])
+                for name in ("agent-coordination", "dispatch", "orchestrate", "manage-threads"):
+                    self.assertTrue((resources / "skills" / name / "SKILL.md").is_file())
+
     def test_install_does_not_replace_an_unrelated_directory_or_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -217,6 +217,20 @@ test("a completion notification without an item event invalidates an outstanding
   assert.ok(c.scheduled > 0);
 });
 
+test("an approval notification recovers missing controls without an item event", async () => {
+  const c = setup(); await c.select("one");
+  vm.runInContext(source.slice(source.indexOf("function connect("), source.indexOf("function newProject(")), c);
+  c.connect();
+  c.$("message").value = "Keep this draft";
+  const request = {key: "approval", method: "item/commandExecution/requestApproval", params: {reason: "Bash"}};
+  c.replies.set("one", {...fixture("one"), requests: [request]});
+  c.events.onmessage({data: JSON.stringify({approvals: [{thread_id: "one", request_key: "approval"}], events: []})});
+  assert.ok(c.scheduled > 0, "notification must recover the authoritative pending request");
+  await c.refreshDetail();
+  assert.equal(c.state.detail.requests[0].key, "approval");
+  assert.equal(c.$("message").value, "Keep this draft");
+});
+
 test("the transcript cache evicts old conversations while retaining the current selection", async () => {
   const c = setup();
   for (const id of ["one", "two", "three", "four", "five", "six"]) await c.select(id);

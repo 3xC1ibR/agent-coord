@@ -216,7 +216,7 @@ class WebPush:
                  "test": "Phone notifications are working"}[kind]
         context = context or {}
         if kind == "approval":
-            label = ("Claude" if context.get("client") == "claude" else "Codex") + " is requesting approval"
+            label = {"kimi": "Kimi", "antigravity": "Antigravity", "claude": "Claude"}.get(context.get("client"), "Codex") + " is requesting approval"
         # Match desktop alerts using notification metadata, never turn contents
         # or approval commands. Bound the encrypted Web Push payload size.
         group = str(context.get("project_name") or context.get("repository_name") or "Ribbon Field")[:160]

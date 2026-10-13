@@ -112,6 +112,19 @@ def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]
         shutil.copyfile(SCRIPTS / "agent-coord", cli)
     cli.chmod(0o755)
     snapshot["agent-coord"] = hashlib.sha256(cli.read_bytes()).hexdigest()
+    hook = resources / "backend/agent-coord-hook"
+    shutil.copyfile(SCRIPTS / "agent-coord-hook", hook)
+    hook.chmod(0o755)
+    snapshot["agent-coord-hook"] = hashlib.sha256(hook.read_bytes()).hexdigest()
+    for source in sorted((SCRIPTS.parent / "skills").rglob("*")):
+        if not source.is_file() or "__pycache__" in source.parts or source.suffix == ".pyc":
+            continue
+        relative = source.relative_to(SCRIPTS.parent)
+        target = resources / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data = source.read_bytes()
+        target.write_bytes(data)
+        snapshot[str(Path("..") / relative)] = hashlib.sha256(data).hexdigest()
     return snapshot
 
 

@@ -85,7 +85,7 @@ def _parser() -> argparse.ArgumentParser:
 
     register = subcommands.add_parser("register", help="Register or refresh a session.")
     register.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
-    register.add_argument("--client", required=True, choices=["claude", "codex", "antigravity"])
+    register.add_argument("--client", required=True, choices=["claude", "codex", "antigravity", "kimi"])
     register.add_argument("--cwd", default=os.getcwd())
     register.add_argument("--name")
 
@@ -149,7 +149,7 @@ def _parser() -> argparse.ArgumentParser:
     create_agent.add_argument("--from-session", help="Dispatcher; defaults to the current caller.")
     create_agent.add_argument("--cwd", default=os.getcwd())
     create_agent.add_argument("--name", required=True)
-    create_agent.add_argument("--client", choices=["codex", "claude", "antigravity"], default="codex")
+    create_agent.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi"], default="codex")
     create_agent.add_argument("--mode", choices=["orchestration"],
                               help="Record orchestration intent for this creation (default: unspecified).")
     create_agent.add_argument("--model")
@@ -169,7 +169,7 @@ def _parser() -> argparse.ArgumentParser:
     models = thread_commands.add_parser("models", help="Query the running app for supported provider models and effort levels.")
     models.add_argument("--from-session", help="Requester; defaults to the current caller.")
     models.add_argument("--cwd", default=os.getcwd())
-    models.add_argument("--client", choices=["codex", "claude", "antigravity"], default="codex")
+    models.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi"], default="codex")
     for control in (create_agent, settings, models):
         control.add_argument("--request-id", help="Stable idempotency key; reuse the same key when retrying this request.")
         control.add_argument("--wait", type=float, default=5, help="Wait up to 0–30 seconds for confirmation (default 5).")
@@ -316,6 +316,12 @@ def _parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="Only valid with --wait. Positive number of seconds to wait.",
     )
+
+    message = subcommands.add_parser("message", help="Read a bounded message page and its delivery status.")
+    message.add_argument("--session-id", help="Sender or recipient; defaults to the current caller.")
+    message.add_argument("--message-id", type=int, required=True)
+    message.add_argument("--offset", type=int, default=0)
+    message.add_argument("--limit", type=int, default=8000)
 
     acknowledge = subcommands.add_parser("ack", help="Acknowledge a message.")
     acknowledge.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
@@ -692,6 +698,10 @@ def run(arguments: argparse.Namespace) -> Any:
             mark_delivered=not arguments.peek,
             unread_only=arguments.unread,
         )
+    if command == "message":
+        from .message_delivery import MessageDelivery
+        return MessageDelivery(store).read(arguments.session_id, arguments.message_id,
+                                           offset=arguments.offset, limit=arguments.limit)
     if command == "ack":
         if arguments.all_unread:
             return store.acknowledge_all_unread(arguments.session_id)

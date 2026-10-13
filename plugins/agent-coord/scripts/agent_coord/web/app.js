@@ -736,8 +736,8 @@ function agentThreadChildren(parent, tree, compact) {
     button.append(node("span", child.title, "agent-row-title"));
     const phase = threadGrouping.phaseLabel(child);
     const provider = child.client === "codex" ? "Codex" : child.client === "claude" ? "Claude Code"
-      : child.client === "antigravity" ? "Antigravity" : "Unknown provider";
-    const logoLabel = child.client === "codex" ? "OpenAI · Codex" : child.client === "claude" ? "Anthropic · Claude Code" : "Google · Antigravity";
+      : child.client === "kimi" ? "Kimi" : child.client === "antigravity" ? "Antigravity" : "Unknown provider";
+    const logoLabel = child.client === "codex" ? "OpenAI · Codex" : child.client === "claude" ? "Anthropic · Claude Code" : child.client === "kimi" ? "Moonshot · Kimi Code" : "Google · Antigravity";
     const logo = globalThis.providerLogo?.(child.client, logoLabel);
     const labels = [!logo && provider, phase, status.label !== phase && status.label].filter(Boolean);
     const metadata = node("span", labels.join(" · "), "agent-row-status");
@@ -1016,7 +1016,7 @@ function renderSessionSettings() {
   $("workspace").textContent = session?.cwd || state.detail?.work_thread?.cwd || "";
   $("workspace").title = $("workspace").textContent;
   $("session-settings").hidden = !browserSession;
-  const providerName = session?.client === "antigravity" ? "Antigravity" : session?.client === "claude" ? "Claude Code" : "Codex";
+  const providerName = session?.client === "kimi" ? "Kimi" : session?.client === "antigravity" ? "Antigravity" : session?.client === "claude" ? "Claude Code" : "Codex";
   $("session-model").textContent = "Model · " + providerName + " · " + (session?.model || "Default");
   $("session-effort").textContent = "Reasoning · " + (session?.effort || "Model default");
   $("session-yolo").hidden = !session?.yolo;
@@ -1034,6 +1034,8 @@ function openSessionPermissions() {
   $("edit-yolo").checked = !!detail.session?.yolo;
   $("permissions-description").textContent = detail.session?.client === "claude"
     ? "With YOLO off, Claude Code uses its configured permissions and asks before restricted tool actions. Changes apply to the next turn."
+    : detail.session?.client === "kimi"
+    ? "With YOLO off, Kimi uses manual tool approvals. Changes apply to the next turn."
     : detail.session?.client === "antigravity"
     ? "With YOLO off, Antigravity uses its native permissions and tool approval prompts. Changes apply to the next turn."
     : "With YOLO off, Codex uses workspace access and asks for additional permissions. Changes apply to the next turn.";
@@ -1072,7 +1074,7 @@ function renderStatus() {
     $("toggle-dispatcher").textContent = dispatcher ? "Stop using as dispatcher" : "Use as dispatcher";
     $("toggle-dispatcher").disabled = work?.attention === "archived" || state.busy;
   }
-  const composerLabel = dispatcher ? "Send a request" : work?.client === "antigravity" ? "Message Antigravity" : work?.client === "claude" ? "Message Claude" : "Message Codex";
+  const composerLabel = dispatcher ? "Send a request" : work?.client === "kimi" ? "Message Kimi" : work?.client === "antigravity" ? "Message Antigravity" : work?.client === "claude" ? "Message Claude" : "Message Codex";
   $("message-label").textContent = composerLabel;
   $("message").placeholder = composerLabel + " or drop images…";
   const archived = work?.attention === "archived";
@@ -1228,7 +1230,7 @@ function renderTimeline() {
           const images = (item.content || []).filter(c => c.type === "image");
           if (images.length) ChatImageAttachments.appendPreviews(document, body, images);
         }
-        message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
+        message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
         message.append(body);
         fragment.append(message);
       } else {
@@ -1352,13 +1354,14 @@ function renderRequests() {
     const box = node("section", null, "request"), params = request.params;
     const actions = node("div", null, "actions");
     if (request.method === "item/tool/requestUserInput") {
-      box.append(node("h3", (state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " has a question"));
+      box.append(node("h3", (state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " has a question"));
       const fields = [];
       for (const question of params.questions || []) {
         const label = node("label", question.question);
         const fixed = question.allowCustomAnswer === false && question.options?.length;
         const input = node(fixed ? "select" : "input");
         if (fixed) {
+          input.multiple = !!question.multiSelect;
           for (const option of question.options) {
             const choice = node("option", option.label); choice.value = option.value || option.label; input.append(choice);
           }
@@ -1370,7 +1373,8 @@ function renderRequests() {
         }
         label.append(input); box.append(label); fields.push([question.id, input]);
       }
-      actions.append(requestButton("Send answer", "accept", request, () => ({answers: Object.fromEntries(fields.map(([id, input]) => [id, {answers: [input.value]}]))})));
+      actions.append(requestButton("Send answer", "accept", request, () => ({answers: Object.fromEntries(fields.map(([id, input]) => [id, {answers: input.multiple ? Array.from(input.selectedOptions, option => option.value) : [input.value]}]))})));
+      if (params.allowCancel) actions.append(requestButton("Cancel", "cancel", request));
     } else if (request.method === "mcpServer/elicitation/request") {
       box.append(node("h3", "A tool needs your input"), node("p", params.message || ""));
       const fields = [];
@@ -1387,7 +1391,7 @@ function renderRequests() {
       }
       actions.append(requestButton("Continue", "accept", request, () => ({content: Object.fromEntries(fields.map(([key, schema, input]) => [key, schema.type === "boolean" ? input.checked : ["number", "integer"].includes(schema.type) ? Number(input.value) : input.value]))})), requestButton("Cancel", "cancel", request));
     } else if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(request.method)) {
-      box.append(node("h3", (state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " is requesting approval"));
+      box.append(node("h3", (state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " is requesting approval"));
       if (params.reason) box.append(node("p", params.reason));
       box.append(node("pre", params.command || (params.permissions || params.networkApprovalContext ? JSON.stringify(params.permissions || params.networkApprovalContext, null, 2) : params.grantRoot || "Apply the file changes shown above.")));
       const choices = params.availableDecisions || (request.method === "item/permissions/requestApproval" ? ["accept", "decline"] : ["accept", "acceptForSession", "decline", "cancel"]);
@@ -1458,7 +1462,9 @@ function connect() {
     notifications.receive(batch.completions || []);
     notifications.receive(batch.approvals || []);
     notifications.receive(batch.snoozes || []);
-    if (batch.completions?.length || batch.snoozes?.length) { scheduleList(); if (state.selected) scheduleDetail(); }
+    // A notification can arrive after the request event was missed. Reconcile
+    // the pending controls as well as notifying, even without an item event.
+    if (batch.completions?.length || batch.snoozes?.length || batch.approvals?.length) { scheduleList(); if (state.selected) scheduleDetail(); }
     if (batch.reset) { for (const entry of state.conversations?.values() || []) entry.revision++; scheduleDetail(); }
     for (const event of batch.events) {
       if (event.method === "bridge/disconnected") { for (const entry of state.conversations?.values() || []) entry.revision++; showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail?.work_thread?.client === "codex" && state.detail) { state.detail.running = false; state.detailRefreshing = true; renderRequests(); } renderStatus(); }
@@ -1563,14 +1569,14 @@ function renderModelPicker() {
   const session = state.detail?.session, picker = $("model-picker");
   if (!session) { picker.disabled = true; globalThis.modelPicker?.sync(); renderEffortPicker(); return; }
   const draft = isSessionDraft(), client = session.client || "codex";
-  const clients = draft ? ["codex", "claude", "antigravity"] : [client];
+  const clients = draft ? ["codex", "claude", "antigravity", "kimi"] : [client];
   const catalogs = state.modelCatalogs ||= new Map();
   const signature = JSON.stringify([clients, session.model, [...catalogs]]);
   if (picker.dataset.signature !== signature) {
     picker.dataset.signature = signature;
     picker.replaceChildren();
     for (const provider of clients) {
-      const group = node("optgroup"); group.label = provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude Code" : "Codex";
+      const group = node("optgroup"); group.label = provider === "kimi" ? "Kimi Code" : provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude Code" : "Codex";
       if (draft || !session.model) group.append(new Option(group.label + " default", modelValue(provider, "")));
       const models = catalogs.get(provider) || [];
       for (const model of models) group.append(new Option(model.displayName || model.model, modelValue(provider, model.model)));
@@ -1583,8 +1589,8 @@ function renderModelPicker() {
   picker.value = modelValue(client, session.model);
   picker.disabled = state.busy || state.detailRefreshing || !!state.detail.running || state.detail.work_thread?.attention === "archived" || !!state.newSessionDraft?.createdId && draft;
   const errors = clients.filter(provider => state.modelErrors?.has(provider));
-  $("model-picker-status").textContent = errors.length ? errors.map(provider => (provider === "antigravity" ? "Antigravity" : provider === "claude" ? "Claude Code" : "Codex") + " models unavailable").join(" · ") : "";
-  if (client === "antigravity" && state.modelErrors?.has(client)) $("model-picker-status").textContent = state.modelErrors.get(client);
+  $("model-picker-status").textContent = errors.length ? errors.map(provider => (provider === "kimi" ? "Kimi" : provider === "antigravity" ? "Antigravity" : provider === "claude" ? "Claude Code" : "Codex") + " models unavailable").join(" · ") : "";
+  if (["antigravity", "kimi"].includes(client) && state.modelErrors?.has(client)) $("model-picker-status").textContent = state.modelErrors.get(client);
   globalThis.modelPicker?.sync();
   renderEffortPicker();
 }
@@ -1623,7 +1629,7 @@ async function changeSessionEffort() {
 $("effort-picker").onchange = () => action(changeSessionEffort);
 $("effort-picker").onfocus = () => { loadSessionModels(); };
 async function loadSessionModels() {
-  const clients = isSessionDraft() ? ["codex", "claude", "antigravity"] : [state.detail?.session?.client || "codex"];
+  const clients = isSessionDraft() ? ["codex", "claude", "antigravity", "kimi"] : [state.detail?.session?.client || "codex"];
   const catalogs = state.modelCatalogs ||= new Map(), loading = state.modelLoading ||= new Set();
   const errors = state.modelErrors ||= new Map();
   await Promise.all(clients.map(async client => {
@@ -1883,7 +1889,7 @@ $("search").onkeydown = event => {
   if (event.key === "Escape") { $("search").value = ""; filtersChanged(); }
 };
 async function sendMessage(mode = "steer") {
-  if (state.detail?.running && ["claude", "antigravity"].includes(state.detail?.work_thread?.client)) mode = "queue";
+  if (state.detail?.running && ["claude", "antigravity", "kimi"].includes(state.detail?.work_thread?.client)) mode = "queue";
   const detail = state.detail;
   const dispatcher = !!detail?.work_thread?.dispatcher;
   const id = state.selected, text = $("message").value;

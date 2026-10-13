@@ -27,6 +27,7 @@ from .timeline_clock import preserve_timing, restore_timing, set_time
 from .schedules import ScheduledPrompts
 from .claude_code import ClaudeRPC
 from .antigravity import AntigravityRPC
+from .kimi import KimiRPC
 from .attention import AttentionClassifier
 from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
@@ -176,7 +177,7 @@ class CodexRPC:
 
 
 class BrowserSessions:
-    def __init__(self, store: CoordinationStore, cwd: str | None = None, *, rpc_factory=CodexRPC, claude_factory=ClaudeRPC, antigravity_factory=AntigravityRPC):
+    def __init__(self, store: CoordinationStore, cwd: str | None = None, *, rpc_factory=CodexRPC, claude_factory=ClaudeRPC, antigravity_factory=AntigravityRPC, kimi_factory=KimiRPC):
         self.store = store
         self.cwd = str(Path(cwd).expanduser().resolve()) if cwd else None
         self.lock = threading.RLock()
@@ -215,6 +216,7 @@ class BrowserSessions:
         self.rpc = rpc_factory(store, self._event)
         self.claude = claude_factory(store, self._event)
         self.antigravity = antigravity_factory(store, self._event)
+        self.kimi = kimi_factory(store, self._event)
         # Upgrade browser conversations created before work threads existed.
         threads = self.store.threads
         with self.store._connection() as connection:
@@ -251,9 +253,9 @@ class BrowserSessions:
         return dict(row)
 
     def _provider(self, client: str):
-        if not isinstance(client, str) or client not in {"codex", "claude", "antigravity"}:
-            raise CoordinationError("Choose Codex, Claude Code, or Google Antigravity as the session provider.")
-        return {"codex": self.rpc, "claude": self.claude, "antigravity": self.antigravity}[client]
+        if not isinstance(client, str) or client not in {"codex", "claude", "antigravity", "kimi"}:
+            raise CoordinationError("Choose Codex, Claude Code, Google Antigravity, or Kimi Code as the session provider.")
+        return {"codex": self.rpc, "claude": self.claude, "antigravity": self.antigravity, "kimi": self.kimi}[client]
 
     def _rpc(self, thread_id: str):
         # Saved terminal Codex threads can be read before browser adoption/fork.
@@ -404,6 +406,7 @@ class BrowserSessions:
             set_time(item, "timelineAt", (existing or {}).get("timelineAt") or now)
             if existing is None:
                 turn["items"].append(copy.deepcopy(item))
+                self._record_item_tool(params["threadId"], item)
             else:
                 existing.update(copy.deepcopy(item))
         item = next((i for i in turn["items"] if i["id"] == params.get("itemId")), None)
@@ -415,6 +418,29 @@ class BrowserSessions:
             thread["status"] = {"type": "active" if method == "turn/started" else "idle"}
         if method in {"item/completed", "turn/completed"}:
             self._save_history(params["threadId"])
+
+    TOOL_ITEMS = {"commandExecution": "run", "fileChange": "edit", "mcpToolCall": "tool", "webSearch": "read"}
+
+    def _record_item_tool(self, thread_id: str, item: dict) -> None:
+        """Remember what a Codex turn is doing from its streamed items; best effort."""
+        kind = self.TOOL_ITEMS.get(item.get("type")) if isinstance(item, dict) else None
+        if not kind:
+            return
+        try:
+            if item["type"] == "commandExecution":
+                command = item.get("command")
+                label = " ".join(str(part) for part in command) if isinstance(command, list) else str(command or "")
+            elif item["type"] == "fileChange":
+                changes = item.get("changes") or []
+                label = ", ".join(str(change.get("path")) for change in changes[:3]
+                                  if isinstance(change, dict) and change.get("path"))
+            elif item["type"] == "mcpToolCall":
+                label = ".".join(str(item.get(key)) for key in ("server", "tool") if item.get(key))
+            else:
+                label = str(item.get("query") or "")
+            self.store.record_tool(thread_id, item["type"], label, kind=kind)
+        except Exception:  # noqa: BLE001 -- activity must never break history capture.
+            return
 
     @staticmethod
     def _query_thread(rpc: CodexRPC, thread_id: str, *, include_turns: bool) -> dict:
@@ -664,6 +690,7 @@ class BrowserSessions:
             thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
         thread["dispatcher"] = self.dispatch.settings(thread_id)["enabled"] if hasattr(self, "dispatch") else False
         session = self.store.get_session(thread_id)
+        thread["last_tool"] = session.get("last_tool")
         with self.lock:
             waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
             # Loading provider context does not establish idleness. A live hook
@@ -1015,6 +1042,8 @@ class BrowserSessions:
             raise CoordinationError("Use /cd <directory>, with matching quotes around quoted paths.") from exc
         if not valid:
             raise CoordinationError("Choose an existing directory within this UI's workspace.")
+        if record["client"] == "kimi" and directory != record["cwd"]:
+            raise CoordinationError("Kimi sessions keep their original workspace. Start a new session in the new directory.")
         with self.store._connection() as db:
             db.execute("UPDATE browser_sessions SET cwd = ?, updated_at = ? WHERE thread_id = ?",
                        (directory, time.time(), thread_id))
@@ -1029,7 +1058,8 @@ class BrowserSessions:
             return None
         client = self._record(thread_id)["client"]
         default_permissions = {"claude": "Claude Code configured permissions with tool approval prompts",
-                               "antigravity": "Antigravity native permissions with tool approval prompts"}.get(
+                               "antigravity": "Antigravity native permissions with tool approval prompts",
+                               "kimi": "Kimi native permissions with tool approval prompts"}.get(
                                    client, "workspace access with approval prompts")
         if command == "/help":
             reply = ("Commands: /cd [directory], /model [model-id] [effort], /effort [level], "
@@ -1335,6 +1365,8 @@ class BrowserSessions:
                 if decision not in {"accept", "decline"}:
                     raise CoordinationError("Choose allow or decline.")
                 result = {"permissions": params["permissions"] if decision == "accept" else {}, "scope": "turn"}
+            elif method == "item/tool/requestUserInput" and decision == "cancel" and params.get("allowCancel"):
+                result = {"decision": "cancel"}
             elif method == "item/tool/requestUserInput":
                 answers = body.get("answers")
                 questions = params.get("questions", [])
@@ -1373,6 +1405,7 @@ class BrowserSessions:
         self.rpc.close()
         self.claude.close()
         self.antigravity.close()
+        self.kimi.close()
         self.schedules.close()
         for thread_id in list(self.loaded):
             if self._record(thread_id)["client"] != "codex":
