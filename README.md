@@ -1248,6 +1248,12 @@ agent-coord thread update --session-id <id> --no-repository --no-project
 agent-coord thread list --repository <repository-id> --no-project
 ```
 
+Assigning, changing, or clearing a thread's group also updates all its descendants:
+app agents created in orchestration mode and attached terminal delegates, recursively.
+New descendants inherit their parent's group. Standalone dispatched agents remain
+independent. Group changes preserve each thread's workspace, repository, and
+Now/Later/Closed placement.
+
 Thread data lives alongside coordination data in the local SQLite database.
 `work_threads.project_cwd` stores immutable directory-project membership; saved
 views and new groups store their project directory in `cwd`. Artifact workspace

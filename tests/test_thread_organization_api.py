@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
 from agent_coord.cli import _parser, run
+from agent_coord.app_control import AppControl, AppControlWorker
 from agent_coord.codex_app_server import BrowserSessions
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import make_ui_server
@@ -34,6 +35,111 @@ class ThreadOrganizationTests(unittest.TestCase):
 
     def create(self, **values):
         return self.sessions.create(values)["session"]["thread_id"]
+
+    def create_agent(self, parent, *, mode="orchestration", **values):
+        worker = AppControlWorker(self.sessions)
+        self.addCleanup(worker.close)
+        request = worker.control.request("create", parent, {
+            "cwd": str(self.root), "prompt": "Build the assigned mockup.", "mode": mode, **values,
+        })
+        worker.process_once()
+        result = worker.control.status(request["request_id"])
+        self.assertEqual(result["status"], "completed", result)
+        return result["thread_id"]
+
+    def attach(self, parent, child):
+        delegation = self.store.create_delegation(
+            parent_session_id=parent, cwd=str(self.root), scopes=[child + ".txt"],
+            instructions="Build a nested mockup.", mode="reviewed")
+        self.store.attach_delegation(delegation["delegation_id"], child)
+        return delegation["delegation_id"]
+
+    def test_group_assignment_recurses_through_existing_agents_over_http_and_cli(self):
+        parent = self.create()
+        child = self.create_agent(parent)
+        grandchild = self.create_agent(child)
+        standalone = self.create_agent(parent, mode=None)
+        independent_child = self.create_agent(standalone)
+        other = self.store.threads.organization.create_project("Other")
+        self.store.threads.update(child, project_id=other["id"], attention="later")
+        self.store.threads.update(grandchild, attention="archived", repository_id=None)
+        before = {tid: self.store.threads.get(tid, history=True) for tid in (parent, child, grandchild)}
+        request = self.start_ui()
+        request("threads/" + parent, {"project_id": self.project["id"]})
+        for tid, original in before.items():
+            actual = self.store.threads.get(tid, history=True)
+            self.assertEqual(actual["project_id"], self.project["id"])
+            for field in ("cwd", "repository_id", "attention", "original_request", "checkpoints", "links", "updated_at"):
+                self.assertEqual(actual[field], original[field], field)
+        for tid in (standalone, independent_child):
+            self.assertIsNone(self.store.threads.get(tid)["project_id"])
+        # Clearing through the CLI uses the same recursive operation.
+        run(_parser().parse_args(["--db", str(self.store.database_path), "thread", "update",
+                                  "--session-id", parent, "--no-project"]))
+        reopened = CoordinationStore(self.store.database_path)
+        for tid in before:
+            self.assertIsNone(reopened.threads.get(tid)["project_id"])
+
+    def test_new_orchestration_agents_inherit_group_at_every_depth(self):
+        parent = self.create(project_id=self.project["id"])
+        child = self.create_agent(parent)
+        grandchild = self.create_agent(child)
+        self.assertEqual(self.store.threads.get(child)["project_id"], self.project["id"])
+        self.assertEqual(self.store.threads.get(grandchild)["project_id"], self.project["id"])
+        self.assertIsNone(self.store.threads.get(self.create_agent(parent, mode=None))["project_id"])
+        # An explicit child assignment remains supported.
+        other = self.store.threads.organization.create_project("Independent assignment")
+        explicit = self.create_agent(parent, project_id=other["id"])
+        self.assertEqual(self.store.threads.get(explicit)["project_id"], other["id"])
+
+    def test_group_recurses_through_mixed_terminal_and_app_descendants(self):
+        parent = self.create(project_id=self.project["id"])
+        self.store.register(session_id="terminal-child", client="codex", cwd=str(self.root))
+        delegation = self.attach(parent, "terminal-child")
+        self.assertEqual(self.store.threads.get("terminal-child")["project_id"], self.project["id"])
+        grandchild = self.create_agent("terminal-child")
+        # A malformed cycle cannot hang recursive group assignment.
+        self.attach(grandchild, parent)
+        other = self.store.threads.organization.create_project("Moved")
+        self.sessions.update_work_thread(parent, {"project_id": other["id"]})
+        for tid in (parent, "terminal-child", grandchild):
+            self.assertEqual(self.store.threads.get(tid)["project_id"], other["id"])
+        self.store.threads.update("terminal-child", project_id=None)
+        self.store.attach_delegation(delegation, "terminal-child")
+        self.assertIsNone(self.store.threads.get("terminal-child")["project_id"])
+
+    def test_group_uses_first_identified_creation_and_handles_uncertain_delivery(self):
+        parent = self.create(project_id=self.project["id"])
+        child = self.create()
+        control = AppControl(self.store)
+        request = control.request("create", parent, {"prompt": "Mockup", "mode": "orchestration"})
+        control.claim(request["request_id"], "test")
+        control.identified(request["request_id"], child)
+        self.assertEqual(self.store.threads.get(child)["project_id"], self.project["id"])
+        control.complete(request["request_id"], error="Delivery interrupted", uncertain=True)
+        self.store.threads.update(parent, project_id=None)
+        self.assertIsNone(self.store.threads.get(child)["project_id"])
+        # Later provenance cannot reparent an existing agent.
+        stranger = self.create()
+        later = control.request("create", stranger, {"prompt": "Retry", "mode": "orchestration"})
+        control.claim(later["request_id"], "test")
+        control.identified(later["request_id"], child)
+        self.store.threads.update(stranger, project_id=self.project["id"])
+        self.assertIsNone(self.store.threads.get(child)["project_id"])
+
+    def test_reassigning_same_group_repairs_old_descendants_and_invalid_group_is_atomic(self):
+        parent = self.create(project_id=self.project["id"])
+        child = self.create_agent(parent)
+        # Simulate membership left behind by the old parent-only update.
+        with self.store._connection() as db:
+            db.execute("UPDATE thread_organization SET project_id = NULL WHERE thread_id = ?", (child,))
+        with self.assertRaises(CoordinationError):
+            self.store.threads.update(parent, title="Changed", project_id="missing")
+        self.assertIsNone(self.store.threads.get(child)["project_id"])
+        self.assertNotEqual(self.store.threads.get(parent)["title"], "Changed")
+        self.store.threads.update(parent, project_id=self.project["id"])
+        self.assertEqual({t["thread_id"] for t in self.store.threads.list(project_id=self.project["id"])},
+                         {parent, child})
 
     def test_create_defaults_and_explicit_nulls_are_distinct(self):
         code = self.create(cwd=str(self.repo))

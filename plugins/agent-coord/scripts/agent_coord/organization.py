@@ -1,12 +1,41 @@
 """Optional thread organization, independent of execution workspaces."""
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
 from .store import CoordinationError
 
 UNSET = object()
+
+
+def app_agent_creators(db):
+    """Read the first identified creation, including uncertain deliveries."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
+        return {}
+    rows = db.execute("""SELECT r.thread_id, r.sender_session_id, r.payload_json,
+        COALESCE(t.title, s.name, r.sender_session_id) AS title, s.cwd
+        FROM app_control_requests r
+        LEFT JOIN sessions s ON s.session_id = r.sender_session_id
+        LEFT JOIN work_threads t ON t.thread_id = r.sender_session_id
+        WHERE r.operation = 'create' AND r.thread_id IS NOT NULL
+        AND r.status IN ('running', 'completed', 'uncertain')
+        ORDER BY r.created_at, r.request_id""").fetchall()
+    creators = {}
+    for row in rows:
+        if row["thread_id"] == row["sender_session_id"]:
+            continue
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            payload = {}
+        mode = payload.get("mode") if isinstance(payload, dict) else None
+        creators.setdefault(row["thread_id"], {
+            "thread_id": row["sender_session_id"], "title": row["title"], "cwd": row["cwd"],
+            "mode": "orchestration" if mode == "orchestration" else None,
+        })
+    return creators
 
 
 def repository_root(cwd: str) -> str | None:
@@ -88,6 +117,32 @@ class OrganizationStore:
                        (repository_id, root, Path(root).name or root))
         db.execute("INSERT OR IGNORE INTO thread_organization (thread_id, repository_id) VALUES (?, ?)",
                    (thread_id, repository_id))
+        creator = app_agent_creators(db).get(thread_id)
+        if creator and creator["mode"] == "orchestration":
+            OrganizationStore.inherit_group(db, thread_id, creator["thread_id"])
+
+    @staticmethod
+    def inherit_group(db, thread_id, parent_id):
+        db.execute("""UPDATE thread_organization SET project_id =
+                      (SELECT project_id FROM thread_organization WHERE thread_id = ?)
+                      WHERE thread_id = ? AND project_id IS NULL""", (parent_id, thread_id))
+
+    @staticmethod
+    def descendants(db, thread_id):
+        children = {}
+        for child, creator in app_agent_creators(db).items():
+            if creator["mode"] == "orchestration":
+                children.setdefault(creator["thread_id"], set()).add(child)
+        for row in db.execute("SELECT parent_session_id, child_session_id FROM delegations WHERE child_session_id IS NOT NULL"):
+            children.setdefault(row["parent_session_id"], set()).add(row["child_session_id"])
+        pending, visited = [thread_id], set()
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(children.get(current, ()))
+        return visited
 
     def list(self) -> dict:
         self.backfill()
@@ -161,4 +216,5 @@ class OrganizationStore:
         if repository_id is not UNSET:
             db.execute("UPDATE thread_organization SET repository_id = ? WHERE thread_id = ?", (repository_id, thread_id))
         if project_id is not UNSET:
-            db.execute("UPDATE thread_organization SET project_id = ? WHERE thread_id = ?", (project_id, thread_id))
+            db.executemany("UPDATE thread_organization SET project_id = ? WHERE thread_id = ?",
+                           [(project_id, child) for child in OrganizationStore.descendants(db, thread_id)])

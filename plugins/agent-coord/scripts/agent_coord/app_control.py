@@ -156,8 +156,17 @@ class AppControl:
 
     def identified(self, request_id, thread_id):
         with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT thread_id FROM app_control_requests WHERE request_id = ?", (request_id,)).fetchone()
             db.execute("UPDATE app_control_requests SET thread_id = ?, updated_at = ? WHERE request_id = ? AND status = 'running'",
                        (thread_id, self.store.clock(), request_id))
+            # Normally identified before registration; ensure_thread inherits then.
+            # Also cover an already registered child without resetting later edits.
+            if previous and previous["thread_id"] is None:
+                from .organization import app_agent_creators
+                creator = app_agent_creators(db).get(thread_id)
+                if creator and creator["mode"] == "orchestration":
+                    self.store.threads.organization.inherit_group(db, thread_id, creator["thread_id"])
 
     def complete(self, request_id, *, result=None, error=None, uncertain=False):
         status = "uncertain" if uncertain else "failed" if error is not None else "completed"

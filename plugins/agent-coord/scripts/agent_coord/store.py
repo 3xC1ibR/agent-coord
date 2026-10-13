@@ -1993,6 +1993,8 @@ class CoordinationStore:
                 """,
                 (child_session_id, now, delegation_id),
             )
+            if attached is None:
+                self.threads.organization.inherit_group(connection, child_session_id, row["parent_session_id"])
         return self.get_delegation(delegation_id)
 
     def record_delegation_token_usage(

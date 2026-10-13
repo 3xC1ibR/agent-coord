@@ -32,6 +32,7 @@ from .attention import AttentionClassifier
 from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
+from .organization import app_agent_creators
 from .session_close import stop_terminal_session
 from .workspaces import matches_workspace, workspace_choices
 
@@ -650,32 +651,11 @@ class BrowserSessions:
                     for request in self.requests.values() if request["params"].get("threadId") == thread_id]
 
     def _app_agent_creators(self) -> dict:
-        # Creation provenance is independent of the assignment's reply contract.
-        # An identified creation remains valid even if later delivery is uncertain.
         with self.store._connection() as db:
-            if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
-                return {}
-            rows = db.execute("""SELECT r.thread_id, r.sender_session_id, r.payload_json,
-                COALESCE(t.title, s.name, r.sender_session_id) AS title, s.cwd
-                FROM app_control_requests r
-                LEFT JOIN sessions s ON s.session_id = r.sender_session_id
-                LEFT JOIN work_threads t ON t.thread_id = r.sender_session_id
-                WHERE r.operation = 'create' AND r.thread_id IS NOT NULL
-                AND r.status IN ('running', 'completed', 'uncertain')
-                ORDER BY r.created_at, r.request_id""").fetchall()
-        creators = {}
-        for row in rows:
-            if row["thread_id"] != row["sender_session_id"]:
-                try:
-                    payload = json.loads(row["payload_json"])
-                except (TypeError, ValueError):
-                    payload = {}
-                mode = payload.get("mode") if isinstance(payload, dict) else None
-                creators.setdefault(row["thread_id"], {
-                    "thread_id": row["sender_session_id"], "title": row["title"],
-                    "available": bool(row["cwd"] and matches_workspace(row["cwd"], self.cwd)),
-                    "mode": "orchestration" if mode == "orchestration" else None,
-                })
+            creators = app_agent_creators(db)
+        for creator in creators.values():
+            cwd = creator.pop("cwd")
+            creator["available"] = bool(cwd and matches_workspace(cwd, self.cwd))
         return creators
 
     def work_thread(self, thread_id: str, *, history=True, _creators=None) -> dict:
