@@ -2,6 +2,10 @@
 .thread-panes[hidden], .conversation-pane-frame[hidden], .thread-pane[hidden] { display: none !important; }
 .pane-layout { position: absolute; inset: 0; display: flex; padding: 6px; }
 .pane-column { display: flex; flex-direction: column; flex-basis: 0; min-width: 0; min-height: 0; }
+.pane-branch { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
+.pane-branch.vertical { flex-direction: column; }
+.pane-branch[hidden] { display: none !important; }
+.pane-manual-layout.pane-maximized .pane-divider { display: none; }
 .thread-pane { display: flex; flex-direction: column; flex-basis: 0; min-height: 0; min-width: 0; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
 .thread-pane.pane-focused { border-color: var(--hover-line); box-shadow: 0 0 0 1px var(--hover-line); }
 .pane-header { display: flex; align-items: center; gap: 3px; padding: 3px 5px; flex-shrink: 0; min-width: 0; height: 35px; background: var(--panel); }
@@ -11,6 +15,17 @@
 .pane-tabs button[aria-selected=true] { background: var(--surface); color: var(--ink); box-shadow: inset 0 -2px var(--ink); }
 .pane-tabs button[data-status=working]::before { content: "● "; color: var(--accent); }
 .pane-tabs button[data-status=input]::before { content: "● "; color: var(--warm); }
+.pane-tabs [draggable=true] { cursor: grab; }
+.pane-tabs [data-drop-side=before] { box-shadow: inset 3px 0 var(--accent); }
+.pane-tabs [data-drop-side=after] { box-shadow: inset -3px 0 var(--accent); }
+.pane-tabs[data-drop-side] { background: var(--hover-bg); }
+.pane-drop-surface { position: fixed; z-index: 1000; }
+.pane-drop-preview { display: none; position: absolute; inset: 4px; pointer-events: none; align-items: center; justify-content: center; border: 2px solid var(--accent); border-radius: 6px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--ink); font-size: 13px; font-weight: 600; }
+.pane-drop-surface[data-edge] .pane-drop-preview { display: flex; }
+.pane-drop-surface[data-edge=left] .pane-drop-preview { right: 50%; }
+.pane-drop-surface[data-edge=right] .pane-drop-preview { left: 50%; }
+.pane-drop-surface[data-edge=top] .pane-drop-preview { bottom: 50%; }
+.pane-drop-surface[data-edge=bottom] .pane-drop-preview { top: 50%; }
 .pane-content { flex: 1; min-height: 0; }
 .pane-deck { position: absolute; inset: 0; pointer-events: none; }
 .conversation-pane-frame { position: absolute; border: 0; pointer-events: auto; background: var(--surface); }
@@ -22,6 +37,7 @@
 .pane-maximized > .pane-divider, .pane-maximized .pane-column > .pane-divider,
 .pane-maximized > .pane-column:not(.maximized-column) { display: none; }
 body.panes-visible #welcome, body.panes-visible > main > #conversation { display: none !important; }
+body.panes-visible .conversation-tabs { display: none; }
 body.panes-visible main > .views-bar { display: flex; }
 body.pane-document { display: block; height: 100dvh; }
 .pane-document > .sidebar, .pane-document > .sidebar-backdrop, .pane-document .workspace-bar,

@@ -31,7 +31,67 @@ const paneLayout = (() => {
     if (event.metaKey) return key === "KeyT" || key.toLowerCase() === "t" ? "tile" : null;
     return ({ArrowLeft: "previous", ArrowRight: "next", Enter: "maximize"})[key] || null;
   }
-  return {plan, arrange, shortcut};
+  // Automatic tiling starts as columns. Manual splits can nest in either axis.
+  function tree(layout) {
+    if (layout.tree) return layout.tree;
+    let slot = 0;
+    return {axis: "horizontal", sizes: layout.widths || layout.columns.map(() => 1),
+      children: layout.columns.map((count, column) => ({axis: "vertical",
+        sizes: layout.heights?.[column] || Array(count).fill(1),
+        children: Array.from({length: count}, () => ({slot: slot++}))}))};
+  }
+  function mapTree(node, fn) {
+    if (!node.children) return fn(node);
+    const pairs = node.children.map((child, i) => [mapTree(child, fn), node.sizes[i]]).filter(([child]) => child);
+    if (!pairs.length) return null;
+    if (pairs.length === 1) return pairs[0][0];
+    return {...node, children: pairs.map(([child]) => child), sizes: pairs.map(([, size]) => size)};
+  }
+  function removeGroup(layout, index) {
+    if (layout.tree) layout.tree = mapTree(layout.tree, node => node.slot === index ? null : {slot: node.slot > index ? node.slot - 1 : node.slot});
+    else {
+      let offset = 0;
+      const column = layout.columns.findIndex(count => { const found = index < offset + count; offset += count; return found; });
+      layout.columns[column]--; layout.columns = layout.columns.filter(Boolean);
+      layout.widths = null; layout.heights = null;
+    }
+    layout.groups.splice(index, 1); layout.tabs.splice(index, 1);
+  }
+  function move(layout, id, target, edge = "center", position) {
+    if (!layout.groups[target] || !["left", "right", "top", "bottom", "center"].includes(edge)) return false;
+    const source = layout.groups.findIndex(group => group.includes(id));
+    if (edge !== "center" && source === target && layout.groups[source].length === 1) return false;
+    // Refer to the group itself: pruning an empty source can change its index.
+    const destination = layout.groups[target];
+    if (source >= 0) {
+      const group = layout.groups[source], from = group.indexOf(id);
+      if (source === target && position != null && from < position) position--;
+      group.splice(from, 1);
+      if (layout.tabs[source] === id) layout.tabs[source] = group[Math.min(from, group.length - 1)];
+    }
+    if (edge === "center") {
+      destination.splice(position == null ? destination.length : Math.max(0, Math.min(position, destination.length)), 0, id);
+      layout.tabs[target] = id;
+    } else {
+      const slot = layout.groups.length, leaf = {slot};
+      layout.tree = mapTree(tree(layout), node => node.slot !== target ? node : {
+        axis: edge === "left" || edge === "right" ? "horizontal" : "vertical", sizes: [1, 1],
+        children: edge === "left" || edge === "top" ? [leaf, node] : [node, leaf]});
+      layout.groups.push([id]); layout.tabs.push(id);
+    }
+    if (source >= 0 && !layout.groups[source].length) removeGroup(layout, source);
+    if (!layout.order.includes(id)) layout.order.push(id);
+    layout.selected = id; layout.maximized = null;
+    return true;
+  }
+  function dropZone(rect, x, y) {
+    if (!rect.width || !rect.height) return "center";
+    const distances = [(x - rect.left) / rect.width, (rect.left + rect.width - x) / rect.width,
+      (y - rect.top) / rect.height, (rect.top + rect.height - y) / rect.height];
+    const closest = Math.min(...distances);
+    return closest < .25 ? ["left", "right", "top", "bottom"][distances.indexOf(closest)] : "center";
+  }
+  return {plan, arrange, shortcut, tree, removeGroup, move, dropZone};
 })();
 
 class ThreadPanes {
@@ -44,6 +104,9 @@ class ThreadPanes {
     const Resize = document.defaultView?.ResizeObserver;
     if (Resize) { this.observer = new Resize(() => { this.position(); this.onResize?.(); }); this.observer.observe(container); }
     document.defaultView?.addEventListener("resize", () => this.position());
+    document.addEventListener?.("dragend", () => this.endDrag());
+    document.addEventListener?.("drop", () => this.endDrag());
+    document.addEventListener?.("dragleave", event => { if (!event.relatedTarget) this.clearDropPreview(); });
   }
   el(tag, className, text) {
     const element = this.document.createElement(tag);
@@ -85,6 +148,7 @@ class ThreadPanes {
     this.render(); this.onFocus?.(this.selected); return true;
   }
   hide() {
+    this.endDrag();
     this.active = false; this.container.hidden = true;
     for (const record of this.records.values()) record.api?.setActive(false);
   }
@@ -178,20 +242,84 @@ class ThreadPanes {
     if (this.workspaceClose) { this.workspaceClose(id); return; }
     const group = layout.groups[index]; group.splice(group.indexOf(id), 1);
     if (group.length) layout.tabs[index] = group[0];
-    else {
-      let offset = 0;
-      const column = layout.columns.findIndex(count => { const found = index < offset + count; offset += count; return found; });
-      layout.columns[column]--; layout.columns = layout.columns.filter(Boolean);
-      layout.groups.splice(index, 1); layout.tabs.splice(index, 1);
-      layout.widths = null; layout.heights = null;
-    }
+    else paneLayout.removeGroup(layout, index);
+    layout.order = layout.order.filter(value => value !== id);
     layout.maximized = null;
     if (!layout.groups.length) { this.hide(); this.onExit?.(); return; }
     layout.selected = layout.tabs[Math.min(index, layout.tabs.length - 1)];
     // Keep the conversation mounted so closing a pane never discards a draft.
     this.render(); this.focus(layout.selected);
   }
+  moveThread(thread, slot, edge = "center", position) {
+    if (!this.active || !paneLayout.move(this.layout, thread.thread_id, slot, edge, position)) return false;
+    this.record(thread); this.render(); this.focus(thread.thread_id); return true;
+  }
+  startDrag(thread, event) {
+    if (!thread?.thread_id || thread.thread_id === "new-session" || this.canDrag?.(thread) === false) return false;
+    this.endDrag(); this.dragging = thread;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", thread.thread_id);
+    this.dropSurfaces = [];
+    const targets = this.active ? (this.slots || []).filter(({pane}) => !pane.hidden)
+      .map(({pane, body}) => ({body, slot: Number(pane.dataset.slot)})) : this.dragTargets?.() || [];
+    for (const {body, slot} of targets) {
+      const surface = this.el("div", "pane-drop-surface"), preview = this.el("div", "pane-drop-preview");
+      surface.setAttribute("aria-hidden", "true"); surface.append(preview);
+      const rect = body.getBoundingClientRect();
+      Object.assign(surface.style, {left: rect.left + "px", top: rect.top + "px", width: rect.width + "px", height: rect.height + "px"});
+      surface.ondragover = drag => {
+        const edge = paneLayout.dropZone(surface.getBoundingClientRect(), drag.clientX, drag.clientY);
+        this.clearDropPreview();
+        if (!this.acceptsDrop(slot, edge)) return;
+        drag.preventDefault(); drag.dataTransfer.dropEffect = "move";
+        surface.dataset.edge = edge;
+        preview.textContent = edge === "center" ? "Move to pane" : "Split " + ({top: "above", bottom: "below"}[edge] || edge);
+      };
+      surface.ondragleave = () => { delete surface.dataset.edge; };
+      surface.ondrop = drop => this.drop(drop, slot, paneLayout.dropZone(surface.getBoundingClientRect(), drop.clientX, drop.clientY));
+      this.document.body.append(surface); this.dropSurfaces.push(surface);
+    }
+    return true;
+  }
+  acceptsDrop(slot, edge) {
+    if (!this.dragging || this.canDrag?.(this.dragging) === false) return false;
+    const groups = this.active ? this.layout.groups : this.dragGroups?.();
+    const group = groups?.[slot];
+    return !!group && !(edge !== "center" && group.length === 1 && group[0] === this.dragging.thread_id);
+  }
+  clearDropPreview() {
+    for (const surface of this.dropSurfaces || []) delete surface.dataset.edge;
+    for (const tab of this.chrome.querySelectorAll("[data-drop-side]")) delete tab.dataset.dropSide;
+  }
+  endDrag() {
+    if (!this.dragging) return;
+    this.dragging = null; this.clearDropPreview();
+    for (const surface of this.dropSurfaces || []) surface.remove();
+    this.dropSurfaces = []; this.onDragEnd?.();
+  }
+  drop(event, slot, edge, position) {
+    if (!this.acceptsDrop(slot, edge)) return;
+    event.preventDefault(); event.stopPropagation();
+    const thread = this.dragging;
+    this.endDrag();
+    if (this.onDrop) this.onDrop(thread, slot, edge, position);
+    else this.moveThread(thread, slot, edge, position);
+  }
+  bindTabDrop(element, slot, position) {
+    const insertion = event => {
+      const after = position != null && event.clientX >= element.getBoundingClientRect().left + element.getBoundingClientRect().width / 2;
+      return {after, index: position == null ? undefined : position + (after ? 1 : 0)};
+    };
+    element.ondragover = event => {
+      if (!this.acceptsDrop(slot, "center")) return;
+      event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move";
+      this.clearDropPreview(); element.dataset.dropSide = insertion(event).after ? "after" : "before";
+    };
+    element.ondragleave = () => { delete element.dataset.dropSide; };
+    element.ondrop = event => this.drop(event, slot, "center", insertion(event).index);
+  }
   keydown(event) {
+    if (this.dragging && event.key === "Escape") { this.endDrag(); event.preventDefault(); return true; }
     if (event.target?.closest?.("dialog[open]")) return false;
     if ((event.key === "Escape" || event.key === "Esc" || event.code === "Escape") && this.active && this.layout.maximized != null &&
         !event.target?.closest?.("#rename-form")) {
@@ -211,6 +339,21 @@ class ThreadPanes {
     const layout = this.layout;
     this.chrome.replaceChildren(); this.slots = [];
     this.chrome.classList.toggle("pane-maximized", layout.maximized != null);
+    this.chrome.classList.toggle("pane-manual-layout", !!layout.tree);
+    if (layout.tree) {
+      const build = node => {
+        if (!node.children) return this.renderPane(node.slot);
+        const branch = this.el("div", "pane-branch " + node.axis);
+        node.children.forEach((child, index) => {
+          if (index) branch.append(this.splitter(branch, index, node.axis, null, node));
+          const element = build(child); element.style.flexGrow = String(node.sizes[index]); branch.append(element);
+        });
+        branch.hidden = [...branch.children].every(child => child.hidden || child.classList.contains("pane-divider"));
+        return branch;
+      };
+      const root = build(layout.tree); root.style.flexGrow = "1";
+      this.chrome.append(root); this.position(); return;
+    }
     let index = 0;
     layout.columns.forEach((count, column) => {
       if (column) this.chrome.append(this.splitter(this.chrome, column, "horizontal"));
@@ -220,35 +363,46 @@ class ThreadPanes {
       for (let row = 0; row < count; row++, index++) {
         const slot = index;
         if (row) col.append(this.splitter(col, row, "vertical", column));
-        const pane = this.el("section", "thread-pane"); pane.dataset.slot = String(slot);
+        const pane = this.renderPane(slot);
         pane.style.flexGrow = String(layout.heights?.[column]?.[row] || 1);
-        pane.hidden = layout.maximized != null && layout.maximized !== slot;
         if (!pane.hidden && layout.maximized != null) col.classList.add("maximized-column");
-        pane.setAttribute("aria-label", "Conversation pane " + (slot + 1));
-        const header = this.el("div", "pane-header"), tabs = this.el("div", "pane-tabs");
-        tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "Threads in pane " + (slot + 1));
-        for (const id of layout.groups[slot]) {
-          const thread = this.records.get(id).thread;
-          const tab = this.button(thread.title, thread.title, () => this.focus(id));
-          tab.dataset.paneThread = id; tab.dataset.status = thread.response_state || "";
-          tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(layout.tabs[slot] === id));
-          tab.tabIndex = layout.tabs[slot] === id ? 0 : -1;
-          tab.onkeydown = event => {
-            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || event.ctrlKey || event.altKey || event.metaKey) return;
-            event.preventDefault(); const group = layout.groups[slot], current = group.indexOf(id);
-            const next = event.key === "Home" ? 0 : event.key === "End" ? group.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + group.length) % group.length;
-            this.focus(group[next], false);
-            this.chrome.querySelector('[data-pane-thread="' + CSS.escape(group[next]) + '"]')?.focus();
-          };
-          tabs.append(tab);
-        }
-        header.append(tabs, this.button(layout.maximized === slot ? "↙" : "⤢", layout.maximized === slot ? "Restore panes" : "Maximize pane (Ctrl+Alt+Enter)", () => this.maximize(slot)),
-          this.button("×", "Close pane — keep thread and draft", () => this.close(slot)));
-        const body = this.el("div", "pane-content");
-        pane.append(header, body); col.append(pane); this.slots.push({pane, body, id: layout.tabs[slot]});
+        col.append(pane);
       }
     });
     this.position();
+  }
+  renderPane(slot) {
+    const layout = this.layout;
+    const pane = this.el("section", "thread-pane"); pane.dataset.slot = String(slot);
+    pane.hidden = layout.maximized != null && layout.maximized !== slot;
+    pane.setAttribute("aria-label", "Conversation pane " + (slot + 1));
+    const header = this.el("div", "pane-header"), tabs = this.el("div", "pane-tabs");
+    tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "Threads in pane " + (slot + 1));
+    this.bindTabDrop(tabs, slot);
+    for (const id of layout.groups[slot]) {
+      const thread = this.records.get(id).thread;
+      const tab = this.button(thread.title, thread.title, () => this.focus(id));
+      tab.dataset.paneThread = id; tab.dataset.status = thread.response_state || "";
+      tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(layout.tabs[slot] === id));
+      tab.tabIndex = layout.tabs[slot] === id ? 0 : -1;
+      tab.draggable = true; tab.title += " · Drag to an edge to split";
+      tab.ondragstart = event => { if (!this.startDrag(thread, event)) event.preventDefault(); };
+      tab.ondragend = () => this.endDrag();
+      this.bindTabDrop(tab, slot, layout.groups[slot].indexOf(id));
+      tab.onkeydown = event => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || event.ctrlKey || event.altKey || event.metaKey) return;
+        event.preventDefault(); const group = layout.groups[slot], current = group.indexOf(id);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? group.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + group.length) % group.length;
+        this.focus(group[next], false);
+        this.chrome.querySelector('[data-pane-thread="' + CSS.escape(group[next]) + '"]')?.focus();
+      };
+      tabs.append(tab);
+    }
+    header.append(tabs, this.button(layout.maximized === slot ? "↙" : "⤢", layout.maximized === slot ? "Restore panes" : "Maximize pane (Ctrl+Alt+Enter)", () => this.maximize(slot)),
+      this.button("×", "Close pane — keep thread and draft", () => this.close(slot)));
+    const body = this.el("div", "pane-content");
+    pane.append(header, body); this.slots.push({pane, body, id: layout.tabs[slot]});
+    return pane;
   }
   position() {
     if (!this.active || !this.slots) return;
@@ -265,7 +419,7 @@ class ThreadPanes {
       record.api?.setActive(visible.has(id) && id === this.selected && this.document.hasFocus());
     }
   }
-  splitter(parent, index, direction, column) {
+  splitter(parent, index, direction, column, node) {
     const horizontal = direction === "horizontal";
     const divider = this.el("div", "pane-divider " + direction);
     divider.tabIndex = 0; divider.setAttribute("role", "separator");
@@ -280,7 +434,8 @@ class ThreadPanes {
       a.style.flexGrow = String(sum * ratio); b.style.flexGrow = String(sum * (1 - ratio));
       divider.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
       const values = siblings.map(el => Number(el.style.flexGrow));
-      if (horizontal) this.layout.widths = values;
+      if (node) node.sizes = values;
+      else if (horizontal) this.layout.widths = values;
       else { this.layout.heights ||= {}; this.layout.heights[column] = values; }
       this.position();
     };
@@ -356,6 +511,30 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
       if (record.api) record.api.restoreDraft(draft);
       else record.initialDraft = draft;
     }
+  }
+  const tabThreads = () => (state.threadTabs?.items || []).filter(thread => thread.thread_id !== "new-session");
+  shell.canDrag = thread => state.selected !== "new-session" && canChangeLayout() &&
+    (!state.dispatchWorkspace?.active || shell.layout?.order.includes(thread.thread_id));
+  shell.dragGroups = () => [tabThreads().map(thread => thread.thread_id)];
+  shell.dragTargets = () => [{body: $(state.selected ? "conversation" : "welcome"), slot: 0}];
+  shell.onDrop = (thread, slot, edge, position) => {
+    if (!shell.active) {
+      const threads = tabThreads(), ids = threads.map(item => item.thread_id);
+      if (!ids.includes(thread.thread_id)) return;
+      const selected = ids.includes(state.selected) ? state.selected : ids[0];
+      const layout = {order: [...ids], columns: [1], groups: [ids], tabs: [selected], selected,
+        maximized: null, returnTarget: returnTarget()};
+      if (!paneLayout.move(layout, thread.thread_id, slot, edge, position)) return;
+      for (const item of threads) shell.record(item);
+      shell.layouts.set(getView(), layout); shell.viewId = getView();
+      show(); shell.active = true; container.hidden = false;
+      syncDrafts(); shell.render(); shell.focus(thread.thread_id);
+    } else shell.moveThread(thread, slot, edge, position);
+  };
+  if (state.threadTabs) {
+    state.threadTabs.onDragStart = (thread, event) => shell.startDrag(thread, event);
+    state.threadTabs.onDragEnd = () => shell.endDrag();
+    shell.onDragEnd = () => { state.threadTabs.dragging = null; state.threadTabs.render(); };
   }
   function tile() {
     if (!canChangeLayout()) return false;

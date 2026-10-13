@@ -32,6 +32,77 @@ test("pane shortcuts leave typing, IME and ordinary navigation alone", () => {
   assert.equal(paneLayout.shortcut({...modifiers, key: "Enter", shiftKey: true}), null);
 });
 
+const leaves = node => node.children ? node.children.flatMap(leaves) : [node.slot];
+function assertLayout(layout) {
+  const ids = layout.groups.flat();
+  assert.equal(new Set(ids).size, ids.length, "each conversation belongs to exactly one group");
+  assert.ok(layout.groups.every(group => group.length));
+  layout.tabs.forEach((id, slot) => assert.ok(layout.groups[slot].includes(id)));
+  assert.deepEqual(leaves(paneLayout.tree(layout)).sort((a, b) => a - b), layout.groups.map((_, i) => i));
+  assert.ok(ids.includes(layout.selected));
+}
+function singleGroup() {
+  return {order: ["a", "b", "c"], columns: [1], groups: [["a", "b", "c"]], tabs: ["a"], selected: "a", maximized: null};
+}
+
+test("edge drops split the target locally in all four directions and nest across axes", () => {
+  for (const edge of ["left", "right", "top", "bottom"]) {
+    const layout = singleGroup();
+    assert.equal(paneLayout.move(layout, "b", 0, edge), true);
+    assertLayout(layout);
+    assert.equal(layout.tree.axis, ["left", "right"].includes(edge) ? "horizontal" : "vertical");
+    assert.deepEqual(leaves(layout.tree), ["left", "top"].includes(edge) ? [1, 0] : [0, 1]);
+    assert.deepEqual(layout.groups, [["a", "c"], ["b"]]);
+    const otherAxis = layout.tree.axis === "horizontal" ? "bottom" : "right";
+    assert.equal(paneLayout.move(layout, "c", 0, otherAxis), true);
+    assertLayout(layout);
+    const nested = layout.tree.children.find(node => node.children);
+    assert.ok(nested); assert.notEqual(nested.axis, layout.tree.axis);
+    assert.deepEqual(leaves(nested), [0, 2]);
+  }
+});
+
+test("moving tabs between groups collapses empty splits and reordering respects insertion positions", () => {
+  const layout = singleGroup();
+  paneLayout.move(layout, "b", 0, "right");
+  paneLayout.move(layout, "c", 0, "bottom");
+  paneLayout.move(layout, "b", 0, "center", 0);
+  assertLayout(layout); assert.deepEqual(layout.groups, [["b", "a"], ["c"]]);
+  assert.equal(layout.tree.axis, "vertical");
+  paneLayout.move(layout, "c", 0, "center", 1);
+  assertLayout(layout); assert.deepEqual(layout.groups, [["b", "c", "a"]]);
+  assert.deepEqual(layout.tree, {slot: 0});
+  paneLayout.move(layout, "b", 0, "center", 2);
+  assert.deepEqual(layout.groups, [["c", "b", "a"]]);
+  paneLayout.move(layout, "a", 0, "center", 0);
+  assert.deepEqual(layout.groups, [["a", "c", "b"]]); assertLayout(layout);
+});
+
+test("a sole tab cannot split itself, and invalid drops never change the layout", () => {
+  const layout = {...singleGroup(), order: ["a"], groups: [["a"]], tabs: ["a"]};
+  const before = structuredClone(layout);
+  for (const edge of ["left", "right", "top", "bottom"]) assert.equal(paneLayout.move(layout, "a", 0, edge), false);
+  assert.equal(paneLayout.move(layout, "a", 99, "right"), false);
+  assert.equal(paneLayout.move(layout, "a", 0, "invalid"), false);
+  assert.deepEqual(layout, before);
+});
+
+test("drop preview zones distinguish edges from the center at the pane's actual bounds", () => {
+  const rect = {left: 100, top: 80, width: 800, height: 400};
+  for (const [x, y, edge] of [[101, 280, "left"], [899, 280, "right"], [500, 81, "top"],
+    [500, 479, "bottom"], [500, 280, "center"], [400, 200, "center"]]) {
+    assert.equal(paneLayout.dropZone(rect, x, y), edge);
+  }
+});
+
+test("repeated moves and splits preserve every conversation and valid tree references", () => {
+  const layout = singleGroup(), edges = ["center", "left", "bottom", "right", "top"];
+  for (let i = 0; i < 200; i++) {
+    paneLayout.move(layout, ["a", "b", "c"][i % 3], (i * 7) % layout.groups.length, edges[i % edges.length], i % 4);
+    assertLayout(layout); assert.deepEqual(layout.groups.flat().sort(), ["a", "b", "c"]);
+  }
+});
+
 function setup() {
   const classes = () => { const set = new Set(); return {add: c => set.add(c), contains: c => set.has(c),
     remove: c => set.delete(c), toggle(c, on) { if (on) set.add(c); else set.delete(c); }}; };
@@ -170,6 +241,46 @@ test("view layouts are independent and closing panes keeps conversation state", 
   assert.equal(panes.active, false); assert.equal(exits.length, 1);
   assert.equal(panes.show("first"), false);
   assert.equal(panes.show("second"), true);
+});
+
+test("manual tab moves reuse live documents, drafts and scroll, including after closing a nested group", () => {
+  const {panes} = setup(); panes.tile("view", [thread("a"), thread("b"), thread("c")]);
+  const record = panes.records.get("b"), draft = {text: "Unsent", images: [{id: "image"}], mentions: [{id: "ref"}], scroll: 260};
+  record.frame = {contentWindow: {}, hidden: false};
+  record.api = {setActive() {}, focus() {}, exportDraft: () => draft};
+  const frame = record.frame, api = record.api;
+  panes.moveThread(thread("b"), 0, "bottom");
+  assertLayout(panes.layout);
+  assert.equal(record.frame, frame); assert.equal(record.api, api); assert.equal(panes.exportDraft("b"), draft);
+  panes.moveThread(thread("b"), 0, "center");
+  assertLayout(panes.layout); assert.equal(panes.selected, "b");
+  panes.close(0); assertLayout(panes.layout);
+  assert.equal(panes.records.get("b"), record); assert.equal(panes.exportDraft("b"), draft);
+  assert.equal(panes.layout.order.includes("b"), false);
+});
+
+test("dragging from conversation tabs seeds just the working set and retains the original draft", () => {
+  const {shell, state, doc, setThreads} = shellFixture();
+  state.threadTabs = {items: [thread("a"), thread("b"), thread("c")]};
+  state.selected = "a"; doc.getElementById("message").value = "Keep this draft";
+  doc.getElementById("timeline").scrollTop = 123;
+  setThreads([thread("unopened")]);
+  shell.onDrop(thread("b"), 0, "right");
+  assert.equal(shell.active, true); assertLayout(shell.layout);
+  assert.deepEqual(Array.from(shell.layout.order), ["a", "b", "c"]);
+  assert.deepEqual(Array.from(shell.layout.groups[0]), ["a", "c"]);
+  assert.equal(shell.records.get("a").initialDraft.text, "Keep this draft");
+  assert.equal(shell.records.get("a").initialDraft.scroll, 123);
+  assert.equal(shell.selected, "b");
+});
+
+test("Escape removes drag shields without changing conversation layout or focus", () => {
+  const {panes} = setup(); panes.tile("view", [thread("a"), thread("b")]);
+  const before = structuredClone(panes.layout), removed = [];
+  panes.dragging = thread("b"); panes.dropSurfaces = [{dataset: {edge: "left"}, remove() { removed.push(true); }}];
+  panes.keydown({key: "Escape", preventDefault() {}});
+  assert.equal(panes.dragging, null); assert.deepEqual(removed, [true]);
+  assert.deepEqual(panes.layout, before);
 });
 
 test("overflow tabs switch without replacing records and keyboard focus follows panes", () => {

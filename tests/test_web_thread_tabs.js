@@ -91,3 +91,24 @@ test("unavailable or malformed storage does not prevent opening conversations", 
     assert.equal(new Set(tabs.items.map(item => item.thread_id)).size, tabs.items.length);
   }
 });
+
+test("status refreshes retain the dragged DOM tab until drop or cancellation", () => {
+  const element = () => ({children: [], dataset: {}, scrollLeft: 0, classList: {add() {}},
+    append(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
+    setAttribute() {}, contains: () => false, querySelectorAll: () => []});
+  const container = element(), document = {createElement: element};
+  const tabs = new ThreadTabs({container, document}); tabs.setProject("/work");
+  tabs.open(thread("a")); tabs.open(thread("b"));
+  const source = container.children[1], ends = [];
+  tabs.onDragEnd = () => ends.push(true);
+  source.ondragstart({dataTransfer: {setData() {}}});
+  tabs.update([{...thread("a"), title: "Streaming update"}]);
+  assert.equal(container.children[1], source, "streaming must not detach the native drag source");
+  source.ondragend();
+  assert.deepEqual(ends, [true]); assert.equal(tabs.dragging, null);
+  assert.equal(container.children[1].children[0].textContent, "Streaming update");
+  let prevented = false;
+  tabs.onDragStart = () => false;
+  container.children[1].ondragstart({preventDefault() { prevented = true; }});
+  assert.equal(prevented, true); assert.equal(tabs.dragging, null);
+});

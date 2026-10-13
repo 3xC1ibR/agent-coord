@@ -88,8 +88,12 @@ class ThreadTabs {
       : event.key === "ArrowRight" ? (index + 1) % ids.length : event.key === "ArrowLeft" ? (index + ids.length - 1) % ids.length : -1;
     if (next >= 0) { event.preventDefault(); this.reveal(ids[next], true); }
   }
+  endDrag() {
+    this.dragging = null; this.onDragEnd?.(); this.render();
+  }
   render() {
-    if (!this.container) return;
+    // Status updates must not replace the native drag source mid-gesture.
+    if (!this.container || this.dragging) return;
     const signature = JSON.stringify([this.selected ?? null, this.selected === undefined,
       this.items.map(item => [item.thread_id, item.title, item.response_state, item.unread_result])]);
     if (signature === this.signature) return;
@@ -113,9 +117,12 @@ class ThreadTabs {
         const close = this.document.createElement("button"); close.type = "button"; close.className = "conversation-tab-close";
         close.textContent = "×"; close.title = "Close tab"; close.setAttribute("aria-label", "Close tab · " + item.title);
         close.onclick = () => this.close(id); wrapper.append(close);
-        wrapper.draggable = true;
-        wrapper.ondragstart = event => { this.dragging = id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); };
-        wrapper.ondragend = () => { this.dragging = null; };
+        wrapper.draggable = id !== "new-session";
+        wrapper.ondragstart = event => {
+          if (id === "new-session" || !this.canNavigate() || this.onDragStart?.(item, event) === false) { event.preventDefault(); return; }
+          this.dragging = id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id);
+        };
+        wrapper.ondragend = () => this.endDrag();
         wrapper.ondragover = event => { if (this.dragging) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } };
         wrapper.ondrop = event => {
           if (!this.dragging || this.dragging === id) return;
@@ -123,7 +130,7 @@ class ThreadTabs {
           const from = this.items.findIndex(item => item.thread_id === this.dragging);
           const target = this.items.findIndex(item => item.thread_id === id);
           const rect = wrapper.getBoundingClientRect(), after = event.clientX >= rect.left + rect.width / 2;
-          this.move(this.dragging, target + (after ? 1 : 0) - (from < target ? 1 : 0)); this.dragging = null;
+          this.move(this.dragging, target + (after ? 1 : 0) - (from < target ? 1 : 0)); this.endDrag();
         };
       } else wrapper.classList.add("overview-tab");
       this.container.append(wrapper);
