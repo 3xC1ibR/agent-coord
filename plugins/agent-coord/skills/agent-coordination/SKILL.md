@@ -68,6 +68,7 @@ result, save a short factual checkpoint with the bundled CLI:
 ```bash
 agent-coord checkpoint --json '{
   "title": "Database write performance",
+  "domain": "backend",
   "phase": "investigation",
   "summary": "Compared the two approaches and documented the findings.",
   "next_action": "",
@@ -111,6 +112,27 @@ A user-chosen name takes precedence: agent checkpoints still
 save progress but cannot replace a title whose source is `user`. The original
 request remains unchanged. Titles accept 1–160 characters; the word count is
 writing guidance.
+
+An optional `domain` names the current assignment's category, such as `web`,
+`backend`, or `docs`. Reuse one of the workspace domains supplied in hook context
+unless the work is clearly elsewhere. Set it once per assignment; omit it on
+routine checkpoints until the work moves. Unlike the conversation title, an
+agent-set domain can change with a later assignment. Explicit names accept
+1–64 characters and normalize whitespace and case; omission preserves the value.
+Saved context includes `domain`, `domain_source`, and `scope_cluster`.
+Sources are `derived`, `agent`, or `user`; unset fields are null. A user-chosen
+domain cannot be overwritten by an agent or scope derivation.
+
+Successful scope declarations supply a fallback based on the common directory
+of their literal path prefixes, relative to the workspace (`.` for the entire
+workspace). It persists after `end-work`; a later declaration updates a derived
+domain. Explicit names take precedence. Path-derived labels are excluded from
+the suggested vocabulary. Threads with neither signal remain unset.
+At the user's request, use `thread update --domain <name>` for an override or
+`thread update --no-domain` to reset to the last scope fallback and permit agent
+reporting again. The checkpoint editor offers the same override and reset.
+User-authored checkpoints may reset with `"domain": null`; agents must omit the
+field instead of sending null. Domain metadata does not change thread placement.
 
 Use `summary` as the separate changing current/latest-work description. Its first
 sentence should concisely say what is being done now or what was delivered; use

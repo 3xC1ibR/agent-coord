@@ -110,5 +110,5 @@ test("preview stays open while moving onto it and closes after leaving", async (
 test("failed requests retain useful context without global errors; click dismisses", async () => {
   const s = setup(); s.enter(s.first); await s.flush(); s.requests[0].reject(new Error("offline")); await Promise.resolve();
   assert.match(s.panel.html, /<p>Saved progress<\/p>/); assert.match(s.panel.text, /Latest message unavailable/);
-  s.overview.handlers.click(); assert.equal(s.panel.hidden, true);
+  s.overview.handlers.click({target: s.overview}); assert.equal(s.panel.hidden, true);
 });

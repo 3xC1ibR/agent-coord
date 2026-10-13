@@ -9,7 +9,7 @@ from .store import CoordinationError
 
 DEFAULT_FILTERS = {"repository": "", "project": "", "phase": "", "show": "active", "search": ""}
 PHASES = {"", "new", "discussion", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"}
-GROUPS = {"phase", "repository", "project", "none"}
+GROUPS = {"phase", "domain", "repository", "project", "none"}
 
 
 class ViewStore:

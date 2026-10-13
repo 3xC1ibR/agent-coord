@@ -40,3 +40,23 @@ test("changing grouping never drops threads with no associations", () => {
   }
   assert.deepEqual(groupThreads([], "repository"), []);
 });
+
+test("domain grouping uses explicit names before scope fallback and retains missing signals", () => {
+  const input = [
+    {thread_id: "explicit", domain: "web", scope_cluster: "backend"},
+    {thread_id: "same", domain: " WEB "},
+    {thread_id: "fallback", domain: null, scope_cluster: "web"},
+    {thread_id: "path", scope_cluster: "src/api"},
+    {thread_id: "workspace", domain: ".", domain_source: "derived"},
+    {thread_id: "missing"},
+    {thread_id: "literal-none", domain: "__none__"},
+  ];
+  const before = JSON.stringify(input), groups = groupThreads(input, "domain");
+  assert.deepEqual(groups.find(group => group.label === "web").threads.map(thread => thread.thread_id), ["explicit", "same", "fallback"]);
+  assert.equal(groups.find(group => group.label === "Workspace").threads[0].thread_id, "workspace");
+  assert.equal(groups.at(-1).label, "No domain");
+  assert.equal(new Set(groups.map(group => group.key)).size, groups.length);
+  assert.equal(groups.flatMap(group => group.threads).length, input.length);
+  assert.equal(JSON.stringify(input), before);
+  assert.deepEqual(groupThreads([], "domain"), []);
+});

@@ -62,3 +62,36 @@
   .welcome .placement-switch button { flex: 1; min-height: 44px; font-size: 14px; border-radius: 5px; }
   .welcome .workspace-actions:has(> #welcome-project[hidden]) { display: none; }
 }
+
+/* Views and their tools form one row beneath the directory tabs. */
+.view-navigation, .view-utilities { display: none; }
+@media (min-width: 721px) {
+  .views-bar.unified-views { min-height: 54px; padding: 0 14px; gap: 20px; background: var(--paper); }
+  .unified-views .view-navigation { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+  .unified-views .placement-switch { flex: none; gap: 2px; padding: 0; border: 0; border-radius: 0; }
+  .unified-views .placement-switch button { min-height: 30px; padding: 6px 9px; border-radius: 5px; font-size: 12px; }
+  .unified-views .placement-switch button[aria-pressed="true"] { background: var(--tint); }
+  .unified-views .saved-view-tabs { flex: 0 1 auto; align-items: center; gap: 4px; padding-left: 12px; border-left: 1px solid var(--line-strong); }
+  .unified-views .saved-view-tab { max-width: 180px; padding: 6px 9px; min-height: 30px; border: 0; border-radius: 5px; }
+  .unified-views .saved-view-tab[aria-selected="true"] { background: var(--tint); color: var(--ink); }
+  .unified-views .view-navigation > button { flex: none; padding: 6px 8px; border: 0; font-size: 12px; white-space: nowrap; }
+  .unified-views .view-navigation > #add-view { color: var(--muted); }
+  .unified-views .view-menu > summary { padding: 6px; }
+  .unified-views .view-menu-panel { left: 0; right: auto; }
+  .unified-views .view-utilities { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: 0 1 auto; min-width: 0; margin-left: auto; }
+  .unified-views .search-field { width: clamp(150px, 17vw, 260px); flex: 0 1 auto; }
+  .unified-views .search-field input { width: 100%; padding-block: 7px; }
+  .unified-views .search-field > span { font-size: 20px; }
+  .unified-views .filter-menu summary { min-height: 32px; padding: 6px 9px; background: transparent; font-size: 11px; }
+  .unified-views .filter-panel { left: auto; right: 0; }
+  .unified-views .filter-panel > .domain-toggle { width: 100%; margin: 0 0 14px; padding: 8px 10px; border: 1px solid var(--line); text-align: left; }
+  .unified-views .view-utilities > button { flex: none; padding: 7px 10px; font-size: 11px; white-space: nowrap; }
+  .unified-views > .view-actions, .workspace-tools.tools-in-header { display: none; }
+  main > .welcome { padding-top: 20px; }
+  @media (max-width: 1100px) {
+    .views-bar.unified-views { flex-wrap: wrap; gap: 4px 16px; padding-block: 7px; }
+    .unified-views .view-navigation { flex-basis: 100%; }
+    .unified-views .view-utilities { flex: 1; }
+    .unified-views .search-field { flex: 1; width: auto; }
+  }
+}

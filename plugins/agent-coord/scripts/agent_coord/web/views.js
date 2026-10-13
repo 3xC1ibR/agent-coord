@@ -61,27 +61,45 @@ class SavedViews {
     try { this.navigation = JSON.parse(storage?.getItem(this.key) || "{}"); } catch { /* Optional window state. */ }
     if (!this.navigation || typeof this.navigation !== "object" || Array.isArray(this.navigation)) this.navigation = {};
     this.bind();
-    this.setupMobile();
+    this.setupLayout();
   }
-  setupMobile() {
+  setupLayout() {
     this.mobile = this.doc.defaultView?.matchMedia("(max-width: 720px)");
     if (!this.mobile) return;
     const host = this.$("mobile-overview");
     const hostHome = this.doc.createComment("project view selector"); host.before(hostHome);
-    const homes = ["welcome-new", "view-menu", "add-view", "reset-view", "update-view"].map(id => {
-      const element = this.$(id), marker = this.doc.createComment("overview control position");
+    const bar = this.doc.querySelector(".views-bar"), tools = this.doc.querySelector(".workspace-tools");
+    const navigation = this.doc.createElement("div"); navigation.className = "view-navigation";
+    const utilities = this.doc.createElement("div"); utilities.className = "view-utilities";
+    bar.prepend(navigation); bar.append(utilities);
+    const placement = this.doc.querySelector(".placement-switch"), search = this.doc.querySelector(".search-field");
+    const filters = this.doc.querySelector(".view-filters"), actions = this.doc.querySelector(".workspace-actions");
+    const elements = ["welcome-new", "view-menu", "add-view", "reset-view", "update-view", "saved-view-tabs",
+      "tile-threads", "leave-tiles", "group-by-domain", "start-dispatcher"].map(id => this.$(id));
+    const homes = [...elements, placement, search, filters, actions].map(element => {
+      const marker = this.doc.createComment("overview control position");
       element.before(marker);
       return {element, marker};
     });
     const sync = () => {
       this.closeMenu();
+      for (const {element, marker} of homes) marker.after(element);
+      bar.classList.toggle("unified-views", !this.mobile.matches);
+      tools.classList.toggle("tools-in-header", !this.mobile.matches);
       if (this.mobile.matches) {
         this.doc.querySelector(".workspace-bar").insertBefore(host, this.$("connection"));
         host.append(this.$("welcome-new"), this.$("view-menu"));
         this.$("mobile-view-actions").append(this.$("add-view"), this.$("reset-view"), this.$("update-view"));
       } else {
         hostHome.after(host);
-        for (const {element, marker} of homes) marker.after(element);
+        navigation.append(placement, this.$("saved-view-tabs"), this.$("add-view"), this.$("view-menu"),
+          this.$("reset-view"), this.$("update-view"));
+        utilities.append(search, filters, this.$("tile-threads"), this.$("leave-tiles"));
+        this.doc.querySelector(".filter-panel").prepend(this.$("group-by-domain"));
+        const header = this.doc.querySelector(".workspace-bar");
+        header.insertBefore(actions, this.$("connection"));
+        const menu = header.querySelector(".workspace-switcher-panel");
+        if (menu) menu.append(this.$("start-dispatcher"));
       }
       this.changed();
     };
@@ -89,7 +107,7 @@ class SavedViews {
     sync();
   }
   $(id) { return this.doc.getElementById(id); }
-  scoped(items) { return items.filter(view => this.cwd === undefined || !view.cwd || view.cwd === this.cwd); }
+  scoped(items) { return items.filter(view => this.cwd === undefined || view.cwd === this.cwd); }
   async setProject(cwd) {
     this.remember();
     await Promise.all([...this.saves.values()].map(pending => pending.promise));
@@ -122,7 +140,7 @@ class SavedViews {
       control.value = f[field];
     }
     this.$("phase-filter").value = f.phase; this.$("view").value = f.show; this.$("search").value = f.search;
-    this.$("group-by").value = ["phase", "project", "none"].includes(value.group_by) ? value.group_by : "phase";
+    this.$("group-by").value = ["phase", "domain", "project", "none"].includes(value.group_by) ? value.group_by : "phase";
   }
   dirty() { return !threadViews.same(this.read(), this.definition); }
   remember() {
@@ -244,7 +262,10 @@ class SavedViews {
   }
   focusActive() {
     if (this.mobile?.matches) this.$("mobile-view").focus({preventScroll: true});
-    else if (!this.$("saved-view-tabs").hidden) {
+    else if (this.activeId === "all" && this.$("show-now")) {
+      const show = this.read().filters.show;
+      this.$(show === "later" ? "show-later" : show === "archived" ? "show-closed" : "show-now").focus({preventScroll: true});
+    } else if (!this.$("saved-view-tabs").hidden) {
       const tab = this.$("saved-view-tabs").querySelector('[aria-selected="true"]');
       tab?.focus({preventScroll: true});
       tab?.scrollIntoView({block: "nearest", inline: "nearest"});
@@ -272,6 +293,11 @@ class SavedViews {
     this.$("mobile-view").disabled = this.cwd === "";
     this.$("saved-view-tabs").hidden = this.cwd === "" || this.items.length <= 1;
     this.$("overview-title").textContent = this.current().name + " overview";
+    if (this.$("show-closed")) this.$("show-closed").title = "Show closed threads";
+    for (const [id, show] of [["show-now", "active"], ["show-later", "later"], ["show-closed", "archived"]]) {
+      const active = !custom && (show === "active" ? !["later", "archived"].includes(f.show) : f.show === show);
+      this.$(id)?.setAttribute("aria-pressed", String(active));
+    }
   }
   render(threads = this.threads) {
     this.threads = threads;
@@ -291,10 +317,11 @@ class SavedViews {
         (counts.attention ? " · " + counts.attention + " need attention" : "") +
         (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
       picker.append(option);
+      if (view.id === "all") return;
       const tab = this.doc.createElement("button"), selected = view.id === this.activeId;
       tab.type = "button"; tab.className = "saved-view-tab"; tab.dataset.viewId = view.id;
       tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(selected));
-      tab.setAttribute("aria-controls", "welcome"); tab.tabIndex = selected ? 0 : -1;
+      tab.setAttribute("aria-controls", "welcome"); tab.tabIndex = selected || (this.activeId === "all" && index === 1) ? 0 : -1;
       tab.title = view.name;
       tab.setAttribute("aria-label", view.name + (counts.attention ? " · " + counts.attention + " need attention" : "") +
         (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
@@ -330,28 +357,41 @@ class SavedViews {
     finally { this.busy = false; this.$("save-view").disabled = false; this.render(); }
   }
   async openDialog(mode) {
-    const id = this.activeId;
+    const id = this.activeId, cwd = this.cwd;
     await this.saves.get(id)?.promise;
-    if (this.activeId !== id) return;
+    if (this.activeId !== id || this.cwd !== cwd || cwd === "") return;
     this.closeMenu();
     // Capture the target and definition so polling or navigation cannot retarget a save.
     const view = this.current();
-    this.edit = {mode, id: view.id, version: this.definition.version, cwd: this.cwd,
+    this.edit = {mode, id: view.id, version: this.definition.version, cwd,
       value: mode === "duplicate" ? {filters: view.filters, group_by: view.group_by} : this.read()};
     this.$("view-dialog-title").textContent = mode === "rename" ? "Rename view" : mode === "duplicate" ? "Duplicate view" : "Save view";
     this.$("view-dialog-description").textContent = mode === "rename" ? "Give this view a new name."
-      : mode === "duplicate" ? "Create a view with the same saved filters and grouping in this project." : "Save these filters and grouping within the current project.";
+      : mode === "duplicate" ? "Create a view with the same saved filters and grouping in this workspace." : "Save these filters and grouping within the current workspace.";
     this.$("view-name").value = mode === "rename" ? view.name : mode === "duplicate" ? view.name + " copy" : "";
     this.$("view-error").hidden = true;
     this.$("view-dialog").showModal(); this.$("view-name").focus();
   }
   bind() {
+    for (const [id, show] of [["show-now", "active"], ["show-later", "later"], ["show-closed", "archived"]]) {
+      const button = this.$(id);
+      if (button) button.onclick = async () => {
+        try {
+          const base = this.activeId === "all" ? this.read() : this.all;
+          await this.overview({...base.filters, show}, base.group_by);
+          this.focusActive();
+        } catch (error) { this.onError(error); }
+      };
+    }
     this.$("saved-view-tabs").onkeydown = event => {
       if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
-      const next = threadViews.shortcut(event, this.items.indexOf(this.current()), this.items.length, true);
+      const custom = this.items.filter(view => view.id !== "all");
+      if (!custom.length) return;
+      const focused = event.target?.dataset?.viewId || this.activeId;
+      const next = threadViews.shortcut(event, Math.max(0, custom.findIndex(view => view.id === focused)), custom.length, true);
       if (next === null) return;
       event.preventDefault();
-      return this.activate(this.items[next].id).catch(this.onError);
+      return this.activate(custom[next].id).catch(this.onError);
     };
     this.$("mobile-view").onchange = () => this.activate(this.$("mobile-view").value).catch(this.onError);
     this.$("add-view").onclick = () => this.openDialog("create").catch(this.onError);
@@ -385,7 +425,10 @@ class SavedViews {
         if (edit.mode === "rename") {
           this.items = this.items.map(view => view.id === result.id ? result : view);
           if (this.activeId === result.id) this.definition = {...this.definition, name: result.name, version: result.version};
-        } else this.items.push(result);
+        } else if (this.scoped([result]).length) {
+          // A workspace switch or poll may finish while the save is in flight.
+          this.items = [...this.items.filter(view => view.id !== result.id), result];
+        }
         this.$("view-dialog").close();
         if (edit.mode !== "rename") await this.activate(result.id, true);
         else this.focusActive();

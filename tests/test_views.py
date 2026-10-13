@@ -63,6 +63,44 @@ class SavedViewTests(unittest.TestCase):
             item = self.views.create({"name": str(filters), "filters": filters})
             self.assertEqual(item["filters"], {**DEFAULT_FILTERS, **filters})
 
+    def test_domain_grouping_can_be_saved_updated_and_restored(self):
+        view = self.views.create({"name": "Domains", "group_by": "domain"})
+        reopened = ViewStore(CoordinationStore(self.store.database_path))
+        self.assertEqual(reopened.list()[0]["group_by"], "domain")
+        changed = reopened.update(view["id"], {"group_by": "phase", "version": view["version"]})
+        changed = reopened.update(view["id"], {"group_by": "domain", "version": changed["version"]})
+        self.assertEqual(self.views.list()[0]["group_by"], "domain")
+
+    def test_workspace_ownership_survives_updates_and_restart(self):
+        foo = self.root / "foo"
+        bar = self.root / "bar"
+        original = self.views.create({"name": "Review", "cwd": str(foo / "subdir" / "..")})
+        other = self.views.create({"name": "Review", "cwd": str(bar)})
+        self.assertEqual(original["cwd"], str(foo))
+        self.assertEqual(other["cwd"], str(bar))
+        with self.assertRaises(CoordinationError):
+            self.views.create({"name": "review", "cwd": str(foo)})
+        updated = self.views.update(original["id"], {"name": "Ready", "filters": {"phase": "validation"}, "version": 1})
+        self.assertEqual(updated["cwd"], str(foo))
+        with self.assertRaises(CoordinationError):
+            self.views.update(original["id"], {"cwd": str(bar), "version": 2})
+        reopened = ViewStore(CoordinationStore(self.store.database_path))
+        self.assertEqual(reopened.list(), [updated, other])
+
+    def test_reordering_and_deleting_are_local_to_the_owning_workspace(self):
+        foo = str(self.root / "foo")
+        bar = str(self.root / "bar")
+        first = self.views.create({"name": "First", "cwd": foo})
+        other = self.views.create({"name": "First", "cwd": bar})
+        second = self.views.create({"name": "Second", "cwd": foo})
+        legacy = self.views.create({"name": "Legacy"})
+        self.views.move(second["id"], {"direction": "left"})
+        self.assertEqual([view["id"] for view in self.views.list()],
+                         [second["id"], other["id"], first["id"], legacy["id"]])
+        self.views.delete(second["id"], {"version": 1})
+        self.assertEqual(next(view for view in self.views.list() if view["id"] == other["id"]), other)
+        self.assertIn(legacy, self.views.list())
+
     def test_invalid_definitions_leave_store_unchanged(self):
         for body in ({}, {"name": ""}, {"name": " "}, {"name": "x" * 161}, {"name": True},
                      {"name": "All work"}, {"name": "bad", "unknown": True},
@@ -169,7 +207,8 @@ class SavedViewTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for view interaction tests")
     def test_browser_views(self):
-        result = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_web_views.js"))],
+        result = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_web_views.js")),
+                                 str(Path(__file__).with_name("test_web_domain_grouping.js"))],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

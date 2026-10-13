@@ -174,6 +174,28 @@ def _scope_root(scope: str) -> str:
     return prefix or "."
 
 
+def derive_scope_cluster(scopes: Iterable[str], cwd: str) -> str | None:
+    """Common directory of normalized scope prefixes, relative to the workspace.
+
+    This is a structural fallback, not a guessed human domain. Exact files use
+    their parent; directory scopes and glob prefixes keep their directory.
+    Unrelated scopes share the workspace cluster (".").
+    """
+    directories = []
+    for scope in scopes:
+        match = _WILDCARD.search(scope)
+        if match:
+            prefix = scope[:match.start()]
+            root = (prefix.rstrip("/") if prefix.endswith("/") else posixpath.dirname(prefix)) or "."
+        else:
+            root = scope.rstrip("/") or "."
+        path = Path(cwd) / root
+        if not match and (path.is_file() or (not path.is_dir() and PurePosixPath(root).suffix)):
+            root = posixpath.dirname(root) or "."
+        directories.append(root)
+    return (posixpath.commonpath(directories) or ".") if directories else None
+
+
 def scopes_overlap(left: str, right: str) -> bool:
     left_glob = _WILDCARD.search(left) is not None
     right_glob = _WILDCARD.search(right) is not None
@@ -1238,6 +1260,7 @@ class CoordinationStore:
                     session_id,
                 ),
             )
+            self.threads.record_scope(connection, session_id, normalized, session["cwd"])
         return self.get_session(session_id)
 
     def check_conflicts(self, session_id: str) -> list[dict[str, Any]]:
@@ -1412,6 +1435,7 @@ class CoordinationStore:
                     recipient_session_id,
                 ),
             )
+            self.threads.record_scope(connection, recipient_session_id, requested_scopes, recipient_row["cwd"])
             bead_context = ""
             if source_bead_id is not None:
                 bead_context = f"Bead: {source_bead_id} to {target}. "

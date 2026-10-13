@@ -94,6 +94,7 @@ class WorkingFolders {
 class ProjectTabs {
   constructor({document, folders, onSwitch, onError, canSwitch = () => true}) {
     Object.assign(this, {doc: document, folders, onSwitch, onError, canSwitch});
+    this.setupHeader();
     document.addEventListener("keydown", event => {
       if (document.querySelector("dialog[open]") || event.target.closest("input, textarea, select, [contenteditable]")) return;
       const tabs = document.getElementById("view-tabs"), items = folders.projects;
@@ -104,12 +105,50 @@ class ProjectTabs {
       event.preventDefault(); this.activate(items[next].cwd).catch(onError);
     });
   }
+  setupHeader() {
+    const header = this.doc.querySelector(".workspace-bar"), projects = this.doc.getElementById("project-navigation");
+    const desktop = this.doc.defaultView?.matchMedia("(min-width: 721px)");
+    if (!header || !projects || !desktop) return;
+    // Keep one set of controls and restore their original positions on phones.
+    const home = this.doc.createComment("project navigation position"); projects.before(home);
+    const menu = this.doc.createElement("details"); menu.className = "workspace-switcher";
+    const toggle = this.doc.createElement("summary");
+    toggle.textContent = "Ribbon Field"; toggle.setAttribute("aria-label", "Ribbon Field workspace menu");
+    const chevron = this.doc.createElement("span"); chevron.textContent = "▾"; chevron.setAttribute("aria-hidden", "true");
+    toggle.append(chevron); menu.append(toggle);
+    const panel = this.doc.createElement("div"); panel.className = "workspace-switcher-panel";
+    for (const [label, id] of [["Workspace overview", "home"], ["Open project…", "open-folder"],
+      ["Scheduled prompts", "scheduled-prompts"]]) {
+      const button = this.doc.createElement("button"); button.type = "button"; button.textContent = label;
+      button.onclick = () => { menu.open = false; this.doc.getElementById(id)?.click(); };
+      panel.append(button);
+    }
+    const monitor = this.doc.createElement("a"); monitor.href = "/monitor"; monitor.textContent = "Coordination monitor";
+    panel.append(monitor); menu.append(panel);
+    header.querySelector(".breadcrumb").append(menu);
+    menu.addEventListener("click", event => {
+      if (event.target.closest(".workspace-switcher-panel button, .workspace-switcher-panel a")) menu.open = false;
+    });
+    this.doc.addEventListener("pointerdown", event => { if (!menu.contains(event.target)) menu.open = false; });
+    this.doc.addEventListener("keydown", event => {
+      if (event.key === "Escape" && menu.open) { menu.open = false; toggle.focus(); event.preventDefault(); }
+    });
+    const sync = () => {
+      menu.open = false; menu.hidden = !desktop.matches;
+      header.classList.toggle("header-tabs", desktop.matches);
+      if (desktop.matches) header.insertBefore(projects, header.querySelector(".dispatcher-mobile-nav"));
+      else home.after(projects);
+    };
+    desktop.addEventListener("change", sync); sync();
+  }
   async activate(cwd) {
     this.pending = (this.pending || Promise.resolve()).catch(() => {}).then(async () => {
       if (!this.canSwitch()) return;
       this.folders.activate(cwd);
       await this.onSwitch(); this.render();
-      this.doc.getElementById("view-tabs").querySelector('[aria-selected="true"]')?.focus({preventScroll: true});
+      const tab = this.doc.getElementById("view-tabs").querySelector('[aria-selected="true"]');
+      tab?.focus({preventScroll: true});
+      tab?.scrollIntoView({block: "nearest", inline: "nearest"});
     });
     return this.pending;
   }
@@ -131,7 +170,10 @@ class ProjectTabs {
       tab.setAttribute("aria-controls", "welcome"); tab.tabIndex = selected ? 0 : -1;
       tab.title = project.cwd;
       label.className = "view-tab-name"; label.textContent = project.cwd.split("/").filter(Boolean).pop() || "/";
-      tab.append(label);
+      const icon = this.doc.createElement("span"); icon.className = "project-folder-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2h6a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 16 16H4a1.5 1.5 0 0 1-1.5-1.5z"/></svg>';
+      tab.append(icon, label);
       const counts = threadViews.badges(threads.filter(t => inProject(t, project.cwd)), {});
       if (counts.attention) {
         const badge = this.doc.createElement("span"); badge.className = "view-attention"; badge.textContent = String(counts.attention); tab.append(badge);

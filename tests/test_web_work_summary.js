@@ -45,7 +45,10 @@ test('resumed work hides the old user next step while retaining checkpoint conte
   assert.equal(result.nodes.find(n=>n.className==='next-action'),undefined);
   assert.equal(result.nodes.find(n=>n.className==='stale-checkpoint').textContent,'New activity since this checkpoint');
   assert.equal(result.summary.textContent,checkpoint.summary);
-  if(response_state==='working') assert.equal(result.nodes.find(n=>n.className.split(' ').includes('card-state')).textContent,'Working');
+  if(response_state==='working') {
+   assert.equal(result.nodes.find(n=>n.className.split(' ').includes('card-state')),undefined);
+   assert.equal(result.nodes.find(n=>n.className==='sr-only').textContent,'Working');
+  }
  }
 });
 test('Attention explains why a response is present, including failures and reminders',()=>{
@@ -62,12 +65,14 @@ test('Attention explains why a response is present, including failures and remin
   assert.ok(!status.className.includes('sr-only'));
  }
 });
-test('card actions share one group and remain outside the navigation button',()=>{
+test('title controls remain outside the navigation button and separate from response actions',()=>{
  const result=card({can_handle_response:true});
  const controls=result.root.children.find(n=>n.className==='card-actions');
  assert.ok(!controls.children.some(n=>n.className==='card-pin'));
- assert.ok(controls.children.some(n=>n.className==='card-close'));
- assert.ok(controls.children.some(n=>n.dataset.action==='more'));
+ const titleControls=result.root.children.find(n=>n.className==='card-title-actions');
+ assert.ok(titleControls.children.some(n=>n.className==='card-close'));
+ assert.ok(titleControls.children.some(n=>n.dataset.action==='more'));
+ assert.ok(!controls.children.some(n=>n.className==='card-close'||n.dataset.action==='more'));
  const walk=n=>[n,...n.children.flatMap(walk)];
  for(const button of result.nodes.filter(n=>n.tag==='button'))
   assert.ok(walk(button).slice(1).every(n=>n.tag!=='button'));

@@ -50,7 +50,9 @@ test("only explicit orchestration creations nest across phases without changing 
   assert.deepEqual(c.rows().map(n => n.dataset.thread), ["orchestrated"]);
   assert.equal(c.$("thread-count").textContent, "4");
   assert.equal(JSON.stringify(records), before);
-  assert.equal(withClass(c.rows()[0], "agent-row-status")[0].textContent, "Unknown provider · Deploying · Working");
+  assert.equal(withClass(c.rows()[0], "agent-row-status")[0].textContent, "Unknown provider · Deploying");
+  assert.equal(withClass(c.rows()[0], "sr-only")[0].textContent, "Working");
+  assert.ok(c.rows()[0].className.split(" ").includes("working"));
   c.rows()[0].onclick(); assert.deepEqual(c.selected, ["orchestrated"]);
   assert.equal(withClass(c.$("sessions"), "agent-row").length, 1);
   assert.equal(withClass(c.$("overview"), "agent-origin")[0].textContent, "Created by parent");
@@ -75,7 +77,7 @@ test("collapse persists with count-free disclosure and styled unread child rows"
   const c = harness([thread("parent"), thread("child", "parent", {status: "running", unread_result: true})]);
   let details = withClass(c.$("overview"), "agent-children")[0];
   assert.equal(details.open, true);
-  assert.equal(withClass(details, "agent-counts")[0].textContent, "1 working");
+  assert.equal(withClass(details, "agent-counts").length, 0);
   assert.equal(withClass(details, "agent-children-toggle")[0].attrs["aria-label"], "Agents created by parent · 1 agent · 1 working · 1 unread");
   assert.match(c.rows()[0].className, /response-unread/);
   assert.ok(walk(details).every(n => !/\d+ agents?|unread|read response/i.test(n.textContent || "")));

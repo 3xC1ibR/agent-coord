@@ -10,7 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
 from agent_coord.cli import _parser, run
-from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.store import CoordinationError, CoordinationStore, derive_scope_cluster
 from agent_coord.threads import project_root
 
 
@@ -29,6 +29,145 @@ class WorkThreadTests(unittest.TestCase):
             "phase": "investigation", "summary": "Two options remain.",
             "next_action": "Choose an approach.", "next_actor": "user", **changes,
         })
+
+    def test_domain_is_optional_sticky_and_can_follow_a_new_assignment(self):
+        thread = self.threads.get("conversation")
+        self.assertIsNone(thread["domain"])
+        self.assertIsNone(thread["domain_source"])
+        self.assertIsNone(thread["scope_cluster"])
+        self.save(title="Product development", domain="  WEB  ")
+        self.threads.start_turn("conversation", prompt="Continue the implementation.", turn_id="second")
+        thread = self.save(summary="Continued implementation.")
+        self.assertEqual((thread["domain"], thread["domain_source"]), ("web", "agent"))
+        self.save(domain="Backend", title="Another assignment")
+        reopened = CoordinationStore(self.store.database_path).threads.get("conversation")
+        self.assertEqual((reopened["domain"], reopened["domain_source"]), ("backend", "agent"))
+        self.assertEqual(reopened["title"], "Product development")
+        self.assertEqual(reopened["original_request"], "Continue the implementation.")
+
+    def test_user_domain_is_protected_and_reset_permits_agent_reporting(self):
+        self.save(domain="web")
+        self.threads.update("conversation", domain="  User   Interface ")
+        self.store.begin_work(session_id="conversation", scopes=["backend/**"])
+        thread = self.save(domain="backend", summary="Saved despite protected domain.")
+        self.assertEqual((thread["domain"], thread["domain_source"]), ("user interface", "user"))
+        self.assertEqual(thread["checkpoint"]["summary"], "Saved despite protected domain.")
+        self.assertEqual(thread["scope_cluster"], "backend")
+        reset = self.threads.update("conversation", domain=None)
+        self.assertEqual((reset["domain"], reset["domain_source"]), ("backend", "derived"))
+        self.assertEqual(self.save(domain="infra")["domain_source"], "agent")
+        self.threads.checkpoint("conversation", {"phase": "discussion", "summary": "My note.", "domain": "docs"}, author="user")
+        self.assertEqual(self.save(domain="web")["domain"], "docs")
+        self.threads.checkpoint("conversation", {"phase": "discussion", "summary": "Reset.", "domain": None}, author="user")
+        self.assertEqual(self.save(domain="web")["domain"], "web")
+
+    def test_reset_without_scope_leaves_domain_unset_and_omission_preserves_override(self):
+        self.threads.update("conversation", domain="research")
+        self.threads.update("conversation", title="Research conversation")
+        self.assertEqual(self.save()["domain_source"], "user")
+        reset = self.threads.update("conversation", domain=None)
+        self.assertIsNone(reset["domain"])
+        self.assertIsNone(reset["domain_source"])
+        self.assertEqual(self.save(domain="docs")["domain_source"], "agent")
+
+    def test_invalid_domain_cannot_partially_save(self):
+        self.save(domain="web")
+        before = self.threads.get("conversation", history=True)
+        for domain in (None, "", "  ", 1, True, [], {}, "x" * 65, "ß" * 64):
+            with self.subTest(domain=domain):
+                with self.assertRaisesRegex(CoordinationError, "Thread domain"):
+                    self.save(domain=domain, summary="Invalid change.", links=[{"kind": "issue", "target": "issue-1"}])
+                self.assertEqual(self.threads.get("conversation", history=True), before)
+        for domain in ("", False, [], "x" * 65):
+            with self.assertRaisesRegex(CoordinationError, "Thread domain"):
+                self.threads.update("conversation", domain=domain, title="Must not change")
+            self.assertEqual(self.threads.get("conversation", history=True), before)
+        self.assertEqual(self.save(domain="x" * 64)["domain"], "x" * 64)
+
+    def test_scope_fallback_survives_end_work_and_follows_new_scopes(self):
+        self.store.begin_work(session_id="conversation", scopes=["src/web/app.js", "src/web/index.html"])
+        self.store.end_work("conversation")
+        reopened = CoordinationStore(self.store.database_path)
+        thread = reopened.threads.get("conversation")
+        self.assertEqual((thread["domain"], thread["domain_source"], thread["scope_cluster"]), ("src/web", "derived", "src/web"))
+        reopened.begin_work(session_id="conversation", scopes=["backend/**"])
+        self.assertEqual(reopened.threads.get("conversation")["domain"], "backend")
+        reopened.threads.checkpoint("conversation", {"phase": "implementation", "summary": "Explicit label.", "domain": "api"})
+        reopened.begin_work(session_id="conversation", scopes=["infra/**"])
+        thread = reopened.threads.get("conversation")
+        self.assertEqual((thread["domain"], thread["domain_source"], thread["scope_cluster"]), ("api", "agent", "infra"))
+
+    def test_scope_clusters_are_structural_and_bounded_by_the_workspace(self):
+        (self.root / "web").mkdir()
+        (self.root / "web" / "LICENSE").write_text("license")
+        cases = [([], None), (["src/web/*.js", "src/web/styles/**"], "src/web"),
+                 (["src/web/button*.js"], "src/web"), (["src/**", "tests/**"], "."),
+                 (["README.md"], "."), (["web"], "web"), (["web/LICENSE"], "web"), (["**/*"], "."),
+                 (["test*.py"], "."), (["src/web*/**"], "src")]
+        for scopes, expected in cases:
+            with self.subTest(scopes=scopes):
+                self.assertEqual(derive_scope_cluster(scopes, str(self.root)), expected)
+        self.store.begin_work(session_id="conversation", scopes=[str(self.root / "src/web/app.js")])
+        self.assertEqual(self.threads.get("conversation")["scope_cluster"], "src/web")
+
+    def test_conflicting_scope_cannot_change_domain_and_handoff_persists_fallback(self):
+        self.store.register(session_id="peer", client="claude", cwd=str(self.root))
+        self.store.begin_work(session_id="conversation", scopes=["web/**"])
+        with self.assertRaises(CoordinationError):
+            self.store.begin_work(session_id="peer", scopes=["web/app.js"])
+        self.assertIsNone(self.threads.get("peer")["domain"])
+        self.store.handoff_work(sender_session_id="conversation", recipient_session_id="peer", patch_label="Web change",
+                           validation_boundary="Unit tests pass.", validation_responsibility="Review.", mode="validation")
+        self.store.end_work("peer")
+        thread = self.threads.get("peer")
+        self.assertEqual((thread["domain"], thread["domain_source"], thread["scope_cluster"]), ("web", "derived", "web"))
+
+    def test_domain_migration_backfills_active_scope_without_changing_checkpoint(self):
+        self.save()
+        self.store.begin_work(session_id="conversation", scopes=["web/**"])
+        before = self.threads.get("conversation")["checkpoint"]
+        with self.store._connection() as db:
+            for field in ("domain", "domain_source", "scope_cluster"):
+                db.execute(f"ALTER TABLE work_threads DROP COLUMN {field}")
+        reopened = CoordinationStore(self.store.database_path)
+        thread = reopened.threads.get("conversation")
+        self.assertEqual((thread["domain"], thread["domain_source"], thread["scope_cluster"]), ("web", "derived", "web"))
+        self.assertEqual(thread["checkpoint"], before)
+        reopened.end_work("conversation")
+        self.assertEqual(CoordinationStore(self.store.database_path).threads.get("conversation")["domain"], "web")
+
+    def test_workspace_domain_vocabulary_is_normalized_open_explicit_and_bounded(self):
+        self.save(domain="  WEB ")
+        self.store.register(session_id="duplicate", client="claude", cwd=str(self.root))
+        self.threads.update("duplicate", domain="web")
+        self.store.register(session_id="derived", client="kimi", cwd=str(self.root))
+        self.store.begin_work(session_id="derived", scopes=["generated/**"])
+        self.store.register(session_id="closed", client="codex", cwd=str(self.root))
+        self.threads.update("closed", domain="closed", attention="archived")
+        other = self.root / "other"
+        other.mkdir()
+        self.store.register(session_id="elsewhere", client="antigravity", cwd=str(other))
+        self.threads.update("elsewhere", domain="elsewhere")
+        self.assertEqual(self.threads.known_domains(str(self.root)), ["web"])
+        for index in range(23):
+            session_id = f"vocabulary-{index}"
+            self.store.register(session_id=session_id, client="codex", cwd=str(self.root))
+            self.threads.update(session_id, domain=f"domain-{index:02}")
+        names = self.threads.known_domains(str(self.root))
+        self.assertEqual(len(names), 20)
+        self.assertEqual(names[0], "web")
+        self.assertEqual(names[1], "domain-00")
+
+    def test_cli_domain_override_reset_and_checkpoint_reporting(self):
+        def run_cli(*args):
+            return run(_parser().parse_args(["--db", str(self.store.database_path), *args]))
+        run_cli("thread", "update", "--session-id", "conversation", "--domain", "WEB")
+        thread = run_cli("checkpoint", "--session-id", "conversation", "--json",
+                         json.dumps({"phase": "discussion", "summary": "New assignment.", "domain": "docs"}))
+        self.assertEqual((thread["domain"], thread["domain_source"]), ("web", "user"))
+        thread = run_cli("thread", "update", "--session-id", "conversation", "--no-domain")
+        self.assertIsNone(thread["domain"])
+        self.assertEqual(self.save(domain="docs")["domain_source"], "agent")
 
     def test_first_request_survives_later_turns_and_user_title(self):
         self.threads.start_turn("conversation", prompt="Investigate the database writes.", turn_id="first")

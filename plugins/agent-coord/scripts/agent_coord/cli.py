@@ -188,6 +188,10 @@ def _parser() -> argparse.ArgumentParser:
     thread_update = thread_commands.add_parser("update")
     thread_update.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     thread_update.add_argument("--title")
+    domain_options = thread_update.add_mutually_exclusive_group()
+    domain_options.add_argument("--domain", default=argparse.SUPPRESS, help="Set a protected assignment domain.")
+    domain_options.add_argument("--no-domain", dest="domain", action="store_const", const=None,
+                                default=argparse.SUPPRESS, help="Reset to automatic domain reporting or scope fallback.")
     thread_update.add_argument("--attention", choices=sorted(ATTENTION_STATES))
     for field in ("repository", "project"):
         options = thread_update.add_mutually_exclusive_group()
@@ -612,7 +616,8 @@ def run(arguments: argparse.Namespace) -> Any:
             if arguments.thread_command == "cancel-close":
                 return control.cancel(arguments.session_id)
             return control.status(arguments.session_id)
-        return store.threads.update(arguments.session_id, title=arguments.title, attention=arguments.attention, **associations)
+        return store.threads.update(arguments.session_id, title=arguments.title, attention=arguments.attention,
+                                    **({"domain": arguments.domain} if hasattr(arguments, "domain") else {}), **associations)
     if command == "project":
         if arguments.project_command == "create":
             return store.threads.organization.create_project(arguments.name)

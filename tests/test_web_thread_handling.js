@@ -57,8 +57,8 @@ test("Dismiss on attention and ordinary overview cards handles the displayed res
     const endActions = controls.children.find(child => child.className === "card-end-actions");
     const dismiss = endActions.children.find(child => child.dataset.action === "handle");
     assert.deepEqual(Array.from(endActions.children, child => child.dataset.action), ["handle"]);
-    const more = controls.children.find(child => child.dataset.action === "more");
-    assert.equal(more.textContent, "⋮");
+    const more = card.children.find(child => child.className === "card-title-actions").children.find(child => child.dataset.action === "more");
+    assert.equal(more.textContent, "…");
     let menu;
     c.state.threadActions = {notify() {}, showMenu: (trigger, title, items) => { menu = items; }};
     more.onclick({stopPropagation() {}});
@@ -76,8 +76,8 @@ test("Dismiss on attention and ordinary overview cards handles the displayed res
 test("Dismiss is absent for required input and disabled while the card is saving or closing", () => {
   const item = response({links: []}), c = cardSetup(item);
   const control = () => c.threadCard(item, false, true).children
-    .find(child => child.className === "card-actions").children.find(child => child.className === "card-end-actions")
-    .children.find(child => child.dataset.action === "handle");
+    .find(child => child.className === "card-actions")?.children.find(child => child.className === "card-end-actions")
+    ?.children.find(child => child.dataset.action === "handle");
   c.state.updatingThreads.add(item.thread_id);
   assert.equal(control().disabled, true);
   c.state.updatingThreads.clear(); c.state.closing.add(item.thread_id);

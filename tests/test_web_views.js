@@ -91,7 +91,7 @@ function setup({saved = [], windowStorage = storage(), preferences = storage()} 
     "filter-menu", "reset-view", "update-view", "view-move-left", "view-move-right", "back-home", "overview-title", "add-view",
     "save-view", "view-dialog-title", "view-dialog-description", "view-name", "view-error", "view-dialog", "view-form",
     "view-rename", "view-duplicate", "view-delete", "view-menu-toggle", "view-custom-actions", "filter-count",
-    "mobile-view", "mobile-view-attention", "mobile-view-activity", "saved-view-tabs"];
+    "mobile-view", "mobile-view-attention", "mobile-view-activity", "saved-view-tabs", "show-now", "show-later", "show-closed"];
   const controls = Object.fromEntries(ids.map(id => [id, new Element(id)]));
   controls.view.value = "active"; controls["group-by"].value = "phase";
   doc.getElementById = id => controls[id]; doc.createElement = () => new Element();
@@ -181,6 +181,21 @@ test("named views automatically save filters and grouping while keeping their ow
   assert.equal(c.controls.search.value, "Saved search"); assert.equal(c.views.dirty(), false);
 });
 
+test("domain grouping is restored for saved views and survives window reopen", async () => {
+  const c = setup({saved: [{id: "domains", name: "Domains", filters: {}, group_by: "domain"},
+    {id: "phases", name: "Phases", filters: {}, group_by: "phase"}]});
+  await c.views.start();
+  await c.views.activate("domains");
+  assert.equal(c.controls["group-by"].value, "domain");
+  await c.views.activate("phases");
+  c.controls["group-by"].value = "domain";
+  await c.views.persist();
+  assert.equal(c.records[1].group_by, "domain");
+  const reopened = setup({saved: c.records, windowStorage: c.windowStorage, preferences: c.preferences});
+  await reopened.views.start();
+  assert.equal(reopened.controls["group-by"].value, "domain");
+});
+
 test("automatic filter saving survives a fresh window", async () => {
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}}]});
   await c.views.start(); await c.views.activate("rig");
@@ -259,7 +274,7 @@ test("view tabs keep focus as live counts update and text editing retains its sh
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}}]});
   await c.views.start(); await c.views.activate("rig");
   c.views.render([thread("approval", {response_state: "input"})]);
-  assert.equal(c.doc.activeElement, c.controls["saved-view-tabs"].children[1]);
+  assert.equal(c.doc.activeElement, c.controls["saved-view-tabs"].children[0]);
   assert.equal(c.doc.activeElement.attributes["aria-selected"], "true");
   assert.match(c.doc.activeElement.attributes["aria-label"], /1 need attention/);
   assert.equal(c.controls["mobile-view-attention"].textContent, "1");
@@ -285,7 +300,7 @@ test("view dots show running work and return to the unread-result state when it 
   running.response_state = "available";
   c.views.render([running, completed]);
   assert.equal(activity.className, "view-completed");
-  assert.equal(c.doc.activeElement, c.controls["saved-view-tabs"].children[1]);
+  assert.equal(c.doc.activeElement, c.controls["saved-view-tabs"].children[0]);
   completed.unread_result = false; c.views.render([running, completed]);
   assert.equal(activity.hidden, true);
 });
@@ -414,11 +429,11 @@ test("project switching isolates views and remembers each project's filters", as
   ]});
   await c.views.setProject("/projects");
   assert.deepEqual(c.views.items.map(v => v.id), ["all", "parent"]);
-  assert.deepEqual(c.controls["saved-view-tabs"].children.map(v => v.dataset.viewId), ["all", "parent"]);
+  assert.deepEqual(c.controls["saved-view-tabs"].children.map(v => v.dataset.viewId), ["parent"]);
   await c.views.activate("parent");
   await c.views.setProject("/projects/website");
   assert.deepEqual(c.views.items.map(v => v.id), ["all", "child"]);
-  assert.deepEqual(c.controls["saved-view-tabs"].children.map(v => v.dataset.viewId), ["all", "child"]);
+  assert.deepEqual(c.controls["saved-view-tabs"].children.map(v => v.dataset.viewId), ["child"]);
   assert.equal(c.views.activeId, "all");
   c.controls.search.value = "child filter"; c.views.remember();
   await c.views.setProject("/projects");
@@ -433,23 +448,134 @@ test("project switching isolates views and remembers each project's filters", as
   assert.equal(c.records.at(-1).cwd, "/projects/website");
 });
 
+test("workspace tabs and mobile pickers exclude other workspaces and unassigned legacy views", async () => {
+  const c = setup({saved: [
+    {id: "foo", name: "Review", cwd: "/opt/foo"},
+    {id: "bar", name: "Review", cwd: "/opt/bar"},
+    {id: "legacy", name: "Old view", cwd: null},
+    {id: "missing", name: "Unassigned view"},
+  ]});
+  for (const [cwd, id] of [["/opt/foo", "foo"], ["/opt/bar", "bar"], ["/opt/foo", "foo"]]) {
+    await c.views.setProject(cwd);
+    c.views.sync(structuredClone(c.records)); c.views.render();
+    assert.deepEqual(c.views.items.map(view => view.id), ["all", id]);
+    assert.deepEqual(c.controls["saved-view-tabs"].children.map(tab => tab.dataset.viewId), [id]);
+    assert.deepEqual(c.controls["mobile-view"].children.map(option => option.value), ["all", id]);
+    await c.views.activate(id === "foo" ? "bar" : "foo");
+    assert.equal(c.views.activeId, "all");
+  }
+  assert.equal(c.records.length, 4);
+  assert.deepEqual(c.errors, []);
+});
+
+test("created and duplicated views keep their workspace after switching and reopening", async () => {
+  const c = setup();
+  await c.views.setProject("/opt/foo");
+  c.controls["phase-filter"].value = "validation";
+  await c.views.openDialog("create"); c.controls["view-name"].value = "Review";
+  await c.controls["view-form"].onsubmit({preventDefault() {}});
+  const original = c.views.activeId;
+  await c.views.openDialog("duplicate"); c.controls["view-name"].value = "Review copy";
+  await c.controls["view-form"].onsubmit({preventDefault() {}});
+  const duplicate = c.views.activeId;
+  assert.notEqual(original, duplicate);
+  assert.ok(c.records.every(view => view.cwd === "/opt/foo" && view.filters.phase === "validation"));
+  await c.views.setProject("/opt/bar");
+  assert.deepEqual(c.views.items.map(view => view.id), ["all"]);
+  await c.views.openDialog("create"); c.controls["view-name"].value = "Review";
+  await c.controls["view-form"].onsubmit({preventDefault() {}});
+  const bar = c.views.activeId;
+  assert.equal(c.records.at(-1).cwd, "/opt/bar");
+  const reopened = setup({saved: c.records, preferences: c.preferences});
+  await reopened.views.setProject("/opt/foo");
+  assert.deepEqual(reopened.views.items.map(view => view.id), ["all", original, duplicate]);
+  assert.equal(reopened.views.activeId, duplicate);
+  await reopened.views.setProject("/opt/bar");
+  assert.deepEqual(reopened.views.items.map(view => view.id), ["all", bar]);
+  assert.equal(reopened.views.activeId, bar);
+  assert.deepEqual(c.errors, []);
+});
+
+for (const mode of ["create", "duplicate"]) {
+  test(`a delayed ${mode} stays in its original workspace when another workspace opens`, async () => {
+    const c = setup({saved: [{id: "foo", name: "Review", cwd: "/opt/foo", filters: {phase: "validation"}}]});
+    await c.views.setProject("/opt/foo"); await c.views.activate("foo");
+    await c.views.openDialog(mode); c.controls["view-name"].value = "New review";
+    const api = c.views.api;
+    let release;
+    c.views.api = async (path, body) => {
+      if (path === "views" && body) await new Promise(resolve => { release = resolve; });
+      return api(path, body);
+    };
+    const saving = c.controls["view-form"].onsubmit({preventDefault() {}});
+    await Promise.resolve();
+    await c.views.setProject("/opt/bar");
+    c.controls.search.value = "Bar search";
+    release(); await saving;
+    const created = c.records.at(-1);
+    assert.equal(created.cwd, "/opt/foo");
+    assert.equal(created.filters.phase, "validation");
+    assert.deepEqual(c.views.items.map(view => view.id), ["all"]);
+    assert.equal(c.views.activeId, "all");
+    assert.equal(c.controls.search.value, "Bar search");
+    await c.views.setProject("/opt/foo");
+    assert.deepEqual(c.views.items.map(view => view.id), ["all", "foo", created.id]);
+    assert.deepEqual(c.errors, []);
+  });
+}
+
+test("a create dialog cannot follow an in-flight workspace switch", async () => {
+  const c = setup();
+  await c.views.setProject("/opt/foo");
+  // Both workspaces have All conversations selected; the view ID alone cannot guard this race.
+  const switching = c.views.setProject("/opt/bar");
+  const opening = c.views.openDialog("create");
+  await Promise.all([switching, opening]);
+  assert.equal(c.controls["view-dialog"].open, undefined);
+  assert.deepEqual(c.records, []);
+});
+
 test("desktop tabs switch filters by click and keyboard and disappear without saved views", async () => {
-  const c = setup({saved: [{id: "review", name: "Review", filters: {phase: "validation"}}]});
+  const c = setup({saved: [{id: "review", name: "Review", filters: {phase: "validation"}},
+    {id: "build", name: "Build", filters: {phase: "implementation"}}]});
   await c.views.start();
   const tabs = c.controls["saved-view-tabs"];
   assert.equal(tabs.hidden, false);
   assert.deepEqual(tabs.children.map(tab => tab.tabIndex), [0, -1]);
-  await tabs.children[1].onclick();
+  await tabs.children[0].onclick();
   assert.equal(c.controls["phase-filter"].value, "validation");
-  assert.deepEqual(tabs.children.map(tab => tab.tabIndex), [-1, 0]);
-  for (const [key, expected] of [["ArrowRight", "all"], ["End", "review"], ["Home", "all"], ["ArrowLeft", "review"]]) {
+  assert.deepEqual(tabs.children.map(tab => tab.tabIndex), [0, -1]);
+  for (const [key, expected] of [["ArrowRight", "build"], ["End", "build"], ["Home", "review"], ["ArrowLeft", "build"]]) {
     let prevented = false;
     await tabs.onkeydown({key, preventDefault() { prevented = true; }});
     assert.equal(prevented, true); assert.equal(c.views.activeId, expected);
     assert.equal(c.doc.activeElement.dataset.viewId, expected);
   }
   await c.controls["view-delete"].onclick();
+  await tabs.children[0].onclick();
+  await c.controls["view-delete"].onclick();
   assert.equal(tabs.hidden, true); assert.equal(c.views.activeId, "all");
-  assert.equal(c.doc.activeElement, c.controls["add-view"]);
+  assert.equal(c.doc.activeElement, c.controls["show-now"]);
   assert.deepEqual(c.errors, []);
+});
+
+
+test("built-in view navigation leaves saved filters intact and keeps Closed selected", async () => {
+  const c = setup({saved: [{id: "review", name: "Review", filters: {phase: "validation"}}]});
+  await c.views.start(); await c.views.activate("review");
+  assert.equal(c.controls["show-now"].attributes["aria-pressed"], "false");
+  for (const [id, show] of [["show-later", "later"], ["show-now", "active"], ["show-closed", "archived"], ["show-closed", "archived"]]) {
+    await c.controls[id].onclick();
+    assert.equal(c.views.activeId, "all");
+    assert.equal(c.controls.view.value, show);
+    assert.equal(c.controls["phase-filter"].value, "");
+    assert.equal(c.controls[id].attributes["aria-pressed"], "true");
+    assert.equal(c.doc.activeElement, c.controls[id]);
+  }
+  assert.equal(c.records[0].filters.phase, "validation");
+  assert.equal(c.records[0].filters.show, "active");
+  assert.ok(c.calls.every(call => !call.path.endsWith("/update")));
+  await c.views.activate("review");
+  assert.equal(c.controls["phase-filter"].value, "validation");
+  assert.equal(c.controls["show-closed"].attributes["aria-pressed"], "false");
 });

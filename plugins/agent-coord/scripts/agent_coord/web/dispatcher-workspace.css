@@ -356,3 +356,9 @@ body.dispatcher-workspace #dispatcher-dock.expanded .conversation-content {
   body.dispatcher-workspace #dispatcher-options-toggle:focus-visible,
   body.dispatcher-workspace .dispatcher-mobile-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 }
+
+@media (min-width: 721px) {
+  body.dispatcher-workspace > main > .workspace-bar.header-tabs { padding-inline: 12px; background: var(--panel); }
+  body.dispatcher-workspace .header-tabs .projects-bar { display: flex; }
+  body.dispatcher-workspace .header-tabs #dispatcher-projects-toggle { display: none; }
+}

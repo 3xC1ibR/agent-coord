@@ -1,0 +1,19 @@
+.conversation-tabs { display: flex; flex-shrink: 0; min-width: 0; overflow-x: auto; scrollbar-width: thin; background: var(--paper); border-bottom: 1px solid var(--line); padding: 0 12px; }
+.conversation-tab { display: flex; align-items: stretch; flex: 0 0 auto; max-width: 250px; min-width: 90px; border-right: 1px solid var(--line); border-bottom: 2px solid transparent; }
+.conversation-tab[data-selected=true] { background: var(--surface); border-bottom-color: var(--accent); }
+.conversation-tab button { background: transparent; color: var(--muted); border: 0; border-radius: 0; box-shadow: none; }
+.conversation-tab button:hover { background: var(--hover-bg); color: var(--ink); }
+.conversation-tab-select { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 10px 12px; font-size: 12px; text-align: left; }
+.conversation-tab[data-selected=true] .conversation-tab-select { color: var(--ink); }
+.conversation-tab-close { flex-shrink: 0; padding: 6px 9px; font-size: 17px; }
+.conversation-tab-select[data-status=working]::before { content: "● "; color: var(--accent); }
+.conversation-tab-select[data-status=input]::before { content: "● "; color: var(--warm); }
+.conversation-tab button:focus-visible { outline-offset: -3px; }
+.overview-tab { position: sticky; left: 0; z-index: 1; background: var(--paper); }
+.pane-document .conversation-tabs { display: none; }
+@media (max-width: 720px) {
+  .conversation-tabs { padding: 0; }
+  .conversation-tab { max-width: 190px; }
+  .conversation-tab-select { min-height: 44px; }
+  .conversation-tab-close { min-width: 36px; }
+}

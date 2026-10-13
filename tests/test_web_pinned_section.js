@@ -83,6 +83,29 @@ test("Attention hides when all its cards are pinned without losing required acti
   }
 });
 
+test("pinning removes stage and organization cards, preserves navigation, and unpinning restores them", () => {
+  for (const groupBy of ["phase", "project", "repository"]) {
+    for (const phase of ["new", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"]) {
+      const c = overview();
+      c.$("group-by").value = groupBy;
+      c.state.sessions = [thread("pin", {pinned: true, work_phase: phase}), thread("other", {work_phase: phase})];
+      const boardCards = () => c.$("overview").children.find(el => el.className.endsWith("-board"))
+        .children.flatMap(cardIds).filter(Boolean);
+      const sidebarCards = () => c.$("sessions").children.flatMap(el => el.children)
+        .map(el => el.dataset.thread).filter(Boolean);
+      c.renderList();
+      assert.deepEqual(cardIds(c.$("overview").children[0]), ["pin"]);
+      assert.deepEqual(boardCards(), ["other"]);
+      assert.ok(sidebarCards().includes("pin"));
+      assert.equal(c.$("thread-count").textContent, "2");
+      assert.equal(c.state.sessions[0].work_phase, phase);
+      c.state.sessions[0].pinned = false;
+      c.renderList();
+      assert.deepEqual(boardCards().sort(), ["other", "pin"]);
+    }
+  }
+});
+
 test("a pinned Later thread stays in Attention when it is absent from Pinned", () => {
   const c = overview();
   c.state.sessions = [thread("now", {pinned: true, response_state: "reply", needs_attention: true}),

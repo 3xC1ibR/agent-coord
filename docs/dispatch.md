@@ -16,10 +16,12 @@ terminal delegates are separate mechanisms. See the
 
 ## Quick start and controls
 
-1. Open a project overview and click **Start dispatcher**, separate from
-   **New session**. It waits for startup discovery, reuses an eligible dispatcher
-   for that directory, or creates and designates a new Codex chat with normal
-   permissions. Opening it does not submit a provider prompt.
+1. Open a project overview and click **Open dispatcher**, separate from
+   **New session**. This is the dispatcher entry point; it reuses the existing
+   eligible dispatcher for that directory with its saved model, reasoning, and
+   permissions. When no dispatcher exists, the control reads **Start dispatcher**
+   and creates a new Codex chat with normal permissions. It waits for startup
+   discovery, and opening it does not submit a provider prompt.
 2. The action opens a separate dispatcher workspace. Its canvas starts with
    conversations routed through that dispatcher, leaving unrelated project
    sessions in the existing overview. Type a request in the bottom composer;
@@ -30,11 +32,11 @@ terminal delegates are separate mechanisms. See the
    its transcript within the workspace.
 4. Return to the overview with the project breadcrumb or dispatcher close control;
    **Open dispatcher** brings the workspace back.
-   Disable routing with **Stop using as dispatcher** in the full chat or thread
-   menu. Hiding the dock alone does not disable it.
+   Disable routing with **Stop using as dispatcher** in the overview thread menu.
+   Hiding the dock alone does not disable it.
 
-An existing Codex or Claude app conversation can instead be designated with
-**Use as dispatcher**. Asking an agent to follow the dispatch skill is a workflow
+Existing designated Codex and Claude conversations remain available through
+**Open dispatcher**. Asking an agent to follow the dispatch skill is a workflow
 instruction; the UI designation separately enables automatic request routing.
 
 The dispatcher workspace leaves the overview's stages, filters, and saved

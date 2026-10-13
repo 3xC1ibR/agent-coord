@@ -1,6 +1,8 @@
 .filter-menu { position: relative; flex: none; }
 .closed-toggle { flex: none; min-height: 36px; padding: 8px 11px; border-color: transparent; font-size: 11px; }
 .closed-toggle[aria-pressed="true"] { border-color: var(--line-strong); color: var(--ink); background: var(--tint); }
+.domain-toggle { flex: none; min-height: 36px; padding: 8px 11px; font-size: 12px; }
+.domain-toggle[aria-pressed="true"] { border-color: var(--line-strong); color: var(--ink); background: var(--tint); }
 .filter-menu summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--surface); font-size: 12px; cursor: pointer; list-style: none; }
 .filter-menu summary::-webkit-details-marker { display: none; }
 .filter-menu summary:hover, .filter-menu[open] summary { border-color: var(--hover-line); }

@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .context import caller_session, command_prefix
-from .store import CoordinationError
+from .store import CoordinationError, derive_scope_cluster
 from .organization import OrganizationStore, UNSET
 from .attention import AttentionStore
 
@@ -23,6 +23,10 @@ def _text(value, label, limit, *, empty=False):
     if not isinstance(value, str) or len(value) > limit or (not empty and not value.strip()):
         raise CoordinationError(f"{label} must be {'non-empty ' if not empty else ''}text of at most {limit} characters.")
     return value.strip()
+
+
+def _domain(value):
+    return _text(" ".join(_text(value, "Thread domain", 64).split()).casefold(), "Thread domain", 64)
 
 
 def project_root(cwd: str) -> str:
@@ -60,6 +64,7 @@ class ThreadStore:
                     project_id TEXT NOT NULL REFERENCES work_projects(id),
                     title TEXT NOT NULL, original_request TEXT NOT NULL DEFAULT '',
                     title_source TEXT NOT NULL DEFAULT 'auto',
+                    domain TEXT, domain_source TEXT, scope_cluster TEXT,
                     attention TEXT NOT NULL DEFAULT 'now',
                     pinned INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
@@ -104,6 +109,15 @@ class ThreadStore:
             # Serialize upgrades across independently running terminal hooks.
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(work_threads)")}
+            for field in ("domain", "domain_source", "scope_cluster"):
+                if field not in columns:
+                    db.execute(f"ALTER TABLE work_threads ADD COLUMN {field} TEXT")
+            # Include declarations made by an older runtime. Persist once so
+            # releasing the lease or restarting does not erase the fallback.
+            for row in db.execute("""SELECT t.thread_id, s.write_scope_json, s.cwd FROM work_threads t
+                                     JOIN sessions s ON s.session_id = t.thread_id
+                                     WHERE t.scope_cluster IS NULL AND s.write_scope_json != '[]'""").fetchall():
+                self.record_scope(db, row["thread_id"], json.loads(row["write_scope_json"]), row["cwd"])
             if "project_cwd" not in columns:
                 # Preserve the exact launch directory independently of mutable
                 # execution cwd and the legacy repository-based artifact root.
@@ -149,6 +163,37 @@ class ThreadStore:
 
         self.organization = OrganizationStore(store)
         self.attention = AttentionStore(store)
+
+    @staticmethod
+    def record_scope(db, thread_id, scopes, cwd):
+        cluster = derive_scope_cluster(scopes, cwd)
+        db.execute("""UPDATE work_threads SET scope_cluster = ?,
+                      domain = CASE WHEN domain_source IS NULL OR domain_source = 'derived' THEN ? ELSE domain END,
+                      domain_source = CASE WHEN domain_source IS NULL OR domain_source = 'derived' THEN ? ELSE domain_source END
+                      WHERE thread_id = ?""",
+                   (cluster, cluster, "derived" if cluster is not None else None, thread_id))
+
+    @staticmethod
+    def _save_domain(db, thread_id, domain, author):
+        if domain is None:
+            # User reset returns to the last scope fallback, or an unset value.
+            db.execute("""UPDATE work_threads SET domain = scope_cluster,
+                          domain_source = CASE WHEN scope_cluster IS NULL THEN NULL ELSE 'derived' END
+                          WHERE thread_id = ?""", (thread_id,))
+        else:
+            db.execute("""UPDATE work_threads SET domain = ?, domain_source = ?
+                          WHERE thread_id = ? AND (? = 'user' OR domain_source IS NULL OR domain_source != 'user')""",
+                       (domain, author, thread_id, author))
+
+    def known_domains(self, cwd: str) -> list[str]:
+        """Bounded explicit vocabulary from open threads in this workspace."""
+        with self.store._connection() as db:
+            rows = db.execute("""SELECT t.domain, COUNT(*) AS uses FROM work_threads t
+                                 JOIN sessions s ON s.session_id = t.thread_id
+                                 WHERE s.cwd = ? AND t.attention != 'archived'
+                                   AND t.domain_source IN ('agent', 'user') AND t.domain IS NOT NULL
+                                 GROUP BY t.domain ORDER BY uses DESC, t.domain LIMIT 20""", (cwd,)).fetchall()
+        return [row["domain"] for row in rows]
 
     def ensure(self, session_id: str, *, project_cwd: str | None = None) -> dict:
         session = self.store.get_session(session_id)
@@ -305,13 +350,15 @@ class ThreadStore:
                                         AND t.snoozed_until = snooze_notifications.snoozed_until)""",
                               (self.store.clock(), notification_id, self.store.clock())).rowcount == 1
 
-    def update(self, thread_id: str, *, title=None, attention=None, pinned=UNSET, seen=False,
+    def update(self, thread_id: str, *, title=None, domain=UNSET, attention=None, pinned=UNSET, seen=False,
                seen_checkpoint_id=None, seen_completion_id=None, handled=False,
                handled_checkpoint_id=None, handled_completion_id=None, repository_id=UNSET, project_id=UNSET,
                snoozed_until=UNSET, resume_snooze=UNSET) -> dict:
         self.get(thread_id)
         if title is not None:
             title = _text(title, "Thread title", 160)
+        if domain is not UNSET and domain is not None:
+            domain = _domain(domain)
         if attention is not None and (not isinstance(attention, str) or attention not in ATTENTION_STATES):
             raise CoordinationError("Attention must be now, later, or archived.")
         if pinned is not UNSET and not isinstance(pinned, bool):
@@ -357,6 +404,8 @@ class ThreadStore:
             self.organization.update(db, thread_id, repository_id=repository_id, project_id=project_id)
             if title is not None:
                 db.execute("UPDATE work_threads SET title = ?, title_source = 'user' WHERE thread_id = ?", (title, thread_id))
+            if domain is not UNSET:
+                self._save_domain(db, thread_id, domain, "user")
             if attention is not None:
                 db.execute("UPDATE work_threads SET attention = ?, snoozed_until = NULL, deferred_at = ? WHERE thread_id = ?",
                            (attention, self.store.clock() if attention == "later" else None, thread_id))
@@ -468,8 +517,8 @@ class ThreadStore:
                        (request, " ".join(request.split())[:100], session_id))
 
     def checkpoint(self, session_id: str, payload: dict, *, author="agent") -> dict:
-        if not isinstance(payload, dict) or set(payload) - {"phase", "summary", "next_action", "next_actor", "links", "turn_id", "title"}:
-            raise CoordinationError("Checkpoint accepts phase, summary, next_action, next_actor, links, turn_id, and optional title.")
+        if not isinstance(payload, dict) or set(payload) - {"phase", "summary", "next_action", "next_actor", "links", "turn_id", "title", "domain"}:
+            raise CoordinationError("Checkpoint accepts phase, summary, next_action, next_actor, links, turn_id, and optional title and domain.")
         phase, actor = payload.get("phase"), payload.get("next_actor", "nobody")
         if not isinstance(phase, str) or phase not in PHASES:
             raise CoordinationError("Choose a supported checkpoint phase: " + ", ".join(sorted(PHASES)))
@@ -478,6 +527,9 @@ class ThreadStore:
         summary = _text(payload.get("summary"), "Checkpoint summary", 2000)
         action = _text(payload.get("next_action", ""), "Next action", 1000, empty=True)
         title = _text(payload["title"], "Thread title", 160) if "title" in payload else None
+        domain = payload.get("domain", UNSET)
+        if domain is not UNSET and not (domain is None and author == "user"):
+            domain = _domain(domain)
         if bool(action) != (actor != "nobody"):
             raise CoordinationError("A next action needs an owner; use nobody with an empty next action.")
         thread = self.ensure(session_id)
@@ -504,6 +556,8 @@ class ThreadStore:
             if title is not None and (author == "user" or current["title_source"] == "auto"):
                 source = "user" if author == "user" else "agent"
                 db.execute("UPDATE work_threads SET title = ?, title_source = ? WHERE thread_id = ?", (title, source, session_id))
+            if domain is not UNSET:
+                self._save_domain(db, session_id, domain, "user" if author == "user" else "agent")
             db.execute("UPDATE work_threads SET updated_at = ? WHERE thread_id = ?", (now, session_id))
         return self.get(session_id, history=True)
 
@@ -563,10 +617,11 @@ class ThreadStore:
             " checkpoint" + identity + " --json '<object>'. "
             'The object has phase (discussion, investigation, planning, orchestrating, implementation, validation, deployment, finished), '
             'summary (1–2 factual sentences), next_action (empty if none), next_actor (user, agent, external, nobody), '
-            'optional title (a concise 3–6 word thread name), and optional links [{"kind":"document","label":"Design","target":"docs/design.md"}]. '
+            'optional title (a concise 3–6 word thread name), optional domain (a short assignment category), and optional links [{"kind":"document","label":"Design","target":"docs/design.md"}]. '
             "Set title at the first meaningful checkpoint when title_source is auto. "
             "Keep established conversation names stable across assignments: omit title on later checkpoints. Use thread update --title only for a deliberate rename. "
             "User-chosen titles (title_source user) take precedence and cannot be overwritten by agent checkpoints. "
+            "Set domain once per assignment and omit it on later checkpoints until the work moves; reuse a workspace domain unless the work is clearly elsewhere, and preserve a user-chosen domain (domain_source user). "
             "Use summary for the changing current/latest work, keeping its first sentence concise and descriptive. Update it when a new assignment starts; describe completed or failed results as outcomes, never as ongoing work. Preserve useful progress detail in the following sentence. Distinguish proposals, implemented changes, validation, and deployment. "
             'Set next_actor to user only when progress or completion requires a specific user answer, approval, decision, or action; describe it in next_action. '
             "Keep optional advice, invitations to continue, and nonblocking reminders in summary. "
@@ -582,10 +637,13 @@ class ThreadStore:
         )
         if session_id:
             thread = self.ensure(session_id)
+            text += "\nWorkspace domains: " + json.dumps(self.known_domains(thread["cwd"]))
             text += "\nThread context (saved data): " + json.dumps({
                 "project": thread["project_cwd"], "group": thread["project_name"],
                 "workspace": thread["cwd"], "attention": thread["attention"],
                 "title": thread["title"], "title_source": thread["title_source"],
+                "domain": thread["domain"], "domain_source": thread["domain_source"],
+                "scope_cluster": thread["scope_cluster"],
                 "checkpoint": thread["checkpoint"], "links": thread["links"],
             })
         return text

@@ -372,7 +372,7 @@ def _handler(
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
-            if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/conversation-scroll.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css"}:
+            if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/conversation-scroll.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css", "/thread-tabs.js", "/thread-tabs.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return

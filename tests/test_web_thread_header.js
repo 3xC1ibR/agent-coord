@@ -129,6 +129,81 @@ test("the header omits Your turn and Working while preserving requests for input
   assert.equal(c.$("status").hidden, true);
 });
 
+test("elapsed time uses the current turn start across refreshes, steering and unit boundaries", () => {
+  const c = setup(), started = 1800000000;
+  Object.assign(c.state.detail, {running: true, activeTurn: "current", thread: {turns: [
+    {id: "old", status: "inProgress", startedAt: started - 1000},
+    {id: "current", status: "inProgress", startedAt: started},
+  ]}});
+  for (const [elapsed, expected] of [[0, "0s"], [59, "59s"], [60, "1m 0s"], [134, "2m 14s"], [3661, "1h 1m 1s"]]) {
+    c.renderTurnElapsed(started + elapsed);
+    assert.equal(c.$("turn-elapsed").hidden, false);
+    assert.equal(c.$("turn-elapsed").textContent, "Working · " + expected);
+  }
+  c.state.detail = JSON.parse(JSON.stringify(c.state.detail));
+  c.state.detail.thread.turns[1].items = [{type: "userMessage", content: [{text: "Steer this turn"}]}];
+  c.renderTurnElapsed(started + 135);
+  assert.equal(c.$("turn-elapsed").textContent, "Working · 2m 15s");
+  c.state.detail.requests = [{}];
+  c.renderTurnElapsed(started + 136);
+  assert.equal(c.$("turn-elapsed").textContent, "Elapsed · 2m 16s");
+});
+
+test("elapsed time clears at completion, failure, stop and navigation, and resets for the next turn", () => {
+  const c = setup(), started = 1800000000;
+  Object.assign(c.state.detail, {running: true, activeTurn: "current", thread: {turns: [
+    {id: "current", status: "inProgress", startedAt: started},
+  ]}});
+  c.state.sessions = [{thread_id: "one", status: "running"}]; // Inventory can lag behind streamed completion.
+  c.renderTurnElapsed(started + 134);
+  c.state.detail.running = false;
+  c.renderTurnElapsed(started + 135);
+  assert.equal(c.$("turn-elapsed").hidden, true);
+  assert.equal(c.$("turn-elapsed").textContent, "");
+  c.state.detail.running = true;
+  for (const status of ["completed", "failed", "interrupted"]) {
+    c.state.detail.thread.turns[0].status = status;
+    c.renderTurnElapsed(started + 136);
+    assert.equal(c.$("turn-elapsed").hidden, true);
+  }
+  c.state.detail.activeTurn = "next";
+  c.renderTurnElapsed(started + 137);
+  assert.equal(c.$("turn-elapsed").hidden, true); // Never borrow the previous turn's time.
+  c.state.detail.thread.turns.push({id: "next", status: "inProgress", startedAt: started + 137});
+  c.renderTurnElapsed(started + 138);
+  assert.equal(c.$("turn-elapsed").textContent, "Working · 1s");
+  c.state.detail = null;
+  c.renderTurnElapsed(started + 139);
+  assert.equal(c.$("turn-elapsed").hidden, true);
+});
+
+test("elapsed time handles persisted timestamps and hides missing or invalid timing", () => {
+  const c = setup(), started = 1800000000;
+  Object.assign(c.state.detail, {running: true, activeTurn: "current", thread: {turns: [
+    {id: "current", status: "inProgress"},
+  ]}});
+  for (const value of [started, started * 1000, new Date(started * 1000).toISOString()]) {
+    c.state.detail.thread.turns[0].startedAt = value;
+    c.renderTurnElapsed(started + 134);
+    assert.equal(c.$("turn-elapsed").textContent, "Working · 2m 14s");
+  }
+  for (const value of [undefined, null, "", "invalid", NaN, Infinity]) {
+    c.state.detail.thread.turns[0].startedAt = value;
+    c.renderTurnElapsed(started + 134);
+    assert.equal(c.$("turn-elapsed").hidden, true);
+  }
+  delete c.state.detail.thread.turns[0].startedAt;
+  Object.assign(c.state.detail.work_thread, {turn_id: "current", turn_started_at: started});
+  c.renderTurnElapsed(started + 134);
+  assert.equal(c.$("turn-elapsed").textContent, "Working · 2m 14s");
+  c.state.detail.work_thread.turn_id = "old";
+  c.renderTurnElapsed(started + 134);
+  assert.equal(c.$("turn-elapsed").hidden, true);
+  c.state.detail.thread.turns[0].startedAt = started + 140;
+  c.renderTurnElapsed(started + 134);
+  assert.equal(c.$("turn-elapsed").textContent, "Working · 0s");
+});
+
 test("fork availability follows backend eligibility and live activity", () => {
   const c = setup();
   Object.assign(c.state.detail.work_thread, {client: "codex", can_fork: true});

@@ -20,3 +20,41 @@ main:has(> .conversation:not([hidden])) > .projects-bar { display: none; }
   .project-tab-close { min-width: 32px; min-height: 44px; }
   .no-project #mobile-overview { display: none !important; }
 }
+
+/* Directory tabs share the title bar and join the workspace surface. */
+.project-folder-icon { display: inline-flex; width: 16px; height: 16px; flex: none; color: var(--muted); }
+.project-folder-icon svg { width: 100%; height: 100%; }
+.project-tab-close { opacity: 0; pointer-events: none; }
+.project-tab:has([aria-selected="true"]) .project-tab-close,
+.project-tab:hover .project-tab-close,
+.project-tab:focus-within .project-tab-close { opacity: 1; pointer-events: auto; }
+.workspace-switcher { position: relative; flex: none; }
+.workspace-switcher > summary { display: flex; align-items: center; gap: 7px; padding: 8px 4px; color: var(--muted); font-size: 12px; white-space: nowrap; cursor: pointer; list-style: none; }
+.workspace-switcher > summary::-webkit-details-marker { display: none; }
+.workspace-switcher > summary:hover, .workspace-switcher[open] > summary { color: var(--ink); }
+.workspace-switcher > summary > span { font-size: 10px; }
+.workspace-switcher-panel { position: absolute; top: calc(100% + 8px); left: 0; z-index: 25; display: grid; gap: 3px; min-width: 220px; padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 12px 32px var(--shadow); }
+.workspace-switcher-panel button, .workspace-switcher-panel a { display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--ink); font-size: 12px; text-align: left; }
+.workspace-switcher-panel a:hover { background: var(--hover-bg); }
+@media (hover: none) { .project-tab-close { opacity: 1; pointer-events: auto; } }
+@media (min-width: 721px) {
+  main > .workspace-bar.header-tabs { min-height: 50px; padding: 0 12px; gap: 14px; background: var(--panel); }
+  .header-tabs .breadcrumb { flex: none; gap: 8px; }
+  .header-tabs .breadcrumb > :not(#menu-toggle):not(.workspace-switcher) { display: none !important; }
+  .header-tabs #menu-toggle { width: 30px; height: 30px; padding: 5px; border: 0; background: transparent; color: var(--muted); }
+  .header-tabs .projects-bar { align-self: stretch; flex: 1; align-items: end; gap: 7px; padding: 0; border: 0; }
+  .header-tabs .view-tabs { align-self: stretch; align-items: end; flex: 0 1 auto; padding: 7px 2px 0; gap: 3px; scrollbar-width: none; }
+  .header-tabs .view-tabs::-webkit-scrollbar { display: none; }
+  .header-tabs .project-tab { position: relative; height: 38px; max-width: 242px; padding-right: 5px; border: 1px solid transparent; border-bottom: 0; border-radius: 9px 9px 0 0; }
+  .header-tabs .project-tab:hover { background: var(--hover-bg); }
+  .header-tabs .project-tab:has([aria-selected="true"]) { height: 39px; margin-bottom: -1px; border-color: var(--line); background: var(--paper); z-index: 1; }
+  .header-tabs .project-tab .view-tab { height: 100%; min-width: 0; padding: 0 8px 0 12px; gap: 7px; border: 0; background: transparent; font-size: 12px; }
+  .header-tabs .project-tab .view-tab:hover { background: transparent; }
+  .header-tabs .project-tab-close { flex: none; width: 23px; height: 23px; padding: 0; border-radius: 5px; }
+  .header-tabs #open-project-tab { flex: none; width: 28px; height: 30px; padding: 0; margin-bottom: 4px; border: 0; font-size: 18px; }
+  .header-tabs .connection { font-size: 0; gap: 0; }
+  .header-tabs .workspace-actions { flex: none; margin-left: 0; }
+  .header-tabs .workspace-actions button { padding: 7px 11px; font-size: 11px; }
+  main:not(:has(> .welcome:not([hidden]))) .header-tabs .workspace-actions,
+  .no-project .header-tabs .workspace-actions { display: none; }
+}

@@ -47,6 +47,24 @@ class HookTests(unittest.TestCase):
         self.assertIn("codex-one", context)
         self.assertEqual(self.store.get_session("codex-one")["presence"], "online")
 
+    def test_each_prompt_receives_domain_ownership_and_workspace_vocabulary(self) -> None:
+        handle(self.payload("SessionStart"), self.store)
+        self.store.threads.update("codex-one", domain="Web")
+        self.store.register(session_id="peer", client="claude", cwd=str(self.root))
+        self.store.threads.update("peer", domain="docs")
+        for event in ("SessionStart", "UserPromptSubmit"):
+            result = handle(self.payload(event, prompt="Continue."), self.store)
+            context = result["hookSpecificOutput"]["additionalContext"]
+            names = json.loads(context.split("Workspace domains: ", 1)[1].splitlines()[0])
+            self.assertEqual(names, ["docs", "web"])
+            saved = json.loads(context.split("Thread context (saved data): ", 1)[1])
+            self.assertEqual((saved["domain"], saved["domain_source"]), ("web", "user"))
+            self.assertIsNone(saved["scope_cluster"])
+            self.assertIn("once per assignment", context)
+        self.store.threads.update("peer", domain="backend")
+        result = handle(self.payload("UserPromptSubmit", prompt="Continue."), self.store)
+        self.assertIn('Workspace domains: ["backend", "web"]', result["hookSpecificOutput"]["additionalContext"])
+
     def test_hooks_capture_intent_and_preserve_checkpoint_after_stop(self) -> None:
         handle(self.payload("SessionStart"), self.store)
         handle(self.payload("UserPromptSubmit", prompt="Investigate the write path."), self.store)

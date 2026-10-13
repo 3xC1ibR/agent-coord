@@ -787,10 +787,10 @@ class BrowserSessions:
 
     def _update_work_thread(self, thread_id: str, body: dict) -> dict:
         thread = self.work_thread(thread_id)
-        if set(body) - {"attention", "title", "pinned", "seen", "seen_checkpoint_id", "seen_completion_id",
+        if set(body) - {"attention", "title", "domain", "pinned", "seen", "seen_checkpoint_id", "seen_completion_id",
                         "handled", "handled_checkpoint_id", "handled_completion_id", "repository_id", "project_id",
                         "snoozed_until", "resume_snooze"}:
-            raise CoordinationError("Thread update accepts attention, title, pinned, read and handled markers, snoozed_until, resume_snooze, repository_id, and project_id.")
+            raise CoordinationError("Thread update accepts attention, title, domain, pinned, read and handled markers, snoozed_until, resume_snooze, repository_id, and project_id.")
         associations = {key: body[key] for key in ("repository_id", "project_id") if key in body}
         self.store.threads.organization.validate_assignments(**associations)
         if "attention" in body and not isinstance(body["attention"], str):
@@ -816,6 +816,7 @@ class BrowserSessions:
                                   seen_checkpoint_id=body.get("seen_checkpoint_id"), seen_completion_id=body.get("seen_completion_id"),
                                   handled=body.get("handled", False), handled_checkpoint_id=body.get("handled_checkpoint_id"),
                                   handled_completion_id=body.get("handled_completion_id"),
+                                  **({"domain": body["domain"]} if "domain" in body else {}),
                                   **{key: body[key] for key in ("snoozed_until", "resume_snooze") if key in body},
                                   **({"pinned": body["pinned"]} if "pinned" in body else {}), **associations)
         self._publish("browser/changed", {"threadId": thread_id})

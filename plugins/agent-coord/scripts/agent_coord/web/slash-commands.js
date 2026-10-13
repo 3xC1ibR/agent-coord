@@ -42,7 +42,7 @@
       if (caret <= command[0].length) return {kind: "command",
         prefix: input.value.slice(command[1].length, caret).toLowerCase(), start: command[1].length, end: command[0].length};
       const name = command[2].toLowerCase();
-      if (!["/model", "/effort"].includes(name) || /[\r\n]/.test(input.value.slice(0, caret))) return null;
+      if (!["/model", "/effort", "/permissions"].includes(name) || /[\r\n]/.test(input.value.slice(0, caret))) return null;
       // Track token boundaries so editing an argument keeps its neighbors intact.
       const tokens = [...input.value.matchAll(/"[^"\r\n]*(?:"|$)|'[^'\r\n]*(?:'|$)|[^\s]+/g)];
       let index = tokens.findIndex(token => caret >= token.index && caret <= token.index + token[0].length);
@@ -50,7 +50,8 @@
       const token = tokens[index], start = token && token.index <= caret ? token.index : caret;
       const end = start === token?.index ? start + token[0].length : caret;
       const unquote = value => value.replace(/^["']|["']$/g, "");
-      const kind = name === "/model" && index === 1 ? "model" :
+      const kind = name === "/permissions" && index === 1 ? "permissions" :
+        name === "/model" && index === 1 ? "model" :
         (name === "/effort" && index === 1) || (name === "/model" && index === 2) ? "effort" : null;
       if (!kind) return null;
       return {kind, start, end, prefix: unquote(input.value.slice(start, caret)).toLowerCase(),
@@ -76,6 +77,10 @@
 
     suggestions(query) {
       if (query.kind === "command") return commands;
+      if (query.kind === "permissions") return [
+        {name: "default", arguments: "", description: "Configured permissions with approval prompts"},
+        {name: "yolo", arguments: "", description: "Full machine access without approval prompts"},
+      ];
       const models = this.models();
       if (query.kind === "model") return models.map(model => ({name: model.model,
         arguments: model.displayName || "", description: model.description || ""}));
@@ -106,7 +111,8 @@
       this.matches = matches;
       this.menu.hidden = false;
       this.input.setAttribute("aria-controls", this.menu.id);
-      this.menu.setAttribute("aria-label", query.kind === "model" ? "Models" : query.kind === "effort" ? "Reasoning effort" : "Slash commands");
+      this.menu.setAttribute("aria-label", query.kind === "model" ? "Models" : query.kind === "effort" ? "Reasoning effort" :
+        query.kind === "permissions" ? "Permissions" : "Slash commands");
       this.input.setAttribute("aria-expanded", "true");
       this.menu.replaceChildren();
       const doc = this.input.ownerDocument;

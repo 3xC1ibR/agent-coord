@@ -74,6 +74,47 @@ test("fork and close autocomplete without executing and leave Enter available to
   }
 });
 
+test("permissions command opens modes and completes without submitting or loading models", async () => {
+  let loads = 0;
+  const f = setup({loadModels: async () => { loads++; return models; }});
+  f.type("/per");
+  assert.deepEqual(f.names(), ["/permissions"]);
+  assert.equal(f.key("Tab").defaultPrevented, true);
+  assert.equal(f.input.value, "/permissions ");
+  assert.equal(f.menu.hidden, false);
+  assert.deepEqual(f.names(), ["default", "yolo"]);
+  assert.equal(f.menu.attributes["aria-label"], "Permissions");
+  assert.match(f.menu.children[1].children[2].textContent, /without approval prompts/);
+  f.key("ArrowDown");
+  assert.equal(f.key("Enter").defaultPrevented, true);
+  assert.equal(f.input.value, "/permissions yolo ");
+  assert.equal(f.menu.hidden, true);
+  assert.equal(f.key("Enter").defaultPrevented, undefined);
+  assert.equal(f.changes, 2);
+  await settle();
+  assert.equal(loads, 0);
+});
+
+test("permissions mode prefixes filter, preserve surrounding text and respect dismissal", () => {
+  const f = setup();
+  f.type("  /PERMISSIONS DE");
+  assert.deepEqual(f.names(), ["default"]);
+  f.menu.children[0].emit("click");
+  assert.equal(f.input.value, "  /PERMISSIONS default ");
+  f.type("/permissions yo extra", 15);
+  assert.deepEqual(f.names(), ["yolo"]);
+  f.key("Tab");
+  assert.equal(f.input.value, "/permissions yolo extra");
+  for (const value of ["/permissions unknown", "/permissions default extra", "/permissions yolo ", "/permissions\n", "/permissions\ndef"]) {
+    f.type(value); assert.equal(f.menu.hidden, true, value);
+    assert.equal(f.key("Enter").defaultPrevented, undefined, value);
+  }
+  f.type("/permissions ");
+  assert.equal(f.key("Escape").defaultPrevented, true);
+  f.complete.render(); assert.equal(f.menu.hidden, true);
+  assert.equal(f.key("Enter").defaultPrevented, undefined);
+});
+
 test("command completion opens provider models then supported effort without submitting", async () => {
   const clients = [], f = setup({loadModels: async client => { clients.push(client); return models; }});
   f.type("/mo"); f.key("Tab"); await settle();

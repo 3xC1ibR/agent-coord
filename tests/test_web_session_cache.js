@@ -3,6 +3,7 @@ const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
 const clone = value => JSON.parse(JSON.stringify(value));
 
@@ -237,4 +238,30 @@ test("the transcript cache evicts old conversations while retaining the current 
   assert.equal(c.state.conversations.size, 4);
   assert.equal(c.state.conversations.has("one"), false);
   assert.equal(c.state.conversations.get("six").detail, c.state.detail);
+});
+
+test("tab navigation preserves drafts and reading positions beyond the transcript cache limit", async () => {
+  const c = setup();
+  const tabs = c.state.threadTabs = new ThreadTabs({onSelect: id => id ? c.select(id) : c.goHome()});
+  tabs.setProject("/project");
+  for (const [index, id] of ["one", "two", "three", "four", "five", "six"].entries()) {
+    await c.select(id);
+    c.$("message").value = "Draft " + id;
+    c.$("timeline").scrollTop = 100 + index;
+  }
+  assert.equal(c.state.conversations.has("one"), false);
+  assert.equal(tabs.items.length, 6);
+  await tabs.activate(null);
+  assert.equal(c.$("welcome").hidden, false);
+  await tabs.activate("one");
+  assert.equal(c.$("message").value, "Draft one");
+  assert.equal(c.$("timeline").scrollTop, 100);
+  assert.equal(tabs.items.length, 6);
+  await tabs.close("one");
+  assert.equal(c.state.selected, "two");
+  assert.equal(c.$("message").value, "Draft two");
+  assert.equal(c.$("timeline").scrollTop, 101);
+  assert.equal(c.calls.some(call => call.body?.attention || call.path.endsWith("/stop")), false);
+  await c.select("one");
+  assert.equal(c.$("message").value, "Draft one", "closing a tab keeps its draft for later reopening");
 });
