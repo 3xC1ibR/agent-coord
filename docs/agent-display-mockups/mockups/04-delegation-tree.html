@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 04 · Delegation tree</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* An org chart of who started whom. Each root is its own tree; trees wrap so the forest fits the window. */
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 18px; }
+    .toolbar .counts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+    .toolbar .counts b { color: var(--ink); font-weight: 600; margin-right: 3px; }
+    .toolbar .counts .needs b { color: var(--warm); }
+    .toolbar .counts .dot { margin-right: 6px; }
+    .toolbar .actions { display: flex; gap: 6px; margin-left: auto; }
+    .toolbar .btn.filter[aria-pressed="true"] { border-color: var(--warm); color: var(--warm); background: var(--warm-tint); }
+    .filter-note { font-size: 11px; color: var(--muted); margin: -8px 0 14px; }
+    .forest { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 26px 18px; overflow-x: auto; padding: 2px 2px 12px; }
+    .tree { flex: none; margin: 0; padding: 0; list-style: none; }
+    .tree ul { display: flex; justify-content: center; margin: 0; padding: 18px 0 0; list-style: none; position: relative; }
+    .tree li { position: relative; display: flex; flex-direction: column; align-items: center; padding: 18px 5px 0; }
+    .tree > li { padding: 0; }
+    /* Connectors: each child draws half of the bar above it plus its own drop. */
+    .tree ul li::before, .tree ul li::after { content: ""; position: absolute; top: 0; right: 50%; width: 50%; height: 18px; border-top: 1px solid var(--line-strong); }
+    .tree ul li::after { right: auto; left: 50%; border-left: 1px solid var(--line-strong); }
+    .tree ul li:only-child::before, .tree ul li:only-child::after { display: none; }
+    .tree ul li:only-child { padding-top: 0; }
+    .tree ul li:first-child::before, .tree ul li:last-child::after { border: 0 none; }
+    .tree ul li:last-child::before { border-right: 1px solid var(--line-strong); border-radius: 0 6px 0 0; }
+    .tree ul li:first-child::after { border-radius: 6px 0 0 0; }
+    .tree ul::before { content: ""; position: absolute; top: 0; left: 50%; height: 18px; border-left: 1px solid var(--line-strong); }
+
+    .node { position: relative; width: 236px; display: flex; flex-direction: column; gap: 7px; padding: 10px 12px 9px; cursor: pointer; text-align: left; }
+    .node:hover { border-color: var(--hover-line); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 5%, transparent); }
+    .node.root { width: 252px; }
+    .node .identity { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 10px; color: var(--muted); }
+    .node .identity .provider-logo { width: 13px; height: 13px; }
+    .node .identity .name { color: var(--ink); font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .node .identity .chip { padding: 0 5px; }
+    .needs-badge { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 9px; background: var(--warm); color: var(--surface); font: 600 10px var(--mono); line-height: 1.6; }
+    :root[data-theme="dark"] .needs-badge { color: var(--paper); }
+    .node h3 { font-size: 13px; font-weight: 550; letter-spacing: -.02em; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .node .state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+    .node .state .label { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
+    .node.working .state .label { color: var(--accent); }
+    .node.waiting .state .label { color: var(--warm); }
+    .node.failed .state .label { color: var(--danger); }
+    .phase-pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px 1px 6px; border: 1px solid var(--line); border-radius: 10px; font-size: 10px; color: var(--muted); }
+    .phase-pill .phase-steps i { width: 4px; height: 4px; border-radius: 50%; }
+    .phase-pill .prog { font: 10px var(--mono); color: var(--ink); }
+    .node .activity { font-size: 11px; color: var(--accent); line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node .activity::before { content: "▸ "; }
+    .node .next-user { font-size: 11px; line-height: 1.45; color: var(--ink); border-left: 2px solid var(--warm); padding-left: 7px; }
+    .node .next-user b { color: var(--warm); font-weight: 600; }
+    .node .done-line { font-size: 11px; color: var(--muted); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    /* Ask summary, expandable into the shared answerable ask box. */
+    .ask-sum { display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--warm) 40%, var(--line)); border-left: 3px solid var(--warm); border-radius: 5px; background: color-mix(in srgb, var(--warm-tint) 55%, var(--surface)); color: var(--ink); font-size: 11px; line-height: 1.45; text-align: left; cursor: pointer; }
+    .ask-sum:hover { border-color: var(--warm); }
+    .ask-sum .k { font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); display: flex; gap: 6px; }
+    .ask-sum .k span:last-child { margin-left: auto; color: var(--muted); letter-spacing: 0; text-transform: none; font-weight: 400; }
+    .ask-sum .q { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .node .ask { padding: 8px 9px; font-size: 11px; }
+    .node .ask .ask-options { gap: 4px; margin-top: 6px; }
+    .node .ask .btn.small { padding: 3px 7px; font-size: 10.5px; }
+    .node .ask-fold { align-self: flex-start; margin: -2px 0 0 -6px; }
+    /* Children toggle and the collapsed edge. */
+    .kids-toggle { display: flex; align-items: center; gap: 6px; margin: 0 -4px -3px; padding: 4px; border: 0; border-top: 1px solid var(--line); background: none; color: var(--muted); font-size: 10.5px; cursor: pointer; text-align: left; }
+    .kids-toggle:hover { color: var(--ink); }
+    .caret { flex: none; width: 6px; height: 6px; margin: 0 3px 0 2px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); }
+    .caret.open { transform: rotate(45deg) translate(-1px, -1px); }
+    .collapsed-edge { display: flex; flex-direction: column; align-items: center; }
+    .collapsed-edge::before { content: ""; height: 14px; border-left: 1px dashed var(--line-strong); }
+    .edge-pill { display: inline-flex; align-items: center; gap: 7px; padding: 3px 9px; border: 1px dashed var(--line-strong); border-radius: 11px; background: var(--paper); color: var(--muted); font-size: 10.5px; cursor: pointer; white-space: nowrap; }
+    .edge-pill:hover { border-color: var(--hover-line); color: var(--ink); }
+    .edge-pill .n { display: inline-flex; align-items: center; gap: 3px; font-family: var(--mono); }
+    .edge-pill .n.needs { color: var(--warm); font-weight: 600; }
+    .edge-pill.passive { cursor: default; border-style: dotted; }
+    .empty { color: var(--muted); font-size: 12px; padding: 24px 0; }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  // View state lives here so Play/Step/answer re-renders keep it.
+  const view = {mode: null, overrides: new Map(), askOpen: new Map(), onlyNeeds: false, scrollLeft: 0};
+
+  function isCollapsed(a, field) {
+    if (view.overrides.has(a.id)) return view.overrides.get(a.id);
+    if (view.mode === "all") return true;
+    if (view.mode === "none") return false;
+    return field.scale === "large" && field.depth(a.id) === 0;
+  }
+  function setCollapsed(id, on) { view.overrides.set(id, on); }
+
+  function rollup(list, field) {
+    const c = field.counts(list);
+    return [["working", c.working, "working"], ["waiting", c.waiting + c.blocked, "waiting"], ["failed", c.failed, "failed"], ["done", c.done, "done"]].filter(([, n]) => n);
+  }
+  function edgePill(hidden, field, onClick, label) {
+    const pill = $(onClick ? "button" : "span", "edge-pill" + (onClick ? "" : " passive"));
+    if (onClick) { pill.type = "button"; pill.onclick = e => { e.stopPropagation(); onClick(); }; }
+    pill.append($("span", null, label));
+    for (const [cls, n, title] of rollup(hidden, field)) { const s = $("span", "n"); s.title = n + " " + title; s.append($("span", "dot " + cls), String(n)); pill.append(s); }
+    const needs = hidden.filter(field.needsUser).length;
+    if (needs) pill.append($("span", "n needs", needs + " need you"));
+    return pill;
+  }
+
+  // The fixture's label pluralizes one waited-on agent; name it instead.
+  function statusText(a, field) {
+    if (a.status !== "blocked" || field.externalWaits(a).length) return field.statusLabel(a);
+    const waits = field.agentWaits(a);
+    return waits.length === 1 ? "Waiting on " + (waits[0].name || waits[0].title) : field.statusLabel(a);
+  }
+
+  function askSection(a, field, api) {
+    const wrap = $("div");
+    const open = view.askOpen.has(a.id) ? view.askOpen.get(a.id) : field.scale !== "large";
+    if (open) {
+      const box = Mockup.askBox(a, field, null); box.onclick = e => e.stopPropagation();
+      wrap.append(box);
+      const fold = $("button", "btn quiet small ask-fold", "Fold ask"); fold.type = "button";
+      fold.onclick = e => { e.stopPropagation(); view.askOpen.set(a.id, false); api.rerender(); };
+      wrap.append(fold);
+    } else {
+      const s = $("button", "ask-sum"); s.type = "button"; s.title = "Answer here";
+      const k = $("span", "k"); k.append($("span", null, a.ask.kind + (a.ask.blocking ? " · blocking" : "")), $("span", null, field.relativeTime(a.ask.askedAt)));
+      s.append(k, $("span", "q", a.ask.question));
+      s.onclick = e => { e.stopPropagation(); view.askOpen.set(a.id, true); api.rerender(); };
+      wrap.append(s);
+    }
+    return wrap;
+  }
+
+  function node(a, field, api, ctx) {
+    const kids = field.children(a.id);
+    const needsBelow = field.descendantsNeedingUser(a.id).length;
+    const el = $("article", "card node " + a.status + (ctx.depth === 0 ? " root" : "") + (field.needsUser(a) ? " needs-you" : "") + (a.status === "working" ? " working" : ""));
+    el.tabIndex = 0; el.onclick = () => api.select(a.id);
+    el.onkeydown = e => { if (e.key === "Enter" && e.target === el) api.select(a.id); };
+    // Identity, with the bubbled-up needs-you count pinned to the right.
+    const id = $("div", "identity");
+    id.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    if (a.name && a.name !== AgentField.ROLE_LABELS[a.role]) id.append($("span", "name", a.name));
+    id.append($("span", "chip", AgentField.ROLE_LABELS[a.role].replace("Terminal delegate", "Delegate").replace("Release specialist", "Release")));
+    if (a.kind !== "app") id.append($("span", "chip mono", a.kind));
+    if (needsBelow) { const b = $("span", "needs-badge", "▲ " + needsBelow); b.title = needsBelow + (needsBelow === 1 ? " agent below needs" : " agents below need") + " your input"; id.append(b); }
+    el.append(id);
+    const h = $("h3", null, a.title); h.title = a.title; el.append(h);
+    const st = $("div", "state");
+    const label = $("span", "label", statusText(a, field)); label.title = label.textContent;
+    const pill = $("span", "phase-pill"); pill.append(AgentField.phaseSteps(a), AgentField.PHASE_LABELS[a.phase]);
+    const prog = field.progress(a); if (prog.total && a.status !== "done") pill.append($("span", "prog", prog.done + "/" + prog.total));
+    st.append(AgentField.statusDot(a), label, pill);
+    el.append(st);
+    if (a.ask) el.append(askSection(a, field, api));
+    else if (field.needsUser(a)) { const n = $("div", "next-user"); n.append($("b", null, "Your next step · "), a.next.action); el.append(n); }
+    else if (a.status === "working" && a.activity) { const act = $("div", "activity", a.activity); act.title = a.activity; el.append(act); }
+    else if (a.status === "done") el.append($("div", "done-line", a.summary));
+    if (kids.length && !ctx.forceOpen) {
+      const collapsed = ctx.collapsed;
+      const t = $("button", "kids-toggle"); t.type = "button"; t.setAttribute("aria-expanded", String(!collapsed));
+      t.append($("span", "caret" + (collapsed ? "" : " open")), $("span", null, kids.length + (kids.length === 1 ? " agent" : " agents") + (field.descendants(a.id).length > kids.length ? " · " + field.descendants(a.id).length + " total" : "")));
+      t.onclick = e => { e.stopPropagation(); setCollapsed(a.id, !collapsed); api.rerender(); };
+      el.append(t);
+    }
+    return el;
+  }
+
+  function branch(a, field, api, depth, keep) {
+    const li = $("li");
+    const kids = field.children(a.id);
+    const shown = keep ? kids.filter(k => keep.has(k.id)) : kids;
+    const collapsed = !keep && isCollapsed(a, field);
+    li.append(node(a, field, api, {depth, collapsed, forceOpen: !!keep}));
+    if (!kids.length) return li;
+    if (collapsed) {
+      const edge = $("div", "collapsed-edge");
+      edge.append(edgePill(field.descendants(a.id), field, () => { setCollapsed(a.id, false); api.rerender(); }, field.descendants(a.id).length + " below"));
+      li.append(edge);
+      return li;
+    }
+    if (shown.length) { const ul = $("ul"); for (const k of shown) ul.append(branch(k, field, api, depth + 1, keep)); li.append(ul); }
+    const hidden = kids.filter(k => !shown.includes(k));
+    if (hidden.length) {
+      const edge = $("div", "collapsed-edge");
+      edge.append(edgePill(hidden.flatMap(k => [k, ...field.descendants(k.id)]), field, null, "+" + hidden.length + " not needing you"));
+      li.append(edge);
+    }
+    return li;
+  }
+
+  // Roots that need you (themselves or below) first, then active work, then the rest; stable within a bucket.
+  function rootRank(a, field) {
+    if (field.needsUser(a) || field.descendantsNeedingUser(a.id).length) return 0;
+    if ([a, ...field.descendants(a.id)].some(x => x.status === "working" || x.status === "blocked")) return 1;
+    return a.status === "done" ? 3 : 2;
+  }
+
+  Mockup.mount({
+    number: 4, title: "Delegation tree", spectrum: "moderate",
+    summary: "An org chart of who started whom: roots across the top, sub-agents below, and needs-you counts bubbling up every branch.",
+    signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "updated_at"],
+      proposed: ["name", "role", "kind", "activity", "ask", "blocks", "waiting_on", "plan"]},
+    notes: "Assumes every agent records its creator (created_by) so the forest can be drawn, and that asks are structured enough to answer from a node.",
+    render(field, stage, api) {
+      const prev = stage.querySelector(".forest"); if (prev) view.scrollLeft = prev.scrollLeft;
+      stage.replaceChildren();
+      const all = field.agents, c = field.counts(all), asks = field.asks();
+      const roots = field.roots().map((a, i) => ({a, i, r: rootRank(a, field)})).sort((x, y) => x.r - y.r || x.i - y.i).map(x => x.a);
+
+      const bar = $("div", "toolbar");
+      const counts = $("div", "counts");
+      const stat = (cls, n, text, dot) => { const s = $("span", cls); if (dot) s.append($("span", "dot " + dot)); s.append($("b", null, String(n)), text); return s; };
+      counts.append(stat("", all.length, all.length === 1 ? "agent" : "agents"), stat("", roots.length, roots.length === 1 ? "tree" : "trees"),
+        stat("needs", asks.length, "need you", "waiting"), stat("", c.working, "working", "working"), stat("", c.blocked, "waiting on others", "blocked"), stat("", c.done, "done", "done"));
+      const actions = $("div", "actions");
+      const only = $("button", "btn small filter", "Only branches that need me"); only.type = "button"; only.setAttribute("aria-pressed", String(view.onlyNeeds));
+      only.onclick = () => { view.onlyNeeds = !view.onlyNeeds; api.rerender(); };
+      const collapseAll = $("button", "btn small", "Collapse all"); collapseAll.type = "button";
+      collapseAll.onclick = () => { view.mode = "all"; view.overrides.clear(); view.onlyNeeds = false; api.rerender(); };
+      const expandAll = $("button", "btn small", "Expand all"); expandAll.type = "button";
+      expandAll.onclick = () => { view.mode = "none"; view.overrides.clear(); view.onlyNeeds = false; api.rerender(); };
+      actions.append(only, collapseAll, expandAll);
+      bar.append(counts, actions);
+      stage.append(bar);
+
+      // The filter keeps every agent that needs you plus the chain of creators above it.
+      let keep = null, list = roots;
+      if (view.onlyNeeds) {
+        keep = new Set();
+        for (const a of asks) { keep.add(a.id); for (const p of field.ancestors(a.id)) keep.add(p.id); }
+        list = roots.filter(r => keep.has(r.id));
+        stage.append($("p", "filter-note", "Showing " + keep.size + " of " + all.length + " agents: the " + asks.length + " that need you and the agents that started them."));
+      }
+
+      const forest = $("div", "forest");
+      for (const r of list) { const ul = $("ul", "tree"); ul.append(branch(r, field, api, 0, keep)); forest.append(ul); }
+      if (!list.length) forest.append($("p", "empty", view.onlyNeeds ? "Nothing needs you. Every branch is running on its own." : "No agents."));
+      stage.append(forest);
+      forest.scrollLeft = view.scrollLeft;
+    },
+  });
+})();
+</script>
+</body>
+</html>

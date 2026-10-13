@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 01 · Card refinements</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Keeps today's structure (Pinned + Attention, then work stages) and only tightens the card. */
+    .overview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+    .section h2 { font-size: 15px; font-weight: 550; letter-spacing: -.02em; margin-bottom: 10px; }
+    .section h2 small { font: 10px var(--mono); color: var(--muted); margin-left: 8px; }
+    .stack { display: grid; gap: 12px; }
+    .thread { position: relative; display: flex; flex-direction: column; gap: 10px; padding: 16px 18px 12px; cursor: pointer; }
+    .thread:hover { border-color: var(--hover-line); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 4%, transparent); }
+    .identity { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10px; color: var(--muted); }
+    .identity .provider-logo { width: 13px; height: 13px; }
+    .identity .when { margin-left: auto; font-family: var(--mono); white-space: nowrap; }
+    .thread h3 { font-size: 16px; font-weight: 550; letter-spacing: -.025em; line-height: 1.4; }
+    .state { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+    .state .label { color: var(--ink); }
+    .state.working .label { color: var(--accent); }
+    .state.waiting .label, .state.failed .label { color: var(--warm); }
+    .state.failed .label { color: var(--danger); }
+    .activity { font-size: 11.5px; color: var(--accent); line-height: 1.5; }
+    .activity::before { content: "▸ "; }
+    .summary { font-size: 12px; line-height: 1.7; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .thread.done .summary::before { content: "Completed · "; color: var(--ok); }
+    .next { display: flex; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 11px; line-height: 1.55; }
+    .next b { font-weight: 600; }
+    .next.external b { color: var(--muted); }
+    .stale { font-size: 11px; color: var(--warm); }
+    .agents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+    .agents .count { font: 10px var(--mono); color: var(--muted); margin-right: 2px; }
+    .agent-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px 3px 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); font-size: 11px; color: var(--ink); cursor: pointer; }
+    .agent-chip:hover { border-color: var(--hover-line); }
+    .agent-chip.needs { border-color: var(--warm); background: var(--warm-tint); }
+    .agent-chip small { color: var(--muted); font-size: 10px; }
+    .agent-chip .t { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .footer { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+    .footer .right { margin-left: auto; display: flex; gap: 4px; }
+    .attention .thread { padding: 12px 16px 10px; }
+    .attention .thread h3 { font-size: 14px; }
+    .attention .summary { -webkit-line-clamp: 2; }
+    .board { margin-top: 34px; display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 14px; align-items: start; }
+    .board .col h2 { font-size: 11px; font-weight: 500; padding-bottom: 10px; border-bottom: 1px solid var(--line); margin-bottom: 12px; color: var(--muted); }
+    .board .col h2 b { color: var(--ink); font-weight: 600; margin-right: 6px; }
+    .board .thread { padding: 12px 13px 10px; gap: 8px; }
+    .board .thread h3 { font-size: 13px; }
+    .board .summary { -webkit-line-clamp: 3; font-size: 11.5px; }
+    .board .agent-chip .t { max-width: 110px; }
+    .empty { color: var(--muted); font-size: 11px; }
+    @media (max-width: 1100px) { .overview { grid-template-columns: 1fr; } .board { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
+
+  function card(a, field, api, variant = "full") {
+    const el = $("article", "card thread " + a.status + (field.needsUser(a) ? " needs-you" : "") + (a.status === "working" ? " working" : ""));
+    el.tabIndex = 0; el.onclick = () => api.select(a.id); el.onkeydown = e => { if (e.key === "Enter") api.select(a.id); };
+    // 1. Identity: who this is, before what it is doing.
+    const id = $("div", "identity");
+    id.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    if (a.name && a.name !== ROLE_SHORT[a.role]) id.append($("span", "chip", a.name));
+    id.append($("span", null, ROLE_SHORT[a.role] + (a.kind !== "app" ? " · " + a.kind : "")));
+    if (a.pinned) id.append($("span", "chip mono", "pinned"));
+    const when = $("span", "when", field.relativeTime(a.updatedAt)); when.title = new Date(a.updatedAt).toLocaleString(); id.append(when);
+    el.append(id, $("h3", null, a.title));
+    // 2. State: runtime status + phase stepper replace the single phase word.
+    const st = $("div", "state " + a.status);
+    st.append(AgentField.statusDot(a), $("span", "label", field.statusLabel(a)), AgentField.phaseSteps(a), $("span", null, AgentField.PHASE_LABELS[a.phase]));
+    const prog = field.progress(a); if (prog.total && a.status !== "done") st.append($("span", "mono", prog.done + "/" + prog.total));
+    el.append(st);
+    if (a.activity && a.status === "working") el.append($("div", "activity", a.activity));
+    // 3. The ask comes before the summary when the user is the next actor.
+    if (a.ask) el.append(Mockup.askBox(a, field, null));
+    if (variant !== "attention" || !a.ask) { const s = $("p", "summary", a.summary); s.title = a.summary; el.append(s); }
+    if (!a.ask && a.next?.action) {
+      const n = $("div", "next " + a.next.actor);
+      n.append($("span", null, "↳"), $("span")); n.lastChild.append($("b", null, ({user: "Your next step", agent: "Up next", external: "Waiting on"}[a.next.actor] || "Next") + " · "), a.next.action);
+      el.append(n);
+    }
+    if (a.stale) el.append($("div", "stale", "New activity since this checkpoint"));
+    // 4. Sub-agents as chips instead of a collapsible list; grandchildren roll into a count.
+    const kids = field.children(a.id);
+    if (kids.length) {
+      const row = $("div", "agents");
+      const nested = kids.reduce((n, k) => n + field.descendants(k.id).length, 0);
+      const needs = field.descendantsNeedingUser(a.id).length;
+      row.append($("span", "count", kids.length + (kids.length === 1 ? " agent" : " agents") + (nested ? " · +" + nested + " nested" : "") + (needs ? " · " + needs + " need you" : "")));
+      for (const k of kids) {
+        const chip = $("button", "agent-chip" + (field.needsUser(k) ? " needs" : "")); chip.type = "button"; chip.title = k.title + " · " + field.statusLabel(k);
+        chip.append(AgentField.statusDot(k), $("span", "t", k.title), $("small", null, k.status === "working" && k.activity ? k.activity : field.statusLabel(k)));
+        chip.onclick = e => { e.stopPropagation(); api.select(k.id); };
+        row.append(chip);
+      }
+      el.append(row);
+    }
+    // 5. Footer actions stay where they are today.
+    const f = $("div", "footer");
+    if (a.unread) { const d = $("button", "btn quiet small", "Dismiss"); d.type = "button"; d.onclick = e => { e.stopPropagation(); field.dismiss(a.id); }; f.append(d); }
+    const right = $("div", "right"); for (const t of ["⋮", "×"]) { const b = $("button", "btn quiet small", t); b.type = "button"; b.onclick = e => e.stopPropagation(); right.append(b); } f.append(right);
+    el.append(f);
+    return el;
+  }
+
+  Mockup.mount({
+    number: 1, title: "Card refinements", spectrum: "conservative",
+    summary: "Same layout as today; the card gains an identity row, a phase stepper, a live activity line, an answerable ask, and sub-agent chips.",
+    signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "unread", "stale", "updated_at", "pinned"],
+      proposed: ["name", "role", "kind", "activity", "ask", "plan"]},
+    notes: "Only the card changed. The ask replaces the free-text next step when the user is the next actor, so it can be answered without opening the thread.",
+    render(field, stage, api) {
+      stage.replaceChildren();
+      const roots = field.roots();
+      const asks = field.asks();
+      const pinned = roots.filter(a => a.pinned);
+      const overview = $("div", "overview");
+      const left = $("section", "section"); left.append($("h2", null, "Pinned"));
+      const ls = $("div", "stack"); for (const a of pinned) ls.append(card(a, field, api)); if (!pinned.length) ls.append($("p", "empty", "—")); left.append(ls);
+      const right = $("section", "section attention"); const h = $("h2", null, "Attention"); h.append($("small", null, asks.length + " need you")); right.append(h);
+      const rs = $("div", "stack"); for (const a of asks) rs.append(card(a, field, api, "attention")); if (!asks.length) rs.append($("p", "empty", "Nothing needs you.")); right.append(rs);
+      overview.append(left, right); stage.append(overview);
+      const board = $("div", "board");
+      const askIds = new Set(asks.map(a => a.id));
+      for (const phase of AgentField.PHASES) {
+        const col = $("section", "col"); const items = roots.filter(a => a.phase === phase && !a.pinned && !askIds.has(a.id)).sort((x, y) => Number(y.status === "working") - Number(x.status === "working") || y.updatedAt - x.updatedAt);
+        const hh = $("h2"); hh.append($("b", null, String(items.length)), AgentField.PHASE_LABELS[phase]); col.append(hh);
+        const stack = $("div", "stack"); for (const a of items) stack.append(card(a, field, api, "board")); if (!items.length) stack.append($("p", "empty", "—")); col.append(stack); board.append(col);
+      }
+      stage.append(board);
+    },
+  });
+})();
+</script>
+</body>
+</html>

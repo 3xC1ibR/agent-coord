@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 18 · Atlas</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* One canvas with one coordinate system. The camera zooms through three levels: all domains,
+       one domain as a scatter, one orchestrator with its sub-agents. Size is how much you have
+       talked to an agent; color is how recently it did anything; a ring is its state. */
+    html, body { height: 100%; } body { height: 100dvh; overflow: hidden; }
+    #stage { display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+    #stage[data-panel="bottom"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 190px; }
+    .canvas { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--paper); }
+    svg.atlas { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+    svg.atlas.dragging { cursor: grabbing; }
+    .blob { fill: color-mix(in srgb, var(--ink) 4%, var(--paper)); stroke: color-mix(in srgb, var(--ink) 14%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; cursor: pointer; transition: fill .25s, stroke .25s; }
+    .blob:hover { fill: color-mix(in srgb, var(--ink) 7%, var(--paper)); stroke: color-mix(in srgb, var(--ink) 30%, transparent); }
+    .cluster.focused .blob { fill: color-mix(in srgb, var(--surface) 70%, var(--paper)); stroke: color-mix(in srgb, var(--ink) 22%, transparent); cursor: default; }
+    .cluster.dim .blob { opacity: .22; stroke: color-mix(in srgb, var(--ink) 10%, transparent) !important; }
+    .cluster.dim text { opacity: .35; }
+    .cluster.needs:not(.focused) .blob { stroke: color-mix(in srgb, var(--warm) 55%, transparent); }
+    .cluster-label { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--ink); letter-spacing: -.01em; pointer-events: none; }
+    .cluster-sub { font: 10px var(--mono); fill: var(--muted); letter-spacing: .06em; text-transform: uppercase; pointer-events: none; }
+    .cluster-count { font: 600 11px var(--mono); fill: var(--muted); pointer-events: none; }
+    .cluster-needs { font: 600 10px var(--mono); fill: var(--warm); pointer-events: none; }
+    .spoke, .tie, .node circle, .sub circle { vector-effect: non-scaling-stroke; }
+    .node { cursor: pointer; }
+    .node.faded { opacity: .35; }
+    .node circle.core { stroke: var(--paper); stroke-width: 1.2; }
+    .node circle.state { fill: none; stroke-width: 2.2; display: none; }
+    .node.waiting circle.state { display: block; stroke: var(--warm); animation: blink 1.3s steps(2, start) infinite; }
+    .node.failed circle.state { display: block; stroke: var(--danger); animation: blink 1.3s steps(2, start) infinite; }
+    .node.blocked circle.state { display: block; stroke: var(--muted); stroke-dasharray: 3 3; stroke-width: 1.4; }
+    .node.done circle.state { display: block; stroke: var(--ok); stroke-width: 1.4; opacity: .7; }
+    .node.working circle.halo { fill: var(--accent); opacity: .16; animation: breathe 2.6s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+    .node.pinned circle.ring { fill: none; stroke: var(--line-strong); stroke-width: .8; }
+    .node circle.mark { fill: none; stroke: var(--ink); stroke-width: 1.4; display: none; }
+    .node.highlight circle.mark { display: block; animation: locate 1.6s ease-out 3; transform-box: fill-box; transform-origin: center; }
+    .node.peeked circle.mark { display: block; }
+    .spoke { stroke: color-mix(in srgb, var(--ink) 30%, transparent); stroke-width: .8; }
+    .sub circle.core { stroke: var(--paper); stroke-width: .8; cursor: pointer; }
+    .sub circle.state { fill: none; stroke-width: 1.8; display: none; }
+    .sub.waiting circle.state, .sub.failed circle.state { display: block; stroke: var(--warm); animation: blink 1.3s steps(2, start) infinite; }
+    .sub.blocked circle.state { display: block; stroke: var(--muted); stroke-dasharray: 2 2; stroke-width: 1.2; }
+    .sub.done circle.state { display: block; stroke: var(--ok); stroke-width: 1.2; opacity: .7; }
+    .sub circle.mark { fill: none; stroke: var(--ink); stroke-width: 1.2; display: none; }
+    .sub.highlight circle.mark { display: block; animation: locate 1.6s ease-out 3; transform-box: fill-box; transform-origin: center; }
+    .sub-count { font: 600 7px var(--mono); fill: var(--muted); pointer-events: none; }
+    .node-label { font: 500 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--ink); pointer-events: none; }
+    .node-label.hub-label { font-weight: 600; }
+    .node-doing { font: 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--muted); pointer-events: none; }
+    .node.working .node-doing, .sub.working .node-doing { fill: var(--accent); }
+    .sub .node-label { font-size: 10.5px; }
+    svg[data-labels="off"] .node-label, svg[data-labels="off"] .node-doing { display: none; }
+    svg[data-labels="needs"] .node:not(.waiting):not(.failed) .node-label, svg[data-labels="needs"] .node-doing { display: none; }
+    .node:hover .node-label, .node:hover .node-doing { display: block !important; }
+    .tie { stroke: var(--muted); stroke-width: .8; stroke-dasharray: 2 3; fill: none; }
+    .tie-label { font: 8.5px var(--mono); fill: var(--muted); }
+    .toolbar { position: absolute; z-index: 3; left: 14px; top: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+    .toolbar .crumb { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
+    .toolbar .crumb button { border: 0; background: transparent; padding: 0; color: var(--muted); cursor: pointer; font: inherit; }
+    .toolbar .crumb button:hover { color: var(--ink); text-decoration: underline; }
+    .toolbar .crumb b { font-weight: 550; }
+    .toolbar .crumb small { color: var(--muted); font-size: 10px; }
+    .toolbar .hint { color: var(--muted); font-size: 11px; margin-left: 4px; }
+    .legend { position: absolute; z-index: 3; left: 14px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 14px; font: 10px var(--mono); letter-spacing: .04em; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+    .legend .swatches { display: inline-flex; gap: 2px; }
+    .legend .swatches i { width: 7px; height: 7px; }
+    .legend .ring { border: 2px solid var(--warm); background: transparent; }
+    .controls { position: absolute; z-index: 3; right: 14px; bottom: 12px; display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); }
+    .controls select { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font-size: 11px; }
+    .panel { min-width: 0; min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; }
+    #stage[data-panel="bottom"] .panel { border-left: 0; border-top: 1px solid var(--line); flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+    .panel-head { flex: none; padding: 12px 16px 8px; font: 600 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+    .panel-head i { width: 6px; height: 6px; border-radius: 50%; background: var(--warm); }
+    #stage[data-panel="bottom"] .panel-head { writing-mode: vertical-rl; transform: rotate(180deg); padding: 10px 6px; border-left: 1px solid var(--line); }
+    .ask-item { display: grid; gap: 4px; padding: 11px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+    .ask-item:hover { background: var(--hover-bg); }
+    .ask-item.located { background: color-mix(in srgb, var(--warm-tint) 60%, var(--surface)); }
+    #stage[data-panel="bottom"] .ask-item { flex: 0 0 300px; border-bottom: 0; border-right: 1px solid var(--line); }
+    .ask-item .top { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; }
+    .ask-item .top .kind { font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+    .ask-item .top b { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ask-item .top small { color: var(--muted); font-size: 10px; white-space: nowrap; margin-left: auto; }
+    .ask-item .from { font-size: 10px; color: var(--muted); }
+    .ask-item .q { font-size: 11.5px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .ask-item .act { display: flex; gap: 5px; align-items: center; margin-top: 2px; }
+    .ask-item .act .btn { padding: 3px 9px; font-size: 11px; }
+    .ask-item .act .locate { margin-left: auto; font-size: 10px; color: var(--muted); }
+    .panel .calm { padding: 16px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+    @keyframes blink { 50% { opacity: .3; } }
+    @keyframes breathe { 50% { transform: scale(1.5); opacity: .07; } }
+    @keyframes locate { 0% { transform: scale(2.4); opacity: 0; } 30% { opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .node circle.halo, .node circle.state, .sub circle.state { animation: none !important; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el, NS = "http://www.w3.org/2000/svg";
+  const svgEl = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) if (v != null) e.setAttribute(k, v); if (parent) parent.append(e); return e; };
+  const MIN = 60000;
+  const hash01 = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  const scenario = new URLSearchParams(location.search).get("domains") || "clean";
+  const storeKey = "atlas:" + scenario;
+  let saved = {}; try { saved = JSON.parse(localStorage.getItem(storeKey) || "{}"); } catch { saved = {}; }
+  const clusterPos = new Map(Object.entries(saved.clusters || {})), pins = new Map(Object.entries(saved.pins || {}));
+  const persist = () => { try { localStorage.setItem(storeKey, JSON.stringify({clusters: Object.fromEntries(clusterPos), pins: Object.fromEntries(pins)})); } catch { /* private mode */ } };
+  const CANON = {frontend: "web", ui: "web", webui: "web", web: "web", api: "backend", server: "backend", services: "backend", ios: "mobile", phone: "mobile", mobileapp: "mobile", documentation: "docs", writing: "docs", ci: "infra", devops: "infra", tooling: "infra", shipping: "release", deploy: "release", analysis: "research", investigation: "research"};
+  const norm = label => label.toLowerCase().replace(/[^a-z0-9/]+/g, "");
+  const clusterKey = label => { if (!label) return "∅"; const n = norm(label); return CANON[n] || n; };
+  const LABEL_W = 235, LABEL_H = 30; // label boxes in screen pixels at the cluster's own zoom level
+  const state = {level: 0, focus: null, hub: null, view: null, anim: null, hovered: null, highlight: null, panel: "right", labels: "auto", targetScale: null};
+  let canvas, svg, panel, toolbar, controls, legend, clusters = new Map(), nodeEls = new Map(), api, currentField = null, drawnScale = 1;
+  const W = () => canvas.clientWidth || 1000, H = () => canvas.clientHeight || 700;
+  const viewScale = () => W() / (state.view?.w || 1600);
+  const layoutScale = () => state.targetScale || viewScale();
+  const px = () => 1 / layoutScale();
+  // Encodings. Size: messages from the user. Color: age. Ring: state (in CSS).
+  const ageMix = (field, a) => Math.round(100 - 80 * Math.min(1, Math.log1p(field.age(a) / MIN) / Math.log1p(24 * 60)));
+  const fillFor = (field, a) => "color-mix(in srgb, var(--accent) " + ageMix(field, a) + "%, var(--paper))";
+  const sizeFor = (a, far) => far ? Math.min(8, 2.6 + 1.3 * Math.sqrt(a.userTurns || 0)) : Math.min(15, 4 + 2.6 * Math.sqrt(a.userTurns || 0));
+
+  /* ---------- Clusters ---------- */
+  function buildClusters(field) {
+    const map = new Map();
+    const add = (key, a, raw) => { if (!map.has(key)) map.set(key, {key, members: [], raw: new Map(), secondary: new Map()}); const c = map.get(key); c.members.push(a); if (raw) c.raw.set(raw, (c.raw.get(raw) || 0) + 1); return c; };
+    for (const a of field.roots()) { const ds = field.domainsOf(a); const c = add(ds[0] ? clusterKey(ds[0]) : "∅", a, ds[0] || null); if (ds[1]) c.secondary.set(a.id, clusterKey(ds[1])); }
+    const odd = c => c.members.length === 1 && c.key !== "∅" && !c.key.includes("/") && !AgentField.DOMAINS.includes(c.key) && scenario !== "none";
+    const singles = [...map.values()].filter(odd);
+    if (singles.length >= 3) { const other = {key: "other", members: [], raw: new Map(), secondary: new Map(), merged: singles.map(c => c.key)}; for (const c of singles) { map.delete(c.key); other.members.push(...c.members); for (const [r, n] of c.raw) other.raw.set(r, n); } map.set("other", other); }
+    for (const c of map.values()) {
+      const top = [...c.raw.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
+      c.label = c.key === "∅" ? "No domain reported" : c.key === "other" ? "Other" : (AgentField.DOMAIN_LABELS[c.key] || top || c.key);
+      c.aliases = [...new Set([...c.raw.keys()].filter(r => clusterKey(r) === c.key && norm(r) !== norm(c.label) && norm(r) !== c.key))];
+      c.source = scenario === "none" && c.key !== "∅" ? "from write scope" : c.key === "other" ? c.merged.length + " labels" : c.aliases.length ? "also " + c.aliases.slice(0, 3).join(", ") : "";
+      c.needs = c.members.reduce((n, a) => n + (field.needsUser(a) ? 1 : 0) + field.descendantsNeedingUser(a.id).length, 0);
+      c.working = c.members.filter(a => a.status === "working").length;
+      c.r = 64 + 24 * Math.sqrt(c.members.length) + Math.min(18, c.members.reduce((n, a) => n + field.children(a.id).length, 0) * 1.6);
+      c.scale = Math.min(W(), H()) / (2.5 * c.r); // the camera scale at which this cluster fills the view
+    }
+    return map;
+  }
+  function placeClusters(map) {
+    const list = [...map.values()].sort((a, b) => a.key.localeCompare(b.key));
+    for (const c of list) {
+      const p = clusterPos.get(c.key);
+      if (p) { c.x = p.x; c.y = p.y; c.pinned = true; continue; }
+      const h = hash01(c.key), h2 = hash01(c.key + "r"), ang = h * Math.PI * 2, rad = 150 + h2 * 210;
+      c.x = 800 + Math.cos(ang) * rad * 1.2; c.y = 500 + Math.sin(ang) * rad * 1.0; c.pinned = false;
+    }
+    for (let it = 0; it < 90; it++) for (let i = 0; i < list.length; i++) for (let k = i + 1; k < list.length; k++) {
+      const a = list[i], b = list[k]; const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 0.01, min = a.r + b.r + 36;
+      if (d >= min) continue; const push = (min - d) / 2, ux = dx / d, uy = dy / d;
+      if (!a.pinned && !b.pinned) { a.x -= ux * push; a.y -= uy * push; b.x += ux * push; b.y += uy * push; }
+      else if (!a.pinned) { a.x -= ux * push * 2; a.y -= uy * push * 2; } else if (!b.pinned) { b.x += ux * push * 2; b.y += uy * push * 2; }
+    }
+    for (const c of list) if (!c.pinned) { c.x = Math.max(c.r + 20, Math.min(1600 - c.r - 20, c.x)); c.y = Math.max(c.r + 20, Math.min(1000 - c.r - 20, c.y)); }
+  }
+  // A scatter with stable, label-aware positions. The same coordinates serve every zoom level.
+  function placeMembers(c, field, map) {
+    const u = 1 / c.scale, R = c.r * 0.72;
+    for (const a of c.members) {
+      const pin = pins.get(a.id); if (pin) { a._x = c.x + pin.dx; a._y = c.y + pin.dy; a._pinned = true; continue; }
+      a._pinned = false;
+      const h1 = hash01(a.id), h2 = hash01(a.id + "a"), rad = R * Math.sqrt(0.12 + 0.88 * h1), ang = h2 * Math.PI * 2;
+      a._x = c.x + Math.cos(ang) * rad * 0.9; a._y = c.y + Math.sin(ang) * rad * 0.78 + c.r * 0.06;
+      const sec = c.secondary.get(a.id) && map.get(c.secondary.get(a.id));
+      if (sec) { const d = Math.hypot(sec.x - c.x, sec.y - c.y) || 1; a._x = c.x + (sec.x - c.x) / d * R * 0.9; a._y = c.y + (sec.y - c.y) / d * R * 0.75; }
+    }
+    const free = c.members.filter(a => !a._pinned).sort((p, q) => p.id.localeCompare(q.id));
+    const left = 16 * u, right = LABEL_W * u, bh = LABEL_H * u;
+    for (let it = 0; it < 24; it++) for (let i = 0; i < free.length; i++) for (let k = i + 1; k < free.length; k++) {
+      const p = free[i], q = free[k]; const dy = q._y - p._y;
+      const extra = (field.children(p.id).length + field.children(q.id).length) * 7 * u;
+      // Boxes run from a little left of the dot to the end of its label.
+      const pL = p._x - left - extra, pR = p._x + right, qL = q._x - left - extra, qR = q._x + right;
+      const ox = Math.min(pR, qR) - Math.max(pL, qL), oy = bh + extra - Math.abs(dy);
+      if (ox <= 0 || oy <= 0) continue;
+      if (oy / (bh + extra) <= ox / (right + left)) { const push = oy / 2 * (dy >= 0 ? 1 : -1) || oy / 2; p._y -= push; q._y += push; }
+      else { const push = ox / 2 * (q._x >= p._x ? 1 : -1) || ox / 2; p._x -= push; q._x += push; }
+    }
+    for (const a of free) { const dx = a._x - c.x, dy = a._y - c.y, lim = c.r * 0.9, d = Math.hypot(dx / 1.05, dy / 0.9); if (d > lim) { a._x = c.x + dx * lim / d; a._y = c.y + dy * lim / d; } }
+    for (let it = 0; it < 8; it++) for (let i = 0; i < free.length; i++) for (let k = i + 1; k < free.length; k++) { const p = free[i], q = free[k]; const dy = q._y - p._y; const ox = Math.min(p._x + right, q._x + right) - Math.max(p._x - left, q._x - left), oy = bh - Math.abs(dy); if (ox <= 0 || oy <= 0) continue; const push = oy / 2 * (dy >= 0 ? 1 : -1) || oy / 2; p._y -= push; q._y += push; }
+  }
+  // Level 2: an orchestrator's sub-agents bloom out on spokes; grandchildren orbit their parent.
+  function bloom(hub, field, S) {
+    const u = 1 / S, kids = field.children(hub.id), R1 = (84 + 10 * kids.length) * u;
+    kids.forEach((k, i) => { const ang = -Math.PI / 2 + (i + 0.5) * (2 * Math.PI / kids.length); k._ang = ang; k._x = hub._x + Math.cos(ang) * R1 * 1.45; k._y = hub._y + Math.sin(ang) * R1 * 0.78;
+      const gk = field.children(k.id), R2 = 26 * u; gk.forEach((g, j) => { const a2 = ang + (j - (gk.length - 1) / 2) * 0.7; g._x = k._x + Math.cos(a2) * R2; g._y = k._y + Math.sin(a2) * R2; }); });
+  }
+  function hull(points) {
+    const pts = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]); if (pts.length < 3) return pts;
+    const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lower = []; for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+    const upper = []; for (const p of pts.reverse()) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+    return lower.slice(0, -1).concat(upper.slice(0, -1));
+  }
+  function blobPath(c, field, focused) {
+    const u = 1 / c.scale, pad = 30 + Math.min(10, c.members.length), pts = [];
+    const ring = (x, y, r) => { for (let i = 0; i < 10; i++) { const a = i / 10 * Math.PI * 2 + hash01(c.key) * 0.5; pts.push([x + Math.cos(a) * r, y + Math.sin(a) * r]); } };
+    for (const a of c.members) { ring(a._x, a._y, pad + (field.children(a.id).length ? 8 : 0)); if (focused) { const w = LABEL_W * u; ring(a._x + w * 0.5, a._y + 2 * u, 22 * u); ring(a._x + w, a._y + 2 * u, 20 * u); } }
+    ring(c.x, c.y - c.r * 0.72, 34); ring(c.x, c.y, 26);
+    const h = hull(pts); if (h.length < 3) return "";
+    let d = ""; const n = h.length;
+    for (let i = 0; i < n; i++) { const p0 = h[(i - 1 + n) % n], p1 = h[i], p2 = h[(i + 1) % n], p3 = h[(i + 2) % n];
+      const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6], c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+      d += (i ? "" : "M" + p1[0].toFixed(1) + " " + p1[1].toFixed(1)) + " C" + c1[0].toFixed(1) + " " + c1[1].toFixed(1) + " " + c2[0].toFixed(1) + " " + c2[1].toFixed(1) + " " + p2[0].toFixed(1) + " " + p2[1].toFixed(1); }
+    return d + "Z";
+  }
+  function layout(field) {
+    clusters = buildClusters(field); placeClusters(clusters);
+    for (const c of clusters.values()) placeMembers(c, field, clusters);
+    if (state.level === 2 && state.hub && field.byId(state.hub)) bloom(field.byId(state.hub), field, layoutScale());
+  }
+
+  /* ---------- Camera ---------- */
+  function applyView() { if (!state.view) return; const v = state.view; svg.setAttribute("viewBox", v.x.toFixed(1) + " " + v.y.toFixed(1) + " " + v.w.toFixed(1) + " " + v.h.toFixed(1)); const scale = viewScale(); svg.dataset.labels = state.labels === "auto" ? (state.level >= 1 || scale > 1.5 ? "on" : scale > 0.9 ? "needs" : "off") : state.labels; }
+  function setView(box, animate = true) {
+    const target = box; cancelAnimationFrame(state.anim); state.targetScale = W() / target.w;
+    if (!animate || !state.view || matchMedia("(prefers-reduced-motion: reduce)").matches) { state.view = target; applyView(); return; }
+    const from = {...state.view}, t0 = performance.now(), dur = 520;
+    const step = now => { const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3); state.view = {x: from.x + (target.x - from.x) * e, y: from.y + (target.y - from.y) * e, w: from.w + (target.w - from.w) * e, h: from.h + (target.h - from.h) * e}; applyView(); if (p < 1) state.anim = requestAnimationFrame(step); };
+    state.anim = requestAnimationFrame(step);
+  }
+  const centred = (cx, cy, S) => ({x: cx - W() / (2 * S), y: cy - H() / (2 * S), w: W() / S, h: H() / S});
+  function allBounds() { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const c of clusters.values()) { x0 = Math.min(x0, c.x - c.r); y0 = Math.min(y0, c.y - c.r); x1 = Math.max(x1, c.x + c.r); y1 = Math.max(y1, c.y + c.r); } if (!isFinite(x0)) return {x: 0, y: 0, w: 1600, h: 1000}; const pad = 70, bw = x1 - x0 + 2 * pad, bh = y1 - y0 + 2 * pad, S = Math.min(W() / bw, H() / bh); return centred((x0 + x1) / 2, (y0 + y1) / 2, S); }
+  function fitAll(animate = true) { state.level = 0; state.focus = null; state.hub = null; setView(allBounds(), animate); draw(); }
+  function focusCluster(key, animate = true) { const c = clusters.get(key); if (!c) return; state.level = 1; state.focus = key; state.hub = null; setView(centred(c.x + 40 / c.scale, c.y, c.scale), animate); draw(); }
+  function focusHub(id, animate = true) { const a = currentField.byId(id), c = clusterOf(id); if (!a || !c) return; state.level = 2; state.focus = c.key; state.hub = id; const S = c.scale * 2.4; setView(centred(a._x + 30 / S, a._y, S), animate); draw(); }
+  function back() { if (state.level === 2) focusCluster(state.focus); else if (state.level === 1) fitAll(); }
+  function clusterOf(id) { for (const c of clusters.values()) if (c.members.some(a => a.id === id)) return c; const p = currentField.parent(id); return p ? clusterOf(p.id) : null; }
+  function rootOf(id) { let a = currentField.byId(id); while (a && a.parentId && currentField.byId(a.parentId)) a = currentField.byId(a.parentId); return a; }
+  function flyTo(id) { const a = currentField.byId(id), c = clusterOf(id); if (!a || !c) return; state.highlight = id; const root = rootOf(id); if (root.id !== id) focusHub(root.id); else focusCluster(c.key); }
+  function toCanvas(dxPx, dyPx) { const k = state.view.w / W(); return {dx: dxPx * k, dy: dyPx * k}; }
+
+  /* ---------- Rendering ---------- */
+  function build(stage) {
+    stage.classList.add("full-bleed"); stage.replaceChildren(); stage.dataset.panel = state.panel;
+    canvas = $("div", "canvas"); stage.append(canvas);
+    svg = svgEl("svg", {class: "atlas", "aria-label": "Domain atlas"}, canvas);
+    toolbar = $("div", "toolbar"); canvas.append(toolbar);
+    legend = $("div", "legend"); canvas.append(legend);
+    controls = $("div", "controls"); canvas.append(controls);
+    panel = $("aside", "panel"); panel.setAttribute("aria-label", "Needs you"); stage.append(panel);
+    Mockup.drag(svg, {onStart: () => svg.classList.add("dragging"), onMove: ({mx, my}) => { const {dx, dy} = toCanvas(mx, my); cancelAnimationFrame(state.anim); state.view = {...state.view, x: state.view.x - dx, y: state.view.y - dy}; applyView(); }, onEnd: ({dragged, event}) => { svg.classList.remove("dragging"); if (!dragged && event.target === svg) back(); }});
+    svg.addEventListener("wheel", e => { e.preventDefault(); const k = Math.exp(e.deltaY * 0.0016); const r = svg.getBoundingClientRect(); const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height; const v = state.view; const nw = Math.max(100, Math.min(4000, v.w * k)), nh = v.h * (nw / v.w); cancelAnimationFrame(state.anim); state.view = {x: v.x + (v.w - nw) * fx, y: v.y + (v.h - nh) * fy, w: nw, h: nh}; state.targetScale = viewScale(); applyView(); if (currentField && Math.abs(state.targetScale - drawnScale) / drawnScale > 0.18) { layout(currentField); drawCanvas(currentField); } }, {passive: false});
+    document.addEventListener("keydown", e => { if (e.key === "Escape" && !document.querySelector(".lens") && state.level > 0) back(); });
+    window.addEventListener("resize", () => { if (state.level === 2) focusHub(state.hub, false); else if (state.level === 1) focusCluster(state.focus, false); else setView(allBounds(), false); });
+  }
+  function drawToolbar(field) {
+    toolbar.replaceChildren();
+    const crumb = $("span", "crumb");
+    const all = $("button", null, "All domains"); all.type = "button"; all.onclick = () => fitAll(); crumb.append(all);
+    const c = state.focus && clusters.get(state.focus);
+    if (c) { crumb.append($("span", "muted", "›")); if (state.level === 2) { const b = $("button", null, c.label); b.type = "button"; b.onclick = () => focusCluster(c.key); crumb.append(b); } else crumb.append($("b", null, c.label)); if (c.source && state.level === 1) crumb.append($("small", null, c.source)); }
+    if (state.level === 2 && field.byId(state.hub)) { const h = field.byId(state.hub); crumb.append($("span", "muted", "›"), $("b", null, h.name || h.title)); }
+    toolbar.append(crumb);
+    toolbar.append($("span", "hint", state.level === 2 ? "Click a sub-agent or the hub to peek · Esc or the background goes back" : state.level === 1 ? "Click an orchestrator to open it · click an agent to peek · drag to pin · Esc or the background zooms out" : "Click a domain to zoom in · drag a domain to move it · scroll to zoom"));
+    legend.replaceChildren();
+    const size = $("span"); size.append($("i"), "size: messages with you"); size.querySelector("i").style.cssText = "width:6px;height:6px;background:var(--accent)"; const big = $("i"); big.style.cssText = "width:11px;height:11px;background:var(--accent)"; size.insertBefore(big, size.firstChild);
+    const col = $("span"); const sw = $("span", "swatches"); for (const p of [100, 75, 50, 28]) { const i = $("i"); i.style.background = "color-mix(in srgb, var(--accent) " + p + "%, var(--paper))"; sw.append(i); } col.append(sw, "color: age, recent → faded");
+    const ring = $("span"); ring.append($("i", "ring"), "ring: needs you · waiting · done");
+    legend.append(size, col, ring);
+    controls.replaceChildren();
+    const panelSel = $("select"); for (const [v, l] of [["right", "Panel: right"], ["bottom", "Panel: bottom"]]) { const o = $("option", null, l); o.value = v; o.selected = v === state.panel; panelSel.append(o); }
+    panelSel.onchange = () => { state.panel = panelSel.value; document.getElementById("stage").dataset.panel = state.panel; requestAnimationFrame(() => { layout(field); if (state.level === 2) focusHub(state.hub, false); else if (state.level === 1) focusCluster(state.focus, false); else setView(allBounds(), false); draw(); }); };
+    const labelSel = $("select"); for (const [v, l] of [["auto", "Labels: auto"], ["on", "Labels: on"], ["needs", "Labels: needs you"], ["off", "Labels: off"]]) { const o = $("option", null, l); o.value = v; o.selected = v === state.labels; labelSel.append(o); }
+    labelSel.onchange = () => { state.labels = labelSel.value; applyView(); };
+    const fit = $("button", "btn small", "Fit"); fit.type = "button"; fit.onclick = () => fitAll();
+    const reset = $("button", "btn small", "Reset layout"); reset.type = "button"; reset.onclick = () => { clusterPos.clear(); pins.clear(); persist(); layout(field); fitAll(); };
+    controls.append(panelSel, labelSel, fit, reset);
+  }
+  function drawPanel(field) {
+    panel.replaceChildren();
+    const asks = field.asks();
+    const head = $("div", "panel-head"); head.append($("i"), "Needs you" + (asks.length ? " · " + asks.length : "")); panel.append(head);
+    if (!asks.length) { panel.append($("p", "calm", "Nothing needs you. Working agents breathe in place; everything keeps its spot.")); return; }
+    for (const a of asks) {
+      const item = $("div", "ask-item" + (state.highlight === a.id ? " located" : "")); item.tabIndex = 0;
+      item.onclick = e => { if (e.target.closest("button")) return; if (state.highlight === a.id && state.level > 0) { const el = nodeEls.get(a.id) || nodeEls.get(rootOf(a.id)?.id); api.peek(a.id, el || item); } else flyTo(a.id); };
+      item.onkeydown = e => { if (e.key === "Enter") item.click(); };
+      const top = $("div", "top"); top.append($("span", "kind", a.ask ? (a.ask.kind === "failure" ? "failed" : a.ask.kind) : "needs you"), AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("b", null, a.name || a.title), $("small", null, field.relativeTime(a.ask?.askedAt || a.updatedAt)));
+      item.append(top);
+      const parent = a.parentId && field.byId(a.parentId); const c = clusterOf(a.id);
+      item.append($("div", "from", (parent ? "from " + (parent.name || parent.title) + " · " : "") + (c ? c.label : "") + (field.impact(a.id).length ? " · blocks " + field.impact(a.id).length : "")));
+      item.append($("div", "q", a.ask ? a.ask.question : a.next.action));
+      const act = $("div", "act");
+      if (a.ask?.options?.length) { const first = a.ask.options[0]; const b = $("button", "btn small primary", first.label); b.type = "button"; b.onclick = e => { e.stopPropagation(); field.answer(a.id, first.id); }; act.append(b); if (a.ask.options.length > 1) { const more = $("button", "btn small quiet", "More…"); more.type = "button"; more.onclick = e => { e.stopPropagation(); api.peek(a.id, item); }; act.append(more); } }
+      else { const b = $("button", "btn small", a.ask?.freeText ? "Answer…" : "Open"); b.type = "button"; b.onclick = e => { e.stopPropagation(); api.peek(a.id, item); }; act.append(b); }
+      act.append($("span", "locate", state.highlight === a.id ? "located" : "show on map ↗")); item.append(act);
+      panel.append(item);
+    }
+  }
+  function drawCanvas(field) {
+    svg.replaceChildren(); nodeEls.clear(); drawnScale = layoutScale();
+    const gBlobs = svgEl("g", {class: "blobs"}, svg), gTies = svgEl("g", {class: "ties"}, svg), gNodes = svgEl("g", {class: "nodes"}, svg);
+    const k = px(), far = state.level === 0;
+    for (const c of clusters.values()) {
+      const focused = state.focus === c.key;
+      const g = svgEl("g", {class: "cluster" + (focused ? " focused" : state.level ? " dim" : "") + (c.needs ? " needs" : "")}, gBlobs);
+      const path = svgEl("path", {class: "blob", d: blobPath(c, field, focused)}, g);
+      const title = svgEl("title", {}, path); title.textContent = c.label + " · " + c.members.length + (c.members.length === 1 ? " agent" : " agents") + (c.working ? " · " + c.working + " working" : "") + (c.needs ? " · " + c.needs + " need you" : "") + (c.aliases.length ? "\nAlso reported as: " + c.aliases.join(", ") : "") + (c.merged ? "\nSingle-agent labels: " + c.merged.join(", ") : "") + (c.key === "∅" ? "\nThese agents reported no domain." : "") + (scenario === "none" && c.key !== "∅" ? "\nDerived from the write scope." : "");
+      Mockup.drag(path, {onMove: ({mx, my}) => { if (state.level) return; const {dx, dy} = toCanvas(mx, my); clusterPos.set(c.key, {x: (clusterPos.get(c.key)?.x ?? c.x) + dx, y: (clusterPos.get(c.key)?.y ?? c.y) + dy}); layout(field); drawCanvas(field); }, onEnd: ({dragged}) => { if (dragged) persist(); else if (!focused) focusCluster(c.key); else if (state.level === 2) focusCluster(c.key); }});
+      path.addEventListener("pointerdown", e => e.stopPropagation());
+      const ly = c.y - c.r * 0.64;
+      if (!focused) {
+        const label = svgEl("text", {class: "cluster-label", x: c.x, y: ly, "text-anchor": "middle", style: "font-size:" + (13 * k).toFixed(1) + "px"}, g); label.textContent = c.label;
+        if (c.source) { const sub = svgEl("text", {class: "cluster-sub", x: c.x, y: ly + 12 * k, "text-anchor": "middle", style: "font-size:" + (9.5 * k).toFixed(1) + "px"}, g); sub.textContent = c.source; }
+        const cnt = svgEl("text", {class: "cluster-count", x: c.x, y: ly - 14 * k, "text-anchor": "middle", style: "font-size:" + (10.5 * k).toFixed(1) + "px"}, g); cnt.textContent = String(c.members.length) + (c.working ? " · " + c.working + " working" : "");
+        if (c.needs) { const nd = svgEl("text", {class: "cluster-needs", x: c.x, y: ly - 27 * k, "text-anchor": "middle", style: "font-size:" + (10 * k).toFixed(1) + "px"}, g); nd.textContent = c.needs + " need you"; }
+      }
+      for (const a of c.members) {
+        const sec = c.secondary.get(a.id) && clusters.get(c.secondary.get(a.id));
+        if (sec && (focused || state.hovered === a.id)) { const dx = sec.x - a._x, dy = sec.y - a._y, d = Math.hypot(dx, dy) || 1, len = (focused ? 54 : 30) * k, ex = a._x + dx / d * len, ey = a._y + dy / d * len; svgEl("line", {class: "tie", x1: a._x, y1: a._y, x2: ex, y2: ey}, gTies); if (focused) { const t = svgEl("text", {class: "tie-label", x: ex + 3 * k, y: ey + 3 * k, style: "font-size:" + (8.5 * k).toFixed(1) + "px"}, gTies); t.textContent = "also " + sec.label + " →"; } }
+        drawNode(a, field, gNodes, {far, focused, hubView: state.level === 2 && state.hub === a.id, faded: state.level === 2 && state.hub !== a.id});
+      }
+    }
+  }
+  function stateClass(a) { return a.status; }
+  function drawNode(a, field, parent, {far, focused, hubView, faded}) {
+    const k = px(), kids = field.children(a.id);
+    const hl = state.highlight && (state.highlight === a.id || field.descendants(a.id).some(d => d.id === state.highlight));
+    const g = svgEl("g", {class: "node " + stateClass(a) + (a._pinned ? " pinned" : "") + (hl && !hubView ? " highlight" : "") + (api.peeked === a.id ? " peeked" : "") + (faded ? " faded" : ""), transform: "translate(" + a._x.toFixed(1) + " " + a._y.toFixed(1) + ")"}, parent);
+    const r = sizeFor(a, far) * k;
+    if (a.status === "working") svgEl("circle", {class: "halo", r: r + 3 * k}, g);
+    svgEl("circle", {class: "mark", r: r + 5 * k}, g);
+    svgEl("circle", {class: "ring", r: r + 3 * k}, g);
+    svgEl("circle", {class: "state", r: r + 2 * k}, g);
+    svgEl("circle", {class: "core", r, style: "fill:" + fillFor(field, a)}, g);
+    const doing = a.status === "working" ? (a.activity || field.toolLabel(a)) : a.status === "done" ? "done " + field.relativeTime(a.updatedAt) : field.statusLabel(a);
+    const title = svgEl("title", {}, g); title.textContent = (a.name ? a.name + " · " : "") + a.title + "\n" + doing + "\n" + (a.turns || 0) + " messages · " + (a.userTurns || 0) + " from you · last activity " + field.relativeTime(field.lastActivity(a)) + (kids.length ? "\n" + kids.length + " sub-agents" : "") + (a.domainReported && a.domainReported !== a.domain ? "\nReported domain: " + (a.domains?.join(", ") || "none") : "");
+    if (kids.length && !hubView) { // compact spokes; a count past six
+      const shown = kids.slice(0, 6), sr = r + 8 * k;
+      shown.forEach((kid, i) => { const ang = -Math.PI / 2 + i * (2 * Math.PI / Math.max(6, shown.length)) + hash01(a.id) * 0.4; const x = Math.cos(ang) * sr, y = Math.sin(ang) * sr;
+        svgEl("line", {class: "spoke", x1: 0, y1: 0, x2: x, y2: y}, g);
+        const s = svgEl("g", {class: "sub " + stateClass(kid) + (state.highlight === kid.id ? " highlight" : ""), transform: "translate(" + x.toFixed(1) + " " + y.toFixed(1) + ")"}, g);
+        svgEl("circle", {class: "mark", r: 5 * k}, s); svgEl("circle", {class: "state", r: 3.4 * k}, s); svgEl("circle", {class: "core", r: 2.3 * k, style: "fill:" + fillFor(field, kid)}, s);
+        const st = svgEl("title", {}, s); st.textContent = kid.title + " · " + (kid.status === "working" ? (kid.activity || field.toolLabel(kid) || "working") : field.statusLabel(kid));
+        if (field.children(kid.id).length) { const t = svgEl("text", {class: "sub-count", x: 3 * k, y: -3 * k, style: "font-size:" + (7 * k).toFixed(1) + "px"}, s); t.textContent = "+" + field.descendants(kid.id).length; }
+        s.addEventListener("pointerdown", e => e.stopPropagation()); s.addEventListener("click", e => { e.stopPropagation(); if (state.level === 0) focusCluster(clusterOf(a.id).key); else api.peek(kid.id, s); });
+      });
+      if (kids.length > 6) { const t = svgEl("text", {class: "sub-count", x: sr + 2 * k, y: 3 * k, style: "font-size:" + (7 * k).toFixed(1) + "px"}, g); t.textContent = "+" + (kids.length - 6); }
+    }
+    if (hubView) { // level 2: sub-agents bloom out with labels; grandchildren orbit them
+      for (const kid of kids) {
+        svgEl("line", {class: "spoke", x1: 0, y1: 0, x2: kid._x - a._x, y2: kid._y - a._y}, g);
+        const s = svgEl("g", {class: "sub " + stateClass(kid) + (state.highlight === kid.id ? " highlight" : "") + (api.peeked === kid.id ? " peeked" : ""), transform: "translate(" + (kid._x - a._x).toFixed(1) + " " + (kid._y - a._y).toFixed(1) + ")"}, g);
+        const kr = Math.min(11, 3.5 + 2.2 * Math.sqrt(kid.userTurns || 0)) * k;
+        if (kid.status === "working") { const h = svgEl("circle", {class: "halo", r: kr + 3 * k}, s); h.style.cssText = "fill:var(--accent);opacity:.16"; }
+        svgEl("circle", {class: "mark", r: kr + 5 * k}, s); svgEl("circle", {class: "state", r: kr + 2 * k}, s); svgEl("circle", {class: "core", r: kr, style: "fill:" + fillFor(field, kid)}, s);
+        const kd = kid.status === "working" ? (kid.activity || field.toolLabel(kid)) : kid.status === "done" ? "done " + field.relativeTime(kid.updatedAt) : field.statusLabel(kid);
+        const leftSide = Math.cos(kid._ang ?? 0) < -0.15, lx = (kr + 7 * k) * (leftSide ? -1 : 1), anchor = leftSide ? "end" : "start";
+        const lbl = svgEl("text", {class: "node-label", x: lx, y: 3.5 * k, "text-anchor": anchor, style: "font-size:" + (10.5 * k).toFixed(1) + "px"}, s); lbl.textContent = (kid.name || kid.title).slice(0, 30) + ((kid.name || kid.title).length > 30 ? "…" : "");
+        const dd = svgEl("text", {class: "node-doing", x: lx, y: 14.5 * k, "text-anchor": anchor, style: "font-size:" + (9.5 * k).toFixed(1) + "px"}, s); dd.textContent = (kd || "").slice(0, 40) + ((kd || "").length > 40 ? "…" : "");
+        const st = svgEl("title", {}, s); st.textContent = kid.title + "\n" + kd + "\n" + (kid.turns || 0) + " messages";
+        for (const gk of field.children(kid.id)) { svgEl("line", {class: "spoke", x1: 0, y1: 0, x2: gk._x - kid._x, y2: gk._y - kid._y}, s); const m = svgEl("g", {class: "sub " + stateClass(gk) + (state.highlight === gk.id ? " highlight" : ""), transform: "translate(" + (gk._x - kid._x).toFixed(1) + " " + (gk._y - kid._y).toFixed(1) + ")"}, s); svgEl("circle", {class: "mark", r: 5 * k}, m); svgEl("circle", {class: "state", r: 3.4 * k}, m); svgEl("circle", {class: "core", r: 2.4 * k, style: "fill:" + fillFor(field, gk)}, m); const mt = svgEl("title", {}, m); mt.textContent = gk.title + " · " + (gk.status === "working" ? (gk.activity || field.toolLabel(gk) || "working") : field.statusLabel(gk)); m.addEventListener("pointerdown", e => e.stopPropagation()); m.addEventListener("click", e => { e.stopPropagation(); api.peek(gk.id, m); }); }
+        s.addEventListener("pointerdown", e => e.stopPropagation()); s.addEventListener("click", e => { e.stopPropagation(); api.peek(kid.id, s); });
+      }
+    }
+    const lx = r + (kids.length && !hubView ? 12 * k : 7 * k);
+    const label = svgEl("text", {class: "node-label" + (hubView ? " hub-label" : ""), x: lx, y: 3.5 * k, style: "font-size:" + ((hubView ? 12.5 : 11) * k).toFixed(1) + "px"}, g); label.textContent = (a.name || a.title).slice(0, 34) + ((a.name || a.title).length > 34 ? "…" : "");
+    const d = svgEl("text", {class: "node-doing", x: lx, y: 14.5 * k, style: "font-size:" + (10 * k).toFixed(1) + "px"}, g); d.textContent = (doing || "").slice(0, 44) + ((doing || "").length > 44 ? "…" : "");
+    if (focused && clusters.get(state.focus)?.key === "other" && a.domains?.[0]) { const raw = svgEl("text", {class: "node-doing", x: lx, y: 25 * k, style: "font-size:" + (9.5 * k).toFixed(1) + "px"}, g); raw.textContent = "reported as “" + a.domains[0] + "”"; }
+    g.addEventListener("pointerdown", e => e.stopPropagation());
+    g.addEventListener("pointerenter", () => { state.hovered = a.id; });
+    g.addEventListener("pointerleave", () => { state.hovered = null; });
+    Mockup.drag(g, {onMove: ({mx, my}) => { if (state.level === 0) return; const {dx, dy} = toCanvas(mx, my); const c = clusterOf(a.id); const cur = pins.get(a.id) || {dx: a._x - c.x, dy: a._y - c.y}; pins.set(a.id, {dx: cur.dx + dx, dy: cur.dy + dy}); a._x = c.x + cur.dx + dx; a._y = c.y + cur.dy + dy; a._pinned = true; g.setAttribute("transform", "translate(" + a._x.toFixed(1) + " " + a._y.toFixed(1) + ")"); },
+      onEnd: ({dragged}) => { if (dragged) { persist(); layout(field); drawCanvas(field); return; } state.highlight = null;
+        if (state.level === 0) focusCluster(clusterOf(a.id).key); else if (kids.length && !hubView) focusHub(a.id); else api.peek(a.id, g); }});
+    nodeEls.set(a.id, g);
+  }
+  let draw = () => {};
+  function render(field, stage, mockupApi) {
+    api = mockupApi; currentField = field;
+    if (!svg || !svg.isConnected) { build(stage); layout(field); state.view = null; setView(allBounds(), false); } else layout(field);
+    draw = () => { layout(field); drawToolbar(field); drawCanvas(field); drawPanel(field); applyView(); };
+    draw();
+  }
+  Mockup.mount({
+    number: 18, title: "Atlas", spectrum: "synthesis", fullBleed: true, domainScenarios: true,
+    summary: "One canvas, three zoom levels: all domains, one domain as a scatter, one orchestrator with its sub-agents. Size is messages with you, color is age, a ring is state; a quiet panel lists what needs you.",
+    signals: {current: ["status", "tool_activity", "age", "messages", "pending_approval", "created_by", "client", "title", "write_scope", "scope_cluster", "phase", "summary", "next_action"], proposed: ["domain", "ask", "name", "activity"]},
+    notes: "Positions are the same at every zoom level, so the far view is a true overview of the scatter. The Domains selector varies how many domains the model reports and how messy they are; cluster positions persist per scenario.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

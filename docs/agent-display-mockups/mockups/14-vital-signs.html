@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 14 · Vital signs</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Every agent is a trace of its tool calls over the last hour. What it is doing comes from the
+       tool stream at the right edge; needs-you rows flatline warm and are answered inline. */
+    .vs { --gut: 46px; --lbl: 440px; --row: 26px; --needs-extra: 22px; position: relative; }
+    .vs[data-scale="medium"] { --row: 21px; --needs-extra: 18px; }
+    .vs[data-scale="large"] { --row: 14px; --lbl: 400px; --needs-extra: 8px; }
+    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 10px; font-size: 11px; color: var(--muted); }
+    .bar .group { display: inline-flex; align-items: center; gap: 3px; }
+    .bar .legend { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-left: auto; font-size: 10.5px; }
+    .bar .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .bar .legend svg { overflow: visible; }
+    .axis { position: sticky; top: 0; z-index: 5; display: grid; grid-template-columns: var(--gut) var(--trace-w) var(--lbl); height: 24px; background: var(--paper); border-bottom: 1px solid var(--line); }
+    .axis .ticks { position: relative; }
+    .axis .t { position: absolute; bottom: 5px; transform: translateX(-50%); font: 9.5px var(--mono); color: var(--muted); white-space: nowrap; }
+    .axis .t::after { content: ""; position: absolute; left: 50%; top: 14px; height: 5px; border-left: 1px solid var(--line-strong); }
+    .axis .t.now { color: var(--accent); font-weight: 600; transform: translateX(-100%); }
+    .axis .t.now::after { left: auto; right: 0; border-color: var(--accent); }
+    .axis .hover-t { position: absolute; bottom: 4px; transform: translateX(-50%); padding: 1px 6px; border-radius: 3px; background: var(--ink); color: var(--paper); font: 600 9.5px var(--mono); white-space: nowrap; pointer-events: none; z-index: 2; }
+    .axis .side { align-self: end; padding: 0 0 5px 14px; font: 9.5px var(--mono); letter-spacing: .06em; color: var(--muted); text-transform: uppercase; }
+    .list { position: relative; }
+    .grid { position: absolute; top: 0; bottom: 0; border-left: 1px solid color-mix(in srgb, var(--line) 65%, transparent); pointer-events: none; }
+    .now-rule { position: absolute; top: 0; bottom: 0; border-left: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); pointer-events: none; }
+    .cross { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--ink); opacity: .35; pointer-events: none; z-index: 4; }
+
+    .row { position: relative; display: grid; grid-template-columns: var(--gut) var(--trace-w) var(--lbl); align-items: center; height: var(--row); cursor: grab; touch-action: none; user-select: none; }
+    .row:hover, .row.peeked { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+    .row.peeked { box-shadow: inset 2px 0 0 var(--ink); }
+    .row.related { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+    .row.dragging { z-index: 8; cursor: grabbing; background: var(--surface); box-shadow: 0 6px 20px var(--shadow); }
+    .row.drop-before::before { content: ""; position: absolute; left: 0; right: 0; top: -1px; border-top: 2px solid var(--accent); }
+    .row.needs { height: calc(var(--row) + var(--needs-extra)); background: color-mix(in srgb, var(--warm-tint) 55%, transparent); border-top: 1px solid color-mix(in srgb, var(--warm) 18%, transparent); }
+    .row.needs + .row:not(.needs) { margin-top: 8px; }
+    .row.needs:hover { background: color-mix(in srgb, var(--warm-tint) 85%, transparent); }
+    .row.sub { height: calc(var(--row) - 4px); }
+    .vs[data-scale="large"] .row.sub { height: 12px; }
+    .gut { display: flex; align-items: center; justify-content: flex-end; gap: 5px; padding-right: 8px; min-width: 0; }
+    .gut .provider-logo { width: 11px; height: 11px; opacity: .8; }
+    .vs[data-scale="large"] .gut .provider-logo { width: 9px; height: 9px; }
+    .gut .pin { font-size: 9px; color: var(--muted); }
+    .row.sub .gut { padding-right: 14px; }
+    .row.sub .gut::before { content: ""; width: 7px; height: 7px; margin-top: -6px; border-left: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); border-bottom-left-radius: 3px; }
+    .trace { display: block; overflow: visible; }
+    .trace .base { stroke: var(--line-strong); stroke-width: 1; }
+    .trace .quiet { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 2 3; }
+    .trace .pulse { fill: none; stroke-width: 1.25; stroke-linejoin: round; stroke: var(--dot-idle); }
+    .row.working .pulse { stroke: var(--accent); }
+    .row.done .pulse { stroke: color-mix(in srgb, var(--ok) 70%, var(--line-strong)); }
+    .row.blocked .pulse { stroke: var(--muted); }
+    .row.waiting .pulse, .row.failed .pulse { stroke: color-mix(in srgb, var(--ink) 55%, var(--line-strong)); }
+    .row.sub .pulse { stroke-width: 1; }
+    .trace .flat { stroke: var(--warm); stroke-width: 2; }
+    .row.failed .trace .flat { stroke: var(--danger); }
+    .trace .ask-mark { fill: var(--warm); }
+    .row.failed .trace .ask-mark { fill: var(--danger); }
+    .trace .hold { fill: none; stroke: var(--muted); stroke-width: 1.25; }
+    .trace .hold-text { font: 9px var(--mono); fill: var(--muted); }
+    .trace .live { fill: var(--accent); }
+    .trace .live-ring { fill: none; stroke: var(--accent); stroke-width: 1; animation: ring 1.8s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+    @keyframes ring { from { opacity: .7; transform: scale(1); } to { opacity: 0; transform: scale(3); } }
+    @media (prefers-reduced-motion: reduce) { .trace .live-ring { animation: none; opacity: 0; } }
+    .trace .end-done { fill: var(--ok); }
+    .trace .end-idle { fill: var(--dot-idle); }
+    .lbl { display: flex; align-items: center; gap: 7px; min-width: 0; padding-left: 14px; font-size: 11.5px; white-space: nowrap; }
+    .vs[data-scale="large"] .lbl { font-size: 10px; gap: 5px; }
+    .lbl .doing { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
+    .row.working .lbl .doing { color: var(--ink); }
+    .row.done .lbl .doing, .row.idle .lbl .doing, .row.blocked .lbl .doing { color: var(--muted); }
+    .lbl .who { flex: 1 1 0; min-width: 40px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: .9em; }
+    .lbl .kind { flex: none; font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+    .row.failed .lbl .kind { color: var(--danger); }
+    .lbl .q { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+    .lbl .meta { display: flex; gap: 7px; align-items: baseline; min-width: 0; flex: none; }
+    .lbl .meta .who { flex: 0 1 auto; max-width: 160px; }
+    .vs[data-scale="large"] .lbl .meta .who { max-width: 84px; }
+    .vs[data-scale="large"] .lbl .nb { display: none; }
+    .trace .flat.soft { stroke-dasharray: 5 3; }
+    /* Above large, a needs-you label takes two lines: kind and creator, then the question. */
+    .vs:not([data-scale="large"]) .row.needs .lbl { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: auto auto; column-gap: 6px; row-gap: 1px; align-content: center; }
+    .vs:not([data-scale="large"]) .row.needs .lbl .meta { grid-column: 1; grid-row: 1; }
+    .vs:not([data-scale="large"]) .row.needs .lbl .q { grid-column: 1; grid-row: 2; }
+    .vs:not([data-scale="large"]) .row.needs .lbl .btn { grid-row: 1 / span 2; align-self: center; }
+    .vs:not([data-scale="large"]) .row.needs .lbl .bracket { display: none; }
+    .lbl .btn { flex: none; padding: 2px 8px; font-size: 10.5px; }
+    .vs[data-scale="large"] .lbl .btn { padding: 1px 6px; font-size: 9.5px; }
+    .bracket { flex: none; display: inline-flex; align-items: center; gap: 2px; padding: 0 4px; height: 13px; border: 0; border-left: 1px solid var(--line-strong); border-right: 1px solid var(--line-strong); border-radius: 3px; background: none; cursor: pointer; color: var(--muted); font: 8.5px var(--mono); }
+    .bracket:hover, .bracket[aria-expanded="true"] { border-color: var(--ink); color: var(--ink); }
+    .bracket i { display: block; width: 4px; height: 4px; border-radius: 50%; background: var(--dot-idle); }
+    .bracket i.working { background: var(--accent); } .bracket i.needs { background: var(--warm); } .bracket i.done { background: var(--ok); }
+    .bracket i.blocked { background: transparent; box-shadow: inset 0 0 0 1px var(--muted); } .bracket i.failed { background: var(--danger); }
+    .empty { padding: 40px; text-align: center; color: var(--muted); }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const SVG = "http://www.w3.org/2000/svg";
+  const MIN = 60_000, HOUR = 3_600_000;
+  const WINDOWS = [["30m", 30 * MIN], ["1h", HOUR], ["90m", 90 * MIN]];
+  const hash = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  const sinkDepth = age => Math.min(1, Math.log1p(age / MIN) / Math.log1p(6 * 60));
+  // View state across re-renders: window, pinned slots (dragged rows), expanded brackets, persistent row nodes.
+  const view = {span: HOUR, pins: new Map(), open: new Set()};
+  let wrap, bar, axis, list, cross, hoverT, nodes = new Map(), api, field, traceW = 900, rowH = 26, needsExtra = 22, rowsNow = [];
+
+  const node = (tag, attrs = {}, cls) => { const n = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); if (cls) n.setAttribute("class", cls); return n; };
+  const statusOf = a => field.needsUser(a) && a.status !== "failed" ? "waiting" : a.status;
+  const who = a => a.name ? a.name + " · " + a.title : a.title;
+  // When the trace stops being live: the ask freezes it, a wait holds it, otherwise the last activity.
+  const liveUntil = a => a.ask ? Math.min(a.ask.askedAt, field.now) : a.status === "working" ? field.now : a.status === "blocked" ? Math.min(a.updatedAt, field.now) : field.lastActivity(a);
+  const born = a => Math.min(a.createdAt, ...(a.pulses?.length ? [a.pulses[0]] : []), field.now);
+
+  function build(stage) {
+    stage.replaceChildren();
+    wrap = $("div", "vs"); bar = $("div", "bar"); axis = $("div", "axis"); list = $("div", "list");
+    cross = $("div", "cross"); cross.hidden = true; hoverT = $("span", "hover-t"); hoverT.hidden = true;
+    wrap.append(bar, axis, list); stage.append(wrap);
+    list.addEventListener("pointermove", e => crosshair(e.clientX));
+    list.addEventListener("pointerleave", () => { cross.hidden = hoverT.hidden = true; });
+    addEventListener("resize", () => api.rerender());
+    nodes.clear();
+  }
+
+  function crosshair(clientX) {
+    const r = list.getBoundingClientRect(), gut = parseFloat(getComputedStyle(wrap).getPropertyValue("--gut"));
+    const x = clientX - r.left - gut;
+    if (x < 0 || x > traceW) { cross.hidden = hoverT.hidden = true; return; }
+    const t = field.now - view.span + x / traceW * view.span;
+    cross.hidden = hoverT.hidden = false; cross.style.left = (gut + x) + "px"; hoverT.style.left = x + "px";
+    const ago = Math.round((field.now - t) / MIN);
+    hoverT.textContent = new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) + (ago ? " · −" + ago + "m" : " · now");
+  }
+
+  function toolbar() {
+    bar.replaceChildren();
+    const win = $("div", "group"); win.append($("span", null, "Last"));
+    for (const [label, span] of WINDOWS) { const b = $("button", "btn small", label); b.type = "button"; b.setAttribute("aria-pressed", String(view.span === span)); b.onclick = () => { view.span = span; api.rerender(); }; win.append(b); }
+    const reset = $("button", "btn small", "Reset layout"); reset.type = "button"; reset.disabled = !view.pins.size && !view.open.size;
+    reset.title = "Unpin dragged rows and fold sub-agents"; reset.onclick = () => { view.pins.clear(); view.open.clear(); api.rerender(); };
+    const legend = $("div", "legend");
+    const sample = (draw, text) => { const s = $("span"); const svg = node("svg", {width: 22, height: 10}); draw(svg); s.append(svg, text); legend.append(s); };
+    sample(svg => svg.append(node("path", {d: "M0 7 L6 7 L7.5 1 L9 8 L10.5 7 L22 7", fill: "none", stroke: "var(--accent)", "stroke-width": 1.25})), "tool call");
+    sample(svg => { svg.append(node("line", {x1: 3, y1: 5, x2: 22, y2: 5, stroke: "var(--warm)", "stroke-width": 2}), node("path", {d: "M3 1 L7 5 L3 9 L-1 5 Z", fill: "var(--warm)"})); }, "flatlined on you");
+    sample(svg => svg.append(node("rect", {x: 1, y: 1.5, width: 20, height: 7, rx: 2, fill: "none", stroke: "var(--muted)", "stroke-width": 1.25})), "waiting on something else");
+    sample(svg => svg.append(node("circle", {cx: 11, cy: 5, r: 2.5, fill: "var(--accent)"})), "live now");
+    bar.append(win, reset, legend);
+  }
+
+  function axisRow() {
+    axis.replaceChildren($("span"));
+    const ticks = $("div", "ticks"); const step = view.span <= 30 * MIN ? 5 * MIN : view.span <= HOUR ? 10 * MIN : 15 * MIN;
+    for (let ago = step; ago < view.span; ago += step) { const t = $("span", "t", "−" + Math.round(ago / MIN) + "m"); t.style.left = (traceW * (1 - ago / view.span)) + "px"; ticks.append(t); }
+    const now = $("span", "t now", "now " + new Date(field.now).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})); now.style.left = traceW + "px"; ticks.append(now, hoverT);
+    axis.append(ticks, $("span", "side", "Doing · from the tool stream"));
+  }
+
+  // The trace: a baseline while the agent existed, a spike per tool call, then how it ended.
+  function trace(a, h, sub) {
+    const start = field.now - view.span, X = t => Math.max(0, Math.min(traceW, (t - start) / view.span * traceW));
+    const svg = node("svg", {width: traceW, height: h}, "trace");
+    const base = Math.round(h * (sub ? 0.62 : 0.68)) + .5, amp = h * (sub ? 0.42 : 0.58);
+    const from = born(a), until = liveUntil(a);
+    const x0 = X(from), x1 = X(until);
+    const pulses = (a.pulses || []).filter(t => t >= start && t <= until + 1);
+    if (until < start && !a.ask && a.status !== "blocked" && a.status !== "working") { svg.append(node("line", {x1: 0, y1: base, x2: traceW, y2: base}, "quiet")); return svg; }
+    if (x1 > x0) svg.append(node("line", {x1: x0, y1: base, x2: x1, y2: base}, "base"));
+    if (pulses.length) {
+      let d = "M" + x0.toFixed(1) + " " + base;
+      for (const t of pulses) { const x = X(t), up = base - amp * (0.55 + 0.45 * hash(a.id + t)); d += " L" + (x - 1.5).toFixed(1) + " " + base + " L" + x.toFixed(1) + " " + up.toFixed(1) + " L" + (x + 1.3).toFixed(1) + " " + (base + 1.5) + " L" + (x + 2.5).toFixed(1) + " " + base; }
+      d += " L" + x1.toFixed(1) + " " + base;
+      svg.append(node("path", {d}, "pulse"));
+    }
+    const now = X(field.now);
+    if (a.ask) {
+      // Flatline from the ask to now; the marker is where it stopped for you.
+      svg.append(node("line", {x1: x1, y1: base, x2: now, y2: base}, "flat" + (a.ask.blocking ? "" : " soft")));
+      const r = sub ? 3 : 4.5; svg.append(node("path", {d: `M${x1} ${base - r} L${x1 + r} ${base} L${x1} ${base + r} L${x1 - r} ${base} Z`}, "ask-mark"));
+    } else if (a.status === "blocked") {
+      const hh = Math.max(5, h * 0.4); svg.append(node("rect", {x: x1, y: base - hh / 2, width: Math.max(3, now - x1), height: hh, rx: 2}, "hold"));
+      const what = field.externalWaits(a)[0] || (field.agentWaits(a).length ? field.statusLabel(a).replace(/^Waiting on /, "") : "");
+      if (now - x1 > what.length * 5.6 + 16 && h >= 18) { const t = node("text", {x: x1 + 6, y: base + 3}, "hold-text"); t.textContent = what; svg.append(t); }
+    } else if (a.status === "working") {
+      svg.append(node("line", {x1: x1 - 0.5, y1: base, x2: now, y2: base}, "base"));
+      const r = sub ? 2 : Math.min(3, h / 6); svg.append(node("circle", {cx: now, cy: base, r}, "live"), node("circle", {cx: now, cy: base, r}, "live-ring"));
+    } else if (a.status === "done") svg.append(node("circle", {cx: x1, cy: base, r: sub ? 2 : Math.min(3, h / 6)}, "end-done"));
+    else if (a.status === "failed") svg.append(node("circle", {cx: x1, cy: base, r: 3}, "ask-mark"));
+    else svg.append(node("rect", {x: x1 - 1, y: base - 3, width: 2, height: 6}, "end-idle"));
+    return svg;
+  }
+
+  function answerInline(lbl, a, parent) {
+    const meta = $("span", "meta"); meta.append($("span", "kind", a.ask ? (a.ask.kind === "failure" ? "failed" : a.ask.kind) + "" : "your turn")); if (a.ask && !a.ask.blocking) meta.firstChild.append($("span", "nb", " · non-blocking"));
+    if (parent) meta.append($("span", "who", "from " + (parent.name || parent.title)));
+    const q = $("span", "q", (a.ask ? a.ask.question : a.next.action)); q.title = q.textContent; lbl.append(meta, q);
+    const stop = e => e.stopPropagation();
+    if (a.ask?.options?.length) {
+      const o = a.ask.options[0], b = $("button", "btn small primary", o.label); b.type = "button"; b.onpointerdown = stop;
+      b.onclick = e => { e.stopPropagation(); field.answer(a.id, o.id); }; lbl.append(b);
+      if (a.ask.options.length > 1 || a.ask.freeText) { const m = $("button", "btn small quiet", "More…"); m.type = "button"; m.onpointerdown = stop; m.onclick = e => { e.stopPropagation(); peek(a, lbl); }; lbl.append(m); }
+    } else { const m = $("button", "btn small", a.ask?.freeText ? "Answer…" : "Open"); m.type = "button"; m.onpointerdown = stop; m.onclick = e => { e.stopPropagation(); peek(a, lbl); }; lbl.append(m); }
+  }
+
+  function doing(a) {
+    const steps = field.recentSteps(a);
+    if (a.status === "working") return field.toolLabel(a) || a.activity || "Working";
+    if (a.status === "blocked") return field.statusLabel(a);
+    if (a.status === "done") return "✓ Done " + field.relativeTime(field.lastActivity(a)) + (steps.length ? " · " + steps[steps.length - 1].label : "");
+    if (a.status === "failed") return "Failed " + field.relativeTime(field.lastActivity(a)) + (a.failure ? " · " + a.failure : "");
+    return "Quiet " + field.relativeTime(field.lastActivity(a)) + " · " + AgentField.PHASE_LABELS[a.phase];
+  }
+
+  function peek(a, anchor) {
+    api.peek(a.id, anchor);
+    for (const [, n] of nodes) n.classList.toggle("peeked", n.dataset.id === api.peeked);
+  }
+
+  function row(key, a, {sub = false, depth = 0, surfaced = false} = {}) {
+    let el = nodes.get(key);
+    if (!el) {
+      el = $("div", "row"); el.tabIndex = 0; nodes.set(key, el);
+      if (!sub) Mockup.drag(el, {
+        onStart: () => { el.classList.add("dragging"); },
+        onMove: ({dy, event}) => { el.style.transform = "translateY(" + dy + "px)"; dropTarget(el, event.clientY); },
+        onEnd: ({dragged, event}) => {
+          el.style.transform = ""; el.classList.remove("dragging");
+          for (const n of list.querySelectorAll(".drop-before")) n.classList.remove("drop-before");
+          if (!dragged) { peek(field.byId(el.dataset.id), el.querySelector(".lbl")); return; }
+          pinAt(el, event.clientY);
+        },
+      });
+      else el.onclick = () => peek(field.byId(el.dataset.id), el.querySelector(".lbl"));
+      el.onkeydown = e => { if (e.key === "Enter") peek(field.byId(el.dataset.id), el.querySelector(".lbl")); };
+      el.onpointerenter = () => relate(el.dataset.id, true);
+      el.onpointerleave = () => relate(el.dataset.id, false);
+    }
+    el.dataset.id = a.id; el.dataset.key = key;
+    const needs = field.needsUser(a), pinned = view.pins.has(a.id) && !sub;
+    el.className = "row " + statusOf(a) + (a.status === "failed" ? " failed" : "") + (needs && !sub ? " needs" : "") + (sub ? " sub" : "") + (pinned ? " pinned" : "") + (api.peeked === a.id ? " peeked" : "");
+    // Age sinks: rows dim with time since the last tool call, unless they need you or were pinned.
+    el.style.opacity = needs || pinned ? 1 : (1 - 0.6 * sinkDepth(field.age(a))).toFixed(2);
+    const parent = a.parentId && field.byId(a.parentId);
+    el.title = who(a) + "\n" + AgentField.PROVIDER_NAMES[a.client] + (a.role ? " · " + AgentField.ROLE_LABELS[a.role] : "") + (a.kind !== "app" ? " · " + a.kind : "") + (parent ? "\nCreated by " + (parent.name || parent.title) : "") + "\nLast tool call " + field.relativeTime(field.lastActivity(a)) + (pinned ? "\nPinned here (drag to move, Reset layout to unpin)" : "");
+    const gut = $("div", "gut"); if (sub) gut.style.paddingLeft = (depth * 10) + "px";
+    if (pinned) gut.append($("span", "pin", "◆"));
+    gut.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), AgentField.statusDot(a));
+    const h = sub && field.scale === "large" ? 12 : rowH + (needs && !sub ? needsExtra : sub ? -4 : 0);
+    const lbl = $("div", "lbl");
+    const kids = field.children(a.id);
+    if (kids.length && !surfaced) {
+      const br = $("button", "bracket"); br.type = "button"; br.setAttribute("aria-expanded", String(view.open.has(a.id)));
+      const shown = kids.slice(0, 8); for (const k of shown) br.append($("i", field.needsUser(k) ? "needs" : k.status));
+      if (kids.length > shown.length) br.append("+" + (kids.length - shown.length));
+      br.title = kids.length + " sub-agents: " + kids.map(k => k.title + " (" + (k.status === "working" ? field.toolLabel(k) || "working" : field.statusLabel(k)) + ")").join(", ") + "\nClick to " + (view.open.has(a.id) ? "fold" : "show their traces");
+      br.onpointerdown = e => e.stopPropagation();
+      br.onclick = e => { e.stopPropagation(); if (view.open.has(a.id)) view.open.delete(a.id); else view.open.add(a.id); api.rerender(); };
+      lbl.append(br);
+    }
+    if (needs && !sub) answerInline(lbl, a, surfaced ? parent : null);
+    else {
+      // An expanded sub-agent says what it did (its last step) unless it is live or waiting on something.
+      const last = sub && (a.status === "done" || a.status === "idle") ? field.recentSteps(a).slice(-1)[0]?.label : null;
+      const d = $("span", "doing", last ? (a.status === "done" ? "✓ " : "") + last : doing(a)); d.title = d.textContent; lbl.append(d);
+      lbl.append($("span", "who", sub ? a.title : who(a)));
+      if (sub && needs) { const k = $("span", "kind", "needs you ↑"); lbl.append(k); }
+    }
+    el.replaceChildren(gut, trace(a, h, sub), lbl);
+    return el;
+  }
+
+  function relate(id, on) {
+    const a = field.byId(id); if (!a) return;
+    const ids = new Set([...field.agentWaits(a).map(w => w.id), ...field.blocks(id)]);
+    for (const [, n] of nodes) if (ids.has(n.dataset.id)) n.classList.toggle("related", on);
+  }
+  function slotAt(clientY) {
+    const tops = rowsNow.map(k => nodes.get(k)).filter(n => n && !n.classList.contains("dragging"));
+    let i = 0; for (const n of tops) { const r = n.getBoundingClientRect(); if (clientY > r.top + r.height / 2) i++; }
+    return {i, tops};
+  }
+  function dropTarget(el, clientY) {
+    for (const n of list.querySelectorAll(".drop-before")) n.classList.remove("drop-before");
+    const {i, tops} = slotAt(clientY); if (tops[i]) tops[i].classList.add("drop-before");
+  }
+  function pinAt(el, clientY) {
+    const {i} = slotAt(clientY);
+    view.pins.delete(el.dataset.id);
+    view.pins.set(el.dataset.id, i);
+    api.rerender();
+  }
+
+  function order() {
+    // Needs-you first (sub-agents surface on their own), then by last tool call; pinned rows hold their slot.
+    const asks = field.asks();
+    const askIds = new Set(asks.map(a => a.id));
+    const rest = field.roots().filter(a => !askIds.has(a.id)).sort((x, y) => field.lastActivity(y) - field.lastActivity(x));
+    const top = [...asks, ...rest];
+    const eligible = new Set(top.map(a => a.id));
+    for (const id of view.pins.keys()) if (!eligible.has(id)) view.pins.delete(id);
+    const out = top.filter(a => !view.pins.has(a.id));
+    for (const [id, slot] of [...view.pins].sort((x, y) => x[1] - y[1])) out.splice(Math.min(slot, out.length), 0, field.byId(id));
+    return out;
+  }
+
+  function render(f, stage, mountApi) {
+    field = f; api = mountApi;
+    if (!wrap || !wrap.isConnected) build(stage);
+    wrap.dataset.scale = field.scale;
+    const css = getComputedStyle(wrap); rowH = parseFloat(css.getPropertyValue("--row")); needsExtra = parseFloat(css.getPropertyValue("--needs-extra"));
+    const gut = 46, lblW = parseFloat(css.getPropertyValue("--lbl"));
+    traceW = Math.max(320, Math.floor(wrap.clientWidth - gut - lblW));
+    wrap.style.setProperty("--trace-w", traceW + "px");
+    toolbar(); axisRow();
+    const keep = new Set(), seq = [];
+    rowsNow = [];
+    const walkKids = (a, depth) => { if (!view.open.has(a.id)) return; for (const k of field.children(a.id)) { const key = "s:" + k.id; keep.add(key); seq.push(row(key, k, {sub: true, depth})); walkKids(k, depth + 1); } };
+    for (const a of order()) {
+      const surfaced = !!a.parentId && !!field.byId(a.parentId);
+      const key = "t:" + a.id; keep.add(key); rowsNow.push(key);
+      seq.push(row(key, a, {surfaced}));
+      if (!surfaced) walkKids(a, 1);
+    }
+    for (const [k, n] of nodes) if (!keep.has(k)) { n.remove(); nodes.delete(k); }
+    // Grid and the now rule sit behind the rows.
+    const deco = [];
+    const step = view.span <= 30 * MIN ? 5 * MIN : view.span <= HOUR ? 10 * MIN : 15 * MIN;
+    for (let ago = step; ago < view.span; ago += step) { const g = $("div", "grid"); g.style.left = (gut + traceW * (1 - ago / view.span)) + "px"; deco.push(g); }
+    const nr = $("div", "now-rule"); nr.style.left = (gut + traceW) + "px"; deco.push(nr);
+    list.replaceChildren(...deco, ...seq, cross);
+    if (!seq.length) list.append($("p", "empty", "No agents."));
+  }
+
+  Mockup.mount({
+    number: 14, title: "Vital signs", spectrum: "round two",
+    summary: "Each agent is a trace of its tool calls over the last hour; the tool stream says what it is doing, needs-you flatlines warm and is answered inline, sub-agents fold into a bracket.",
+    signals: {current: ["status", "tool_activity", "age", "pending_approval", "created_by", "client", "title", "next_action", "next_actor", "phase"],
+      proposed: ["ask", "name", "role", "kind", "plan", "waiting_on", "blocks"]},
+    notes: "Everything on a row except the ask options comes from the runtime (tool-call times, the latest tool, status, age, parent); plan steps, names and roles only enrich the hover and the expanded sub-agent lines.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

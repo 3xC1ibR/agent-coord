@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 08 · Written briefing</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* The overview is a status report composed from checkpoints, plans and the event log; no model calls. */
+    .strip { position: sticky; top: 0; z-index: 5; display: flex; align-items: flex-start; gap: 14px; margin: -24px -28px 28px; padding: 10px 28px; background: color-mix(in srgb, var(--paper) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+    .strip-label { flex: none; padding-top: 4px; font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .pips { flex: 1; display: flex; flex-wrap: wrap; gap: 5px 8px; }
+    .pipgroup { display: inline-flex; align-items: center; gap: 3px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); transition: border-color .12s; }
+    .pipgroup.lit { border-color: var(--ink); }
+    .pip { display: block; width: 9px; height: 9px; padding: 0; border: 0; border-radius: 50%; background: var(--dot-idle); cursor: pointer; transition: transform .12s, box-shadow .12s; }
+    .pip.root { border-radius: 2px; width: 10px; height: 10px; }
+    .pip.sub { width: 7px; height: 7px; }
+    .pip.working { background: var(--accent); }
+    .pip.waiting { background: var(--warm); }
+    .pip.blocked { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .pip.failed { background: var(--danger); }
+    .pip.done { background: var(--ok); opacity: .55; }
+    .pip.lit, .pip:hover { transform: scale(1.35); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--ink); opacity: 1; }
+
+    .layout { display: grid; grid-template-columns: minmax(0, 720px) 220px; gap: 64px; justify-content: center; align-items: start; }
+    .brief { font-family: ui-serif, "New York", "Iowan Old Style", Georgia, serif; font-size: 16.5px; line-height: 1.75; color: var(--ink); }
+    .brief .kicker { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .brief h1 { font-size: 30px; font-weight: 600; letter-spacing: -.02em; line-height: 1.25; margin: 6px 0 14px; }
+    .brief .lede { font-size: 17.5px; color: color-mix(in srgb, var(--ink) 82%, var(--muted)); }
+    .brief section { margin-top: 34px; }
+    .brief h2 { display: flex; align-items: center; gap: 10px; min-height: 26px; padding-top: 16px; margin-bottom: 12px; border-top: 1px solid var(--line); font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .brief h2 .n { color: var(--ink); }
+    .brief #needs h2 { color: var(--warm); border-top-color: color-mix(in srgb, var(--warm) 45%, var(--line)); }
+    .brief p { margin-bottom: 14px; }
+    .brief p.para-asks .s { display: block; margin-top: 10px; }
+    .brief .group-label { display: block; margin-bottom: 2px; font: 10px var(--mono); letter-spacing: .03em; color: var(--muted); }
+    .brief .group-label b { color: var(--ink); font-weight: 600; }
+    .brief .group-label .needs { color: var(--warm); }
+    .brief .quote { color: color-mix(in srgb, var(--ink) 88%, var(--muted)); }
+    .brief .aside { color: var(--muted); }
+    .brief .empty { color: var(--muted); font-style: italic; }
+    .ref { font-weight: 600; color: inherit; text-decoration: underline; text-decoration-color: var(--line-strong); text-decoration-thickness: 1px; text-underline-offset: 3px; border-radius: 3px; cursor: pointer; transition: background .12s; }
+    .ref:hover { color: var(--accent); text-decoration-color: var(--accent); }
+    .ref.lit { background: var(--tint); box-shadow: 0 0 0 2px var(--tint); }
+    .ref .dot { margin: 0 4px 3px 1px; }
+    .ref.waiting, .ref.failed { text-decoration-color: color-mix(in srgb, var(--warm) 60%, transparent); }
+    .answers { display: inline-flex; flex-wrap: wrap; gap: 4px; margin: 0 2px 0 4px; vertical-align: 1px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.2; }
+    .answers .btn { padding: 3px 9px; border-radius: 11px; font-size: 11.5px; }
+    .answers input { width: 200px; padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .tag { display: inline-block; margin-left: 5px; padding: 0 5px; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 3px; font: 9px/1.6 var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--accent); vertical-align: 2px; }
+    .more { font: 11.5px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+    .more:hover { text-decoration: underline; }
+    .windows { display: inline-flex; gap: 2px; margin-left: auto; padding: 2px; border: 1px solid var(--line); border-radius: 6px; text-transform: none; letter-spacing: 0; }
+    .windows button { border: 0; background: none; padding: 3px 9px; border-radius: 4px; font: 11px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--muted); cursor: pointer; }
+    .windows button[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .colophon { margin-top: 30px; padding-top: 12px; border-top: 1px solid var(--line); font: 10px var(--mono); color: var(--muted); }
+
+    .rail { position: sticky; top: 72px; display: grid; gap: 18px; font-size: 12px; }
+    .rail h4 { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+    .rail .speak { width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px; }
+    .toc { display: grid; gap: 2px; }
+    .toc a { display: flex; justify-content: space-between; padding: 5px 8px; border-radius: 5px; color: var(--ink); }
+    .toc a:hover { background: var(--hover-bg); }
+    .toc a span:last-child { font-family: var(--mono); color: var(--muted); }
+    .toc a.warm span:last-child { color: var(--warm); font-weight: 600; }
+    .legend { display: grid; gap: 4px; color: var(--muted); }
+    .legend div { display: flex; align-items: center; gap: 8px; }
+    .legend .pip { cursor: default; }
+    .legend b { margin-left: auto; font: 11px var(--mono); color: var(--ink); font-weight: 500; }
+    .rail p { color: var(--muted); font-size: 11px; line-height: 1.55; }
+    @media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); gap: 28px; } .rail { position: static; order: -1; grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60_000, HOUR = 3_600_000;
+  const WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+  const num = n => n < WORDS.length ? WORDS[n] : String(n);
+  const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+  const lower = s => s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
+  const plural = (n, one, many = one + "s") => n === 1 ? one : many;
+  const LIMITS = {asks: 4, groups: 3, solo: 6, idle: 8, finished: 6};
+  const WINDOWS = [{id: "30m", label: "30 min", ms: 30 * MIN, phrase: "in the last 30 minutes"}, {id: "2h", label: "2 h", ms: 2 * HOUR, phrase: "in the last two hours"}, {id: "today", label: "Today", ms: null, phrase: "today"}];
+  const ASK_PHRASE = {decision: "a decision", approval: "your approval", information: "an answer", access: "access", review: "your sign-off on a review", failure: "a call"};
+  const ASK_NOUN = {decision: ["decision", "decisions"], approval: ["approval", "approvals"], information: ["question", "questions"], access: ["access request", "access requests"], review: ["review", "reviews"], failure: ["failure", "failures"], next: ["handed-back step", "handed-back steps"]};
+  const KIND_WORD = {subagent: "subagent", delegate: "terminal delegate"};
+  const ACTIVE = new Set(["working", "blocked", "waiting", "failed"]);
+  // View state survives re-renders from Play/Step/answer.
+  const view = {window: "2h", expanded: new Set(), speaking: false, wired: false, drafts: new Map(), focus: null};
+
+  function span(ms) {
+    const m = Math.max(1, Math.round(ms / MIN)); if (m < 60) return m + plural(m, " minute", " minutes");
+    const h = ms / HOUR; if (h < 24) { const v = h < 10 ? Math.round(h * 10) / 10 : Math.round(h); return v + (v === 1 ? " hour" : " hours"); }
+    const d = Math.round(h / 24); return d + plural(d, " day", " days");
+  }
+  const ago = (field, at) => field.now - at < MIN ? "just now" : span(field.now - at) + " ago";
+  function join(items, conj = "and") { const out = []; items.forEach((it, i) => { if (i) out.push(i === items.length - 1 ? (items.length > 2 ? ", " : " ") + conj + " " : ", "); out.push(it); }); return out; }
+  function line(cls, ...parts) { const s = $("span", cls); s.append(...parts.flat(Infinity).filter(p => p != null && p !== "")); return s; }
+  const quote = text => $("span", "quote", "“" + text + "”");
+  const tally = (list, key) => { const m = new Map(); for (const x of list) { const k = key(x); m.set(k, (m.get(k) || 0) + 1); } return [...m.entries()].sort((a, b) => b[1] - a[1]); };
+
+  /* A name in the prose: opens the drawer, and hovering it lights the matching pip. */
+  function ref(ctx, a, label) {
+    const r = $("a", "ref " + a.status); r.href = "#" + a.id; r.dataset.agent = a.id;
+    r.title = a.title + " · " + ctx.field.statusLabel(a);
+    r.append(AgentField.statusDot(a), label || a.name || a.title);
+    r.onclick = e => { e.preventDefault(); ctx.api.select(a.id); };
+    return r;
+  }
+  function refs(ctx, list, max = 3) { const shown = list.slice(0, max).map(a => ref(ctx, a)); if (list.length > max) shown.push(num(list.length - max) + " more"); return join(shown); }
+  function identity(ctx, a) {
+    const who = AgentField.PROVIDER_NAMES[a.client] + " " + AgentField.ROLE_LABELS[a.role].toLowerCase();
+    if (a.name && a.name !== a.title) return [ref(ctx, a), ", the " + who + " on ", $("em", null, a.title), ","];
+    return [ref(ctx, a), " (" + who + ")"];
+  }
+  function more(ctx, key, total, noun) {
+    const open = view.expanded.has(key);
+    const b = $("button", "more ctl", open ? "Show fewer" : "Show all " + total + " " + noun); b.type = "button";
+    b.onclick = () => { if (open) view.expanded.delete(key); else view.expanded.add(key); ctx.api.rerender(); };
+    return b;
+  }
+  const limit = (key, list, n) => view.expanded.has(key) ? list : list.slice(0, n);
+
+  /* What needs you: one sentence per ask with the answers inline. */
+  function answers(ctx, a) {
+    const box = $("span", "answers ctl");
+    a.ask.options.forEach((o, i) => { const b = $("button", "btn small" + (i === 0 ? " primary" : ""), o.label); b.type = "button"; b.onclick = () => ctx.field.answer(a.id, o.id); box.append(b); });
+    if (a.ask.freeText) {
+      const input = $("input"); input.placeholder = "Type an answer…"; input.dataset.draft = a.id; input.value = view.drafts.get(a.id) || "";
+      input.oninput = () => view.drafts.set(a.id, input.value); input.onfocus = () => { view.focus = a.id; }; input.onblur = () => { if (view.focus === a.id) view.focus = null; };
+      const send = $("button", "btn small primary", "Answer"); send.type = "button";
+      send.onclick = () => { const v = input.value.trim(); if (!v) return; view.drafts.delete(a.id); view.focus = null; ctx.field.answer(a.id, v); };
+      input.onkeydown = e => { if (e.key === "Enter") send.click(); };
+      box.append(input, send);
+    }
+    return box;
+  }
+  function askSentence(ctx, a) {
+    const {field} = ctx;
+    if (!a.ask) return line("s", ref(ctx, a), " handed the next step back to you: ", quote(a.next.action), " It has waited " + span(field.now - a.updatedAt) + ". ");
+    const impact = field.impact(a.id).map(field.byId).filter(Boolean);
+    const ask = a.ask.kind === "failure" ? [" failed" + (a.failure ? " (" + lower(a.failure) + ")" : "") + " and wants a call: "] : [" wants " + ASK_PHRASE[a.ask.kind] + ": "];
+    const effect = impact.length ? [" Answering unblocks ", refs(ctx, impact), "."] : a.ask.blocking ? [" Its own work is paused until you answer."] : [" Nothing else is held up by it."];
+    return line("s", identity(ctx, a), ask, quote(a.ask.question), effect, " Waiting " + span(field.now - a.ask.askedAt) + ".", answers(ctx, a), " ");
+  }
+  function needsSection(ctx, asks) {
+    const {field} = ctx;
+    const sec = $("section"); sec.id = "needs";
+    const h = $("h2", null, "What needs you "); h.append($("span", "n", "· " + asks.length)); sec.append(h);
+    if (!asks.length) { sec.append($("p", "empty", "Nothing needs you. Every agent can continue on its own.")); return sec; }
+    const p = $("p", "para-asks");
+    const holding = asks.filter(a => field.impact(a.id).length).length;
+    const blocking = asks.filter(a => a.ask?.blocking).length;
+    const lead = [cap(num(asks.length)) + " " + plural(asks.length, "agent is", "agents are") + " waiting on you"];
+    if (holding) lead.push(holding === asks.length && asks.length > 1 ? ", and every one of them holds up other work" : ", and " + num(holding) + " of them " + plural(holding, "holds", "hold") + " up other work");
+    else if (blocking) lead.push("; " + num(blocking) + " " + plural(blocking, "is", "are") + " paused until you answer");
+    lead.push(".");
+    if (asks.length > LIMITS.asks) {
+      const kinds = tally(asks, a => a.ask?.kind || "next").map(([k, n]) => num(n) + " " + ASK_NOUN[k][n === 1 ? 0 : 1]);
+      lead.push(" By kind: ", join(kinds).join(""), ". The " + num(LIMITS.asks) + " that matter most, by what they hold up and how long they have waited:");
+    }
+    p.append(line(null, lead));
+    for (const a of limit("asks", asks, LIMITS.asks)) p.append(askSentence(ctx, a));
+    sec.append(p);
+    if (asks.length > LIMITS.asks) sec.append(more(ctx, "asks", asks.length, "asks"));
+    return sec;
+  }
+
+  /* What is moving: one sentence per agent, a paragraph per orchestration group. */
+  function doing(ctx, a) {
+    const {field} = ctx;
+    const k = a.plan.findIndex(s => s.state === "active" || s.state === "blocked");
+    const step = k >= 0 && a.plan.length > 1 ? "step " + (k + 1) + " of " + a.plan.length : null;
+    switch (a.status) {
+      case "working": {
+        const act = a.activity ? lower(a.activity) : AgentField.PHASE_LABELS[a.phase].toLowerCase();
+        const label = k >= 0 ? lower(a.plan[k].label) : null;
+        return [" is " + act + (step ? " (" + step + (label && label !== act.toLowerCase() ? ": " + label : "") + ")" : "") + "."];
+      }
+      case "blocked": {
+        const ext = field.externalWaits(a), waits = field.agentWaits(a);
+        const needing = waits.filter(field.needsUser);
+        const on = [...ext, ...waits.map(w => ref(ctx, w))];
+        const clause = !needing.length ? "" : waits.length === 1 ? ", which needs you" : ", " + num(needing.length) + " of which " + plural(needing.length, "needs", "need") + " you";
+        const listed = on.length > 3 ? [...on.slice(0, 3), num(on.length - 3) + " more"] : on;
+        return [" has been waiting " + span(field.now - a.updatedAt) + " on ", listed.length ? join(listed) : "other work", clause, "."];
+      }
+      case "waiting": return [" is paused on your " + (a.ask ? ASK_NOUN[a.ask.kind][0] : "next step") + (step ? " at " + step : "") + " (above)."];
+      case "failed": return [" failed" + (a.failure ? " (" + lower(a.failure) + ")" : "") + (field.needsUser(a) ? " and needs your call (above)." : ".")];
+      case "idle": return [" is idle after " + AgentField.PHASE_LABELS[a.phase].toLowerCase() + ", last checked in " + ago(field, a.updatedAt) + "."];
+      default: return [" finished " + ago(field, a.updatedAt) + "."];
+    }
+  }
+  function sentence(ctx, a) {
+    const parent = ctx.field.parent(a.id);
+    const prefix = a.kind !== "app" && parent ? [ref(ctx, parent, (parent.name || parent.title) + "’s"), " " + KIND_WORD[a.kind] + " "] : [];
+    return line("s", prefix, ref(ctx, a), doing(ctx, a), " ");
+  }
+  function groupParagraph(ctx, g) {
+    const {field} = ctx;
+    const p = $("p", "group");
+    const c = field.counts(g.members);
+    const label = $("span", "group-label ctl");
+    label.append($("b", null, g.root.name || g.root.title), " · " + g.members.length + " agents · " + c.working + " working");
+    if (c.needsUser) label.append(" · ", $("span", "needs", c.needsUser + " " + plural(c.needsUser, "needs", "need") + " you"));
+    if (c.done) label.append(" · " + c.done + " done");
+    p.append(label);
+    const done = [];
+    for (const {agent} of field.treeRows([g.root.id])) { if (agent.status === "done") done.push(agent); else p.append(sentence(ctx, agent)); }
+    if (done.length) p.append(line("s aside", "Already done here: ", refs(ctx, done, 4), "."));
+    return p;
+  }
+  function movingLede(ctx) {
+    const {field} = ctx;
+    const working = field.agents.filter(a => a.status === "working"), blocked = field.agents.filter(a => a.status === "blocked");
+    const out = [];
+    if (!working.length) out.push("No agent is working right now.");
+    else {
+      const domains = tally(working, a => a.domain), phases = tally(working, a => a.phase);
+      out.push(cap(num(working.length)) + " " + plural(working.length, "agent is", "agents are") + " working");
+      if (domains.length === 1) out.push(" in " + AgentField.DOMAIN_LABELS[domains[0][0]]);
+      else {
+        out.push(" across " + num(domains.length) + " domains");
+        if (working.length > 8) out.push(", most in " + domains.slice(0, 2).map(([d, n]) => AgentField.DOMAIN_LABELS[d] + " (" + n + ")").join(" and "));
+      }
+      out.push(": ", join(phases.map(([ph, n]) => num(n) + " " + AgentField.PHASE_LABELS[ph].toLowerCase())).join(""), ".");
+    }
+    if (blocked.length) {
+      const onAgents = blocked.filter(a => field.agentWaits(a).length).length;
+      const ext = tally(blocked.flatMap(a => field.externalWaits(a)), x => x);
+      const parts = [];
+      if (onAgents) parts.push(num(onAgents) + " on other agents");
+      if (ext.length) parts.push(ext.reduce((n, [, k]) => n + k, 0) === 1 ? "one on " + ext[0][0] : num(ext.reduce((n, [, k]) => n + k, 0)) + " on outside systems (" + ext.slice(0, 3).map(([x, n]) => x + (n > 1 ? " ×" + n : "")).join(", ") + (ext.length > 3 ? ", …" : "") + ")");
+      out.push(" " + cap(num(blocked.length)) + " " + plural(blocked.length, "is", "are") + " waiting: " + join(parts).join("") + ".");
+    }
+    return out;
+  }
+  function movingSection(ctx, plan) {
+    const sec = $("section"); sec.id = "moving";
+    const h = $("h2", null, "What is moving "); h.append($("span", "n", "· " + plan.movingCount)); sec.append(h);
+    const lede = movingLede(ctx);
+    const shape = [];
+    if (plan.groups.length) shape.push(num(plan.groups.length) + " orchestration " + plural(plan.groups.length, "group"));
+    if (plan.solo.length) shape.push(num(plan.solo.length) + " " + plural(plan.solo.length, "agent") + " on " + plural(plan.solo.length, "its", "their") + " own");
+    if (shape.length) lede.push(" The work sits in " + join(shape).join("") + (plan.groups.length > LIMITS.groups ? "; the busiest come first." : "."));
+    const lp = $("p"); lp.append(line(null, lede)); sec.append(lp);
+    for (const g of limit("groups", plan.groups, LIMITS.groups)) sec.append(groupParagraph(ctx, g));
+    if (plan.groups.length > LIMITS.groups) { const p = $("p"); p.append(more(ctx, "groups", plan.groups.length, "groups")); sec.append(p); }
+    if (plan.solo.length) {
+      const p = $("p", "group"); const label = $("span", "group-label ctl"); label.append($("b", null, "On their own"), " · " + plan.solo.length + " agents"); p.append(label);
+      for (const a of limit("solo", plan.solo, LIMITS.solo)) p.append(sentence(ctx, a));
+      if (plan.solo.length > LIMITS.solo) p.append(more(ctx, "solo", plan.solo.length, "agents"));
+      sec.append(p);
+    }
+    if (plan.idle.length) {
+      const unread = plan.idle.filter(a => a.unread).length;
+      const shown = view.expanded.has("idle") ? plan.idle.length : LIMITS.idle;
+      const p = $("p", "aside");
+      p.append(line(null, cap(num(plan.idle.length)) + " " + plural(plan.idle.length, "agent is", "agents are") + " idle" + (unread ? ", " + num(unread) + " with " + plural(unread, "a result", "results") + " you have not read" : "") + ": ", refs(ctx, plan.idle, shown), ". "));
+      if (plan.idle.length > LIMITS.idle) p.append(more(ctx, "idle", plan.idle.length, "idle agents"));
+      sec.append(p);
+    }
+    return sec;
+  }
+
+  /* Finished since you left, from checkpoint history and the event log. */
+  function finishedAt(a) { for (let i = a.history.length - 1; i >= 0; i--) if (a.history[i].phase === "finished") return a.history[i].at; return a.updatedAt; }
+  function windowStart(field) { const w = WINDOWS.find(x => x.id === view.window); if (w.ms) return field.now - w.ms; const d = new Date(field.now); d.setHours(0, 0, 0, 0); return d.getTime(); }
+  function finishedSection(ctx) {
+    const {field, api} = ctx;
+    const w = WINDOWS.find(x => x.id === view.window), start = windowStart(field);
+    const done = field.agents.filter(a => a.status === "done").map(a => ({a, at: finishedAt(a)})).sort((x, y) => y.at - x.at);
+    const list = done.filter(d => d.at >= start);
+    const sec = $("section"); sec.id = "finished";
+    const h = $("h2", null, "Finished since you left "); h.append($("span", "n", "· " + list.length));
+    const seg = $("span", "windows ctl");
+    for (const x of WINDOWS) { const b = $("button", null, x.label); b.type = "button"; b.setAttribute("aria-pressed", String(x.id === view.window)); b.onclick = () => { view.window = x.id; api.rerender(); }; seg.append(b); }
+    h.append(seg); sec.append(h);
+    if (!list.length) {
+      const p = $("p"); p.append(line("empty", "Nothing finished " + w.phrase + ". "));
+      if (done.length) p.append(line(null, "The most recent was ", ref(ctx, done[0].a), ", " + ago(field, done[0].at) + "."));
+      sec.append(p);
+    } else {
+      const p = $("p");
+      const subs = list.filter(d => d.a.kind !== "app").length;
+      if (list.length > LIMITS.finished) p.append(line(null, cap(num(list.length)) + " agents finished " + w.phrase + (subs ? ", " + num(subs) + " of them sub-agents or delegates" : "") + ". Most recent first: "));
+      for (const {a, at} of limit("finished", list, LIMITS.finished - 1 + Number(list.length <= LIMITS.finished))) {
+        const parent = field.parent(a.id);
+        const links = a.links.filter(l => l.kind === "pull_request" || l.kind === "document").map(l => l.kind.replace("_", " ") + " " + l.label);
+        p.append(line("s", ref(ctx, a), a.unread ? $("span", "tag ctl", "unread") : "", " finished " + ago(field, at), parent ? [" for ", ref(ctx, parent)] : "", " after " + span(at - a.createdAt) + ": ", quote(a.summary), links.length ? " (" + links.join(", ") + ")" : "", " "));
+      }
+      sec.append(p);
+      if (list.length > LIMITS.finished) sec.append(more(ctx, "finished", list.length, "finished agents"));
+    }
+    // Everything else that happened in the window, counted rather than listed.
+    const events = field.events.filter(e => e.at >= start);
+    const checkpoints = field.agents.flatMap(a => a.history.filter(e => e.at >= start && e.actor === "agent" && e.phase !== "finished").map(() => a.id));
+    const opened = field.agents.filter(a => a.ask && a.ask.askedAt >= start).length;
+    const n = type => events.filter(e => e.type === type).length;
+    const also = [];
+    if (checkpoints.length) also.push(num(checkpoints.length) + " " + plural(checkpoints.length, "checkpoint") + " from " + num(new Set(checkpoints).size) + " " + plural(new Set(checkpoints).size, "agent"));
+    if (n("phase")) also.push(num(n("phase")) + " phase " + plural(n("phase"), "change"));
+    if (opened) also.push(num(opened) + " new " + plural(opened, "ask") + " still open");
+    if (n("spawned")) also.push(num(n("spawned")) + " new " + plural(n("spawned"), "agent") + " started by other agents");
+    if (n("resumed")) also.push(num(n("resumed")) + " " + plural(n("resumed"), "agent") + " resumed after a wait");
+    if (n("answered")) also.push("you answered " + num(n("answered")) + " " + plural(n("answered"), "ask"));
+    if (also.length) sec.append($("p", "aside", "Also " + w.phrase + ": " + join(also).join("") + "."));
+    return sec;
+  }
+
+  /* Compact strip of every agent, grouped by root. */
+  function strip(ctx) {
+    const {field, api} = ctx;
+    const bar = $("div", "strip"); bar.append($("span", "strip-label", "All agents · " + field.agents.length));
+    const pips = $("div", "pips");
+    for (const r of field.roots()) {
+      const g = $("span", "pipgroup");
+      for (const {agent: a, depth} of field.treeRows([r.id])) {
+        const status = field.needsUser(a) && a.status !== "failed" ? "waiting" : a.status;
+        const b = $("button", "pip " + status + (depth === 0 ? " root" : depth > 1 ? " sub" : "")); b.type = "button"; b.dataset.agent = a.id;
+        b.title = (a.name ? a.name + " · " : "") + a.title + " — " + field.statusLabel(a); b.setAttribute("aria-label", b.title);
+        b.onclick = () => api.select(a.id); g.append(b);
+      }
+      pips.append(g);
+    }
+    bar.append(pips); return bar;
+  }
+  function wireHover(stage) {
+    if (view.wired) return; view.wired = true;
+    let lit = null;
+    const light = id => {
+      if (id === lit) return; lit = id;
+      for (const n of stage.querySelectorAll(".lit")) n.classList.remove("lit");
+      if (!id) return;
+      for (const n of stage.querySelectorAll('[data-agent="' + CSS.escape(id) + '"]')) { n.classList.add("lit"); n.closest(".pipgroup")?.classList.add("lit"); }
+    };
+    stage.addEventListener("mouseover", e => light(e.target.closest("[data-agent]")?.dataset.agent || null));
+    stage.addEventListener("mouseleave", () => light(null));
+  }
+
+  function readAloud(article, button) {
+    if (view.speaking) { speechSynthesis.cancel(); view.speaking = false; button.textContent = "▶ Read aloud"; return; }
+    const copy = article.cloneNode(true); for (const n of copy.querySelectorAll(".ctl")) n.remove();
+    const u = new SpeechSynthesisUtterance(copy.textContent.replace(/\s+/g, " ").trim());
+    u.onend = u.onerror = () => { view.speaking = false; const b = document.querySelector(".rail .speak"); if (b) b.textContent = "▶ Read aloud"; };
+    view.speaking = true; button.textContent = "■ Stop reading"; speechSynthesis.speak(u);
+  }
+
+  Mockup.mount({
+    number: 8, title: "Written briefing", spectrum: "radical",
+    summary: "The overview is a status report written from the checkpoints: what needs you with answers inline, what is moving per group, and what finished.",
+    signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "unread", "updated_at", "links", "checkpoint_history"],
+      proposed: ["name", "role", "kind", "activity", "ask", "blocks", "domain", "plan", "waiting_on", "cost", "events"]},
+    notes: "Assumes checkpoints carry a structured ask, plan steps, a live activity line and waiting-on edges, plus an event log, so the briefing can be composed deterministically with no model call.",
+    render(field, stage, api) {
+      stage.replaceChildren();
+      wireHover(stage);
+      const ctx = {field, api};
+      const asks = field.asks();
+      const c = field.counts();
+      // Partition roots: orchestration groups with live work, solo agents in motion, idle roots.
+      const groups = [], solo = [], idle = [];
+      for (const r of field.roots()) {
+        const desc = field.descendants(r.id), members = [r, ...desc];
+        if (desc.length && members.some(m => ACTIVE.has(m.status))) {
+          const k = field.counts(members); groups.push({root: r, members, score: k.needsUser * 100 + k.working * 10 + k.blocked});
+        } else if (!desc.length && (r.status === "working" || r.status === "blocked" || (r.status === "failed" && !field.needsUser(r)))) solo.push(r);
+        else if (r.status === "idle") idle.push(r);
+      }
+      groups.sort((x, y) => y.score - x.score);
+      idle.sort((x, y) => Number(y.unread) - Number(x.unread) || y.updatedAt - x.updatedAt);
+      const movingCount = c.working + c.blocked;
+
+      stage.append(strip(ctx));
+      const layout = $("div", "layout");
+      const article = $("article", "brief");
+      const when = new Date(field.now);
+      article.append($("div", "kicker", "Briefing · " + when.toLocaleDateString([], {weekday: "long", month: "long", day: "numeric"}) + " · " + when.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) + " simulated"));
+      article.append($("h1", null, (asks.length ? cap(num(asks.length)) + " " + plural(asks.length, "thing needs", "things need") + " you." : "Nothing needs you.") + " " + (c.working ? cap(num(c.working)) + " " + plural(c.working, "agent is", "agents are") + " working." : "No agent is working.")));
+      const roots = field.roots().length, depth = Math.max(0, ...field.agents.map(a => field.depth(a.id)));
+      const minutes = field.agents.reduce((n, a) => n + a.cost.minutes, 0), usd = field.agents.reduce((n, a) => n + a.cost.usd, 0);
+      // Count needs-you once: a failed agent that asks for a call is listed as needing you, not again as failed.
+      const failedAsking = field.agents.filter(a => a.status === "failed" && field.needsUser(a)).length;
+      const states = [num(c.working) + " working", num(c.blocked) + " waiting on other work", num(asks.length) + " waiting on you" + (failedAsking ? " (" + num(failedAsking) + " after a failure)" : ""), num(c.idle) + " idle", num(c.done) + " done"];
+      if (c.failed - failedAsking > 0) states.push(num(c.failed - failedAsking) + " failed");
+      article.append($("p", "lede", "Of the " + c.total + " agents in this field, " + join(states).join("") + ". You started " + num(roots) + " of them; agents started the other " + num(c.total - roots) + (depth > 1 ? ", up to " + num(depth) + " levels deep" : "") + ". Together they have run " + span(minutes * MIN) + " of agent time and spent $" + usd.toFixed(2) + "."));
+      article.append(needsSection(ctx, asks), movingSection(ctx, {groups, solo, idle, movingCount}), finishedSection(ctx));
+      article.append($("div", "colophon ctl", "Written from checkpoints, plans, waiting-on edges and the event log at " + when.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) + ". No model call; every name opens its thread."));
+
+      const rail = $("aside", "rail");
+      const speak = $("button", "btn speak", view.speaking ? "■ Stop reading" : "▶ Read aloud"); speak.type = "button";
+      if (!("speechSynthesis" in window)) { speak.disabled = true; speak.title = "Speech synthesis is not available in this browser"; }
+      speak.onclick = () => readAloud(article, speak);
+      const toc = $("div"); toc.append($("h4", null, "In this briefing"));
+      const links = $("nav", "toc");
+      for (const [id, label, n, warm] of [["needs", "Needs you", asks.length, asks.length > 0], ["moving", "Moving", movingCount, false], ["finished", "Finished", Number(article.querySelector("#finished .n").textContent.replace(/\D/g, "")), false]]) {
+        const a = $("a", warm ? "warm" : null); a.href = "#" + id; a.append($("span", null, label), $("span", null, String(n)));
+        a.onclick = e => { e.preventDefault(); article.querySelector("#" + id).scrollIntoView({behavior: "smooth", block: "start"}); }; links.append(a);
+      }
+      toc.append(links);
+      const legend = $("div"); legend.append($("h4", null, "Strip"));
+      const lg = $("div", "legend");
+      for (const [cls, label, n] of [["working", "Working", c.working], ["waiting", "Needs you", c.needsUser], ["blocked", "Waiting on work", c.blocked], ["failed", "Failed", c.failed], ["idle", "Idle", c.idle], ["done", "Done", c.done]]) {
+        const row = $("div"); row.append($("span", "pip " + cls), $("span", null, label), $("b", null, String(n))); lg.append(row);
+      }
+      legend.append(lg);
+      const hint = $("p", null, "Square pips are agents you started; smaller pips are sub-agents. Hover a name to find it in the strip.");
+      rail.append(speak, toc, legend, hint);
+      layout.append(article, rail); stage.append(layout);
+      if (view.focus) { const input = stage.querySelector('input[data-draft="' + CSS.escape(view.focus) + '"]'); if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); } }
+    },
+  });
+})();
+</script>
+</body>
+</html>

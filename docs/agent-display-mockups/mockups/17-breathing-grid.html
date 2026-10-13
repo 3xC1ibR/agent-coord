@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 17 · Breathing grid</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* A live contribution graph: one cell per root agent, breathing at its tool-call cadence.
+       Needs-you cells take the top row, fresh work follows, old results sink to the bottom rows. */
+    #stage { display: flex; flex-direction: column; overflow: hidden; }
+    .bar { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 20px 6px 64px; font-size: 11px; color: var(--muted); }
+    .bar .hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar .btn[aria-pressed="true"].needs-filter { border-color: var(--warm); background: var(--warm-tint); color: var(--warm); }
+    .bar .needs-filter::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--warm); margin-right: 6px; vertical-align: 1px; }
+    .wrap { position: relative; flex: 1; min-height: 0; margin: 0 20px 16px 0; }
+    .gutter { position: absolute; left: 0; top: 0; bottom: 0; width: 56px; pointer-events: none; }
+    .gutter span { position: absolute; right: 10px; font: 9px var(--mono); color: var(--muted); letter-spacing: .04em; transform: translateY(2px); white-space: nowrap; transition: top .6s ease; }
+    .gutter span.you { color: var(--warm); font-weight: 600; }
+    .grid { position: absolute; left: 64px; right: 0; top: 0; bottom: 0; }
+    .drop { position: absolute; border: 1.5px dashed var(--ink); border-radius: 6px; pointer-events: none; opacity: .5; }
+
+    .cell { --breath: 2.4s; position: absolute; border-radius: 6px; background: var(--tint); border: 1px solid transparent; cursor: grab; overflow: hidden; outline: 0;
+      transition: left .6s ease, top .6s ease, width .35s ease, height .35s ease, opacity .5s; color: var(--ink); }
+    .cell:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+    .cell.dragging { transition: none; z-index: 20; cursor: grabbing; box-shadow: 0 10px 30px var(--shadow); }
+    .grid.dragging .cell:not(.dragging) { transition: opacity .3s; }
+    .grid.instant .cell, .instant + .gutter span, .gutter.instant span { transition: none; }
+    .cell:hover { z-index: 5; border-color: var(--hover-line); }
+    .cell.idle { background: color-mix(in srgb, var(--dot-idle) 22%, var(--surface)); }
+    .cell.working { background: color-mix(in srgb, var(--accent) 20%, var(--surface)); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+    .cell.working::before { content: ""; position: absolute; inset: 0; background: var(--accent); opacity: 0; animation: breathe var(--breath) ease-in-out infinite; pointer-events: none; }
+    .cell.fresh::after { content: ""; position: absolute; inset: 0; border-radius: 6px; box-shadow: inset 0 0 0 2px var(--accent); animation: flash 1.1s ease-out 1 forwards; pointer-events: none; }
+    .cell.blocked { background: var(--surface); border: 1.5px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
+    .cell.done { background: color-mix(in srgb, var(--ok) 16%, var(--surface)); }
+    .cell.failed { background: color-mix(in srgb, var(--danger) 16%, var(--surface)); border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
+    .cell.needs { background: color-mix(in srgb, var(--warm) 18%, var(--surface)); border-color: var(--warm); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warm) 22%, transparent), 0 0 18px color-mix(in srgb, var(--warm) 30%, transparent); }
+    .cell.needs.failed { border-color: var(--danger); }
+    .cell.pinned { border-style: solid; border-color: var(--ink); }
+    .cell.peeked { box-shadow: 0 0 0 2px var(--ink); z-index: 6; }
+    .cell.dimmed { opacity: .12 !important; }
+
+    .cell .logo { position: absolute; left: 7px; top: 7px; display: flex; }
+    .cell .logo .provider-logo { width: 11px; height: 11px; }
+    .cell .nm { position: absolute; left: 7px; right: 7px; bottom: 6px; font-size: 10.5px; line-height: 1.3; letter-spacing: -.01em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cell.has-kids .nm { right: 30px; }
+    .cell.done .nm, .cell.idle .nm { color: var(--muted); }
+    .cell .tool { position: absolute; left: 24px; right: 7px; top: 6px; font: 9px var(--mono); color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .grid[data-tiny] .nm, .grid[data-tiny] .tool, .grid[data-tiny] .logo { display: none; }
+
+    /* Needs-you cells are two cells wide: ask kind, who, question, and a one-click answer on hover. */
+    .cell.ask-cell { cursor: pointer; }
+    .cell .kind { position: absolute; left: 24px; top: 6px; font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); white-space: nowrap; }
+    .cell.failed .kind { color: var(--danger); }
+    .cell .q { position: absolute; left: 8px; right: 8px; top: 22px; font-size: 11px; line-height: 1.35; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cell.ask-cell .nm { font-weight: 600; color: var(--ink); right: 8px; display: block; white-space: nowrap; text-overflow: ellipsis; }
+    .cell.ask-cell.narrow .q { display: none; }
+    .cell.ask-cell.narrow .kind { left: 7px; top: 22px; }
+    .cell.ask-cell.narrow .answer { left: 6px; }
+    .cell.ask-cell.narrow .answer .btn.primary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cell.ask-cell.narrow .answer .btn:not(.primary) { display: none; }
+    .cell.ask-cell .nm small { font-weight: 400; color: var(--muted); margin-left: 4px; }
+    .cell .answer { position: absolute; right: 6px; bottom: 6px; display: flex; gap: 4px; opacity: 0; transform: translateY(3px); transition: opacity .15s, transform .15s; }
+    .cell .answer .btn { padding: 3px 8px; font-size: 10.5px; }
+    .cell.ask-cell:hover .answer, .cell.ask-cell:focus-within .answer, .cell.ask-cell.peeked .answer { opacity: 1; transform: none; }
+    .cell.ask-cell:hover .nm, .cell.ask-cell:focus-within .nm { opacity: 0; }
+    .grid[data-tiny] .cell .q { display: none; }
+
+    /* Sub-agents: an inset in the parent's corner, which is also the expand control. */
+    .inset { all: unset; position: absolute; right: 5px; bottom: 5px; width: 20px; height: 20px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px; padding: 2px; border-radius: 4px; background: color-mix(in srgb, var(--surface) 75%, transparent); cursor: pointer; box-sizing: border-box; }
+    .inset:hover, .inset:focus-visible { box-shadow: 0 0 0 1.5px var(--ink); }
+    .inset i { border-radius: 1.5px; background: var(--dot-idle); }
+    .inset i.working { background: var(--accent); } .inset i.waiting, .inset i.needs { background: var(--warm); } .inset i.failed { background: var(--danger); }
+    .inset i.done { background: var(--ok); opacity: .7; } .inset i.blocked { background: transparent; box-shadow: inset 0 0 0 1px var(--muted); }
+    .inset.count { display: grid; place-items: center; grid-template-columns: 1fr; grid-template-rows: 1fr; font: 600 9.5px var(--mono); color: var(--ink); }
+    .inset.count.warn { color: var(--warm); box-shadow: inset 0 0 0 1.5px var(--warm); }
+
+    /* Expanded parent: the same cell grown in place, listing each sub-agent's last step. */
+    .cell.expanded { cursor: default; }
+    .cell .xhead { position: absolute; left: 8px; right: 8px; top: 6px; display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; }
+    .cell .xhead span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cell .xhead button { all: unset; cursor: pointer; font: 11px var(--mono); color: var(--muted); padding: 0 4px; border-radius: 3px; }
+    .cell .xhead button:hover, .cell .xhead button:focus-visible { color: var(--ink); background: var(--surface); }
+    .cell .xlist { position: absolute; left: 6px; right: 6px; top: 26px; bottom: 6px; overflow: auto; display: grid; align-content: start; gap: 1px; }
+    .cell .xrow { display: grid; grid-template-columns: 9px minmax(0, 1fr); column-gap: 7px; align-items: center; padding: 3px 4px; border-radius: 4px; cursor: pointer; font-size: 10.5px; line-height: 1.3; }
+    .cell .xrow:hover, .cell .xrow:focus-visible { background: color-mix(in srgb, var(--surface) 80%, transparent); outline: 0; }
+    .cell .xrow i { width: 9px; height: 9px; border-radius: 2px; background: var(--dot-idle); }
+    .cell .xrow i.working { background: var(--accent); } .cell .xrow i.needs { background: var(--warm); } .cell .xrow i.failed { background: var(--danger); }
+    .cell .xrow i.done { background: var(--ok); opacity: .7; } .cell .xrow i.blocked { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .cell .xrow b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cell .xrow small { grid-column: 2; color: var(--muted); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cell .xrow.working small { color: var(--accent); font-family: var(--mono); }
+    .cell .xrow.needs small { color: var(--warm); }
+
+    @keyframes breathe { 50% { opacity: .28; } }
+    @keyframes flash { from { opacity: 1; } to { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .cell.working::before, .cell.fresh::after { animation: none; } .cell, .gutter span { transition: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60000, GAP = 6, MAX_S = 96, MIN_S = 18;
+  // View state that survives re-renders: pinned slots, expanded parents, the needs-you filter, last seen tool pulse.
+  const pins = new Map(), expanded = new Set(), seenPulse = new Map();
+  let needsOnly = false, gridEl, gutterEl, dropEl, filterBtn, lastApi = null, lastLay = null;
+  const nodes = new Map();
+
+  const sinkDepth = age => Math.min(1, Math.log1p(age / MIN) / Math.log1p(24 * 60));
+  const compactAge = ms => ms < 2 * MIN ? "now" : ms < 60 * MIN ? Math.round(ms / MIN) + "m" : ms < 24 * 60 * MIN ? Math.round(ms / (60 * MIN)) + "h" : Math.round(ms / (24 * 60 * MIN)) + "d";
+  const nameOf = a => a.name || a.title;
+  const doingOf = (field, a) => a.status === "working" ? (field.toolLabel(a) || a.activity || "Working") : a.status === "done" ? "Done " + field.relativeTime(field.lastActivity(a)) : field.statusLabel(a);
+  const lastStep = (field, k) => {
+    if (field.needsUser(k)) return k.ask ? k.ask.kind + ": " + k.ask.question : k.next.action;
+    if (k.status === "working") return field.toolLabel(k) || k.activity || "Working";
+    const s = field.recentSteps(k); const done = s.filter(x => x.state === "done"); return (done[done.length - 1] || s[0])?.label || k.summary;
+  };
+  const kidClass = (field, k) => field.needsUser(k) ? "needs" : k.status;
+
+  // Skip the slide-in on first paint and on resize; transitions are for re-sorting.
+  function settle() { gridEl.classList.add("instant"); gutterEl.classList.add("instant"); requestAnimationFrame(() => requestAnimationFrame(() => { gridEl.classList.remove("instant"); gutterEl.classList.remove("instant"); })); }
+
+  function build(stage, api) {
+    stage.classList.add("full-bleed"); stage.replaceChildren(); nodes.clear();
+    const bar = $("div", "bar");
+    bar.append($("span", "hint", "Fresh activity rises to the top rows; older work sinks. Drag a cell to pin it. Its corner opens sub-agents."));
+    filterBtn = $("button", "btn small needs-filter", "Needs you"); filterBtn.type = "button"; filterBtn.setAttribute("aria-pressed", "false"); filterBtn.title = "Dim everything that does not need you";
+    filterBtn.onclick = () => { needsOnly = !needsOnly; filterBtn.setAttribute("aria-pressed", String(needsOnly)); api.rerender(); };
+    const reset = $("button", "btn small", "Reset layout"); reset.type = "button"; reset.title = "Unpin every cell and collapse sub-agents";
+    reset.onclick = () => { pins.clear(); expanded.clear(); api.rerender(); };
+    bar.append(filterBtn, reset);
+    const wrap = $("div", "wrap"); gutterEl = $("div", "gutter"); gridEl = $("div", "grid"); dropEl = $("div", "drop"); dropEl.hidden = true;
+    gridEl.append(dropEl); wrap.append(gutterEl, gridEl); stage.append(bar, wrap); settle();
+  }
+
+  // Every root agent, plus any sub-agent that needs the user (it surfaces on its own, labeled with its creator).
+  function entries(field) {
+    const askRank = new Map(field.asks().map((a, i) => [a.id, i]));
+    const list = field.roots().concat(field.agents.filter(a => a.parentId && field.byId(a.parentId) && field.needsUser(a)));
+    return list.sort((x, y) => {
+      const nx = askRank.has(x.id), ny = askRank.has(y.id);
+      if (nx !== ny) return nx ? -1 : 1;
+      if (nx) return askRank.get(x.id) - askRank.get(y.id);
+      return field.lastActivity(y) - field.lastActivity(x) || x.id.localeCompare(y.id);
+    });
+  }
+
+  function spanOf(field, a, S, wideNeeds) {
+    const kids = field.children(a.id).length;
+    if (expanded.has(a.id) && kids) { const w = Math.max(2, Math.ceil(230 / (S + GAP))); return {w, h: Math.max(2, Math.ceil((34 + kids * 32) / (S + GAP)))}; }
+    if (field.needsUser(a) && wideNeeds) return {w: Math.max(2, Math.ceil(196 / (S + GAP))), h: 1};
+    return {w: 1, h: 1};
+  }
+
+  // Pinned cells claim their slots first; everything else fills first-fit in recency order.
+  function pack(field, list, S, C) {
+    const occ = new Set(), placed = [];
+    const free = (c, r, w, h) => { if (c < 0 || c + w > C) return false; for (let i = 0; i < w; i++) for (let j = 0; j < h; j++) if (occ.has((c + i) + "," + (r + j))) return false; return true; };
+    const take = (c, r, w, h) => { for (let i = 0; i < w; i++) for (let j = 0; j < h; j++) occ.add((c + i) + "," + (r + j)); };
+    const needsCount = list.filter(field.needsUser).length, wideNeeds = needsCount * Math.max(2, Math.ceil(196 / (S + GAP))) <= C;
+    const items = list.map(a => ({a, ...spanOf(field, a, S, wideNeeds)}));
+    for (const it of items) { const p = pins.get(it.a.id); if (!p) continue; it.c = Math.max(0, Math.min(p.c, C - it.w)); it.r = p.r; take(it.c, it.r, it.w, it.h); it.pinned = true; placed.push(it); }
+    for (const it of items) {
+      if (it.pinned) continue;
+      if (it.w > C) it.w = C;
+      for (let r = 0; it.r == null; r++) for (let c = 0; c + it.w <= C; c++) if (free(c, r, it.w, it.h)) { it.c = c; it.r = r; take(c, r, it.w, it.h); break; }
+      placed.push(it);
+    }
+    const rows = placed.reduce((m, it) => Math.max(m, it.r + it.h), 0);
+    return {placed, rows};
+  }
+
+  // The grid never scrolls: pick the largest cell size whose packing fits the area.
+  function layout(field) {
+    const W = gridEl.clientWidth || 1200, H = gridEl.clientHeight || 700;
+    const list = entries(field);
+    let best = null;
+    for (let S = MAX_S; S >= MIN_S; S -= 2) {
+      const C = Math.max(2, Math.floor((W + GAP) / (S + GAP)));
+      const p = pack(field, list, S, C);
+      best = {S, C, ...p};
+      if (p.rows * (S + GAP) - GAP <= H) break;
+    }
+    return best;
+  }
+
+  function cellRect(lay, c, r, w = 1, h = 1) { const u = lay.S + GAP; return {left: c * u, top: r * u, width: w * u - GAP, height: h * u - GAP}; }
+  function slotAt(lay, x, y) { const u = lay.S + GAP; return {c: Math.max(0, Math.min(lay.C - 1, Math.floor(x / u))), r: Math.max(0, Math.floor(y / u))}; }
+
+  function inset(field, a, api) {
+    const kids = field.children(a.id); const needs = field.descendantsNeedingUser(a.id).length;
+    const b = $("button", "inset" + (kids.length > 4 ? " count" + (needs ? " warn" : "") : "")); b.type = "button";
+    if (kids.length > 4) b.textContent = String(kids.length);
+    else for (const k of kids) { const i = $("i", kidClass(field, k)); b.append(i); }
+    b.title = kids.length + " sub-agents" + (needs ? " · " + needs + " need you" : "") + "\n" + kids.map(k => "• " + k.title + " — " + doingOf(field, k)).join("\n") + "\nClick to open in place";
+    b.setAttribute("aria-label", "Show " + kids.length + " sub-agents of " + a.title);
+    b.onpointerdown = e => e.stopPropagation();
+    b.onclick = e => { e.stopPropagation(); expanded.add(a.id); api.rerender(); };
+    return b;
+  }
+
+  function fillCell(el, field, a, it, api) {
+    const kids = field.children(a.id), parent = a.parentId && field.byId(a.parentId);
+    const needs = field.needsUser(a), branchNeeds = field.descendantsNeedingUser(a.id).length;
+    el.replaceChildren();
+    el.title = (a.name ? a.name + " · " : "") + a.title + "\n" + doingOf(field, a) + (parent ? "\nfrom " + nameOf(parent) : "") + (kids.length ? "\n" + kids.length + " sub-agents" + (branchNeeds ? ", " + branchNeeds + " need you" : "") : "");
+    if (expanded.has(a.id) && kids.length) {
+      const head = $("div", "xhead"); head.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("span", null, nameOf(a)));
+      const close = $("button", null, "–"); close.type = "button"; close.title = "Fold sub-agents back into the corner"; close.setAttribute("aria-label", "Collapse sub-agents");
+      close.onpointerdown = e => e.stopPropagation(); close.onclick = e => { e.stopPropagation(); expanded.delete(a.id); api.rerender(); };
+      head.append(close);
+      const listEl = $("div", "xlist");
+      for (const k of kids) {
+        const row = $("div", "xrow " + kidClass(field, k)); row.tabIndex = 0;
+        const grand = field.descendants(k.id).length;
+        row.append($("i", kidClass(field, k)), $("b", null, nameOf(k) + (grand ? " +" + grand : "")), $("small", null, lastStep(field, k)));
+        row.title = k.title + "\n" + doingOf(field, k);
+        row.onpointerdown = e => e.stopPropagation();
+        row.onclick = e => { e.stopPropagation(); api.peek(k.id, row); };
+        row.onkeydown = e => { if (e.key === "Enter") { e.stopPropagation(); api.peek(k.id, row); } };
+        listEl.append(row);
+      }
+      el.append(head, listEl); return;
+    }
+    const logo = $("span", "logo"); logo.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client])); el.append(logo);
+    if (needs) {
+      el.append($("span", "kind", a.ask ? (a.ask.kind === "failure" ? "failed" : a.ask.kind) + (a.ask.blocking && it.w > 1 ? " · blocking" : "") : "your step"));
+      el.title = (a.ask ? a.ask.question : a.next.action) + "\n\n" + el.title;
+      el.append($("span", "q", a.ask ? a.ask.question : a.next.action));
+      const nm = $("span", "nm", nameOf(a)); if (parent) nm.append($("small", null, "from " + nameOf(parent))); el.append(nm);
+      const ans = $("div", "answer");
+      if (a.ask?.options?.length) {
+        const first = a.ask.options[0]; const b = $("button", "btn small primary", first.label); b.type = "button"; b.title = "Answer: " + first.label;
+        b.onpointerdown = e => e.stopPropagation(); b.onclick = e => { e.stopPropagation(); field.answer(a.id, first.id); }; ans.append(b);
+        if (a.ask.options.length > 1) { const m = $("button", "btn small", "More…"); m.type = "button"; m.onpointerdown = e => e.stopPropagation(); m.onclick = e => { e.stopPropagation(); api.peek(a.id, el); }; ans.append(m); }
+      } else { const b = $("button", "btn small primary", a.ask?.freeText ? "Answer…" : "Open"); b.type = "button"; b.onpointerdown = e => e.stopPropagation(); b.onclick = e => { e.stopPropagation(); api.peek(a.id, el); }; ans.append(b); }
+      el.append(ans);
+    } else {
+      if (a.status === "working" && field.toolLabel(a) && lastLay.S >= 64) el.append($("span", "tool", field.toolLabel(a)));
+      el.append($("span", "nm", nameOf(a)));
+    }
+    if (kids.length && !(needs && parent)) el.append(inset(field, a, api));
+  }
+
+  function makeCell(id, api) {
+    const el = $("div", "cell"); el.tabIndex = 0; el.dataset.id = id; gridEl.append(el);
+    let target = null;
+    Mockup.drag(el, {
+      onStart: () => { gridEl.classList.add("dragging"); lastApi?.unpeek?.(); },
+      onMove: ({dx, dy, event}) => {
+        el.style.transform = "translate(" + dx + "px," + dy + "px)";
+        const g = gridEl.getBoundingClientRect(), it = lastLay.placed.find(p => p.a.id === id);
+        target = slotAt(lastLay, event.clientX - g.left - (it ? 0 : 0), event.clientY - g.top);
+        const r = cellRect(lastLay, Math.min(target.c, lastLay.C - (it?.w || 1)), target.r, it?.w || 1, it?.h || 1);
+        Object.assign(dropEl.style, {left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px"}); dropEl.hidden = false;
+      },
+      onEnd: ({dragged}) => {
+        gridEl.classList.remove("dragging"); dropEl.hidden = true; el.style.transform = "";
+        if (!dragged || !target) { target = null; api.peek(id, el); return; }
+        // A pin displaces any other pin it lands on; the displaced cell rejoins the recency order.
+        for (const [other, p] of pins) if (other !== id && p.c === target.c && p.r === target.r) pins.delete(other);
+        pins.set(id, target); target = null; api.rerender();
+      },
+    });
+    el.onkeydown = e => { if (e.key === "Enter" && e.target === el) api.peek(id, el); };
+    nodes.set(id, el); return el;
+  }
+
+  function render(field, stage, api) {
+    lastApi = api;
+    if (!gridEl || !gridEl.isConnected) build(stage, api);
+    const lay = layout(field); lastLay = lay;
+    if (lay.S < 46) gridEl.dataset.tiny = ""; else delete gridEl.dataset.tiny;
+    const keep = new Set();
+    for (const it of lay.placed) {
+      const a = it.a; keep.add(a.id);
+      const el = nodes.get(a.id) || makeCell(a.id, api);
+      const needs = field.needsUser(a), kids = field.children(a.id).length, branchNeeds = needs || field.descendantsNeedingUser(a.id).length > 0;
+      el.className = "cell " + a.status + (needs ? " needs ask-cell" + (it.w === 1 ? " narrow" : "") : "") + (kids ? " has-kids" : "") + (expanded.has(a.id) && kids ? " expanded" : "") + (it.pinned ? " pinned" : "") + (api.peeked === a.id ? " peeked" : "") + (needsOnly && !branchNeeds ? " dimmed" : "");
+      const r = cellRect(lay, it.c, it.r, it.w, it.h);
+      Object.assign(el.style, {left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px"});
+      // Age sinks: unpinned, settled cells dim as their last tool call or update gets older.
+      const age = field.age(a);
+      el.style.opacity = needs || a.status === "working" || it.pinned ? "" : String(Math.max(0.38, 1 - 0.62 * sinkDepth(age)) * (a.status === "done" ? 0.85 : 1));
+      // Breathe at the agent's own cadence: recent tool calls per 20 minutes set the period.
+      const recent = field.pulsesSince(a, 20 * MIN).length;
+      el.style.setProperty("--breath", Math.max(1.2, Math.min(5, 0.9 + (20 / Math.max(1, recent)) * 0.7)).toFixed(2) + "s");
+      const pulse = a.lastTool?.at ?? 0;
+      if (seenPulse.has(a.id) && seenPulse.get(a.id) !== pulse && a.status === "working" && field.now - pulse < 90000) { el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh"); }
+      seenPulse.set(a.id, pulse);
+      fillCell(el, field, a, it, api);
+    }
+    for (const [id, el] of nodes) if (!keep.has(id)) { el.remove(); nodes.delete(id); }
+    // Gutter: how old each row's freshest work is, so the sink is readable without a stat line.
+    gutterEl.replaceChildren();
+    const u = lay.S + GAP; let lastLabel = null;
+    for (let r = 0; r < lay.rows; r++) {
+      const row = lay.placed.filter(it => it.r === r && !it.pinned);
+      if (!row.length) continue;
+      const allNeeds = row.every(it => field.needsUser(it.a));
+      const label = allNeeds ? "you" : compactAge(Math.min(...row.filter(it => !field.needsUser(it.a)).map(it => field.age(it.a))));
+      if (label === lastLabel) continue; lastLabel = label;
+      const s = $("span", allNeeds ? "you" : null, label === "now" || label === "you" ? label : label + " ago"); s.style.top = (r * u) + "px"; gutterEl.append(s);
+    }
+  }
+
+  Mockup.mount({
+    number: 17, title: "Breathing grid", spectrum: "round two", fullBleed: true,
+    summary: "A live contribution graph: one cell per root agent, breathing at its tool-call cadence; needs-you cells lead, old work sinks to the bottom rows.",
+    signals: {current: ["status", "tool_activity", "age", "pending_approval", "created_by", "client", "title", "phase", "summary", "next_action", "next_actor"],
+      proposed: ["ask", "name", "plan"]},
+    notes: "Order, dimming, and breathing come only from runtime signals (status, tool pulses, last activity, parent/child); ask options add the one-click answer and plan adds sharper last steps, but the grid reads without them.",
+    render,
+  });
+  window.addEventListener("resize", () => { if (!gridEl) return; settle(); lastApi?.rerender(); });
+})();
+</script>
+</body>
+</html>

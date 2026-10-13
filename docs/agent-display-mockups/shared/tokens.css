@@ -1,0 +1,206 @@
+/* Shared tokens for the agent-display mockups. Values mirror the shipped
+   styles.css / theme.css so every mockup reads as Ribbon Field. Cobalt accent
+   for running work and primary actions; orange is reserved for attention. */
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  font-synthesis: none;
+  --paper: #f5f5f4; --surface: #ffffff; --ink: #18181b; --muted: #6a6a71;
+  --line: #e4e4e6; --line-strong: #cfcfd3;
+  --accent: #2550d8; --accent-hover: #1d42b8; --on-accent: #ffffff;
+  --tint: #ededee; --panel: #efefef; --hover-bg: #ededee; --hover-line: #b3b3b9;
+  --warm: #c2410c; --warm-tint: #fbe9e0; --danger: #c0392b; --danger-tint: #f9e3e0;
+  --ok: #2f7d4f; --ok-tint: #e2f1e7;
+  --dot-idle: #a6a6ad; --shadow: #18181b26;
+  --sb-bg: #121215; --sb-ink: #e6e6ea; --sb-muted: #85858d; --sb-line: #27272c; --sb-hover: #1c1c21; --sb-accent: #8fb0ff;
+  --mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  /* Domain hues: muted, distinguishable, equal weight. Used only where a
+     mockup needs to separate territories; never for status. */
+  --domain-web: #5b6fb8; --domain-backend: #7a8a4e; --domain-mobile: #9a6a9e;
+  --domain-docs: #b08a3e; --domain-infra: #5c8c8a; --domain-release: #a86a4c; --domain-research: #7c7c8c;
+  color: var(--ink); background: var(--paper);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #141418; --surface: #1c1c21; --ink: #e6e6ea; --muted: #8a8a93;
+  --line: #26262b; --line-strong: #303036;
+  --accent: #7fa3ff; --accent-hover: #9ab6ff; --on-accent: #0d0f13;
+  --tint: #1c1c21; --panel: #1c1c21; --hover-bg: #232328; --hover-line: #3a3a41;
+  --warm: #ffa07a; --warm-tint: #3a2620; --danger: #ff8a80; --danger-tint: #3a2222;
+  --ok: #7fc99a; --ok-tint: #1f3327;
+  --dot-idle: #55555c; --shadow: #0006;
+  --sb-bg: #101014; --sb-line: #26262b; --sb-hover: #1a1a1f;
+  --domain-web: #8e9fe0; --domain-backend: #aebb7a; --domain-mobile: #c79ccb;
+  --domain-docs: #d8b366; --domain-infra: #88bdbb; --domain-release: #d9977a; --domain-research: #a9a9bb;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; min-height: 100%; }
+body { display: flex; flex-direction: column; min-height: 100dvh; }
+button, input, textarea, select { font: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a { color: inherit; text-decoration: none; }
+h1, h2, h3, h4, p { margin: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+
+/* Buttons */
+.btn { cursor: pointer; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; font-size: 12px; line-height: 1.2; transition: background .15s, border-color .15s; }
+.btn:hover:not(:disabled) { background: var(--hover-bg); border-color: var(--hover-line); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 550; }
+.btn.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.quiet { background: transparent; color: var(--muted); }
+.btn.quiet:hover:not(:disabled) { color: var(--ink); }
+.btn.warm { border-color: var(--warm); color: var(--warm); }
+.btn.warm:hover:not(:disabled) { background: var(--warm-tint); }
+.btn.small { padding: 4px 8px; font-size: 11px; }
+.btn[aria-pressed="true"] { background: var(--tint); color: var(--ink); border-color: var(--line-strong); }
+
+/* Chips and dots */
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: 10px; line-height: 1.5; color: var(--muted); white-space: nowrap; max-width: 100%; }
+.chip.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.chip.warm { color: var(--warm); border-color: color-mix(in srgb, var(--warm) 50%, transparent); background: var(--warm-tint); }
+.chip.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, transparent); background: var(--danger-tint); }
+.chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.chip.mono { font-family: var(--mono); font-size: 9px; letter-spacing: .02em; }
+.dot { display: inline-block; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--dot-idle); vertical-align: middle; }
+.dot.working { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); animation: dot-pulse 2s ease-in-out infinite; }
+.dot.waiting { background: var(--warm); }
+.dot.blocked { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+.dot.failed { background: var(--danger); }
+.dot.done { background: var(--ok); }
+.dot.idle { background: var(--dot-idle); }
+@keyframes dot-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 8%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
+
+/* Phase stepper: eight segments, filled through the current phase. */
+.phase-steps { display: inline-flex; gap: 2px; align-items: center; vertical-align: middle; }
+.phase-steps i { display: block; width: 9px; height: 4px; border-radius: 1px; background: var(--line-strong); }
+.phase-steps i.past { background: color-mix(in srgb, var(--ink) 55%, var(--line-strong)); }
+.phase-steps i.current { background: var(--accent); }
+.phase-steps.done i { background: var(--ok); }
+
+/* Provider logos */
+.provider-logo { width: 14px; height: 14px; flex: none; vertical-align: middle; }
+.provider-logo-codex { color: var(--ink); } .provider-logo-claude { color: #d97757; } .provider-logo-kimi { color: var(--ink); }
+
+/* Structured ask (proposed signal). */
+.ask { border: 1px solid color-mix(in srgb, var(--warm) 45%, var(--line)); border-left: 3px solid var(--warm); border-radius: 6px; padding: 10px 12px; background: color-mix(in srgb, var(--warm-tint) 55%, var(--surface)); font-size: 12px; line-height: 1.55; }
+.ask-kind { display: inline-block; font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); margin-bottom: 4px; }
+.ask-question { color: var(--ink); }
+.ask-impact { display: block; margin-top: 4px; font-size: 10px; color: var(--muted); }
+.ask-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ask-options .btn { background: var(--surface); }
+.ask-options .btn.primary { background: var(--accent); }
+.ask-answer { display: flex; gap: 6px; margin-top: 8px; }
+.ask-answer input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--ink); font-size: 12px; }
+
+/* Cards */
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 16px 18px; min-width: 0; }
+.card.working { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.card.needs-you { border-top: 2px solid var(--warm); }
+.card.failed { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+.card.done { background: color-mix(in srgb, var(--surface) 60%, var(--paper)); }
+
+/* Faux app chrome produced by mockup.js */
+.app-chrome { flex: none; border-bottom: 1px solid var(--line); background: var(--paper); }
+.app-tabs { display: flex; align-items: center; gap: 22px; padding: 10px 28px 0; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.app-tabs span { display: inline-flex; align-items: center; gap: 8px; padding: 8px 2px 12px; border-bottom: 2px solid transparent; }
+.app-tabs span[aria-current="true"] { color: var(--ink); border-color: var(--ink); }
+.app-tabs small { font: 10px var(--mono); border: 1px solid var(--line-strong); border-radius: 9px; padding: 1px 6px; }
+.app-tabs .tab-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); padding: 0; border: 0; }
+.app-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 28px; }
+.app-tools .search { flex: 0 1 280px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 12px; }
+.app-tools .search kbd { margin-left: auto; font: 10px var(--mono); border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 5px; }
+.app-tools .segmented { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; }
+.app-tools .segmented span { padding: 5px 10px; font-size: 12px; border-radius: 5px; color: var(--muted); }
+.app-tools .segmented span[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+.app-tools .spacer { flex: 1; }
+
+/* Mockup shell */
+.mock-shell { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 16px; background: var(--sb-bg); color: var(--sb-ink); font-size: 12px; border-bottom: 1px solid var(--sb-line); }
+.mock-shell .mock-id { font: 11px var(--mono); color: var(--sb-muted); letter-spacing: .06em; }
+.mock-shell .mock-title { font-weight: 600; }
+.mock-shell .mock-summary { color: var(--sb-muted); max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mock-shell .spectrum { font: 10px var(--mono); letter-spacing: .06em; text-transform: uppercase; padding: 2px 7px; border-radius: 3px; border: 1px solid var(--sb-line); color: var(--sb-muted); }
+.mock-shell .spectrum[data-level="conservative"] { color: #9fd3b0; border-color: #2e5a3c; }
+.mock-shell .spectrum[data-level="moderate"] { color: #8fb0ff; border-color: #2d4580; }
+.mock-shell .spectrum[data-level="radical"] { color: #ffb48f; border-color: #6a3a24; }
+.mock-shell .spectrum[data-level="round two"] { color: var(--sb-ink); border-color: var(--sb-muted); }
+.mock-shell .spectrum[data-level="synthesis"] { color: #9fd3b0; border-color: #9fd3b0; }
+.mock-shell .mock-spacer { flex: 1; }
+.mock-shell .btn { background: transparent; color: var(--sb-ink); border-color: var(--sb-line); padding: 5px 9px; font-size: 11px; }
+.mock-shell .btn:hover:not(:disabled) { background: var(--sb-hover); border-color: var(--sb-muted); }
+.mock-shell .btn[aria-pressed="true"] { background: var(--sb-hover); border-color: var(--sb-accent); color: var(--sb-accent); }
+.mock-shell select { background: var(--sb-bg); color: var(--sb-ink); border: 1px solid var(--sb-line); border-radius: 6px; padding: 4px 8px; font-size: 11px; color-scheme: dark; }
+.mock-shell nav { display: flex; gap: 4px; }
+.mock-shell details { position: relative; }
+.mock-shell summary { cursor: pointer; list-style: none; font-size: 11px; color: var(--sb-muted); border: 1px solid var(--sb-line); border-radius: 6px; padding: 5px 9px; }
+.mock-shell summary::-webkit-details-marker { display: none; }
+.mock-shell details[open] summary { color: var(--sb-accent); border-color: var(--sb-accent); }
+.mock-shell .signals { position: absolute; z-index: 50; top: calc(100% + 6px); left: 0; min-width: 320px; max-width: 460px; padding: 12px 14px; background: var(--sb-bg); border: 1px solid var(--sb-line); border-radius: 8px; box-shadow: 0 10px 30px #0008; font-size: 11px; line-height: 1.6; }
+.mock-shell .signals h4 { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--sb-muted); margin: 8px 0 4px; }
+.mock-shell .signals h4:first-child { margin-top: 0; }
+.mock-shell .signals code { font: 11px var(--mono); color: var(--sb-ink); background: var(--sb-hover); padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
+.mock-shell .signals code.proposed { color: #ffb48f; }
+.mock-shell .signals p { color: var(--sb-muted); margin-top: 8px; }
+.mock-note { flex-basis: 100%; font-size: 11px; color: var(--sb-muted); line-height: 1.5; }
+
+/* Stage */
+#stage { flex: 1; min-height: 0; position: relative; padding: 24px 28px 40px; }
+#stage.full-bleed { padding: 0; }
+
+/* Shared thread drawer (opened via api.select). */
+.drawer { position: fixed; z-index: 100; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); background: var(--surface); border-left: 1px solid var(--line); box-shadow: -12px 0 40px var(--shadow); overflow: auto; padding: 20px 22px 32px; display: flex; flex-direction: column; gap: 14px; font-size: 12px; line-height: 1.6; }
+.drawer-head { display: flex; align-items: flex-start; gap: 10px; }
+.drawer-head h2 { font-size: 17px; font-weight: 550; letter-spacing: -.02em; line-height: 1.35; flex: 1; }
+.drawer-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.drawer h3 { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
+.drawer .plan { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.drawer .plan li { display: flex; gap: 8px; align-items: baseline; }
+.drawer .plan li.done { color: var(--muted); text-decoration: line-through; }
+.drawer .plan li.active { color: var(--ink); font-weight: 550; }
+.drawer .plan li.blocked { color: var(--warm); }
+.drawer .plan li.delegated { color: var(--muted); }
+.drawer .plan li::before { content: "○"; font-size: 10px; color: var(--muted); }
+.drawer .plan li.done::before { content: "●"; color: var(--ok); }
+.drawer .plan li.active::before { content: "◐"; color: var(--accent); }
+.drawer .plan li.blocked::before { content: "◌"; color: var(--warm); }
+.drawer .history { display: grid; gap: 8px; }
+.drawer .history article { border-left: 2px solid var(--line); padding-left: 10px; }
+.drawer .history small { display: block; font: 10px var(--mono); color: var(--muted); }
+.drawer .kids { display: grid; gap: 4px; }
+.drawer .kids button { text-align: left; }
+.drawer .scope code { display: block; font: 10px var(--mono); color: var(--muted); }
+.drawer-close { position: absolute; top: 10px; right: 10px; }
+
+/* Lens: the compact peek that replaces opening a thread. */
+.lens { position: fixed; z-index: 120; width: min(340px, calc(100vw - 24px)); padding: 12px 14px 10px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 14px 40px var(--shadow); font-size: 12px; line-height: 1.5; display: grid; gap: 8px; }
+.lens-head { display: flex; align-items: center; gap: 7px; }
+.lens-head .provider-logo { width: 13px; height: 13px; }
+.lens-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 550; letter-spacing: -.015em; line-height: 1.35; }
+.lens-head .btn { padding: 2px 7px; }
+.lens-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); }
+.lens-meta .btn { padding: 1px 6px; font-size: 10px; }
+.lens-row { display: grid; grid-template-columns: 38px 1fr; gap: 8px; align-items: baseline; }
+.lens-row b { font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.lens-tool .mono { font-size: 10.5px; color: var(--accent); overflow-wrap: anywhere; }
+.lens-steps { list-style: none; margin: 0; padding: 6px 0 0; border-top: 1px solid var(--line); display: grid; gap: 3px; font-size: 11.5px; }
+.lens-steps li { display: flex; gap: 7px; align-items: baseline; }
+.lens-steps li::before { content: "○"; font-size: 10px; color: var(--muted); }
+.lens-steps li.done { color: var(--muted); } .lens-steps li.done::before { content: "●"; color: var(--ok); }
+.lens-steps li.active { color: var(--ink); font-weight: 550; } .lens-steps li.active::before { content: "◐"; color: var(--accent); }
+.lens-steps li.blocked { color: var(--warm); } .lens-steps li.blocked::before { content: "◌"; color: var(--warm); }
+.lens-kids { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+.lens-kids .btn { padding: 1px 6px; font-size: 10.5px; }
+.lens-dots { display: inline-flex; gap: 5px; }
+.lens-kid-list { list-style: none; margin: 0; padding: 0 0 0 4px; display: grid; gap: 3px; font-size: 11px; }
+.lens-kid-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.lens-kid-list .btn { padding: 1px 5px; font-size: 11px; }
+.lens-kid-list .muted { font-size: 10.5px; }
+.lens-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+.lens .ask { padding: 8px 10px; }
+.dragging { cursor: grabbing !important; user-select: none; }

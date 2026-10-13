@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ribbon Field · Agent display mockups</title>
+  <link rel="stylesheet" href="shared/tokens.css">
+  <style>
+    body { padding: 36px 40px 60px; max-width: 1180px; margin: 0 auto; }
+    header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px; margin-bottom: 8px; }
+    h1 { font-size: 24px; font-weight: 600; letter-spacing: -.03em; }
+    .lede { color: var(--muted); font-size: 13px; line-height: 1.7; max-width: 78ch; margin-bottom: 26px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 28px; font-size: 12px; color: var(--muted); }
+    .controls select { padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+    .tile { display: flex; flex-direction: column; gap: 10px; padding: 18px 20px; cursor: pointer; }
+    .tile:hover { border-color: var(--hover-line); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 4%, transparent); }
+    .tile .top { display: flex; align-items: center; gap: 10px; font: 11px var(--mono); color: var(--muted); }
+    .tile .top .spectrum { margin-left: auto; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 7px; border-radius: 3px; border: 1px solid var(--line-strong); }
+    .tile .top .spectrum[data-level="conservative"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+    .tile .top .spectrum[data-level="moderate"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+    .tile .top .spectrum[data-level="radical"] { color: var(--warm); border-color: color-mix(in srgb, var(--warm) 50%, transparent); }
+    .tile .top .spectrum[data-level="round two"] { color: var(--ink); border-color: var(--ink); }
+    .tile .top .spectrum[data-level="synthesis"] { color: var(--ok); border-color: var(--ok); }
+    .round { grid-column: 1 / -1; margin: 14px 0 -4px; font-size: 13px; line-height: 1.6; color: var(--muted); }
+    .round b { color: var(--ink); }
+    .tile h2 { font-size: 16px; font-weight: 550; letter-spacing: -.02em; }
+    .tile p { font-size: 12px; line-height: 1.65; color: var(--muted); }
+    .tile .answers { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 11px; line-height: 1.5; margin-top: 2px; }
+    .tile .answers b { font-weight: 600; color: var(--muted); font-family: var(--mono); font-size: 10px; }
+    .tile .thumb { aspect-ratio: 16 / 10; border-radius: 5px; border: 1px solid var(--line); background: var(--paper) center / cover no-repeat; }
+    .tile .thumb[data-missing] { display: grid; place-items: center; color: var(--muted); font-size: 11px; }
+    h3.sec { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 36px 0 12px; }
+    table { border-collapse: collapse; font-size: 12px; width: 100%; }
+    td, th { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    code { font: 11px var(--mono); background: var(--tint); padding: 1px 5px; border-radius: 3px; }
+    code.proposed { color: var(--warm); }
+  </style>
+</head>
+<body>
+<header><h1>Agent display mockups</h1><span class="muted">Ten ways to show what agents exist, what they are doing, who they spawned, and what they need from you.</span></header>
+<p class="lede">Every mockup renders the same simulated field of agents at three scales and shares one thread drawer. The first ones keep today's layout and use only signals the checkpoint already carries. The later ones assume richer checkpoints: a stable identity, a role, structured asks, a plan, live activity, and dependency edges. Open a mockup, press <strong>Play</strong> to let the simulation run, answer an ask, and click any agent to open its thread.</p>
+<div class="controls">
+  <label>Scale <select id="scale"><option value="small">16 agents</option><option value="medium">≈45 agents</option><option value="large">≈160 agents</option></select></label>
+  <label>Theme <select id="theme"><option value="">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+  <span>Keyboard inside a mockup: <code>[</code> previous · <code>]</code> next · <code>.</code> step the simulation · <code>Esc</code> close the drawer</span>
+</div>
+<div class="grid" id="grid"></div>
+
+<h3 class="sec">What a checkpoint says today, and what it could say</h3>
+<table>
+  <tr><th>Question a glance should answer</th><th>Signal available today</th><th>Signal a richer checkpoint could add</th></tr>
+  <tr><td>What agents are there?</td><td><code>title</code> (3–6 words), provider, dispatcher flag</td><td><code class="proposed">name</code> (stable identity), <code class="proposed">role</code>, <code class="proposed">kind</code> (app, subagent, delegate)</td></tr>
+  <tr><td>What is each one doing?</td><td><code>phase</code>, <code>summary</code>, runtime working/idle state</td><td><code class="proposed">activity</code> (live one-liner), <code class="proposed">plan</code> steps with states, <code class="proposed">eta</code>, <code class="proposed">confidence</code></td></tr>
+  <tr><td>On what?</td><td><code>write_scope</code> from begin-work, <code>links</code></td><td><code class="proposed">domain</code>, <code class="proposed">target</code> (page, service, module)</td></tr>
+  <tr><td>Which sub-agents does it have?</td><td><code>created_by_thread_id</code> + orchestration mode (app agents only)</td><td>provider-native subagents and terminal delegates reported as <code class="proposed">kind</code>, delegated <code class="proposed">plan</code> steps, <code class="proposed">waiting_on</code> edges</td></tr>
+  <tr><td>What needs me, and what exactly?</td><td><code>next_actor=user</code> + free-text <code>next_action</code>, pending approvals, reply classification</td><td><code class="proposed">ask</code> with kind, question, options, blocking flag; derived <code class="proposed">blocks</code> (impact on other agents)</td></tr>
+  <tr><td>What is it doing right now?</td><td><code>tool_activity</code> (the provider stream already reports every read, edit, run, and search), <code>pending_approval</code>, time since the last tool call. These cost the model nothing and drive round two.</td><td><code class="proposed">activity</code> only if a one-line intent is wanted on top of the tool stream</td></tr>
+  <tr><td>How is it going over time?</td><td>checkpoint history, <code>updated_at</code>, stale flag</td><td><code class="proposed">events</code> (phase changes, asks, spawns, finishes), <code class="proposed">cost</code></td></tr>
+</table>
+<p class="lede" style="margin-top:18px">See <code>README.md</code> in this directory for the rationale behind each mockup and how to render screenshots.</p>
+<script src="shared/mockup.js"></script>
+<script src="shared/fixture.js"></script>
+<script>
+(() => {
+  const DESCRIPTIONS = {
+    "01-card-refinements.html": {what: "Today's layout with a tighter card: identity row, phase stepper, live activity line, an answerable ask, and sub-agent chips.",
+      answers: {who: "Provider mark, optional name, role chip, title", doing: "Status + stepper + activity line + summary", subs: "Chips under the parent card, nested count rolls up", needs: "Ask box with inline options replaces the next-step text"}},
+    "02-agent-roster.html": {what: "A dense, sortable table of every agent with tree indentation. A process monitor for agents; built for forty or more.",
+      answers: {who: "One row per agent, indented under its creator", doing: "Phase, activity, and scope columns", subs: "Collapsible tree rows with roll-up counts", needs: "Needs column sorts to the top; answer inline"}},
+    "03-needs-you-inbox.html": {what: "Your queue first. Structured asks (decision, approval, information, access, review, failure) are answered in place; working agents shrink to a quiet strip.",
+      answers: {who: "The asking agent, with its creator for context", doing: "One-line strip per working agent below the queue", subs: "Folded into the parent's strip entry", needs: "The inbox is the needs, sorted by what each one blocks"}},
+    "04-delegation-tree.html": {what: "An org chart of orchestrators, specialists, and provider subagents. Needs-you counts bubble up to every ancestor so collapsed branches still tell you.",
+      answers: {who: "Nodes with provider, name, role", doing: "Phase pill and activity on each node", subs: "The tree is the structure", needs: "Warm badges bubble up; filter to needs-me"}},
+    "05-territory-map.html": {what: "Agents placed over the files, services, or domains they are touching. Overlaps are conflicts; empty regions are untouched. Answers 'on what' by where.",
+      answers: {who: "Markers on the map, named on hover", doing: "Position is the scope; color is the status", subs: "Nested markers inside the parent's region", needs: "Warm markers and a side list of asks"}},
+    "06-swimlane-timeline.html": {what: "One lane per agent along a time axis: phase segments, checkpoint ticks, asks as stop markers, sub-agents forking out of the parent lane. A now line shows who is stalled and since when.",
+      answers: {who: "Lane labels", doing: "Phase color of the current segment", subs: "Child lanes fork from the parent at creation time", needs: "Stop markers that freeze a lane until answered"}},
+    "07-plan-boards.html": {what: "Each agent reports a short plan. Cards become progress columns; delegated steps carry the sub-agent; the header rolls up steps done across the field.",
+      answers: {who: "Column header with identity", doing: "The active step", subs: "A delegated step is the sub-agent", needs: "Blocked steps are the asks"}},
+    "08-written-briefing.html": {what: "A written status report composed from checkpoints: what needs you, what is moving, what finished since you left. Every noun links to its agent.",
+      answers: {who: "Named inline, with a pip strip for the whole field", doing: "One sentence per agent", subs: "Mentioned under their parent", needs: "The first paragraph, with answer buttons inline"}},
+    "09-mission-control.html": {what: "A zoomable canvas: agents positioned by domain and phase, delegation and waiting-on edges drawn between them, blocked agents docked at the bottom. Clusters become a heat map at scale.",
+      answers: {who: "Nodes with identity on hover", doing: "Vertical position is the phase", subs: "Edges from creator to child", needs: "The dock at the bottom"}},
+    "10-focus-mode.html": {what: "One thing at a time. The single most important ask fills the screen with full context; the rest of the field is a peripheral strip of pips. Answer, skip, or defer.",
+      answers: {who: "The agent in focus, plus pips", doing: "Peripheral pips by status", subs: "Shown only when relevant to the ask", needs: "The entire screen"}},
+    "11-settling-field.html": {what: "A free canvas of marks. Fresh work floats at the top, old results sink to the floor, needs-you sits on the surface with a one-click answer. Drag a mark to pin it; click to peek.",
+      answers: {who: "A dot; name on hover, lens on click", doing: "Height is age from the last tool call; working dots breathe", subs: "Satellites around the parent, count when many", needs: "The surface strip, answered there"}},
+    "12-constellations.html": {what: "The delegation tree as a night sky: each orchestration group is a constellation of stars joined by faint lines. Brightness is recency; needs-you stars pulse warm with an answer button.",
+      answers: {who: "A star; the root is brightest", doing: "Halo and brightness from recent tool calls", subs: "Lines from the root star", needs: "Pulsing stars near the top with a button"}},
+    "13-orbits.html": {what: "Each root agent is a sun and its sub-agents orbit it. Motion is activity: working planets move, idle ones hold, done ones dim at the edge. Click a sun to zoom into its system.",
+      answers: {who: "A sun or a planet", doing: "Orbital motion and corona color", subs: "The orbits", needs: "Warm glow plus a surface strip"}},
+    "14-vital-signs.html": {what: "Every agent is a sparkline of its tool calls over the last hour. Flatlines with a warm marker need you; sub-agents nest as thinner traces. Built entirely from runtime signals.",
+      answers: {who: "A row label", doing: "The pulse trace itself and the tool name", subs: "Nested thinner traces, collapsible", needs: "Flatline markers with an inline button"}},
+    "15-river.html": {what: "Phases as a flow from left to right. Agents are particles drifting downstream; needs-you particles are caught on rocks at the top; done particles settle in the delta.",
+      answers: {who: "A particle", doing: "Position in the flow and drift speed", subs: "Smaller particles tethered alongside", needs: "The rocks at the top, answered there"}},
+    "16-radar.html": {what: "What needs you is at the center. Rings outward: working, idle, blocked, done drifting off the edge. Sectors are domains; a sweep highlights recent tool calls.",
+      answers: {who: "A blip", doing: "Ring and sweep highlight", subs: "Tethered small blips", needs: "The bull's-eye, answered there"}},
+    "17-breathing-grid.html": {what: "A dense grid of small cells, one per agent, that breathe at their activity rate. Fresh cells sit in the top rows, old cells sink. Sub-agents are inset sub-cells.",
+      answers: {who: "A cell", doing: "Breathing cadence and tool on hover", subs: "Inset sub-cells, expand in place", needs: "Warm glowing cells with a button on hover"}},
+    "18-atlas.html": {what: "The synthesis. One canvas, three zoom levels: all domains as amorphous clusters that keep their place; one domain as a scatter; one orchestrator with its sub-agents bloomed out. Dot size is how much you have talked to the agent, color is age (full blue now, faded later), a ring is state. A quiet panel lists everything that needs you and flies you to it. The Domains selector varies how many domains the model reports and how messy they are.",
+      answers: {who: "A dot in its domain; hub with spokes for an orchestrator", doing: "Label and tool at the domain level; lens on click", subs: "Click the hub: they bloom out with labels", needs: "The panel, answered there; blinking rings on the map"}},
+  };
+  const grid = document.getElementById("grid");
+  const scaleSel = document.getElementById("scale"), themeSel = document.getElementById("theme");
+  const q = new URLSearchParams(location.search);
+  scaleSel.value = q.get("scale") || "small"; themeSel.value = q.get("theme") || "";
+  const href = file => { const p = new URLSearchParams(); if (scaleSel.value !== "small") p.set("scale", scaleSel.value); if (themeSel.value) p.set("theme", themeSel.value); const s = p.toString(); return "mockups/" + file + (s ? "?" + s : ""); };
+  function draw() {
+    grid.replaceChildren();
+    for (const [i, [file, title, level]] of Mockup.MANIFEST.entries()) {
+      if (i === 0) { const r = document.createElement("p"); r.className = "round"; r.innerHTML = "<b>Round one.</b> Ten views from a conservative card restyle to a canvas, built to find out which signals matter."; grid.append(r); }
+      if (i === 17) { const r = document.createElement("p"); r.className = "round"; r.innerHTML = "<b>Synthesis.</b> The direction after round two: spatial, like a physical book. Settling field's canvas and sinking, constellations' blinking needs-you dots and hub-and-spoke groups, orbits' zoom-in, mission control's quiet needs-you panel. Domains cluster the map; try the Domains selector to see what happens when the model reports three, fourteen, messy, or no domains."; grid.append(r); }
+      if (i === 10) { const r = document.createElement("p"); r.className = "round"; r.innerHTML = "<b>Round two.</b> After review: agents as marks, not cards. Needs-you is prominent and answered in place. Sub-agents are relationships. Age sinks. Drag to pin. No stat lines. Click any mark for the lens: now, tool, last and next step, sub-agents, open thread. These lean on runtime signals (tool calls, pending approvals, age) that cost the model nothing."; grid.append(r); }
+      const d = DESCRIPTIONS[file] || {what: "", answers: {}};
+      const tile = document.createElement("a"); tile.className = "card tile"; tile.href = href(file);
+      const top = document.createElement("div"); top.className = "top"; top.textContent = String(i + 1).padStart(2, "0");
+      const sp = document.createElement("span"); sp.className = "spectrum"; sp.dataset.level = level; sp.textContent = level; top.append(sp);
+      const thumb = document.createElement("div"); thumb.className = "thumb";
+      const img = new Image(); const theme = themeSel.value || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      img.src = "out/" + file.replace(".html", "") + "-" + theme + "-small.png";
+      img.onload = () => { thumb.style.backgroundImage = "url(" + img.src + ")"; thumb.style.backgroundPosition = "top"; };
+      img.onerror = () => { thumb.dataset.missing = "1"; thumb.textContent = "Run render.sh for a thumbnail"; };
+      const h = document.createElement("h2"); h.textContent = title;
+      const p = document.createElement("p"); p.textContent = d.what;
+      const ans = document.createElement("div"); ans.className = "answers";
+      for (const [k, label] of [["who", "who"], ["doing", "doing"], ["subs", "sub-agents"], ["needs", "needs me"]]) { const b = document.createElement("b"); b.textContent = label; const s = document.createElement("span"); s.textContent = d.answers[k] || ""; ans.append(b, s); }
+      tile.append(top, thumb, h, p, ans); grid.append(tile);
+    }
+  }
+  scaleSel.onchange = themeSel.onchange = () => { const p = new URLSearchParams(); if (scaleSel.value !== "small") p.set("scale", scaleSel.value); if (themeSel.value) p.set("theme", themeSel.value); history.replaceState(null, "", location.pathname + (p.toString() ? "?" + p : "")); if (themeSel.value) { document.documentElement.dataset.theme = themeSel.value; } draw(); };
+  if (themeSel.value) document.documentElement.dataset.theme = themeSel.value; else document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  draw();
+})();
+</script>
+</body>
+</html>

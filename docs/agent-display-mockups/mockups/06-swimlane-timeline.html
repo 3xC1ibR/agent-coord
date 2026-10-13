@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 06 · Swimlane timeline</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* One lane per agent on a shared clock; children fork out of their creator at createdAt. */
+    .tl-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin-bottom: 12px; }
+    .tl-head h2 { font-size: 15px; font-weight: 550; letter-spacing: -.02em; }
+    .tl-head .counts { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--muted); }
+    .tl-head .counts span { display: inline-flex; align-items: center; gap: 5px; }
+    .tl-head .counts b { color: var(--ink); font-weight: 600; }
+    .tl-head .counts .needs b { color: var(--warm); }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 14px; }
+    .group { display: inline-flex; align-items: center; gap: 3px; }
+    .group .lbl { font: 10px var(--mono); color: var(--muted); letter-spacing: .04em; margin-right: 4px; }
+    .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-left: auto; font-size: 10px; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend i { display: inline-block; width: 18px; height: 8px; border-radius: 2px; }
+    .legend .sw-phases { display: inline-flex; gap: 1px; }
+    .legend .sw-phases i { width: 7px; }
+    .legend i.k-ask { background: var(--warm-tint); border: 1px solid var(--warm); border-left-width: 3px; }
+    .legend i.k-ext { border: 1.5px solid var(--muted); }
+    .legend i.k-agents { border: 1.5px dashed var(--muted); }
+    .legend i.k-tick { width: 2px; height: 12px; background: var(--ink); border-radius: 1px; }
+
+    .tl { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; }
+    .axis-row { position: sticky; top: 0; z-index: 6; display: grid; grid-template-columns: var(--label-w) minmax(0, 1fr); background: var(--surface); border-bottom: 1px solid var(--line); border-radius: 7px 7px 0 0; }
+    .axis-row .corner { padding: 8px 12px; font: 10px var(--mono); color: var(--muted); letter-spacing: .04em; border-right: 1px solid var(--line); }
+    .axis { position: relative; height: 30px; overflow: hidden; cursor: ew-resize; }
+    .axis .t { position: absolute; top: 9px; transform: translateX(-50%); font: 10px var(--mono); color: var(--muted); white-space: nowrap; }
+    .axis .t::after { content: ""; position: absolute; left: 50%; top: 15px; height: 6px; border-left: 1px solid var(--line-strong); }
+    .axis .t.now { color: var(--accent); font-weight: 600; z-index: 1; background: var(--surface); padding: 0 4px; }
+    .axis .t.now::after { border-color: var(--accent); }
+    .body { display: grid; grid-template-columns: var(--label-w) minmax(0, 1fr); }
+    .labels { border-right: 1px solid var(--line); min-width: 0; }
+    .canvas { position: relative; overflow: hidden; }
+
+    /* Left column: identity and status. */
+    .lane-label { position: relative; display: flex; align-items: center; gap: 7px; height: var(--row); padding-right: 10px; cursor: pointer; border-bottom: 1px solid transparent; min-width: 0; }
+    .lane-label:hover, .lane-label.hot { background: var(--hover-bg); }
+    .lane-label.sel { box-shadow: inset 2px 0 0 var(--accent); }
+    .lane-label .tw { flex: none; width: 16px; height: 16px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 9px; cursor: pointer; border-radius: 3px; }
+    .lane-label .tw:hover { background: var(--tint); color: var(--ink); }
+    .lane-label .elbow { position: absolute; top: 0; width: 8px; height: 50%; border-left: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); border-bottom-left-radius: 4px; }
+    .lane-label .provider-logo { width: 13px; height: 13px; }
+    .lane-label .txt { min-width: 0; flex: 1; display: grid; gap: 1px; }
+    .lane-label .t1 { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 12px; font-weight: 500; letter-spacing: -.01em; }
+    .lane-label .t1 .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lane-label .t1 .chip { padding: 0 5px; font-size: 9.5px; }
+    .lane-label .t2 { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 10.5px; color: var(--muted); }
+    .lane-label .t2 span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lane-label .t2 .st { flex: none; color: var(--ink); }
+    .lane-label .t2 .st.working { color: var(--accent); }
+    .lane-label .t2 .st.waiting, .lane-label .t2 .st.failed { color: var(--warm); }
+    .lane-label .t2 .st.failed { color: var(--danger); }
+    .lane-label.done .t1 { color: var(--muted); font-weight: 450; }
+    .lane-label .side { flex: none; display: flex; align-items: center; gap: 4px; }
+    .badge { font: 600 9.5px var(--mono); padding: 1px 5px; border-radius: 8px; }
+    .badge.warm { color: var(--warm); background: var(--warm-tint); border: 1px solid color-mix(in srgb, var(--warm) 45%, transparent); }
+    .badge.kids { color: var(--muted); border: 1px solid var(--line-strong); }
+
+    /* Canvas layers */
+    .band { position: absolute; left: 0; right: 0; height: var(--row); cursor: pointer; }
+    .band.zebra { background: color-mix(in srgb, var(--ink) 1.8%, transparent); }
+    .band.hot { background: var(--hover-bg); }
+    .grid { position: absolute; top: 0; bottom: 0; border-left: 1px solid color-mix(in srgb, var(--line) 70%, transparent); pointer-events: none; }
+    .future { position: absolute; top: 0; bottom: 0; right: 0; pointer-events: none; background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--ink) 3%, transparent) 6px 7px); }
+    .now-line { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1.5px solid var(--accent); z-index: 5; pointer-events: none; }
+    .fade-left { position: absolute; top: 0; bottom: 0; left: 0; width: 18px; z-index: 6; pointer-events: none; background: linear-gradient(to right, var(--surface), transparent); }
+    .fork { position: absolute; width: 0; border-left: 1px solid var(--line-strong); z-index: 1; pointer-events: none; }
+    .fork::before { content: ""; position: absolute; left: -3.5px; top: -3px; width: 6px; height: 6px; border-radius: 50%; background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .fork.collapsed { border-left-style: dotted; }
+    .seg { position: absolute; height: 14px; border-radius: 2px; z-index: 2; overflow: hidden; cursor: pointer; font: 9.5px/14px var(--mono); padding-left: 5px; white-space: nowrap; color: var(--ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 6%, transparent); }
+    .seg + .seg { border-left: 1px solid var(--surface); }
+    .seg[data-phase="discussion"] { background: color-mix(in srgb, var(--ink) 9%, var(--surface)); }
+    .seg[data-phase="investigation"] { background: color-mix(in srgb, var(--ink) 16%, var(--surface)); }
+    .seg[data-phase="planning"] { background: color-mix(in srgb, var(--ink) 24%, var(--surface)); }
+    .seg[data-phase="orchestrating"] { background: color-mix(in srgb, var(--ink) 31%, var(--surface)); }
+    .seg[data-phase="implementation"] { background: color-mix(in srgb, var(--ink) 44%, var(--surface)); color: var(--surface); }
+    .seg[data-phase="validation"] { background: color-mix(in srgb, var(--ink) 56%, var(--surface)); color: var(--surface); }
+    .seg[data-phase="deployment"] { background: color-mix(in srgb, var(--ink) 68%, var(--surface)); color: var(--surface); }
+    .legend .sw-phases i[data-phase="discussion"] { background: color-mix(in srgb, var(--ink) 9%, var(--surface)); }
+    .legend .sw-phases i[data-phase="investigation"] { background: color-mix(in srgb, var(--ink) 16%, var(--surface)); }
+    .legend .sw-phases i[data-phase="planning"] { background: color-mix(in srgb, var(--ink) 24%, var(--surface)); }
+    .legend .sw-phases i[data-phase="orchestrating"] { background: color-mix(in srgb, var(--ink) 31%, var(--surface)); }
+    .legend .sw-phases i[data-phase="implementation"] { background: color-mix(in srgb, var(--ink) 44%, var(--surface)); }
+    .legend .sw-phases i[data-phase="validation"] { background: color-mix(in srgb, var(--ink) 56%, var(--surface)); }
+    .legend .sw-phases i[data-phase="deployment"] { background: color-mix(in srgb, var(--ink) 68%, var(--surface)); }
+    .seg.done { opacity: .55; }
+    .seg.live { border-right: 2px solid var(--accent); }
+    .edge { position: absolute; width: 8px; height: 8px; margin: 3px 0 0 -4px; border-radius: 50%; background: var(--accent); z-index: 4; pointer-events: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); animation: edge-pulse 1.8s ease-in-out infinite; }
+    .edge-glow { position: absolute; height: 14px; z-index: 3; pointer-events: none; background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 45%, transparent)); border-radius: 0 2px 2px 0; animation: glow-pulse 1.8s ease-in-out infinite; }
+    @keyframes edge-pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 6%, transparent); } }
+    @keyframes glow-pulse { 50% { opacity: .35; } }
+    @media (prefers-reduced-motion: reduce) { .edge, .edge-glow { animation: none; } }
+    .tick { position: absolute; width: 9px; height: 22px; margin-left: -4.5px; z-index: 4; cursor: default; }
+    .tick::before { content: ""; position: absolute; left: 3.5px; top: 0; bottom: 0; width: 2px; border-radius: 1px; background: var(--ink); opacity: .75; }
+    .tick:hover::before { background: var(--accent); opacity: 1; }
+    .tick.user::before { left: 1px; top: 6px; bottom: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--surface); box-shadow: inset 0 0 0 2px var(--accent); opacity: 1; }
+    .stop { position: absolute; height: 18px; z-index: 3; padding: 0 0 0 7px; border: 1px solid var(--warm); border-left-width: 4px; border-radius: 2px 4px 4px 2px; background: var(--warm-tint); color: var(--warm); font: 600 9.5px/16px var(--mono); text-align: left; white-space: nowrap; overflow: hidden; cursor: pointer; }
+    .stop.soft { background: repeating-linear-gradient(135deg, var(--warm-tint) 0 5px, color-mix(in srgb, var(--warm-tint) 40%, var(--surface)) 5px 9px); }
+    .stop.failure { border-left-color: var(--danger); }
+    .stop:hover, .stop.open { background: color-mix(in srgb, var(--warm) 22%, var(--surface)); }
+    .hold { position: absolute; height: 14px; z-index: 2; border: 1.5px solid var(--muted); border-radius: 3px; background: transparent; color: var(--muted); font: 9.5px/11px var(--mono); padding-left: 5px; white-space: nowrap; overflow: hidden; }
+    .hold.agents { border-style: dashed; }
+    .parked { position: absolute; height: 0; margin-top: 7px; border-top: 1px dotted var(--line-strong); z-index: 1; pointer-events: none; }
+    .mark { position: absolute; width: 14px; height: 14px; margin-left: -7px; z-index: 4; border-radius: 50%; font: 700 8.5px/14px var(--mono); text-align: center; }
+    .mark.finish { background: var(--ok); color: var(--surface); }
+    .mark.failed { background: var(--danger); color: var(--surface); }
+    .mark.idle { width: 4px; margin-left: -2px; border-radius: 1px; background: var(--dot-idle); }
+    .rail { position: absolute; height: 0; border-top: 1px solid var(--line-strong); z-index: 1; pointer-events: none; }
+    .fork-dot { position: absolute; width: 7px; height: 7px; margin-left: -3.5px; padding: 0; border: 0; border-radius: 50%; background: var(--dot-idle); z-index: 2; cursor: pointer; box-shadow: 0 0 0 1.5px var(--surface); }
+    .fork-dot.working { background: var(--accent); } .fork-dot.needs { background: var(--warm); } .fork-dot.done { background: var(--ok); }
+    .fork-dot.blocked { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--muted), 0 0 0 1.5px var(--surface); } .fork-dot.failed { background: var(--danger); }
+    .fork-dot:hover { transform: scale(1.5); }
+    .stop.mini { height: 8px; padding: 0; border-left-width: 3px; border-radius: 1px 3px 3px 1px; }
+    .agg-label { position: absolute; z-index: 3; transform: translateX(-100%); margin-left: -6px; font: 9.5px/12px var(--mono); color: var(--muted); white-space: nowrap; background: var(--surface); padding: 0 3px; pointer-events: none; }
+    .agg-label b { font-weight: 600; } .agg-label .w { color: var(--accent); } .agg-label .n { color: var(--warm); } .agg-label .d { color: var(--ok); }
+
+    .ask-pop { position: absolute; z-index: 30; width: 380px; padding: 10px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 12px 34px var(--shadow); }
+    .ask-pop header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 11px; color: var(--muted); }
+    .ask-pop header b { color: var(--ink); font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ask-pop header .btn { margin-left: auto; }
+    .tl-tip { position: fixed; z-index: 90; max-width: 340px; padding: 7px 10px; background: var(--ink); color: var(--paper); border-radius: 6px; font-size: 11px; line-height: 1.5; pointer-events: none; box-shadow: 0 6px 20px var(--shadow); }
+    .tl-tip b { display: block; font: 600 10px var(--mono); letter-spacing: .03em; opacity: .75; margin-bottom: 2px; }
+    .hint { margin-top: 10px; font-size: 10.5px; color: var(--muted); }
+    .empty { padding: 30px; text-align: center; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60_000, HOUR = 3_600_000;
+  const ROW = 40, LABEL_W = 300, LANE_Y = 13, FOLDED_Y = 7, PAD = 0.035;
+  const ZOOMS = [["1h", HOUR], ["3h", 3 * HOUR], ["6h", 6 * HOUR], ["12h", 12 * HOUR], ["24h", 24 * HOUR]];
+  const STEPS = [5, 10, 15, 30, 60, 120, 180, 360, 720].map(m => m * MIN);
+  const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
+  // View state survives re-renders: window span and end (null = follow now), per-lane disclosure, open ask.
+  const view = {span: 6 * HOUR, end: null, toggled: new Map(), openAsk: null};
+  let api = null, tip = null, frame = 0, bound = false;
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const time = t => new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  const win = field => { const live = field.now + view.span * PAD; const end = view.end == null ? live : Math.min(view.end, live); return {start: end - view.span, end, span: view.span}; };
+  function setWindow(field, end, span) {
+    view.span = clamp(span, 20 * MIN, 48 * HOUR);
+    const live = field.now + view.span * PAD;
+    view.end = end >= live - MIN ? null : end;
+  }
+  const rerender = () => api.rerender();
+  const rerenderSoon = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; api.rerender(); }); };
+  const expanded = (field, a) => view.toggled.has(a.id) ? view.toggled.get(a.id) : field.scale !== "large";
+
+  // Roots that need the user come first, then live work, then the rest; each group by start time.
+  function rank(field, a) {
+    const tree = [a, ...field.descendants(a.id)];
+    if (tree.some(x => x.ask?.blocking)) return 0;
+    if (tree.some(field.needsUser)) return 1;
+    if (tree.some(x => x.status === "working" || x.status === "blocked")) return 2;
+    return 3;
+  }
+
+  // Where a lane starts. Generated fixture children can carry a createdAt after their own history or
+  // after now, so take the earliest recorded moment and never start in the future.
+  const born = (field, a) => Math.min(a.createdAt, a.updatedAt, a.checkpointAt, ...a.history.map(h => h.at), field.now);
+
+  // When the colored work stops: at the ask (lane frozen), at the start of a wait, at now, or at the last activity.
+  function workEnd(field, a) {
+    if (a.ask) return clamp(a.ask.askedAt, born(field, a), field.now);
+    if (a.status === "working") return field.now;
+    return clamp(a.updatedAt, born(field, a), field.now);
+  }
+
+  // A checkpoint's phase applies from its timestamp onward; the first phase extends back to creation.
+  function phaseSegments(field, a, end) {
+    const entries = a.history.filter(h => h.actor !== "user" && h.phase !== "finished").sort((x, y) => x.at - y.at);
+    const out = []; let cur = entries[0]?.phase ?? a.phase, from = born(field, a);
+    for (const e of entries) { if (e.phase !== cur) { if (e.at > from) out.push({from, to: Math.min(e.at, end), phase: cur}); from = Math.max(from, e.at); cur = e.phase; } }
+    if (a.phase !== "finished" && a.phase !== cur && a.status !== "done") { /* current phase without its own checkpoint yet */ out.push({from, to: Math.min(a.checkpointAt, end), phase: cur}); from = Math.max(from, a.checkpointAt); cur = a.phase; }
+    out.push({from, to: end, phase: cur});
+    return out.filter(s => s.to > s.from);
+  }
+
+  function showTip(target, x, y) {
+    if (!tip) { tip = $("div", "tl-tip"); tip.hidden = true; document.body.append(tip); }
+    tip.replaceChildren($("b", null, target.dataset.tipHead || ""), $("span", null, target.dataset.tip));
+    tip.hidden = false;
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = clamp(x + 14, 8, innerWidth - w - 8) + "px";
+    tip.style.top = (y + 18 + h > innerHeight ? y - h - 12 : y + 18) + "px";
+  }
+  const hideTip = () => { if (tip) tip.hidden = true; };
+  const tipped = (el, head, body) => { el.dataset.tipHead = head; el.dataset.tip = body; return el; };
+
+  function bindOnce() {
+    if (bound) return; bound = true;
+    document.addEventListener("click", e => {
+      if (!view.openAsk || e.target.closest(".ask-pop, .stop")) return;
+      view.openAsk = null; rerender();
+    });
+    document.addEventListener("keydown", e => { if (e.key === "Escape" && view.openAsk) { view.openAsk = null; rerender(); } });
+    addEventListener("resize", rerenderSoon);
+  }
+
+  function onWheel(field, e, host) {
+    const horizontal = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    if (!(e.ctrlKey || e.metaKey || horizontal)) return;
+    e.preventDefault();
+    const rect = host.getBoundingClientRect(), f = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+    const {start, span} = win(field);
+    if (e.ctrlKey || e.metaKey) {
+      const t = start + f * span, next = clamp(span * Math.exp(e.deltaY * 0.012), 20 * MIN, 48 * HOUR);
+      setWindow(field, t - f * next + next, next);
+    } else setWindow(field, start + span + (e.deltaX || e.deltaY) / rect.width * span, span);
+    rerenderSoon();
+  }
+
+  function toolbar(field, rows) {
+    const bar = $("div", "toolbar");
+    const zoom = $("div", "group"); zoom.append($("span", "lbl", "WINDOW"));
+    for (const [label, span] of ZOOMS) {
+      const b = $("button", "btn small", label); b.type = "button"; b.setAttribute("aria-pressed", String(view.span === span));
+      b.onclick = () => { setWindow(field, view.end ?? Infinity, span); rerender(); }; zoom.append(b);
+    }
+    const all = $("button", "btn small", "All"); all.type = "button"; all.title = "Fit every visible lane";
+    all.onclick = () => { const first = Math.min(...rows.map(r => born(field, r.a))); setWindow(field, Infinity, (field.now - first) * 1.06); rerender(); };
+    zoom.append(all);
+    const pan = $("div", "group");
+    const mk = (label, title, fn) => { const b = $("button", "btn small", label); b.type = "button"; b.title = title; b.onclick = fn; return b; };
+    const {start, span} = win(field);
+    pan.append(mk("−", "Zoom out", () => { setWindow(field, (view.end ?? Infinity), span * 1.6); rerender(); }), mk("+", "Zoom in", () => { setWindow(field, (view.end ?? Infinity), span / 1.6); rerender(); }),
+      mk("‹", "Earlier", () => { setWindow(field, start + span * 0.67, span); rerender(); }), mk("›", "Later", () => { setWindow(field, start + span * 1.33, span); rerender(); }));
+    const live = mk(view.end == null ? "● Live" : "Jump to now", "Keep the now line in view", () => { view.end = null; rerender(); });
+    live.setAttribute("aria-pressed", String(view.end == null)); pan.append(live);
+    const tree = $("div", "group");
+    tree.append(mk("Expand all", "Show every child lane", () => { for (const a of field.agents) if (field.children(a.id).length) view.toggled.set(a.id, true); rerender(); }),
+      mk("Collapse all", "Fold child lanes into an aggregate strip", () => { for (const a of field.agents) if (field.children(a.id).length) view.toggled.set(a.id, false); rerender(); }));
+    const legend = $("div", "legend");
+    const phases = $("span"); const sw = $("span", "sw-phases"); for (const p of AgentField.PHASES.slice(0, 7)) { const i = $("i"); i.dataset.phase = p; i.title = AgentField.PHASE_LABELS[p]; sw.append(i); }
+    phases.append(sw, "phases");
+    const item = (cls, text) => { const s = $("span"); s.append($("i", cls), text); return s; };
+    legend.append(phases, item("k-tick", "checkpoint"), item("k-ask", "needs you"), item("k-ext", "external wait"), item("k-agents", "waiting on agents"));
+    bar.append(zoom, pan, tree, legend);
+    return bar;
+  }
+
+  function label(field, a, depth, kids, open, i) {
+    const row = $("div", "lane-label " + a.status + (api.selected === a.id ? " sel" : "")); row.dataset.row = i;
+    row.style.paddingLeft = (8 + depth * 16) + "px";
+    row.title = a.title + (a.activity && a.status === "working" ? " — " + a.activity : "");
+    if (depth) { const el = $("span", "elbow"); el.style.left = (depth * 16 - 6) + "px"; row.append(el); }
+    if (kids.length) {
+      const t = $("button", "tw", open ? "▼" : "▶"); t.type = "button"; t.setAttribute("aria-expanded", String(open)); t.title = open ? "Fold child lanes" : "Show child lanes";
+      t.onclick = e => { e.stopPropagation(); view.toggled.set(a.id, !open); rerender(); }; row.append(t);
+    } else row.append($("span", "tw"));
+    row.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    const txt = $("div", "txt"), t1 = $("div", "t1"), t2 = $("div", "t2");
+    if (a.name && a.name !== ROLE_SHORT[a.role]) t1.append($("span", "chip", a.name));
+    t1.append($("span", "title", a.title));
+    t2.append(AgentField.statusDot(a), $("span", "st " + a.status, field.statusLabel(a)));
+    t2.append($("span", null, "· " + (a.status === "working" && a.activity ? a.activity : ROLE_SHORT[a.role] + (a.kind !== "app" ? " · " + a.kind : ""))));
+    txt.append(t1, t2); row.append(txt);
+    const side = $("div", "side");
+    const needs = field.descendantsNeedingUser(a.id).length;
+    if (needs && !open) { const b = $("span", "badge warm", String(needs)); b.title = needs + " nested " + (needs === 1 ? "agent needs" : "agents need") + " you"; side.append(b); }
+    const desc = kids.length ? field.descendants(a.id).length : 0;
+    if (desc && !open) { const b = $("span", "badge kids", "+" + desc); b.title = desc + " folded lanes"; side.append(b); }
+    row.append(side);
+    row.onclick = () => api.select(a.id);
+    return row;
+  }
+
+  function lane(field, canvas, r, i, X, px, rowIndex) {
+    const {a, depth, open} = r;
+    const folded = !open && r.kids.length > 0;
+    const top = i * ROW, y = top + (folded ? FOLDED_Y : LANE_Y), now = field.now;
+    const winStart = win(field).start;
+    const place = (el, t1, t2, yy = y) => { const l = Math.max(X(t1), -2), rr = Math.min(X(t2), 102); el.style.left = l + "%"; el.style.width = Math.max(0, rr - l) + "%"; el.style.top = yy + "px"; return el; };
+    const stopAt = (el, t1, yy, min = 22) => { el.style.right = (100 - X(now)) + "%"; el.style.width = "max(" + Math.min(X(now) - X(t1), 102) + "%, " + min + "px)"; el.style.top = yy + "px"; return el; };
+    const at = (el, t, yy = y) => { el.style.left = X(t) + "%"; el.style.top = yy + "px"; return el; };
+    const band = $("div", "band" + (i % 2 ? " zebra" : "")); band.style.top = top + "px"; band.dataset.row = i; band.onclick = () => api.select(a.id); canvas.append(band);
+    // Fork connector from the creator's lane down to this one at the moment it was created.
+    if (depth && rowIndex.has(a.parentId)) {
+      const p = rowIndex.get(a.parentId), f = $("div", "fork");
+      f.style.left = X(born(field, a)) + "%"; f.style.top = (p * ROW + LANE_Y + 7) + "px"; f.style.height = ((i - p) * ROW) + "px"; canvas.append(f);
+    }
+    const end = workEnd(field, a);
+    const segs = phaseSegments(field, a, end);
+    const live = a.status === "working";
+    segs.forEach((s, k) => {
+      const el = place($("div", "seg" + (a.status === "done" ? " done" : "") + (live && k === segs.length - 1 ? " live" : "")), s.from, s.to);
+      el.dataset.phase = s.phase;
+      // A segment clipped at the left edge starts 2% before the window; keep its label in view.
+      const clipped = s.from < winStart, visible = px(s.to - Math.max(s.from, winStart));
+      if (visible > 84) { el.textContent = AgentField.PHASE_LABELS[s.phase]; if (clipped) el.style.paddingLeft = (px(view.span * 0.02) + 22) + "px"; }
+      tipped(el, AgentField.PHASE_LABELS[s.phase] + " · " + time(s.from) + "–" + (s.to >= now ? "now" : time(s.to)) + " · " + field.duration(s.to - s.from), a.title + (live && k === segs.length - 1 && a.activity ? " — " + a.activity : ""));
+      el.onclick = () => api.select(a.id);
+      canvas.append(el);
+    });
+    if (live) {
+      const g = place($("div", "edge-glow"), Math.max(born(field, a), now - view.span * 0.06), now); canvas.append(g);
+      canvas.append(at($("div", "edge"), now));
+    }
+    // Waits: hollow from when the wait began to now.
+    if (a.status === "blocked" && !a.ask) {
+      const ext = field.externalWaits(a), agents = field.agentWaits(a);
+      const el = place($("div", "hold" + (ext.length ? "" : " agents")), end, now);
+      const what = ext.length ? ext.join(", ") : agents.length + (agents.length === 1 ? " agent: " : " agents: ") + agents.map(w => w.title).join(", ");
+      if (px(now - end) > 60) el.textContent = ext.length ? ext[0] : agents.length + (agents.length === 1 ? " agent" : " agents");
+      tipped(el, "Waiting · since " + time(end) + " · " + field.duration(now - end), what);
+      canvas.append(el);
+    }
+    // Asks: a warm stop from askedAt to now; the lane is frozen until the user answers.
+    if (a.ask) {
+      const s = stopAt($("button", "stop" + (a.ask.blocking ? "" : " soft") + (a.ask.kind === "failure" ? " failure" : "") + (view.openAsk === a.id ? " open" : "")), end, y - 2);
+      s.type = "button"; s.dataset.ask = a.id;
+      const w = px(now - end);
+      s.textContent = w > 120 ? a.ask.kind + " · " + field.duration(now - end) : w > 44 ? field.duration(now - end) : "";
+      s.setAttribute("aria-label", "Answer: " + a.ask.question);
+      tipped(s, "Needs you · " + a.ask.kind + (a.ask.blocking ? " · blocking" : "") + " · asked " + field.relativeTime(a.ask.askedAt), a.ask.question + " (click to answer)");
+      s.onclick = e => { e.stopPropagation(); view.openAsk = view.openAsk === a.id ? null : a.id; hideTip(); rerender(); };
+      canvas.append(s);
+    }
+    // Ends: finished, failed, or parked (idle) with a dotted line to now.
+    if (a.status === "done") canvas.append(tipped(at($("div", "mark finish", "✓"), end), "Done · " + time(end), a.summary));
+    else if (a.status === "failed" && !a.ask) canvas.append(tipped(at($("div", "mark failed", "✕"), end), "Failed · " + time(end), a.failure || a.summary));
+    else if (a.status === "idle") {
+      canvas.append(tipped(at($("div", "mark idle"), end), "Idle since " + time(end), a.summary));
+      if (now > end) canvas.append(place($("div", "parked"), end, now));
+    }
+    // Checkpoint ticks: hover for the summary.
+    for (const h of a.history) {
+      if (h.at > now || (h.phase === "finished" && a.status === "done")) continue;
+      const t = at($("div", "tick" + (h.actor === "user" ? " user" : "")), h.at, y - 4);
+      tipped(t, (h.actor === "user" ? "You · " : "Checkpoint · ") + AgentField.PHASE_LABELS[h.phase] + " · " + time(h.at) + " (" + field.relativeTime(h.at) + ")", h.summary);
+      canvas.append(t);
+    }
+    // Folded subtree: a rail from the first fork to now with a status dot at each child's fork,
+    // the folded asks as one warm stop (click to unfold and answer), and counts as text.
+    if (folded) {
+      const desc = field.descendants(a.id), sy = top + 31;
+      const first = Math.max(Math.min(...desc.map(d => born(field, d))), winStart - view.span);
+      const rail = place($("div", "rail"), first, now, sy); canvas.append(rail);
+      for (const d of desc) {
+        const dot = at($("button", "fork-dot " + (field.needsUser(d) ? "needs" : d.status)), born(field, d), sy - 3); dot.type = "button";
+        tipped(dot, (d.parentId === a.id ? "Started " : "Nested · started ") + time(born(field, d)) + " · " + field.statusLabel(d), d.title + (d.activity && d.status === "working" ? " — " + d.activity : ""));
+        dot.onclick = e => { e.stopPropagation(); api.select(d.id); };
+        canvas.append(dot);
+      }
+      const c = {working: 0, needs: 0, blocked: 0, done: 0};
+      for (const d of desc) { if (field.needsUser(d)) c.needs++; else if (d.status in c) c[d.status]++; }
+      const asking = desc.filter(d => d.ask).sort((x, y) => Number(!!y.ask.blocking) - Number(!!x.ask.blocking) || x.ask.askedAt - y.ask.askedAt);
+      let labelAt = now;
+      if (asking.length) {
+        const since = Math.min(...asking.map(d => d.ask.askedAt));
+        const st = stopAt($("button", "stop mini"), since, sy - 4, 16); st.type = "button";
+        tipped(st, asking.length + " folded " + (asking.length === 1 ? "ask" : "asks") + " · oldest " + field.relativeTime(since), asking.map(d => d.title + ": " + d.ask.question).join("  •  ") + " (click to unfold and answer)");
+        st.onclick = e => { e.stopPropagation(); view.toggled.set(a.id, true); for (const x of field.ancestors(asking[0].id)) view.toggled.set(x.id, true); view.openAsk = asking[0].id; hideTip(); rerender(); };
+        canvas.append(st);
+        labelAt = Math.min(since, now - 18 * view.span / px(view.span));
+      }
+      const lbl = at($("div", "agg-label"), labelAt, sy - 6);
+      const part = (n, cls, word) => { if (!n) return; if (lbl.childNodes.length) lbl.append(" · "); lbl.append($("b", cls, String(n)), " " + word); };
+      part(c.needs, "n", "need you"); part(c.working, "w", "working"); part(c.blocked, null, "waiting"); part(c.done, "d", "done");
+      if (lbl.childNodes.length && px(labelAt - first) > 190) canvas.append(lbl);
+    }
+  }
+
+  function axisTicks(field, start, end, cw) {
+    const span = end - start;
+    const step = STEPS.find(s => span / s <= cw / 84) || STEPS[STEPS.length - 1];
+    const off = new Date(start).getTimezoneOffset() * MIN;
+    const out = []; for (let t = Math.ceil((start - off) / step) * step + off; t < end; t += step) out.push(t);
+    return out;
+  }
+
+  function askPopover(field, stage, canvas) {
+    const a = view.openAsk && field.byId(view.openAsk);
+    if (!a?.ask) { view.openAsk = null; return; }
+    const marker = canvas.querySelector('[data-ask="' + a.id + '"]'); if (!marker) return;
+    const pop = $("div", "ask-pop"); pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", "Answer " + a.title);
+    const head = $("header"); head.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("b", null, a.name ? a.name + " · " + a.title : a.title));
+    const x = $("button", "btn quiet small", "×"); x.type = "button"; x.setAttribute("aria-label", "Close"); x.onclick = () => { view.openAsk = null; rerender(); }; head.append(x);
+    pop.append(head, Mockup.askBox(a, field, api.select));
+    stage.append(pop);
+    const s = stage.getBoundingClientRect(), m = marker.getBoundingClientRect(), c = canvas.getBoundingClientRect();
+    const left = clamp(Math.max(m.left, c.left) - s.left, 8, s.width - pop.offsetWidth - 8);
+    pop.style.left = left + "px"; pop.style.top = (m.bottom - s.top + 6) + "px";
+  }
+
+  function render(field, stage, mountApi) {
+    api = mountApi; bindOnce(); hideTip();
+    const scrollY = window.scrollY;
+    stage.replaceChildren();
+    stage.style.setProperty("--label-w", LABEL_W + "px"); stage.style.setProperty("--row", ROW + "px");
+    const now = field.now;
+    const roots = field.roots().map(a => ({a, r: rank(field, a)})).sort((x, y) => x.r - y.r || born(field, x.a) - born(field, y.a)).map(x => x.a);
+    const rows = []; const rowIndex = new Map();
+    const walk = (a, depth) => { const kids = field.children(a.id), open = kids.length > 0 && expanded(field, a); rowIndex.set(a.id, rows.length); rows.push({a, depth, kids, open}); if (open) for (const k of kids) walk(k, depth + 1); };
+    for (const r of roots) walk(r, 0);
+
+    const counts = field.counts(), asks = field.asks();
+    const head = $("div", "tl-head"); head.append($("h2", null, "Swimlanes"));
+    const cs = $("div", "counts");
+    const count = (n, word, cls, dot) => { const s = $("span", cls); if (dot) s.append($("span", "dot " + dot)); s.append($("b", null, String(n)), " " + word); cs.append(s); };
+    count(asks.length, asks.length === 1 ? "needs you" : "need you", "needs", "waiting"); count(counts.working, "working", null, "working"); count(counts.blocked, "waiting on others", null, "blocked");
+    count(counts.done, "done", null, "done"); count(counts.idle, "idle", null, "idle");
+    cs.append($("span", null, roots.length + " lanes · " + (rows.length - roots.length) + " child lanes shown"));
+    head.append(cs); stage.append(head, toolbar(field, rows));
+
+    const {start, end, span} = win(field);
+    const cw = Math.max(360, stage.clientWidth - 56 - LABEL_W - 2);
+    const X = t => (t - start) / span * 100, px = ms => ms / span * cw;
+    const tl = $("div", "tl");
+    const axisRow = $("div", "axis-row"); const corner = $("div", "corner", "AGENT · STATUS"); const axis = $("div", "axis");
+    const ticks = axisTicks(field, start, end, cw);
+    for (const t of ticks) { if (Math.abs(px(now - t)) < 80 || px(t - start) < 32) continue; const l = $("span", "t", time(t)); l.style.left = X(t) + "%"; axis.append(l); }
+    const nl = $("span", "t now", "now " + time(now)); nl.style.left = X(now) + "%"; axis.append(nl);
+    axisRow.append(corner, axis);
+    const body = $("div", "body"); const labels = $("div", "labels"); const canvas = $("div", "canvas");
+    canvas.style.height = rows.length * ROW + "px";
+    for (const t of ticks) { const g = $("div", "grid"); g.style.left = X(t) + "%"; canvas.append(g); }
+    const fut = $("div", "future"); fut.style.left = X(now) + "%"; canvas.append(fut);
+    rows.forEach((r, i) => { labels.append(label(field, r.a, r.depth, r.kids, r.open, i)); lane(field, canvas, r, i, X, px, rowIndex); });
+    const nowLine = $("div", "now-line"); nowLine.style.left = X(now) + "%"; canvas.append(nowLine);
+    if (start > Math.min(...rows.map(r => born(field, r.a)))) canvas.append($("div", "fade-left"));
+    body.append(labels, canvas); tl.append(axisRow, body);
+    if (!rows.length) tl.append($("p", "empty", "No agents."));
+    stage.append(tl);
+    stage.append($("p", "hint", "Hover a tick for its checkpoint · click a warm stop to answer in place · click a lane name for the thread · ⌘/Ctrl + wheel zooms, Shift + wheel pans."));
+
+    // Hover: tooltips from data-tip, and cross-highlight the label and its band.
+    const hot = i => { for (const el of tl.querySelectorAll(".hot")) el.classList.remove("hot"); if (i != null) for (const el of tl.querySelectorAll('[data-row="' + i + '"]')) el.classList.add("hot"); };
+    canvas.addEventListener("mousemove", e => {
+      const t = e.target.closest("[data-tip]"); if (t) showTip(t, e.clientX, e.clientY); else hideTip();
+      const row = Math.floor((e.clientY - canvas.getBoundingClientRect().top) / ROW); hot(row >= 0 && row < rows.length ? row : null);
+    });
+    canvas.addEventListener("mouseleave", () => { hideTip(); hot(null); });
+    labels.addEventListener("mouseover", e => { const r = e.target.closest("[data-row]"); hot(r ? r.dataset.row : null); });
+    labels.addEventListener("mouseleave", () => hot(null));
+    for (const host of [canvas, axis]) host.addEventListener("wheel", e => onWheel(field, e, host), {passive: false});
+    askPopover(field, stage, canvas);
+    if (window.scrollY !== scrollY) window.scrollTo(0, scrollY);
+  }
+
+  Mockup.mount({
+    number: 6, title: "Swimlane timeline", spectrum: "moderate",
+    summary: "Every agent is a lane on one clock: phases as ink-tinted segments, checkpoints as ticks, asks as warm stops frozen until now, waits as hollow spans; children fork out of their creator.",
+    signals: {current: ["title", "phase", "status", "client", "created_by", "checkpoint_history", "updated_at", "next_actor", "summary"],
+      proposed: ["name", "role", "kind", "activity", "ask", "waiting_on", "blocks"]},
+    notes: "Assumes each checkpoint is timestamped when its phase starts and that an ask records askedAt and a wait records when it began (approximated here by the last update).",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

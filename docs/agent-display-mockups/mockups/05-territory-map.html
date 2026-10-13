@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 05 · Territory map</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Answers "on what" by where: regions from write scopes (or domain + target), agents as markers inside them. */
+    .terr { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px 24px; align-items: start; }
+    .terr-bar { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; font-size: 11px; color: var(--muted); }
+    .terr-bar .label { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .seg { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .seg button { border: 0; background: transparent; padding: 5px 10px; font-size: 12px; border-radius: 5px; color: var(--muted); cursor: pointer; }
+    .seg button[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .totals { display: flex; gap: 12px; font-family: var(--mono); font-size: 10.5px; }
+    .totals b { color: var(--ink); font-weight: 600; }
+    .totals .hot b { color: var(--warm); }
+    .legend { margin-left: auto; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    .legend span { display: inline-flex; gap: 5px; align-items: center; }
+    .legend .swatch { width: 18px; height: 8px; border-radius: 2px; }
+    .legend .swatch.shared { background: repeating-linear-gradient(-45deg, var(--line-strong) 0 3px, transparent 3px 6px); }
+    .legend .swatch.conflict { background: repeating-linear-gradient(-45deg, var(--warm) 0 3px, transparent 3px 6px); }
+    .legend .swatch.untouched { border: 1px dashed var(--line-strong); }
+
+    .map { display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; min-width: 0; }
+    .top { flex: var(--g) 1 var(--b); min-width: 0; max-width: 100%; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--hue, var(--line)); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; transition: opacity .15s; }
+    .top-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-size: 10.5px; color: var(--muted); }
+    .top-head b { font: 600 12px var(--mono); color: var(--ink); letter-spacing: -.01em; }
+    .top-head .hot { color: var(--warm); }
+    .top.untouched { background: transparent; border-style: dashed; border-left-width: 1px; opacity: .55; }
+    .top.untouched .subs { gap: 4px; }
+    .subs { display: flex; flex-wrap: wrap; gap: 6px; }
+    .sub { position: relative; flex: var(--g) 1 var(--b); min-width: 0; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); padding: 9px 8px 8px; display: flex; flex-direction: column; gap: 7px; transition: opacity .15s, box-shadow .15s; }
+    .sub.shared::before, .sub.conflict::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 4px; border-radius: 6px 6px 0 0; }
+    .sub.shared::before { background: repeating-linear-gradient(-45deg, var(--line-strong) 0 4px, transparent 4px 8px); }
+    .sub.conflict { border-color: color-mix(in srgb, var(--warm) 40%, var(--line)); }
+    .sub.conflict::before { background: repeating-linear-gradient(-45deg, var(--warm) 0 4px, transparent 4px 8px); }
+    .sub.untouched { flex: 0 1 auto; align-self: flex-start; background: transparent; border-style: dashed; padding: 5px 8px; opacity: .6; }
+    .sub.quiet { background: transparent; }
+    .sub-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; font: 10.5px var(--mono); color: var(--muted); }
+    .sub-head .name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .sub.untouched .sub-head .name, .sub.quiet .sub-head .name { color: var(--muted); }
+    .sub-head .n { flex: none; }
+    .sub-head .overlap { flex: none; margin-left: auto; padding: 0 5px; border-radius: 3px; border: 1px solid var(--line-strong); font-size: 9.5px; color: var(--muted); white-space: nowrap; }
+    .sub.conflict .overlap { border-color: color-mix(in srgb, var(--warm) 50%, transparent); background: var(--warm-tint); color: var(--warm); }
+    .sub-head .toggle { flex: none; border: 0; background: transparent; color: var(--muted); padding: 0 2px; cursor: pointer; font: inherit; }
+    .sub-head .toggle:hover { color: var(--ink); }
+    .sub.collapsible > .sub-head { cursor: pointer; }
+
+    .markers { display: flex; flex-wrap: wrap; gap: 5px; align-items: flex-start; }
+    .marker { display: inline-flex; flex-direction: column; gap: 4px; max-width: 100%; min-width: 0; padding: 3px 9px 3px 7px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 11px; line-height: 1.45; color: var(--ink); cursor: pointer; text-align: left; }
+    .marker:hover, .kid:hover { border-color: var(--hover-line); }
+    .marker .row, .kid { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .marker .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+    .marker.working { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+    .marker.needs { border-color: var(--warm); background: var(--warm-tint); }
+    .marker.failed { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); }
+    .marker.done, .marker.idle { color: var(--muted); background: transparent; }
+    .marker.has-kids { border-radius: 8px; padding-bottom: 5px; }
+    .marker .kids { display: flex; flex-wrap: wrap; gap: 3px; padding-left: 12px; }
+    .kid { display: inline-flex; padding: 1px 6px 1px 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); font-size: 10px; color: var(--muted); cursor: pointer; max-width: 100%; }
+    .kid .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 110px; }
+    .kid.working { color: var(--ink); }
+    .kid.needs { border-color: var(--warm); background: var(--warm-tint); color: var(--ink); }
+    .kid .grand { font: 9px var(--mono); color: var(--muted); }
+    .kid .dot { width: 5px; height: 5px; }
+    .marker .more { font: 9.5px var(--mono); color: var(--muted); align-self: center; }
+
+    /* Aggregate (large scale or collapsed) */
+    .agg { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line); gap: 1px; }
+    .agg i { display: block; min-width: 3px; }
+    .agg .working { background: var(--accent); } .agg .waiting { background: var(--warm); } .agg .failed { background: var(--danger); }
+    .agg .blocked { background: color-mix(in srgb, var(--ink) 35%, var(--line)); } .agg .idle { background: var(--dot-idle); } .agg .done { background: var(--ok); }
+    .agg-text { display: flex; flex-wrap: wrap; gap: 2px 9px; font: 10px var(--mono); color: var(--muted); }
+    .agg-text .hot { color: var(--warm); }
+    .agg-text .run { color: var(--accent); }
+
+    /* Spotlight from the asks list */
+    .terr.spot .sub:not(.lit) { opacity: .32; }
+    .terr.spot .top:not(.lit) { opacity: .45; }
+    .sub.lit { box-shadow: 0 0 0 2px var(--warm); }
+    .marker.lit, .kid.lit { box-shadow: 0 0 0 2px var(--warm); }
+
+    /* Side list of asks */
+    .side { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 2px; }
+    .side h2 { font-size: 15px; font-weight: 550; letter-spacing: -.02em; }
+    .side h2 small { font: 10px var(--mono); color: var(--muted); margin-left: 8px; }
+    .ask-item { display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; }
+    .ask-item:hover { border-color: var(--hover-line); }
+    .ask-who { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; }
+    .ask-who button { border: 0; background: transparent; padding: 0; color: var(--ink); font-weight: 550; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; text-align: left; }
+    .ask-who button:hover { text-decoration: underline; }
+    .ask-who .provider-logo { width: 12px; height: 12px; }
+    .ask-where { font: 10px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ask-item .ask { padding: 8px 10px; }
+    .empty { color: var(--muted); font-size: 12px; }
+
+    /* Hover card */
+    .tip { position: fixed; z-index: 90; width: 280px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 8px 24px var(--shadow); font-size: 11.5px; line-height: 1.5; pointer-events: none; display: flex; flex-direction: column; gap: 5px; }
+    .tip h4 { font-size: 12.5px; font-weight: 600; letter-spacing: -.01em; }
+    .tip .meta { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10.5px; flex-wrap: wrap; }
+    .tip .act { color: var(--accent); }
+    .tip .act::before { content: "▸ "; }
+    .tip .sum { color: var(--muted); }
+    .tip .where { font: 10px var(--mono); color: var(--muted); }
+
+    @media (max-width: 1100px) { .terr { grid-template-columns: 1fr; } .side { position: static; max-height: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const ACTIVE = new Set(["working", "waiting", "blocked", "failed"]);
+  const STATUS_ORDER = ["waiting", "failed", "working", "blocked", "idle", "done"];
+  /* Known territory the fixture does not enumerate, so empty regions are visible. A real view would read the repository tree. */
+  const TERRITORY = [
+    "plugins/agent-coord/scripts/agent_coord/cli.py", "plugins/agent-coord/scripts/agent_coord/web/index.html",
+    "plugins/agent-coord/skills/manage-threads/SKILL.md", "plugins/agent-coord/skills/dispatch/SKILL.md", "plugins/agent-coord/hooks/**",
+    "tests/test_schedules.py", "tests/test_kimi.py", "tests/test_store.py",
+    "docs/thread-panes.md", "docs/speech.md", "docs/style-mockups/**",
+    "demo/hundred-games/**", "mobile/**", "scripts/**", "build/macos/**", "desktop/macos/build.py",
+    "rig/api/auth/**", "rig/web/settings/**", "AGENTS.md", "CLAUDE.md",
+  ];
+  const TARGETS = {web: ["Overview", "Thread view", "Composer", "Sidebar", "Dispatcher workspace"], backend: ["threads.py", "attention.py", "store.py", "codex_app_server.py", "dispatch_runtime.py"],
+    mobile: ["Mobile chat", "Push worker", "PWA shell", "Mobile overview", "Speech input"], docs: ["README", "docs/dispatch.md", "SKILL.md", "docs/native-push.md", "docs/remote-access.md"],
+    infra: ["desktop/macos/build.py", "scripts/", "launchd", "tests/", "demo/"], release: ["combined-qd9", "mobile-beta-3", "plugin 0.9.4", "marketplace", "macOS app"], research: ["rig evaluation", "launch research", "classifier", "onboarding", "pricing"]};
+
+  // View state that survives re-renders.
+  let mode = "path";
+  const expanded = new Map();     // mode|regionKey -> bool (overrides the scale default)
+  let spotId = null;              // agent whose ask is hovered in the side list
+  let tipId = null, tipAnchor = null;
+  let sideScroll = 0;
+  let wired = false;
+  let tip = null;
+  let currentModel = null;
+
+  /* ---------- Region keys ---------- */
+  const parse = p => { const glob = p.endsWith("/**"); const clean = glob ? p.slice(0, -3) : p.replace(/\/$/, ""); const segs = clean.split("/").filter(Boolean); return {glob, dirs: glob ? segs : segs.slice(0, -1), file: glob ? null : segs[segs.length - 1]}; };
+  function buildTrie(paths) {
+    const root = {dirs: new Map(), files: 0, globbed: false};
+    for (const p of paths) { const {glob, dirs} = parse(p); let n = root; for (const d of dirs) { if (!n.dirs.has(d)) n.dirs.set(d, {dirs: new Map(), files: 0, globbed: false}); n = n.dirs.get(d); } if (glob) n.globbed = true; else n.files++; }
+    return root;
+  }
+  function pathRegion(p, trie) {
+    const {glob, dirs, file} = parse(p);
+    if (!dirs.length) return {top: "", sub: file};
+    let n = trie.dirs.get(dirs[0]), i = 1;
+    // Collapse single-child chains so "plugins/agent-coord" reads as one top-level region.
+    while (i < dirs.length && n.dirs.size === 1 && !n.files && !n.globbed) { n = n.dirs.get(dirs[i]); i++; }
+    const rest = dirs.slice(i).join("/");
+    return {top: dirs.slice(0, i).join("/"), sub: rest ? rest + "/" : glob ? "**" : file};
+  }
+  const key = (top, sub) => top + "|" + sub;
+  function overlaps(a, b) {
+    const ga = a.endsWith("/**"), gb = b.endsWith("/**");
+    const pa = ga ? a.slice(0, -2) : a, pb = gb ? b.slice(0, -2) : b;
+    return pa === pb || (ga && pb.startsWith(pa)) || (gb && pa.startsWith(pb));
+  }
+  const related = (field, a, b) => field.ancestors(a.id).includes(b) || field.ancestors(b.id).includes(a);
+
+  /* ---------- Layout model ---------- */
+  function model(field) {
+    const regions = new Map();
+    const tops = new Map();
+    const ensure = (top, sub) => {
+      const k = key(top, sub);
+      if (!regions.has(k)) { regions.set(k, {key: k, top, sub, agents: new Set(), markers: []}); if (!tops.has(top)) tops.set(top, {top, subs: []}); tops.get(top).subs.push(regions.get(k)); }
+      return regions.get(k);
+    };
+    let ownRegions;
+    if (mode === "path") {
+      const all = [...TERRITORY, ...field.agents.flatMap(a => a.scope)];
+      const trie = buildTrie(all);
+      for (const p of all) { const r = pathRegion(p, trie); ensure(r.top, r.sub); }
+      ownRegions = a => [...new Set(a.scope.map(p => { const r = pathRegion(p, trie); return key(r.top, r.sub); }))];
+    } else {
+      for (const d of AgentField.DOMAINS) for (const t of TARGETS[d]) ensure(d, t);
+      for (const a of field.agents) ensure(a.domain, a.target);
+      ownRegions = a => [key(a.domain, a.target)];
+    }
+    const placements = new Map();   // agent id -> [{region, node}]
+    const unscoped = [];
+    const nearestPlaced = a => { let p = field.parent(a.id); while (p) { if (placements.get(p.id)?.length) return placements.get(p.id); p = field.parent(p.id); } return null; };
+    for (const {agent: a} of field.treeRows()) {
+      const own = ownRegions(a);
+      const host = nearestPlaced(a);
+      const node = () => ({agent: a, kids: []});
+      const list = [];
+      if (host && (a.kind === "subagent" || !own.length)) {
+        // Provider-native sub-agents and unscoped helpers ride inside their creator's marker.
+        const h = host[0], n = node(); h.node.kids.push(n); h.region.agents.add(a); list.push({region: h.region, node: n});
+      } else if (own.length) {
+        for (const k of own) {
+          const region = regions.get(k), h = host?.find(x => x.region === region), n = node();
+          if (h) h.node.kids.push(n); else region.markers.push(n);
+          region.agents.add(a); list.push({region, node: n});
+        }
+      } else unscoped.push(a);
+      placements.set(a.id, list);
+    }
+    for (const r of regions.values()) {
+      const active = [...r.agents].filter(a => ACTIVE.has(a.status));
+      r.active = active.length;
+      const clash = new Set();
+      active.forEach((a, i) => { for (const b of active.slice(i + 1)) if (!related(field, a, b) && a.scope.some(p => b.scope.some(q => overlaps(p, q)))) { clash.add(a); clash.add(b); } });
+      r.clash = clash.size; r.conflict = clash.size > 0;
+      r.needs = [...r.agents].filter(field.needsUser).length;
+    }
+    return {regions, tops: [...tops.values()], placements, unscoped};
+  }
+
+  /* ---------- Rendering helpers ---------- */
+  const label = a => a.name || a.title;
+  const shortLabel = (a, n) => { const s = label(a); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+  const statusClass = (field, a) => a.status + (field.needsUser(a) ? " needs" : "");
+  const firstSentence = s => (s.match(/^.*?[.!?](\s|$)/)?.[0] || s).trim();
+  const topLabel = (top) => mode === "domain" ? AgentField.DOMAIN_LABELS[top] : top ? top + "/" : "repository root";
+  const subLabel = sub => sub === "**" ? "everything" : sub;
+  const regionName = r => mode === "domain" ? AgentField.DOMAIN_LABELS[r.top] + " › " + r.sub : (r.top ? r.top + "/" : "") + (r.sub === "**" ? "**" : r.sub);
+  function dominantDomain(agents) { const c = {}; for (const a of agents) c[a.domain] = (c[a.domain] || 0) + 1; return Object.entries(c).sort((x, y) => y[1] - x[1])[0]?.[0]; }
+
+  function kidPill(field, n) {
+    const a = n.agent;
+    const k = $("span", "kid " + statusClass(field, a)); k.dataset.agent = a.id;
+    k.append(AgentField.statusDot(a), $("span", "lbl", shortLabel(a, 22)));
+    const nested = countNested(n);
+    if (nested) k.append($("span", "grand", "+" + nested));
+    return k;
+  }
+  const countNested = n => n.kids.length + n.kids.reduce((s, x) => s + countNested(x), 0);
+  function marker(field, n) {
+    const a = n.agent;
+    const m = $("button", "marker " + statusClass(field, a) + (n.kids.length ? " has-kids" : "")); m.type = "button"; m.dataset.agent = a.id;
+    const row = $("span", "row"); row.append(AgentField.statusDot(a), $("span", "lbl", label(a)));
+    m.append(row);
+    if (n.kids.length) {
+      const kids = $("span", "kids");
+      const sorted = [...n.kids].sort((x, y) => STATUS_ORDER.indexOf(statusOf(field, x.agent)) - STATUS_ORDER.indexOf(statusOf(field, y.agent)));
+      for (const kn of sorted.slice(0, 4)) kids.append(kidPill(field, kn));
+      if (sorted.length > 4) kids.append($("span", "more", "+" + (sorted.length - 4)));
+      m.append(kids);
+    }
+    return m;
+  }
+  const statusOf = (field, a) => field.needsUser(a) ? "waiting" : a.status;
+  function aggregate(field, agents) {
+    const c = {}; for (const a of agents) { const s = statusOf(field, a); c[s] = (c[s] || 0) + 1; }
+    const bar = $("div", "agg");
+    for (const s of STATUS_ORDER) if (c[s]) { const i = $("i", s); i.style.flex = String(c[s]); i.title = c[s] + " " + AgentField.STATUS_LABELS[s].toLowerCase(); bar.append(i); }
+    const text = $("div", "agg-text");
+    if (c.waiting) text.append($("span", "hot", c.waiting + " need you"));
+    if (c.working) text.append($("span", "run", c.working + " working"));
+    if (c.failed) text.append($("span", "hot", c.failed + " failed"));
+    if (c.blocked) text.append($("span", null, c.blocked + " waiting"));
+    if (c.idle) text.append($("span", null, c.idle + " idle"));
+    if (c.done) text.append($("span", null, c.done + " done"));
+    return [bar, text];
+  }
+
+  function regionBlock(field, r, large) {
+    const n = r.agents.size;
+    const cls = ["sub"];
+    if (!n) cls.push("untouched"); else if (!r.active) cls.push("quiet");
+    if (r.active >= 2) cls.push(r.conflict ? "conflict" : "shared");
+    const el = $("section", cls.join(" ")); el.dataset.region = r.key;
+    el.style.setProperty("--g", String(Math.max(1, n)));
+    el.style.setProperty("--b", (n ? 150 + Math.min(n, 12) * 26 : 90) + "px");
+    const head = $("div", "sub-head");
+    const name = $("span", "name", subLabel(r.sub)); name.title = regionName(r); head.append(name);
+    if (!n) { el.append(head); return el; }
+    head.append($("span", "n", "· " + n));
+    if (r.active >= 2) { const o = $("span", "overlap", r.conflict ? r.active + " active · ⚠ " + r.clash + " on same files" : r.active + " active"); o.title = r.conflict ? "Two or more active agents declared overlapping file scopes here" : "Two or more active agents work in this region"; head.append(o); }
+    const xk = mode + "|" + r.key;
+    const open = expanded.has(xk) ? expanded.get(xk) : !large || n <= 2;
+    const collapsible = large && n > 2;
+    if (collapsible) {
+      el.classList.add("collapsible");
+      const t = $("button", "toggle", open ? "▾" : "▸"); t.type = "button"; t.setAttribute("aria-expanded", String(open)); t.title = open ? "Show counts" : "Show agents";
+      head.prepend(t); head.dataset.toggle = xk;
+    }
+    el.append(head);
+    if (open) {
+      const ms = $("div", "markers");
+      const sorted = [...r.markers].sort((x, y) => STATUS_ORDER.indexOf(statusOf(field, x.agent)) - STATUS_ORDER.indexOf(statusOf(field, y.agent)));
+      for (const node of sorted) ms.append(marker(field, node));
+      if (!r.markers.length) ms.append($("span", "agg-text", "Inside agents placed elsewhere"));
+      el.append(ms);
+      if (large) el.append(...aggregate(field, r.agents).slice(1));
+    } else el.append(...aggregate(field, r.agents));
+    return el;
+  }
+
+  function topBlock(field, t, large) {
+    const agents = new Set(); for (const r of t.subs) for (const a of r.agents) agents.add(a);
+    const subs = [...t.subs].sort((x, y) => (y.agents.size - x.agents.size) || (y.active - x.active) || x.sub.localeCompare(y.sub));
+    const n = agents.size;
+    const el = $("section", "top" + (n ? "" : " untouched")); el.dataset.top = t.top;
+    el.style.setProperty("--g", String(Math.max(1, n)));
+    el.style.setProperty("--b", (n ? 220 + Math.min(n, 30) * 22 : 160) + "px");
+    const hueDomain = mode === "domain" ? t.top : n ? dominantDomain(agents) : null;
+    if (hueDomain) el.style.setProperty("--hue", "var(--domain-" + hueDomain + ")");
+    const head = $("div", "top-head"); head.append($("b", null, topLabel(t.top)));
+    if (n) {
+      const active = [...agents].filter(a => ACTIVE.has(a.status)).length, needs = [...agents].filter(field.needsUser).length;
+      const touched = subs.filter(r => r.agents.size).length, contested = subs.filter(r => r.active >= 2).length;
+      head.append($("span", null, n + (n === 1 ? " agent" : " agents") + " · " + active + " active"));
+      head.append($("span", null, touched + " of " + subs.length + (subs.length === 1 ? " region" : " regions")));
+      if (contested) head.append($("span", subs.some(r => r.conflict) ? "hot" : null, contested + " shared"));
+      if (needs) head.append($("span", "hot", needs + " need you"));
+    } else head.append($("span", null, "untouched"));
+    el.append(head);
+    const box = $("div", "subs");
+    for (const r of subs) box.append(regionBlock(field, r, large));
+    el.append(box);
+    return el;
+  }
+
+  function unscopedBlock(field, list, large) {
+    const r = {key: "unscoped", top: "", sub: "no declared scope", agents: new Set(), markers: [], active: 0, conflict: false};
+    for (const a of list) { r.agents.add(a); r.markers.push({agent: a, kids: []}); }
+    const el = $("section", "top"); el.dataset.top = "unscoped";
+    el.style.setProperty("--g", String(Math.max(1, list.length))); el.style.setProperty("--b", "320px");
+    const head = $("div", "top-head"); head.append($("b", null, "No declared scope"), $("span", null, list.length + " agents · reading, reviewing, or routing without a write scope"));
+    el.append(head);
+    const box = $("div", "subs");
+    const sub = regionBlock(field, r, large);
+    sub.querySelector(".sub-head .name").textContent = "researchers, reviewers, dispatchers";
+    box.append(sub); el.append(box);
+    return el;
+  }
+
+  /* ---------- Hover card ---------- */
+  function showTip(field, id, anchor) {
+    const a = field.byId(id); if (!a || !anchor?.isConnected) { hideTip(); return; }
+    tipId = id; tipAnchor = anchor;
+    if (!tip) { tip = $("div", "tip"); tip.setAttribute("role", "tooltip"); document.body.append(tip); }
+    tip.hidden = false; tip.replaceChildren();
+    tip.append($("h4", null, a.title));
+    const who = $("div", "meta"); who.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    if (a.name) who.append($("span", "chip", a.name));
+    who.append($("span", null, AgentField.ROLE_LABELS[a.role] + (a.kind !== "app" ? " · " + a.kind : "")));
+    const parent = field.parent(a.id); if (parent) who.append($("span", null, "· by " + label(parent)));
+    tip.append(who);
+    const st = $("div", "meta"); st.append(AgentField.statusDot(a), $("span", null, field.statusLabel(a)), AgentField.phaseSteps(a), $("span", null, AgentField.PHASE_LABELS[a.phase]), $("span", "mono", field.relativeTime(a.updatedAt)));
+    tip.append(st);
+    if (a.ask) tip.append($("div", "act", "Asks: " + a.ask.question));
+    else if (a.status === "working" && a.activity) tip.append($("div", "act", a.activity));
+    else tip.append($("div", "sum", firstSentence(a.summary)));
+    if (a.scope.length) tip.append($("div", "where", a.scope.slice(0, 3).join(" · ") + (a.scope.length > 3 ? " …" : "")));
+    const r = anchor.getBoundingClientRect(), w = 280;
+    const x = Math.min(window.innerWidth - w - 8, Math.max(8, r.left));
+    tip.style.left = x + "px";
+    const below = r.bottom + 6, h = tip.offsetHeight;
+    tip.style.top = (below + h > window.innerHeight - 8 ? Math.max(8, r.top - h - 6) : below) + "px";
+  }
+  function hideTip() { tipId = null; tipAnchor = null; if (tip) tip.hidden = true; }
+
+  /* ---------- Spotlight ---------- */
+  function applySpot(field, stage) {
+    const root = stage.querySelector(".terr"); if (!root) return;
+    root.classList.toggle("spot", !!spotId);
+    for (const x of root.querySelectorAll(".lit")) x.classList.remove("lit");
+    if (!spotId) return;
+    for (const m of root.querySelectorAll('[data-agent="' + spotId + '"]')) {
+      if (!m.closest(".map")) continue;
+      m.classList.add("lit"); m.closest(".sub")?.classList.add("lit"); m.closest(".top")?.classList.add("lit");
+    }
+    // Collapsed regions do not render markers: light them from the model.
+    for (const k of currentModel?.placements.get(spotId)?.map(p => p.region.key) || []) {
+      const s = root.querySelector('.sub[data-region="' + CSS.escape(k) + '"]'); if (s) { s.classList.add("lit"); s.closest(".top")?.classList.add("lit"); }
+    }
+    if (currentModel?.unscoped.some(a => a.id === spotId)) for (const x of root.querySelectorAll('.top[data-top="unscoped"], .top[data-top="unscoped"] .sub')) x.classList.add("lit");
+  }
+  function wire(stage, api) {
+    if (wired) return; wired = true;
+    stage.addEventListener("click", e => {
+      const t = e.target.closest("[data-toggle]");
+      if (t && !e.target.closest("[data-agent]")) { const xk = t.dataset.toggle; const btn = t.querySelector(".toggle"); expanded.set(xk, btn?.getAttribute("aria-expanded") !== "true"); api.rerender(); return; }
+      const m = e.target.closest(".map [data-agent]"); if (m) { e.stopPropagation(); api.select(m.dataset.agent); }
+    });
+    stage.addEventListener("mouseover", e => { const m = e.target.closest(".map [data-agent]"); if (m && m.dataset.agent !== tipId) showTip(api.field, m.dataset.agent, m); else if (!m && tipId) hideTip(); });
+    stage.addEventListener("mouseleave", hideTip);
+    window.addEventListener("scroll", hideTip, {passive: true});
+  }
+
+  Mockup.mount({
+    number: 5, title: "Territory map", spectrum: "moderate",
+    summary: "Regions built from write scopes (or domain + target); agents are markers inside the territory they touch, with overlap stripes where active agents share ground.",
+    signals: {current: ["title", "phase", "summary", "status", "write_scope", "created_by", "client", "updated_at"],
+      proposed: ["name", "role", "kind", "domain", "target", "activity", "ask", "blocks"]},
+    notes: "Assumes write scopes are declared at file or directory-glob granularity and that empty territory can be read from the repository tree; agents without a scope (researchers, reviewers) sit in their creator's marker or in a separate band.",
+    render(field, stage, api) {
+      const side0 = stage.querySelector(".side"); if (side0) sideScroll = side0.scrollTop;
+      wire(stage, api);
+      stage.replaceChildren();
+      const large = field.scale === "large";
+      const m = model(field); currentModel = m;
+      const root = $("div", "terr");
+
+      // Toolbar: layout toggle, totals, legend.
+      const bar = $("div", "terr-bar");
+      bar.append($("span", "label", "Lay out by"));
+      const seg = $("div", "seg");
+      for (const [v, l] of [["path", "Paths"], ["domain", "Domain · target"]]) { const b = $("button", null, l); b.type = "button"; b.setAttribute("aria-pressed", String(mode === v)); b.onclick = () => { mode = v; hideTip(); api.rerender(); }; seg.append(b); }
+      bar.append(seg);
+      const regs = [...m.regions.values()];
+      const touched = regs.filter(r => r.agents.size).length, shared = regs.filter(r => r.active >= 2), conflicts = shared.filter(r => r.conflict).length;
+      const totals = $("div", "totals");
+      const tot = (n, text, cls) => { const s = $("span", cls); s.append($("b", null, String(n)), " " + text); return s; };
+      totals.append(tot(touched, "of " + regs.length + " regions touched"), tot(shared.length, "shared"));
+      if (conflicts) totals.append(tot(conflicts, "with same-file overlap", "hot"));
+      if (m.unscoped.length) totals.append(tot(m.unscoped.length, "unscoped"));
+      bar.append(totals);
+      if (large) {
+        const all = $("span"); all.style.display = "inline-flex"; all.style.gap = "4px";
+        for (const [l, v] of [["Expand all", true], ["Collapse all", false]]) { const b = $("button", "btn small", l); b.type = "button"; b.onclick = () => { for (const r of regs) if (r.agents.size > 2) expanded.set(mode + "|" + r.key, v); api.rerender(); }; all.append(b); }
+        bar.append(all);
+      }
+      const legend = $("div", "legend");
+      const sw = cls => $("i", "swatch " + cls);
+      const lg = (node, text) => { const s = $("span"); s.append(node, text); return s; };
+      legend.append(lg(AgentField.statusDot({status: "working"}), "working"), lg(AgentField.statusDot({status: "waiting"}), "needs you"), lg(AgentField.statusDot({status: "blocked"}), "waiting"), lg(AgentField.statusDot({status: "done"}), "done"),
+        lg(sw("shared"), "2+ active"), lg(sw("conflict"), "same files"), lg(sw("untouched"), "untouched"));
+      bar.append(legend);
+      root.append(bar);
+
+      // Map: touched top-level regions by weight, untouched ones last.
+      const map = $("div", "map");
+      const weight = t => { const s = new Set(); for (const r of t.subs) for (const a of r.agents) s.add(a); return s.size; };
+      const tops = m.tops.map(t => ({t, w: weight(t)})).sort((x, y) => (y.w - x.w) || topLabel(x.t.top).localeCompare(topLabel(y.t.top)));
+      for (const {t} of tops) map.append(topBlock(field, t, large));
+      if (m.unscoped.length) {
+        const ub = unscopedBlock(field, m.unscoped, large);
+        const firstUntouched = [...map.children].find(c => c.classList.contains("untouched"));
+        map.insertBefore(ub, firstUntouched || null);
+      }
+      root.append(map);
+
+      // Side list: every ask, answerable in place; hovering lights the asking agent's region.
+      const side = $("aside", "side");
+      const asks = field.asks();
+      const h = $("h2", null, "Needs you"); h.append($("small", null, asks.length + (asks.length === 1 ? " ask" : " asks"))); side.append(h);
+      for (const a of asks) {
+        const item = $("div", "ask-item");
+        const who = $("div", "ask-who"); who.append(AgentField.statusDot(a), AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+        const nb = $("button", null, label(a)); nb.type = "button"; nb.title = a.title; nb.onclick = () => api.select(a.id); who.append(nb);
+        item.append(who);
+        const where = (m.placements.get(a.id) || []).map(p => regionName(p.region));
+        const w = $("div", "ask-where", where.length ? "in " + [...new Set(where)].join(" · ") : "no declared scope"); w.title = w.textContent; item.append(w);
+        if (a.ask) item.append(Mockup.askBox(a, field, null));
+        else { const n = $("div", "ask"); n.append($("span", "ask-kind", "your next step"), $("div", "ask-question", a.next.action)); item.append(n); }
+        item.onmouseenter = () => { spotId = a.id; applySpot(field, stage); };
+        item.onmouseleave = () => { if (spotId === a.id) { spotId = null; applySpot(field, stage); } };
+        side.append(item);
+      }
+      if (!asks.length) side.append($("p", "empty", "Nothing needs you."));
+      root.append(side);
+      stage.append(root);
+      side.scrollTop = sideScroll;
+
+      if (spotId && !field.needsUser(field.byId(spotId) || {})) spotId = null;
+      applySpot(field, stage);
+      if (tipId) { const anchor = stage.querySelector('.map [data-agent="' + tipId + '"]'); if (anchor) showTip(field, tipId, anchor); else hideTip(); }
+    },
+  });
+})();
+</script>
+</body>
+</html>

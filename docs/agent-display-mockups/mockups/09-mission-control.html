@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 09 · Mission control</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* A pannable board: domain columns × phase rows, agents as dots, a needs-you dock along the bottom. */
+    html, body { height: 100%; }
+    body { height: 100dvh; overflow: hidden; }
+    #stage.full-bleed { display: flex; flex-direction: column; overflow: hidden; }
+    .mc { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .mc-canvas { position: relative; flex: 1; min-height: 0; overflow: hidden; background: var(--paper); cursor: grab; touch-action: none; user-select: none; }
+    .mc-canvas.panning { cursor: grabbing; }
+    .mc-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+    /* Grid */
+    .mc-band { fill: color-mix(in srgb, var(--ink) 3%, transparent); }
+    .mc-colline { stroke: var(--line); stroke-width: 1; }
+    .mc-extline { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 2 4; }
+
+    /* Edges */
+    .mc-edge { fill: none; stroke-width: 1; transition: opacity .15s; }
+    .mc-edge.parent { stroke: color-mix(in srgb, var(--muted) 45%, transparent); }
+    .mc-edge.wait { stroke: var(--muted); stroke-dasharray: 4 3; opacity: .75; }
+    .mc-edge.ext { stroke: var(--muted); stroke-dasharray: 2 3; opacity: .75; }
+    .mc-edges.focus-only .mc-edge:not(.hl) { display: none; }
+    .mc-edge.hl.parent { stroke: var(--accent); stroke-width: 1.6; }
+    .mc-edge.hl.wait, .mc-edge.hl.ext { stroke: var(--ink); stroke-width: 1.4; opacity: 1; }
+    .mc-edge.chain { stroke: var(--warm) !important; stroke-width: 1.8; opacity: 1; }
+    .mc-arrowhead.muted { fill: var(--muted); } .mc-arrowhead.ink { fill: var(--ink); } .mc-arrowhead.warm { fill: var(--warm); }
+
+    /* Nodes: the status-dot vocabulary, scaled up. */
+    .mc-node { cursor: pointer; transition: opacity .15s; }
+    .mc-node .core { stroke-width: 1.5; stroke: transparent; }
+    .mc-node.working .core { fill: var(--accent); }
+    .mc-node.waiting .core { fill: var(--warm); }
+    .mc-node.blocked .core { fill: var(--paper); stroke: var(--muted); }
+    .mc-node.idle .core { fill: var(--dot-idle); }
+    .mc-node.done .core { fill: color-mix(in srgb, var(--ok) 40%, var(--paper)); }
+    .mc-node.failed .core { fill: var(--danger); }
+    .mc-node:hover .core, .mc-node:focus-visible .core { stroke: var(--ink); }
+    .mc-node:focus { outline: none; }
+    .mc-node .pulse { fill: var(--accent); pointer-events: none; transform-box: fill-box; transform-origin: center; animation: mc-pulse 2.4s ease-out infinite; }
+    @keyframes mc-pulse { from { transform: scale(1); opacity: .42; } to { transform: scale(2.5); opacity: 0; } }
+    .mc-node .halo { fill: color-mix(in srgb, var(--warm) 15%, transparent); stroke: var(--warm); stroke-width: 1.3; }
+    .mc-node .ring { fill: none; stroke: none; }
+    .mc-node.focus .ring { stroke: var(--accent); stroke-width: 2; }
+    .mc-node.impact .ring { stroke: var(--warm); stroke-width: 1.5; stroke-dasharray: 3 2; }
+    .mc-node .count { font: 600 9px var(--mono); text-anchor: middle; dominant-baseline: central; fill: var(--on-accent); pointer-events: none; }
+    .mc-node.blocked .count, .mc-node.idle .count, .mc-node.done .count { fill: var(--ink); }
+    .mc-node .label { font-size: 10.5px; fill: var(--ink); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+    .mc-node.needs .label { fill: var(--warm); font-weight: 600; }
+    .mc-node.done .label { fill: var(--muted); }
+    .mc-svg.dimmed .mc-node:not(.near):not(.impact):not(.focus) { opacity: .18; }
+    .mc-svg.dimmed .mc-edge:not(.hl) { opacity: .08; }
+    .mc-svg.dimmed .mc-ext:not(.near) { opacity: .3; }
+    @media (prefers-reduced-motion: reduce) { .mc-node .pulse { animation: none; opacity: 0; } }
+
+    /* External waits end at labeled markers along the board's right edge. */
+    .mc-ext rect { fill: var(--surface); stroke: var(--line-strong); stroke-dasharray: 3 2; }
+    .mc-ext text { font-size: 10.5px; fill: var(--muted); }
+    .mc-ext.near rect { stroke: var(--ink); stroke-dasharray: none; }
+    .mc-ext.near text { fill: var(--ink); }
+
+    /* Cells that collapsed into count bubbles; fill reads as a heat map of live work. */
+    .mc-cluster { cursor: zoom-in; }
+    .mc-cluster .bubble { stroke: color-mix(in srgb, var(--accent) 30%, var(--line)); stroke-width: 1; }
+    .mc-cluster.cold .bubble { stroke: var(--line-strong); }
+    .mc-cluster:hover .bubble { stroke: var(--ink); }
+    .mc-cluster .n { font: 600 12px var(--mono); text-anchor: middle; dominant-baseline: central; fill: var(--ink); pointer-events: none; }
+    .mc-cluster.hot .n { fill: var(--on-accent); }
+    .mc-cluster.cold .n { fill: var(--muted); }
+    .mc-cluster .badge { fill: var(--warm); stroke: var(--paper); stroke-width: 2; }
+    .mc-cluster .badge-t { font: 700 9px var(--mono); text-anchor: middle; dominant-baseline: central; fill: var(--on-accent); pointer-events: none; }
+    .mc-ghost { pointer-events: none; animation: mc-fade 1.6s ease-out forwards; }
+    .mc-ghost circle { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 2 2; }
+    .mc-ghost path { fill: none; stroke: var(--accent); stroke-width: 1; stroke-dasharray: 1 3; }
+    @keyframes mc-fade { from { opacity: .9; } to { opacity: 0; } }
+
+    /* Axis strips follow pan and zoom. */
+    .mc-axis-x { position: absolute; left: 0; right: 0; top: 0; height: 30px; pointer-events: none; background: linear-gradient(var(--paper) 65%, transparent); }
+    .mc-axis-x span { position: absolute; top: 9px; transform: translateX(-50%); font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+    .mc-axis-x span small, .mc-axis-y span small { font: 400 10px var(--mono); letter-spacing: 0; color: var(--muted); margin-left: 5px; }
+    .mc-axis-x span b, .mc-axis-y span b { font: 600 10px var(--mono); letter-spacing: 0; color: var(--warm); margin-left: 5px; }
+    .mc-axis-y { position: absolute; top: 0; bottom: 0; left: 0; width: 112px; pointer-events: none; background: linear-gradient(90deg, var(--paper) 78%, transparent); }
+    .mc-axis-y span { position: absolute; left: 16px; transform: translateY(-50%); font-size: 11px; color: var(--ink); white-space: nowrap; }
+
+    .mc-tools, .mc-legend { position: absolute; bottom: 10px; display: flex; align-items: center; gap: 6px; padding: 5px 6px; background: color-mix(in srgb, var(--surface) 90%, transparent); border: 1px solid var(--line); border-radius: 7px; cursor: default; }
+    .mc-tools { right: 12px; }
+    .mc-tools .btn { padding: 4px 9px; }
+    .mc-tools .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 2px; }
+    .mc-zoom { min-width: 40px; text-align: center; font-size: 10px; color: var(--muted); }
+    .mc-tools small { font-size: 10px; color: var(--muted); margin-left: 2px; }
+    .mc-legend { left: 12px; gap: 12px; padding: 6px 10px; font-size: 10.5px; color: var(--muted); }
+    .mc-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+    .mc-legend svg { overflow: visible; }
+    .mc-legend .heat { width: 54px; height: 8px; border-radius: 4px; border: 1px solid var(--line); background: linear-gradient(90deg, var(--surface), color-mix(in srgb, var(--accent) 85%, var(--surface))); }
+    .mc-legend .badge { width: 9px; height: 9px; border-radius: 50%; background: var(--warm); }
+
+    .mc-tip { position: absolute; z-index: 5; width: 290px; pointer-events: none; display: grid; gap: 5px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; box-shadow: 0 8px 24px var(--shadow); font-size: 11.5px; line-height: 1.5; }
+    .mc-tip strong { font-size: 13px; font-weight: 550; letter-spacing: -.01em; line-height: 1.35; }
+    .tip-id { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
+    .tip-state { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
+    .tip-state .label { color: var(--ink); }
+    .tip-state.working .label { color: var(--accent); }
+    .tip-state.waiting .label { color: var(--warm); }
+    .tip-state.failed .label { color: var(--danger); }
+    .tip-activity { color: var(--accent); }
+    .tip-activity::before { content: "▸ "; }
+    .tip-ask { color: var(--ink); border-left: 2px solid var(--warm); padding-left: 8px; }
+    .tip-meta { font: 10px var(--mono); color: var(--muted); }
+
+    /* Dock */
+    .mc-dock { flex: none; display: flex; gap: 14px; border-top: 1px solid var(--line); background: var(--surface); padding: 12px 16px 12px; max-height: 236px; }
+    .dock-head { flex: none; width: 128px; display: flex; flex-direction: column; gap: 4px; padding-top: 2px; }
+    .dock-head strong { font-size: 28px; font-weight: 550; letter-spacing: -.03em; line-height: 1; color: var(--warm); }
+    .dock-head strong.calm { color: var(--ok); }
+    .dock-head span { font-size: 12px; font-weight: 550; }
+    .dock-head p { font-size: 10.5px; line-height: 1.5; color: var(--muted); }
+    .dock-head .hint { margin-top: auto; }
+    .dock-list { flex: 1; min-width: 0; display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden; align-items: stretch; padding-bottom: 2px; }
+    .dock-card { flex: 0 0 300px; display: flex; flex-direction: column; gap: 6px; min-height: 0; padding: 9px 11px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); cursor: pointer; overflow: hidden; }
+    .dock-card:hover { border-color: var(--hover-line); }
+    .dock-card.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .dock-id { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; }
+    .dock-id strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .dock-id .role { font-size: 10px; color: var(--muted); white-space: nowrap; }
+    .dock-id .btn { margin-left: auto; padding: 2px 6px; font-size: 10px; flex: none; }
+    .dock-from { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: -3px; }
+    .dock-card .ask { padding: 7px 9px; font-size: 11.5px; }
+    .dock-card .ask-question { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .dock-card .ask-options { margin-top: 6px; }
+    .dock-card .ask-answer { margin-top: 6px; }
+    .dock-divider { flex: none; writing-mode: vertical-rl; transform: rotate(180deg); font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); border-right: 1px dashed var(--line-strong); padding: 0 4px; text-align: center; }
+    .dock-empty { align-self: center; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const {DOMAINS, PHASES, PHASE_LABELS, DOMAIN_LABELS, ROLE_LABELS, PROVIDER_NAMES} = AgentField;
+  const NS = "http://www.w3.org/2000/svg";
+  const s = (tag, attrs = {}, cls = null) => { const n = document.createElementNS(NS, tag); if (cls) n.setAttribute("class", cls); for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+  const CELL = {small: [150, 78], medium: [170, 92], large: [230, 124]};   // world units per domain × phase cell
+  const SPLIT = {small: 0.5, medium: 0.6, large: 0.85};                    // below this zoom, cells collapse into count bubbles
+  const LOGO_ZOOM = 1.5, EXT_W = 190;
+  const PAD = {left: 112, top: 34, right: 20, bottom: 48};
+  const hash = str => { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const short = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+  const firstSentence = t => (t.match(/^.*?[.!?](\s|$)/)?.[0] || t).trim();
+  const toward = (p, q, d) => { const dx = q.x - p.x, dy = q.y - p.y, len = Math.hypot(dx, dy) || 1; return {x: p.x + dx / len * d, y: p.y + dy / len * d}; };
+  const f1 = n => n.toFixed(1);
+
+  // View state lives here so Play/Step/answer re-renders keep the user's pan, zoom, focus and dock scroll.
+  const view = {k: 1, x: 0, y: 0, touched: false};
+  let focusId = null, hoverId = null, edgeMode = null, dockScroll = 0;
+  let positions = new Map(), ghosts = [], size = {w: 0, h: 0};
+  let cur = null, frame = 0, anim = 0, observer = null;
+
+  /* Layout: each agent gets a fixed address (domain column, phase row) and a deterministic sunflower slot inside its cell. */
+  function layout(field) {
+    const [cw, ch] = CELL[field.scale];
+    const cells = new Map();
+    for (const a of field.agents) { const key = a.domain + "|" + a.phase; if (!cells.has(key)) cells.set(key, []); cells.get(key).push(a); }
+    const pos = new Map();
+    for (const [key, list] of cells) {
+      const [d, p] = key.split("|");
+      const cx = (DOMAINS.indexOf(d) + 0.5) * cw, cy = (PHASES.indexOf(p) + 0.5) * ch;
+      const spin = (hash(key) % 628) / 100, step = 15;
+      list.sort((x, y) => hash(x.id) - hash(y.id));
+      const placed = list.map((a, i) => {
+        const rad = list.length === 1 ? 0 : step * Math.sqrt(i + 0.6), ang = spin + i * 2.39996;
+        const kids = field.descendants(a.id).length;
+        return {id: a.id, x: cx + Math.cos(ang) * rad * 1.45, y: cy + Math.sin(ang) * rad * 0.62, r: Math.min(12, 4.6 + 2.1 * Math.sqrt(kids)), kids, cell: key};
+      });
+      relax(placed, cx, cy, cw, ch);
+      for (const p of placed) pos.set(p.id, p);
+    }
+    return {pos, cells, cw, ch};
+  }
+  // Push apart nodes that overlap inside a cell, keeping them within the cell. Deterministic.
+  function relax(items, cx, cy, cw, ch) {
+    const mx = cw / 2 - 12, my = ch / 2 - 10;
+    for (let it = 0; it < 40; it++) {
+      let moved = false;
+      for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+        const a = items[i], b = items[j], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 0.01, min = a.r + b.r + 8;
+        if (d < min) { const push = (min - d) / 2; a.x -= dx / d * push; a.y -= dy / d * push; b.x += dx / d * push; b.y += dy / d * push; moved = true; }
+      }
+      for (const p of items) { p.x = clamp(p.x, cx - mx, cx + mx); p.y = clamp(p.y, cy - my, cy + my); }
+      if (!moved) break;
+    }
+  }
+  function externals(field, L) {
+    const map = new Map();
+    for (const a of field.agents) for (const e of field.externalWaits(a)) { if (!map.has(e)) map.set(e, []); map.get(e).push(a); }
+    const list = [...map].map(([label, waiters]) => ({label, waiters, x: DOMAINS.length * L.cw + 26, y: waiters.reduce((t, a) => t + L.pos.get(a.id).y, 0) / waiters.length})).sort((p, q) => p.y - q.y);
+    let last = -Infinity; for (const e of list) { e.y = Math.max(e.y, last + 30); last = e.y; }
+    return list;
+  }
+  function fit(L, ext) {
+    const W = size.w - PAD.left - PAD.right, H = size.h - PAD.top - PAD.bottom;
+    const ww = DOMAINS.length * L.cw + (ext.length ? EXT_W : 0), wh = PHASES.length * L.ch;
+    const k = clamp(Math.min(W / ww, H / wh), 0.25, 2.5);
+    return {k, x: PAD.left + (W - ww * k) / 2, y: PAD.top + (H - wh * k) / 2};
+  }
+  const X = wx => view.x + wx * view.k, Y = wy => view.y + wy * view.k;
+  const radius = r => r * clamp(Math.sqrt(view.k), 0.75, 1.5);
+  const clustered = () => view.k < SPLIT[cur.field.scale];
+  const mode = () => edgeMode || (cur.field.scale === "large" ? "focus" : "all");
+
+  function schedule() { if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawCanvas(); }); }
+  function zoomAt(mx, my, factor) {
+    cancelAnimationFrame(anim);
+    const k2 = clamp(view.k * factor, 0.25, 3);
+    view.x = mx - (mx - view.x) * (k2 / view.k); view.y = my - (my - view.y) * (k2 / view.k); view.k = k2; view.touched = true; schedule();
+  }
+  function animateTo(target, ms = 420) {
+    cancelAnimationFrame(anim);
+    const from = {k: view.k, x: view.x, y: view.y}, t0 = performance.now();
+    const step = t => {
+      const u = Math.min(1, (t - t0) / ms), e = 1 - Math.pow(1 - u, 3);
+      view.k = from.k + (target.k - from.k) * e; view.x = from.x + (target.x - from.x) * e; view.y = from.y + (target.y - from.y) * e;
+      drawCanvas(); if (u < 1) anim = requestAnimationFrame(step);
+    };
+    anim = requestAnimationFrame(step);
+  }
+  function centerOn(wx, wy, k) {
+    const cx = PAD.left + (size.w - PAD.left - PAD.right) / 2, cy = PAD.top + (size.h - PAD.top - PAD.bottom) / 2;
+    view.touched = true; animateTo({k, x: cx - wx * k, y: cy - wy * k});
+  }
+  // Selecting a dock card pans to the agent, zooms in far enough to split clusters, and lights up its edges and impact.
+  function locate(id) {
+    const p = cur?.L.pos.get(id); if (!p) return;
+    focusId = id; markDock(false);
+    centerOn(p.x, p.y, clamp(Math.max(view.k, SPLIT[cur.field.scale] + 0.3, 1), 0.25, 2.5));
+  }
+
+  /* Canvas drawing. Runs on every field render and on every pan/zoom frame; cheap enough for 160 agents. */
+  function drawCanvas() {
+    if (!cur) return;
+    const {field, L, ext, svg: root} = cur;
+    const k = view.k, cols = DOMAINS.length, rows = PHASES.length;
+    root.replaceChildren(defs());
+    const grid = s("g");
+    for (let i = 0; i < rows; i++) if (i % 2 === 0) grid.append(s("rect", {x: f1(X(0)), y: f1(Y(i * L.ch)), width: f1(cols * L.cw * k), height: f1(L.ch * k)}, "mc-band"));
+    for (let j = 1; j < cols; j++) grid.append(s("line", {x1: f1(X(j * L.cw)), x2: f1(X(j * L.cw)), y1: f1(Y(0)), y2: f1(Y(rows * L.ch))}, "mc-colline"));
+    if (ext.length) grid.append(s("line", {x1: f1(X(cols * L.cw)), x2: f1(X(cols * L.cw)), y1: f1(Y(0)), y2: f1(Y(rows * L.ch))}, "mc-extline"));
+    root.append(grid);
+    if (clustered()) drawClusters(root);
+    else drawField(root);
+    drawAxes(); drawLegend(); syncTools(); applyHighlight();
+  }
+  function defs() {
+    const d = s("defs");
+    for (const tone of ["muted", "ink", "warm"]) {
+      const m = s("marker", {id: "mc-arrow-" + tone, viewBox: "0 0 8 8", refX: 7, refY: 4, markerWidth: 7, markerHeight: 7, orient: "auto", markerUnits: "userSpaceOnUse"});
+      m.append(s("path", {d: "M0,0.6 L8,4 L0,7.4 z"}, "mc-arrowhead " + tone)); d.append(m);
+    }
+    return d;
+  }
+  function screen(id) { const p = cur.L.pos.get(id); return p && {x: X(p.x), y: Y(p.y), r: radius(p.r)}; }
+  function edgePath(d, type, from, to) {
+    const e = s("path", {d}, "mc-edge " + type); e.dataset.from = from; e.dataset.to = to; e.dataset.type = type;
+    if (type !== "parent") e.setAttribute("marker-end", "url(#mc-arrow-muted)");
+    return e;
+  }
+  function straight(p, c, from, to) { const a = toward(p, c, p.r + 1.5), b = toward(c, p, c.r + 1.5); return edgePath(`M${f1(a.x)},${f1(a.y)}L${f1(b.x)},${f1(b.y)}`, "parent", from, to); }
+  function curved(a, b, type, from, to) {
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1, bend = Math.min(46, len * 0.22);
+    const c = {x: (a.x + b.x) / 2 - dy / len * bend, y: (a.y + b.y) / 2 + dx / len * bend};
+    const p0 = toward(a, c, a.r + 1.5), p1 = toward(b, c, b.r + 3);
+    return edgePath(`M${f1(p0.x)},${f1(p0.y)}Q${f1(c.x)},${f1(c.y)} ${f1(p1.x)},${f1(p1.y)}`, type, from, to);
+  }
+  function drawField(root) {
+    const {field, L, ext, api} = cur;
+    const k = view.k, now = performance.now();
+    const edges = s("g", {}, "mc-edges" + (mode() === "focus" ? " focus-only" : ""));
+    const extAt = new Map(ext.map(e => [e.label, {x: X(e.x), y: Y(e.y), r: 0}]));
+    for (const a of field.agents) {
+      const c = screen(a.id);
+      const p = a.parentId && screen(a.parentId); if (p) edges.append(straight(p, c, a.parentId, a.id));
+      for (const w of field.agentWaits(a)) { const t = screen(w.id); if (t) edges.append(curved(c, t, "wait", a.id, w.id)); }
+      for (const e of field.externalWaits(a)) { const m = extAt.get(e); if (m) edges.append(curved(c, m, "ext", a.id, "external:" + e)); }
+    }
+    root.append(edges);
+    const markers = s("g");
+    for (const e of ext) {
+      const g = s("g", {transform: `translate(${f1(X(e.x))},${f1(Y(e.y))})`}, "mc-ext"); g.dataset.ext = e.label;
+      const label = short(e.label, 26), w = label.length * 5.6 + 18;
+      g.append(s("rect", {x: 0, y: -10, width: f1(w), height: 20, rx: 10}));
+      const t = s("text", {x: 9, y: 3.6}); t.textContent = label; g.append(t);
+      const title = s("title"); title.textContent = "External: " + e.label + " · waited on by " + e.waiters.map(a => a.name || a.title).join(", "); g.append(title);
+      markers.append(g);
+    }
+    root.append(markers);
+    ghosts = ghosts.filter(gh => gh.until > now);
+    for (const gh of ghosts) {
+      const to = screen(gh.id); if (!to) continue;
+      const g = s("g", {}, "mc-ghost"); g.style.animationDelay = -(now - (gh.until - 1600)) + "ms";
+      const from = {x: X(gh.x), y: Y(gh.y)};
+      g.append(s("circle", {cx: f1(from.x), cy: f1(from.y), r: f1(to.r)}), s("path", {d: `M${f1(from.x)},${f1(from.y)}L${f1(to.x)},${f1(to.y)}`}));
+      root.append(g);
+    }
+    const rank = a => field.needsUser(a) ? 5 : {done: 0, idle: 1, blocked: 2, failed: 3, working: 4, waiting: 5}[a.status];
+    const nodes = s("g");
+    for (const a of [...field.agents].sort((x, y) => rank(x) - rank(y))) nodes.append(nodeEl(a, field, api, k, now));
+    root.append(nodes);
+  }
+  function nodeEl(a, field, api, k, now) {
+    const p = cur.L.pos.get(a.id), {x, y, r} = screen(a.id), needs = field.needsUser(a);
+    const g = s("g", {transform: `translate(${f1(x)},${f1(y)})`, tabindex: 0, role: "button", "aria-label": (a.name ? a.name + ", " : "") + a.title + ", " + field.statusLabel(a)}, "mc-node " + a.status + (needs ? " needs" : ""));
+    g.dataset.id = a.id;
+    if (needs) g.append(s("circle", {r: f1(r + 4.5)}, "halo"));
+    if (a.status === "working") { const pu = s("circle", {r: f1(r)}, "pulse"); pu.style.animationDelay = -((now + hash(a.id)) % 2400) + "ms"; g.append(pu); }
+    g.append(s("circle", {r: f1(r + (needs ? 7 : 3))}, "ring"), s("circle", {r: f1(r)}, "core"));
+    if (p.kids && r >= 7.5) { const t = s("text", {y: 0.5}, "count"); t.textContent = p.kids; g.append(t); }
+    if (k >= LOGO_ZOOM) { const logo = AgentField.providerLogo(a.client); logo.setAttribute("x", f1(-r - (needs ? 22 : 18))); logo.setAttribute("y", -7); g.append(logo); }
+    const hasKids = p.kids > 0;
+    if (k >= 1.3 || needs || a.id === focusId || (hasKids && k >= (field.scale === "large" ? 1.4 : 0.8))) {
+      const text = k >= LOGO_ZOOM ? (a.name ? a.name + " · " : "") + a.title : a.name || a.title;
+      const t = s("text", {x: f1(r + (needs ? 8 : 5)), y: 3.6}, "label"); t.textContent = short(text, k >= LOGO_ZOOM ? 46 : 26); g.append(t);
+    }
+    g.addEventListener("pointerenter", () => { hoverId = a.id; showTip(a, x, y, r); applyHighlight(); });
+    g.addEventListener("pointerleave", () => { if (hoverId === a.id) hoverId = null; hideTip(); applyHighlight(); });
+    g.addEventListener("pointerdown", e => e.stopPropagation());
+    const open = () => { focusId = a.id; markDock(true); applyHighlight(); api.select(a.id); };
+    g.addEventListener("click", e => { e.stopPropagation(); open(); });
+    g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+    return g;
+  }
+  function drawClusters(root) {
+    const {field, L} = cur;
+    const k = view.k, stats = [];
+    let maxLive = 1;
+    for (const [key, list] of L.cells) { const c = field.counts(list), live = c.working + c.waiting + c.blocked + c.failed; maxLive = Math.max(maxLive, live); stats.push({key, list, c, live}); }
+    const g = s("g");
+    for (const st of stats) {
+      const [d, p] = st.key.split("|");
+      const wx = (DOMAINS.indexOf(d) + 0.5) * L.cw, wy = (PHASES.indexOf(p) + 0.5) * L.ch;
+      const r = Math.min(L.ch * k * 0.42, 9 + 4.6 * Math.sqrt(st.list.length)), heat = st.live / maxLive;
+      const cg = s("g", {transform: `translate(${f1(X(wx))},${f1(Y(wy))})`, tabindex: 0, role: "button", "aria-label": `${DOMAIN_LABELS[d]}, ${PHASE_LABELS[p]}: ${st.list.length} agents. Zoom in.`}, "mc-cluster" + (heat > 0.55 ? " hot" : "") + (!st.live ? " cold" : ""));
+      cg.dataset.cell = st.key;
+      const b = s("circle", {r: f1(r)}, "bubble");
+      b.style.fill = st.live ? `color-mix(in srgb, var(--accent) ${Math.round(12 + heat * 76)}%, var(--surface))` : "var(--surface)";
+      const n = s("text", {y: 0.5}, "n"); n.textContent = st.list.length;
+      cg.append(b, n);
+      if (st.c.needsUser) { const bx = r * 0.74, by = -r * 0.74; cg.append(s("circle", {cx: f1(bx), cy: f1(by), r: 8}, "badge")); const t = s("text", {x: f1(bx), y: f1(by + 0.5)}, "badge-t"); t.textContent = st.c.needsUser; cg.append(t); }
+      cg.addEventListener("pointerenter", () => clusterTip(st, d, p, X(wx), Y(wy), r));
+      cg.addEventListener("pointerleave", hideTip);
+      cg.addEventListener("pointerdown", e => e.stopPropagation());
+      const zoom = () => { hideTip(); centerOn(wx, wy, Math.max(SPLIT[field.scale] * 1.7, 1.2)); };
+      cg.addEventListener("click", e => { e.stopPropagation(); zoom(); });
+      cg.addEventListener("keydown", e => { if (e.key === "Enter") zoom(); });
+      g.append(cg);
+    }
+    root.append(g);
+  }
+  function drawAxes() {
+    const {field, L, ext, axisX, axisY} = cur;
+    axisX.replaceChildren(); axisY.replaceChildren();
+    const count = (list, label, host, styleProp, at) => {
+      const c = field.counts(list), sp = $("span", null, label);
+      sp.append($("small", null, String(c.total)));
+      if (c.needsUser) sp.append($("b", null, "● " + c.needsUser));
+      sp.title = `${label}: ${c.total} agents, ${c.working} working, ${c.needsUser} need you, ${c.done} done`;
+      sp.style[styleProp] = f1(at) + "px"; host.append(sp);
+    };
+    DOMAINS.forEach((d, j) => { const at = X((j + 0.5) * L.cw); if (at > PAD.left - 30 && at < size.w + 40) count(field.agents.filter(a => a.domain === d), DOMAIN_LABELS[d], axisX, "left", at); });
+    if (ext.length && !clustered()) { const at = X(DOMAINS.length * L.cw + EXT_W / 2); if (at > PAD.left && at < size.w + 40) { const sp = $("span", null, "External"); sp.append($("small", null, String(ext.length))); sp.style.left = f1(at) + "px"; axisX.append(sp); } }
+    PHASES.forEach((p, i) => { const at = Y((i + 0.5) * L.ch); if (at > PAD.top - 10 && at < size.h - 30) count(field.agents.filter(a => a.phase === p), PHASE_LABELS[p], axisY, "top", at); });
+  }
+  function swatch(status, extra = "") {
+    const svg = s("svg", {width: 12, height: 12, viewBox: "-6 -6 12 12"}), g = s("g", {}, "mc-node " + status + extra);
+    if (extra) g.append(s("circle", {r: 5.6}, "halo"));
+    g.append(s("circle", {r: extra ? 3.2 : 4.5}, "core")); svg.append(g); return svg;
+  }
+  function edgeSwatch(type) {
+    const svg = s("svg", {width: 24, height: 8, viewBox: "0 0 24 8"});
+    const e = s("path", {d: "M1,4L21,4"}, "mc-edge " + type); if (type !== "parent") e.setAttribute("marker-end", "url(#mc-arrow-muted)");
+    svg.append(e); return svg;
+  }
+  function drawLegend() {
+    const lg = cur.legend; lg.replaceChildren();
+    const item = (icon, text) => { const sp = $("span"); sp.append(icon, text); lg.append(sp); };
+    if (clustered()) {
+      item($("i", "heat"), "Fill = live agents in the cell");
+      item($("i", "badge"), "Need you");
+      lg.append($("span", null, "Zoom in or click a bubble to split it"));
+      return;
+    }
+    item(swatch("working"), "Working"); item(swatch("waiting", " needs"), "Needs you"); item(swatch("blocked"), "Waiting");
+    item(swatch("idle"), "Idle"); item(swatch("done"), "Done");
+    item(edgeSwatch("parent"), "Created"); item(edgeSwatch("wait"), "Waits on");
+    lg.append($("span", null, "Size = sub-agents"));
+  }
+  function buildTools() {
+    const t = $("div", "mc-tools");
+    const btn = (label, title, fn) => { const b = $("button", "btn small", label); b.type = "button"; b.title = title; b.onclick = fn; return b; };
+    const mid = () => [size.w / 2, PAD.top + (size.h - PAD.top - PAD.bottom) / 2];
+    const zoom = $("span", "mc-zoom mono");
+    t.append(btn("−", "Zoom out", () => zoomAt(...mid(), 1 / 1.35)), zoom, btn("+", "Zoom in", () => zoomAt(...mid(), 1.35)),
+      btn("Fit", "Fit the whole board", () => { const target = fit(cur.L, cur.ext); view.touched = false; animateTo(target); }), $("i", "sep"), $("small", null, "Edges"));
+    for (const [m, label, title] of [["all", "All", "Draw every creator and waiting-on edge"], ["focus", "Focus", "Only draw edges of the hovered or selected agent"]]) {
+      const b = btn(label, title, () => { edgeMode = m; drawCanvas(); }); b.dataset.mode = m; t.append(b);
+    }
+    t.addEventListener("pointerdown", e => e.stopPropagation());
+    return t;
+  }
+  function syncTools() {
+    const t = cur.tools, off = clustered();
+    t.querySelector(".mc-zoom").textContent = Math.round(view.k * 100) + "%";
+    for (const b of t.querySelectorAll("[data-mode]")) { b.setAttribute("aria-pressed", String(b.dataset.mode === mode())); b.disabled = off; }
+  }
+
+  /* Highlight: the hovered or focused agent, its creator, sub-agents and waits, plus everything its ask transitively blocks. */
+  function applyHighlight() {
+    if (!cur) return;
+    const {field, svg: root} = cur;
+    const id = hoverId || focusId, a = id && field.byId(id);
+    root.classList.toggle("dimmed", !!a && !clustered());
+    let near = new Set(), impact = new Set(), chain = new Set(), ext = new Set();
+    if (a) {
+      near = new Set([id, ...(a.parentId ? [a.parentId] : []), ...field.children(id).map(c => c.id), ...field.agentWaits(a).map(w => w.id), ...field.blocks(id)]);
+      impact = new Set(field.impact(id)); chain = new Set([id, ...impact]); ext = new Set(field.externalWaits(a));
+    }
+    for (const g of root.querySelectorAll(".mc-node")) { const n = g.dataset.id; g.classList.toggle("focus", n === id); g.classList.toggle("near", near.has(n)); g.classList.toggle("impact", impact.has(n)); }
+    for (const e of root.querySelectorAll(".mc-edge")) {
+      const {from, to, type} = e.dataset;
+      const touches = !!a && (from === id || to === id), inChain = !!a && type === "wait" && chain.has(from) && chain.has(to);
+      e.classList.toggle("hl", touches || inChain); e.classList.toggle("chain", inChain);
+      if (type !== "parent") e.setAttribute("marker-end", `url(#mc-arrow-${inChain ? "warm" : touches ? "ink" : "muted"})`);
+    }
+    for (const m of root.querySelectorAll(".mc-ext")) m.classList.toggle("near", ext.has(m.dataset.ext));
+    for (const c of root.querySelectorAll(".mc-cluster")) c.style.opacity = a && c.dataset.cell !== a.domain + "|" + a.phase ? ".45" : "";
+  }
+
+  /* Hover card */
+  function placeTip(x, y, r) {
+    const tip = cur.tip; tip.hidden = false;
+    let left = x + r + 14; if (left + 300 > size.w) left = x - r - 14 - 290;
+    tip.style.left = Math.max(8, left) + "px"; tip.style.top = clamp(y - 24, 8, size.h - tip.offsetHeight - 8) + "px";
+  }
+  function showTip(a, x, y, r) {
+    const {tip, field} = cur; tip.replaceChildren();
+    const id = $("div", "tip-id"); id.append(AgentField.providerLogo(a.client, PROVIDER_NAMES[a.client]));
+    if (a.name) id.append($("span", "chip", a.name));
+    id.append($("span", null, ROLE_LABELS[a.role] + (a.kind !== "app" ? " · " + a.kind : "") + " · " + PROVIDER_NAMES[a.client]));
+    const st = $("div", "tip-state " + a.status); st.append(AgentField.statusDot(a), $("span", "label", field.statusLabel(a)), AgentField.phaseSteps(a), $("span", null, PHASE_LABELS[a.phase]));
+    tip.append(id, $("strong", null, a.title), st);
+    if (a.status === "working" && a.activity) tip.append($("div", "tip-activity", a.activity));
+    else if (!a.ask) tip.append($("div", "muted", firstSentence(a.summary)));
+    if (a.ask) tip.append($("div", "tip-ask", a.ask.question));
+    const parent = field.parent(a.id), kids = field.children(a.id).length, impact = field.impact(a.id).length;
+    const meta = [DOMAIN_LABELS[a.domain] + " · " + a.target];
+    if (parent) meta.push("from " + (parent.name || parent.title));
+    if (kids) meta.push(kids + (kids === 1 ? " sub-agent" : " sub-agents"));
+    if (impact) meta.push("blocks " + impact);
+    meta.push(field.relativeTime(a.updatedAt));
+    tip.append($("div", "tip-meta", meta.join(" · ")));
+    placeTip(x, y, r);
+  }
+  function clusterTip(st, d, p, x, y, r) {
+    const tip = cur.tip, c = st.c; tip.replaceChildren();
+    tip.append($("div", "tip-id", DOMAIN_LABELS[d] + " · " + PHASE_LABELS[p]), $("strong", null, st.list.length + (st.list.length === 1 ? " agent" : " agents")));
+    tip.append($("div", "muted", [c.working && c.working + " working", c.needsUser && c.needsUser + " need you", c.blocked && c.blocked + " waiting", c.idle && c.idle + " idle", c.done && c.done + " done"].filter(Boolean).join(" · ")));
+    for (const a of st.list.filter(cur.field.needsUser).slice(0, 3)) tip.append($("div", "tip-ask", (a.name ? a.name + ": " : "") + a.ask?.question));
+    tip.append($("div", "tip-meta", "Click to zoom in"));
+    placeTip(x, y, r);
+  }
+  function hideTip() { if (cur) cur.tip.hidden = true; }
+
+  /* Dock: everything that needs the user, answerable in place. */
+  function buildDock(field, api) {
+    const dock = $("section", "mc-dock"); dock.setAttribute("aria-label", "Needs you");
+    const asks = field.asks(), c = field.counts();
+    const head = $("div", "dock-head");
+    head.append($("strong", asks.length ? null : "calm", String(asks.length)), $("span", null, asks.length === 1 ? "needs you" : "need you"),
+      $("p", null, `${c.working} working · ${c.blocked} waiting · ${c.done} done`), $("p", "hint", "Select a card to find it on the board."));
+    const list = $("div", "dock-list");
+    let prevBlocking = null;
+    for (const a of asks) {
+      const blocking = !!a.ask?.blocking;
+      if (prevBlocking && !blocking) list.append($("div", "dock-divider", "Not blocking"));
+      prevBlocking = blocking; list.append(dockCard(a, field, api));
+    }
+    if (!asks.length) list.append($("p", "dock-empty", `Nothing needs you. ${c.working} agents are working.`));
+    list.addEventListener("scroll", () => { dockScroll = list.scrollLeft; });
+    dock.append(head, list);
+    return dock;
+  }
+  function dockCard(a, field, api) {
+    const card = $("article", "dock-card" + (a.id === focusId ? " selected" : "")); card.dataset.id = a.id; card.tabIndex = 0;
+    const id = $("div", "dock-id");
+    id.append(AgentField.statusDot(a), AgentField.providerLogo(a.client, PROVIDER_NAMES[a.client]), $("strong", null, a.name || a.title), $("span", "role", ROLE_LABELS[a.role]));
+    const open = $("button", "btn quiet", "Open"); open.type = "button"; open.title = "Open the thread";
+    open.onclick = e => { e.stopPropagation(); focusId = a.id; markDock(false); applyHighlight(); api.select(a.id); };
+    id.append(open); card.append(id);
+    const parent = field.parent(a.id);
+    const from = [a.name ? a.title : null, parent ? "from " + (parent.name || parent.title) : null].filter(Boolean).join(" · ");
+    if (from) { const f = $("div", "dock-from", from); f.title = from; card.append(f); }
+    if (a.ask) { const box = Mockup.askBox(a, field, null); box.querySelector(".ask-question").title = a.ask.question; card.append(box); }
+    else card.append($("p", "ask-question", a.next.action));
+    card.addEventListener("click", e => { if (!e.target.closest("button, input")) locate(a.id); });
+    card.addEventListener("keydown", e => { if (e.key === "Enter" && e.target === card) locate(a.id); });
+    card.addEventListener("pointerenter", () => { hoverId = a.id; applyHighlight(); });
+    card.addEventListener("pointerleave", () => { if (hoverId === a.id) hoverId = null; applyHighlight(); });
+    return card;
+  }
+  function markDock(scroll) {
+    if (!cur) return;
+    const list = cur.dock.querySelector(".dock-list");
+    for (const c of list.querySelectorAll(".dock-card")) {
+      const on = c.dataset.id === focusId; c.classList.toggle("selected", on);
+      if (on && scroll && (c.offsetLeft < list.scrollLeft || c.offsetLeft + c.offsetWidth > list.scrollLeft + list.clientWidth)) list.scrollTo({left: c.offsetLeft - list.offsetLeft - 8, behavior: "smooth"});
+    }
+  }
+
+  function bindCanvas(canvas) {
+    canvas.addEventListener("wheel", e => { e.preventDefault(); const b = canvas.getBoundingClientRect(); zoomAt(e.clientX - b.left, e.clientY - b.top, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))); }, {passive: false});
+    canvas.addEventListener("pointerdown", e => {
+      if (e.button !== 0) return;
+      cancelAnimationFrame(anim);
+      const start = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; let moved = false;
+      canvas.setPointerCapture(e.pointerId); hideTip();
+      const move = ev => {
+        const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
+        if (!moved && Math.abs(dx) + Math.abs(dy) > 3) { moved = true; canvas.classList.add("panning"); }
+        if (moved) { view.x = start.vx + dx; view.y = start.vy + dy; view.touched = true; schedule(); }
+      };
+      const up = () => {
+        canvas.removeEventListener("pointermove", move); canvas.removeEventListener("pointerup", up); canvas.removeEventListener("pointercancel", up);
+        canvas.classList.remove("panning");
+        if (!moved) { focusId = null; markDock(false); applyHighlight(); }
+      };
+      canvas.addEventListener("pointermove", move); canvas.addEventListener("pointerup", up); canvas.addEventListener("pointercancel", up);
+    });
+    observer?.disconnect();
+    observer = new ResizeObserver(() => {
+      const w = canvas.clientWidth, h = canvas.clientHeight; if (w === size.w && h === size.h) return;
+      size = {w, h}; if (!view.touched) Object.assign(view, fit(cur.L, cur.ext)); drawCanvas();
+    });
+    observer.observe(canvas);
+  }
+
+  Mockup.mount({
+    number: 9, title: "Mission control", spectrum: "radical", fullBleed: true,
+    summary: "A pannable board: agents placed by domain and phase, edges for who created whom and who waits on what, and a dock of everything that needs you.",
+    signals: {current: ["title", "phase", "summary", "status", "client", "created_by", "next_actor", "next_action", "updated_at"],
+      proposed: ["name", "role", "kind", "domain", "target", "activity", "ask", "waiting_on", "blocks"]},
+    notes: "Assumes every agent reports a domain and an explicit waiting-on list, so each one has a fixed address on the board and dependencies can be drawn; at large scale, cells collapse into heat-map bubbles until you zoom in.",
+    render(field, stage, api) {
+      const L = layout(field), ext = externals(field, L), now = performance.now();
+      // Agents that changed cell since the last render leave a fading trail from where they were.
+      ghosts = ghosts.filter(g => g.until > now);
+      for (const [id, p] of L.pos) { const old = positions.get(id); if (old && old.cell !== p.cell) ghosts.push({id, x: old.x, y: old.y, until: now + 1600}); }
+      positions = L.pos;
+      if (focusId && !field.byId(focusId)) focusId = null;
+      if (hoverId && !field.byId(hoverId)) hoverId = null;
+      const drafts = new Map(); let focused = null;
+      if (cur) for (const input of cur.dock.querySelectorAll(".dock-card input")) { const id = input.closest(".dock-card").dataset.id; if (input.value) drafts.set(id, input.value); if (document.activeElement === input) focused = id; }
+
+      stage.replaceChildren();
+      const wrap = $("div", "mc"), canvas = $("div", "mc-canvas");
+      const root = s("svg", {"aria-label": "Agents by domain (columns) and phase (rows)", role: "group"}, "mc-svg");
+      const axisX = $("div", "mc-axis-x"), axisY = $("div", "mc-axis-y"), legend = $("div", "mc-legend"), tools = buildTools(), tip = $("div", "mc-tip"); tip.hidden = true;
+      canvas.append(root, axisY, axisX, legend, tools, tip);
+      const dock = buildDock(field, api);
+      wrap.append(canvas, dock); stage.append(wrap);
+      for (const input of dock.querySelectorAll(".dock-card input")) { const id = input.closest(".dock-card").dataset.id; if (drafts.has(id)) input.value = drafts.get(id); if (id === focused) input.focus(); }
+      dock.querySelector(".dock-list").scrollLeft = dockScroll;
+
+      cur = {field, api, L, ext, svg: root, axisX, axisY, legend, tools, tip, dock};
+      size = {w: canvas.clientWidth, h: canvas.clientHeight};
+      if (!view.touched) Object.assign(view, fit(L, ext));
+      bindCanvas(canvas);
+      drawCanvas();
+      if (ghosts.length) setTimeout(schedule, 1700);
+    },
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 11 · Settling field</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* A free canvas. Fresh activity floats at the top; old results sink to the floor.
+       Needs-you lives on the surface and can be answered there. */
+    #stage { display: flex; flex-direction: column; overflow: hidden; }
+    .surface { flex: none; display: flex; align-items: stretch; gap: 10px; padding: 12px 28px 10px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--warm-tint) 35%, var(--paper)); min-height: 64px; overflow-x: auto; }
+    .surface.calm { background: var(--paper); align-items: center; color: var(--muted); font-size: 12px; }
+    .surface-item { flex: 0 0 auto; display: grid; grid-template-columns: auto 1fr; gap: 2px 9px; align-items: center; max-width: 360px; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--warm) 45%, var(--line)); border-left: 3px solid var(--warm); border-radius: 7px; background: var(--surface); cursor: pointer; }
+    .surface-item:hover { border-color: var(--warm); }
+    .surface-item .who { grid-column: 2; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 550; min-width: 0; }
+    .surface-item .who span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .surface-item .who small { font-weight: 400; color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .surface-item .kind { grid-column: 1; grid-row: 1 / span 3; align-self: start; font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); padding-top: 3px; writing-mode: vertical-rl; transform: rotate(180deg); }
+    .surface-item .q { grid-column: 2; font-size: 11.5px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .surface-item .act { grid-column: 2; display: flex; gap: 5px; align-items: center; margin-top: 2px; }
+    .surface-item .act .btn { padding: 3px 9px; font-size: 11px; }
+    .surface-item .act .muted { font-size: 10px; margin-left: auto; white-space: nowrap; }
+    .field { position: relative; flex: 1; min-height: 0; overflow: hidden; background:
+      linear-gradient(to bottom, transparent 0, transparent 78%, color-mix(in srgb, var(--ink) 4%, transparent) 100%); }
+    .field .col { position: absolute; top: 0; bottom: 0; border-left: 1px dashed color-mix(in srgb, var(--line) 70%, transparent); }
+    .field .col-label { position: absolute; top: 8px; font: 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); transform: translateX(-50%); white-space: nowrap; }
+    .field .depth { position: absolute; left: 6px; font: 9px var(--mono); color: var(--muted); transform: translateY(-50%); pointer-events: none; }
+    .field .depth::after { content: ""; position: absolute; left: 34px; top: 50%; width: 10px; border-top: 1px solid var(--line); }
+    .mark { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--dot-idle); cursor: grab; transition: left .9s ease, top .9s ease, opacity .6s; outline: 0; }
+    .mark.dragging, .field.dragging .mark { transition: none; }
+    .mark.working { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); animation: breathe 2.4s ease-in-out infinite; }
+    .mark.waiting, .mark.failed { background: var(--warm); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warm) 22%, transparent); }
+    .mark.failed { background: var(--danger); }
+    .mark.blocked { background: var(--surface); box-shadow: inset 0 0 0 2px var(--muted); }
+    .mark.done { background: var(--ok); opacity: .55; }
+    .mark.idle { opacity: .8; }
+    .mark.pinned::after { content: ""; position: absolute; inset: -5px; border: 1px solid var(--line-strong); border-radius: 50%; }
+    .mark.peeked, .mark:hover { z-index: 3; }
+    .mark.peeked::before { content: ""; position: absolute; inset: -7px; border: 2px solid var(--ink); border-radius: 50%; }
+    .mark .label { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); font-size: 11px; white-space: nowrap; color: var(--ink); pointer-events: none; max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+    .mark .label small { color: var(--muted); margin-left: 5px; font-size: 10px; }
+    .mark.working .label small { color: var(--accent); }
+    .mark.done .label, .mark.idle .label { color: var(--muted); }
+    .field[data-labels="none"] .mark .label, .field[data-labels="active"] .mark.idle .label, .field[data-labels="active"] .mark.done .label, .field[data-labels="active"] .mark.blocked .label,
+    .field[data-labels="needs"] .mark:not(.waiting):not(.failed) .label { display: none; }
+    .field .mark:hover .label { display: block !important; background: var(--surface); padding: 2px 6px; border-radius: 4px; box-shadow: 0 2px 10px var(--shadow); }
+    .sat { position: absolute; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; border-radius: 50%; background: var(--dot-idle); cursor: pointer; }
+    .sat.working { background: var(--accent); } .sat.waiting, .sat.failed { background: var(--warm); } .sat.done { background: var(--ok); } .sat.blocked { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .sat-count { position: absolute; font: 8px var(--mono); color: var(--muted); transform: translate(8px, -14px); pointer-events: none; }
+    .cluster { position: absolute; display: grid; place-items: center; border-radius: 50%; background: color-mix(in srgb, var(--accent) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); color: var(--ink); font: 600 11px var(--mono); cursor: pointer; transform: translate(-50%, -50%); transition: left .9s ease, top .9s ease; }
+    .cluster:hover { border-color: var(--accent); }
+    .cluster.needs { border-color: var(--warm); }
+    .cluster.needs::after { content: attr(data-needs); position: absolute; top: -6px; right: -6px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: var(--warm); color: var(--on-accent); font: 600 9px var(--mono); display: grid; place-items: center; }
+    .cluster small { position: absolute; bottom: -14px; font: 8px var(--mono); color: var(--muted); white-space: nowrap; }
+    .edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+    .edges line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: .8; }
+    .edges line.blocks { stroke: var(--warm); }
+    .tools { position: absolute; right: 16px; bottom: 10px; z-index: 2; display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); }
+    .tools select { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font-size: 11px; }
+    @keyframes breathe { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 8%, transparent); } }
+    @media (prefers-reduced-motion: reduce) { .mark.working { animation: none; } .mark, .cluster { transition: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60000, HOUR = 3600000;
+  const hash = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  // View state that survives re-renders: user placements (pinned), expanded clusters, hover, label mode, column mode.
+  const placed = new Map(), expanded = new Set();
+  let labels = new URLSearchParams(location.search).get("scale") === "large" ? "needs" : "active", columns = "domain", hovered = null, surface, fieldEl, edges, toolsEl, nodes = new Map(), clusters = new Map();
+  const TOP = 34, BOTTOM = 26;
+  const depthFor = age => { const m = age / MIN; return Math.min(1, Math.log1p(m) / Math.log1p(24 * 60)); };
+
+  function build(stage, api) {
+    stage.classList.add("full-bleed"); stage.replaceChildren();
+    surface = $("div", "surface"); stage.append(surface);
+    fieldEl = $("div", "field"); fieldEl.dataset.labels = labels; stage.append(fieldEl);
+    edges = document.createElementNS("http://www.w3.org/2000/svg", "svg"); edges.setAttribute("class", "edges"); fieldEl.append(edges);
+    toolsEl = $("div", "tools");
+    const lab = $("select"); for (const [v, l] of [["active", "Labels: active"], ["needs", "Labels: needs you"], ["all", "Labels: all"], ["none", "Labels: none"]]) { const o = $("option", null, l); o.value = v; o.selected = v === labels; lab.append(o); }
+    lab.onchange = () => { labels = lab.value; fieldEl.dataset.labels = labels; };
+    const col = $("select"); for (const [v, l] of [["domain", "Columns: domain"], ["none", "Columns: none"]]) { const o = $("option", null, l); o.value = v; o.selected = v === columns; col.append(o); }
+    col.onchange = () => { columns = col.value; api.rerender(); };
+    const reset = $("button", "btn small", "Reset layout"); reset.type = "button"; reset.onclick = () => { placed.clear(); expanded.clear(); api.rerender(); };
+    toolsEl.append(lab, col, reset); fieldEl.append(toolsEl);
+    nodes.clear(); clusters.clear();
+  }
+
+  function surfaceItems(field, api) {
+    const asks = field.asks();
+    surface.replaceChildren(); surface.classList.toggle("calm", !asks.length);
+    if (!asks.length) { surface.append($("span", null, "Nothing needs you. Fresh work floats at the top; older results settle toward the floor.")); return; }
+    for (const a of asks) {
+      const item = $("div", "surface-item"); item.tabIndex = 0;
+      item.onclick = e => { if (e.target.closest("button")) return; api.peek(a.id, item); };
+      item.append($("span", "kind", a.ask ? (a.ask.kind === "failure" ? "failed" : a.ask.kind) : "needs you"));
+      const who = $("div", "who"); who.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("span", null, a.name || a.title));
+      const parent = a.parentId && field.byId(a.parentId); if (parent) who.append($("small", null, "from " + (parent.name || parent.title)));
+      item.append(who, $("div", "q", a.ask ? a.ask.question : a.next.action));
+      const act = $("div", "act");
+      if (a.ask?.options?.length) {
+        const first = a.ask.options[0]; const b = $("button", "btn small primary", first.label); b.type = "button"; b.onclick = e => { e.stopPropagation(); field.answer(a.id, first.id); }; act.append(b);
+        if (a.ask.options.length > 1) { const more = $("button", "btn small quiet", "More…"); more.type = "button"; more.onclick = e => { e.stopPropagation(); api.peek(a.id, item); }; act.append(more); }
+      } else { const b = $("button", "btn small", a.ask?.freeText ? "Answer…" : "Open"); b.type = "button"; b.onclick = e => { e.stopPropagation(); api.peek(a.id, item); }; act.append(b); }
+      const impact = field.impact(a.id).length;
+      act.append($("span", "muted", (impact ? "blocks " + impact + " · " : "") + field.relativeTime(a.ask?.askedAt || a.updatedAt)));
+      item.append(act); surface.append(item);
+    }
+  }
+
+  function layout(field) {
+    const W = fieldEl.clientWidth || 1200, H = fieldEl.clientHeight || 600;
+    const roots = field.roots().filter(a => a.kind === "app" || !field.byId(a.parentId));
+    const cols = AgentField.DOMAINS, cw = W / cols.length;
+    const pos = new Map();
+    for (const a of roots) {
+      const p = placed.get(a.id);
+      if (p) { pos.set(a.id, {x: p.x * W, y: p.y * H, pinned: true}); continue; }
+      const j = hash(a.id), j2 = hash(a.id + "y");
+      const x = columns === "domain" ? cols.indexOf(a.domain) * cw + cw * (0.14 + j * 0.72) : 24 + j * (W - 48);
+      const depth = a.status === "done" ? Math.max(0.82, depthFor(field.age(a))) : depthFor(field.age(a));
+      const y = TOP + 14 + depth * (H - TOP - BOTTOM - 28) + (j2 - 0.5) * 10;
+      pos.set(a.id, {x, y, pinned: false});
+    }
+    // Separate marks that land on top of each other (deterministic order).
+    const items = [...pos.entries()].filter(([, p]) => !p.pinned).sort((a, b) => a[0].localeCompare(b[0]));
+    for (let iter = 0; iter < 6; iter++) for (let i = 0; i < items.length; i++) for (let k = i + 1; k < items.length; k++) {
+      const p = items[i][1], q = items[k][1]; const dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy), min = 22;
+      if (d < min && d > 0) { const push = (min - d) / 2, ux = dx / d, uy = dy / d; p.x -= ux * push; p.y -= uy * push; q.x += ux * push; q.y += uy * push; }
+      else if (d === 0) { q.x += 12; }
+    }
+    for (const [, p] of items) { p.x = Math.max(14, Math.min(W - 14, p.x)); p.y = Math.max(TOP + 8, Math.min(H - BOTTOM, p.y)); }
+    return {pos, W, H, cw, cols, roots};
+  }
+
+  function clustered(field, lay) {
+    // At scale, cells with many marks collapse into a counted bubble unless expanded.
+    const cellOf = id => { const p = lay.pos.get(id); return Math.floor(p.x / (lay.W / 7)) + ":" + Math.floor(((p.y - TOP) / (lay.H - TOP)) * 6); };
+    const cells = new Map();
+    for (const a of lay.roots) { if (lay.pos.get(a.id).pinned || field.needsUser(a)) continue; const c = cellOf(a.id); if (!cells.has(c)) cells.set(c, []); cells.get(c).push(a); }
+    const hidden = new Set(), bubbles = [];
+    for (const [cell, list] of cells) {
+      if (list.length < 6 || expanded.has(cell)) continue;
+      for (const a of list) hidden.add(a.id);
+      const cx = list.reduce((s, a) => s + lay.pos.get(a.id).x, 0) / list.length, cy = list.reduce((s, a) => s + lay.pos.get(a.id).y, 0) / list.length;
+      bubbles.push({cell, list, x: cx, y: cy, needs: list.reduce((n, a) => n + field.descendantsNeedingUser(a.id).length, 0), working: list.filter(a => a.status === "working").length});
+    }
+    return {hidden, bubbles};
+  }
+
+  function render(field, stage, api) {
+    if (!fieldEl || !fieldEl.isConnected) build(stage, api);
+    surfaceItems(field, api);
+    const lay = layout(field), {hidden, bubbles} = clustered(field, lay);
+    // Columns and depth rulers.
+    for (const el of fieldEl.querySelectorAll(".col, .col-label, .depth")) el.remove();
+    if (columns === "domain") for (const [i, d] of lay.cols.entries()) { const c = $("div", "col"); c.style.left = (i * lay.cw) + "px"; const l = $("div", "col-label", AgentField.DOMAIN_LABELS[d]); l.style.left = (i * lay.cw + lay.cw / 2) + "px"; fieldEl.append(c, l); }
+    for (const [label, age] of [["now", 0], ["10m", 10 * MIN], ["1h", HOUR], ["6h", 6 * HOUR], ["older", 24 * HOUR]]) { const d = $("div", "depth", label); d.style.top = (TOP + 14 + depthFor(age) * (lay.H - TOP - BOTTOM - 28)) + "px"; fieldEl.append(d); }
+    const keep = new Set();
+    for (const a of lay.roots) {
+      if (hidden.has(a.id)) continue;
+      const p = lay.pos.get(a.id); keep.add(a.id);
+      let el = nodes.get(a.id);
+      if (!el) {
+        el = $("div", "mark"); el.tabIndex = 0; el.dataset.id = a.id; nodes.set(a.id, el); fieldEl.append(el);
+        Mockup.drag(el, {
+          onStart: () => fieldEl.classList.add("dragging"),
+          onMove: ({mx, my}) => { const cur = placed.get(a.id) || {x: parseFloat(el.style.left) / fieldEl.clientWidth, y: parseFloat(el.style.top) / fieldEl.clientHeight}; const nx = Math.max(0.01, Math.min(0.99, cur.x + mx / fieldEl.clientWidth)), ny = Math.max((TOP + 8) / fieldEl.clientHeight, Math.min(0.98, cur.y + my / fieldEl.clientHeight)); placed.set(a.id, {x: nx, y: ny}); el.style.left = nx * 100 + "%"; el.style.top = ny * 100 + "%"; drawEdges(field, lay, api); },
+          onEnd: ({dragged}) => { fieldEl.classList.remove("dragging"); if (dragged) { el.classList.add("pinned"); api.rerender(); } else api.peek(a.id, el); },
+        });
+        el.onkeydown = e => { if (e.key === "Enter") api.peek(a.id, el); };
+        el.onpointerenter = () => { hovered = a.id; drawEdges(field, lay, api); };
+        el.onpointerleave = () => { hovered = null; drawEdges(field, lay, api); };
+      }
+      const kids = field.children(a.id), desc = field.descendants(a.id).length;
+      el.className = "mark " + a.status + (p.pinned ? " pinned" : "") + (api.peeked === a.id ? " peeked" : "");
+      const size = 10 + Math.min(8, desc * 2); el.style.width = el.style.height = size + "px"; el.style.margin = (-size / 2) + "px 0 0 " + (-size / 2) + "px";
+      el.style.left = (p.x / lay.W * 100) + "%"; el.style.top = (p.y / lay.H * 100) + "%";
+      const doing = a.status === "working" ? (a.activity || field.toolLabel(a)) : a.status === "done" ? "done " + field.relativeTime(a.updatedAt) : field.statusLabel(a);
+      el.title = (a.name ? a.name + " · " : "") + a.title + "\n" + doing + (kids.length ? "\n" + kids.length + " sub-agents" : "");
+      el.replaceChildren();
+      const label = $("span", "label"); label.append(a.name || a.title); if (a.status === "working" && (a.activity || field.toolLabel(a))) label.append($("small", null, a.activity || field.toolLabel(a))); el.append(label);
+      // Satellites: sub-agents orbit the parent; more than six collapse into a count.
+      if (kids.length) {
+        if (kids.length <= 6) kids.forEach((k, i) => { const s = $("span", "sat " + k.status); const ang = -Math.PI / 2 + i * (2 * Math.PI / Math.max(6, kids.length)); const r = size / 2 + 6; s.style.left = (size / 2 + Math.cos(ang) * r) + "px"; s.style.top = (size / 2 + Math.sin(ang) * r) + "px"; s.title = k.title + " · " + (k.status === "working" ? (k.activity || field.toolLabel(k) || "working") : field.statusLabel(k)); s.onpointerdown = e => e.stopPropagation(); s.onclick = e => { e.stopPropagation(); api.peek(k.id, s); }; el.append(s); });
+        else el.append($("span", "sat-count", kids.length + (field.descendantsNeedingUser(a.id).length ? "!" : "")));
+      }
+    }
+    for (const [id, el] of nodes) if (!keep.has(id)) { el.remove(); nodes.delete(id); }
+    // Cluster bubbles.
+    const keepC = new Set();
+    for (const b of bubbles) {
+      keepC.add(b.cell); let el = clusters.get(b.cell);
+      if (!el) { el = $("div", "cluster"); clusters.set(b.cell, el); fieldEl.append(el); el.onclick = () => { expanded.add(b.cell); api.rerender(); }; }
+      const size = 26 + Math.min(26, b.list.length * 1.5); el.style.width = el.style.height = size + "px";
+      el.style.left = (b.x / lay.W * 100) + "%"; el.style.top = (b.y / lay.H * 100) + "%";
+      el.classList.toggle("needs", b.needs > 0); el.dataset.needs = String(b.needs);
+      el.replaceChildren(String(b.list.length), $("small", null, b.working ? b.working + " working" : "quiet"));
+      el.title = b.list.map(a => a.title).slice(0, 8).join("\n") + (b.list.length > 8 ? "\n…" : "") + "\nClick to spread out";
+    }
+    for (const [cell, el] of clusters) if (!keepC.has(cell)) { el.remove(); clusters.delete(cell); }
+    drawEdges(field, lay, api);
+  }
+
+  function drawEdges(field, lay, api) {
+    edges.replaceChildren();
+    const focus = hovered || api.peeked; if (!focus) return;
+    const a = field.byId(focus); if (!a) return;
+    const rootOf = id => { let x = field.byId(id); while (x && x.parentId && field.byId(x.parentId) && !nodes.has(x.id)) x = field.byId(x.parentId); return x; };
+    const from = rootOf(focus); if (!from || !nodes.has(from.id)) return;
+    const centre = id => { const el = nodes.get(id); if (!el) return null; return {x: parseFloat(el.style.left) / 100 * fieldEl.clientWidth, y: parseFloat(el.style.top) / 100 * fieldEl.clientHeight}; };
+    const p = centre(from.id); if (!p) return;
+    const line = (to, cls) => { const q = centre(to); if (!q) return; const l = document.createElementNS(edges.namespaceURI, "line"); l.setAttribute("x1", p.x); l.setAttribute("y1", p.y); l.setAttribute("x2", q.x); l.setAttribute("y2", q.y); if (cls) l.setAttribute("class", cls); edges.append(l); };
+    for (const w of field.agentWaits(a)) { const r = rootOf(w.id); if (r && r.id !== from.id) line(r.id); }
+    for (const id of field.blocks(a.id)) { const r = rootOf(id); if (r && r.id !== from.id) line(r.id, "blocks"); }
+  }
+
+  Mockup.mount({
+    number: 11, title: "Settling field", spectrum: "round two", fullBleed: true,
+    summary: "A free canvas of marks: fresh work floats, old results sink, needs-you sits on the surface and is answered there; drag to pin, click to peek.",
+    signals: {current: ["status", "tool_activity", "age", "pending_approval", "created_by", "client", "title", "phase", "summary", "next_action", "write_scope"], proposed: ["ask", "name", "domain", "activity", "plan"]},
+    notes: "Vertical position is age from the runtime (last tool call), not the checkpoint. The surface shows every needs-you with its first option as a one-click answer; the lens has the rest.",
+    render,
+  });
+  window.addEventListener("resize", () => { placed.size || expanded.size; });
+})();
+</script>
+</body>
+</html>

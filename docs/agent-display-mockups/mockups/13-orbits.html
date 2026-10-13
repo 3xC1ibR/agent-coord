@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 13 · Orbits</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Each root agent is a sun; sub-agents orbit it. Motion is activity, height is age, needs-you sits on the surface. */
+    html, body { height: 100%; }
+    body { height: 100dvh; overflow: hidden; }
+    #stage { display: flex; flex-direction: column; overflow: hidden; }
+    .surface { flex: none; display: flex; align-items: stretch; gap: 10px; padding: 12px 28px 10px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--warm-tint) 35%, var(--paper)); min-height: 64px; overflow-x: auto; }
+    .surface.calm { background: var(--paper); align-items: center; color: var(--muted); font-size: 12px; }
+    .surface-item { flex: 0 0 auto; display: grid; grid-template-columns: auto 1fr; gap: 2px 9px; align-items: center; max-width: 360px; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--warm) 45%, var(--line)); border-left: 3px solid var(--warm); border-radius: 7px; background: var(--surface); cursor: pointer; }
+    .surface-item:hover { border-color: var(--warm); }
+    .surface-item .who { grid-column: 2; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 550; min-width: 0; }
+    .surface-item .who span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .surface-item .who small { font-weight: 400; color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .surface-item .kind { grid-column: 1; grid-row: 1 / span 3; align-self: start; font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); padding-top: 3px; writing-mode: vertical-rl; transform: rotate(180deg); }
+    .surface-item .q { grid-column: 2; font-size: 11.5px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .surface-item .act { grid-column: 2; display: flex; gap: 5px; align-items: center; margin-top: 2px; }
+    .surface-item .act .btn { padding: 3px 9px; font-size: 11px; }
+    .surface-item .act .muted { font-size: 10px; margin-left: auto; white-space: nowrap; }
+
+    .sky { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; touch-action: none; user-select: none;
+      background: linear-gradient(to bottom, transparent 0, transparent 78%, color-mix(in srgb, var(--ink) 4%, transparent) 100%); }
+    .sky.panning { cursor: grabbing; }
+    .sky > svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    .ruler text { font: 9px var(--mono); fill: var(--muted); }
+    .ruler line { stroke: var(--line); }
+
+    .system { cursor: grab; }
+    .system.dragging { cursor: grabbing; }
+    .system.faded { opacity: .28; }
+    .system:focus { outline: none; }
+    .orbit { fill: none; stroke: color-mix(in srgb, var(--muted) 30%, transparent); stroke-width: 1; }
+    .orbit.outer { stroke-dasharray: 2 4; stroke: color-mix(in srgb, var(--muted) 24%, transparent); }
+    .orbit.moon { stroke: color-mix(in srgb, var(--muted) 22%, transparent); }
+    .pin-ring { fill: none; stroke: var(--line-strong); stroke-dasharray: 1 4; stroke-width: 1.2; }
+
+    .body { cursor: pointer; }
+    .body:focus { outline: none; }
+    .body .core { stroke-width: 1.5; stroke: transparent; fill: var(--dot-idle); }
+    .body.working .core { fill: var(--accent); }
+    .body.waiting .core { fill: var(--warm); }
+    .body.failed .core { fill: var(--danger); }
+    .body.blocked .core { fill: var(--paper); stroke: var(--muted); }
+    .body.done .core { fill: color-mix(in srgb, var(--ok) 45%, var(--paper)); }
+    .body.done { opacity: .6; }
+    .body:hover .core, .body:focus-visible .core { stroke: var(--ink); }
+    .body .glow { fill: color-mix(in srgb, var(--warm) 18%, transparent); stroke: color-mix(in srgb, var(--warm) 55%, transparent); stroke-width: 1; }
+    .body .peek-ring { fill: none; stroke: none; }
+    .body.peeked .peek-ring { stroke: var(--ink); stroke-width: 2; }
+    /* The sun's own state shows in its corona. */
+    .corona { fill: none; stroke-width: 2.5; }
+    .sun.working .corona { stroke: color-mix(in srgb, var(--accent) 45%, transparent); animation: corona 2.6s ease-in-out infinite; }
+    .sun.needs .corona { stroke: var(--warm); fill: color-mix(in srgb, var(--warm) 14%, transparent); }
+    .sun.blocked .corona { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 3 2; }
+    .sun.idle .corona, .sun.done .corona { stroke: color-mix(in srgb, var(--muted) 25%, transparent); stroke-width: 1; }
+    @keyframes corona { 50% { stroke-width: 5; stroke: color-mix(in srgb, var(--accent) 18%, transparent); } }
+    .label { font-size: 11px; fill: var(--ink); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+    .label .sub { font-size: 10px; fill: var(--muted); }
+    .label.working .sub { fill: var(--accent); }
+    .label.needs { fill: var(--warm); font-weight: 600; }
+    .label.quiet { fill: var(--muted); }
+
+    /* Collapsed systems at scale: a disc with a planet count. */
+    .disc .fill { stroke: color-mix(in srgb, var(--accent) 35%, var(--line)); stroke-width: 1; }
+    .disc.quiet .fill { stroke: var(--line-strong); }
+    .disc:hover .fill { stroke: var(--ink); }
+    .disc .n { font: 600 11px var(--mono); text-anchor: middle; dominant-baseline: central; fill: var(--ink); pointer-events: none; }
+    .disc.hot .n { fill: var(--on-accent); }
+    .disc .badge { fill: var(--warm); stroke: var(--paper); stroke-width: 2; }
+    .disc .badge-t { font: 700 9px var(--mono); text-anchor: middle; dominant-baseline: central; fill: var(--on-accent); pointer-events: none; }
+
+    .edges line { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 4 3; }
+    .edges line.blocks { stroke: var(--warm); }
+    .edges line.standing { stroke: var(--warm); opacity: .45; }
+    .arrowhead { fill: var(--muted); } .arrowhead.warm { fill: var(--warm); }
+
+    .controls { position: absolute; right: 14px; bottom: 10px; display: flex; gap: 6px; align-items: center; }
+    .controls .btn { padding: 4px 9px; font-size: 11px; background: color-mix(in srgb, var(--surface) 92%, transparent); }
+    .back { position: absolute; left: 14px; top: 10px; }
+    .back .btn { font-size: 11px; padding: 5px 10px; }
+    @media (prefers-reduced-motion: reduce) { .sun.working .corona { animation: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const NS = "http://www.w3.org/2000/svg";
+  const s = (tag, attrs = {}, cls = null) => { const n = document.createElementNS(NS, tag); if (cls) n.setAttribute("class", cls); for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+  const MIN = 60000, HOUR = 3600000, TAU = Math.PI * 2;
+  const TOP = 30, BOTTOM = 34, LEFT = 56;
+  const RESOLVE_ZOOM = 1.5;   // at large scale, systems below this zoom collapse into discs
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const hash = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const short = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+  const f1 = n => n.toFixed(1);
+  const depthFor = age => Math.min(1, Math.log1p(age / MIN) / Math.log1p(24 * 60));
+
+  // View state that survives re-renders: camera, focused system, pinned systems, hover.
+  const view = {k: 1, x: 0, y: 0};
+  const pins = new Map();
+  let focusSys = null, hoverId = null, dragging = null, lastPeeked = null;
+  let cur = null, size = {w: 1200, h: 600}, loop = 0, anim = 0, built = null;
+
+  /* Layout: one system per root. Height is the age of its newest tool call; size is tool activity in the last hour. */
+  function layout(field) {
+    const W = size.w, H = size.h, systems = [];
+    let maxAct = 1;
+    for (const r of field.roots()) {
+      const members = [r, ...field.descendants(r.id)];
+      const act = members.reduce((n, a) => n + field.pulsesSince(a, HOUR).length, 0);
+      const needs = members.filter(field.needsUser);
+      systems.push({id: r.id, root: r, members, act, needs, age: Math.min(...members.map(field.age)), allDone: members.every(a => a.status === "done")});
+      maxAct = Math.max(maxAct, act);
+    }
+    const bodies = new Map();
+    for (const sys of systems) {
+      sys.depth = sys.allDone ? Math.max(0.86, depthFor(sys.age)) : sys.needs.length ? Math.min(0.1, depthFor(sys.age)) : depthFor(sys.age);
+      sys.sf = (0.74 + 0.5 * Math.sqrt(sys.act / maxAct)) * (1 - 0.3 * sys.depth);
+      const planets = field.children(sys.id), live = planets.filter(p => p.status !== "done"), done = planets.filter(p => p.status === "done");
+      const moonsOf = new Map(planets.map(p => [p.id, field.descendants(p.id)]));
+      const anyMoons = [...moonsOf.values()].some(m => m.length);
+      sys.lone = !planets.length;
+      const sunR = sys.lone ? 5.5 : 7 + Math.min(4, 1.4 * Math.sqrt(sys.members.length - 1));
+      const R1 = sunR + 20 + 2.5 * Math.max(0, live.length - 3), rm = 10, Rd = R1 + (anyMoons ? rm + 7 : 11);
+      const R = sys.lone ? sunR + 8 : (done.length ? Rd : R1 + (anyMoons ? rm : 0)) + 7;
+      Object.assign(sys, {raw: {sunR, R1, Rd, rm, R}, planets, live, done, moonsOf, labelW: Math.max(Math.min(sys.lone ? 30 : 34, (sys.root.name || sys.root.title).length), sys.lone ? Math.min(44, lastStep(field, sys.root).length) * 0.9 : 0) * 6.1});
+    }
+    // A sparse sky gets bigger systems; a crowded one keeps them small.
+    const boxOf = (sys, R) => sys.lone ? {l: R, r: R + sys.labelW + 6, t: Math.max(R, 12), b: Math.max(R, 20)} : {l: Math.max(R, sys.labelW / 2), r: Math.max(R, sys.labelW / 2), t: R, b: R + 16};
+    const area = systems.reduce((n, x) => { const b = boxOf(x, x.raw.R * x.sf); return n + (b.l + b.r) * (b.t + b.b); }, 0);
+    const boost = clamp(Math.sqrt(0.2 * (W - LEFT) * (H - TOP - BOTTOM) / Math.max(1, area)), 1, 2.2);
+    for (const sys of systems) {
+      const m = sys.sf * boost, {sunR, R1, Rd, rm, R} = sys.raw;
+      Object.assign(sys, {sunR: sunR * Math.min(m, 1.5), R1: R1 * m, Rd: Rd * m, rm: rm * m, R: R * m});
+      sys.box = boxOf(sys, sys.R);
+      const {planets, live, done, moonsOf} = sys;
+      bodies.set(sys.id, {sys, kind: "sun"});
+      const spin = hash(sys.id) * TAU;
+      const place = (list, orbit, offset) => list.forEach((p, i) => {
+        bodies.set(p.id, {sys, kind: "planet", orbit, base: offset + spin + i * TAU / list.length, w: speed(field, p)});
+        const moons = moonsOf.get(p.id), mspin = hash(p.id) * TAU;
+        moons.forEach((m, j) => bodies.set(m.id, {sys, kind: "moon", host: p.id, orbit: sys.rm, base: mspin + j * TAU / moons.length, w: speed(field, m) * 1.6}));
+      });
+      place(live, sys.R1, 0); place(done, sys.Rd, Math.PI / 5);
+    }
+    // Free canvas: pinned systems keep their place; the rest are spread by a seeded x and pushed apart.
+    const span = H - TOP - BOTTOM - 48;
+    for (const sys of systems) {
+      const pin = pins.get(sys.id);
+      if (pin) { sys.x = pin.fx * W; sys.y = pin.fy * H; sys.pinned = true; continue; }
+      sys.x = LEFT + sys.R + hash(sys.id + "x") * Math.max(1, W - LEFT - 2 * sys.R - 16);
+      sys.y = TOP + 24 + sys.depth * span + (hash(sys.id + "y") - 0.5) * 16;
+    }
+    // Greedy placement, label boxes included: pinned first, then needs-you, then freshest. Each takes the nearest free
+    // spot to its target, searching sideways before downward, so height keeps meaning age.
+    const gap = 10, placedList = [];
+    const minX = sys => LEFT + sys.box.l, maxX = sys => W - sys.box.r - 8, minY = sys => TOP + sys.box.t, maxY = sys => H - BOTTOM - sys.box.b * 0.6;
+    const hits = (sys, x, y) => placedList.some(o => x - sys.box.l - gap < o.x + o.box.r && x + sys.box.r + gap > o.x - o.box.l && y - sys.box.t - gap < o.y + o.box.b && y + sys.box.b + gap > o.y - o.box.t);
+    const order = [...systems].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || Number(b.needs.length > 0) - Number(a.needs.length > 0) || a.depth - b.depth || a.id.localeCompare(b.id));
+    for (const sys of order) {
+      if (!sys.pinned) {
+        const x0 = clamp(sys.x, minX(sys), Math.max(minX(sys), maxX(sys))), y0 = clamp(sys.y, minY(sys), Math.max(minY(sys), maxY(sys)));
+        let spot = null;
+        for (let dy = 0; !spot && y0 + dy <= Math.max(y0, maxY(sys)); dy += 14) for (let i = 0; i < 2 * W / 16; i++) {
+          const x = x0 + (i % 2 ? -1 : 1) * Math.ceil(i / 2) * 16;
+          if (x < minX(sys) || x > maxX(sys)) continue;
+          if (!hits(sys, x, y0 + dy)) { spot = {x, y: y0 + dy}; break; }
+        }
+        Object.assign(sys, spot || {x: x0, y: y0});
+      }
+      placedList.push(sys);
+    }
+    return {systems, bodies, maxAct, boost, byId: new Map(systems.map(x => [x.id, x]))};
+  }
+  // Orbital speed is recent tool activity; anything not working holds still.
+  function speed(field, a) {
+    if (a.status !== "working" || still) return 0;
+    const recent = field.pulsesSince(a, 10 * MIN).length;
+    return TAU / clamp(80 / (1 + recent), 14, 60) * (hash(a.id + "dir") < 0.15 ? -1 : 1);
+  }
+  const resolved = sys => sys.lone || cur.field.scale !== "large" || view.k >= RESOLVE_ZOOM || focusSys === sys.id;
+  const X = wx => view.x + wx * view.k, Y = wy => view.y + wy * view.k;
+  const br = r => r * clamp(Math.pow(view.k, 0.6), 0.8, 2.4) * Math.sqrt(cur.L.boost);    // body radii grow slower than distances
+  function angle(b, t) { return b.base + b.w * t / 1000; }
+  // Screen position of any body at time t (collapsed systems map to the disc centre).
+  function bodyAt(id, t) {
+    const b = cur.L.bodies.get(id); if (!b) return null;
+    const sys = b.sys, cx = X(sys.x), cy = Y(sys.y), k = view.k;
+    if (b.kind === "sun" || !resolved(sys)) return {x: cx, y: cy};
+    if (b.kind === "planet") { const a = angle(b, t); return {x: cx + Math.cos(a) * b.orbit * k, y: cy + Math.sin(a) * b.orbit * k}; }
+    const h = bodyAt(b.host, t), a = angle(b, t); return {x: h.x + Math.cos(a) * b.orbit * k, y: h.y + Math.sin(a) * b.orbit * k};
+  }
+
+  function doing(field, a) {
+    if (a.status === "working") return field.toolLabel(a) || a.activity || "Working";
+    if (a.status === "done") return "Done " + field.relativeTime(a.updatedAt);
+    if (field.needsUser(a)) return (a.ask ? a.ask.kind : "needs you") + ": " + (a.ask?.question || a.next.action);
+    return field.statusLabel(a) + " · " + field.relativeTime(field.lastActivity(a));
+  }
+  function lastStep(field, a) {
+    if (a.status === "working") return field.toolLabel(a) || "";
+    const steps = field.recentSteps(a), cur = steps.find(x => x.state === "active" || x.state === "blocked") || steps.filter(x => x.state === "done").pop();
+    return cur ? short(cur.label, 48) : "";
+  }
+
+  /* Build the persistent shell once; the sky's SVG is redrawn on every render and every camera move. */
+  function build(stage, api) {
+    stage.classList.add("full-bleed"); stage.replaceChildren();
+    const surface = $("div", "surface"), sky = $("div", "sky"), svg = s("svg", {role: "group", "aria-label": "Agent systems: suns are root agents, orbiting bodies are their sub-agents"});
+    const back = $("div", "back"); const backBtn = $("button", "btn", "← All systems"); backBtn.type = "button"; backBtn.onclick = zoomOut; back.append(backBtn); back.hidden = true;
+    const controls = $("div", "controls");
+    const btn = (label, title, fn) => { const b = $("button", "btn small", label); b.type = "button"; b.title = title; b.onclick = fn; return b; };
+    controls.append(btn("−", "Zoom out", () => zoomAt(size.w / 2, size.h / 2, 1 / 1.4)), btn("+", "Zoom in", () => zoomAt(size.w / 2, size.h / 2, 1.4)),
+      btn("Reset layout", "Unpin every system and reset the view", () => { pins.clear(); focusSys = null; Object.assign(view, {k: 1, x: 0, y: 0}); api.rerender(); }));
+    for (const el of [back, controls]) el.addEventListener("pointerdown", e => e.stopPropagation());
+    sky.append(svg, back, controls); stage.append(surface, sky);
+    sky.addEventListener("wheel", e => { e.preventDefault(); const b = sky.getBoundingClientRect(); zoomAt(e.clientX - b.left, e.clientY - b.top, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))); }, {passive: false});
+    sky.addEventListener("pointerdown", e => {
+      if (e.button !== 0) return;
+      cancelAnimationFrame(anim);
+      const start = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; let moved = false;
+      sky.setPointerCapture(e.pointerId);
+      const move = ev => { const dx = ev.clientX - start.x, dy = ev.clientY - start.y; if (!moved && Math.hypot(dx, dy) > 3) { moved = true; sky.classList.add("panning"); } if (moved) { view.x = start.vx + dx; view.y = start.vy + dy; draw(); } };
+      const up = () => { sky.removeEventListener("pointermove", move); sky.removeEventListener("pointerup", up); sky.removeEventListener("pointercancel", up); sky.classList.remove("panning"); };
+      sky.addEventListener("pointermove", move); sky.addEventListener("pointerup", up); sky.addEventListener("pointercancel", up);
+    });
+    new ResizeObserver(() => { const w = sky.clientWidth, h = sky.clientHeight; if (!w || (w === size.w && h === size.h) || !cur) return; size = {w, h}; cur.L = layout(cur.field); draw(); }).observe(sky);
+    // Escape zooms out of a system, unless it is closing the lens first.
+    window.addEventListener("keydown", e => { if (e.key === "Escape" && focusSys && !api.peeked && !e.target.matches?.("input, textarea")) zoomOut(); }, true);
+    built = {surface, sky, svg, back};
+  }
+
+  function surfaceItems(field, api) {
+    const {surface} = built, asks = field.asks();
+    surface.replaceChildren(); surface.classList.toggle("calm", !asks.length);
+    if (!asks.length) { surface.append($("span", null, "Nothing needs you. Moving bodies are working; quiet ones are waiting their turn or done.")); return; }
+    for (const a of asks) {
+      const item = $("div", "surface-item"); item.tabIndex = 0;
+      const open = () => { const b = cur.L.bodies.get(a.id); if (b && !b.sys.lone && focusSys !== b.sys.id) zoomInto(b.sys); api.peek(a.id, item); };
+      item.onclick = e => { if (!e.target.closest("button")) open(); };
+      item.onkeydown = e => { if (e.key === "Enter" && e.target === item) open(); };
+      item.onpointerenter = () => { hoverId = a.id; drawEdges(performance.now()); };
+      item.onpointerleave = () => { if (hoverId === a.id) hoverId = null; drawEdges(performance.now()); };
+      item.append($("span", "kind", a.ask ? (a.ask.kind === "failure" ? "failed" : a.ask.kind) : "needs you"));
+      const who = $("div", "who"); who.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("span", null, a.name || a.title));
+      const parent = field.parent(a.id); if (parent) who.append($("small", null, "from " + (parent.name || parent.title)));
+      item.append(who, $("div", "q", a.ask ? a.ask.question : a.next.action));
+      const act = $("div", "act");
+      if (a.ask?.options?.length) {
+        const first = a.ask.options[0], b = $("button", "btn small primary", first.label); b.type = "button"; b.onclick = e => { e.stopPropagation(); field.answer(a.id, first.id); }; act.append(b);
+        if (a.ask.options.length > 1) { const more = $("button", "btn small quiet", "More…"); more.type = "button"; more.onclick = e => { e.stopPropagation(); api.peek(a.id, item); }; act.append(more); }
+      } else { const b = $("button", "btn small", a.ask?.freeText ? "Answer…" : "Open"); b.type = "button"; b.onclick = e => { e.stopPropagation(); api.peek(a.id, item); }; act.append(b); }
+      const impact = field.impact(a.id).length;
+      act.append($("span", "muted", (impact ? "blocks " + impact + " · " : "") + field.relativeTime(a.ask?.askedAt || a.updatedAt)));
+      item.append(act); surface.append(item);
+    }
+  }
+
+  /* Camera */
+  function zoomAt(mx, my, factor) {
+    cancelAnimationFrame(anim);
+    const k2 = clamp(view.k * factor, 0.5, 6);
+    view.x = mx - (mx - view.x) * (k2 / view.k); view.y = my - (my - view.y) * (k2 / view.k); view.k = k2;
+    if (focusSys && view.k < 1.2) focusSys = null;
+    draw();
+  }
+  function animateTo(target, ms = 480) {
+    cancelAnimationFrame(anim);
+    const from = {...view}, t0 = performance.now();
+    const step = t => { const u = Math.min(1, (t - t0) / ms), e = 1 - Math.pow(1 - u, 3); for (const key of ["k", "x", "y"]) view[key] = from[key] + (target[key] - from[key]) * e; draw(); if (u < 1) anim = requestAnimationFrame(step); };
+    anim = requestAnimationFrame(step);
+  }
+  function zoomInto(sys) {
+    focusSys = sys.id;
+    const k = clamp(0.34 * Math.min(size.w, size.h) / sys.R, 1.6, 5);
+    animateTo({k, x: size.w / 2 - sys.x * k, y: size.h / 2 - sys.y * k});
+  }
+  function zoomOut() { focusSys = null; cur?.api.unpeek(); animateTo({k: 1, x: 0, y: 0}); }
+
+  /* Drawing */
+  function draw() {
+    if (!cur || dragging) return;
+    const {field, L} = cur, {svg, back} = built, t = performance.now();
+    cancelAnimationFrame(loop);
+    svg.replaceChildren(defs());
+    const ruler = s("g", {}, "ruler"), span = size.h - TOP - BOTTOM - 48;
+    for (const [label, age] of [["now", 0], ["10m", 10 * MIN], ["1h", HOUR], ["6h", 6 * HOUR], ["older", 24 * HOUR]]) {
+      const y = Y(TOP + 24 + depthFor(age) * span); if (y < 8 || y > size.h - 6) continue;
+      const tx = s("text", {x: 12, y: f1(y + 3)}); tx.textContent = label; ruler.append(tx, s("line", {x1: 40, x2: 48, y1: f1(y), y2: f1(y)}));
+    }
+    svg.append(ruler);
+    const movers = [], sysLayer = s("g"), edges = s("g", {}, "edges");
+    // Draw old systems first so fresh ones sit on top.
+    for (const sys of [...L.systems].sort((a, b) => b.depth - a.depth)) sysLayer.append(systemEl(sys, field, movers, t));
+    svg.append(sysLayer, edges);
+    cur.edges = edges; cur.movers = movers;
+    back.hidden = !focusSys;
+    lastPeeked = null; markPeeked();
+    drawEdges(t);
+    if (movers.length) { const tick = now => { for (const m of movers) { const p = m.pos(now); m.g.setAttribute("transform", `translate(${f1(p.x)},${f1(p.y)})`); } if (hoverId || cur.api.peeked || cur.standing) drawEdges(now); markPeeked(); loop = requestAnimationFrame(tick); }; loop = requestAnimationFrame(tick); }
+  }
+  function defs() {
+    const d = s("defs");
+    for (const tone of ["", "warm"]) { const m = s("marker", {id: "orb-arrow" + (tone ? "-" + tone : ""), viewBox: "0 0 8 8", refX: 7, refY: 4, markerWidth: 7, markerHeight: 7, orient: "auto", markerUnits: "userSpaceOnUse"}); m.append(s("path", {d: "M0,0.6 L8,4 L0,7.4 z"}, "arrowhead " + tone)); d.append(m); }
+    return d;
+  }
+  function bodyEl(a, field, r, cls) {
+    const needs = field.needsUser(a);
+    const g = s("g", {tabindex: 0, role: "button", "aria-label": (a.name ? a.name + ", " : "") + a.title + ". " + doing(field, a)}, "body " + a.status + (needs ? " needs" : "") + (cls ? " " + cls : ""));
+    g.dataset.id = a.id;
+    const title = s("title"); title.textContent = (a.name ? a.name + " · " : "") + a.title + "\n" + doing(field, a); g.append(title);
+    if (needs) g.append(s("circle", {r: f1(r + 4)}, "glow"));
+    g.append(s("circle", {r: f1(r + (needs ? 7 : 4))}, "peek-ring"), s("circle", {r: f1(r)}, "core"));
+    g.addEventListener("pointerenter", () => { hoverId = a.id; drawEdges(performance.now()); });
+    g.addEventListener("pointerleave", () => { if (hoverId === a.id) hoverId = null; drawEdges(performance.now()); });
+    return g;
+  }
+  function label(x, y, main, sub, cls, anchor = "start") {
+    const t = s("text", {x: f1(x), y: f1(y), "text-anchor": anchor}, "label " + cls);
+    const m = s("tspan"); m.textContent = main; t.append(m);
+    if (sub) { const sp = s("tspan", {x: f1(x), dy: "12"}, "sub"); sp.textContent = sub; t.append(sp); }
+    return t;
+  }
+  function systemEl(sys, field, movers, t) {
+    const {api} = cur, k = view.k, cx = X(sys.x), cy = Y(sys.y), root = sys.root, focused = focusSys === sys.id;
+    const g = s("g", {transform: `translate(${f1(cx)},${f1(cy)})`}, "system" + (focusSys && !focused ? " faded" : ""));
+    g.dataset.sys = sys.id;
+    if (sys.pinned) g.append(s("circle", {r: f1(sys.R * k + 3)}, "pin-ring"));
+    const fresh = sys.age < 10 * MIN, scaleLarge = field.scale === "large";
+    if (!resolved(sys)) {
+      // Collapsed: a disc with a planet count; fill reads as recent tool activity.
+      const r = Math.max(9, sys.R * k * 0.46), heat = sys.act / cur.L.maxAct;
+      const d = s("g", {tabindex: 0, role: "button", "aria-label": `${root.title}: ${sys.members.length - 1} sub-agents. Zoom in.`}, "body disc" + (heat > 0.55 ? " hot" : "") + (sys.act ? "" : " quiet"));
+      d.dataset.id = root.id;
+      const title = s("title"); title.textContent = (root.name ? root.name + " · " : "") + root.title + "\n" + doing(field, root) + "\n" + (sys.members.length - 1) + " sub-agents" + (sys.needs.length ? " · " + sys.needs.length + " need you" : "") + "\nClick to zoom in"; d.append(title);
+      d.append(s("circle", {r: f1(r + 3.5)}, "corona"));
+      const fill = s("circle", {r: f1(r)}, "fill"); fill.style.fill = sys.act ? `color-mix(in srgb, var(--accent) ${Math.round(10 + heat * 75)}%, var(--surface))` : "var(--surface)"; d.append(fill);
+      const n = s("text", {y: 0.5}, "n"); n.textContent = sys.members.length - 1; d.append(n);
+      if (sys.needs.length) { const bx = r * 0.75, by = -r * 0.75; d.append(s("circle", {cx: f1(bx), cy: f1(by), r: 7.5}, "badge")); const bt = s("text", {x: f1(bx), y: f1(by + 0.5)}, "badge-t"); bt.textContent = sys.needs.length; d.append(bt); }
+      const wrap = s("g", {}, "sun " + root.status + (field.needsUser(root) ? " needs" : "")); wrap.append(d); g.append(wrap);
+      if (sys.needs.length) g.append(label(0, r + 14, short(root.name || root.title, 24), null, sys.needs.length ? "needs" : "", "middle"));
+      attach(g, sys, field); return g;
+    }
+    if (sys.live.length) g.append(s("circle", {r: f1(sys.R1 * k)}, "orbit"));
+    if (sys.done.length) g.append(s("circle", {r: f1(sys.Rd * k)}, "orbit outer"));
+    // Sun
+    const sunR = sys.sunR * clamp(Math.pow(view.k, 0.6), 0.8, 2.4), sun = bodyEl(root, field, sunR, "sun");
+    sun.insertBefore(s("circle", {r: f1(sunR + 4)}, "corona"), sun.querySelector(".core"));
+    const corona = sun.querySelector(".corona"); if (corona && root.status === "working") corona.style.animationDelay = -((t + hash(root.id) * 2600) % 2600) + "ms";
+    g.append(sun);
+    const needsRoot = field.needsUser(root);
+    const sunLabelCls = needsRoot ? "needs" : root.status === "working" ? "working" : root.status === "done" || root.status === "idle" ? "quiet" : "";
+    const sunSub = focused || sys.lone && (k >= 1.3 || !scaleLarge) ? short(lastStep(field, root) || doing(field, root), 44) : null;
+    const showSun = !scaleLarge || k >= RESOLVE_ZOOM || needsRoot || fresh || focused;
+    if (showSun) g.append(sys.lone ? label(sunR + 8, 3.5, short(root.name || root.title, 30), sunSub, sunLabelCls) : label(0, sys.R * k + 4, short(root.name || root.title, 34), sunSub, sunLabelCls, "middle"));
+    // Planets and moons
+    const showPlanetLabels = focused || k >= 2.6;
+    for (const p of sys.planets) {
+      const b = cur.L.bodies.get(p.id), pr = br(p.status === "done" ? 2.6 : 3.8);
+      const pos = () => { const a = angle(b, performance.now()); return {x: Math.cos(a) * b.orbit * k, y: Math.sin(a) * b.orbit * k}; };
+      const a0 = angle(b, t), pg = s("g", {transform: `translate(${f1(Math.cos(a0) * b.orbit * k)},${f1(Math.sin(a0) * b.orbit * k)})`});
+      const moons = sys.moonsOf.get(p.id);
+      if (moons.length) pg.append(s("circle", {r: f1(sys.rm * k)}, "orbit moon"));
+      pg.append(bodyEl(p, field, pr));
+      for (const m of moons) {
+        const mb = cur.L.bodies.get(m.id), mr = br(m.status === "done" ? 1.8 : 2.4), ma = angle(mb, t);
+        const mg = s("g", {transform: `translate(${f1(Math.cos(ma) * mb.orbit * k)},${f1(Math.sin(ma) * mb.orbit * k)})`});
+        mg.append(bodyEl(m, field, mr, "moon"));
+        if (showPlanetLabels && k >= 3) mg.append(label(mr + 4, 3, short(m.name || m.title, 22), null, m.status === "done" ? "quiet" : field.needsUser(m) ? "needs" : ""));
+        pg.append(mg);
+        if (mb.w) movers.push({g: mg, pos: now => { const a = angle(mb, now); return {x: Math.cos(a) * mb.orbit * k, y: Math.sin(a) * mb.orbit * k}; }});
+      }
+      if (showPlanetLabels) pg.append(label(pr + 6, 3.5, short(p.name || p.title, 30), lastStep(field, p), field.needsUser(p) ? "needs" : p.status === "working" ? "working" : p.status === "done" ? "quiet" : ""));
+      g.append(pg);
+      if (b.w) movers.push({g: pg, pos});
+    }
+    attach(g, sys, field);
+    return g;
+  }
+  // Drag a system to pin it; a press without movement peeks the body (or zooms into a sun).
+  function attach(g, sys, field) {
+    const {api} = cur; let downOn = null;
+    g.addEventListener("pointerdown", e => { e.stopPropagation(); downOn = e.target.closest?.("[data-id]") || null; });
+    Mockup.drag(g, {
+      onStart: () => { cancelAnimationFrame(anim); dragging = sys.id; api.unpeek(); },
+      onMove: ({mx, my}) => { sys.x += mx / view.k; sys.y += my / view.k; sys.pinned = true; pins.set(sys.id, {fx: sys.x / size.w, fy: sys.y / size.h}); g.setAttribute("transform", `translate(${f1(X(sys.x))},${f1(Y(sys.y))})`); },
+      onEnd: ({dragged}) => {
+        if (dragged) { dragging = null; draw(); return; }
+        activate(sys, downOn?.dataset.id || sys.id, downOn || g, field);
+      },
+    });
+    g.addEventListener("keydown", e => { if (e.key !== "Enter" && e.key !== " ") return; const el = e.target.closest("[data-id]"); if (!el) return; e.preventDefault(); activate(sys, el.dataset.id, el, field); });
+  }
+  function activate(sys, id, el, field) {
+    const {api} = cur;
+    if (!resolved(sys) || (id === sys.id && !sys.lone && focusSys !== sys.id)) { zoomInto(sys); return; }
+    const r = el.getBoundingClientRect();
+    api.peek(id, el, {x: r.right, y: r.top});
+    markPeeked();
+  }
+  function markPeeked() {
+    const p = cur.api.peeked || null; if (p === lastPeeked) return; lastPeeked = p;
+    for (const g of built.svg.querySelectorAll(".body")) g.classList.toggle("peeked", g.dataset.id === p);
+  }
+  // Waiting-on edges only for the hovered or peeked body, plus standing warm edges into anything that needs you from another system.
+  function drawEdges(t) {
+    if (!cur?.edges) return;
+    const {field, L, edges} = cur;
+    edges.replaceChildren();
+    const line = (from, to, cls) => {
+      const p = bodyAt(from, t), q = bodyAt(to, t); if (!p || !q) return;
+      const dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy); if (d < 12) return;
+      const l = s("line", {x1: f1(p.x + dx / d * 6), y1: f1(p.y + dy / d * 6), x2: f1(q.x - dx / d * 9), y2: f1(q.y - dy / d * 9)}, cls || "");
+      l.setAttribute("marker-end", `url(#orb-arrow${cls ? "-warm" : ""})`); edges.append(l);
+    };
+    let standing = false;
+    for (const b of L.systems.flatMap(x => x.needs)) for (const id of field.blocks(b.id)) if (L.bodies.get(id)?.sys !== L.bodies.get(b.id)?.sys) { line(id, b.id, "standing"); standing = true; }
+    cur.standing = standing;
+    const focus = hoverId || cur.api.peeked, a = focus && field.byId(focus); if (!a) return;
+    for (const w of field.agentWaits(a)) line(a.id, w.id);
+    for (const id of field.blocks(a.id)) line(id, a.id, field.needsUser(a) ? "blocks" : "");
+  }
+
+  Mockup.mount({
+    number: 13, title: "Orbits", spectrum: "round two", fullBleed: true,
+    summary: "Each root agent is a sun and its sub-agents orbit it. Moving means working, height means age, and needs-you sits on the surface with a one-click answer.",
+    signals: {current: ["status", "tool_activity", "age", "pending_approval", "created_by", "client", "title", "phase", "summary", "next_action"], proposed: ["ask", "name", "plan"]},
+    notes: "The sky needs only free signals: parent/child gives the orbits, runtime status gives motion and color, tool pulses give orbital speed and system size, and age gives height. Names, plan steps and structured ask options only enrich the labels, the lens and the surface.",
+    render(field, stage, api) {
+      if (!built || !built.sky.isConnected) build(stage, api);
+      surfaceItems(field, api);
+      const w = built.sky.clientWidth, h = built.sky.clientHeight; if (w) size = {w, h};
+      cur = {field, api, L: null, edges: null, movers: [], standing: false};
+      if (focusSys && !field.byId(focusSys)) focusSys = null;
+      cur.L = layout(field);
+      draw();
+    },
+  });
+})();
+</script>
+</body>
+</html>

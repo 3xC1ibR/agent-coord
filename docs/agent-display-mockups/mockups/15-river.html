@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 15 · River</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Phases flow left to right. Agents are particles in the current; needs-you is caught on rocks above it; done work settles in the delta. */
+    #stage { display: flex; flex-direction: column; overflow: hidden; }
+    .rapids { position: relative; flex: none; border-bottom: 1px solid color-mix(in srgb, var(--warm) 25%, var(--line)); background: color-mix(in srgb, var(--warm-tint) 35%, var(--paper)); }
+    .rapids.open { max-height: 44vh; overflow-y: auto; }
+    .rapids.calm { background: var(--paper); border-bottom-color: var(--line); display: flex; align-items: center; padding: 0 28px; color: var(--muted); font-size: 12px; }
+    .rock { position: absolute; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto auto; gap: 1px 10px; align-items: center; padding: 7px 10px 7px 9px; background: var(--surface); border: 1px solid color-mix(in srgb, var(--warm) 45%, var(--line)); border-radius: 20px 14px 18px 12px / 14px 18px 12px 20px; box-shadow: 0 2px 8px color-mix(in srgb, var(--ink) 6%, transparent); cursor: pointer; transition: left .5s ease, top .5s ease; }
+    .rock:hover { border-color: var(--warm); }
+    .rock .pebble { grid-row: 1 / span 3; width: 12px; height: 12px; border-radius: 50%; background: var(--warm); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warm) 20%, transparent); }
+    .rock.failed .pebble { background: var(--danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 18%, transparent); }
+    .rock .who { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 11.5px; font-weight: 550; }
+    .rock .who span, .rock .who small { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .rock .who span { flex-shrink: .4; }
+    .rock .who small { font-weight: 400; font-size: 10px; color: var(--muted); }
+    .rock .q { font-size: 11px; line-height: 1.4; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rock .q b { font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); margin-right: 5px; }
+    .rock .act { display: flex; gap: 5px; align-items: center; margin-top: 3px; min-width: 0; overflow: hidden; }
+    .rock .act .btn { padding: 3px 9px; font-size: 11px; white-space: nowrap; }
+    .rock .act .muted { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 9.5px var(--mono); white-space: nowrap; }
+    .rock.more { grid-template-columns: 1fr; place-items: center; font: 11px var(--mono); color: var(--warm); background: transparent; border-style: dashed; }
+
+    .river { position: relative; flex: 1; min-height: 0; overflow: visible; }
+    .river svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+    .bg .water { fill: color-mix(in srgb, var(--accent) 5%, transparent); }
+    .bg .bank { fill: none; stroke: color-mix(in srgb, var(--accent) 22%, var(--line)); stroke-width: 1; }
+    .bg .divider { stroke: var(--line); stroke-dasharray: 2 5; }
+    .bg .channel { fill: none; stroke: color-mix(in srgb, var(--accent) 16%, transparent); stroke-width: 1; }
+    .bg .eddy { fill: none; stroke: color-mix(in srgb, var(--ink) 14%, transparent); stroke-width: 1; stroke-dasharray: 3 3; }
+    .bg .silt-top { stop-color: var(--ok); stop-opacity: 0; } .bg .silt-bottom { stop-color: var(--ink); stop-opacity: .07; }
+    .edges line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+    .edges line.blocks { stroke: var(--warm); }
+    .edges line.lineage { stroke: color-mix(in srgb, var(--ink) 30%, transparent); stroke-dasharray: none; }
+    .phase-label { position: absolute; top: 8px; transform: translateX(-50%); font: 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); white-space: nowrap; pointer-events: none; }
+    .phase-label.delta { color: var(--ok); }
+
+    .p { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--dot-idle); cursor: grab; outline: 0; transition: left .9s ease, top .9s ease, opacity .6s; z-index: 1; }
+    .p:hover, .p.peeked { z-index: 4; }
+    .p.dragging, .river.dragging .p, .river.dragging .school { transition: none; animation: none; }
+    .p.working { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+    .p.working.drift { animation: drift var(--dur, 4s) ease-in-out infinite; }
+    .p.blocked, .p.failed { background: var(--surface); box-shadow: inset 0 0 0 2px var(--muted); }
+    .p.failed { box-shadow: inset 0 0 0 2px var(--danger); }
+    .p.idle { opacity: .85; }
+    .p.done { background: var(--ok); opacity: var(--silt, .6); }
+    .p.pinned::after { content: ""; position: absolute; inset: -5px; border: 1px solid var(--line-strong); border-radius: 50%; }
+    .p.peeked::before { content: ""; position: absolute; inset: -7px; border: 2px solid var(--ink); border-radius: 50%; }
+    .p .wake { position: absolute; right: 50%; top: 50%; width: var(--wake, 12px); height: 2px; margin-top: -1px; border-radius: 2px; pointer-events: none;
+      background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 45%, transparent)); }
+    .p .label { position: absolute; left: calc(100% + 6px); top: 50%; transform: translateY(-50%); font-size: 11px; white-space: nowrap; color: var(--ink); pointer-events: none; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+    .p .label small { margin-left: 5px; font-size: 10px; color: var(--accent); }
+    .p.flip .label { left: auto; right: calc(100% + 6px); }
+    .p.idle .label, .p.done .label, .p.blocked .label { color: var(--muted); }
+    .river[data-labels="hover"] .p .label, .river[data-labels="active"] .p:not(.working):not(.pinned) .label { display: none; }
+    .river .p:hover .label { display: block !important; max-width: 300px; background: var(--surface); padding: 2px 7px; border-radius: 4px; box-shadow: 0 2px 10px var(--shadow); color: var(--ink); }
+    .sat { position: absolute; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: var(--dot-idle); cursor: pointer; }
+    .sat.working { background: var(--accent); } .sat.done { background: var(--ok); } .sat.failed { background: var(--danger); }
+    .sat.blocked { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .thread { position: absolute; height: 1px; background: color-mix(in srgb, var(--ink) 22%, transparent); transform-origin: 0 50%; pointer-events: none; }
+    .sat-count { position: absolute; transform: translate(-100%, -50%); padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); font: 9px var(--mono); color: var(--muted); cursor: pointer; white-space: nowrap; line-height: 13px; }
+    .sat-count:hover { color: var(--ink); border-color: var(--hover-line); }
+
+    .school { position: absolute; display: grid; place-items: center; transform: translate(-50%, -50%); border-radius: 50%; border: 1px solid var(--line-strong); background: color-mix(in srgb, var(--surface) 70%, transparent); font: 600 11px var(--mono); color: var(--ink); cursor: zoom-in; transition: left .9s ease, top .9s ease; z-index: 2; }
+    .school.current { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+    .school.hold { border-style: dashed; }
+    .school.delta { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); background: color-mix(in srgb, var(--ok) 10%, var(--surface)); color: var(--muted); }
+    .school.eddy { color: var(--muted); }
+    .school:hover { border-color: var(--ink); }
+    .split-zone { position: absolute; border: 1px dashed var(--line-strong); border-radius: 14px; pointer-events: none; }
+
+    .tools { position: absolute; left: 16px; bottom: 10px; z-index: 5; display: flex; gap: 8px; align-items: center; font-size: 10.5px; color: var(--muted); }
+    .tools select { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font-size: 11px; }
+    @keyframes drift { 0%, 100% { transform: translate(-3px, 0); } 50% { transform: translate(5px, -1.5px); } }
+    @media (prefers-reduced-motion: reduce) { .p.working.drift { animation: none; } .p, .school, .rock { transition: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60000, HOUR = 3600000, PHASES = AgentField.PHASES, FLOW = 7;   // seven flowing phases, then the delta
+  const hash = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  const depthFor = age => Math.min(1, Math.log1p(age / MIN) / Math.log1p(24 * 60));
+  const short = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+
+  // View state kept across re-renders.
+  const placed = new Map();          // pinned particles: id -> {fx, fy}
+  const openKids = new Set();        // parents whose sub-agents are fanned out
+  const openSchools = new Set();     // schools split by click
+  let hoverSchool = null, hoverRect = null, hovered = null, rocksOpen = false;
+  const SCALE = new URLSearchParams(location.search).get("scale");
+  let labels = SCALE === "large" ? "hover" : SCALE === "medium" ? "active" : "all";
+  let band, river, bg, edges, tools, labelBox, zone;
+  const nodes = new Map(), schoolEls = new Map();
+  let rockAt = new Map(), schoolAt = new Map(), lay = null;
+
+  function build(stage, api) {
+    stage.classList.add("full-bleed"); stage.replaceChildren();
+    band = $("div", "rapids"); river = $("div", "river"); river.dataset.labels = labels;
+    const svg = cls => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("class", cls); return s; };
+    bg = svg("bg"); edges = svg("edges"); labelBox = $("div"); zone = $("div", "split-zone"); zone.hidden = true;
+    tools = $("div", "tools");
+    const lab = $("select"); for (const [v, l] of [["all", "Labels: all"], ["active", "Labels: moving"], ["hover", "Labels: on hover"]]) { const o = $("option", null, l); o.value = v; o.selected = v === labels; lab.append(o); }
+    lab.onchange = () => { labels = lab.value; river.dataset.labels = labels; };
+    const reset = $("button", "btn small", "Reset layout"); reset.type = "button";
+    reset.onclick = () => { placed.clear(); openKids.clear(); openSchools.clear(); hoverSchool = null; api.rerender(); };
+    tools.append(lab, reset, $("span", null, "Drag a particle to pin it · click to peek"));
+    river.append(bg, labelBox, zone, edges, tools);
+    stage.append(band, river);
+    river.addEventListener("pointermove", e => {
+      if (!hoverSchool || !hoverRect) return;
+      const r = river.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+      if (x < hoverRect.x0 || x > hoverRect.x1 || y < hoverRect.y0 || y > hoverRect.y1) { hoverSchool = null; api.rerender(); }
+    });
+    river.addEventListener("pointerleave", () => { if (hoverSchool) { hoverSchool = null; api.rerender(); } });
+    window.addEventListener("resize", () => { river.classList.add("dragging"); api.rerender(); requestAnimationFrame(() => requestAnimationFrame(() => river.classList.remove("dragging"))); });
+    nodes.clear(); schoolEls.clear();
+  }
+
+  /* ---------- Geometry ---------- */
+  function geometry(W, H) {
+    const cw = W * 0.82 / FLOW, deltaX = FLOW * cw, top = 30, bottom = H - 14;
+    return {W, H, cw, deltaX, top, bottom, h: bottom - top};
+  }
+  // Progress within the current phase: plan steps when the agent reports them, otherwise time since it entered the phase (checkpoint history).
+  function progressIn(field, a) {
+    if (a.plan.length) { const {done, total} = field.progress(a); return Math.min(1, (done + (a.status === "working" ? 0.5 : 0)) / total); }
+    let since = a.createdAt; for (let i = a.history.length - 1; i >= 0 && a.history[i].phase === a.phase; i--) since = a.history[i].at;
+    return 1 - Math.exp(-(field.now - since) / (90 * MIN));
+  }
+  const stacked = (field, list) => list.length < (field.scale === "large" ? 5 : 7);
+  const inDelta = a => a.status === "done" || PHASES.indexOf(a.phase) >= FLOW;
+  const laneOf = a => inDelta(a) ? "delta" : a.status === "idle" ? "eddy" : a.status === "working" ? "current" : "hold";
+  const flowX = (field, g, a) => { const i = Math.max(0, PHASES.indexOf(a.phase)); return (i + 0.12 + progressIn(field, a) * 0.76) * g.cw; };
+
+  /* ---------- Rocks: needs-you, caught above the place it would be in the stream ---------- */
+  function drawRocks(field, api, W, g0) {
+    const asks = field.asks();
+    band.replaceChildren(); rockAt = new Map();
+    band.classList.toggle("calm", !asks.length); band.classList.toggle("open", rocksOpen);
+    if (!asks.length) { band.style.height = "44px"; band.append($("span", null, "Nothing is caught. Everything is in the stream.")); return 44; }
+    const large = field.scale === "large", RW = large ? 252 : 280, RH = 66, GAP = 8, PAD = 10, MORE = 92, maxRows = rocksOpen ? 99 : large ? 2 : 3;
+    const right = W - 12 - (rocksOpen ? MORE + GAP : 0);
+    const want = asks.map(a => ({a, cx: inDelta(a) ? g0.deltaX : flowX(field, g0, a)})).sort((x, y) => x.cx - y.cx);
+    const rows = [], over = [];
+    for (const item of want) {
+      let placedRow = -1, x = 0;
+      for (let r = 0; r < maxRows; r++) {
+        const end = rows[r] ?? -Infinity;
+        x = Math.max(12, end + GAP, Math.min(item.cx - RW / 2, right - RW));
+        if (x + RW <= right) { placedRow = r; break; }
+      }
+      if (placedRow < 0) { over.push(item); continue; }
+      rows[placedRow] = x + RW; item.x = x; item.row = placedRow;
+    }
+    // Overflow: the last row gives up its rightmost slot to a "more" rock.
+    if (over.length) {
+      const last = maxRows - 1, inLast = want.filter(i => i.row === last).sort((x, y) => x.x - y.x);
+      while (inLast.length && inLast[inLast.length - 1].x + RW > W - 12 - MORE - GAP) { const bump = inLast.pop(); over.unshift(bump); bump.row = undefined; }
+      rows[last] = inLast.length ? inLast[inLast.length - 1].x + RW : 0;
+    }
+    const used = Math.max(1, rows.filter(v => v != null).length), bandH = PAD * 2 + used * RH + (used - 1) * GAP;
+    band.style.height = bandH + "px";
+    for (const item of want) {
+      if (item.row == null) continue;
+      const a = item.a, parent = field.parent(a.id);
+      const rock = $("div", "rock " + a.status); rock.dataset.id = a.id; rock.tabIndex = 0;
+      rock.style.left = item.x + "px"; rock.style.top = (PAD + item.row * (RH + GAP)) + "px"; rock.style.width = RW + "px"; rock.style.height = RH + "px";
+      rock.title = (a.name ? a.name + " · " : "") + a.title + "\n" + (a.ask?.question || a.next.action);
+      rock.append($("span", "pebble"));
+      const who = $("div", "who"); who.append($("span", null, a.name || a.title)); if (parent) who.append($("small", null, "from " + (parent.name || short(parent.title, 22)))); rock.append(who);
+      const q = $("div", "q"); q.append($("b", null, a.ask ? (a.ask.kind === "failure" ? "failed" : a.ask.kind) : "you")); q.append(a.ask ? a.ask.question : a.next.action); rock.append(q);
+      const act = $("div", "act");
+      if (a.ask?.options?.length) {
+        const first = a.ask.options[0], b = $("button", "btn small primary", first.label); b.type = "button"; b.onclick = e => { e.stopPropagation(); field.answer(a.id, first.id); }; act.append(b);
+        if (a.ask.options.length > 1) { const m = $("button", "btn small quiet", "More…"); m.type = "button"; m.onclick = e => { e.stopPropagation(); api.peek(a.id, rock); }; act.append(m); }
+      } else { const b = $("button", "btn small", a.ask?.freeText ? "Answer…" : "Open"); b.type = "button"; b.onclick = e => { e.stopPropagation(); api.peek(a.id, rock); }; act.append(b); }
+      const impact = field.impact(a.id).length;
+      act.append($("span", "muted", (impact ? "blocks " + impact + " · " : "") + field.relativeTime(a.ask?.askedAt || a.updatedAt)));
+      rock.append(act);
+      rock.onclick = e => { if (!e.target.closest("button")) api.peek(a.id, rock); };
+      rock.onkeydown = e => { if (e.key === "Enter" && e.target === rock) api.peek(a.id, rock); };
+      band.append(rock);
+      rockAt.set(a.id, {x: item.x + 15, y: PAD + item.row * (RH + GAP) + RH / 2 - bandH});   // river coordinates, used to release particles from the rock
+    }
+    if (over.length || rocksOpen) {
+      const last = rocksOpen ? used - 1 : maxRows - 1;
+      const m = $("button", "rock more", rocksOpen ? "fewer" : "+" + over.length + " more"); m.type = "button";
+      m.style.left = (W - 12 - MORE) + "px"; m.style.top = (PAD + last * (RH + GAP)) + "px"; m.style.width = MORE + "px"; m.style.height = RH + "px";
+      m.onclick = () => { rocksOpen = !rocksOpen; api.rerender(); };
+      band.append(m);
+    }
+    return bandH;
+  }
+
+  /* ---------- Flow layout ---------- */
+  function layout(field, g) {
+    const rocks = new Set(field.asks().map(a => a.id));
+    const flow = [], host = new Map(), sats = new Map();
+    for (const {agent: a} of field.treeRows()) {
+      if (rocks.has(a.id)) continue;
+      const p = a.parentId && field.byId(a.parentId);
+      // Provider-native sub-agents and terminal delegates ride with their creator; app specialists flow at their own phase.
+      // If the creator is caught on a rock, its helpers float on their own.
+      if (p && a.kind !== "app" && !rocks.has(p.id)) { const h = host.get(p.id) || p.id; host.set(a.id, h); if (!sats.has(h)) sats.set(h, []); sats.get(h).push(a); }
+      else flow.push(a);
+    }
+    const pos = new Map(), eddies = new Map();
+    for (const a of flow) {
+      const pin = placed.get(a.id);
+      if (pin) { pos.set(a.id, {x: pin.fx * g.W, y: pin.fy * g.H, pinned: true, lane: laneOf(a)}); continue; }
+      const lane = laneOf(a), j = hash(a.id + "y");
+      let x, y;
+      if (lane === "delta") { const age = field.age(a); x = g.deltaX + 18 + hash(a.id) * (g.W - g.deltaX - 36); y = g.top + 10 + depthFor(age) * (g.h - 20); }
+      else if (lane === "eddy") { const col = Math.max(0, PHASES.indexOf(a.phase)); if (!eddies.has(col)) eddies.set(col, []); eddies.get(col).push(a); continue; }
+      else { x = flowX(field, g, a); y = g.top + (lane === "current" ? 0.1 + j * 0.52 : 0.16 + j * 0.46) * g.h; }
+      pos.set(a.id, {x, y, pinned: false, lane});
+    }
+    // Idle agents circle in an eddy near the lower bank of their phase.
+    for (const [col, list] of eddies) {
+      list.sort((x, y) => field.age(x) - field.age(y));
+      const cx = (col + 0.5) * g.cw, cy = g.top + 0.83 * g.h;
+      // A few idle agents stack in a loose curl so labels stay legible; many spiral (and school at scale).
+      list.forEach((a, k) => {
+        if (stacked(field, list)) { pos.set(a.id, {x: cx - 20 + Math.sin(k * 1.3) * 10, y: cy + (k - (list.length - 1) / 2) * 17, pinned: false, lane: "eddy", col}); return; }
+        const ang = k * 2.4, r = k ? 9 + 7 * Math.sqrt(k) : 0; pos.set(a.id, {x: cx + Math.cos(ang) * r * 1.4, y: cy + Math.sin(ang) * r * 0.7, pinned: false, lane: "eddy", col});
+      });
+    }
+    // Keep particles in their own phase band and out of each other's way.
+    const items = [...pos.entries()].filter(([, p]) => !p.pinned && p.lane !== "eddy").sort((x, y) => x[0].localeCompare(y[0]));
+    const bounds = (id, p) => p.lane === "delta" ? [g.deltaX + 10, g.W - 10] : (() => { const i = Math.max(0, PHASES.indexOf(field.byId(id).phase)); return [i * g.cw + 10, (i + 1) * g.cw - 10]; })();
+    const reach = field.scale === "large" ? 30 : 210, gapY = field.scale === "large" ? 16 : 20;
+    for (let it = 0; it < 8; it++) for (let i = 0; i < items.length; i++) for (let k = i + 1; k < items.length; k++) {
+      const p = items[i][1], q = items[k][1], dy = q.y - p.y;
+      if (Math.abs(dy) >= gapY || Math.max(p.x, q.x) - 40 > Math.min(p.x, q.x) + reach) continue;
+      const push = (gapY - Math.abs(dy)) / 2 + 0.5, dir = dy > 0 || (!dy && items[i][0] < items[k][0]) ? 1 : -1;
+      p.y -= dir * push; q.y += dir * push;
+    }
+    for (const [id, p] of items) { const [x0, x1] = bounds(id, p); p.x = Math.max(x0, Math.min(x1, p.x)); p.y = Math.max(g.top + 6, Math.min(g.bottom - 6, p.y)); }
+    return {flow, pos, sats, eddies, host};
+  }
+
+  function schools(field, g, L) {
+    const threshold = field.scale === "large" ? 5 : 9;
+    const groups = new Map();
+    for (const a of L.flow) {
+      const p = L.pos.get(a.id); if (p.pinned) continue;
+      const k = p.lane === "delta" ? "delta:" + Math.min(3, Math.floor(depthFor(field.age(a)) * 4)) : p.lane + ":" + Math.max(0, PHASES.indexOf(a.phase));
+      if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a);
+    }
+    const hidden = new Set(), list = [];
+    for (const [key, members] of groups) {
+      if (members.length < threshold || openSchools.has(key) || hoverSchool === key) continue;
+      const x = members.reduce((s, a) => s + L.pos.get(a.id).x, 0) / members.length, y = members.reduce((s, a) => s + L.pos.get(a.id).y, 0) / members.length;
+      for (const a of members) hidden.add(a.id);
+      list.push({key, members, x, y, lane: key.split(":")[0]});
+    }
+    return {hidden, list, groups};
+  }
+
+  /* ---------- Rendering ---------- */
+  function drawBackground(field, g, L) {
+    bg.replaceChildren(); labelBox.replaceChildren();
+    const NS = bg.namespaceURI, mk = (tag, attrs) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); bg.append(n); return n; };
+    const bankTop = x => g.top - 6 + Math.sin(x / 70) * 3, bankBottom = x => g.bottom + 4 + Math.sin(x / 85 + 1) * 3 + (x > g.deltaX ? (x - g.deltaX) * 0.04 : 0);
+    let top = "", bot = "";
+    for (let x = 0; x <= g.W; x += 24) { top += (x ? " L" : "M") + x + "," + bankTop(x).toFixed(1); bot = " L" + x + "," + bankBottom(x).toFixed(1) + bot; }
+    mk("path", {d: top + " L" + g.W + "," + bankBottom(g.W).toFixed(1) + bot.replace(/^ L/, " L") + " Z", class: "water"});
+    mk("path", {d: top, class: "bank"});
+    let b2 = ""; for (let x = 0; x <= g.W; x += 24) b2 += (x ? " L" : "M") + x + "," + bankBottom(x).toFixed(1); mk("path", {d: b2, class: "bank"});
+    // Sediment: the delta darkens toward the bottom, where older results settle.
+    const defs = mk("defs", {}); const grad = document.createElementNS(NS, "linearGradient"); grad.id = "silt"; grad.setAttribute("x1", "0"); grad.setAttribute("y1", "0"); grad.setAttribute("x2", "0"); grad.setAttribute("y2", "1");
+    for (const [o, c] of [["0", "silt-top"], ["1", "silt-bottom"]]) { const s = document.createElementNS(NS, "stop"); s.setAttribute("offset", o); s.setAttribute("class", c); grad.append(s); } defs.append(grad);
+    mk("rect", {x: g.deltaX, y: g.top - 6, width: g.W - g.deltaX, height: g.h + 14, fill: "url(#silt)"});
+    for (let k = 0; k < 4; k++) { const ty = g.top + (0.15 + k * 0.24) * g.h; mk("path", {d: `M${g.deltaX - 30},${g.top + 0.4 * g.h} C${g.deltaX + 30},${g.top + 0.4 * g.h} ${g.deltaX + 40},${ty} ${g.W},${ty + 10}`, class: "channel"}); }
+    for (let i = 1; i <= FLOW; i++) mk("line", {x1: i * g.cw, x2: i * g.cw, y1: g.top, y2: g.bottom, class: "divider"});
+    for (const [col, list] of L.eddies) { const cx = (col + 0.5) * g.cw, cy = g.top + 0.83 * g.h, r = 12 + 7 * Math.sqrt(list.length); const st = stacked(field, list); mk("ellipse", {cx, cy, rx: st ? 34 : r * 1.5, ry: st ? 12 + list.length * 8.5 : r * 0.75, class: "eddy"}); }
+    PHASES.forEach((p, i) => { const l = $("div", "phase-label" + (i >= FLOW ? " delta" : ""), i >= FLOW ? "Delta · done" : AgentField.PHASE_LABELS[p]); l.style.left = (i >= FLOW ? g.deltaX + (g.W - g.deltaX) / 2 : (i + 0.5) * g.cw) + "px"; labelBox.append(l); });
+  }
+
+  function particle(field, api, a, p, L, g) {
+    let el = nodes.get(a.id);
+    if (!el) {
+      el = $("div", "p"); el.tabIndex = 0; el.dataset.id = a.id; nodes.set(a.id, el); river.insertBefore(el, tools);
+      Mockup.drag(el, {
+        onStart: () => river.classList.add("dragging"),
+        onMove: ({mx, my}) => { const r = river.getBoundingClientRect(); const cur = placed.get(a.id) || {fx: parseFloat(el.style.left) / r.width, fy: parseFloat(el.style.top) / r.height};
+          const fx = Math.max(0.01, Math.min(0.99, cur.fx + mx / r.width)), fy = Math.max(0.03, Math.min(0.98, cur.fy + my / r.height)); placed.set(a.id, {fx, fy}); el.style.left = fx * r.width + "px"; el.style.top = fy * r.height + "px"; },
+        onEnd: ({dragged}) => { river.classList.remove("dragging"); if (dragged) api.rerender(); else api.peek(a.id, el); },
+      });
+      el.onkeydown = e => { if (e.key === "Enter" && e.target === el) api.peek(a.id, el); };
+      el.onpointerenter = () => { hovered = a.id; drawEdges(api.field, api); };
+      el.onpointerleave = () => { if (hovered === a.id) { hovered = null; drawEdges(api.field, api); } };
+      // Released from a rock or split from a school: start where it was, then flow to its place.
+      const origin = rockAt.get(a.id) || schoolAt.get(a.id);
+      if (origin) { el.style.left = origin.x + "px"; el.style.top = origin.y + "px"; void el.offsetWidth; }
+    }
+    const pulses = field.pulsesSince(a, 15 * MIN).length;
+    el.className = "p " + a.status + (p.pinned ? " pinned" : " drift") + (api.peeked === a.id ? " peeked" : "") + (p.x > g.W - 190 ? " flip" : "");
+    el.style.setProperty("--dur", Math.max(1.4, 6 - pulses * 0.55).toFixed(2) + "s");
+    el.style.setProperty("--wake", (6 + Math.min(8, pulses) * 4) + "px");
+    if (a.status === "done") el.style.setProperty("--silt", (0.85 - depthFor(field.age(a)) * 0.5).toFixed(2));
+    const kids = L.sats.get(a.id) || [], desc = field.descendants(a.id).length;
+    const size = 11 + Math.min(6, kids.length * 1.5);
+    el.style.width = el.style.height = size + "px"; el.style.margin = (-size / 2) + "px 0 0 " + (-size / 2) + "px";
+    el.style.left = p.x + "px"; el.style.top = p.y + "px";
+    const doing = a.status === "working" ? (a.activity || field.toolLabel(a)) : a.status === "done" ? "Done " + field.relativeTime(a.updatedAt) : a.status === "idle" ? "Idle since " + field.relativeTime(field.lastActivity(a)) : field.statusLabel(a);
+    const parent = field.parent(a.id);
+    el.title = (a.name ? a.name + " · " : "") + a.title + "\n" + doing + (parent ? "\nFrom " + (parent.name || parent.title) : "") + (desc ? "\n" + desc + " sub-agents" : "") + (p.pinned ? "\nPinned" : "");
+    el.replaceChildren();
+    if (a.status === "working" && !p.pinned) el.append($("span", "wake"));
+    const label = $("span", "label", a.name || short(a.title, 30));
+    if (a.status === "working" && (a.activity || field.toolLabel(a))) label.append($("small", null, a.activity || field.toolLabel(a)));
+    el.append(label);
+    // Sub-agents travel alongside, upstream of the parent, on short threads. More than three collapse into a count.
+    if (kids.length) {
+      const c = size / 2, open = kids.length <= 3 || openKids.has(a.id);
+      const shown = open ? kids : [];
+      shown.forEach((k, i) => {
+        const dx = -(c + 12 + i * 9), dy = (i % 2 ? 1 : -1) * (5 + i * 1.5);
+        const th = $("span", "thread"); th.style.left = c + "px"; th.style.top = c + "px"; th.style.width = Math.hypot(dx, dy) + "px"; th.style.transform = "rotate(" + Math.atan2(dy, dx) + "rad)"; el.append(th);
+        const s = $("span", "sat " + k.status); s.style.left = (c + dx) + "px"; s.style.top = (c + dy) + "px";
+        s.title = k.title + "\n" + (k.status === "working" ? (k.activity || field.toolLabel(k) || "Working") : k.status === "done" ? "Done · " + (field.recentSteps(k).at(-1)?.label || "") : field.statusLabel(k));
+        s.onpointerdown = e => e.stopPropagation(); s.onclick = e => { e.stopPropagation(); api.peek(k.id, s); };
+        el.append(s);
+      });
+      if (!open || kids.length > 3) {
+        const n = $("span", "sat-count", open ? "−" : "+" + kids.length); n.style.left = (-(open ? kids.length * 9 + 14 : 6)) + "px"; n.style.top = (c + (open ? 0 : 0)) + "px";
+        n.title = open ? "Fold sub-agents" : kids.length + " sub-agents: " + kids.map(k => k.title).slice(0, 6).join(", ") + (kids.length > 6 ? "…" : "") + "\nClick to fan out";
+        n.onpointerdown = e => e.stopPropagation(); n.onclick = e => { e.stopPropagation(); open ? openKids.delete(a.id) : openKids.add(a.id); api.rerender(); };
+        el.append(n);
+      }
+    }
+    return el;
+  }
+
+  function drawEdges(field, api) {
+    edges.replaceChildren();
+    const focus = hovered || api.peeked; if (!focus || !lay) return;
+    const a = field.byId(focus); if (!a) return;
+    const at = id => { const p = lay.L.pos.get(id); if (p && nodes.has(id)) return p; const h = lay.L.host.get(id); if (h && nodes.has(h)) return lay.L.pos.get(h); return rockAt.get(id) || null; };
+    const from = at(focus); if (!from) return;
+    const line = (to, cls) => { if (!to || (to.x === from.x && to.y === from.y)) return; const l = document.createElementNS(edges.namespaceURI, "line"); for (const [k, v] of [["x1", from.x], ["y1", from.y], ["x2", to.x], ["y2", to.y]]) l.setAttribute(k, v); if (cls) l.setAttribute("class", cls); edges.append(l); };
+    const parent = field.parent(a.id); if (parent && !lay.L.host.has(a.id)) line(at(parent.id), "lineage");
+    for (const k of field.children(a.id)) if (!lay.L.host.has(k.id)) line(at(k.id), "lineage");
+    for (const w of field.agentWaits(a)) if (w.id !== parent?.id && w.parentId !== a.id) line(at(w.id));
+    for (const id of field.blocks(a.id)) line(at(id), "blocks");
+  }
+
+  function render(field, stage, api) {
+    if (!river || !river.isConnected) build(stage, api);
+    const W = stage.clientWidth || 1440;
+    const g0 = geometry(W, 600);
+    drawRocks(field, api, W, g0);
+    const g = geometry(W, river.clientHeight || 600);
+    const L = layout(field, g), S = schools(field, g, L);
+    lay = {g, L};
+    drawBackground(field, g, L);
+    const keep = new Set();
+    for (const a of L.flow) { if (S.hidden.has(a.id)) continue; keep.add(a.id); particle(field, api, a, L.pos.get(a.id), L, g); }
+    for (const [id, el] of nodes) if (!keep.has(id)) { el.remove(); nodes.delete(id); }
+    // Schools: same lane and phase band merged into a counted mark; hover or click splits it.
+    schoolAt = new Map();
+    const keepS = new Set();
+    for (const s of S.list) {
+      keepS.add(s.key); let el = schoolEls.get(s.key);
+      if (!el) {
+        el = $("button", "school"); el.type = "button"; schoolEls.set(s.key, el); river.insertBefore(el, tools);
+        el.onpointerenter = () => { hoverSchool = el.dataset.key; api.rerender(); };
+        el.onclick = () => { openSchools.add(el.dataset.key); hoverSchool = null; api.rerender(); };
+      }
+      el.dataset.key = s.key; el.className = "school " + s.lane;
+      const d = 24 + Math.min(34, s.members.length * 2); el.style.width = d * 1.5 + "px"; el.style.height = d + "px";
+      el.style.left = s.x + "px"; el.style.top = s.y + "px";
+      const working = s.members.filter(a => a.status === "working").length;
+      el.textContent = String(s.members.length);
+      el.title = s.members.slice(0, 8).map(a => (a.name ? a.name + " · " : "") + a.title).join("\n") + (s.members.length > 8 ? "\n…" : "") + (working ? "\n" + working + " moving" : "") + "\nHover to split · click to keep split";
+      for (const a of s.members) schoolAt.set(a.id, {x: s.x, y: s.y});
+    }
+    for (const [k, el] of schoolEls) if (!keepS.has(k)) { el.remove(); schoolEls.delete(k); }
+    // While a school is split by hover, keep it open until the pointer leaves its area.
+    hoverRect = null; zone.hidden = true;
+    if (hoverSchool && S.groups.has(hoverSchool)) {
+      const ps = S.groups.get(hoverSchool).map(a => L.pos.get(a.id));
+      const x0 = Math.min(...ps.map(p => p.x)) - 26, x1 = Math.max(...ps.map(p => p.x)) + 26, y0 = Math.min(...ps.map(p => p.y)) - 20, y1 = Math.max(...ps.map(p => p.y)) + 20;
+      hoverRect = {x0, x1, y0, y1}; zone.hidden = false; Object.assign(zone.style, {left: x0 + "px", top: y0 + "px", width: x1 - x0 + "px", height: y1 - y0 + "px"});
+    } else hoverSchool = null;
+    drawEdges(field, api);
+  }
+
+  Mockup.mount({
+    number: 15, title: "River", spectrum: "round two", fullBleed: true,
+    summary: "Phases flow left to right; agents are particles in the current, needs-you is caught on rocks above it and answered there, done work settles in the delta.",
+    signals: {current: ["status", "tool_activity", "age", "pending_approval", "created_by", "phase", "checkpoint_history", "title", "summary", "next_action", "client"],
+      proposed: ["ask", "plan", "name", "activity"]},
+    notes: "Free signals carry the view: x is the checkpoint phase plus time since entering it (from checkpoint history), drift speed is tool calls in the last 15 minutes, delta depth is runtime age. A reported plan sharpens progress within the phase, structured ask options give the one-click answer on the rock, and a name shortens labels.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

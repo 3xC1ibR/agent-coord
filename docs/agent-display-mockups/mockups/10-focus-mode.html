@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 10 · Focus mode</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* One thing at a time: the top ask fills the stage; every other agent is a pip along the bottom edge. */
+    #stage { display: flex; flex-direction: column; padding: 0; }
+    .topline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 18px 32px 0; font-size: 12px; color: var(--muted); }
+    .count { font-size: 13px; color: var(--ink); }
+    .count b { font-size: 22px; font-weight: 600; letter-spacing: -.03em; color: var(--warm); margin-right: 2px; }
+    .count.clear b { color: var(--ok); }
+    .tally { display: inline-flex; align-items: center; gap: 6px; }
+    .tally .btn { padding: 2px 7px; font-size: 10px; }
+    .flash { color: var(--ok); }
+    .flash::before { content: "✓ "; }
+    .topline .field-sum { margin-left: auto; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; }
+    .field-sum span { display: inline-flex; align-items: center; gap: 5px; }
+
+    .focus-wrap { flex: 1; display: flex; justify-content: center; padding: 34px 32px 48px; }
+    .focus { width: min(860px, 100%); display: flex; flex-direction: column; gap: 18px; }
+    .focus.enter { animation: focus-in .28s ease-out; }
+    @keyframes focus-in { from { opacity: 0; transform: translateY(8px); } }
+    @media (prefers-reduced-motion: reduce) { .focus.enter { animation: none; } }
+    .eyebrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font: 600 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--warm); }
+    .eyebrow.calm-eyebrow, .eyebrow.view { color: var(--muted); }
+    .eyebrow .waited { color: var(--muted); font-weight: 400; letter-spacing: .04em; }
+    .eyebrow .waited.long { color: var(--warm); }
+    .focus h1 { font-size: 34px; font-weight: 600; letter-spacing: -.035em; line-height: 1.15; }
+    .lineage { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); margin-top: -8px; }
+    .lineage button { border: 0; background: none; padding: 0; color: var(--ink); cursor: pointer; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+    .lineage button:hover { text-decoration-color: var(--ink); }
+    .ident { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .ident .provider-logo { width: 16px; height: 16px; }
+    .ident .who { color: var(--ink); font-weight: 550; }
+    .ident .sep { color: var(--line-strong); }
+    .ident .open { margin-left: auto; }
+
+    .ask-panel { border: 1px solid color-mix(in srgb, var(--warm) 40%, var(--line)); border-left: 4px solid var(--warm); border-radius: 10px; background: color-mix(in srgb, var(--warm-tint) 45%, var(--surface)); padding: 22px 24px 18px; display: grid; gap: 16px; }
+    .ask-panel .question { font-size: 21px; line-height: 1.45; letter-spacing: -.015em; }
+    .ask-panel.plain { border-color: var(--line); border-left-color: var(--accent); background: var(--surface); }
+    .ask-panel.plain .question { font-size: 16px; color: var(--muted); }
+    .transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .transport .label { font: 600 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
+    .transport .gap { flex: 1; min-width: 12px; }
+    .transport .btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; }
+    .transport .opt { background: var(--surface); }
+    .transport .opt.primary { background: var(--accent); }
+    kbd { font: 10px var(--mono); padding: 0 5px; border: 1px solid currentColor; border-radius: 3px; opacity: .55; }
+    .free { display: flex; gap: 8px; }
+    .free input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 14px; }
+    .free .btn { padding: 10px 16px; font-size: 13px; }
+    .ask-panel .after { border-top: 1px solid color-mix(in srgb, var(--warm) 22%, var(--line)); padding-top: 14px; }
+    .ask-panel.plain .after { border-top-color: var(--line); }
+    .skipped-note { font-size: 11px; color: var(--muted); }
+
+    .blocks { display: grid; gap: 6px; }
+    .blocks h2, .cols h2 { font: 600 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+    .blocks .none { font-size: 12px; color: var(--muted); }
+    .agent-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 13px; text-align: left; cursor: pointer; }
+    .agent-row:hover { border-color: var(--hover-line); }
+    .agent-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-row small { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .agent-row small.st-working { color: var(--accent); }
+    .agent-row small.st-waiting { color: var(--warm); }
+    .agent-row .via { font-size: 10px; color: var(--muted); }
+    .agent-row.ext { cursor: default; color: var(--muted); }
+    .rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+    .more { font-size: 11px; color: var(--muted); padding-left: 2px; }
+
+    .cols { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 28px; padding-top: 6px; border-top: 1px solid var(--line); }
+    .cols section { display: grid; gap: 8px; align-content: start; }
+    .cols section + section { margin-top: 14px; }
+    .cols .col { display: flex; flex-direction: column; min-width: 0; }
+    .summary { font-size: 14px; line-height: 1.7; }
+    .activity { font-size: 13px; color: var(--accent); }
+    .activity::before { content: "▸ "; }
+    .next-step { font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+    .next-step b { color: var(--ink); font-weight: 550; }
+    .plan { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+    .plan li { display: flex; gap: 10px; align-items: baseline; }
+    .plan li::before { content: "○"; flex: none; width: 12px; font-size: 11px; color: var(--muted); }
+    .plan li.done { color: var(--muted); }
+    .plan li.done::before { content: "●"; color: var(--ok); }
+    .plan li.active { font-weight: 550; }
+    .plan li.active::before { content: "◐"; color: var(--accent); }
+    .plan li.blocked { color: var(--warm); font-weight: 550; }
+    .plan li.blocked::before { content: "◌"; color: var(--warm); }
+    .plan li.delegated::before { content: "↳"; }
+    .plan li .here { font: 9px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--warm); }
+    .plan li button { border: 0; background: none; padding: 0; color: var(--muted); font-size: 11px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+    .scope code { display: block; font: 11px var(--mono); color: var(--muted); overflow-wrap: anywhere; line-height: 1.6; }
+    .links { display: flex; flex-wrap: wrap; gap: 6px; }
+    .links .chip { font-size: 11px; color: var(--ink); }
+    .links .chip small { color: var(--muted); font: 9px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+    .meta { font: 11px var(--mono); color: var(--muted); line-height: 1.7; }
+    .empty { font-size: 12px; color: var(--muted); }
+
+    .calm { align-items: center; text-align: center; gap: 14px; padding-top: 40px; }
+    .calm .mark { width: 54px; height: 54px; border-radius: 50%; background: var(--ok-tint); color: var(--ok); display: grid; place-items: center; font-size: 22px; }
+    .calm h1 { font-size: 38px; }
+    .calm .lede { font-size: 15px; color: var(--muted); max-width: 52ch; line-height: 1.6; }
+    .calm .panel { width: min(560px, 100%); text-align: left; display: grid; gap: 8px; margin-top: 16px; }
+    .calm .panel h2 { font: 600 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+    .calm .panel > .btn { justify-self: start; }
+    .calm .deferred-line { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+
+    /* Peripheral strip: every agent as a pip, grouped by root. */
+    .periphery { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: flex-start; gap: 16px; padding: 10px 32px 12px; background: color-mix(in srgb, var(--paper) 92%, transparent); backdrop-filter: blur(8px); border-top: 1px solid var(--line); }
+    .periphery .key { flex: none; display: grid; gap: 4px; padding-top: 4px; font-size: 10px; color: var(--muted); }
+    .periphery .key b { font-size: 11px; font-weight: 550; color: var(--ink); }
+    .periphery .key span { display: inline-flex; align-items: center; gap: 5px; }
+    .periphery .key .pip { cursor: default; }
+    .pips { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 6px; max-height: 108px; overflow: auto; }
+    .pip-group { display: flex; flex-direction: column; gap: 3px; padding: 4px 6px; border: 1px solid transparent; border-radius: 7px; }
+    .pip-group .row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+    .pip-group.holds-focus { background: var(--surface); border-color: var(--line); }
+    .pip-group .name { max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--muted); }
+    .pip-group.holds-focus .name { color: var(--ink); }
+    .pip { flex: none; display: block; width: 9px; height: 9px; padding: 0; border: 0; border-radius: 50%; background: var(--dot-idle); cursor: pointer; transition: transform .12s; }
+    .pip:hover { transform: scale(1.35); }
+    .pip.root { width: 12px; height: 12px; margin-right: 2px; }
+    .pip.working { background: var(--accent); }
+    .pip.blocked { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .pip.done { background: var(--ok); opacity: .5; }
+    .pip.failed { background: var(--danger); }
+    .pip.needs { background: var(--warm); opacity: 1; box-shadow: none; }
+    .pip.needs.skipped { opacity: .5; }
+    .pip.needs.deferred { background: transparent; box-shadow: inset 0 0 0 1.5px var(--warm); }
+    .pip.current { transform: scale(1.3); box-shadow: 0 0 0 2px var(--paper), 0 0 0 3.5px var(--ink); }
+    .pip.current.deferred { box-shadow: inset 0 0 0 1.5px var(--warm), 0 0 0 2px var(--paper), 0 0 0 3.5px var(--ink); }
+
+    @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } .focus h1 { font-size: 28px; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60_000, DEFER_MS = 30 * MIN;
+  const ASK_VERB = {decision: "Decision", approval: "Approval", information: "Question", access: "Access", review: "Review", failure: "Failed"};
+
+  // View state kept across re-renders; the shell's Reset builds a new field, which clears it.
+  let seen = null, api = null, currentId = null, viewId = null, lastShownId = null, flash = null;
+  const skipped = new Set(), deferred = new Map(), drafts = new Map();
+
+  function sync(field) {
+    if (field !== seen) { seen = field; currentId = viewId = lastShownId = flash = null; skipped.clear(); deferred.clear(); drafts.clear(); }
+    for (const [id, until] of deferred) { const a = field.byId(id); if (until <= field.now || !a || !field.needsUser(a)) deferred.delete(id); }
+  }
+  const queue = field => field.asks().filter(a => !deferred.has(a.id));
+  function current(field, q) {
+    if (currentId && q.some(a => a.id === currentId)) return field.byId(currentId);
+    const next = q.find(a => !skipped.has(a.id)) || q[0] || null;
+    currentId = next?.id ?? null;
+    return next;
+  }
+  function focused(field) { return (viewId && field.byId(viewId)) || current(field, queue(field)); }
+  // The next item after `id` in queue order, preferring ones not skipped yet.
+  function after(field, id) {
+    const q = queue(field).filter(a => a.id !== id), all = field.asks(), i = all.findIndex(a => a.id === id);
+    const later = q.filter(a => all.indexOf(a) > i), earlier = q.filter(a => all.indexOf(a) < i);
+    const order = [...later, ...earlier];
+    return (order.find(a => !skipped.has(a.id)) || order[0] || null)?.id ?? null;
+  }
+
+  function skip(field) {
+    const a = focused(field); if (!a || !field.needsUser(a)) return;
+    skipped.add(a.id); viewId = null; currentId = after(field, a.id) || a.id; flash = null; api.rerender();
+  }
+  function defer(field) {
+    const a = focused(field); if (!a || !field.needsUser(a)) return;
+    deferred.set(a.id, field.now + DEFER_MS); viewId = null; currentId = after(field, a.id); flash = {text: "Deferred " + (a.name || a.title) + " for 30 min"}; api.rerender();
+  }
+  function answer(field, a, choice, label) {
+    flash = {text: "Answered “" + label + "” · " + (a.name || a.title) + " continues"};
+    drafts.delete(a.id); skipped.delete(a.id); if (viewId === a.id) viewId = null; currentId = after(field, a.id);
+    field.answer(a.id, choice);
+  }
+  function view(field, id) {
+    const a = field.byId(id); if (!a) return;
+    if (field.needsUser(a) && !deferred.has(id)) { currentId = id; viewId = null; } else viewId = id;
+    flash = null; api.rerender();
+  }
+  function backToQueue() { if (viewId) { viewId = null; api.rerender(); } }
+
+  document.addEventListener("keydown", e => {
+    if (!seen || !api || e.metaKey || e.ctrlKey || e.altKey || e.target.matches?.("input, textarea, select")) return;
+    const a = focused(seen);
+    if (e.key === "s") skip(seen);
+    else if (e.key === "d") defer(seen);
+    else if (e.key === "Escape") backToQueue();
+    else if (/^[1-9]$/.test(e.key) && a?.ask) { const o = a.ask.options[Number(e.key) - 1]; if (o) answer(seen, a, o.id, o.label); }
+  });
+
+  /* Estimated time to finish from plan progress (the proposed eta signal). */
+  function eta(field, a) {
+    const {done, total} = field.progress(a); if (!total || done >= total) return null;
+    const perStep = Math.max(4, Math.min(40, (field.now - a.createdAt) / MIN / Math.max(1, done + 0.5)));
+    return {left: total - done, minutes: Math.max(2, Math.round((total - done - 0.5) * perStep))};
+  }
+  const who = a => a.name || a.title;
+  const statusText = (field, a) => field.statusLabel(a).replace(/^Waiting on 1 agents$/, "Waiting on 1 agent");
+  const shortRole = a => AgentField.ROLE_LABELS[a.role] + (a.kind !== "app" ? " · " + a.kind : "");
+
+  function agentRow(field, a, extra) {
+    const b = $("button", "agent-row"); b.type = "button"; b.title = a.title + " · " + statusText(field, a);
+    b.append(AgentField.statusDot(a), $("span", "t", a.title));
+    if (extra) b.append($("span", "via", extra));
+    b.append($("small", "st-" + a.status, field.needsUser(a) && !a.ask ? "Your step" : statusText(field, a)));
+    b.onclick = () => view(field, a.id);
+    return b;
+  }
+
+  function topline(field, q, a) {
+    const top = $("div", "topline");
+    const pos = a ? q.findIndex(x => x.id === a.id) : -1;
+    const count = $("span", "count" + (q.length ? "" : " clear"));
+    if (pos >= 0 && !viewId) count.append($("b", null, String(pos + 1)), " of " + q.length + " need you");
+    else count.append($("b", null, String(q.length)), q.length === 1 ? " needs you" : " need you");
+    top.append(count);
+    const skippedLive = [...skipped].filter(id => q.some(x => x.id === id)).length;
+    if (skippedLive) top.append($("span", "tally", skippedLive + " skipped"));
+    if (deferred.size) {
+      const t = $("span", "tally"); const soonest = Math.min(...deferred.values());
+      t.append(deferred.size + " deferred · back in " + field.duration(soonest - field.now));
+      const b = $("button", "btn quiet", "Bring back"); b.type = "button"; b.onclick = () => { deferred.clear(); api.rerender(); }; t.append(b);
+      top.append(t);
+    }
+    if (flash) top.append($("span", "flash", flash.text));
+    const c = field.counts(), sum = $("span", "field-sum");
+    const part = (status, n, label) => { if (!n) return; const s = $("span"); s.append(AgentField.statusDot({status}), n + " " + label); sum.append(s); };
+    sum.append($("span", null, c.total + " agents"));
+    part("working", c.working, "working"); part("blocked", c.blocked, "waiting on others"); part("idle", c.idle, "idle"); part("failed", c.failed, "failed"); part("done", c.done, "done");
+    top.append(sum);
+    return top;
+  }
+
+  function lineage(field, a) {
+    const chain = field.ancestors(a.id).reverse(); if (!chain.length) return null;
+    const line = $("div", "lineage"); line.append("Created by ");
+    chain.forEach((p, i) => { if (i) line.append(" › "); const b = $("button", null, p.title); b.type = "button"; b.onclick = () => view(field, p.id); line.append(b); });
+    return line;
+  }
+
+  function identity(field, a) {
+    const row = $("div", "ident");
+    row.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    if (a.name) row.append($("span", "who", a.name), $("span", "sep", "·"));
+    row.append($("span", null, shortRole(a)), $("span", "sep", "·"), $("span", null, AgentField.PROVIDER_NAMES[a.client]), $("span", "sep", "·"));
+    const st = $("span", "ident"); st.append(AgentField.statusDot(a), statusText(field, a), AgentField.phaseSteps(a), AgentField.PHASE_LABELS[a.phase]); row.append(st);
+    const prog = field.progress(a); if (prog.total) row.append($("span", "mono", prog.done + "/" + prog.total));
+    const open = $("button", "btn quiet small open", "Open thread ↗"); open.type = "button"; open.onclick = () => api.select(a.id); row.append(open);
+    return row;
+  }
+
+  function askPanel(field, a, inQueue) {
+    const panel = $("div", "ask-panel");
+    if (a.ask) {
+      panel.append($("div", "question", a.ask.question));
+      if (a.ask.freeText) {
+        const free = $("div", "free"); const input = $("input"); input.dataset.draft = a.id; input.placeholder = "Type your answer…"; input.value = drafts.get(a.id) || "";
+        input.oninput = () => drafts.set(a.id, input.value);
+        const send = $("button", "btn primary", "Answer"); send.type = "button";
+        send.onclick = () => { const v = input.value.trim(); if (v) answer(field, a, v, v); };
+        input.onkeydown = e => { if (e.key === "Enter") send.click(); };
+        free.append(input, send); panel.append(free);
+      }
+    } else {
+      panel.classList.add("plain");
+      panel.append($("div", "question", a.next.action));
+    }
+    const tr = $("div", "transport" + (a.ask?.options.length ? "" : " after"));
+    if (a.ask?.options.length) {
+      tr.append($("span", "label", "Answer"));
+      a.ask.options.forEach((o, i) => {
+        const b = $("button", "btn opt" + (i === 0 ? " primary" : "")); b.type = "button";
+        b.append($("kbd", null, String(i + 1)), o.label); b.onclick = () => answer(field, a, o.id, o.label); tr.append(b);
+      });
+    }
+    tr.append($("span", "gap"));
+    const sk = $("button", "btn quiet"); sk.type = "button"; sk.append("Skip", $("kbd", null, "S")); sk.onclick = () => skip(field);
+    const df = $("button", "btn quiet"); df.type = "button"; df.append(deferred.has(a.id) ? "Defer again" : "Defer 30 min", $("kbd", null, "D")); df.onclick = () => defer(field);
+    tr.append(sk, df);
+    panel.append(tr);
+    if (skipped.has(a.id)) panel.append($("span", "skipped-note", "You skipped this earlier; it comes back once the rest have had a turn."));
+    if (!inQueue && deferred.has(a.id)) panel.append($("span", "skipped-note", "Deferred · back in the queue in " + field.duration(deferred.get(a.id) - field.now) + "."));
+    return panel;
+  }
+
+  function blocksSection(field, a) {
+    const sec = $("section", "blocks");
+    const impact = field.impact(a.id).map(field.byId).filter(Boolean);
+    const direct = new Set(field.blocks(a.id));
+    sec.append($("h2", null, impact.length ? "Blocks " + impact.length + (impact.length === 1 ? " agent" : " agents") : "Blocks"));
+    if (!impact.length) {
+      sec.append($("p", "none", a.ask?.blocking ? "No other agent is waiting on this; only " + who(a) + " is paused." : a.ask ? "Not blocking: " + who(a) + " can hold until you answer." : "No other agent is waiting on this one."));
+      return sec;
+    }
+    const rows = $("div", "rows");
+    for (const b of impact.slice(0, 6)) rows.append(agentRow(field, b, direct.has(b.id) ? null : "indirectly"));
+    sec.append(rows);
+    if (impact.length > 6) sec.append($("span", "more", "+" + (impact.length - 6) + " more"));
+    return sec;
+  }
+
+  function waitsSection(field, a) {
+    const waits = field.agentWaits(a), ext = field.externalWaits(a);
+    if (!waits.length && !ext.length) return null;
+    const sec = $("section", "blocks"); sec.append($("h2", null, "Waiting on"));
+    const rows = $("div", "rows");
+    for (const w of waits.slice(0, 6)) rows.append(agentRow(field, w));
+    for (const e of ext) { const r = $("div", "agent-row ext"); r.append(AgentField.statusDot({status: "blocked"}), $("span", "t", e), $("small", null, "external")); rows.append(r); }
+    sec.append(rows);
+    if (waits.length > 6) sec.append($("span", "more", "+" + (waits.length - 6) + " more"));
+    return sec;
+  }
+
+  function columns(field, a) {
+    const cols = $("div", "cols");
+    const left = $("div", "col"), right = $("div", "col");
+    const stand = $("section"); stand.append($("h2", null, "Where things stand"));
+    if (a.activity && a.status === "working") stand.append($("p", "activity", a.activity));
+    stand.append($("p", "summary", a.summary));
+    if (!a.ask && a.next?.action && a.next.actor !== "user") { const n = $("p", "next-step"); n.append($("b", null, ({agent: "Up next", external: "Waiting on"}[a.next.actor] || "Next") + " · "), a.next.action); stand.append(n); }
+    left.append(stand);
+    if (a.plan.length) {
+      const sec = $("section"); sec.append($("h2", null, "Plan · " + field.progress(a).done + " of " + a.plan.length));
+      const ul = $("ul", "plan");
+      for (const s of a.plan) {
+        const li = $("li", s.state, s.label);
+        if (s.state === "blocked" && a.ask) li.append($("span", "here", "needs you"));
+        if (s.agentId && field.byId(s.agentId)) { const b = $("button", null, "→ " + field.byId(s.agentId).title); b.type = "button"; b.onclick = () => view(field, s.agentId); li.append(b); }
+        ul.append(li);
+      }
+      sec.append(ul); left.append(sec);
+    }
+    const kids = field.children(a.id);
+    if (kids.length) {
+      const sec = $("section", "blocks"); sec.append($("h2", null, "Agents it started · " + kids.length));
+      const rows = $("div", "rows"); for (const k of kids.slice(0, 6)) rows.append(agentRow(field, k)); sec.append(rows);
+      if (kids.length > 6) sec.append($("span", "more", "+" + (kids.length - 6) + " more"));
+      right.append(sec);
+    }
+    const scope = $("section", "scope"); scope.append($("h2", null, "Scope"));
+    if (a.scope.length) for (const s of a.scope) scope.append($("code", null, s)); else scope.append($("p", "empty", "No write scope declared."));
+    right.append(scope);
+    if (a.links.length) {
+      const sec = $("section"); sec.append($("h2", null, "Links"));
+      const ls = $("div", "links"); for (const l of a.links) { const c = $("span", "chip"); c.title = l.target; c.append($("small", null, l.kind.replaceAll("_", " ")), l.label); ls.append(c); }
+      sec.append(ls); right.append(sec);
+    }
+    const meta = $("section"); meta.append($("h2", null, "Run"));
+    const m = $("p", "meta");
+    m.append("Started " + field.relativeTime(a.createdAt) + " · updated " + field.relativeTime(a.updatedAt), $("br"),
+      field.duration(a.cost.minutes * MIN) + " · " + Math.round(a.cost.tokens / 1000) + "k tokens · $" + a.cost.usd.toFixed(2));
+    const e = a.status === "working" && eta(field, a); if (e) m.append($("br"), "About " + e.minutes + " min left · " + e.left + (e.left === 1 ? " step" : " steps"));
+    meta.append(m); right.append(meta);
+    cols.append(left, right);
+    return cols;
+  }
+
+  function detail(field, a, inQueue) {
+    const box = $("section", "focus");
+    const needs = field.needsUser(a);
+    const eye = $("div", "eyebrow" + (needs ? "" : " view"));
+    if (needs) {
+      eye.append($("span", null, (a.ask ? ASK_VERB[a.ask.kind] || a.ask.kind : "Your next step") + (a.ask?.blocking ? " · blocking" : "")));
+      const since = a.ask?.askedAt ?? a.updatedAt, waited = field.now - since;
+      eye.append($("span", "waited" + (waited >= 20 * MIN ? " long" : ""), "Waiting on you " + field.duration(waited)));
+    } else {
+      eye.append($("span", null, "Viewing · not waiting on you"));
+      const back = $("button", "btn quiet small"); back.type = "button"; back.append("← Back to the queue ", $("kbd", null, "Esc")); back.onclick = backToQueue; eye.append(back);
+    }
+    box.append(eye, $("h1", null, a.title));
+    const lin = lineage(field, a); if (lin) box.append(lin);
+    box.append(identity(field, a));
+    if (needs) box.append(askPanel(field, a, inQueue));
+    box.append(blocksSection(field, a));
+    const w = waitsSection(field, a); if (w) box.append(w);
+    box.append(columns(field, a));
+    return box;
+  }
+
+  function calm(field, q) {
+    const box = $("section", "focus calm");
+    box.append($("div", "mark", "✓"), $("h1", null, "Nothing needs you"));
+    const c = field.counts(), roots = field.roots().filter(r => r.status !== "done").length;
+    const bits = [c.working + " working", c.blocked + " waiting on others", c.idle + " idle", c.done + " done"].filter(s => !s.startsWith("0 "));
+    box.append($("p", "lede", c.total + " agents across " + roots + " active " + (roots === 1 ? "thread" : "threads") + ": " + bits.join(", ") + ". You can step away; anything new will land here."));
+    if (deferred.size) {
+      const p = $("div", "panel"); p.append($("h2", null, "Deferred"));
+      for (const [id, until] of [...deferred].sort((x, y) => x[1] - y[1])) {
+        const a = field.byId(id); const line = $("div", "deferred-line");
+        line.append(agentRow(field, a, "back in " + field.duration(until - field.now)));
+        p.append(line);
+      }
+      const b = $("button", "btn small", "Bring them back now"); b.type = "button"; b.onclick = () => { deferred.clear(); api.rerender(); }; p.append(b);
+      box.append(p);
+    }
+    const moving = field.agents.filter(a => a.status === "working").map(a => ({a, e: eta(field, a)})).filter(x => x.e).sort((x, y) => x.e.minutes - y.e.minutes);
+    const p = $("div", "panel"); p.append($("h2", null, "Next expected completion"));
+    if (moving.length) {
+      const [first, ...rest] = moving;
+      p.append(agentRow(field, first.a, "about " + first.e.minutes + " min · " + first.e.left + (first.e.left === 1 ? " step left" : " steps left")));
+      if (first.a.activity) p.append($("p", "activity", first.a.activity));
+      if (rest.length) { p.append($("h2", null, "Then")); for (const x of rest.slice(0, 3)) p.append(agentRow(field, x.a, "about " + x.e.minutes + " min")); }
+      if (rest.length > 3) p.append($("span", "more", "+" + (rest.length - 3) + " more working"));
+    } else p.append($("p", "empty", "No agent is working right now."));
+    box.append(p);
+    return box;
+  }
+
+  function periphery(field, focus) {
+    const nav = $("nav", "periphery"); nav.setAttribute("aria-label", "All agents");
+    const key = $("div", "key"); key.append($("b", null, "All agents · " + field.agents.length));
+    for (const [cls, label] of [["needs", "needs you"], ["working", "working"], ["blocked", "waiting"], ["done", "done"]]) { const s = $("span"); s.append($("i", "pip " + cls), label); key.append(s); }
+    const pips = $("div", "pips");
+    const roots = field.roots(), labelled = roots.length <= 14;
+    const focusRoot = focus ? [focus, ...field.ancestors(focus.id)].pop().id : null;
+    for (const r of roots) {
+      const g = $("div", "pip-group" + (r.id === focusRoot ? " holds-focus" : ""));
+      const row = $("div", "row");
+      for (const {agent: a, depth} of field.treeRows([r.id])) {
+        const needs = field.needsUser(a);
+        const p = $("button", "pip " + a.status + (depth === 0 ? " root" : "") + (needs ? " needs" : "") + (needs && skipped.has(a.id) ? " skipped" : "") + (deferred.has(a.id) ? " deferred" : "") + (focus?.id === a.id ? " current" : ""));
+        p.type = "button"; p.title = a.title + (a.name ? " (" + a.name + ")" : "") + " · " + (needs ? "needs you" : statusText(field, a)) + (deferred.has(a.id) ? " · deferred" : "");
+        p.setAttribute("aria-label", p.title); p.onclick = () => view(field, a.id);
+        row.append(p);
+      }
+      g.append(row);
+      if (labelled) { const n = $("span", "name", r.name || r.title); n.title = r.title; g.append(n); }
+      pips.append(g);
+    }
+    nav.append(key, pips);
+    return nav;
+  }
+
+  Mockup.mount({
+    number: 10, title: "Focus mode", spectrum: "radical", showChrome: false,
+    summary: "One ask at a time, full screen, with Answer, Skip, and Defer; every other agent is a pip on the edge.",
+    signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "links", "write_scope", "updated_at"],
+      proposed: ["name", "role", "kind", "ask", "blocks", "plan", "activity", "waiting_on", "cost", "eta"]},
+    notes: "Assumes asks can be ranked (blocking, impact, age) well enough that showing only the top one is safe, and estimates the next completion from plan progress until agents report an eta.",
+    render(field, stage, mockApi) {
+      api = mockApi; sync(field);
+      const active = document.activeElement, draftId = active?.dataset?.draft, caret = draftId ? active.selectionStart : null;
+      const q = queue(field), a = focused(field);
+      const inQueue = !!a && q.some(x => x.id === a.id);
+      const body = a ? detail(field, a, inQueue) : calm(field, q);
+      const shownId = a?.id ?? "calm";
+      if (shownId !== lastShownId) body.classList.add("enter");
+      lastShownId = shownId;
+      const wrap = $("div", "focus-wrap"); wrap.append(body);
+      stage.replaceChildren(topline(field, q, a), wrap, periphery(field, a));
+      if (draftId) { const input = stage.querySelector(`input[data-draft="${draftId}"]`); if (input) { input.focus(); input.setSelectionRange(caret, caret); } }
+    },
+  });
+})();
+</script>
+</body>
+</html>

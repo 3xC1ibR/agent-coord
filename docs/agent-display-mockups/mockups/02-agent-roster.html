@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 02 · Agent roster</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* A process monitor for agents: one dense row per agent, indented under its creator. */
+    .roster-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+    .roster-head h2 { font-size: 15px; font-weight: 550; letter-spacing: -.02em; }
+    .roster-head small { font: 10px var(--mono); color: var(--muted); }
+    .roster-tools { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; height: 46px; padding: 0 2px; background: var(--paper); }
+    .roster-tools input { flex: 0 1 260px; min-width: 140px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .roster-tools .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+    .roster-tools .toggle { display: inline-flex; align-items: center; gap: 6px; }
+    .roster-tools .toggle b { font: 10px var(--mono); color: var(--muted); font-weight: 400; }
+    .roster-tools .toggle[aria-pressed="true"] b { color: var(--ink); }
+    .roster-tools .toggle.needs[aria-pressed="true"] { border-color: var(--warm); background: var(--warm-tint); color: var(--warm); }
+    .roster-tools .shown { margin-left: auto; font: 10px var(--mono); color: var(--muted); white-space: nowrap; }
+
+    table.roster { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+    .roster th { position: sticky; top: 46px; z-index: 3; background: var(--paper); text-align: left; font: 600 9.5px var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--muted); padding: 7px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; user-select: none; }
+    .roster th button { all: unset; cursor: pointer; display: inline-flex; gap: 5px; align-items: center; }
+    .roster th button:hover, .roster th[aria-sort] button { color: var(--ink); }
+    .roster th button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .roster th .arrow { font-size: 9px; color: var(--accent); }
+    .roster td { padding: 0 10px; height: 34px; border-bottom: 1px solid var(--line); background: var(--surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+    .roster tr.row { cursor: pointer; }
+    .roster tr.row.zebra td { background: color-mix(in srgb, var(--ink) 2.6%, var(--surface)); }
+    .roster tr.row:hover td { background: var(--hover-bg); }
+    .roster tr.row.selected td { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
+    .roster tr.row:focus-visible { outline: none; }
+    .roster tr.row:focus-visible td { box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
+    .roster tr.row.needs td:first-child { box-shadow: inset 3px 0 0 var(--warm); }
+    .roster tr.row.context td { color: var(--muted); }
+    .roster tr.row.context td > * { opacity: .6; }
+    .roster tr.row.done .who .t { color: var(--muted); }
+
+    /* Agent cell: indent, elbow connector, disclosure, identity. */
+    .who { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .who .indent { flex: none; position: relative; height: 34px; }
+    .who .indent::after { content: ""; position: absolute; right: 2px; top: 0; width: 7px; height: 17px; border-left: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); border-bottom-left-radius: 3px; }
+    .who .indent.root::after { display: none; }
+    .who .disc { all: unset; flex: none; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 3px; color: var(--muted); font-size: 9px; cursor: pointer; transition: transform .12s; }
+    .who .disc:hover { background: var(--tint); color: var(--ink); }
+    .who .disc:focus-visible { outline: 2px solid var(--accent); }
+    .who .disc.open { transform: rotate(90deg); }
+    .who .disc.none { visibility: hidden; }
+    .who .provider-logo { width: 13px; height: 13px; }
+    .who .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .who .n { font-weight: 600; margin-right: 6px; }
+    .who .t { color: var(--ink); }
+    .who .n + .t { color: var(--muted); }
+    .who .role { flex: none; font-size: 10px; color: var(--muted); }
+    .who .chip { padding: 0 5px; }
+
+    .doing { color: var(--muted); }
+    .doing.live { color: var(--accent); }
+    .doing.live::before { content: "▸ "; }
+    .doing.failed { color: var(--danger); }
+
+    .phase { display: flex; align-items: center; gap: 7px; font-size: 11px; }
+    .phase .phase-steps i { width: 7px; }
+
+    .needs-cell { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; }
+    .needs-cell .askchip { cursor: pointer; flex: none; font-family: var(--mono); font-size: 9.5px; letter-spacing: .02em; }
+    .needs-cell .askchip:hover { border-color: var(--warm); }
+    .needs-cell .askchip[aria-expanded="true"] { background: var(--warm); color: var(--surface); }
+    .needs-cell .q { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+    .needs-cell .wait { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+    .needs-cell .wait::before { content: "◌ "; }
+    .needs-cell .below { color: var(--warm); font-size: 10.5px; }
+
+    .kids { display: flex; align-items: center; gap: 6px; font: 11px var(--mono); }
+    .kids .num { min-width: 1.4em; text-align: right; color: var(--ink); }
+    .kids .dots { display: inline-flex; gap: 3px; align-items: center; }
+    .kids .dots .dot { width: 5px; height: 5px; box-shadow: none; animation: none; }
+    .kids .dots .dot.blocked { box-shadow: inset 0 0 0 1.2px var(--muted); }
+    .kids .more { color: var(--muted); font-size: 10px; }
+    .kids .roll { display: inline-flex; gap: 7px; font-size: 10px; color: var(--muted); }
+    .kids .roll span { display: inline-flex; align-items: center; gap: 3px; }
+    .kids .roll .dot { width: 5px; height: 5px; box-shadow: none; animation: none; }
+    .kids .roll .w { color: var(--warm); font-weight: 600; }
+
+    .scope { font: 10.5px var(--mono); color: var(--muted); }
+    .scope .extra { color: var(--ink); margin-left: 4px; }
+    .updated { font: 10.5px var(--mono); color: var(--muted); text-align: right; }
+    .updated .new { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); margin-right: 5px; vertical-align: middle; }
+
+    .roster tr.ask-row td { height: auto; white-space: normal; padding: 6px 10px 12px; background: color-mix(in srgb, var(--warm-tint) 30%, var(--surface)); }
+    .roster tr.ask-row .ask { max-width: 760px; }
+
+    table.roster.dense td { height: 30px; }
+    table.roster.dense .who .indent { height: 30px; }
+    table.roster.dense .who .indent::after { height: 15px; }
+    .roster td.empty { text-align: center; color: var(--muted); height: 80px; }
+    .legend { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 14px; font-size: 10.5px; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+
+    @media (max-width: 1100px) { .roster col.c-scope, .roster .c-scope { display: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
+  const FILTERS = [
+    ["needs", "Needs you", (a, f) => f.needsUser(a)],
+    ["working", "Working", a => a.status === "working"],
+    ["blocked", "Waiting", a => a.status === "blocked"],
+    ["idle", "Idle", a => a.status === "idle"],
+    ["failed", "Failed", a => a.status === "failed"],
+    ["done", "Done", a => a.status === "done"],
+  ];
+  const COLUMNS = [
+    {key: "agent", label: "Agent", width: "320px"},
+    {key: "doing", label: "Doing", width: null, sortable: false},
+    {key: "phase", label: "Phase", width: "196px"},
+    {key: "needs", label: "Needs", width: "224px"},
+    {key: "agents", label: "Agents", width: "124px"},
+    {key: "scope", label: "Scope", width: "164px"},
+    {key: "updated", label: "Updated", width: "78px"},
+  ];
+
+  // View state lives here so Play/Step/answer re-renders keep it.
+  const view = {sort: {key: "needs", dir: 1}, query: "", statuses: new Set(), collapsed: new Map(), asksOpen: new Set()};
+  let head, tools, host, search, shownLabel; const toggles = new Map();
+  let lastField = null, lastApi = null;
+
+  const firstSentence = text => { const m = (text || "").match(/^.*?[.!?](?=\s|$)/); return m ? m[0] : text || ""; };
+  const shortPath = p => { if (p.length <= 30) return p; const parts = p.split("/"); let out = parts.pop(); while (parts.length && out.length + parts[parts.length - 1].length < 26) out = parts.pop() + "/" + out; return "…/" + out; };
+  const filtering = () => !!view.query.trim() || view.statuses.size > 0;
+
+  function matches(a, field) {
+    if (view.statuses.size && !FILTERS.some(([k, , fn]) => view.statuses.has(k) && fn(a, field))) return false;
+    const q = view.query.trim().toLowerCase(); if (!q) return true;
+    return [a.title, a.name, AgentField.ROLE_LABELS[a.role], a.kind, AgentField.PROVIDER_NAMES[a.client], a.summary, a.activity, a.ask?.question, ...a.scope]
+      .some(s => s && s.toLowerCase().includes(q));
+  }
+
+  // One post-order pass: per-subtree counts for roll-ups and the attention sort.
+  function subtreeStats(field) {
+    const stats = new Map();
+    const visit = a => {
+      const s = {total: 0, working: 0, needs: 0, done: 0, blocked: 0, anyNeeds: field.needsUser(a), anyWorking: a.status === "working"};
+      for (const k of field.children(a.id)) {
+        const ks = visit(k);
+        s.total += 1 + ks.total; s.needs += ks.needs + (field.needsUser(k) ? 1 : 0);
+        s.working += ks.working + (k.status === "working" ? 1 : 0); s.done += ks.done + (k.status === "done" ? 1 : 0); s.blocked += ks.blocked + (k.status === "blocked" ? 1 : 0);
+        s.anyNeeds ||= ks.anyNeeds; s.anyWorking ||= ks.anyWorking;
+      }
+      stats.set(a.id, s); return s;
+    };
+    for (const r of field.roots()) visit(r);
+    return stats;
+  }
+
+  function comparator(field, stats) {
+    const rank = a => { const s = stats.get(a.id); return field.needsUser(a) ? 0 : s.anyNeeds ? 1 : s.anyWorking ? 2 : a.status === "blocked" ? 3 : a.status === "idle" ? 4 : a.status === "failed" ? 5 : 6; };
+    const byUpdated = (x, y) => y.updatedAt - x.updatedAt;
+    const primary = {
+      needs: (x, y) => rank(x) - rank(y),
+      agent: (x, y) => (x.name || x.title).localeCompare(y.name || y.title),
+      phase: (x, y) => AgentField.PHASES.indexOf(x.phase) - AgentField.PHASES.indexOf(y.phase),
+      agents: (x, y) => stats.get(y.id).total - stats.get(x.id).total,
+      scope: (x, y) => (x.scope[0] || "￿").localeCompare(y.scope[0] || "￿"),
+      updated: byUpdated,
+    }[view.sort.key];
+    return (x, y) => view.sort.dir * primary(x, y) || rank(x) - rank(y) || byUpdated(x, y);
+  }
+
+  // Sorted variant of field.treeRows(): the same pre-order walk, with siblings ordered by the active sort.
+  function rows(field, stats) {
+    const cmp = comparator(field, stats);
+    const active = filtering();
+    const keep = new Set(), hits = new Set();
+    if (active) for (const a of field.agents) if (matches(a, field)) { hits.add(a.id); keep.add(a.id); for (const p of field.ancestors(a.id)) keep.add(p.id); }
+    const out = [];
+    const walk = (a, depth) => {
+      if (active && !keep.has(a.id)) return;
+      out.push({agent: a, depth, context: active && !hits.has(a.id)});
+      if (isCollapsed(a, field, stats)) return;
+      for (const c of [...field.children(a.id)].sort(cmp)) walk(c, depth + 1);
+    };
+    for (const r of [...field.roots()].sort(cmp)) walk(r, 0);
+    return {rows: out, hits: active ? hits.size : field.agents.length};
+  }
+
+  // First sight decides the default; after that the user's choice sticks per parent.
+  function isCollapsed(a, field, stats) {
+    if (!field.children(a.id).length) return false;
+    if (!view.collapsed.has(a.id)) view.collapsed.set(a.id, field.scale === "large" && !stats.get(a.id).anyNeeds);
+    return view.collapsed.get(a.id);
+  }
+
+  function revealMatches(field) {
+    if (!filtering()) return;
+    for (const a of field.agents) if (matches(a, field)) for (const p of field.ancestors(a.id)) view.collapsed.set(p.id, false);
+  }
+
+  function buildChrome() {
+    head = $("div", "roster-head");
+    tools = $("div", "roster-tools");
+    search = $("input"); search.type = "search"; search.placeholder = "Filter by title, name, role, scope…"; search.setAttribute("aria-label", "Filter agents");
+    search.oninput = () => { view.query = search.value; revealMatches(lastField); draw(); };
+    search.onkeydown = e => { if (e.key === "Escape" && search.value) { e.stopPropagation(); search.value = ""; search.oninput(); } };
+    tools.append(search, $("span", "sep"));
+    for (const [key, label] of FILTERS) {
+      const b = $("button", "btn small toggle" + (key === "needs" ? " needs" : "")); b.type = "button"; b.setAttribute("aria-pressed", "false");
+      b.append(label, $("b")); b.title = "Show only " + label.toLowerCase() + " (combine toggles)";
+      b.onclick = () => { view.statuses.has(key) ? view.statuses.delete(key) : view.statuses.add(key); b.setAttribute("aria-pressed", String(view.statuses.has(key))); revealMatches(lastField); draw(); };
+      toggles.set(key, b); tools.append(b);
+    }
+    tools.append($("span", "sep"));
+    for (const [label, value] of [["Expand all", false], ["Collapse all", true]]) {
+      const b = $("button", "btn small quiet", label); b.type = "button";
+      b.onclick = () => { for (const a of lastField.agents) if (lastField.children(a.id).length) view.collapsed.set(a.id, value); draw(); };
+      tools.append(b);
+    }
+    shownLabel = $("span", "shown"); tools.append(shownLabel);
+    host = $("div");
+  }
+
+  const draw = () => lastApi?.rerender();
+
+  function agentCell(a, depth, field, stats) {
+    const td = $("td"); const w = $("div", "who");
+    const ind = $("span", "indent" + (depth ? "" : " root")); ind.style.width = (depth * 18) + "px"; w.append(ind);
+    const kids = field.children(a.id).length;
+    const disc = $("button", "disc" + (kids ? (isCollapsed(a, field, stats) ? "" : " open") : " none"), "▶"); disc.type = "button";
+    if (kids) {
+      const collapsed = isCollapsed(a, field, stats);
+      disc.setAttribute("aria-expanded", String(!collapsed)); disc.setAttribute("aria-label", (collapsed ? "Expand " : "Collapse ") + a.title);
+      disc.onclick = e => { e.stopPropagation(); view.collapsed.set(a.id, !collapsed); draw(); };
+    } else disc.tabIndex = -1;
+    w.append(disc, AgentField.statusDot(a), AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    const label = $("span", "label");
+    if (a.name && a.name !== a.title) label.append($("span", "n", a.name));
+    label.append($("span", "t", a.title));
+    label.title = (a.name ? a.name + " · " : "") + a.title + "\n" + AgentField.ROLE_LABELS[a.role] + " · " + AgentField.PROVIDER_NAMES[a.client] + (a.kind !== "app" ? " · " + a.kind : "");
+    w.append(label);
+    if (a.kind !== "app") w.append($("span", "chip mono", a.kind));
+    else w.append($("span", "role", ROLE_SHORT[a.role]));
+    td.append(w); return td;
+  }
+
+  function doingCell(a) {
+    const td = $("td");
+    let text, cls = "doing";
+    if (a.status === "working" && a.activity) { text = a.activity; cls += " live"; }
+    else { text = firstSentence(a.summary); if (a.status === "failed") cls += " failed"; }
+    const s = $("span", cls, text); td.title = a.status === "working" && a.activity ? a.activity + "\n\n" + a.summary : a.summary; td.append(s); return td;
+  }
+
+  function phaseCell(a) {
+    const td = $("td"); const p = $("div", "phase");
+    p.append(AgentField.phaseSteps(a), $("span", null, AgentField.PHASE_LABELS[a.phase]));
+    const prog = lastField.progress(a); if (prog.total && a.status !== "done") { const m = $("span", "mono muted", prog.done + "/" + prog.total); m.style.fontSize = "10px"; p.append(m); }
+    td.append(p); return td;
+  }
+
+  function needsCell(a, field, stats, collapsed) {
+    const td = $("td"); const c = $("div", "needs-cell");
+    if (a.ask) {
+      const open = view.asksOpen.has(a.id);
+      const chip = $("button", "chip askchip " + (a.ask.kind === "failure" ? "danger" : "warm"), a.ask.kind + (a.ask.blocking ? " · blocking" : "") + (open ? " ▴" : " ▾"));
+      chip.type = "button"; chip.setAttribute("aria-expanded", String(open)); chip.title = (open ? "Hide" : "Answer here: ") + a.ask.question;
+      chip.onclick = e => { e.stopPropagation(); open ? view.asksOpen.delete(a.id) : view.asksOpen.add(a.id); draw(); };
+      const q = $("span", "q", a.ask.question); c.append(chip, q); td.title = a.ask.question + "\nAsked " + field.relativeTime(a.ask.askedAt);
+    } else if (field.needsUser(a)) {
+      c.append($("span", "chip warm mono", "your step"), $("span", "q", a.next.action)); td.title = a.next.action;
+    } else if (a.status === "blocked") {
+      const ext = field.externalWaits(a), ags = field.agentWaits(a);
+      const names = [...ext, ...ags.map(w => w.name || w.title)];
+      const text = "Waiting on " + (names.length <= 1 ? names[0] || "—" : ext.length ? ext[0] + " +" + (names.length - 1) : ags.length + " agents");
+      c.append($("span", "wait", text)); td.title = "Waiting on:\n" + names.join("\n");
+    }
+    if (collapsed && !field.needsUser(a) && stats.get(a.id).needs) c.append($("span", "below", "↳ " + stats.get(a.id).needs + " below need you"));
+    td.append(c); return td;
+  }
+
+  function agentsCell(a, field, stats, collapsed) {
+    const td = $("td"); const kids = field.children(a.id); const s = stats.get(a.id);
+    if (!kids.length) return td;
+    const k = $("div", "kids"); k.append($("span", "num", String(s.total)));
+    if (collapsed) {
+      const roll = $("span", "roll");
+      for (const [n, cls, label] of [[s.working, "working", "working"], [s.needs, "waiting", "need you"], [s.done, "done", "done"]]) {
+        if (!n) continue; const r = $("span", cls === "waiting" ? "w" : null); r.append($("span", "dot " + cls), String(n)); r.title = n + " " + label; roll.append(r);
+      }
+      td.title = s.total + " agents below · " + s.working + " working · " + s.needs + " need you · " + s.done + " done";
+      k.append(roll);
+    } else {
+      const dots = $("span", "dots");
+      for (const kid of kids.slice(0, 8)) { const d = AgentField.statusDot(kid); if (field.needsUser(kid)) d.className = "dot waiting"; dots.append(d); }
+      k.append(dots);
+      const nested = s.total - kids.length; const extra = Math.max(0, kids.length - 8);
+      if (extra || nested) k.append($("span", "more", (extra ? "+" + extra : "") + (nested ? " +" + nested + " nested" : "")));
+      td.title = kids.length + " direct · " + nested + " nested\n" + kids.map(x => "• " + x.title + " — " + field.statusLabel(x)).join("\n");
+    }
+    td.append(k); return td;
+  }
+
+  function scopeCell(a) {
+    const td = $("td", "c-scope"); if (!a.scope.length) { td.append($("span", "scope", "—")); return td; }
+    const s = $("span", "scope", shortPath(a.scope[0])); td.append(s);
+    if (a.scope.length > 1) s.append($("span", "extra", "+" + (a.scope.length - 1)));
+    td.title = a.scope.join("\n"); return td;
+  }
+
+  function updatedCell(a, field) {
+    const td = $("td", "updated"); if (a.unread) { const d = $("span", "new"); d.title = "Unread result"; td.append(d); }
+    td.append(field.relativeTime(a.updatedAt)); td.title = new Date(a.updatedAt).toLocaleString() + (a.stale ? "\nNew activity since this checkpoint" : ""); return td;
+  }
+
+  function table(field, api, stats) {
+    const {rows: list, hits} = rows(field, stats);
+    shownLabel.textContent = filtering() ? hits + " of " + field.agents.length + " match" : list.length + " of " + field.agents.length + " rows shown";
+    const t = $("table", "roster" + (field.agents.length > 60 ? " dense" : ""));
+    const cg = $("colgroup"); for (const c of COLUMNS) { const col = $("col", "c-" + c.key); if (c.width) col.style.width = c.width; cg.append(col); } t.append(cg);
+    const thead = $("thead"); const hr = $("tr");
+    for (const c of COLUMNS) {
+      const th = $("th", "c-" + c.key);
+      if (c.sortable === false) th.textContent = c.label;
+      else {
+        const b = $("button", null, c.label); b.type = "button";
+        const on = view.sort.key === c.key;
+        if (on) { th.setAttribute("aria-sort", view.sort.dir === 1 ? "ascending" : "descending"); b.append($("span", "arrow", view.sort.dir === 1 ? "▼" : "▲")); }
+        b.title = c.key === "needs" ? "Needs you first, then working, then most recently updated" : "Sort by " + c.label.toLowerCase();
+        b.onclick = () => { view.sort = on ? {key: c.key, dir: -view.sort.dir} : {key: c.key, dir: 1}; draw(); };
+        th.append(b);
+      }
+      hr.append(th);
+    }
+    thead.append(hr); t.append(thead);
+    const tb = $("tbody");
+    if (!list.length) { const tr = $("tr"); const td = $("td", "empty", "No agents match. Clear the filter or toggles."); td.colSpan = COLUMNS.length; tr.append(td); tb.append(tr); }
+    list.forEach(({agent: a, depth, context}, i) => {
+      const collapsed = isCollapsed(a, field, stats);
+      const tr = $("tr", "row " + a.status + (i % 2 ? " zebra" : "") + (field.needsUser(a) ? " needs" : "") + (context ? " context" : "") + (api.selected === a.id ? " selected" : ""));
+      tr.dataset.id = a.id; tr.tabIndex = 0;
+      tr.onclick = () => { api.select(a.id); for (const r of tb.querySelectorAll("tr.selected")) r.classList.remove("selected"); tr.classList.add("selected"); };
+      tr.onkeydown = e => {
+        if (e.target !== tr) return;
+        if (e.key === "Enter") tr.onclick();
+        else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && field.children(a.id).length) { e.preventDefault(); view.collapsed.set(a.id, e.key === "ArrowLeft"); draw(); }
+        else if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); const rs = [...tb.querySelectorAll("tr.row")]; rs[rs.indexOf(tr) + (e.key === "ArrowDown" ? 1 : -1)]?.focus(); }
+      };
+      tr.append(agentCell(a, depth, field, stats), doingCell(a), phaseCell(a), needsCell(a, field, stats, collapsed), agentsCell(a, field, stats, collapsed), scopeCell(a), updatedCell(a, field));
+      tb.append(tr);
+      if (a.ask && view.asksOpen.has(a.id)) {
+        const ar = $("tr", "ask-row"); const td = $("td"); td.colSpan = COLUMNS.length; td.style.paddingLeft = (40 + depth * 18) + "px";
+        td.append(Mockup.askBox(a, field, api.select)); ar.append(td); tb.append(ar);
+      }
+    });
+    t.append(tb); return t;
+  }
+
+  Mockup.mount({
+    number: 2, title: "Agent roster", spectrum: "conservative",
+    summary: "A process monitor for agents: one dense, sortable row per agent, indented under its creator, with asks answerable in the row.",
+    signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "unread", "stale", "write_scope", "updated_at"],
+      proposed: ["name", "role", "kind", "activity", "ask", "plan", "waiting_on"]},
+    notes: "Assumes the user scans many agents at once, so each agent gets one line and the creator tree, sort, and filter carry the structure; collapsed branches still report what is working, needs you, and is done.",
+    render(field, stage, api) {
+      lastField = field; lastApi = api;
+      if (!head) buildChrome();
+      const y = window.scrollY;
+      const focusedRow = document.activeElement?.closest?.("tr.row")?.dataset.id;
+      for (const id of view.asksOpen) if (!field.byId(id)?.ask) view.asksOpen.delete(id);
+      const counts = field.counts();
+      head.replaceChildren($("h2", null, "Agents"), $("small", null, counts.total + " agents · " + field.roots().length + " started by you · " + (counts.total - field.roots().length) + " started by agents"));
+      for (const [key, , fn] of FILTERS) toggles.get(key).querySelector("b").textContent = String(field.agents.filter(a => fn(a, field)).length);
+      const stats = subtreeStats(field);
+      host.replaceChildren(table(field, api, stats));
+      if (stage.firstChild !== head) {
+        const legend = $("div", "legend");
+        for (const [cls, label] of [["working", "Working"], ["waiting", "Needs you"], ["blocked", "Waiting on something"], ["idle", "Idle"], ["failed", "Failed"], ["done", "Done"]]) { const s = $("span"); s.append($("span", "dot " + cls), label); legend.append(s); }
+        stage.replaceChildren(head, tools, host, legend);
+      }
+      if (focusedRow) host.querySelector(`tr.row[data-id="${focusedRow}"]`)?.focus({preventScroll: true});
+      if (window.scrollY !== y) window.scrollTo(0, y);
+    },
+  });
+})();
+</script>
+</body>
+</html>

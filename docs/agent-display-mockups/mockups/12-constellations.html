@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 12 · Constellations</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* The delegation tree as a night sky. A constellation per orchestration group; brightness is recency.
+       Needs-you stars pulse warm near the top and carry their own answer button. */
+    #stage { display: flex; flex-direction: column; overflow: hidden; }
+    .sky { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: default; touch-action: none;
+      background: radial-gradient(ellipse at 50% 0%, color-mix(in srgb, var(--accent) 5%, transparent) 0, transparent 60%),
+        linear-gradient(to bottom, transparent 0, transparent 70%, color-mix(in srgb, var(--ink) 5%, transparent) 100%); }
+    .sky.panning { cursor: grabbing; }
+    .overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+    .overlay line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+    .overlay line.warm { stroke: var(--warm); opacity: .55; }
+    .overlay line.focus { opacity: 1; }
+    .ruler { position: absolute; left: 10px; font: 9px var(--mono); letter-spacing: .06em; color: var(--muted); opacity: .7; transform: translateY(-50%); pointer-events: none; }
+    .ruler::after { content: ""; position: absolute; left: 100%; top: 50%; width: 14px; margin-left: 5px; border-top: 1px solid var(--line-strong); }
+    .calm { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); font-size: 12px; color: var(--muted); pointer-events: none; }
+
+    .group { position: absolute; width: 0; height: 0; transition: left .9s ease, top .9s ease; }
+    .sky.dragging .group, .sky.panning .group, .sky.zooming .group { transition: none; }
+    .group svg { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+    .group svg line { stroke: var(--ink); stroke-width: 1; }
+    .group svg line.d1 { opacity: .22; }
+    .group svg line.d2 { opacity: .12; stroke-dasharray: 2 3; }
+    .group.lifted svg line.d1 { opacity: .4; } .group.lifted svg line.d2 { opacity: .25; }
+
+    .star { position: absolute; width: var(--s); height: var(--s); margin: calc(var(--s) / -2) 0 0 calc(var(--s) / -2); border-radius: 50%; background: var(--ink); opacity: var(--o); cursor: grab; outline: 0; z-index: 1; }
+    .star::before { content: ""; position: absolute; inset: -8px; border-radius: 50%; }
+    .star.working { background: var(--accent); }
+    .star.hot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent), 0 0 14px 4px color-mix(in srgb, var(--accent) 35%, transparent); animation: twinkle 2.2s ease-in-out infinite; }
+    .star.idle { background: color-mix(in srgb, var(--ink) 75%, var(--paper)); }
+    .star.blocked { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .star.done { background: var(--ok); }
+    .star.needs { background: var(--warm); opacity: 1; z-index: 2; animation: beacon 1.8s ease-out infinite; }
+    .star.needs.failed { background: var(--danger); }
+    .star.pinned::after { content: ""; position: absolute; inset: -4px; border: 1px solid var(--line-strong); border-radius: 50%; }
+    .star:hover, .star:focus-visible { opacity: 1; z-index: 4; }
+    .star:focus-visible::before { border: 1.5px solid var(--accent); }
+    .star.peeked::before { inset: -6px; border: 1.5px solid var(--ink); }
+    .star-label { position: absolute; transform: translate(-50%, 9px); font-size: 10.5px; color: var(--muted); white-space: nowrap; max-width: 170px; overflow: hidden; text-overflow: ellipsis; pointer-events: none; opacity: var(--o); }
+    .fold { position: absolute; transform: translate(-130%, -50%); font: 9px var(--mono); color: var(--muted); pointer-events: none; white-space: nowrap; }
+    .star-label.root { color: var(--ink); font-weight: 500; }
+
+    /* Needs-you tag beside its star: what is asked and the primary answer. */
+    .ask-tag { position: absolute; z-index: 5; display: flex; align-items: center; gap: 6px; width: var(--tw); height: 26px; padding: 0 3px 0 7px; transform: translateY(-50%); border: 1px solid color-mix(in srgb, var(--warm) 45%, var(--line)); border-left: 3px solid var(--warm); border-radius: 6px; background: var(--surface); box-shadow: 0 3px 12px var(--shadow); cursor: pointer; font-size: 11px; white-space: nowrap; }
+    .ask-tag:hover { border-color: var(--warm); }
+    .ask-tag .k { flex: none; font: 600 8.5px var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--warm); }
+    .ask-tag .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 550; color: var(--ink); }
+    .ask-tag .who small { font-weight: 400; color: var(--muted); font-size: 10px; }
+    .ask-tag .btn { flex: none; padding: 2px 7px; font-size: 10.5px; max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
+    .ask-tag .btn.quiet { padding: 2px 5px; }
+    .group svg line.lead { stroke: var(--warm); opacity: .6; stroke-dasharray: none; }
+
+    /* A distant constellation, seen as one glow until you zoom in. */
+    .glow { position: absolute; width: var(--g); height: var(--g); transform: translate(-50%, -50%); border-radius: 50%; cursor: zoom-in; display: grid; place-items: center;
+      background: radial-gradient(circle, color-mix(in srgb, var(--ink) 30%, transparent) 0, color-mix(in srgb, var(--ink) 10%, transparent) 35%, transparent 70%); opacity: var(--o); transition: left .9s ease, top .9s ease; }
+    .glow.active { background: radial-gradient(circle, color-mix(in srgb, var(--accent) 55%, transparent) 0, color-mix(in srgb, var(--accent) 16%, transparent) 38%, transparent 70%); }
+    .glow b { font: 600 10px var(--mono); color: var(--ink); }
+    .glow small { position: absolute; top: calc(50% + 12px); left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--muted); white-space: nowrap; max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+    .sky.panning .glow, .sky.zooming .glow { transition: none; }
+
+    .tools { position: absolute; right: 16px; bottom: 12px; z-index: 6; display: flex; gap: 4px; align-items: center; }
+    .tools .btn { padding: 4px 9px; font-size: 11px; }
+    .tools .zoom { font: 10px var(--mono); color: var(--muted); min-width: 34px; text-align: center; }
+    .hint { position: absolute; left: 16px; bottom: 14px; z-index: 6; font-size: 10.5px; color: var(--muted); pointer-events: none; }
+
+    @keyframes twinkle { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 8%, transparent), 0 0 20px 6px color-mix(in srgb, var(--accent) 22%, transparent); } }
+    @keyframes beacon { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warm) 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 9px color-mix(in srgb, var(--warm) 0%, transparent); } }
+    @media (prefers-reduced-motion: reduce) { .star.hot, .star.needs { animation: none; } .group, .glow { transition: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60000, HOUR = 3600000;
+  const hash = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  const depthFor = age => Math.min(1, Math.log1p(age / MIN) / Math.log1p(12 * 60));
+  const TAGW = 252, TAGH = 30;
+  const clip = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+  // View state kept across re-renders: pinned constellations (world fractions), zoom and pan, hover.
+  const placed = new Map();
+  let zoom = 1, pan = {x: 0, y: 0}, hovered = null, sky, overlay, zoomLabel, calm;
+  const groupEls = new Map(), starEls = new Map(), glowEls = new Map(), tagEls = new Map();
+  let starPos = new Map(), groupPos = new Map(), lastField = null, lastApi = null;
+
+  const toScreen = (x, y) => ({x: x * zoom + pan.x, y: y * zoom + pan.y});
+  const toWorld = (x, y) => ({x: (x - pan.x) / zoom, y: (y - pan.y) / zoom});
+
+  function build(stage, api) {
+    stage.classList.add("full-bleed"); stage.replaceChildren();
+    sky = $("div", "sky"); stage.append(sky);
+    overlay = document.createElementNS("http://www.w3.org/2000/svg", "svg"); overlay.setAttribute("class", "overlay"); sky.append(overlay);
+    calm = $("div", "calm", "Nothing needs you. Brighter stars moved most recently."); sky.append(calm);
+    const tools = $("div", "tools");
+    const btn = (label, title, fn) => { const b = $("button", "btn", label); b.type = "button"; b.title = title; b.onclick = fn; return b; };
+    zoomLabel = $("span", "zoom");
+    tools.append(btn("−", "Zoom out", () => zoomAt(zoom / 1.4)), zoomLabel, btn("+", "Zoom in", () => zoomAt(zoom * 1.4)),
+      btn("Fit", "Back to the whole sky", () => { zoom = 1; pan = {x: 0, y: 0}; api.rerender(); }),
+      btn("Reset layout", "Unpin every constellation and fit the sky", () => { placed.clear(); zoom = 1; pan = {x: 0, y: 0}; api.rerender(); }));
+    sky.append(tools, $("div", "hint", "Drag a star to move its constellation · wheel to zoom · drag the sky to pan"));
+    groupEls.clear(); starEls.clear(); glowEls.clear(); tagEls.clear();
+    sky.addEventListener("wheel", e => { e.preventDefault(); const r = sky.getBoundingClientRect(); zoomAt(zoom * Math.exp(-e.deltaY * 0.0015), {x: e.clientX - r.left, y: e.clientY - r.top}); }, {passive: false});
+    // Pan by dragging empty sky.
+    let panStart = null;
+    sky.addEventListener("pointerdown", e => { if (e.button !== 0 || e.target.closest(".star, .ask-tag, .glow, .tools, .lens")) return; panStart = {x: e.clientX, y: e.clientY, px: pan.x, py: pan.y, moved: false}; sky.setPointerCapture?.(e.pointerId); });
+    sky.addEventListener("pointermove", e => { if (!panStart) return; const dx = e.clientX - panStart.x, dy = e.clientY - panStart.y; if (!panStart.moved && Math.hypot(dx, dy) < 4) return; panStart.moved = true; sky.classList.add("panning"); pan = {x: panStart.px + dx, y: panStart.py + dy}; api.rerender(); });
+    const endPan = () => { panStart = null; sky.classList.remove("panning"); };
+    sky.addEventListener("pointerup", endPan); sky.addEventListener("pointercancel", endPan);
+  }
+
+  function zoomAt(next, at) {
+    const z = Math.max(0.6, Math.min(3.2, next));
+    const p = at || {x: sky.clientWidth / 2, y: sky.clientHeight / 2};
+    pan = {x: p.x - (p.x - pan.x) * (z / zoom), y: p.y - (p.y - pan.y) * (z / zoom)}; zoom = z;
+    sky.classList.add("zooming"); lastApi.rerender(); requestAnimationFrame(() => sky.classList.remove("zooming"));
+  }
+
+  // A constellation's shape: children around the root, grandchildren continuing outward. Deterministic per agent id.
+  function shape(field, root, keep) {
+    const rel = new Map([[root.id, {x: 0, y: 0, depth: 0, angle: 0}]]);
+    const place = (parent, depth) => {
+      const kids = field.children(parent.id).filter(k => !keep || keep.has(k.id)); if (!kids.length) return;
+      const p = rel.get(parent.id), base = depth === 1 ? hash(root.id) * Math.PI * 2 : p.angle;
+      kids.forEach((k, i) => {
+        const spread = depth === 1 ? (Math.PI * 2) / Math.max(kids.length, 3) : 0.7;
+        const angle = depth === 1 ? base + i * spread + (hash(k.id) - 0.5) * 0.5 : base + (i - (kids.length - 1) / 2) * spread;
+        const r = (depth === 1 ? 42 : 28) + hash(k.id + "r") * 14;
+        rel.set(k.id, {x: p.x + Math.cos(angle) * r, y: p.y + Math.sin(angle) * r * 0.8, depth, angle});
+        place(k, depth + 1);
+      });
+    };
+    place(root, 1);
+    return rel;
+  }
+
+  function groups(field) {
+    const out = field.roots().map(root => {
+      const members = [root, ...field.descendants(root.id)];
+      const needs = members.filter(field.needsUser);
+      const age = Math.min(...members.map(field.age));
+      const settled = members.every(m => m.status === "done" || m.status === "idle") && root.status === "done";
+      // In a crowded sky, a needs-you constellation shows only the asking stars and their lineage; the rest fold into a count.
+      let keep = null;
+      if (field.agents.length > 60 && zoom < 1.5 && needs.length) { keep = new Set([root.id]); for (const n of needs) { keep.add(n.id); for (const p of field.ancestors(n.id)) keep.add(p.id); } }
+      const rel = shape(field, root, keep);
+      const folded = keep ? members.length - keep.size : 0;
+      const extent = Math.max(8, ...[...rel.values()].map(p => Math.hypot(p.x, p.y)));
+      const xs = [...rel.values()].map(p => p.x), ys = [...rel.values()].map(p => p.y);
+      return {root, members, needs, age, settled, rel, extent, folded, left: Math.min(...xs), right: Math.max(...xs), topY: Math.min(...ys), bottom: Math.max(...ys)};
+    });
+    // Needs-you first (in the order the asks queue ranks them), then by freshest activity.
+    const askRank = new Map(field.asks().map((a, i) => [a.id, i]));
+    const rank = g => g.needs.length ? Math.min(...g.needs.map(a => askRank.get(a.id) ?? 99)) : Infinity;
+    return out.sort((x, y) => rank(x) - rank(y) || x.age - y.age);
+  }
+
+  function layout(field, list, W, H) {
+    const crowdedField = field.agents.length > 60;
+    const pos = new Map();
+    const needs = list.filter(g => g.needs.length);
+    // Needs-you constellations pack into rows at the top, each with room for its stacked tags.
+    let cx = 20, cy = 64, rowH = 0;
+    for (const g of needs) {
+      const left = Math.min(g.left, -78), w = g.right - left + 26 + TAGW + 34, h = Math.max(g.bottom - g.topY + 46, g.needs.length * TAGH + 24);
+      if (cx + w > W - 20 && cx > 20) { cx = 20; cy += rowH; rowH = 0; }
+      pos.set(g.root.id, {x: cx - left, y: cy + h / 2 - (g.bottom + g.topY) / 2, fixed: false});
+      cx += w; rowH = Math.max(rowH, h);
+    }
+    const top = needs.length ? cy + rowH + 40 : 70;
+    const span = Math.max(120, H - top - 70);
+    const rest = list.filter(g => !g.needs.length);
+    for (const g of rest) {
+      const d = depthFor(g.age), y = g.settled ? Math.max(top + span * 0.82, top + d * span) : top + d * span * 0.9;
+      pos.set(g.root.id, {x: 60 + hash(g.root.id + "x") * (W - 120), y: y + (hash(g.root.id + "y") - 0.5) * 24, fixed: false});
+    }
+    for (const g of list) { const p = placed.get(g.root.id); if (p) pos.set(g.root.id, {x: p.x * W, y: p.y * H, fixed: true}); }
+    // Relax overlaps, mostly sideways so height keeps meaning age.
+    const movable = rest.filter(g => !pos.get(g.root.id).fixed);
+    const labelled = g => g.members.length > 1 || !crowdedField;
+    const all = list.map(g => ({g, p: pos.get(g.root.id), r: g.needs.length ? g.extent + 30 : Math.max(g.extent + 16, labelled(g) ? 80 : 14)}));
+    for (let it = 0; it < 50; it++) {
+      for (let i = 0; i < all.length; i++) for (let k = i + 1; k < all.length; k++) {
+        const A = all[i], B = all[k]; if (A.p.fixed && B.p.fixed) continue;
+        let dx = B.p.x - A.p.x, dy = B.p.y - A.p.y; const d = Math.hypot(dx, dy) || 0.01, min = A.r + B.r;
+        if (d >= min) continue;
+        const push = (min - d) / 2; dx /= d; dy /= d;
+        const aMoves = !A.p.fixed && !A.g.needs.length, bMoves = !B.p.fixed && !B.g.needs.length;
+        const share = aMoves && bMoves ? 1 : 2;
+        if (aMoves) { A.p.x -= dx * push * share; A.p.y -= dy * push * share * 0.3; }
+        if (bMoves) { B.p.x += dx * push * share; B.p.y += dy * push * share * 0.3; }
+      }
+      for (const g of movable) { const p = pos.get(g.root.id); p.x = Math.max(Math.max(40 + g.extent, labelled(g) ? 96 : 0), Math.min(W - Math.max(40 + g.extent, labelled(g) ? 96 : 0), p.x)); p.y = Math.max(top - 20, Math.min(H - 40 - g.extent * 0.8, p.y)); }
+    }
+    return {pos, top, span};
+  }
+
+  function star(a, g, field, api) {
+    let el = starEls.get(a.id);
+    if (!el) {
+      el = $("div", "star"); el.tabIndex = 0; el.dataset.id = a.id; starEls.set(a.id, el);
+      let origin = null;
+      Mockup.drag(el, {
+        onStart: () => { sky.classList.add("dragging"); const rootId = rootOf(lastField, a.id); const p = groupPos.get(rootId); origin = {rootId, x: p.x, y: p.y}; },
+        onMove: ({dx, dy}) => { if (!origin) return; const W = sky.clientWidth, H = sky.clientHeight; const w = toWorld(origin.x + dx, origin.y + dy); placed.set(origin.rootId, {x: w.x / W, y: w.y / H}); const gEl = groupEls.get(origin.rootId); if (gEl) { gEl.style.left = (origin.x + dx) + "px"; gEl.style.top = (origin.y + dy) + "px"; } overlay.replaceChildren(); },
+        onEnd: ({dragged}) => { sky.classList.remove("dragging"); origin = null; if (dragged) lastApi.rerender(); else lastApi.peek(a.id, el); },
+      });
+      el.onkeydown = e => { if (e.key === "Enter") lastApi.peek(a.id, el); };
+      el.onpointerenter = () => { hovered = a.id; drawEdges(lastField, lastApi); };
+      el.onpointerleave = () => { if (hovered === a.id) hovered = null; drawEdges(lastField, lastApi); };
+    }
+    const rel = g.rel.get(a.id), age = field.age(a), needs = field.needsUser(a);
+    const b = (1 - depthFor(age)) * (a.status === "done" ? 0.55 : 1);
+    const base = [9, 6, 4.5][Math.min(rel.depth, 2)];
+    const size = needs ? base + 3 : base * (0.7 + 0.55 * b);
+    el.className = "star " + a.status + (needs ? " needs" : "") + (a.status === "working" && age < 3 * MIN ? " hot" : "") + (placed.has(g.root.id) && rel.depth === 0 ? " pinned" : "") + (api.peeked === a.id ? " peeked" : "");
+    el.style.setProperty("--s", size.toFixed(1) + "px"); el.style.setProperty("--o", (needs ? 1 : 0.32 + 0.68 * b).toFixed(2));
+    el.style.left = (rel.x * zoom) + "px"; el.style.top = (rel.y * zoom) + "px";
+    const doing = a.status === "working" ? (field.toolLabel(a) || a.activity || "Working") : a.status === "done" ? "Done " + field.relativeTime(a.updatedAt) : field.statusLabel(a);
+    const parent = a.parentId && field.byId(a.parentId);
+    el.title = (a.name ? a.name + " · " : "") + a.title + "\n" + doing + (parent ? "\nfrom " + (parent.name || parent.title) : "") + "\nlast activity " + field.relativeTime(field.lastActivity(a));
+    return el;
+  }
+
+  function askTag(a, field, api) {
+    let el = tagEls.get(a.id);
+    if (!el) { el = $("div", "ask-tag"); tagEls.set(a.id, el); el.onclick = e => { if (!e.target.closest("button")) lastApi.peek(a.id, el); }; }
+    el.replaceChildren();
+    const parent = a.parentId && field.byId(a.parentId);
+    const who = $("span", "who", a.name || a.title); if (parent) who.append($("small", null, " · from " + (parent.name || parent.title)));
+    el.title = (a.ask ? a.ask.kind + (a.ask.blocking ? " · blocking" : "") + " · asked " + field.relativeTime(a.ask.askedAt) + "\n" + a.ask.question : "Your next step\n" + a.next.action) + "\n— " + a.title;
+    el.append($("span", "k", a.ask ? (a.ask.kind === "failure" ? "failed" : a.ask.kind) : "you"), who);
+    if (a.ask?.options?.length) {
+      const first = a.ask.options[0]; const b = $("button", "btn small primary", first.label); b.type = "button"; b.title = first.label; b.onclick = e => { e.stopPropagation(); field.answer(a.id, first.id); }; el.append(b);
+      if (a.ask.options.length > 1 || a.ask.freeText) { const more = $("button", "btn small quiet", "⋯"); more.type = "button"; more.title = "Other answers"; more.onclick = e => { e.stopPropagation(); lastApi.peek(a.id, el); }; el.append(more); }
+    } else { const b = $("button", "btn small", a.ask?.freeText ? "Answer…" : "Open"); b.type = "button"; b.onclick = e => { e.stopPropagation(); lastApi.peek(a.id, el); }; el.append(b); }
+    el.style.setProperty("--tw", TAGW + "px");
+    return el;
+  }
+
+  function rootOf(field, id) { let a = field.byId(id); while (a?.parentId && field.byId(a.parentId)) a = field.byId(a.parentId); return a?.id; }
+
+  function render(field, stage, api) {
+    lastField = field; lastApi = api;
+    if (!sky || !sky.isConnected) build(stage, api);
+    const W = sky.clientWidth || 1200, H = sky.clientHeight || 700;
+    const list = groups(field), {pos, top, span} = layout(field, list, W, H);
+    const crowded = field.agents.length > 60;
+    zoomLabel.textContent = Math.round(zoom * 100) + "%";
+    calm.hidden = list.some(g => g.needs.length);
+    for (const r of sky.querySelectorAll(".ruler")) r.remove();
+    for (const [label, age] of [["now", 0], ["10m", 10 * MIN], ["1h", HOUR], ["6h", 6 * HOUR]]) { const y = toScreen(0, top + depthFor(age) * span * 0.9).y; if (y < 40 || y > H - 40) continue; const r = $("div", "ruler", label); r.style.top = y + "px"; sky.insertBefore(r, overlay); }
+    const keepG = new Set(), keepS = new Set(), keepGlow = new Set(), keepT = new Set();
+    starPos = new Map(); groupPos = new Map();
+    for (const g of list) {
+      const p = pos.get(g.root.id), s = toScreen(p.x, p.y);
+      groupPos.set(g.root.id, s);
+      // At scale, a large or older constellation that does not need you is one glow until you zoom in.
+      const distant = crowded && zoom < 1.5 && !g.needs.length && !placed.has(g.root.id) && (g.members.length >= 4 || (g.members.length >= 2 && (g.settled || g.age > 10 * MIN)));
+      if (distant) {
+        keepGlow.add(g.root.id);
+        let el = glowEls.get(g.root.id);
+        if (!el) { el = $("div", "glow"); glowEls.set(g.root.id, el); sky.insertBefore(el, sky.querySelector(".tools")); }
+        const working = g.members.filter(m => m.status === "working").length, b = 1 - depthFor(g.age);
+        el.className = "glow" + (working ? " active" : "");
+        el.style.setProperty("--g", (30 + g.members.length * 4) + "px"); el.style.setProperty("--o", (0.45 + 0.55 * b).toFixed(2));
+        el.style.left = s.x + "px"; el.style.top = s.y + "px";
+        el.replaceChildren($("b", null, String(g.members.length)), $("small", null, clip(g.root.title, 24)));
+        el.title = g.root.title + "\n" + g.members.length + " stars · " + (working ? working + " working" : "quiet") + " · last activity " + field.relativeTime(field.now - g.age) + "\nClick to zoom in";
+        el.onclick = () => { const z = Math.max(1.8, zoom); pan = {x: W / 2 - p.x * z, y: H / 2 - p.y * z}; zoom = z; api.rerender(); };
+        continue;
+      }
+      keepG.add(g.root.id);
+      let gEl = groupEls.get(g.root.id);
+      if (!gEl) { gEl = $("div", "group"); gEl.append(document.createElementNS("http://www.w3.org/2000/svg", "svg")); groupEls.set(g.root.id, gEl); sky.insertBefore(gEl, sky.querySelector(".tools")); }
+      gEl.classList.toggle("lifted", g.needs.length > 0 || g.age < 5 * MIN);
+      gEl.style.left = s.x + "px"; gEl.style.top = s.y + "px";
+      // Lineage lines: faint to children, fainter to grandchildren.
+      const svg = gEl.firstChild; svg.replaceChildren();
+      for (const m of g.members) {
+        if (m === g.root || !g.rel.has(m.id)) continue; const a = g.rel.get(m.parentId), b = g.rel.get(m.id); if (!a || !b) continue;
+        const l = document.createElementNS(svg.namespaceURI, "line"); l.setAttribute("x1", a.x * zoom); l.setAttribute("y1", a.y * zoom); l.setAttribute("x2", b.x * zoom); l.setAttribute("y2", b.y * zoom); l.setAttribute("class", b.depth >= 2 ? "d2" : "d1"); svg.append(l);
+      }
+      for (const m of g.members) {
+        if (!g.rel.has(m.id)) continue;
+        const el = star(m, g, field, api); keepS.add(m.id);
+        if (el.parentNode !== gEl) gEl.append(el);
+        const rel = g.rel.get(m.id); starPos.set(m.id, {x: s.x + rel.x * zoom, y: s.y + rel.y * zoom});
+      }
+      // Needs-you tags stack beside the constellation, each tied to its star by a warm leader.
+      const flip = s.x + g.right * zoom + 26 + TAGW > W - 10;
+      g.needs.forEach((m, i) => {
+        keepT.add(m.id); const t = askTag(m, field, api), rel = g.rel.get(m.id);
+        const tx = flip ? g.left * zoom - 22 - TAGW : g.right * zoom + 22, ty = (i - (g.needs.length - 1) / 2) * TAGH + (g.bottom + g.topY) / 2 * zoom;
+        t.style.left = tx + "px"; t.style.top = ty + "px"; if (t.parentNode !== gEl) gEl.append(t);
+        const l = document.createElementNS(svg.namespaceURI, "line"); l.setAttribute("x1", rel.x * zoom); l.setAttribute("y1", rel.y * zoom); l.setAttribute("x2", flip ? tx + TAGW : tx); l.setAttribute("y2", ty); l.setAttribute("class", "lead"); svg.append(l);
+      });
+      let fold = gEl.querySelector(".fold");
+      if (g.folded) { if (!fold) { fold = $("span", "fold"); gEl.append(fold); } fold.textContent = "+" + g.folded; fold.title = g.folded + " more stars in this constellation · zoom in to see them"; } else fold?.remove();
+      // Constellation name under the root; a lone needs-you star is named by its tag.
+      let label = gEl.querySelector(".star-label");
+      if ((g.members.length > 1 || !crowded || zoom >= 1.6) && !(g.members.length === 1 && g.needs.length)) {
+        if (!label) { label = $("span", "star-label root"); gEl.append(label); }
+        label.textContent = clip(g.root.title, 28);
+        label.style.setProperty("--o", (g.needs.length ? 1 : 0.4 + 0.6 * (1 - depthFor(g.age))).toFixed(2));
+        label.style.left = "0px"; label.style.top = "0px";
+      } else label?.remove();
+    }
+    for (const [id, el] of groupEls) if (!keepG.has(id)) { el.remove(); groupEls.delete(id); }
+    for (const [id, el] of starEls) if (!keepS.has(id)) { el.remove(); starEls.delete(id); }
+    for (const [id, el] of glowEls) if (!keepGlow.has(id)) { el.remove(); glowEls.delete(id); }
+    for (const [id, el] of tagEls) if (!keepT.has(id)) { el.remove(); tagEls.delete(id); }
+    drawEdges(field, api);
+  }
+
+  // Waiting-on edges: only for the hovered or peeked star, plus any wait that is held up by something needing you.
+  function drawEdges(field, api) {
+    overlay.replaceChildren();
+    const line = (from, to, cls) => { const p = starPos.get(from), q = starPos.get(to); if (!p || !q) return; const l = document.createElementNS(overlay.namespaceURI, "line"); l.setAttribute("x1", p.x); l.setAttribute("y1", p.y); l.setAttribute("x2", q.x); l.setAttribute("y2", q.y); l.setAttribute("class", cls); overlay.append(l); };
+    for (const a of field.asks()) for (const id of field.blocks(a.id)) if (rootOf(field, id) !== rootOf(field, a.id)) line(id, a.id, "warm");
+    const focus = hovered || api.peeked; const a = focus && field.byId(focus); if (!a) return;
+    for (const w of field.agentWaits(a)) line(a.id, w.id, "focus" + (field.needsUser(w) ? " warm" : ""));
+    for (const id of field.blocks(a.id)) line(id, a.id, "focus" + (field.needsUser(a) ? " warm" : ""));
+  }
+
+  Mockup.mount({
+    number: 12, title: "Constellations", spectrum: "round two", fullBleed: true,
+    summary: "The delegation tree as a night sky: each group is a constellation, brightness is recency, needs-you stars pulse warm with an answer button beside them.",
+    signals: {current: ["created_by", "status", "tool_activity", "age", "pending_approval", "title", "client", "phase", "summary", "next_action", "next_actor"], proposed: ["ask", "name", "waiting_on", "plan"]},
+    notes: "Shape comes from created_by alone and brightness from runtime age, so the sky reads without any extra reporting; ask options, names, and waiting-on edges only enrich it.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

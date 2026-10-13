@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 16 · Radar</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* What needs you is at the centre. Rings move outward with distance from you: working, idle, waiting, done.
+       Angle is domain. A slow sweep lights up blips that just made a tool call. */
+    #stage { display: flex; flex-direction: column; overflow: hidden; }
+    .radar-field { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; touch-action: none; }
+    .radar-field.panning { cursor: grabbing; }
+    .radar-field svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+    .rings { pointer-events: none; }
+    .rings circle { fill: none; stroke: var(--line); stroke-width: 1; }
+    .rings circle.rim { stroke: var(--line-strong); }
+    .rings circle.eye { fill: color-mix(in srgb, var(--warm-tint) 55%, transparent); stroke: color-mix(in srgb, var(--warm) 40%, var(--line)); }
+    .rings circle.eye.calm { fill: color-mix(in srgb, var(--ok-tint) 40%, transparent); stroke: var(--line); }
+    .rings line { stroke: var(--line); stroke-dasharray: 2 4; }
+    .rings text { font: 9px var(--mono); letter-spacing: .1em; text-transform: uppercase; fill: var(--muted); }
+    .rings text.ring { font-size: 8px; letter-spacing: .08em; }
+    .rings text.ring.needs { fill: var(--warm); }
+    .arcs path { cursor: zoom-in; stroke: var(--surface); stroke-width: 1; }
+    .arcs path.working { fill: color-mix(in srgb, var(--accent) 22%, transparent); }
+    .arcs path.idle { fill: color-mix(in srgb, var(--dot-idle) 30%, transparent); }
+    .arcs path.blocked { fill: color-mix(in srgb, var(--muted) 16%, transparent); }
+    .arcs path.done { fill: color-mix(in srgb, var(--ok) 16%, transparent); }
+    .arcs path:hover { stroke: var(--ink); }
+    .arcs text { font: 600 11px var(--mono); fill: var(--ink); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+    .arcs text.needs { fill: var(--warm); font-size: 9px; }
+    .edges { pointer-events: none; }
+    .edges line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+    .edges line.blocks { stroke: var(--warm); }
+    .edges text { font: 9px var(--mono); fill: var(--muted); }
+
+    .sweep { position: absolute; border-radius: 50%; pointer-events: none; transform: translate(-50%, -50%);
+      background: conic-gradient(from 0deg, transparent 0deg 300deg, color-mix(in srgb, var(--accent) 13%, transparent) 360deg); }
+    .sweep i { position: absolute; left: 50%; top: 0; width: 1px; height: 50%; background: linear-gradient(to top, transparent, color-mix(in srgb, var(--accent) 55%, transparent)); }
+    .sweep.spin { animation: sweep var(--period) linear infinite; }
+    @keyframes sweep { from { transform: translate(-50%, -50%) rotate(0deg); } to { transform: translate(-50%, -50%) rotate(360deg); } }
+
+    .blip { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: var(--dot-idle); cursor: pointer; transition: left .8s ease, top .8s ease, opacity .6s; outline: 0; }
+    .radar-field.instant .blip, .blip.dragging { transition: none; }
+    .blip.working { background: var(--accent); }
+    .blip.waiting, .blip.needs { background: var(--warm); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warm) 22%, transparent); }
+    .blip.failed { background: var(--danger); }
+    .blip.blocked { background: var(--surface); box-shadow: inset 0 0 0 2px var(--muted); }
+    .blip.done { background: var(--ok); }
+    .blip.hot { animation: ping var(--period) linear infinite; animation-delay: var(--delay); }
+    @keyframes ping { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent); filter: brightness(1.35); } 18% { box-shadow: 0 0 0 9px transparent; filter: none; } 100% { box-shadow: 0 0 0 9px transparent; } }
+    .blip.pinned { outline: 1px solid var(--line-strong); outline-offset: 3px; }
+    .blip.peeked::before, .blip.lit::before { content: ""; position: absolute; inset: -6px; border: 2px solid var(--ink); border-radius: 50%; }
+    .blip.lit::before { border-color: var(--warm); }
+    .blip:hover, .blip.peeked, .blip.open, .blip.lit { z-index: 4; }
+    .blip.has-kids:hover::after { content: ""; position: absolute; inset: -30px; border-radius: 50%; }
+    .blip .label { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); font-size: 10.5px; white-space: nowrap; color: var(--ink); pointer-events: none; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+    .blip .label small { color: var(--accent); margin-left: 5px; font-size: 10px; }
+    .blip.left .label { left: auto; right: 13px; text-align: right; }
+    .radar-field:not(.labelled) .blip .label, .blip.idle .label, .blip.blocked .label, .blip.done .label, .blip.needs .label, .blip.open .label { display: none; }
+    .radar-field .blip:hover > .label { display: block; background: var(--surface); padding: 2px 6px; border-radius: 4px; box-shadow: 0 2px 10px var(--shadow); z-index: 2; }
+    .blip .count { position: absolute; left: 100%; bottom: 60%; margin-left: 1px; font: 8px var(--mono); color: var(--muted); pointer-events: none; }
+    .blip .count.needs { color: var(--warm); font-weight: 600; }
+    .blip.open .count, .blip:hover .count { display: none; }
+    .sat, .tether { display: none; position: absolute; }
+    .blip.open .sat, .blip:hover .sat, .blip.open .tether, .blip:hover .tether { display: block; }
+    .tether { height: 1px; transform-origin: 0 0; background: color-mix(in srgb, var(--muted) 55%, transparent); pointer-events: none; }
+    .sat { width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: var(--dot-idle); cursor: pointer; }
+    .sat.small { width: 4px; height: 4px; margin: -2px 0 0 -2px; }
+    .sat.working { background: var(--accent); } .sat.waiting, .sat.needs { background: var(--warm); } .sat.failed { background: var(--danger); }
+    .sat.done { background: var(--ok); opacity: .7; } .sat.blocked { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .sat:hover { transform: scale(1.5); }
+
+    /* The bull's-eye: every needs-you, answerable without opening anything. */
+    .eye-stack { position: absolute; z-index: 6; width: 262px; transform: translate(-50%, -50%); display: grid; gap: 6px; cursor: default; }
+    .eye-stack .list { display: grid; gap: 5px; max-height: 196px; overflow: auto; padding: 2px; }
+    .eye-stack .calm { text-align: center; font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .eye-stack .calm b { display: block; font-size: 15px; font-weight: 550; color: var(--ink); letter-spacing: -.01em; }
+    .tag { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 8px; align-items: center; padding: 6px 8px 6px 10px; border: 1px solid color-mix(in srgb, var(--warm) 45%, var(--line)); border-left: 3px solid var(--warm); border-radius: 7px; background: var(--surface); box-shadow: 0 3px 12px color-mix(in srgb, var(--ink) 7%, transparent); cursor: pointer; }
+    .tag:hover { border-color: var(--warm); }
+    .tag .who { display: flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; font-size: 11.5px; font-weight: 550; }
+    .tag .who .kind { flex: none; font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+    .tag .who span { flex: 0 1 auto; min-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tag .who small { flex: 0 4 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; font-size: 10px; color: var(--muted); }
+    .tag .q { grid-column: 1; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tag .act { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 4px; }
+    .tag .act .btn.quiet { padding: 4px 6px; }
+    .tag .act .btn { padding: 4px 7px; font-size: 11px; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .eye-stack .more { justify-self: center; }
+
+    .tools { position: absolute; right: 16px; bottom: 12px; z-index: 7; display: flex; gap: 6px; align-items: center; cursor: default; }
+    .tools .btn { padding: 4px 9px; font-size: 11px; }
+    .tools .zoom { font: 10px var(--mono); color: var(--muted); min-width: 34px; text-align: center; }
+    @media (prefers-reduced-motion: reduce) {
+      .sweep.spin, .blip.hot { animation: none; }
+      .blip.hot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+      .blip { transition: none; }
+    }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const SVG = "http://www.w3.org/2000/svg";
+  const MIN = 60000, PERIOD = 6000, T0 = performance.now();
+  const TAU = Math.PI * 2;
+  const hash = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  // Radial bands as fractions of the rim radius; done drifts past the rim.
+  const BANDS = {needs: [0, 0.50], working: [0.52, 0.69], idle: [0.69, 0.81], blocked: [0.81, 0.93], done: [0.96, 1.15]};
+  const BAND_LABEL = {needs: "needs you", working: "working", idle: "idle", blocked: "waiting", done: "done"};
+  const SECTORS = AgentField.DOMAINS, SW = TAU / SECTORS.length;
+  const EYE_ROWS = 4;
+
+  // View state kept across re-renders.
+  const placed = new Map(), expanded = new Set(), openKids = new Set();
+  let zoom = 1, pan = {x: 0, y: 0}, hovered = null, showAllAsks = false;
+  let fieldEl, ringsSvg, arcsSvg, edgesSvg, sweepEl, eyeEl, toolsEl, zoomLabel, geo = null;
+  const nodes = new Map(), anchors = new Map(), clusterOf = new Map();
+
+  const bandOf = (field, a) => field.needsUser(a) ? "needs" : a.status === "working" ? "working" : a.status === "done" ? "done" : a.status === "blocked" || a.status === "failed" ? "blocked" : "idle";
+  // Domain is an optional enrichment; without it, the top-level scope directory picks a stable sector.
+  const sectorOf = a => { const i = SECTORS.indexOf(a.domain); return i >= 0 ? i : Math.floor(hash((a.scope[0] || a.id).split("/")[0]) * SECTORS.length); };
+  const ageFactor = (field, a, spanMin) => Math.min(1, Math.log1p(field.age(a) / MIN) / Math.log1p(spanMin));
+  const doing = (field, a) => a.status === "working" ? (a.activity || field.toolLabel(a) || "Working") : a.status === "done" ? "Done " + field.relativeTime(a.updatedAt) : field.needsUser(a) ? "Needs you: " + (a.ask?.question || a.next.action) : field.statusLabel(a);
+  const polar = (f, th) => ({x: geo.cx + Math.sin(th) * f * geo.rz, y: geo.cy - Math.cos(th) * f * geo.rz});
+  const settleSoon = () => { fieldEl.classList.add("instant"); requestAnimationFrame(() => requestAnimationFrame(() => fieldEl.classList.remove("instant"))); };
+
+  function build(stage, api) {
+    stage.classList.add("full-bleed"); stage.replaceChildren(); nodes.clear();
+    fieldEl = $("div", "radar-field"); stage.append(fieldEl);
+    ringsSvg = document.createElementNS(SVG, "svg"); ringsSvg.setAttribute("class", "rings");
+    sweepEl = $("div", "sweep spin"); sweepEl.append($("i")); sweepEl.style.setProperty("--period", PERIOD + "ms"); sweepEl.style.animationDelay = -((performance.now() - T0) % PERIOD) + "ms";
+    arcsSvg = document.createElementNS(SVG, "svg"); arcsSvg.setAttribute("class", "arcs");
+    edgesSvg = document.createElementNS(SVG, "svg"); edgesSvg.setAttribute("class", "edges");
+    eyeEl = $("div", "eye-stack"); eyeEl.addEventListener("pointerdown", e => e.stopPropagation());
+    toolsEl = $("div", "tools"); toolsEl.addEventListener("pointerdown", e => e.stopPropagation());
+    const btn = (label, title, fn) => { const b = $("button", "btn", label); b.type = "button"; b.title = title; b.onclick = fn; return b; };
+    zoomLabel = $("span", "zoom");
+    const setZoom = (z, at) => {
+      const nz = Math.max(1, Math.min(4, z)), c = at || {x: geo.w / 2, y: geo.h / 2};
+      const ox = c.x - geo.w / 2 - pan.x, oy = c.y - geo.h / 2 - pan.y;
+      pan = {x: pan.x - ox * (nz / zoom - 1), y: pan.y - oy * (nz / zoom - 1)}; zoom = nz;
+      if (zoom === 1) pan = {x: 0, y: 0};
+      settleSoon(); api.rerender();
+    };
+    toolsEl.append(btn("−", "Zoom out", () => setZoom(zoom / 1.4)), zoomLabel, btn("+", "Zoom in (splits counted arcs)", () => setZoom(zoom * 1.4)),
+      btn("Reset view", "Zoom and pan back to the whole radar", () => { zoom = 1; pan = {x: 0, y: 0}; settleSoon(); api.rerender(); }),
+      btn("Reset layout", "Unpin dragged blips and collapse everything", () => { placed.clear(); expanded.clear(); openKids.clear(); api.rerender(); }));
+    fieldEl.append(ringsSvg, sweepEl, arcsSvg, edgesSvg, eyeEl, toolsEl);
+    fieldEl.addEventListener("wheel", e => { e.preventDefault(); const r = fieldEl.getBoundingClientRect(); setZoom(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15), {x: e.clientX - r.left, y: e.clientY - r.top}); }, {passive: false});
+    Mockup.drag(fieldEl, {
+      onStart: () => fieldEl.classList.add("panning", "instant"),
+      onMove: ({mx, my}) => { if (zoom === 1) return; pan = {x: pan.x + mx, y: pan.y + my}; api.rerender(); },
+      onEnd: () => fieldEl.classList.remove("panning", "instant"),
+    });
+  }
+
+  function geometry() {
+    const w = fieldEl.clientWidth || 1200, h = fieldEl.clientHeight || 700;
+    const r = Math.max(120, Math.min((h / 2 - 30) / 1.17, (w / 2 - 70) / 1.17));
+    return {w, h, r, rz: r * zoom, cx: w / 2 + pan.x, cy: h / 2 + pan.y};
+  }
+
+  function drawRings(field) {
+    ringsSvg.replaceChildren();
+    const add = (tag, attrs, text) => { const n = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); if (text != null) n.textContent = text; ringsSvg.append(n); return n; };
+    add("circle", {cx: geo.cx, cy: geo.cy, r: BANDS.needs[1] * geo.rz, class: "eye" + (field.asks().length ? "" : " calm")});
+    for (const f of [BANDS.working[1], BANDS.idle[1]]) add("circle", {cx: geo.cx, cy: geo.cy, r: f * geo.rz});
+    add("circle", {cx: geo.cx, cy: geo.cy, r: BANDS.blocked[1] * geo.rz, class: "rim"});
+    for (let i = 0; i < SECTORS.length; i++) {
+      const a = polar(BANDS.needs[1], i * SW), b = polar(BANDS.blocked[1], i * SW);
+      add("line", {x1: a.x, y1: a.y, x2: b.x, y2: b.y});
+      const p = polar(1.19, (i + 0.5) * SW);
+      add("text", {x: p.x, y: p.y, "text-anchor": "middle", "dominant-baseline": "central"}, AgentField.DOMAIN_LABELS[SECTORS[i]]);
+    }
+    for (const [band, [f0, f1]] of Object.entries(BANDS)) {
+      if (band === "needs") continue;
+      const p = polar((f0 + f1) / 2, 0);
+      add("text", {x: p.x + 4, y: p.y, class: "ring", "dominant-baseline": "central"}, BAND_LABEL[band]);
+    }
+  }
+
+  function layout(field) {
+    const asks = field.asks();
+    const items = [...field.roots(), ...asks.filter(a => a.parentId && field.byId(a.parentId))];
+    const pos = new Map();
+    for (const a of items) {
+      const band = bandOf(field, a), pin = placed.get(a.id);
+      if (pin) { pos.set(a.id, {...polar(pin.f, pin.th), band, th: pin.th, pinned: true}); continue; }
+      const sector = sectorOf(a), th = sector * SW + SW * (0.12 + 0.76 * hash(a.id));
+      const [f0, f1] = BANDS[band];
+      const f = band === "needs" ? 0.455 + 0.03 * hash(a.id + "r") : f0 + (f1 - f0) * (0.14 + 0.72 * ageFactor(field, a, band === "done" ? 1440 : 360));
+      pos.set(a.id, {...polar(f, th), band, th, f, sector, pinned: false});
+    }
+    // Counted arcs: a sector × ring cell holding many agents (sub-agents included) merges until zoomed in or clicked.
+    const cap = zoom >= 1.8 ? Infinity : 8, cells = new Map(); clusterOf.clear();
+    const weight = list => list.reduce((n, a) => n + 1 + field.descendants(a.id).length, 0);
+    for (const a of items) { const p = pos.get(a.id); if (p.pinned || p.band === "needs") continue; const key = p.sector + ":" + p.band; if (!cells.has(key)) cells.set(key, []); cells.get(key).push(a); }
+    const arcs = [];
+    for (const [key, list] of cells) {
+      const total = weight(list);
+      if (list.length < 2 || total <= cap || expanded.has(key)) continue;
+      const [sector, band] = key.split(":"); arcs.push({key, sector: Number(sector), band, list, total});
+      for (const a of list) { clusterOf.set(a.id, key); pos.delete(a.id); }
+    }
+    // Nudge overlapping blips apart, then keep each inside its ring.
+    const free = [...pos.entries()].filter(([, p]) => !p.pinned).sort((x, y) => x[0].localeCompare(y[0]));
+    for (let iter = 0; iter < 6; iter++) for (let i = 0; i < free.length; i++) for (let k = i + 1; k < free.length; k++) {
+      const p = free[i][1], q = free[k][1], dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy), min = 15;
+      if (d < min && d > 0) { const push = (min - d) / 2, ux = dx / d, uy = dy / d; p.x -= ux * push; p.y -= uy * push; q.x += ux * push; q.y += uy * push; }
+      else if (d === 0) q.x += 8;
+    }
+    for (const [, p] of free) {
+      const dx = p.x - geo.cx, dy = p.y - geo.cy, d = Math.hypot(dx, dy) || 1;
+      const [f0, f1] = p.band === "needs" ? [0.43, 0.505] : BANDS[p.band];
+      const lo = f0 * geo.rz + 5, hi = f1 * geo.rz - 5, cd = Math.max(lo, Math.min(hi, d));
+      p.x = geo.cx + dx / d * cd; p.y = geo.cy + dy / d * cd;
+    }
+    return {items: items.filter(a => pos.has(a.id)), pos, arcs, asks};
+  }
+
+  function drawArcs(field, lay, api) {
+    arcsSvg.replaceChildren();
+    for (const arc of lay.arcs) {
+      const [f0, f1] = BANDS[arc.band], r0 = (f0 + 0.01) * geo.rz, r1 = (f1 - 0.01) * geo.rz;
+      const a0 = arc.sector * SW + SW * 0.05, a1 = (arc.sector + 1) * SW - SW * 0.05;
+      const pt = (r, a) => (geo.cx + Math.sin(a) * r).toFixed(1) + " " + (geo.cy - Math.cos(a) * r).toFixed(1);
+      const path = document.createElementNS(SVG, "path");
+      path.setAttribute("d", `M ${pt(r0, a0)} L ${pt(r1, a0)} A ${r1} ${r1} 0 0 1 ${pt(r1, a1)} L ${pt(r0, a1)} A ${r0} ${r0} 0 0 0 ${pt(r0, a0)} Z`);
+      path.setAttribute("class", arc.band);
+      const t = document.createElementNS(SVG, "title"); t.textContent = arc.total + " agents (" + arc.list.length + " top-level) " + BAND_LABEL[arc.band] + " in " + AgentField.DOMAIN_LABELS[SECTORS[arc.sector]] + "\n" + arc.list.slice(0, 8).map(a => a.title).join("\n") + (arc.list.length > 8 ? "\n…" : "") + "\nClick or zoom in to split";
+      path.append(t);
+      path.addEventListener("pointerdown", e => e.stopPropagation());
+      path.onclick = () => { expanded.add(arc.key); api.rerender(); };
+      const mid = (arc.sector + 0.5) * SW, rm = (r0 + r1) / 2, c = {x: geo.cx + Math.sin(mid) * rm, y: geo.cy - Math.cos(mid) * rm};
+      anchors.set("arc:" + arc.key, c);
+      const label = document.createElementNS(SVG, "text"); label.setAttribute("x", c.x); label.setAttribute("y", c.y); label.textContent = String(arc.total);
+      arcsSvg.append(path, label);
+      const needs = arc.list.reduce((n, a) => n + field.descendantsNeedingUser(a.id).length, 0);
+      if (needs) { const n = document.createElementNS(SVG, "text"); n.setAttribute("x", c.x); n.setAttribute("y", c.y + 12); n.setAttribute("class", "needs"); n.textContent = needs + " need you"; arcsSvg.append(n); }
+    }
+  }
+
+  function satellites(field, a, el, size, api) {
+    const kids = field.children(a.id); if (!kids.length) return;
+    const needs = field.descendantsNeedingUser(a.id).length, total = field.descendants(a.id).length;
+    el.append($("span", "count" + (needs ? " needs" : ""), String(total) + (needs ? "!" : "")));
+    const place = (k, x, y, px, py, small) => {
+      const len = Math.hypot(x - px, y - py), tether = $("span", "tether");
+      tether.style.left = px + "px"; tether.style.top = py + "px"; tether.style.width = len + "px"; tether.style.transform = `rotate(${Math.atan2(y - py, x - px)}rad)`;
+      const s = $("span", "sat " + k.status + (field.needsUser(k) ? " needs" : "") + (small ? " small" : ""));
+      s.style.left = x + "px"; s.style.top = y + "px"; s.title = k.title + (k.name ? " (" + k.name + ")" : "") + "\n" + doing(field, k) + (field.recentSteps(k)[0] ? "\nLast step: " + field.recentSteps(k)[0].label : "");
+      s.addEventListener("pointerdown", e => e.stopPropagation());
+      s.onclick = e => { e.stopPropagation(); api.peek(k.id, s); };
+      el.append(tether, s);
+      anchors.set(k.id, s);
+    };
+    const c = size / 2;
+    kids.forEach((k, i) => {
+      const ang = -Math.PI / 2 + i * TAU / Math.max(5, kids.length), r = c + 13;
+      const x = c + Math.cos(ang) * r, y = c + Math.sin(ang) * r;
+      place(k, x, y, c, c, false);
+      const grand = field.children(k.id);
+      grand.forEach((g, j) => { const ga = ang + (j - (grand.length - 1) / 2) * 0.55; place(g, x + Math.cos(ga) * 9, y + Math.sin(ga) * 9, x, y, true); });
+    });
+  }
+
+  function drawBlips(field, lay, api) {
+    const keep = new Set(), labelled = lay.items.length <= 30 || zoom >= 2;
+    fieldEl.classList.toggle("labelled", labelled);
+    const phase = (performance.now() - T0) % PERIOD;
+    for (const a of lay.items) {
+      const p = lay.pos.get(a.id); keep.add(a.id);
+      let el = nodes.get(a.id);
+      if (!el) {
+        el = $("div", "blip"); el.tabIndex = 0; nodes.set(a.id, el); fieldEl.insertBefore(el, eyeEl);
+        el.addEventListener("pointerdown", e => e.stopPropagation());
+        Mockup.drag(el, {
+          onMove: ({mx, my}) => {
+            const x = parseFloat(el.style.left) + mx, y = parseFloat(el.style.top) + my;
+            const f = Math.min(1.15, Math.hypot(x - geo.cx, y - geo.cy) / geo.rz), th = (Math.atan2(x - geo.cx, -(y - geo.cy)) + TAU) % TAU;
+            placed.set(a.id, {f, th}); el.style.left = x + "px"; el.style.top = y + "px"; drawEdges(field, api);
+          },
+          onEnd: ({dragged}) => {
+            if (dragged) { el.classList.add("pinned"); api.rerender(); return; }
+            if (field.children(a.id).length) { if (openKids.has(a.id) && api.peeked === a.id) openKids.delete(a.id); else openKids.add(a.id); }
+            api.peek(a.id, el); api.rerender();
+          },
+        });
+        el.onkeydown = e => { if (e.key === "Enter") api.peek(a.id, el); };
+        el.onpointerenter = () => { hovered = a.id; drawEdges(api.field, api); };
+        el.onpointerleave = () => { if (hovered === a.id) hovered = null; drawEdges(api.field, api); };
+      }
+      const desc = field.descendants(a.id).length, size = 9 + Math.min(6, desc * 1.5), hot = field.pulsesSince(a, 2 * MIN).length > 0;
+      el.className = "blip " + a.status + (p.band === "needs" ? " needs" : "") + (hot && a.status !== "done" ? " hot" : "") + (p.pinned ? " pinned" : "") + (desc ? " has-kids" : "") +
+        (openKids.has(a.id) ? " open" : "") + (api.peeked === a.id ? " peeked" : "") + (p.x < geo.cx ? " left" : "");
+      el.dataset.id = a.id;
+      el.style.width = el.style.height = size + "px"; el.style.margin = (-size / 2) + "px 0 0 " + (-size / 2) + "px";
+      el.style.left = p.x + "px"; el.style.top = p.y + "px";
+      el.style.opacity = p.band === "done" ? String(1 - 0.7 * ageFactor(field, a, 1440)) : "";
+      // The sweep passes angle th at (th / 2π) of each period; time the ping to that moment.
+      let delay = (p.th / TAU) * PERIOD - phase; if (delay > 0) delay -= PERIOD;
+      el.style.setProperty("--period", PERIOD + "ms"); el.style.setProperty("--delay", delay.toFixed(0) + "ms");
+      const parent = a.parentId && field.byId(a.parentId);
+      el.title = (a.name ? a.name + " · " : "") + a.title + (parent ? "\nfrom " + (parent.name || parent.title) : "") + "\n" + doing(field, a) + (desc ? "\n" + desc + " sub-agents" : "");
+      el.replaceChildren();
+      const label = $("span", "label", a.name || a.title); if (a.status === "working") label.append($("small", null, a.activity || field.toolLabel(a) || "")); el.append(label);
+      satellites(field, a, el, size, api);
+      anchors.set(a.id, el);
+    }
+    for (const [id, el] of nodes) if (!keep.has(id)) { el.remove(); nodes.delete(id); }
+  }
+
+  function drawEye(field, lay, api) {
+    eyeEl.replaceChildren();
+    eyeEl.style.left = geo.cx + "px"; eyeEl.style.top = geo.cy + "px";
+    if (!lay.asks.length) {
+      const c = $("div", "calm"); c.append($("b", null, "Nothing needs you"), "Blips that just used a tool light up as the sweep passes.");
+      eyeEl.append(c); return;
+    }
+    const list = $("div", "list");
+    const shown = showAllAsks ? lay.asks : lay.asks.slice(0, EYE_ROWS);
+    for (const a of shown) {
+      const tag = $("div", "tag"); tag.tabIndex = 0;
+      const parent = a.parentId && field.byId(a.parentId);
+      const who = $("div", "who"); who.append($("span", "kind", a.ask ? (a.ask.kind === "failure" ? "failed" : a.ask.kind) : "you"), $("span", null, a.name || a.title));
+      if (parent) who.append($("small", null, "from " + (parent.name || parent.title)));
+      const q = $("div", "q", a.ask ? a.ask.question : a.next.action); q.title = a.title + "\n" + q.textContent;
+      const act = $("div", "act");
+      if (a.ask?.options?.length) {
+        const first = a.ask.options[0], b = $("button", "btn primary", first.label); b.type = "button"; b.title = first.label;
+        b.onclick = e => { e.stopPropagation(); field.answer(a.id, first.id); }; act.append(b);
+      }
+      const more = $("button", "btn quiet", a.ask?.options?.length ? "…" : a.ask?.freeText ? "Answer…" : "Open"); more.type = "button";
+      more.title = a.ask?.options?.length > 1 ? "Other answers: " + a.ask.options.slice(1).map(o => o.label).join(", ") : "Peek";
+      more.onclick = e => { e.stopPropagation(); api.peek(a.id, tag); }; act.append(more);
+      tag.append(who, act, q);
+      tag.onclick = () => api.peek(a.id, tag);
+      tag.onpointerenter = () => { hovered = a.id; nodes.get(a.id)?.classList.add("lit"); drawEdges(field, api); };
+      tag.onpointerleave = () => { hovered = null; nodes.get(a.id)?.classList.remove("lit"); drawEdges(field, api); };
+      list.append(tag);
+    }
+    eyeEl.append(list);
+    if (lay.asks.length > EYE_ROWS) {
+      const b = $("button", "btn quiet small more", showAllAsks ? "Show fewer" : "+" + (lay.asks.length - EYE_ROWS) + " more need you"); b.type = "button";
+      b.onclick = () => { showAllAsks = !showAllAsks; api.rerender(); }; eyeEl.append(b);
+    }
+  }
+
+  // Waiting-on edges appear only for the hovered or peeked blip.
+  function drawEdges(field, api) {
+    edgesSvg.replaceChildren();
+    const id = hovered || api.peeked, a = id && field.byId(id); if (!a || !geo) return;
+    const fr = fieldEl.getBoundingClientRect();
+    const centre = key => {
+      let cur = key;
+      for (let guard = 0; cur && guard < 8; guard++) {
+        const n = anchors.get(cur);
+        if (n instanceof Element && n.isConnected && n.getClientRects().length) { const r = n.getBoundingClientRect(); return {x: r.left + r.width / 2 - fr.left, y: r.top + r.height / 2 - fr.top}; }
+        if (clusterOf.has(cur)) return anchors.get("arc:" + clusterOf.get(cur));
+        cur = field.byId(cur)?.parentId;
+      }
+      return null;
+    };
+    const from = centre(a.id); if (!from) return;
+    const line = (to, cls, text) => {
+      if (!to || (Math.abs(to.x - from.x) < 1 && Math.abs(to.y - from.y) < 1)) return;
+      const l = document.createElementNS(SVG, "line"); l.setAttribute("x1", from.x); l.setAttribute("y1", from.y); l.setAttribute("x2", to.x); l.setAttribute("y2", to.y); if (cls) l.setAttribute("class", cls); edgesSvg.append(l);
+      if (text) { const t = document.createElementNS(SVG, "text"); t.setAttribute("x", to.x + 4); t.setAttribute("y", to.y - 4); t.textContent = text; edgesSvg.append(t); }
+    };
+    for (const w of field.agentWaits(a)) line(centre(w.id));
+    for (const ext of field.externalWaits(a)) { const dx = from.x - geo.cx, dy = from.y - geo.cy, d = Math.hypot(dx, dy) || 1; line({x: geo.cx + dx / d * geo.rz * 1.06, y: geo.cy + dy / d * geo.rz * 1.06}, null, ext); }
+    for (const b of field.blocks(a.id)) line(centre(b), "blocks");
+  }
+
+  function render(field, stage, api) {
+    if (!fieldEl || !fieldEl.isConnected) build(stage, api);
+    geo = geometry(); anchors.clear();
+    zoomLabel.textContent = Math.round(zoom * 100) + "%";
+    const lay = layout(field);
+    drawRings(field);
+    const sweepR = BANDS.blocked[1] * geo.rz * 2;
+    sweepEl.style.width = sweepEl.style.height = sweepR + "px"; sweepEl.style.left = geo.cx + "px"; sweepEl.style.top = geo.cy + "px";
+    drawArcs(field, lay, api);
+    drawBlips(field, lay, api);
+    drawEye(field, lay, api);
+    drawEdges(field, api);
+  }
+
+  const mounted = Mockup.mount({
+    number: 16, title: "Radar", spectrum: "round two", fullBleed: true,
+    summary: "Needs-you sits in the bull's-eye, answerable there; rings move out through working, idle, waiting, and done; the sweep lights up fresh tool calls.",
+    signals: {current: ["status", "pending_approval", "tool_activity", "age", "created_by", "client", "title", "phase", "summary", "next_action", "write_scope"], proposed: ["ask", "domain", "waiting_on", "name", "activity"]},
+    notes: "Ring comes from runtime status and pending approvals, radius within a ring from runtime age, and the sweep from tool calls in the last two minutes. Domain only picks the angle; without it the sector falls back to the top-level write-scope directory. Ask options turn the primary button into a one-click answer.",
+    render,
+  });
+  window.addEventListener("resize", () => mounted.rerender());
+})();
+</script>
+</body>
+</html>
