@@ -58,6 +58,7 @@ async function openMentionFile(ref) {
 }
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
 async function refreshList({background = false} = {}) {
+  state.schedules?.refresh({background: true}).catch(showError);
   if (state.paneMode) { window.parent.agentCoordPanes?.requestList({background}); return; }
   const view = $("view").value, pending = state.listRefresh;
   // Polls and streamed events must not keep superseding a slow inventory read.
@@ -562,16 +563,18 @@ function renderList() {
   const projectThreads = threadsInProject(state.sessions).filter(t => threadOrganization.matches(t, "", $("project").value));
   const threads = projectThreads.filter(t => threadViews.matches(t,
     {show: $("view").value, phase: $("phase-filter").value, search: query}));
+  const upcoming = upcomingSchedules(query);
   const archived = $("view").value === "archived";
   const groupBy = $("group-by").value;
   $("group-by-domain").setAttribute("aria-pressed", String(groupBy === "domain"));
   const viewId = (state.projectCwd || "") + ":" + (savedViews?.activeId || "all");
-  const signature = JSON.stringify([threads, state.selected, [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
+  const signature = JSON.stringify([threads, upcoming, state.selected, [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
   $("home").setAttribute("aria-current", state.selected && !state.dispatchDock?.active ? "false" : "page");
   $("thread-count").textContent = String(threads.length);
   const projects = new Set(threads.map(t => t.project_id).filter(Boolean)).size;
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
-    " · " + projects + (projects === 1 ? " group" : " groups");
+    " · " + projects + (projects === 1 ? " group" : " groups") +
+    (upcoming.length ? " · " + upcoming.length + (upcoming.length === 1 ? " scheduled prompt" : " scheduled prompts") : "");
   if (signature === state.listSignature) { renderStatus(); state.dispatchDock?.flush(); return; }
   state.listSignature = signature;
   state.overviewMotion ||= createOverviewMotion();
@@ -605,6 +608,7 @@ function renderList() {
     if (sidebarItems.length) $("sessions").append(section);
     parent.append(overview);
   }
+  state.schedules?.renderUpcoming($("overview"), upcoming);
   if (groupBy === "domain") {
     const pinned = agentTree.roots.filter(thread => thread.pinned && thread.attention === "now");
     const pinnedIds = new Set(pinned.map(thread => thread.thread_id));
@@ -652,7 +656,7 @@ function renderList() {
       board.scrollLeft = state.phaseScroll.get(viewId) || 0;
     }
   }
-  if (!threads.length) {
+  if (!threads.length && !upcoming.length) {
     $("sessions").append(node("p", filtered ? "No matching threads" : "Nothing here yet", "empty"));
     const empty = node("div", null, "empty-state");
     const emptyProject = !query && !$("phase-filter").value && !$("repository").value && $("view").value === "active" && !projectThreads.length
@@ -681,6 +685,17 @@ function renderList() {
   }
   renderStatus();
   globalThis.threadHover?.refresh();
+}
+function upcomingSchedules(query) {
+  if ($("view").value !== "later") return [];
+  return state.schedules?.upcoming({matches: item => {
+    const thread = state.sessions.find(thread => thread.thread_id === item.target_thread_id);
+    const context = thread || {...item.settings, cwd: item.cwd};
+    return inProject(context, state.folders?.selected?.cwd) && threadViews.matches(
+      {...context, attention: "later", title: [thread?.title, item.message, item.cwd].filter(Boolean).join(" ")},
+      {show: "later", phase: $("phase-filter").value, project: $("project").value,
+        repository: $("repository").value, search: query});
+  }}) || [];
 }
 function agentThreadTree(threads) {
   // Filter first: a hidden, closed, or differently placed creator must never
@@ -899,6 +914,7 @@ async function select(id, {rollUp = false, dock = false, focus = true} = {}) {
   } else $("session-name").focus({preventScroll: true});
 }
 async function refreshDetail() {
+  state.schedules?.refresh({background: true}).catch(showError);
   const id = state.selected;
   if (!id || isSessionDraft()) return;
   const entry = conversationEntry(id);
@@ -936,6 +952,7 @@ async function refreshDetail() {
   return entry.pending;
 }
 async function refreshThread() {
+  if (state.paneMode) state.schedules?.refresh({background: true}).catch(showError);
   const id = state.selected;
   if (!id || !state.detail || isSessionDraft()) return;
   const revision = state.attentionMutations?.get(id)?.revision || 0;
@@ -1099,6 +1116,7 @@ async function saveSessionPermissions() {
   await refreshList();
 }
 function renderStatus() {
+  state.schedules?.renderThread($("thread-schedules"), state.selected);
   globalThis.agentCoordSpeech?.update(state.selected, state.detail, state.config);
   state.rollUp?.changed();
   renderSessionSettings();
@@ -2249,6 +2267,9 @@ async function boot() {
   }
   state.config = await api("config");
   state.schedules = new ScheduledPromptsUI({document, api, openThread: select, onError: showError,
+    onChange: () => renderList(),
+    getThread: id => state.sessions.find(thread => thread.thread_id === id) ||
+      (state.detail?.work_thread?.thread_id === id ? state.detail.work_thread : null),
     getDraft: () => {
       const current = state.detail?.session;
       const settings = current ? {...current} : {...sessionContext(), client: "codex"};

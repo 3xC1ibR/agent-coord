@@ -643,6 +643,14 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 .schedule-card p { margin: 6px 0; font-size: 12px; }
 .schedule-meta { font-weight: 600; }
 .schedule-error { color: var(--warm); }
+.thread-schedules { flex: none; max-height: 180px; overflow-y: auto; border-top: 1px solid var(--line); padding: 10px 28px; }
+.thread-schedules > h2, .upcoming-schedules > h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.thread-schedules .schedule-card { padding: 10px 12px; margin-top: 8px; }
+.thread-schedules .schedule-card h3 { font-size: 12px; max-height: 3em; }
+.thread-schedules .dialog-actions { margin-top: 8px; }
+.thread-schedules .dialog-actions button { padding: 3px 8px; font-size: 12px; }
+.upcoming-schedules .schedule-card { background: var(--surface); }
+@media (max-width: 720px) { .thread-schedules { padding: 10px 16px; max-height: 160px; } }
 .composer-footer > div { flex-wrap: wrap; justify-content: flex-end; }
 @media (max-width: 520px) { .schedule-settings { grid-template-columns: minmax(0, 1fr); } }
 

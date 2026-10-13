@@ -9,11 +9,18 @@
     }
     return date.getTime() / 1000;
   }
+  function upcomingPrompts(items, {threadId, matches = () => true} = {}) {
+    return items.filter(item => ["scheduled", "waiting", "starting"].includes(item.state) &&
+      (!threadId || item.target_thread_id === threadId) && matches(item))
+      .sort((a, b) => a.run_at - b.run_at || a.id.localeCompare(b.id));
+  }
   class ScheduledPromptsUI {
-    constructor({document, api, getDraft, openThread, onSaved, onError}) {
-      Object.assign(this, {document, api, getDraft, openThread, onSaved, onError});
+    constructor({document, api, getDraft, getThread, openThread, onSaved, onError, onChange}) {
+      Object.assign(this, {document, api, getDraft, getThread, openThread, onSaved, onError, onChange});
       this.$ = id => document.getElementById(id);
       this.catalogs = new Map();
+      this.items = [];
+      this.revision = 0;
       if (typeof ThreadMentions !== "undefined") {
         this.mentions = new ThreadMentions({input: this.$("schedule-message"), menu: this.$("schedule-mentions"), references: this.$("schedule-references"),
           getThread: () => this.requestId, canComplete: () => this.$("schedule-dialog").open && !this.saving,
@@ -140,8 +147,9 @@
           ...(this.targetThread ? {target_thread_id: this.targetThread} : {settings})};
         const mentions = this.mentions?.snapshot() || [];
         if (mentions.length) body.mentions = mentions;
-        if (this.editing) await this.api("schedules/" + encodeURIComponent(this.editing.id), {...body, action: "edit", version: this.editing.version});
-        else await this.api("schedules", {...body, id: this.requestId});
+        const item = this.editing ? await this.api("schedules/" + encodeURIComponent(this.editing.id), {...body, action: "edit", version: this.editing.version}) :
+          await this.api("schedules", {...body, id: this.requestId});
+        this.accept(item);
         this.$("schedule-dialog").close();
         this.onSaved?.(this.draft);
         await this.showList();
@@ -155,45 +163,99 @@
       await this.refresh();
       clearInterval(this.timer);
       this.timer = setInterval(() => {
-        if (this.$("schedules-dialog").open && !this.mutating) this.refresh().catch(error => this.error("schedules-error", error));
+        if (this.$("schedules-dialog").open && !this.mutating) this.refresh({background: true}).catch(error => this.error("schedules-error", error));
       }, 5000);
     }
 
-    async refresh() {
-      const items = (await this.api("schedules")).data;
+    async refresh({background = false} = {}) {
+      if (background && this.pending?.revision === this.revision) return this.pending.promise;
+      const request = {revision: ++this.revision};
+      this.pending = request;
+      request.promise = (async () => {
+        const items = (await this.api("schedules")).data;
+        if (request.revision !== this.revision) return;
+        this.update(items);
+      })();
+      try { await request.promise; }
+      finally { if (this.pending === request) this.pending = null; }
+    }
+
+    update(items) {
+      const changed = JSON.stringify(items) !== JSON.stringify(this.items);
+      this.items = items;
+      if (this.$("schedules-dialog").open) this.renderList();
+      if (changed) this.onChange?.();
+    }
+
+    accept(item) {
+      // Publish the mutation immediately; an older in-flight read cannot undo it.
+      ++this.revision;
+      this.update([item, ...this.items.filter(previous => previous.id !== item.id)]);
+    }
+
+    upcoming(options) { return upcomingPrompts(this.items, options); }
+
+    renderThread(area, threadId) {
+      if (!area) return;
+      const items = threadId ? this.upcoming({threadId}) : [];
+      const signature = JSON.stringify([threadId, items]);
+      if (area.dataset.signature === signature) return;
+      area.dataset.signature = signature;
+      area.hidden = !items.length;
+      area.replaceChildren();
+      if (!items.length) return;
+      area.append(this.node("h2", items.length === 1 ? "Scheduled prompt" : "Scheduled prompts"));
+      for (const item of items) area.append(this.card(item, {compact: true}));
+    }
+
+    renderUpcoming(area, items) {
+      if (!items.length) return;
+      const section = this.node("section", null, "thread-group upcoming-schedules");
+      section.setAttribute("aria-label", "Scheduled prompts");
+      section.append(this.node("h2", "Scheduled prompts"));
+      const cards = this.node("div", null, "thread-cards");
+      for (const item of items) cards.append(this.card(item));
+      section.append(cards); area.append(section);
+    }
+
+    renderList() {
       const list = this.$("schedule-list"); list.replaceChildren();
-      if (!items.length) list.append(this.node("p", "No scheduled prompts yet.", "muted"));
+      if (!this.items.length) list.append(this.node("p", "No scheduled prompts yet.", "muted"));
+      for (const item of this.items) list.append(this.card(item));
+    }
+
+    card(item, {compact = false} = {}) {
       const labels = {scheduled: "Scheduled", waiting: "Waiting for thread", starting: "Starting", running: "Running", completed: "Completed", failed: "Failed", missed: "Missed", cancelled: "Cancelled", review: "Needs review"};
-      for (const item of items) {
-        const card = this.node("article", null, "schedule-card");
-        const title = this.node("h3", item.message);
-        const time = new Date(item.run_at * 1000).toLocaleString(undefined, {timeZone: item.timezone, dateStyle: "medium", timeStyle: "short"});
-        card.append(title, this.node("p", `${labels[item.state] || item.state} · ${time} · ${item.timezone}`, "schedule-meta"),
-          this.node("p", item.target_thread_id ? "Existing thread · Uses its settings at delivery" : `${item.settings.model} · ${item.settings.effort || "Model default"} · ${item.settings.yolo ? "Full access" : "Workspace access"}`, "muted"),
-          this.node("p", item.cwd, "muted"));
-        if (item.error) card.append(this.node("p", item.error, "schedule-error"));
-        const actions = this.node("div", null, "dialog-actions");
-        const button = (label, fn) => {
-          const node = this.node("button", label, "quiet"); node.type = "button";
-          node.onclick = async () => {
-            if (this.mutating) return;
-            this.mutating = true; node.disabled = true;
-            try { await fn(); } catch (error) { this.error("schedules-error", error); }
-            finally { this.mutating = false; node.disabled = false; }
-          }; actions.append(node);
-        };
-        if (["scheduled", "missed", "waiting"].includes(item.state)) {
-          button("Edit", () => this.open(item));
-          button("Cancel", async () => { await this.api("schedules/" + item.id, {action: "cancel", version: item.version}); await this.refresh(); });
-        }
-        if (item.state === "missed") button("Run now", async () => {
-          await this.api("schedules/" + item.id, {action: "run_now", version: item.version}); await this.refresh();
-        });
-        if (item.thread_id) button("Open thread", async () => { await this.openThread(item.thread_id); this.$("schedules-dialog").close(); });
-        card.append(actions); list.append(card);
+      const card = this.node("article", null, "schedule-card");
+      const title = this.node("h3", item.message);
+      const time = new Date(item.run_at * 1000).toLocaleString(undefined, {timeZone: item.timezone, dateStyle: "medium", timeStyle: "short"});
+      card.append(title, this.node("p", `${labels[item.state] || item.state} · ${time} · ${item.timezone}`, "schedule-meta"));
+      if (!compact) card.append(
+        this.node("p", item.target_thread_id ? "Existing thread · " + (this.getThread?.(item.target_thread_id)?.title || "Uses its settings at delivery") : `New thread · ${item.settings.model} · ${item.settings.effort || "Model default"} · ${item.settings.yolo ? "Full access" : "Workspace access"}`, "muted"),
+        this.node("p", item.cwd, "muted"));
+      if (item.error) card.append(this.node("p", item.error, "schedule-error"));
+      const actions = this.node("div", null, "dialog-actions");
+      const button = (label, fn, mutates = true) => {
+        const node = this.node("button", label, "quiet"); node.type = "button";
+        node.onclick = async () => {
+          if (this.mutating) return;
+          if (mutates) this.mutating = true;
+          node.disabled = true;
+          try { await fn(); } catch (error) { this.onError(error); }
+          finally { if (mutates) this.mutating = false; node.disabled = false; }
+        }; actions.append(node);
+      };
+      if (["scheduled", "missed", "waiting"].includes(item.state)) {
+        button("Edit", () => this.open(item), false);
+        button("Cancel", async () => { this.accept(await this.api("schedules/" + item.id, {action: "cancel", version: item.version})); await this.refresh(); });
       }
+      if (item.state === "missed") button("Run now", async () => {
+        this.accept(await this.api("schedules/" + item.id, {action: "run_now", version: item.version})); await this.refresh();
+      });
+      if (item.thread_id && !compact) button("Open thread", async () => { await this.openThread(item.thread_id); this.$("schedules-dialog").close(); }, false);
+      card.append(actions); return card;
     }
   }
   globalThis.ScheduledPromptsUI = ScheduledPromptsUI;
-  if (typeof module !== "undefined") module.exports = {ScheduledPromptsUI, localInput, scheduledTime};
+  if (typeof module !== "undefined") module.exports = {ScheduledPromptsUI, localInput, scheduledTime, upcomingPrompts};
 })();
