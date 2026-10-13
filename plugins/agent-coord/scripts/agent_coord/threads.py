@@ -606,8 +606,8 @@ class ThreadStore:
             db.execute("DELETE FROM thread_links WHERE thread_id = ? AND id = ?", (thread_id, link_id))
         return self.get(thread_id, history=True)
 
-    def instructions(self, session_id: str | None = None, *, caller_context: bool = False) -> str:
-        command = "agent-coord" if caller_context else command_prefix(self.store.database_path)
+    def instructions(self, session_id: str | None = None, *, caller_context: bool = False, command: str | None = None) -> str:
+        command = command or ("agent-coord" if caller_context else command_prefix(self.store.database_path))
         identity = ""
         if session_id and not caller_context and caller_session() != session_id:
             identity = " --session-id " + shlex.quote(session_id)

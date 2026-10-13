@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -149,6 +150,33 @@ class CliContextTests(unittest.TestCase):
         self.assertIn(" --session-id one", text)
         # Provider launchers guarantee context before a new thread has an ID.
         self.assertIn("Run agent-coord checkpoint --json", self.store.threads.instructions(caller_context=True))
+
+    def test_codex_hook_guidance_uses_tool_shell_identity_without_hook_identity(self):
+        for event in ("SessionStart", "UserPromptSubmit"):
+            with self.subTest(event=event):
+                with patch.dict(os.environ, {"AGENT_COORD_CLIENT": "codex"}, clear=True):
+                    result = handle({"hook_event_name": event, "session_id": "one", "cwd": str(self.root)}, self.store)
+                text = result["hookSpecificOutput"]["additionalContext"]
+                command = text.split("Run ", 1)[1].split(" --json ", 1)[0]
+                self.assertNotIn("--session-id", command)
+                # A hook's explicit database fallback must survive shortening.
+                self.assertIn(str(self.database), command)
+                payload = json.dumps({"phase": "investigation", "summary": event})
+                code, receipt = self.invoke(*shlex.split(command)[1:], "--json", payload)
+                self.assertEqual(code, 0)
+                self.assertEqual(receipt["thread_id"], "one")
+                self.assertEqual(self.store.threads.get("one")["checkpoint"]["summary"], event)
+                if event == "SessionStart":
+                    self.assertIn("begin-work --scope", text)
+                    self.assertIn("inbox --unread", text)
+                    self.assertIn("ack --message-id", text)
+
+    def test_bootstrap_preserves_explicit_identity_without_shell_context(self):
+        with patch.dict(os.environ, {"AGENT_COORD_CLIENT": "claude"}, clear=True):
+            result = handle({"hook_event_name": "SessionStart", "session_id": "two", "cwd": str(self.root)}, self.store)
+        text = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("checkpoint --session-id two --json", text)
+        self.assertIn("begin-work --session-id two --scope", text)
 
 
 if __name__ == "__main__":

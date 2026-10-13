@@ -1193,7 +1193,7 @@ plugin to record turn completions.
 Agents maintain checkpoints with:
 
 ```bash
-agent-coord checkpoint --session-id <id> --json '{
+agent-coord checkpoint --json '{
   "title": "Database write performance",
   "phase": "investigation",
   "summary": "Compared two approaches; no implementation has started.",
@@ -1205,6 +1205,11 @@ agent-coord thread show --session-id <id>
 agent-coord thread list
 agent-coord thread update --session-id <id> --attention later
 ```
+
+Checkpoints infer the current session from `AGENT_COORD_SESSION_ID`, then
+`CODEX_THREAD_ID`; agents do not need to look up or pass their own ID. Use
+`--session-id` to target another thread or when running outside an agent's
+shell context. Hooks announce the session ID for that fallback.
 
 Phases are `discussion`, `investigation`, `planning`, `orchestrating`, `implementation`,
 `validation`, `deployment`, and `finished`. Keep the activity phase when answering questions or completing

@@ -42,7 +42,9 @@ def coordination_bootstrap(store, session_id, *, caller_context=True, command=No
     """The same actionable coordination contract for every provider and resume."""
     session = store.get_session(session_id)
     command = command or command_prefix(store.database_path)
-    identity = shlex.quote(session_id)
+    identity = ""
+    if not caller_context and caller_session() != session_id:
+        identity = " --session-id " + shlex.quote(session_id)
     skill = cli_path().parent.parent / "skills/agent-coordination/SKILL.md"
     text = (
         f"This session is registered with agent-coord as {session_id}. "
@@ -63,14 +65,14 @@ def coordination_bootstrap(store, session_id, *, caller_context=True, command=No
     text += (
         "\nCLI examples (replace path placeholders; repeat --scope for each path, never comma-join):"
         f"\n{command} status"
-        f"\n{command} begin-work --session-id {identity} --scope 'src/example.py' --scope 'tests/test_example.py'"
-        f"\n{command} inbox --session-id {identity} --unread"
-        f"\n{command} ack --session-id {identity} --message-id <id>"
-        f"\n{command} end-work --session-id {identity}"
+        f"\n{command} begin-work{identity} --scope 'src/example.py' --scope 'tests/test_example.py'"
+        f"\n{command} inbox{identity} --unread"
+        f"\n{command} ack{identity} --message-id <id>"
+        f"\n{command} end-work{identity}"
         "\nAcknowledge handled messages silently. Reply only when reply_required=true, using "
         f"{command} reply --message-id <id> '<response>'."
     )
-    return text + "\n\n" + store.threads.instructions(session_id, caller_context=caller_context)
+    return text + "\n\n" + store.threads.instructions(session_id, caller_context=caller_context, command=command)
 
 
 def persist_claude_environment(database_path, session_id) -> bool:

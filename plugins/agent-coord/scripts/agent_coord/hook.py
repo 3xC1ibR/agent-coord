@@ -267,18 +267,24 @@ def handle(
             coordination.touch(session_id, "discussing", turn_active=True)
         else:
             coordination.touch(session_id, turn_active=True)
-        text = coordination.threads.instructions(session_id)
+        # Codex injects CODEX_THREAD_ID into tool shells, not necessarily hooks.
+        text = coordination.threads.instructions(
+            session_id, caller_context=session["client"] == "codex",
+            command=command_prefix(coordination.database_path),
+        )
         messages = _actionable_context(coordination, session_id, event)
         if messages:
             text += "\n\n" + messages
         return _context(event, text) if text else {}
 
     if event == "SessionStart":
-        shell_context_ready = False
+        shell_context_ready = session["client"] == "codex"
+        cli_path = command_prefix(coordination.database_path)
         if session["client"] == "claude":
             shell_context_ready = persist_claude_environment(coordination.database_path, session_id)
+            if shell_context_ready:
+                cli_path = "agent-coord"
         coordination.touch(session_id, turn_active=False)
-        cli_path = "agent-coord" if shell_context_ready else command_prefix(coordination.database_path)
         text = ""
         delegation_warning = None
         delegation_id = os.environ.get("AGENT_COORD_DELEGATION_ID")
