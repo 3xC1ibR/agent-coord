@@ -184,7 +184,8 @@ kbd { font: 10px var(--mono); border: 1px solid var(--line); border-radius: 3px;
 .thread-cards .session:hover { background: var(--surface); border-color: var(--hover-line); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 4%, transparent); }
 .thread-cards .session.selected { border-color: var(--hover-line); }
 .thread-cards .session.needs-attention { border-top: 2px solid var(--warm); padding-top: 20px; }
-.thread-card > .session { width: 100%; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.thread-card > .session { width: 100%; }
+.thread-card:has(> .card-actions) > .session { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .card-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-top: 0; border-radius: 0 0 7px 7px; background: var(--surface); }
 .card-actions button { padding: 5px 8px; font-size: 11px; }
 .card-end-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }

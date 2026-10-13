@@ -40,7 +40,3 @@
 .thread-hover .hover-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .thread-hover .hover-foot button { font-size: 12px; padding: 6px 10px; }
 .thread-hover .hover-message-text { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
-.card-actions .card-peek { color: var(--ink); }
-.agent-rows > li { position: relative; }
-.agent-rows .agent-peek { position: absolute; right: 6px; top: 7px; padding: 3px 7px; font-size: 10px; border-radius: 5px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
-.agent-rows .agent-peek:hover { color: var(--ink); border-color: var(--hover-line); }

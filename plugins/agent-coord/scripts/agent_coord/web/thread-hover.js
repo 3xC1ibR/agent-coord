@@ -3,7 +3,7 @@
 // Kept separate from card rendering so list refreshes need no per-card listeners.
 // The hover preview doubles as a lens: what the agent is doing now, where it
 // stands, what comes next, what came before, its sub-agents, and the latest
-// message. Clicking inside pins it; a Peek button opens it pinned.
+// message. Clicking inside pins it.
 function createThreadHover({overview, document, window, getThread, loadPreview, relativeTime,
   markdown = typeof module !== "undefined" && module.exports ? require("./markdown.js") : globalThis.messageMarkdown,
   grouping = globalThis.threadGrouping, providerLogo = globalThis.providerLogo, select = null,
@@ -165,13 +165,6 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
       if (token === request && anchor === button) render(thread, saved?.data || null, {failed: true});
     }
   }
-  function open(button, id, {thread} = {}) {
-    cancel(openTimer); cancel(closeTimer);
-    if (anchor && anchor !== button) hide();
-    pinned = true; trail = [];
-    button.removeAttribute?.("title");
-    show(button, id, {thread});
-  }
   function pin() {
     if (pinned || panel.hidden || !current) return;
     pinned = true; render(current.thread, cache.get(current.thread_id)?.data || null);
@@ -185,7 +178,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     render(fresh, saved?.data || null);
   }
   function target(event) {
-    const button = event.target.closest?.(".session[data-thread]");
+    const button = event.target.closest?.(".session[data-thread], .agent-row[data-thread]");
     return button && overview.contains(button) ? button : null;
   }
   function enter(event) {
@@ -213,7 +206,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   overview.addEventListener("pointerout", leave);
   overview.addEventListener("focusin", enter);
   overview.addEventListener("focusout", leave);
-  overview.addEventListener("click", event => { if (event.target?.closest?.('[data-action="peek"]')) return; hide(); });
+  overview.addEventListener("click", () => hide());
   panel.addEventListener("pointerenter", () => { pointerInside = true; cancel(closeTimer); });
   panel.addEventListener("pointerleave", () => { pointerInside = false; leave({relatedTarget: null}); });
   panel.addEventListener("pointerdown", () => pin());
@@ -229,7 +222,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     hide();
   });
   observer.observe(overview, {childList: true, subtree: true});
-  return {hide, panel, open, pin, refresh, get pinned() { return pinned; }};
+  return {hide, panel, pin, refresh, get pinned() { return pinned; }};
 }
 
 if (typeof module !== "undefined" && module.exports) module.exports = {createThreadHover};
