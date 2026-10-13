@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.speech import DEFAULTS, Speech, spoken_text, validate_settings
@@ -16,6 +17,53 @@ import test_remote_access as remote
 
 
 class SpeechTests(unittest.TestCase):
+    def test_voice_discovery_supports_current_and_legacy_lists_and_rejects_bad_responses(self):
+        requests = []
+        class Kokoro(BaseHTTPRequestHandler):
+            payload = {"voices": [{"id": "bf_emma", "name": "Emma"}, {"id": "af_heart", "name": "Heart"}]}
+            status = 200
+            def do_GET(self):
+                requests.append(self.path)
+                self.send_response(self.status)
+                self.send_header("Content-Type", "application/json")
+                if self.status == 302:
+                    self.send_header("Location", "/redirected")
+                self.end_headers()
+                self.wfile.write(json.dumps(self.payload).encode())
+            def log_message(self, *args): pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Kokoro)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}); thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                service = Speech(Path(directory) / "state.sqlite3")
+                service.configure({**DEFAULTS, "base_url": f"http://127.0.0.1:{server.server_port}/v1"})
+                self.assertEqual(service.voices(), [{"id": "bf_emma", "name": "Emma"}, {"id": "af_heart", "name": "Heart"}])
+                self.assertEqual(requests[-1], "/v1/audio/voices")
+                Kokoro.payload = {"voices": ["bf_emma", "af_heart", "af_heart"]}
+                self.assertEqual(service.voices(), [{"id": "af_heart", "name": "af_heart"}, {"id": "bf_emma", "name": "bf_emma"}])
+                for payload in ({}, [], {"voices": "af_heart"}, {"voices": [None]}, {"voices": [{"id": "invalid voice"}]}):
+                    Kokoro.payload = payload
+                    with self.subTest(payload=payload), self.assertRaisesRegex(CoordinationError, "invalid voice list"):
+                        service.voices()
+                Kokoro.payload = {"voices": []}
+                with self.assertRaisesRegex(CoordinationError, "no available voices"): service.voices()
+                Kokoro.payload = {"voices": ["af_heart"]}
+                with patch("agent_coord.speech.MAX_VOICES", 4), self.assertRaisesRegex(CoordinationError, "oversized"):
+                    service.voices()
+                for status in (500, 302):
+                    Kokoro.status = status
+                    with self.subTest(status=status), self.assertRaisesRegex(CoordinationError, f"HTTP {status}"):
+                        service.voices()
+                self.assertNotIn("/redirected", requests)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_unreachable_voice_provider_returns_an_actionable_error(self):
+        with tempfile.TemporaryDirectory() as directory, patch("agent_coord.speech.build_opener") as opener:
+            opener.return_value.open.side_effect = URLError("connection refused")
+            with self.assertRaisesRegex(CoordinationError, "Start it on your Mac"):
+                Speech(Path(directory) / "state.sqlite3").voices()
+
     def test_final_reply_selection_and_readable_markdown(self):
         turn = {"status": "completed", "items": [
             {"type": "agentMessage", "phase": "commentary", "text": "Working now"},
@@ -105,6 +153,21 @@ class SpeechHTTPTests(unittest.TestCase):
             self.assertEqual(f.request("POST", route, {"text": "arbitrary", "base_url": "https://evil.test"}, cookie=cookie, origin=f.origin, csrf=f.csrf)[0], 400)
             f.remote.revoke(f.remote.device_id(cookie))
             self.assertEqual(f.request("POST", route, {"test": True}, cookie=cookie, origin=f.origin, csrf=f.csrf)[0], 401)
+
+    def test_voice_discovery_requires_pairing_and_is_available_to_local_and_paired_clients(self):
+        f = self.fixture
+        voices = [{"id": "af_heart", "name": "Heart"}]
+        with patch("agent_coord.speech.Speech.voices", return_value=voices) as discovery:
+            self.assertEqual(f.request("GET", "/api/browser/speech/voices")[0], 401)
+            discovery.assert_not_called()
+            result = f.request("GET", "/api/browser/speech/voices", local=True)
+            self.assertEqual(result[0], 200)
+            self.assertEqual(json.loads(result[2]), {"voices": voices})
+            cookie = f.pair()
+            self.assertEqual(f.request("GET", "/api/browser/speech/voices", cookie=cookie)[0], 200)
+            f.remote.revoke(f.remote.device_id(cookie))
+            self.assertEqual(f.request("GET", "/api/browser/speech/voices", cookie=cookie)[0], 401)
+            self.assertEqual(discovery.call_count, 2)
 
     def test_revocation_during_generation_does_not_deliver_audio(self):
         f = self.fixture; cookie = f.pair()

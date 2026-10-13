@@ -121,6 +121,21 @@ test("an action closes the sheet before opening its own dialog; disabled actions
   assert.equal(elements["mobile-thread-sheet"].open,false);
 });
 
+test("speech toggles keep the context sheet open while context dialog actions close it", () => {
+  const {chat,elements}=setup();
+  const toggle=new Element("button-speech"); toggle.id="speech-toggle";
+  const edit=new Element("button-edit-checkpoint");
+  elements["context-panel"].append(toggle);
+  elements["context-panel"].append(edit);
+  chat.open("context");
+  elements["mobile-thread-sheet"].fire("click",{target:toggle});
+  assert.equal(elements["mobile-thread-sheet"].open,true);
+  assert.equal(elements["context-panel"].hidden,false);
+  assert.equal(elements["mobile-chat-actions"].attributes["aria-expanded"],"true");
+  elements["mobile-thread-sheet"].fire("click",{target:edit});
+  assert.equal(elements["mobile-thread-sheet"].open,false);
+});
+
 test("keyboard viewport changes resize the frame, preserve pinch zoom, and clear on desktop", () => {
   const s=setup();
   assert.equal(s.body.style.getPropertyValue("--mobile-viewport-height"),"800px");

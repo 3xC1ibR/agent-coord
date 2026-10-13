@@ -17,6 +17,7 @@ from .store import CoordinationError
 
 DEFAULTS = {"base_url": "http://127.0.0.1:8880/v1", "voice": "af_heart", "speed": 1.0}
 MAX_AUDIO = 32 * 1024 * 1024
+MAX_VOICES = 1024 * 1024
 MAX_TEXT = 24000
 
 
@@ -93,6 +94,37 @@ class Speech:
             finally:
                 temporary.unlink(missing_ok=True)
         return value
+
+    def voices(self) -> list[dict]:
+        request = Request(self.settings()["base_url"] + "/audio/voices",
+                          headers={"Accept": "application/json"})
+        try:
+            with build_opener(ProxyHandler({}), NoRedirects()).open(request, timeout=10) as response:
+                data = response.read(MAX_VOICES + 1)
+                if len(data) > MAX_VOICES:
+                    raise CoordinationError("Kokoro returned an oversized voice list.")
+            payload = json.loads(data)
+            entries = payload.get("voices") if isinstance(payload, dict) else None
+            if not isinstance(entries, list):
+                raise ValueError()
+            voices = {}
+            for entry in entries:
+                voice = entry if isinstance(entry, str) else entry.get("id") if isinstance(entry, dict) else None
+                if not isinstance(voice, str) or not re.fullmatch(r"[A-Za-z0-9_+.-]{1,120}", voice):
+                    raise ValueError()
+                name = entry.get("name") if isinstance(entry, dict) else voice
+                voices[voice] = {"id": voice, "name": name if isinstance(name, str) and 0 < len(name) <= 200 else voice}
+            if not voices:
+                raise CoordinationError("Kokoro has no available voices.")
+            return sorted(voices.values(), key=lambda voice: (voice["name"].casefold(), voice["id"]))
+        except HTTPError as exc:
+            code = exc.code
+            exc.close()
+            raise CoordinationError(f"Kokoro could not list voices (HTTP {code}). Check the server on your Mac.") from None
+        except (URLError, OSError, TimeoutError) as exc:
+            raise CoordinationError("Cannot load Kokoro voices. Start it on your Mac and check Speech settings.") from exc
+        except ValueError as exc:
+            raise CoordinationError("Kokoro returned an invalid voice list.") from exc
 
     def synthesize(self, text: str) -> bytes:
         if not text or len(text) > MAX_TEXT:

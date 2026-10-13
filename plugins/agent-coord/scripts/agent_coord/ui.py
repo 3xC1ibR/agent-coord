@@ -471,6 +471,8 @@ def _handler(
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
             elif route == "speech/settings":
                 self._json(HTTPStatus.OK, speech.settings())
+            elif route == "speech/voices":
+                self._json(HTTPStatus.OK, {"voices": speech.voices()})
             elif route == "schedules":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.schedules.list()})
             elif route == "organization":

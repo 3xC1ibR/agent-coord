@@ -1,9 +1,17 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const {SpeechController} = require('../plugins/agent-coord/scripts/agent_coord/web/speech.js');
+const {SpeechController, voiceChoices} = require('../plugins/agent-coord/scripts/agent_coord/web/speech.js');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const turn = (id, status='completed') => ({id, status, items:[{type:'agentMessage',text:'Reply '+id}]});
 const detail = (turns=[], id='chat') => ({work_thread:{thread_id:id,browser_session:true,title:'Chat'},thread:{turns}});
+test('voice choices preserve available names and keep the saved selection without changing the catalogue',()=>{
+  const voices=Object.freeze([{id:'af_heart',name:'Heart'}, {id:'bf_emma',name:'Emma'}]);
+  assert.deepEqual(voiceChoices(voices,'bf_emma'),voices);
+  assert.deepEqual(voiceChoices(voices,'af_heart+bf_emma'),[
+    {id:'af_heart+bf_emma',name:'af_heart+bf_emma (saved)'},...voices]);
+  assert.deepEqual(voiceChoices([],'bf_emma'),[{id:'bf_emma',name:'bf_emma (saved)'}]);
+  assert.equal(voices.length,2);
+});
 function fixture(extra={}) {
   const store = new Map(), requests=[], revoked=[];
   const audio={play:async()=>{}, pause(){}, removeAttribute(){}, load(){}};

@@ -10,11 +10,16 @@ tools, or prompt changes. Both Codex and Claude chats are supported.
    on the Mac using its documented CPU setup. Kokoro and its voice models are
    a separate service; Ribbon Field does not bundle or download them.
 2. Open **Speech settings** in Ribbon Field’s sidebar. Enter the local Kokoro
-   API address, normally `http://127.0.0.1:8880/v1`. Choose a voice (the default
-   is `af_heart`) and speed, then choose **Test voice** to save and check playback.
-3. Open a chat and select its speaker button. New completed replies are read
-   automatically on that device while Ribbon Field remains open. Existing
-   history is not read when you turn speech on. Select it again to turn it off.
+   API address, normally `http://127.0.0.1:8880/v1`. Choose a voice from the
+   available-voices dropdown (the default is `af_heart`) and a speed, then choose
+   **Test voice** to save and check playback. If you change the address, choose
+   **Save** to load that server's voices. **Refresh voices** retries the list
+   after starting Kokoro; your saved selection remains available while it is offline.
+3. Open a chat's thread context side panel and select **Read replies aloud**.
+   On mobile, open **⋯ → Thread context and links** to reach the same control.
+   New completed replies are read automatically on that device while Ribbon
+   Field remains open. Existing history is not read when you turn speech on.
+   Select it again to turn it off.
 
 The integration ships with the app and requires no helper scripts, development
 checkout, Python SDK, or machine-specific filesystem paths. Settings are saved
@@ -24,7 +29,8 @@ Kokoro-FastAPI service; hosted providers and API keys are not supported.
 ## Listen on your phone
 
 Use the existing [paired Tailscale connection](remote-access.md), open a chat,
-and enable its speaker button on the phone. The Mac generates the audio and
+and enable **Read replies aloud** in its thread context panel on the phone.
+The Mac generates the audio and
 Ribbon Field sends it through the authenticated connection. The phone does not
 need Kokoro installed or a second network route. Configure the provider on the
 Mac; paired phones can view settings and test their own playback.
