@@ -234,6 +234,8 @@ test("fork origin is a navigable text link and clears on thread changes", async 
   const c = setup();
   c.state.detail.work_thread.forked_from = {thread_id: "parent", title: "<Original>"};
   c.renderTitle();
+  assert.equal(c.$("fork-origin").hidden, false);
+  assert.equal(c.$("fork-origin").children[0], "Forked from ");
   const link = c.$("fork-origin").children[1];
   assert.equal(link.textContent, "<Original>");
   assert.equal(link.href, "#parent");
@@ -241,6 +243,9 @@ test("fork origin is a navigable text link and clears on thread changes", async 
   c.select = async id => { c.navigated = id; };
   link.onclick({preventDefault() {}});
   assert.equal(c.navigated, "parent");
+  c.state.detail.work_thread.forked_from.title = "Renamed source";
+  c.renderTitle();
+  assert.equal(c.$("fork-origin").children[1].textContent, "Renamed source");
   c.state.detail = null;
   c.renderTitle();
   assert.equal(c.$("fork-origin").hidden, true);

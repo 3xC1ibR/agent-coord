@@ -149,6 +149,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(fork["forked_from"], {"thread_id": parent, "title": before["title"]})
         self.assertEqual(fork["forked_from_turn_id"], "turn-0")
         self.assertEqual(fork["project_id"], project["id"])
+        self.assertEqual(fork["project_name"], "Fork project")
         self.assertIsNone(fork["repository_id"])
         self.assertEqual(fork["attention"], "now")
         self.assertFalse(fork["pinned"])
@@ -179,6 +180,8 @@ class BrowserSessionTests(unittest.TestCase):
 
     def test_fork_survives_restart_and_resume_failure_without_another_fork(self):
         parent = self.create()
+        group = self.store.threads.organization.create_project("Source group")
+        self.store.threads.update(parent, project_id=group["id"])
         self.sessions.rpc.fast_turn = True
         self.sessions.send(parent, {"message": "Original"})
         child = self.sessions.fork_work_thread(parent)["thread_id"]
@@ -191,9 +194,20 @@ class BrowserSessionTests(unittest.TestCase):
         reopened.rpc.threads = self.sessions.rpc.threads
         detail = reopened.read(child)
         self.assertEqual(detail["work_thread"]["forked_from_thread_id"], parent)
+        self.assertEqual(detail["work_thread"]["project_id"], group["id"])
         self.assertEqual(len(detail["thread"]["turns"]), 1)
         self.assertFalse(detail["work_thread"]["unread"])
         self.assertFalse(any(m == "thread/fork" for m, _ in reopened.rpc.calls))
+        grandchild = reopened.fork_work_thread(child)
+        self.assertEqual(grandchild["project_id"], group["id"])
+        self.assertEqual(grandchild["forked_from"]["thread_id"], child)
+        self.store.threads.update(parent, project_id=None)
+        self.assertEqual(reopened.work_thread(child)["project_id"], group["id"])
+
+    def test_fork_without_group_remains_ungrouped(self):
+        parent = self.create()
+        child = self.sessions.fork_work_thread(parent)["thread_id"]
+        self.assertIsNone(self.sessions.read(child)["work_thread"]["project_id"])
 
     def test_fork_rejects_busy_closed_claude_and_online_terminal_sources(self):
         parent = self.create()

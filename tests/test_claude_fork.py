@@ -64,7 +64,8 @@ class ClaudeForkTests(unittest.TestCase):
         self.turn(parent)
         path = self.transcript(parent)
         self.sessions.update(parent, {"yolo": True})
-        self.store.threads.update(parent, pinned=True)
+        group = self.store.threads.organization.create_project("Source group")
+        self.store.threads.update(parent, pinned=True, project_id=group["id"])
         self.store.threads.checkpoint(parent, {"phase": "planning", "summary": "Parent plan", "next_action": "", "next_actor": "nobody"})
         before = self.store.threads.get(parent, history=True)
         connections = dict(self.sessions.claude.connections)
@@ -72,6 +73,7 @@ class ClaudeForkTests(unittest.TestCase):
         child = fork["thread_id"]
         self.assertEqual(fork["client"], "claude")
         self.assertEqual(fork["forked_from"], {"thread_id": parent, "title": "Source"})
+        self.assertEqual((fork["project_id"], fork["project_name"]), (group["id"], "Source group"))
         self.assertFalse(fork["pinned"])
         self.assertFalse(fork["unread"])
         self.assertIsNone(fork["checkpoint"])
@@ -92,6 +94,25 @@ class ClaudeForkTests(unittest.TestCase):
         self.assertIn('"title": "Fork of Source"', options["developerInstructions"])
         self.assertNotIn("Parent plan", options["developerInstructions"])
         self.assertEqual(len(self.sessions.read(parent)["thread"]["turns"]), 1)
+
+    def test_fork_group_survives_restart_and_nested_forks_without_tracking_parent_moves(self):
+        parent = self.create()
+        ungrouped = self.sessions.fork_work_thread(parent)
+        self.assertIsNone(ungrouped["project_id"])
+        group = self.store.threads.organization.create_project("Source group")
+        self.store.threads.update(parent, project_id=group["id"])
+        child = self.sessions.fork_work_thread(parent)["thread_id"]
+        self.sessions.close()
+        self.sessions = self.make_sessions()
+        detail = self.sessions.read(child)["work_thread"]
+        self.assertEqual((detail["project_id"], detail["project_name"]), (group["id"], "Source group"))
+        self.assertEqual(detail["forked_from"], {"thread_id": parent, "title": "Source"})
+        grandchild = self.sessions.fork_work_thread(child)
+        self.assertEqual(grandchild["project_id"], group["id"])
+        self.assertEqual(grandchild["forked_from"]["thread_id"], child)
+        self.store.threads.update(parent, project_id=None)
+        self.assertEqual(self.sessions.work_thread(child)["project_id"], group["id"])
+        self.assertIsNone(self.sessions.work_thread(ungrouped["thread_id"])["project_id"])
 
     def test_snapshot_survives_parent_progress_restart_and_nested_unused_forks(self):
         parent = self.create()

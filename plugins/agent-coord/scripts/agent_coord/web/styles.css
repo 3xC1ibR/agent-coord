@@ -259,6 +259,7 @@ main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; pad
 .conversation-content { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: auto; }
 .conversation-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; padding: 10px 24px; border-bottom: 1px solid var(--line); }
 .conversation-heading { min-width: 0; flex: 1 1 220px; }
+#fork-origin { margin: 2px 0 0; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .turn-elapsed { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .conversation-head h1, .title-editor input { font-family: Georgia, "Times New Roman", serif; font-size: 20px; font-weight: 400; letter-spacing: -.025em; line-height: 1.3; margin: 0; overflow-wrap: anywhere; }
 .thread-title { max-width: 100%; padding: 2px 4px; margin: -3px -5px; border-color: transparent; background: transparent; font: inherit; letter-spacing: inherit; text-align: left; overflow-wrap: anywhere; cursor: text; }
@@ -676,7 +677,6 @@ body.mobile-chat .conversation-head { flex-shrink: 0; flex-wrap: nowrap; gap: 8p
 body.mobile-chat .conversation-heading { flex: 1; min-width: 0; }
 body.mobile-chat .conversation-head h1 { font: 550 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
 body.mobile-chat .thread-title { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-block: 8px; }
-body.mobile-chat #fork-origin { display: none; }
 body.mobile-chat .title-editor input { font-size: 16px; }
 body.mobile-chat .title-editor-actions small { display: none; }
 body.mobile-chat .conversation-controls { flex-shrink: 0; }
