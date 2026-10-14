@@ -148,6 +148,29 @@ test("project scratchpad is available from the palette and can toggle closed thr
   assert.equal(command("projectScratchpad"), false);
 });
 
+test("opening the scratchpad tab from the palette is separate from floating capture", () => {
+  const f = fixture(), command = f.env.agentCoordDesktop.command;
+  const button = new (f.nodes.get("home").constructor)("open-project-scratchpad");
+  f.nodes.set(button.id, button);
+  let floats = 0;
+  f.env.agentCoordProjectScratchpad = {available: true, toggle() { floats++; return true; }};
+  f.env.document.dispatchEvent(new Event("DOMContentLoaded"));
+  const palette = f.palettes[0];
+  palette.close = () => { palette.dialog.open = false; };
+  palette.dialog.open = true;
+  const entry = palette.actions().find(action => action.id === "openProjectScratchpad");
+  assert.equal(entry.label, "Open project scratchpad");
+  entry.run(); assert.equal(palette.dialog.open, false);
+  assert.equal(button.clicks, 1); assert.equal(floats, 0);
+  command("projectScratchpad"); assert.equal(floats, 1); assert.equal(button.clicks, 1);
+  f.nodes.get("permissions-dialog").open = true;
+  assert.equal(command("openProjectScratchpad"), false);
+  f.nodes.get("permissions-dialog").open = false;
+  button.disabled = true; assert.equal(command("openProjectScratchpad"), false);
+  button.disabled = false; f.env.agentCoordProjectScratchpad.available = false;
+  assert.equal(command("openProjectScratchpad"), false);
+});
+
 test("folder picker asks for one directory and treats cancellation as no selection", async () => {
   const f = fixture();
   f.replies.chooseFiles = [{path: "/work/rig"}];

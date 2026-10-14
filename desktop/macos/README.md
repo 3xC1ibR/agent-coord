@@ -291,11 +291,14 @@ normal behavior, and Undo, Redo, Cut, Copy, Paste, and Select All use macOS edit
 **⌘K** (or **View → Command Palette…**) searches available commands and open
 threads across your saved views. Match a thread's title, project, repository, or
 workspace path; use ↑/↓ and Return to choose a result. Escape or ⌘K closes the
-palette and restores your previous focus. The project **Scratchpad** tab holds
-one plain-text, autosaving note for the selected project directory. **⌘⇧S**
+palette and restores your previous focus. **Ribbon Field → Open project scratchpad**
+opens one plain-text, autosaving note for the selected project directory. Its tab
+starts closed; opening or closing it is remembered per project and window.
+Closing the tab keeps the notes. **⌘⇧S**
 opens those same notes in a floating editor without leaving the conversation;
 press it again or **Escape** to return to your previous focus and selection.
-The command palette also offers **Send work** and **Toggle project scratchpad**.
+The command palette also offers **Open project scratchpad**, **Toggle project scratchpad**,
+and **Send work**. Floating capture does not open the Scratchpad tab.
 **⌘⇧K** opens Send work over the current conversation. Type a request, select
 a matching thread, New conversation, or Ask dispatcher, and press Enter. Only
 the typed request is sent; sending preserves the current conversation and draft.

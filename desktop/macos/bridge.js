@@ -98,6 +98,8 @@
         (!dialog || dialog === palette?.dialog || dialog === window.agentCoordSendWork.dialog)) result.push("sendWork");
     if (window.agentCoordProjectScratchpad?.available &&
         (!dialog || dialog === palette?.dialog || dialog === window.agentCoordProjectScratchpad.dialog)) result.push("projectScratchpad");
+    if (window.agentCoordProjectScratchpad?.available && byID("open-project-scratchpad") &&
+        !byID("open-project-scratchpad").disabled && (!dialog || dialog === palette?.dialog)) result.push("openProjectScratchpad");
     if (destination()) result.push("insertFiles");
     if (dialog || !byID("home")) return result;
     result.push("workspace", "findThread", "newSession", "toggleSidebar", "toggleFiles");
@@ -122,6 +124,9 @@
       case "projectScratchpad":
         if (palette?.dialog.open) palette.close();
         return window.agentCoordProjectScratchpad.toggle();
+      case "openProjectScratchpad":
+        if (palette?.dialog.open) palette.close();
+        byID("open-project-scratchpad").click(); break;
       case "workspace": byID("home").click(); break;
       case "findThread": byID("home").click(); byID("search").focus(); byID("search").select(); break;
       case "newSession": byID("new-session").click(); break;
@@ -241,6 +246,7 @@
           ["newSession", "New session", "⌘N", "create chat"],
           ["sendWork", "Send work", "⇧⌘K", "dispatch route request another conversation"],
           ["openFolder", "Open project", "⌘O", "folder directory recent"],
+          ["openProjectScratchpad", "Open project scratchpad", "", "notes tab jot"],
           ["projectScratchpad", "Toggle project scratchpad", "⇧⌘S", "notes capture jot floating"],
           ["nextSession", "Next session in current view", "⌃Tab", "switch cycle thread"],
           ["previousSession", "Previous session in current view", "⌃⇧Tab", "switch cycle thread"],

@@ -25,22 +25,57 @@ test("overview and repeated opens preserve the working set and user order", asyn
   assert.deepEqual(ids(), ["c", "a", "b"]);
 });
 
-test("project scratchpad is a fixed destination outside the saved thread working set", async () => {
+test("project scratchpad starts closed and persists explicit opens and closes", async () => {
   const {tabs, ids, visits, storage} = setup();
   tabs.onScratchpad = () => tabs.scratchpad();
   tabs.open(thread("one"));
-  await tabs.activate("project-scratchpad");
-  assert.equal(tabs.selected, "project-scratchpad");
-  await tabs.close("project-scratchpad");
-  assert.equal(tabs.selected, "project-scratchpad");
-  assert.deepEqual(ids(), ["one"]); assert.deepEqual(visits, []);
-  assert.deepEqual(setup(storage).ids(), ["one"]);
   const focused = [];
   tabs.reveal = id => focused.push(id);
-  tabs.keydown({key: "ArrowRight", preventDefault() {}}, null);
+  const arrow = {key: "ArrowRight", preventDefault() {}};
+  tabs.keydown(arrow, null);
+  assert.deepEqual(focused, ["one"]);
+  assert.equal(tabs.scratchpadOpen, false);
+  await tabs.activate("project-scratchpad");
+  assert.equal(tabs.selected, "project-scratchpad");
+  assert.equal(tabs.scratchpadOpen, true);
+  assert.deepEqual(ids(), ["one"]);
+  const reopened = setup(storage); reopened.tabs.onScratchpad = () => {};
+  assert.equal(reopened.tabs.scratchpadOpen, true);
+  assert.equal(reopened.tabs.destination(), "project-scratchpad");
+  focused.length = 0; tabs.keydown(arrow, null);
   assert.deepEqual(focused, ["project-scratchpad"]);
-  await tabs.activate("one");
+  await tabs.close("project-scratchpad");
   assert.equal(tabs.selected, "one");
+  assert.equal(tabs.scratchpadOpen, false);
+  assert.deepEqual(visits, ["one"]);
+  const closed = setup(storage); closed.tabs.onScratchpad = () => {};
+  assert.equal(closed.tabs.scratchpadOpen, false);
+  assert.equal(closed.tabs.destination(), "one");
+});
+
+test("scratchpad closes in the background without navigation and respects the navigation guard", async () => {
+  const {tabs, visits} = setup(); tabs.onScratchpad = () => tabs.scratchpad();
+  tabs.scratchpad(); tabs.open(thread("one"));
+  tabs.canNavigate = () => false;
+  await tabs.close("project-scratchpad"); assert.equal(tabs.scratchpadOpen, true);
+  tabs.canNavigate = () => true;
+  await tabs.close("project-scratchpad");
+  assert.equal(tabs.selected, "one"); assert.deepEqual(visits, []);
+  tabs.scratchpad(); await tabs.close("one");
+  await tabs.close("project-scratchpad");
+  assert.equal(tabs.selected, null); assert.deepEqual(visits, [null]);
+});
+
+test("scratchpad visibility stays with its project and defaults closed for older saved tabs", async () => {
+  const {tabs, storage} = setup(); tabs.onScratchpad = () => tabs.scratchpad();
+  tabs.scratchpad(); tabs.setProject("/other");
+  assert.equal(tabs.scratchpadOpen, false);
+  tabs.scratchpad(); await tabs.close("project-scratchpad");
+  tabs.setProject("/work"); assert.equal(tabs.scratchpadOpen, true);
+  tabs.setProject("/other"); assert.equal(tabs.scratchpadOpen, false);
+  storage.set("agent-coord.thread-tabs.:/work", JSON.stringify({items: [], selected: "project-scratchpad"}));
+  const legacy = setup(storage); legacy.tabs.onScratchpad = () => {};
+  assert.equal(legacy.tabs.scratchpadOpen, false); assert.equal(legacy.tabs.destination(), null);
 });
 
 test("closing tabs only navigates, preserves thread lifecycle, and returns to overview after the last", async () => {

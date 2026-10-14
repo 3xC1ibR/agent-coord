@@ -1306,13 +1306,28 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             """, in: item.webView)
         try smokeCheck("project_scratchpad_escape", escaped as? Bool == true)
         let sharedTab = try await smokeJS("""
-            document.querySelector('[data-thread-tab="project-scratchpad"]').click();
+            if (document.querySelector('[data-thread-tab="project-scratchpad"]')) return false;
+            document.querySelector('.workspace-switcher > summary').click();
+            document.querySelector('.workspace-switcher #open-project-scratchpad').click();
             for (let i = 0; i < 80; i++) {
               const editor = document.querySelector('#project-scratchpad-text');
               if (!document.querySelector('#project-scratchpad-page').hidden && !editor.disabled &&
                   editor.value === 'Remember the launch feedback') {
-                document.querySelector('[data-thread-tab=""]').click();
-                return true;
+                const tab = document.querySelector('[data-thread-tab="project-scratchpad"]');
+                tab.parentElement.querySelector('.conversation-tab-close').click();
+                if (document.querySelector('[data-thread-tab="project-scratchpad"]') ||
+                    !document.querySelector('#project-scratchpad-page').hidden) return false;
+                if (!window.agentCoordDesktop.command('openProjectScratchpad')) return false;
+                for (let j = 0; j < 80; j++) {
+                  if (!editor.disabled && editor.value === 'Remember the launch feedback') {
+                    const reopened = Boolean(document.querySelector('[data-thread-tab="project-scratchpad"]')) &&
+                      !document.querySelector('#project-scratchpad-page').hidden;
+                    document.querySelector('[data-thread-tab=""]').click();
+                    return reopened;
+                  }
+                  await new Promise(resolve => setTimeout(resolve, 25));
+                }
+                return false;
               }
               await new Promise(resolve => setTimeout(resolve, 25));
             }

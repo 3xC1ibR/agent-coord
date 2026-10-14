@@ -5,7 +5,7 @@ class ThreadTabs {
   constructor({document, container, storage, fallbackStorage, scope = "", onSelect, onScratchpad, onError, canNavigate = () => true}) {
     Object.assign(this, {document, container, storage, fallbackStorage, onSelect, onScratchpad, onError, canNavigate});
     this.baseKey = "agent-coord.thread-tabs." + scope;
-    this.projects = new Map(); this.selections = new Map(); this.items = []; this.selected = null;
+    this.projects = new Map(); this.selections = new Map(); this.scratchpads = new Map(); this.items = []; this.selected = null;
     container?.setAttribute("role", "tablist");
     container?.setAttribute("aria-label", "Project tabs");
   }
@@ -26,12 +26,14 @@ class ThreadTabs {
         ids.add(item.thread_id); return true;
       }).map(item => ({thread_id: item.thread_id, title: typeof item.title === "string" ? item.title : "Conversation"})) : []);
       this.selections.set(cwd, typeof saved?.selected === "string" ? saved.selected : null);
+      this.scratchpads.set(cwd, saved?.scratchpadOpen === true);
     }
     this.items = this.projects.get(cwd); this.selected = null; this.render();
   }
+  get scratchpadOpen() { return Boolean(this.cwd && this.onScratchpad && this.scratchpads.get(this.cwd)); }
   destination() {
     const id = this.selections.get(this.cwd);
-    return id !== "new-session" && (id === "project-scratchpad" && this.cwd && this.onScratchpad
+    return id !== "new-session" && (id === "project-scratchpad" && this.scratchpadOpen
       || this.items.some(item => item.thread_id === id)) ? id : null;
   }
   save(rememberSelection = false) {
@@ -39,6 +41,7 @@ class ThreadTabs {
     try { this.storage?.setItem(this.baseKey + ":" + this.cwd, JSON.stringify({
       items: this.items.filter(item => item.thread_id !== "new-session").map(({thread_id, title}) => ({thread_id, title})),
       selected: this.destination(),
+      scratchpadOpen: this.scratchpads.get(this.cwd) === true,
     })); } catch { /* Tabs still work without storage. */ }
   }
   open(thread) {
@@ -49,7 +52,11 @@ class ThreadTabs {
     this.selected = thread.thread_id; this.save(true); this.render(); this.reveal(this.selected);
   }
   overview({remember = true} = {}) { this.selected = null; if (remember) this.save(true); this.render(); }
-  scratchpad() { this.selected = "project-scratchpad"; this.save(true); this.render(); this.reveal(this.selected); }
+  scratchpad() {
+    if (!this.cwd || !this.onScratchpad) return;
+    this.scratchpads.set(this.cwd, true);
+    this.selected = "project-scratchpad"; this.save(true); this.render(); this.reveal(this.selected);
+  }
   suspend() { this.selected = undefined; this.save(true); this.render(); }
   update(threads) {
     const available = new Map(threads.map(thread => [thread.thread_id, thread]));
@@ -72,12 +79,19 @@ class ThreadTabs {
     } catch (error) { this.onError?.(error); }
   }
   async close(id, {force = false} = {}) {
+    if (id === "project-scratchpad") {
+      if (!this.scratchpadOpen || !force && !this.canNavigate()) return;
+      this.scratchpads.set(this.cwd, false); this.save(); this.render();
+      if (this.selected === id) await this.activate(this.items[0]?.thread_id || null, {force});
+      this.reveal(this.selected, true); return;
+    }
     const index = this.items.findIndex(item => item.thread_id === id);
     if (index < 0 || !force && !this.canNavigate()) return;
     const selected = this.selected === id;
     this.items.splice(index, 1); this.save(); this.render();
     // Only navigate. Closing a tab never changes the thread or its running agent.
-    if (selected) await this.activate(this.items[Math.min(index, this.items.length - 1)]?.thread_id || null, {force});
+    if (selected) await this.activate(this.items[Math.min(index, this.items.length - 1)]?.thread_id
+      || (this.scratchpadOpen ? "project-scratchpad" : null), {force});
     this.reveal(this.selected, true);
   }
   move(id, index) {
@@ -101,7 +115,7 @@ class ThreadTabs {
     }
     if (event.altKey || event.shiftKey) return;
     if (event.key === "Delete" && id) { event.preventDefault(); this.close(id); return; }
-    const ids = [null, ...(this.cwd && this.onScratchpad ? ["project-scratchpad"] : []), ...this.items.map(item => item.thread_id)], index = ids.indexOf(id);
+    const ids = [null, ...(this.scratchpadOpen ? ["project-scratchpad"] : []), ...this.items.map(item => item.thread_id)], index = ids.indexOf(id);
     const next = event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1
       : event.key === "ArrowRight" ? (index + 1) % ids.length : event.key === "ArrowLeft" ? (index + ids.length - 1) % ids.length : -1;
     if (next >= 0) { event.preventDefault(); this.reveal(ids[next], true); }
@@ -112,7 +126,7 @@ class ThreadTabs {
   render() {
     // Status updates must not replace the native drag source mid-gesture.
     if (!this.container || this.dragging) return;
-    const signature = JSON.stringify([this.selected ?? null, this.selected === undefined, Boolean(this.cwd && this.onScratchpad),
+    const signature = JSON.stringify([this.selected ?? null, this.selected === undefined, this.scratchpadOpen,
       this.items.map(item => [item.thread_id, item.title, item.response_state, item.unread_result])]);
     if (signature === this.signature) return;
     this.signature = signature;
@@ -132,10 +146,12 @@ class ThreadTabs {
       tab.onclick = () => this.activate(id); tab.onkeydown = event => this.keydown(event, id);
       wrapper.dataset.selected = String(this.selected === id);
       wrapper.append(tab);
-      if (id && !scratchpad) {
+      if (id) {
         const close = this.document.createElement("button"); close.type = "button"; close.className = "conversation-tab-close";
         close.textContent = "×"; close.title = "Close tab"; close.setAttribute("aria-label", "Close tab · " + item.title);
         close.onclick = () => this.close(id); wrapper.append(close);
+      }
+      if (id && !scratchpad) {
         wrapper.draggable = id !== "new-session";
         wrapper.ondragstart = event => {
           if (id === "new-session" || !this.canNavigate() || this.onDragStart?.(item, event) === false) { event.preventDefault(); return; }
@@ -155,7 +171,7 @@ class ThreadTabs {
       this.container.append(wrapper);
     };
     add({title: "Overview"}, null);
-    if (this.cwd && this.onScratchpad) add({title: "Scratchpad"}, "project-scratchpad");
+    if (this.scratchpadOpen) add({title: "Scratchpad"}, "project-scratchpad");
     for (const item of this.items) add(item, item.thread_id);
     this.container.scrollLeft = scroll;
     if (focused !== undefined) this.reveal(focused || null, true);

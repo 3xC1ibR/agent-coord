@@ -219,6 +219,7 @@ async function openProjectDirectory(cwd) {
 }
 function renderFolders() {
   state.projectScratchpad?.setProject(state.folders?.selected);
+  $("open-project-scratchpad").disabled = !state.projectScratchpad?.available;
   if (!state.folderPicker) return;
   let context;
   try { context = sessionContext(); } catch { /* Keep unavailable filters visible until the user changes them. */ }
@@ -1983,6 +1984,7 @@ function openProjectScratchpad() {
   $("page-location").textContent = "Scratchpad";
   navigation?.remember();
 }
+$("open-project-scratchpad").onclick = () => { if (canSwitchProject()) openProjectScratchpad(); };
 document.querySelector(".brand").onclick = event => { event.preventDefault(); goHome(); };
 $("home").onclick = $("back-home").onclick = goHome;
 const mobileNavigation = window.matchMedia("(max-width: 720px)");

@@ -124,6 +124,8 @@ class ProjectTabs {
       panel.append(button);
     }
     const monitor = this.doc.createElement("a"); monitor.href = "/monitor"; monitor.textContent = "Coordination monitor";
+    const scratchpad = this.doc.getElementById("open-project-scratchpad");
+    const scratchpadHome = this.doc.createComment("scratchpad navigation position"); scratchpad?.before(scratchpadHome);
     panel.append(monitor); menu.append(panel);
     header.querySelector(".breadcrumb").append(menu);
     menu.addEventListener("click", event => {
@@ -138,6 +140,10 @@ class ProjectTabs {
       header.classList.toggle("header-tabs", desktop.matches);
       if (desktop.matches) header.insertBefore(projects, header.querySelector(".dispatcher-mobile-nav"));
       else home.after(projects);
+      if (scratchpad) {
+        if (desktop.matches) panel.insertBefore(scratchpad, monitor);
+        else scratchpadHome.after(scratchpad);
+      }
     };
     desktop.addEventListener("change", sync); sync();
   }
