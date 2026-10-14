@@ -11,9 +11,9 @@
   ];
 
   class ChatSlashCommands {
-    constructor({input, menu, getThread, getSession = () => ({}), loadModels = async () => [], canComplete, onChange}) {
+    constructor({input, menu, getThread, getSession = () => ({}), loadModels = async () => [], catalogs = new Map(), canComplete, onChange}) {
       Object.assign(this, {input, menu, getThread, getSession, loadModels, canComplete, onChange});
-      this.catalogs = new Map();
+      this.catalogs = catalogs;
       this.loading = new Set();
       this.matches = [];
       this.index = 0;

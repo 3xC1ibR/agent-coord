@@ -1765,17 +1765,23 @@ async function changeSessionEffort() {
 }
 $("effort-picker").onchange = () => action(changeSessionEffort);
 $("effort-picker").onfocus = () => { loadSessionModels(); };
+async function loadModelCatalog(client) {
+  const catalogs = state.modelCatalogs ||= new Map(), loading = state.modelLoading ||= new Map();
+  const errors = state.modelErrors ||= new Map();
+  if (catalogs.has(client)) return catalogs.get(client);
+  if (!loading.has(client)) {
+    loading.set(client, api("models?client=" + encodeURIComponent(client)).then(result => {
+      catalogs.set(client, result.data); errors.delete(client);
+      return result.data;
+    }).catch(error => { errors.set(client, error.message); throw error; })
+      .finally(() => { loading.delete(client); renderModelPicker(); }));
+  }
+  return loading.get(client);
+}
 async function loadSessionModels() {
   const clients = isSessionDraft() ? ["codex", "claude", "antigravity", "kimi"] : [state.detail?.session?.client || "codex"];
-  const catalogs = state.modelCatalogs ||= new Map(), loading = state.modelLoading ||= new Set();
-  const errors = state.modelErrors ||= new Map();
-  await Promise.all(clients.map(async client => {
-    if (catalogs.has(client) || loading.has(client)) return;
-    loading.add(client);
-    try { catalogs.set(client, (await api("models?client=" + client)).data); errors.delete(client); }
-    catch (error) { errors.set(client, error.message); }
-    finally { loading.delete(client); renderModelPicker(); }
-  }));
+  // Share completed and in-flight requests with slash autocomplete.
+  await Promise.all(clients.map(client => loadModelCatalog(client).catch(() => {})));
 }
 async function changeSessionModel() {
   const id = state.selected, [client, model] = JSON.parse($("model-picker").value);
@@ -2076,17 +2082,20 @@ async function sendMessage(mode = "steer") {
   state.busy = true; renderStatus();
   let dispatchReceived = false;
   try {
+    const command = text.trim().split(/\s+/)[0].toLowerCase();
+    if (command === "/fork" || command === "/close") {
+      if (text.trim().toLowerCase() !== command) throw new Error("Use " + command + " without arguments.");
+      if (images.length) throw new Error("Remove attached images before using " + command + ".");
+    }
     if (isSessionDraft()) {
-      if (text.trim() === "/close") {
+      if (command === "/fork") throw new Error("Send a message before forking this conversation.");
+      if (command === "/close") {
         state.drafts.delete("new-session"); state.attachments?.drafts.delete("new-session");
         $("message").value = ""; state.newSessionDraft = null; goHome(); return;
       }
       await sendSessionDraft(text, images, mentions); return;
     }
-    const command = text.trim().split(/\s+/)[0].toLowerCase();
     if (command === "/fork" || command === "/close") {
-      if (text.trim().toLowerCase() !== command) throw new Error("Use " + command + " without arguments.");
-      if (images.length) throw new Error("Remove attached images before using " + command + ".");
       const clearCommand = () => {
         state.commandFeedback.delete(id);
         if (id === state.selected && $("message").value === text) {
@@ -2398,8 +2407,9 @@ async function boot() {
   state.slashCommands = new ChatSlashCommands({input: $("message"), menu: $("slash-commands"),
     getThread: () => state.selected,
     getSession: () => state.detail?.session,
-    loadModels: async client => (await api("models?client=" + encodeURIComponent(client))).data,
-    canComplete: () => !isSessionDraft() && !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !state.busy &&
+    catalogs: (state.modelCatalogs ||= new Map()),
+    loadModels: loadModelCatalog,
+    canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !state.busy &&
       state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
     onChange: () => { state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
   state.attachments = new ChatImageAttachments({document, getThread: () => state.selected,

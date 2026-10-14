@@ -63,6 +63,62 @@ const models = [
 ];
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
+test("new-session composer completes commands, provider models and effort before the first message", async () => {
+  const f = setup(), calls = [];
+  const elements = {message: f.input, "slash-commands": f.menu, composer: {hidden: false}};
+  const state = {selected: "new-session", drafts: new Map(), closing: new Set(),
+    detail: {session: {client: "claude", model: "first-model"},
+      work_thread: {browser_session: true, attention: "now"}}};
+  Object.assign(f.context, {state, $: id => elements[id], isSessionDraft: () => true,
+    loadModelCatalog: async client => { calls.push("models?client=" + client); return models; },
+    api: async path => { calls.push(path); return {data: models}; }});
+  const app = fs.readFileSync(path.join(web, "app.js"), "utf8");
+  vm.runInContext(app.slice(app.indexOf("  state.slashCommands = new ChatSlashCommands("),
+    app.indexOf("  state.attachments = new ChatImageAttachments(")), f.context);
+  f.complete = state.slashCommands;
+  f.type("/");
+  assert.equal(f.menu.hidden, false);
+  assert(f.names().includes("/help"));
+  f.type("/mo"); f.key("Tab"); await settle();
+  assert.deepEqual(calls, ["models?client=claude"]);
+  assert.deepEqual(f.names(), ["first-model", "second-model"]);
+  f.key("Tab");
+  assert.equal(f.input.value, "/model first-model ");
+  assert.deepEqual(f.names(), ["low", "high"]);
+  f.key("ArrowDown"); f.key("Tab");
+  assert.equal(state.drafts.get("new-session"), "/model first-model high ");
+  assert.equal(f.key("Enter").defaultPrevented, undefined);
+  f.type("/permissions yo"); f.key("Tab");
+  assert.equal(state.drafts.get("new-session"), "/permissions yolo ");
+  for (const guard of ["busy", "hidden", "archived", "closing"]) {
+    state.busy = guard === "busy";
+    elements.composer.hidden = guard === "hidden";
+    state.detail.work_thread.attention = guard === "archived" ? "archived" : "now";
+    state.closing = new Set(guard === "closing" ? [state.selected] : []);
+    f.type("/"); assert.equal(f.menu.hidden, true, guard);
+  }
+});
+
+test("slash model suggestions use an already-loaded picker catalog synchronously", () => {
+  const f = setup();
+  const elements = {message: f.input, "slash-commands": f.menu, composer: {hidden: false}};
+  const state = {selected: "new-session", modelCatalogs: new Map([["codex", models]]),
+    drafts: new Map(), closing: new Set(), detail: {session: f.session,
+      work_thread: {browser_session: true, attention: "now"}}};
+  Object.assign(f.context, {state, $: id => elements[id], isSessionDraft: () => true,
+    loadModelCatalog: () => assert.fail("The picker already loaded these models"),
+    api: () => assert.fail("The picker already loaded these models")});
+  const app = fs.readFileSync(path.join(web, "app.js"), "utf8");
+  vm.runInContext(app.slice(app.indexOf("  state.slashCommands = new ChatSlashCommands("),
+    app.indexOf("  state.attachments = new ChatImageAttachments(")), f.context);
+  f.complete = state.slashCommands;
+  f.type("/model ");
+  assert.equal(f.menu.hidden, false);
+  assert.deepEqual(f.names(), ["first-model", "second-model"]);
+  f.type("/effort ");
+  assert.deepEqual(f.names(), ["low", "high"]);
+});
+
 test("fork and close autocomplete without executing and leave Enter available to send", () => {
   const f = setup();
   for (const [prefix, name] of [["/fo", "/fork"], ["/cl", "/close"]]) {

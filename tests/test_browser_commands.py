@@ -81,6 +81,32 @@ class BrowserCommandTests(unittest.TestCase):
         with self.assertRaises(BrowserBusyError):
             self.command("/permissions yolo")
 
+    def test_settings_commands_reconcile_once_and_fetch_the_catalog_once(self):
+        for command in ("/model available-model high", "/effort medium", "/permissions default"):
+            with self.subTest(command=command):
+                self.sessions.rpc.calls.clear()
+                result = self.command(command)
+                methods = [method for method, _ in self.sessions.rpc.calls]
+                self.assertEqual(methods.count("thread/read"), 1)
+                self.assertEqual(methods.count("model/list"), 0 if command.startswith("/permissions") else 1)
+                self.assertNotIn("turn/start", methods)
+                self.assertIn("command", result)
+
+    def test_settings_validation_still_checks_effort_and_direct_updates_reconcile(self):
+        before = self.sessions._record(self.thread)
+        with self.assertRaisesRegex(CoordinationError, "not supported"):
+            self.command("/model available-model unsupported")
+        after = self.sessions._record(self.thread)
+        self.assertEqual((after["model"], after["effort"]), (before["model"], before["effort"]))
+        self.sessions.rpc.calls.clear()
+        self.sessions.update(self.thread, {"effort": "high"})
+        methods = [method for method, _ in self.sessions.rpc.calls]
+        self.assertEqual(methods.count("thread/read"), 1)
+        self.assertEqual(methods.count("model/list"), 1)
+        self.sessions.send(self.thread, {"message": "Work"})
+        with self.assertRaises(BrowserBusyError):
+            self.command("/effort medium")
+
     def test_configuration_with_images_is_rejected_instead_of_sent(self):
         image = {"name": "test.png", "url": "data:image/png;base64,iVBORw0KGgo="}
         for command in ("/cd .", "/permissions yolo", "/model", "/effort", "/help"):

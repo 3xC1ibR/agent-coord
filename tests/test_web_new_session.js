@@ -12,7 +12,7 @@ function setup() {
     $: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); },
     node: (tag, text) => Object.assign(element(), {tag, textContent: text}),
     Option: function(text, value) { return {text, value}; }, navigation: null,
-    state: {config: {cwd: "/server-process"}, folders: {selected: {cwd: "/workspace"}}, organization: {repositories: [], projects: []}, drafts: new Map(), commandFeedback: new Map()},
+    state: {config: {cwd: "/server-process"}, folders: {selected: {cwd: "/workspace"}}, organization: {repositories: [], projects: []}, drafts: new Map(), commandFeedback: new Map(), closing: new Set()},
     threadOrganization: {NONE: "__none__"}, action: fn => fn(), sessionPath: id => "sessions/" + id,
     api: async (path, body) => {
       calls.push({path, body});
@@ -28,8 +28,42 @@ function setup() {
   c.renderFolders = () => {};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function filtersChanged()")), c);
+  vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   return c;
 }
+
+test("configuration commands can be the first submission and display their feedback", async () => {
+  for (const command of ["/help", "/cd .", "/model gpt-test", "/effort high", "/permissions yolo"]) {
+    const c = setup(); await c.newSession();
+    const api = c.api;
+    c.api = async (path, body) => {
+      const result = await api(path, body);
+      return path.endsWith("/messages") ? {command: {message: "Command applied"}} : result;
+    };
+    c.$("message").value = command;
+    await c.sendMessage();
+    assert.equal(c.calls.filter(call => call.path === "sessions").length, 1, command);
+    assert.equal(c.calls.find(call => call.path.endsWith("/messages")).body.message, command);
+    assert.equal(c.state.commandFeedback.get("created"), "Command applied");
+    assert.equal(c.state.selected, "created");
+    assert.equal(c.state.busy, false);
+  }
+});
+
+test("draft thread commands never create a provider session or become prompts", async () => {
+  for (const command of ["/fork", "/close extra", "/fork extra"]) {
+    const c = setup(); await c.newSession(); c.$("message").value = command;
+    await assert.rejects(c.sendMessage(), /before forking|without arguments/);
+    assert.equal(c.calls.filter(call => call.body).length, 0, command);
+    assert.equal(c.$("message").value, command);
+    assert.equal(c.state.busy, false);
+  }
+  const c = setup(); await c.newSession(); c.$("message").value = "/CLOSE ";
+  await c.sendMessage();
+  assert.equal(c.state.newSessionDraft, null);
+  assert.equal(c.state.selected, null);
+  assert.equal(c.calls.filter(call => call.body).length, 0);
+});
 
 test("New session opens a draft with all provider groups before creating any provider session", async () => {
   const c = setup();
@@ -133,6 +167,41 @@ test("repeat New session restores the same draft and chosen model", async () => 
   assert.equal(c.$("message").value, "Keep this");
   assert.equal(c.state.detail.session.model, "sonnet");
   assert.equal(c.calls.filter(call => call.path.startsWith("models?")).length, 4);
+});
+
+test("model menus share an in-flight catalog request and reuse its result", async () => {
+  const c = setup(), api = c.api;
+  let release, loads = 0;
+  c.api = (path, body) => {
+    if (path !== "models?client=codex") return api(path, body);
+    loads++;
+    return new Promise(resolve => { release = resolve; });
+  };
+  const opening = c.newSession();
+  await new Promise(resolve => setImmediate(resolve));
+  const completion = c.loadModelCatalog("codex");
+  assert.equal(loads, 1);
+  const catalog = [{model: "shared"}];
+  release({data: catalog});
+  await opening;
+  assert.equal(await completion, catalog);
+  assert.equal(await c.loadModelCatalog("codex"), catalog);
+  assert.equal(c.state.modelLoading.size, 0);
+});
+
+test("failed shared catalog requests can retry without poisoning other providers", async () => {
+  const c = setup(), api = c.api; let attempts = 0;
+  c.api = (path, body) => {
+    if (path === "models?client=codex" && ++attempts === 1) return Promise.reject(new Error("Temporarily offline"));
+    return api(path, body);
+  };
+  await c.newSession();
+  assert.equal(c.state.modelErrors.get("codex"), "Temporarily offline");
+  assert(c.state.modelCatalogs.has("claude"));
+  await c.loadModelCatalog("codex");
+  assert.equal(attempts, 2);
+  assert.equal(c.state.modelErrors.has("codex"), false);
+  assert.equal(c.state.modelLoading.size, 0);
 });
 
 test("first session requires a folder, retains its group, and cancellation starts nothing", async () => {

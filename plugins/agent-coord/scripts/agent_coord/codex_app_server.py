@@ -971,13 +971,18 @@ class BrowserSessions:
         selected = next((m for m in self.models(client) if m["model"] == model), None)
         if not selected:
             raise CoordinationError("Choose an available model. Use /model to list models.")
+        self._validate_effort(selected, effort)
+        return selected
+
+    @staticmethod
+    def _validate_effort(selected: dict, effort: str | None) -> None:
         supported = [e["reasoningEffort"] for e in selected.get("supportedReasoningEfforts", [])]
         if effort is not None and effort not in supported:
             raise CoordinationError("Reasoning effort is not supported by this model. Available: " + ", ".join(supported))
-        return selected
 
-    def _change_settings(self, thread_id: str, body: dict) -> dict:
-        record = self.read(thread_id)["session"]
+    def _change_settings(self, thread_id: str, body: dict, *, reconciled_session: dict | None = None) -> dict:
+        # send() already reconciles provider turn state under this thread's lock.
+        record = reconciled_session if reconciled_session is not None else self.read(thread_id)["session"]
         if self.store.threads.get(thread_id)["attention"] == "archived":
             raise CoordinationError("Restore this session before changing its settings.")
         with self.lock:
@@ -996,7 +1001,7 @@ class BrowserSessions:
                 effort = self._text(effort, "Reasoning effort", 40)
             elif effort not in supported:
                 effort = selected.get("defaultReasoningEffort")
-            self._validate_settings(model, effort, record["client"])
+            self._validate_effort(selected, effort)
         with self.store._connection() as db:
             db.execute("UPDATE browser_sessions SET model = ?, effort = ?, yolo = ?, updated_at = ? WHERE thread_id = ?",
                        (model, effort, int(yolo), time.time(), thread_id))
@@ -1033,7 +1038,7 @@ class BrowserSessions:
         self._publish("browser/changed", {"threadId": thread_id})
         return self._record(thread_id)
 
-    def _command(self, thread_id: str, message: str) -> dict | None:
+    def _command(self, thread_id: str, message: str, *, reconciled_session: dict | None = None) -> dict | None:
         parts = message.split()
         command = parts[0].lower()
         if command not in {"/cd", "/permissions", "/model", "/effort", "/help"}:
@@ -1058,7 +1063,8 @@ class BrowserSessions:
         elif command == "/permissions":
             if len(parts) > 2 or (len(parts) == 2 and parts[1].lower() not in {"default", "yolo"}):
                 raise CoordinationError("Use /permissions default or /permissions yolo.")
-            record = (self.update(thread_id, {"yolo": parts[1].lower() == "yolo"})
+            record = (self._change_settings(thread_id, {"yolo": parts[1].lower() == "yolo"},
+                                           reconciled_session=reconciled_session)
                       if len(parts) == 2 else self._record(thread_id))
             reply = ("Permissions: yolo — full machine access without approval prompts." if record["yolo"] else
                      "Permissions: default — " + default_permissions + ".")
@@ -1077,7 +1083,7 @@ class BrowserSessions:
             values = {"model" if command == "/model" else "effort": parts[1]}
             if command == "/model" and len(parts) == 3:
                 values["effort"] = parts[2]
-            record = self._change_settings(thread_id, values)
+            record = self._change_settings(thread_id, values, reconciled_session=reconciled_session)
             reply = f"Next message: {record['model']} · {record['effort'] or 'Model default'} reasoning."
         return {"command": {"name": command, "message": reply}, "session": self._record(thread_id)}
 
@@ -1219,7 +1225,7 @@ class BrowserSessions:
                 # Work queued before a subsequent Close is retained; reopen if
                 # it is now eligible to run. A stopped/uncertain wake cannot get here.
                 self.store.threads.update(thread_id, attention="now")
-            command = self._command(thread_id, message) if message and not images else None
+            command = self._command(thread_id, message, reconciled_session=record) if message and not images else None
             if command is not None:
                 return command
             with self.lock:
