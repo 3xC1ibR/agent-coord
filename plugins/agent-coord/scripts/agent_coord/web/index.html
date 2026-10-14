@@ -145,7 +145,7 @@
           </details>
           <div class="placement-switch" role="group" aria-label="Thread placement"><button id="show-now" type="button" class="quiet" aria-pressed="true">Now</button><button id="show-later" type="button" class="quiet" aria-pressed="false">Later</button><button id="show-closed" type="button" class="quiet closed-toggle" aria-pressed="false" title="Show closed threads">Closed</button></div>
         </div>
-        <div class="workspace-actions"><button id="welcome-project" class="quiet" hidden>New group</button><button id="start-dispatcher" class="quiet dispatcher-entry" type="button" title="Send work to the right conversation" disabled>Start dispatcher <span aria-hidden="true">↗</span></button><button id="welcome-new" class="primary" aria-label="New session"><span class="new-session-label">New session</span><span class="mobile-new-label">New</span> <span aria-hidden="true">＋</span></button></div>
+        <div class="workspace-actions"><button id="welcome-project" class="quiet" hidden>New group</button><button id="start-dispatcher" class="quiet dispatcher-entry" type="button" title="Send work to the right conversation" disabled>Start dispatcher <span aria-hidden="true">↗</span></button><button id="send-work-mobile-open" class="quiet send-work-mobile" type="button" aria-haspopup="dialog" aria-controls="send-work-dialog">Send work <span aria-hidden="true">↗</span></button><button id="welcome-new" class="primary" aria-label="New session"><span class="new-session-label">New session</span><span class="mobile-new-label">New</span> <span aria-hidden="true">＋</span></button></div>
       </div>
       <div id="search-options" class="search-options" hidden>
         <label for="search-scope">Search in<select id="search-scope"><option value="all">This project, including closed</option><option value="current">Current view</option></select></label>
@@ -193,6 +193,7 @@
           </form>
         </div>
         <span id="mobile-chat-status" class="mobile-chat-control mobile-chat-status" role="status"></span>
+        <button id="send-work-mobile-chat" class="quiet send-work-mobile" type="button" aria-haspopup="dialog" aria-controls="send-work-dialog">Send work</button>
         <div class="conversation-controls">
           <button id="mobile-chat-actions" class="mobile-chat-control icon-button" type="button" aria-label="Thread actions" aria-haspopup="dialog" aria-controls="mobile-thread-sheet" aria-expanded="false"><span aria-hidden="true">⋯</span></button>
           <div class="session-actions"><span id="status" class="status"></span><span id="snooze-status" class="muted"></span><button id="resume-snooze" class="quiet" hidden>Resume</button><button id="snooze-thread-button" class="quiet">Move to Later…</button><button id="handle-response" class="quiet" hidden>Dismiss</button><button id="fork-thread" class="quiet" hidden title="Copy this conversation into a new thread in the same workspace">Fork</button><button id="park" class="quiet">Move to Later</button><button id="organize-thread" class="quiet">Add to group</button><button id="close-thread" class="quiet">Close thread</button></div>
@@ -288,12 +289,12 @@
   <dialog id="organization-dialog" aria-labelledby="organization-title"><form id="organization-form"><h2 id="organization-title">Group</h2><p class="muted">Choose an existing group, create one, or select No group to remove this thread from its group.</p><div class="organization-fields"><label>Group (optional)<select id="edit-project"></select></label><label hidden>Repository<select id="edit-repository"></select></label></div><label id="edit-project-input" hidden>Group name<input id="edit-project-value" maxlength="160" placeholder="Anthropic migration"></label><label id="edit-repository-input" hidden>Repository directory<input id="edit-repository-value" maxlength="4000" placeholder="/path/to/repository"></label><p id="edit-organization-error" class="dialog-error" role="alert" hidden></p><p id="organization-workspace" class="muted"></p><div class="dialog-actions"><button type="button" class="quiet" data-close="organization-dialog">Cancel</button><button id="save-organization" class="primary">Save</button></div></form></dialog>
   <dialog id="project-target-dialog" aria-labelledby="project-target-title"><form method="dialog"><h2 id="project-target-title">Open project</h2><p id="project-target-path" class="muted"></p><div class="dialog-actions"><button value="cancel" class="quiet">Cancel</button><button value="window" class="quiet">New window</button><button value="tab" class="primary" autofocus>New tab</button></div></form></dialog>
   <dialog id="send-work-dialog" class="send-work-dialog" aria-labelledby="send-work-title">
-    <header><h2 id="send-work-title">Send work</h2><span id="send-work-project"></span><button id="send-work-close" type="button" class="quiet" aria-label="Close Send work">Esc</button></header>
+    <header><h2 id="send-work-title">Send work</h2><span id="send-work-project"></span><button id="send-work-close" type="button" class="quiet" aria-label="Close Send work">Close</button></header>
     <textarea id="send-work-input" rows="2" maxlength="100000" placeholder="What would you like to do?" role="combobox" aria-label="Request to send" aria-autocomplete="list" aria-expanded="true" aria-controls="send-work-results"></textarea>
     <div id="send-work-target" hidden>To <strong id="send-work-target-name"></strong><button id="send-work-unlock" class="quiet" type="button">Change</button></div>
     <ul id="send-work-results" role="listbox" aria-label="Send to a conversation"></ul>
     <p id="send-work-error" class="dialog-error" role="alert" hidden></p>
-    <footer><div><p id="send-work-status" role="status">Only your typed request is sent.</p><p>↑ ↓ Choose · Tab Lock destination · Enter Send</p></div><button id="send-work-submit" class="primary" type="button">Send</button></footer>
+    <footer><div><p id="send-work-status" role="status">Only your typed request is sent.</p><p class="send-work-keyboard-help">↑ ↓ Choose · Tab Lock destination · Enter Send</p><p class="send-work-touch-help">Tap a destination, then Send.</p></div><button id="send-work-submit" class="primary" type="button">Send</button></footer>
   </dialog>
   <div id="send-work-notice" role="status" aria-live="polite" hidden></div>
 </body>

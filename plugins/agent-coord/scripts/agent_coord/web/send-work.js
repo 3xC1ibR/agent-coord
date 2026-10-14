@@ -174,6 +174,11 @@ class SendWorkPalette {
     }, 1000);
   }
   static bindShortcut(document, getPalette) {
+    // Pane buttons open the same top-level palette as the keyboard shortcut.
+    for (const id of ["send-work-mobile-open", "send-work-mobile-chat"]) {
+      const button = document.getElementById(id);
+      if (button) button.onclick = () => getPalette()?.toggle();
+    }
     document.addEventListener("keydown", event => {
       if (event.defaultPrevented || event.isComposing) return;
       const palette = getPalette();
