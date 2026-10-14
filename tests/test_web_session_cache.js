@@ -266,3 +266,152 @@ test("tab navigation preserves drafts and reading positions beyond the transcrip
   await c.select("one");
   assert.equal(c.$("message").value, "Draft one", "closing a tab keeps its draft for later reopening");
 });
+
+function projectSetup(storage) {
+  const c = setup();
+  c.state.projectCwd = "/a";
+  c.state.folders = {selected: {cwd: "/a"}, adopt(folder) { this.selected = folder; }};
+  c.savedViews.setProject = async () => {};
+  c.renderFolders = () => {};
+  c.sessionContext = () => ({cwd: c.state.projectCwd});
+  c.state.threadTabs = new ThreadTabs({storage, onSelect: id => id ? c.select(id) : c.goHome()});
+  c.state.threadTabs.setProject("/a");
+  c.state.attachments = {drafts: new Map(), highlight() {}};
+  c.state.mentions = {drafts: new Map()};
+  for (const [id, cwd] of [["one", "/a"], ["two", "/a"], ["three", "/b"]]) {
+    const detail = fixture(id); detail.work_thread.project_cwd = cwd;
+    c.replies.set(id, detail); c.state.sessions.push(detail.work_thread);
+  }
+  vm.runInContext(source.slice(source.indexOf("async function switchProject("), source.indexOf("function renderFolders(")), c);
+  vm.runInContext(source.slice(source.indexOf("async function newSession("), source.indexOf("async function sendSessionDraft(")), c);
+  c.switchTo = async cwd => { c.state.folders.adopt({cwd}); await c.switchProject(); };
+  return c;
+}
+
+test("project tabs restore independent conversations, drafts and reading positions", async () => {
+  const c = projectSetup();
+  await c.select("one"); await c.select("two");
+  c.$("message").value = "Draft A"; c.$("timeline").scrollTop = 123;
+  await c.switchTo("/b");
+  assert.equal(c.state.selected, null, "a new project starts at Overview");
+  await c.select("three");
+  c.$("message").value = "Draft B"; c.$("timeline").scrollTop = 456;
+  await c.switchTo("/a");
+  assert.equal(c.state.selected, "two"); assert.equal(c.state.threadTabs.selected, "two");
+  assert.equal(c.$("message").value, "Draft A"); assert.equal(c.$("timeline").scrollTop, 123);
+  assert.deepEqual(c.state.threadTabs.items.map(item => item.thread_id), ["one", "two"]);
+  await c.switchTo("/b");
+  assert.equal(c.state.selected, "three");
+  assert.equal(c.$("message").value, "Draft B"); assert.equal(c.$("timeline").scrollTop, 456);
+  await c.switchTo("/b");
+  assert.equal(c.state.selected, "three", "clicking the current project keeps its conversation");
+});
+
+test("restart restores the active conversation and each project's saved tab", async () => {
+  const values = new Map(), storage = {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)};
+  const first = projectSetup(storage);
+  await first.select("one"); await first.select("two"); await first.switchTo("/b"); await first.select("three");
+  const reopened = projectSetup(storage);
+  await reopened.restoreProjectTab();
+  assert.equal(reopened.state.selected, "two");
+  await reopened.switchTo("/b");
+  assert.equal(reopened.state.selected, "three");
+  reopened.goHome();
+  const again = projectSetup(storage); await again.switchTo("/b");
+  assert.equal(again.state.selected, null, "Overview remains the selected tab");
+});
+
+test("project tabs respect Overview and the replacement selected after closing a tab", async () => {
+  const c = projectSetup();
+  await c.select("one"); await c.select("two");
+  await c.state.threadTabs.close("two");
+  await c.switchTo("/b"); await c.switchTo("/a");
+  assert.equal(c.state.selected, "one");
+  await c.state.threadTabs.close("one");
+  await c.switchTo("/b"); await c.switchTo("/a");
+  assert.equal(c.state.selected, null); assert.equal(c.$("welcome").hidden, false);
+  await c.select("two"); c.goHome();
+  await c.switchTo("/b"); await c.switchTo("/a");
+  assert.equal(c.state.selected, null, "choosing Overview is remembered even with open tabs");
+});
+
+test("missing tabs, unavailable threads and moved threads fall back to Overview", async () => {
+  for (const reason of ["closed-tab", "missing", "moved", "moved-during-refresh"]) {
+    const c = projectSetup(); await c.select("one"); await c.switchTo("/b");
+    if (reason === "closed-tab") c.state.threadTabs.projects.get("/a").splice(0);
+    if (reason === "missing") {
+      const api = c.api;
+      c.api = async (path, body) => {
+        if (path === "threads/one" && !body) throw Object.assign(new Error("Gone"), {status: 404});
+        return api(path, body);
+      };
+    }
+    if (reason === "moved") c.state.sessions[0] = {...c.state.sessions[0], project_cwd: "/elsewhere"};
+    if (reason === "moved-during-refresh") {
+      const detail = clone(c.replies.get("one")); detail.work_thread.project_cwd = "/elsewhere";
+      c.replies.set("one", detail);
+    }
+    await c.switchTo("/a");
+    assert.equal(c.state.projectCwd, "/a", reason);
+    assert.equal(c.state.selected, null, reason); assert.equal(c.$("welcome").hidden, false, reason);
+  }
+});
+
+test("temporary restoration failures remain visible and leave a usable Overview", async () => {
+  const c = projectSetup(); await c.select("one"); await c.switchTo("/b");
+  c.api = async () => { throw Object.assign(new Error("Offline"), {status: 503}); };
+  await assert.rejects(c.switchTo("/a"), /Offline/);
+  assert.equal(c.state.selected, null); assert.equal(c.$("welcome").hidden, false);
+});
+
+test("explicit cross-project navigation bypasses remembered conversations", async () => {
+  const c = projectSetup(); await c.select("one"); await c.switchTo("/b"); await c.select("three");
+  c.calls.length = 0;
+  await c.select("two");
+  assert.equal(c.state.projectCwd, "/a"); assert.equal(c.state.selected, "two");
+  assert.equal(c.calls.some(call => call.path === "threads/one"), false);
+  await c.openProjectDirectory("/b");
+  assert.equal(c.state.selected, null, "route callers choose their own destination after changing directory");
+});
+
+test("project restoration does not overwrite newer navigation while loading the project", async () => {
+  const c = projectSetup(); await c.select("one"); await c.switchTo("/b");
+  const gate = deferred(); c.savedViews.setProject = () => gate.promise;
+  const switching = c.switchTo("/a");
+  await c.select("two"); gate.resolve(); await switching;
+  assert.equal(c.state.selected, "two");
+});
+
+test("new-session drafts and attachments remain separate for each project", async () => {
+  const c = projectSetup();
+  await c.newSession();
+  c.$("message").value = "New A";
+  c.state.attachments.drafts.set("new-session", ["image A"]);
+  c.state.mentions.drafts.set("new-session", ["file A"]);
+  await c.switchTo("/b"); await c.newSession();
+  c.$("message").value = "New B";
+  c.state.attachments.drafts.set("new-session", ["image B"]);
+  await c.switchTo("/a");
+  assert.equal(c.state.selected, "new-session"); assert.equal(c.state.detail.session.cwd, "/a");
+  assert.equal(c.$("message").value, "New A");
+  assert.deepEqual(c.state.attachments.drafts.get("new-session"), ["image A"]);
+  assert.deepEqual(c.state.mentions.drafts.get("new-session"), ["file A"]);
+  await c.switchTo("/b");
+  assert.equal(c.state.selected, "new-session"); assert.equal(c.state.detail.session.cwd, "/b");
+  assert.equal(c.$("message").value, "New B");
+  assert.deepEqual(c.state.attachments.drafts.get("new-session"), ["image B"]);
+});
+
+test("project switching restores split selection and its full-conversation return target", async () => {
+  const c = projectSetup(); await c.select("one");
+  const layout = {selected: "two", returnTarget: {thread: "one", scroll: 123}};
+  c.agentCoordPanes = {active: true, layout, leave() { this.active = false; },
+    restoreView() { this.active = true; this.layout.returnTarget = {thread: null}; c.state.threadTabs.suspend(); }};
+  c.state.threadTabs.suspend();
+  await c.switchTo("/b"); assert.equal(c.agentCoordPanes.active, false);
+  await c.select("three"); await c.switchTo("/a");
+  assert.equal(c.agentCoordPanes.active, true); assert.equal(c.agentCoordPanes.layout, layout);
+  assert.equal(layout.selected, "two");
+  assert.deepEqual(layout.returnTarget, {thread: "one", scroll: 123});
+  assert.equal(c.state.threadTabs.selected, undefined);
+});

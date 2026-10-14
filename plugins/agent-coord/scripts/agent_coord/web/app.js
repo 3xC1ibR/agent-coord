@@ -44,7 +44,7 @@ async function api(path, body, requestOptions = {}) {
         : "Could not refresh the workspace: the server returned an unreadable response. Try again shortly.");
   }
   if (viewMutation) ++listRequest;
-  if (!response.ok) throw new Error(result.error || "Request failed");
+  if (!response.ok) throw Object.assign(new Error(result.error || "Request failed"), {status: response.status});
   return result;
 }
 async function openMentionFile(ref) {
@@ -164,10 +164,15 @@ function canSwitchProject() {
   }
   return true;
 }
-async function switchProject() {
+async function switchProject({restoreConversation = true} = {}) {
   const cwd = state.folders.selected?.cwd || "";
-  if (state.projectCwd === cwd) { goHome(); renderFolders(); return; }
-  goHome({restoreDispatcher: false});
+  if (state.projectCwd === cwd) { renderFolders(); return; }
+  // Keep in-memory drafts and tiled destinations as well as the saved tab.
+  const destinations = state.projectDestinations ||= new Map(), panes = globalThis.agentCoordPanes;
+  destinations.set(state.projectCwd, {tab: state.threadTabs?.selected,
+    tiled: !!panes?.active && !state.dispatchWorkspace?.active, returnTarget: panes?.layout?.returnTarget});
+  goHome({restoreDispatcher: false, rememberTab: false});
+  const revision = state.navigationRevision;
   const drafts = state.projectDrafts ||= new Map();
   drafts.set(state.projectCwd, {detail: state.newSessionDraft, text: state.drafts.get("new-session"),
     images: state.attachments?.drafts.get("new-session"), mentions: state.mentions?.drafts.get("new-session")});
@@ -184,14 +189,33 @@ async function switchProject() {
   state.dispatchRestore = true;
   await savedViews.setProject(cwd);
   await refreshList();
+  if (restoreConversation && state.projectCwd === cwd && state.navigationRevision === revision) {
+    const destination = destinations.get(cwd);
+    if (destination?.tiled) {
+      panes?.restoreView();
+      if (panes?.active) panes.layout.returnTarget = destination.returnTarget;
+    } else await restoreProjectTab(destination ? destination.tab : state.threadTabs?.destination());
+  }
   renderFolders(); navigation?.remember();
+}
+async function restoreProjectTab(id = state.threadTabs?.destination()) {
+  const cwd = state.projectCwd;
+  if (id === "project-scratchpad") { openProjectScratchpad(); return; }
+  if (!id || !state.threadTabs?.items.some(item => item.thread_id === id)
+      || id === "new-session" && !state.newSessionDraft) return;
+  try { await select(id, {focus: false, stayInProject: true}); }
+  catch (error) {
+    if (state.projectCwd === cwd && state.selected === id) goHome({restoreDispatcher: false});
+    // Missing conversations fall back to Overview; temporary failures stay visible.
+    if (error.status !== 404) throw error;
+  }
 }
 async function openProjectDirectory(cwd) {
   if (!cwd || state.folders.selected?.cwd === cwd) return;
   // A saved conversation remains accessible if its directory was moved/deleted.
   // New session creation still validates the directory on the server.
   state.folders.adopt({cwd});
-  await switchProject();
+  await switchProject({restoreConversation: false});
 }
 function renderFolders() {
   state.projectScratchpad?.setProject(state.folders?.selected);
@@ -841,13 +865,14 @@ function sameConversation(first, second) {
   return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.work_thread.browser_session, first.work_thread.client]) ===
     JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.work_thread.browser_session, second.work_thread.client]);
 }
-async function select(id, {rollUp = false, dock = false, focus = true} = {}) {
+async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false} = {}) {
   state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.mobileChat?.close();
   if (id === "new-session") return newSession();
   if (!state.paneMode) {
     const known = state.sessions?.find(thread => thread.thread_id === id) || state.conversations?.get(id)?.detail?.work_thread;
+    if (stayInProject && (known?.project_cwd || known?.cwd) && (known.project_cwd || known.cwd) !== state.projectCwd) return;
     if (known?.project_cwd || known?.cwd) await openProjectDirectory(known.project_cwd || known.cwd);
   }
   $("conversation").classList.remove("session-draft");
@@ -923,6 +948,7 @@ async function select(id, {rollUp = false, dock = false, focus = true} = {}) {
   if (state.paneMode) return;
   const displayed = state.detail.work_thread;
   if (displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
+    if (stayInProject) { goHome({restoreDispatcher: false}); return; }
     await openProjectDirectory(displayed.project_cwd);
     return select(id);
   }
@@ -1917,7 +1943,7 @@ function setChatExpanded(expanded) {
   button.title = expanded ? label + " (Esc)" : label;
 }
 $("expand-chat").onclick = () => setChatExpanded(!document.body.classList.contains("chat-expanded"));
-function goHome({restoreDispatcher = true} = {}) {
+function goHome({restoreDispatcher = true, rememberTab = true} = {}) {
   state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.dispatchRestore = restoreDispatcher;
@@ -1937,7 +1963,7 @@ function goHome({restoreDispatcher = true} = {}) {
   state.dispatchDock?.hide();
   state.selected = null; state.detail = null; state.titleEdit = null;
   state.scratchpad?.select(null);
-  state.threadTabs?.overview();
+  state.threadTabs?.overview({remember: rememberTab});
   state.detailRefreshing = false;
   if (navigation) navigation.remember();
   else history.replaceState(null, "", location.pathname + location.search);
@@ -2203,6 +2229,10 @@ async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess 
         } finally { state.closing.delete(id); renderStatus(); }
       });
       state.threadActions?.closed(snapshot);
+      if (state.selected === id) $("view").value = "active";
+      // A confirmed thread close also removes its tab. /close is still busy
+      // sending here, so bypass the guard for this completed lifecycle action.
+      await state.threadTabs?.close(id, {force: true});
     }
     if (state.selected === id) {
       $("view").value = "active";
@@ -2482,7 +2512,8 @@ async function boot() {
       if (state.selected === thread.thread_id) await refreshThread();
     },
     notify: (...args) => state.threadActions.notify(...args), onError: showError});
-  state.threadTabs = new ThreadTabs({document, container: $("conversation-tabs"), storage: windowStorage,
+  state.threadTabs = new ThreadTabs({document, container: $("conversation-tabs"),
+    storage: desktop ? preferences : windowStorage, fallbackStorage: desktop ? windowStorage : null,
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
     canNavigate: canSwitchProject, onError: showError, onScratchpad: openProjectScratchpad,
     onSelect: async id => {
@@ -2546,7 +2577,7 @@ async function boot() {
     },
     restore: async snapshot => {
       if (snapshot.directory) await openProjectDirectory(snapshot.directory);
-      else if (snapshot.directory === "" && state.projectCwd) { state.folders.activate(""); await switchProject(); }
+      else if (snapshot.directory === "" && state.projectCwd) { state.folders.activate(""); await switchProject({restoreConversation: false}); }
       if (snapshot.viewId === "all") await savedViews.overview(snapshot.filters, snapshot.group_by);
       else await savedViews.activate(snapshot.viewId);
       if (snapshot.dispatcher) await select(snapshot.dispatcher, {dock: true, focus: false});
@@ -2569,6 +2600,9 @@ async function boot() {
   if (initialDispatcher) await select(initialDispatcher, {dock: true, focus: false});
   if (initialThread && initialThread !== initialDispatcher) await select(initialThread);
   if (!initialThread && !initialDispatcher && projectQuery.get("scratchpad") === "1") openProjectScratchpad();
+  if (!initialNavigation && !initialThread && !initialDispatcher && projectQuery.get("scratchpad") !== "1") {
+    await restoreProjectTab().catch(showError);
+  }
   if (initialThread && /^\d+$/.test(initialMessage || "")) focusAgentMessage(initialMessage);
   state.dispatchReady = true;
   syncDispatcherOverview();

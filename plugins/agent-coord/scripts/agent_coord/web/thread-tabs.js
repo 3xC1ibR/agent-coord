@@ -2,10 +2,10 @@
 
 // Tabs are a window's working set, independent of thread placement and filters.
 class ThreadTabs {
-  constructor({document, container, storage, scope = "", onSelect, onScratchpad, onError, canNavigate = () => true}) {
-    Object.assign(this, {document, container, storage, onSelect, onScratchpad, onError, canNavigate});
+  constructor({document, container, storage, fallbackStorage, scope = "", onSelect, onScratchpad, onError, canNavigate = () => true}) {
+    Object.assign(this, {document, container, storage, fallbackStorage, onSelect, onScratchpad, onError, canNavigate});
     this.baseKey = "agent-coord.thread-tabs." + scope;
-    this.projects = new Map(); this.items = []; this.selected = null;
+    this.projects = new Map(); this.selections = new Map(); this.items = []; this.selected = null;
     container?.setAttribute("role", "tablist");
     container?.setAttribute("aria-label", "Project tabs");
   }
@@ -13,30 +13,44 @@ class ThreadTabs {
     if (this.cwd === cwd) return;
     this.cwd = cwd;
     if (!this.projects.has(cwd)) {
-      let items;
-      try { items = JSON.parse(this.storage?.getItem(this.baseKey + ":" + cwd) || "[]"); } catch { /* Optional window state. */ }
+      let saved;
+      try {
+        const key = this.baseKey + ":" + cwd;
+        saved = JSON.parse(this.storage?.getItem(key) ?? this.fallbackStorage?.getItem(key) ?? "[]");
+      } catch { /* Optional window state. */ }
+      // Older versions saved only the tab array in session storage.
+      const items = Array.isArray(saved) ? saved : saved?.items;
       const ids = new Set();
       this.projects.set(cwd, Array.isArray(items) ? items.filter(item => {
         if (!item || typeof item.thread_id !== "string" || !item.thread_id || item.thread_id === "new-session" || ids.has(item.thread_id)) return false;
         ids.add(item.thread_id); return true;
       }).map(item => ({thread_id: item.thread_id, title: typeof item.title === "string" ? item.title : "Conversation"})) : []);
+      this.selections.set(cwd, typeof saved?.selected === "string" ? saved.selected : null);
     }
     this.items = this.projects.get(cwd); this.selected = null; this.render();
   }
-  save() {
-    try { this.storage?.setItem(this.baseKey + ":" + this.cwd, JSON.stringify(this.items
-      .filter(item => item.thread_id !== "new-session").map(({thread_id, title}) => ({thread_id, title})))); } catch { /* Tabs still work without storage. */ }
+  destination() {
+    const id = this.selections.get(this.cwd);
+    return id !== "new-session" && (id === "project-scratchpad" && this.cwd && this.onScratchpad
+      || this.items.some(item => item.thread_id === id)) ? id : null;
+  }
+  save(rememberSelection = false) {
+    if (rememberSelection) this.selections.set(this.cwd, this.selected ?? null);
+    try { this.storage?.setItem(this.baseKey + ":" + this.cwd, JSON.stringify({
+      items: this.items.filter(item => item.thread_id !== "new-session").map(({thread_id, title}) => ({thread_id, title})),
+      selected: this.destination(),
+    })); } catch { /* Tabs still work without storage. */ }
   }
   open(thread) {
     if (!thread?.thread_id) return;
     const item = this.items.find(item => item.thread_id === thread.thread_id);
     if (item) Object.assign(item, thread);
     else this.items.push({...thread, title: thread.title || "Conversation"});
-    this.selected = thread.thread_id; this.save(); this.render(); this.reveal(this.selected);
+    this.selected = thread.thread_id; this.save(true); this.render(); this.reveal(this.selected);
   }
-  overview() { this.selected = null; this.render(); }
-  scratchpad() { this.selected = "project-scratchpad"; this.render(); this.reveal(this.selected); }
-  suspend() { this.selected = undefined; this.render(); }
+  overview({remember = true} = {}) { this.selected = null; if (remember) this.save(true); this.render(); }
+  scratchpad() { this.selected = "project-scratchpad"; this.save(true); this.render(); this.reveal(this.selected); }
+  suspend() { this.selected = undefined; this.save(true); this.render(); }
   update(threads) {
     const available = new Map(threads.map(thread => [thread.thread_id, thread]));
     for (const item of this.items) if (available.has(item.thread_id)) Object.assign(item, available.get(item.thread_id));
@@ -48,22 +62,22 @@ class ThreadTabs {
     this.items.splice(index, 1);
     if (!this.items.some(item => item.thread_id === thread.thread_id)) this.items.splice(index, 0, {...thread});
     if (this.selected === id) this.selected = thread.thread_id;
-    this.save(); this.render();
+    this.save(true); this.render();
   }
-  async activate(id) {
-    if (id === this.selected || !this.canNavigate()) return;
+  async activate(id, {force = false} = {}) {
+    if (id === this.selected || !force && !this.canNavigate()) return;
     try {
       if (id === "project-scratchpad" && this.cwd && this.onScratchpad) await this.onScratchpad();
       else await this.onSelect(id);
     } catch (error) { this.onError?.(error); }
   }
-  async close(id) {
+  async close(id, {force = false} = {}) {
     const index = this.items.findIndex(item => item.thread_id === id);
-    if (index < 0 || !this.canNavigate()) return;
+    if (index < 0 || !force && !this.canNavigate()) return;
     const selected = this.selected === id;
     this.items.splice(index, 1); this.save(); this.render();
     // Only navigate. Closing a tab never changes the thread or its running agent.
-    if (selected) await this.activate(this.items[Math.min(index, this.items.length - 1)]?.thread_id || null);
+    if (selected) await this.activate(this.items[Math.min(index, this.items.length - 1)]?.thread_id || null, {force});
     this.reveal(this.selected, true);
   }
   move(id, index) {

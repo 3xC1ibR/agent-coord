@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const grouping = require("../plugins/agent-coord/scripts/agent_coord/web/thread-groups.js");
+const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
 
 function setup() {
@@ -20,6 +21,95 @@ function setup() {
   vm.runInContext(source.slice(source.indexOf("async function toggleThreadClosed("), source.indexOf('$("close-thread").onclick')), c);
   return c;
 }
+
+function withTabs(c, ids = ["one"]) {
+  const storage = new Map(), visits = [];
+  const tabs = new ThreadTabs({
+    storage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value)},
+    canNavigate: () => !c.state.busy,
+    onSelect: id => {
+      visits.push(id);
+      if (id) { c.state.selected = id; tabs.open({thread_id: id}); }
+      else c.goHome();
+    }, onError: c.showError,
+  });
+  const goHome = c.goHome;
+  c.goHome = () => { goHome(); tabs.overview(); };
+  c.state.threadTabs = tabs;
+  tabs.setProject("/work");
+  for (const id of ids) tabs.open({thread_id: id});
+  tabs.open({thread_id: c.state.selected});
+  return {tabs, visits, ids: () => tabs.items.map(item => item.thread_id),
+    savedIds: () => JSON.parse(storage.get(tabs.baseKey + ":/work")).items.map(item => item.thread_id)};
+}
+
+test("closing a middle thread removes its saved tab and selects the next tab to the right", async () => {
+  const c = setup(), t = withTabs(c, ["left", "one", "right"]);
+  c.api = async path => assert.equal(path, "threads/one/close");
+  await c.toggleThreadClosed();
+  assert.deepEqual(t.ids(), ["left", "right"]);
+  assert.deepEqual(t.savedIds(), ["left", "right"]);
+  assert.deepEqual(t.visits, ["right"]);
+  assert.equal(c.state.selected, "right");
+  assert.equal(c.home, undefined);
+});
+
+test("closing the rightmost thread selects the tab to its left even during /close", async () => {
+  const c = setup(), t = withTabs(c, ["left", "one"]);
+  c.state.busy = true;
+  c.api = async () => ({});
+  await c.toggleThreadClosed();
+  assert.deepEqual(t.ids(), ["left"]);
+  assert.deepEqual(t.visits, ["left"]);
+  assert.equal(c.state.selected, "left");
+  assert.equal(c.home, undefined);
+});
+
+test("closing the last thread removes its tab and returns to Overview", async () => {
+  const c = setup(), t = withTabs(c);
+  c.api = async () => ({});
+  await c.toggleThreadClosed();
+  assert.deepEqual(t.ids(), []);
+  assert.deepEqual(t.savedIds(), []);
+  assert.deepEqual(t.visits, [null]);
+  assert.equal(c.state.selected, null);
+  assert.equal(c.home, true);
+});
+
+test("a failed close preserves the tab, its order, and selection", async () => {
+  const c = setup(), t = withTabs(c, ["left", "one", "right"]);
+  c.api = async () => { throw new Error("Shutdown failed"); };
+  await assert.rejects(c.toggleThreadClosed(), /Shutdown failed/);
+  assert.deepEqual(t.ids(), ["left", "one", "right"]);
+  assert.deepEqual(t.savedIds(), ["left", "one", "right"]);
+  assert.deepEqual(t.visits, []);
+  assert.equal(t.tabs.selected, "one");
+  assert.equal(c.state.selected, "one");
+});
+
+test("navigating during shutdown removes the closed tab without moving the new selection", async () => {
+  const c = setup(), t = withTabs(c, ["one", "two", "three"]);
+  let finishClose;
+  c.api = () => new Promise(resolve => { finishClose = resolve; });
+  const closing = c.toggleThreadClosed();
+  assert.deepEqual(t.ids(), ["one", "two", "three"]);
+  await t.tabs.activate("three");
+  finishClose({});
+  await closing;
+  assert.deepEqual(t.ids(), ["two", "three"]);
+  assert.deepEqual(t.visits, ["three"]);
+  assert.equal(c.state.selected, "three");
+});
+
+test("reopening a thread keeps its tab and selection", async () => {
+  const c = setup(), t = withTabs(c, ["one", "two"]);
+  c.state.detail.work_thread.attention = "archived";
+  c.api = async path => assert.equal(path, "threads/one/reopen");
+  await c.toggleThreadClosed();
+  assert.deepEqual(t.ids(), ["one", "two"]);
+  assert.deepEqual(t.visits, []);
+  assert.equal(c.state.selected, "one");
+});
 
 test("closing removes the selected thread and returns to the open overview", async () => {
   const c = setup();

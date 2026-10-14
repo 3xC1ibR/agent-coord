@@ -583,8 +583,9 @@ models, `/model <model-id> [effort]` changes the next turn's model, and `/effort
 <level>` changes its reasoning effort. The slash menu completes model names and
 supported effort levels. `/effort` lists supported levels and `/help` lists commands.
 In the UI, `/fork` opens a new thread from the current idle Codex or Claude conversation;
-`/close` stops and closes the current thread, preserving its history and returning
-to the overview. These thread commands take no arguments or images and run
+`/close` stops and closes the current thread, preserving its history, removing
+its tab, and selecting the adjacent tab (or Overview when no tabs remain).
+These thread commands take no arguments or images and run
 immediately, even when submitted with the queue shortcut.
 Setting changes are saved without starting a model turn and
 require an idle session. The installed Codex configuration is used without

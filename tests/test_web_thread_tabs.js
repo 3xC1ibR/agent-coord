@@ -1,6 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs"), vm = require("node:vm");
 const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
 const thread = id => ({thread_id: id, title: "Thread " + id, attention: "now", response_state: "working"});
 
@@ -129,4 +130,80 @@ test("status refreshes retain the dragged DOM tab until drop or cancellation", (
   tabs.onDragStart = () => false;
   container.children[1].ondragstart({preventDefault() { prevented = true; }});
   assert.equal(prevented, true); assert.equal(tabs.dragging, null);
+});
+
+test("restart preserves tab order and selection through the initial inventory refresh", async () => {
+  const {tabs, storage} = setup();
+  tabs.open(thread("a")); tabs.open(thread("b")); tabs.move("b", 0); tabs.open(thread("a"));
+  const reopened = setup(storage);
+  reopened.tabs.update([{...thread("a"), title: "Renamed"}]);
+  assert.deepEqual(reopened.ids(), ["b", "a"]);
+  assert.equal(reopened.tabs.destination(), "a");
+  await reopened.tabs.activate(reopened.tabs.destination());
+  assert.equal(reopened.tabs.selected, "a");
+  await reopened.tabs.close("a");
+  assert.equal(setup(storage).tabs.destination(), "b");
+  await reopened.tabs.close("b");
+  assert.equal(setup(storage).tabs.destination(), null);
+  assert.deepEqual(setup(storage).ids(), []);
+});
+
+test("Overview, Scratchpad and temporary destinations survive restart safely", () => {
+  const {tabs, storage} = setup();
+  tabs.onScratchpad = () => {};
+  tabs.open(thread("a")); tabs.overview();
+  assert.equal(setup(storage).tabs.destination(), null);
+  tabs.scratchpad();
+  const reopened = setup(storage); reopened.tabs.onScratchpad = () => {};
+  assert.equal(reopened.tabs.destination(), "project-scratchpad");
+  tabs.open(thread("new-session"));
+  assert.equal(setup(storage).tabs.destination(), null);
+  tabs.replace("new-session", thread("created"));
+  assert.equal(setup(storage).tabs.destination(), "created");
+  tabs.suspend();
+  assert.equal(setup(storage).tabs.destination(), null);
+});
+
+test("each window and project keeps its own saved selection", () => {
+  const values = new Map(), storage = {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)};
+  const windowTabs = scope => new ThreadTabs({storage, scope});
+  const first = windowTabs("native-0"), second = windowTabs("native-1");
+  first.setProject("/work"); first.open(thread("a"));
+  first.overview({remember: false}); first.setProject("/other"); first.open(thread("b"));
+  second.setProject("/work"); second.open(thread("c"));
+  const reopened = windowTabs("native-0");
+  reopened.setProject("/work"); assert.equal(reopened.destination(), "a");
+  reopened.setProject("/other"); assert.equal(reopened.destination(), "b");
+  const other = windowTabs("native-1"); other.setProject("/work");
+  assert.equal(other.destination(), "c");
+});
+
+test("legacy session tabs migrate once without reviving a closed persistent tab set", () => {
+  const key = "agent-coord.thread-tabs.:/work", values = new Map();
+  const storage = {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)};
+  const fallbackStorage = {getItem: () => JSON.stringify([thread("legacy")])};
+  const tabs = new ThreadTabs({storage, fallbackStorage}); tabs.setProject("/work"); tabs.update([]);
+  assert.deepEqual(JSON.parse(values.get(key)).items, [{thread_id: "legacy", title: "Thread legacy"}]);
+  values.set(key, JSON.stringify({items: [], selected: null}));
+  const reopened = new ThreadTabs({storage, fallbackStorage}); reopened.setProject("/work");
+  assert.deepEqual(reopened.items, []);
+  values.set(key, JSON.stringify({items: [thread("a")], selected: "missing"}));
+  const stale = new ThreadTabs({storage}); stale.setProject("/work");
+  assert.equal(stale.destination(), null);
+});
+
+test("startup restores the saved tab only when no explicit destination was requested", async () => {
+  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+  const startup = source.slice(source.indexOf("  if (initialNavigation) await navigation.open"), source.indexOf("  state.dispatchReady = true;"));
+  for (const destination of [{}, {initialNavigation: "agentcoord://overview"}, {initialThread: "linked"},
+    {initialDispatcher: "dispatcher"}, {scratchpad: "1"}]) {
+    const calls = [];
+    const context = {initialNavigation: null, initialThread: "", initialDispatcher: null, initialMessage: null,
+      ...destination, projectQuery: new URLSearchParams(destination.scratchpad ? "scratchpad=1" : ""),
+      navigation: {open: async () => calls.push("link")}, select: async id => calls.push(id),
+      openProjectScratchpad: () => calls.push("scratchpad"), restoreProjectTab: async () => calls.push("restore"), showError() {}};
+    await vm.runInNewContext("(async () => {" + startup + "})()", context);
+    assert.deepEqual(calls, [destination.initialNavigation ? "link" : destination.initialThread || destination.initialDispatcher
+      || (destination.scratchpad ? "scratchpad" : "restore")]);
+  }
 });

@@ -6,6 +6,7 @@ const vm = require("node:vm");
 const {randomUUID} = require("node:crypto");
 const TurnNotifications = require("../plugins/agent-coord/scripts/agent_coord/web/notifications.js");
 const ChatImageAttachments = require("../plugins/agent-coord/scripts/agent_coord/web/image-attachments.js");
+const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
 const source = fs.readFileSync(require.resolve("../desktop/macos/bridge.js"), "utf8");
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -343,6 +344,22 @@ test("preferences survive a new origin, and unrelated storage and focus are not 
   assert.equal(reopened.env.localStorage.getItem("agent-coord-group-by"), null);
   assert.equal(saved.unrelated, "secret");
   assert.equal(saved["agent-coord.notifications.focus"], "stale");
+});
+
+test("conversation tabs restore through native preferences after the backend origin changes", async () => {
+  const saved = {}, first = fixture(saved);
+  const tabs = new ThreadTabs({storage: first.env.localStorage, scope: ":native-0"});
+  tabs.setProject("/work");
+  tabs.open({thread_id: "one", title: "First"}); tabs.open({thread_id: "two", title: "Second"});
+  tabs.move("two", 0); tabs.open({thread_id: "one", title: "First"});
+  await settle();
+  const reopened = fixture(saved);
+  const restored = new ThreadTabs({storage: reopened.env.localStorage, scope: ":native-0"});
+  restored.setProject("/work");
+  assert.deepEqual(restored.items, [{thread_id: "two", title: "Second"}, {thread_id: "one", title: "First"}]);
+  assert.equal(restored.destination(), "one");
+  const separate = new ThreadTabs({storage: reopened.env.localStorage, scope: ":native-1"});
+  separate.setProject("/work"); assert.deepEqual(separate.items, []);
 });
 
 test("existing turn notifications request native permission and keep thread click behavior", async () => {
