@@ -267,6 +267,7 @@ normal behavior, and Undo, Redo, Cut, Copy, Paste, and Select All use macOS edit
 | Command | Shortcut |
 | --- | --- |
 | Command palette | ⌘K |
+| Send work to a conversation | ⌘⇧K |
 | Toggle project scratchpad | ⌘⇧S |
 | Next / previous session in current view | ⌃Tab / ⌃⇧Tab |
 | Roll up waiting threads | ⌥⌘R |
@@ -294,7 +295,11 @@ palette and restores your previous focus. The project **Scratchpad** tab holds
 one plain-text, autosaving note for the selected project directory. **⌘⇧S**
 opens those same notes in a floating editor without leaving the conversation;
 press it again or **Escape** to return to your previous focus and selection.
-The command palette also offers **Toggle project scratchpad**. Switching threads preserves drafts
+The command palette also offers **Send work** and **Toggle project scratchpad**.
+**⌘⇧K** opens Send work over the current conversation. Type a request, select
+a matching thread, New conversation, or Ask dispatcher, and press Enter. Only
+the typed request is sent; sending preserves the current conversation and draft.
+Switching threads preserves drafts
 within that window. Other open dialogs keep their normal keyboard behavior.
 
 **Control-Tab** and **Control-Shift-Tab** cycle sessions in the current view's

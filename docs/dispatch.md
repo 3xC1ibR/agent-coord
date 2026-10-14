@@ -16,6 +16,37 @@ terminal delegates are separate mechanisms. See the
 
 ## Quick start and controls
 
+### Send work from anywhere
+
+**Send work** in the sidebar, **⌘⇧K** (Ctrl+Shift+K in a browser), or the native
+command palette opens a destination chooser over the current conversation.
+Type a request to see matching threads in the current project. Local title and
+summary matches appear immediately; after a short pause, saved conversation
+evidence and configured Jev ranking can improve the suggestions. This preview
+does not create conversations, send messages, or resume providers.
+
+Use arrows or click to choose, Tab to lock the destination while continuing to
+type, and Enter or **Send** to submit. Shift+Enter inserts a newline. **New
+conversation** and **Ask dispatcher** remain available. Selecting a thread
+sends directly to that thread; choosing New creates a normal Codex conversation
+with default settings. Ask dispatcher reuses the project's dispatcher or creates
+one if needed. Direct sends do not require a dispatcher conversation.
+
+Only the typed request is delivered. The conversation behind the dialog, its
+draft, and its history are not attached or used as routing context. The dialog
+preserves its own draft on Escape, and restores focus and selection to the
+original conversation. Sending leaves navigation in place and shows a linked
+delivery receipt. A selected destination stays fixed when later suggestions
+arrive. Busy threads queue the request; eligible closed threads reopen. Paused
+or changed destinations fail visibly rather than redirecting the request.
+
+Requests reuse durable dispatch receipts and queue safeguards, including stable
+retry keys and review after uncertain provider submissions. They are recorded
+under a workspace send-work channel, separate from ordinary conversation history.
+Semantic embeddings are not used; Jev ranks the existing bounded evidence.
+
+### Dispatcher workspace
+
 1. Open a project overview and click **Open dispatcher**, separate from
    **New session**. This is the dispatcher entry point; it reuses the existing
    eligible dispatcher for that directory with its saved model, reasoning, and

@@ -1,0 +1,25 @@
+dialog.send-work-dialog { width: min(640px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 64px); padding: 0; overflow: auto; margin: 64px auto auto; }
+.send-work-dialog::backdrop { background: rgb(0 0 0 / 24%); backdrop-filter: blur(3px); }
+.send-work-dialog header { display: flex; align-items: center; gap: 12px; padding: 18px 20px 10px; }
+.send-work-dialog h2 { margin: 0; font-size: 20px; letter-spacing: normal; }
+#send-work-project { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#send-work-close { margin-left: auto; }
+#send-work-input { display: block; width: calc(100% - 40px); min-height: 76px; max-height: 180px; margin: 0 20px 12px; padding: 12px; resize: vertical; font: inherit; font-size: 16px; }
+#send-work-target { margin: 0 20px 12px; font-size: 13px; }
+#send-work-unlock { margin-left: 8px; }
+#send-work-results { margin: 0; padding: 6px; list-style: none; border-block: 1px solid var(--line); max-height: min(360px, calc(100dvh - 360px)); overflow-y: auto; }
+#send-work-results li { padding: 10px 14px; border-radius: 6px; cursor: pointer; }
+#send-work-results li[aria-selected=true] { background: var(--tint); outline: 1px solid var(--line); }
+#send-work-results strong, #send-work-results span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#send-work-results strong { font-size: 14px; font-weight: 550; }
+#send-work-results span { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.send-work-dialog footer { display: flex; align-items: center; gap: 12px; padding: 12px 20px 18px; }
+.send-work-dialog footer > div { flex: 1; }
+.send-work-dialog footer p { margin: 3px 0; font-size: 12px; color: var(--muted); }
+#send-work-error { margin: 12px 20px; }
+#send-work-notice { position: fixed; bottom: 24px; right: 24px; z-index: 40; max-width: min(560px, calc(100vw - 32px)); padding: 12px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 30px #0002; }
+#send-work-notice > * { margin-right: 10px; }
+@media (max-width: 720px) {
+  dialog.send-work-dialog { margin-top: 16px; max-height: calc(100dvh - 32px); }
+  #send-work-notice { right: 16px; bottom: 16px; }
+}

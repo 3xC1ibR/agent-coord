@@ -2022,6 +2022,13 @@ if (!state.paneMode) {
   window.agentCoordProjectScratchpad = state.projectScratchpad;
 }
 ProjectScratchpad.bindShortcut(document, () => state.paneMode ? window.parent.agentCoordProjectScratchpad : state.projectScratchpad);
+if (typeof SendWorkPalette !== "undefined") {
+  if (!state.paneMode) window.agentCoordSendWork = new SendWorkPalette({document, view: window, api,
+    workspace: () => state.config && state.folders?.selected?.cwd,
+    threads: () => state.viewThreads || state.sessions, storage: sessionStorage,
+    openThread: id => select(id).catch(showError)});
+  SendWorkPalette.bindShortcut(document, () => state.paneMode ? window.parent.agentCoordSendWork : window.agentCoordSendWork);
+}
 state.mobileChat = new MobileChat({onBack: goHome, onLayout: () => state.timelineScroll?.layout(), onContextLayout: layoutContext});
 window.agentCoordFindThreads = () => { goHome({restoreDispatcher: false}); $("search").focus(); $("search").select(); };
 document.addEventListener("keydown", event => {

@@ -372,7 +372,7 @@ def _handler(
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
                 return
-            if parsed.path in {"/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
+            if parsed.path in {"/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -719,6 +719,13 @@ def _handler(
                     else:
                         raise CoordinationError("Unknown remote access action or invalid fields.")
                     self._json(HTTPStatus.OK, result)
+                    return
+                if route[:3] == ["api", "browser", "send-work"]:
+                    from . import send_work
+                    operation = {"suggest": send_work.suggestions, "send": send_work.submit, "status": send_work.status}.get(route[3] if len(route) == 4 else "")
+                    if operation is None:
+                        raise CoordinationError("Unknown send-work action.")
+                    self._json(HTTPStatus.OK, operation(browser_sessions.dispatch, body))
                     return
                 if route == ["api", "browser", "navigation", "resolve"]:
                     if set(body) != {"url"}:

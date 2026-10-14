@@ -71,7 +71,8 @@ class BrowserMessageQueue:
             if dispatch_id is not None:
                 receipt = self.sessions.dispatch.get(dispatch_id)
                 if thread_id != receipt["dispatcher_id"]:
-                    if not self.sessions.dispatch.recipient_ready(thread_id):
+                    if not self.sessions.dispatch.recipient_ready(thread_id,
+                            allow_dispatcher=receipt["body"].get("sendWork", {}).get("kind") == "dispatcher"):
                         raise CoordinationError("The routed destination is paused or closing.")
                     if self.sessions.store.threads.get(thread_id)["attention"] == "archived":
                         self.sessions.store.threads.update(thread_id, attention="now")
@@ -164,7 +165,9 @@ class BrowserMessageQueue:
                     receipt = sessions.dispatch.get(dispatch_id)
                     if receipt["state"] in {"sending", "uncertain", "dismissed", "cancelled", "accepted"}:
                         raise CoordinationError("The routed request needs review before delivery.")
-                    if thread_id != receipt["dispatcher_id"] and not sessions.dispatch.recipient_ready(thread_id, reviewed=bool(item["dispatch_reviewed"])):
+                    if thread_id != receipt["dispatcher_id"] and not sessions.dispatch.recipient_ready(thread_id,
+                            reviewed=bool(item["dispatch_reviewed"]),
+                            allow_dispatcher=receipt["body"].get("sendWork", {}).get("kind") == "dispatcher"):
                         raise CoordinationError("The routed destination is paused or closing.")
                 with sessions.store._connection() as db:
                     claimed = db.execute("UPDATE browser_message_queue SET state = 'sending' WHERE id = ? AND state = 'queued' AND owner = ?",

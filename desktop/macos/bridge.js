@@ -94,6 +94,8 @@
     const result = [];
     const dialog = openDialog();
     if (palette && (!dialog || dialog === palette.dialog)) result.push("commandPalette");
+    if (window.agentCoordSendWork?.available &&
+        (!dialog || dialog === palette?.dialog || dialog === window.agentCoordSendWork.dialog)) result.push("sendWork");
     if (window.agentCoordProjectScratchpad?.available &&
         (!dialog || dialog === palette?.dialog || dialog === window.agentCoordProjectScratchpad.dialog)) result.push("projectScratchpad");
     if (destination()) result.push("insertFiles");
@@ -114,6 +116,9 @@
     if (!commands().includes(name)) return false;
     switch (name) {
       case "commandPalette": return palette.toggle();
+      case "sendWork":
+        if (palette?.dialog.open) palette.close();
+        return window.agentCoordSendWork.toggle();
       case "projectScratchpad":
         if (palette?.dialog.open) palette.close();
         return window.agentCoordProjectScratchpad.toggle();
@@ -234,6 +239,7 @@
         const available = commands();
         const actions = [
           ["newSession", "New session", "⌘N", "create chat"],
+          ["sendWork", "Send work", "⇧⌘K", "dispatch route request another conversation"],
           ["openFolder", "Open project", "⌘O", "folder directory recent"],
           ["projectScratchpad", "Toggle project scratchpad", "⇧⌘S", "notes capture jot floating"],
           ["nextSession", "Next session in current view", "⌃Tab", "switch cycle thread"],

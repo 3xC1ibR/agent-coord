@@ -214,7 +214,8 @@ class DispatchRuntime:
                                 error=None if stale["state"] == "routing" else "Creation may have succeeded. Inspect the destination before continuing.")
             rows = db.execute("""SELECT r.* FROM dispatch_requests r WHERE state='pending' AND NOT EXISTS
                 (SELECT 1 FROM dispatch_requests p WHERE p.dispatcher_id=r.dispatcher_id AND p.id<r.id
-                 AND p.state IN ('pending','routing','creating','uncertain')) ORDER BY id""").fetchall()
+                 AND p.state IN ('pending','routing','creating','uncertain')
+                 AND (p.state!='uncertain' OR r.dispatcher_id NOT LIKE 'send-work:%')) ORDER BY id""").fetchall()
             row = next((r for r in rows if matches_workspace(r["cwd"], self.sessions.cwd)), None)
             if not row:
                 return False
@@ -230,6 +231,10 @@ class DispatchRuntime:
         return True
 
     def _execute(self, item):
+        if "sendWork" in item["body"]:
+            from .send_work import execute
+            execute(self, item)
+            return
         started = time.perf_counter()
         identity, dispatcher = item["id"], item["dispatcher_id"]
         body = item["body"]
@@ -305,8 +310,8 @@ class DispatchRuntime:
             self.sessions.queue.enqueue(target, body, dispatch_id=identity)
         self.changed(dispatcher)
 
-    def recipient_ready(self, target, *, reviewed=False):
-        if self.settings(target)["enabled"]:
+    def recipient_ready(self, target, *, reviewed=False, allow_dispatcher=False):
+        if self.settings(target)["enabled"] and not allow_dispatcher:
             return False
         with self.store._connection() as db:
             wake = db.execute("SELECT paused FROM browser_inbox_wake WHERE thread_id=?", (target,)).fetchone()

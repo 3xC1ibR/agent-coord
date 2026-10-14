@@ -343,6 +343,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         edit.addItem(withTitle: "Send Message", action: #selector(webCommand(_:)), keyEquivalent: "\r").representedObject = "sendMessage"
         let view = menu("View")
         view.addItem(withTitle: "Command Palette…", action: #selector(webCommand(_:)), keyEquivalent: "k").representedObject = "commandPalette"
+        let sendWork = view.addItem(withTitle: "Send Work…", action: #selector(webCommand(_:)), keyEquivalent: "K")
+        sendWork.keyEquivalentModifierMask = [.command, .shift]; sendWork.representedObject = "sendWork"
         let scratchpad = view.addItem(withTitle: "Toggle Project Scratchpad", action: #selector(webCommand(_:)), keyEquivalent: "S")
         scratchpad.keyEquivalentModifierMask = [.command, .shift]; scratchpad.representedObject = "projectScratchpad"
         let nextSession = view.addItem(withTitle: "Next Session", action: #selector(webCommand(_:)), keyEquivalent: "\t")
@@ -1136,6 +1138,55 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return restored && blocked;
             """, in: second.webView)
         try smokeCheck("command_palette_focus_and_modal", paletteEscape as? Bool == true)
+        _ = try await smokeJS("""
+            const work = window.agentCoordSendWork;
+            window.smokeWorkOriginal = {api: work.api, workspace: work.workspace, threads: work.threads};
+            work.workspace = () => '/tmp/send-work-smoke';
+            work.threads = () => [{thread_id: 'release-smoke', title: 'Release deployment', cwd: '/tmp/send-work-smoke',
+              browser_session: {}, checkpoint: {summary: 'Build, verify, and deploy Ribbon Field'}}];
+            work.api = async (path, body) => {
+              if (path === 'send-work/suggest') return {candidates: []};
+              window.smokeWorkSent = body;
+              return {receipt: {id: 1, cwd: body.cwd, target_id: 'release-smoke', target_title: 'Release deployment', state: 'accepted'}};
+            };
+            const input = document.querySelector('#search'); input.focus(); input.value = 'Unrelated draft'; input.setSelectionRange(2, 6);
+            window.smokeWorkHash = location.hash;
+            return true;
+            """, in: second.webView)
+        try smokeCheck("send_work_shortcut", smokeKey("k", flags: [.command, .shift], code: 40))
+        let sendWorkOpen = try await smokeJS("""
+            for (let i = 0; i < 40 && !document.querySelector('#send-work-dialog').open; i++)
+              await new Promise(resolve => setTimeout(resolve, 25));
+            const input = document.querySelector('#send-work-input');
+            input.value = 'Redeploy'; input.dispatchEvent(new Event('input', {bubbles: true}));
+            input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, cancelable: true}));
+            return document.querySelector('#send-work-dialog').open && document.activeElement === input &&
+              document.querySelector('#send-work-target-name').textContent === 'Release deployment' &&
+              document.querySelectorAll('#send-work-results [role=option]').length === 3;
+            """, in: second.webView)
+        try smokeCheck("send_work_selection", sendWorkOpen as? Bool == true)
+        let sendWorkImage: NSImage = try await withCheckedThrowingContinuation { continuation in
+            second.webView.takeSnapshot(with: nil) { image, error in
+                if let image = image { continuation.resume(returning: image) }
+                else { continuation.resume(throwing: error ?? NSError(domain: "AgentCoordSmoke", code: 2)) }
+            }
+        }
+        if let data = sendWorkImage.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
+           let png = bitmap.representation(using: .png, properties: [:]) {
+            try png.write(to: smokeReport!.appendingPathExtension("send-work.png"))
+        }
+        let sendWorkSent = try await smokeJS("""
+            const work = window.agentCoordSendWork;
+            await work.send();
+            const input = document.querySelector('#search');
+            const passed = !work.dialog.open && document.activeElement === input && input.value === 'Unrelated draft' &&
+              input.selectionStart === 2 && input.selectionEnd === 6 && location.hash === window.smokeWorkHash &&
+              window.smokeWorkSent.message === 'Redeploy' && window.smokeWorkSent.destination.id === 'release-smoke' &&
+              Object.keys(window.smokeWorkSent).sort().join(',') === 'cwd,destination,message,requestId';
+            Object.assign(work, window.smokeWorkOriginal); work.notice.hidden = true; input.value = '';
+            return passed;
+            """, in: second.webView)
+        try smokeCheck("send_work_typed_only_and_focus", sendWorkSent as? Bool == true)
         try await smokeScratchpad(second, other: first)
         try smokeCheck("roll_up_shortcut", smokeKey("r", flags: [.command, .option], code: 15))
         let rollUpStarted = try await smokeJS("""
