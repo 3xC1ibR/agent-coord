@@ -24,6 +24,24 @@ test("overview and repeated opens preserve the working set and user order", asyn
   assert.deepEqual(ids(), ["c", "a", "b"]);
 });
 
+test("project scratchpad is a fixed destination outside the saved thread working set", async () => {
+  const {tabs, ids, visits, storage} = setup();
+  tabs.onScratchpad = () => tabs.scratchpad();
+  tabs.open(thread("one"));
+  await tabs.activate("project-scratchpad");
+  assert.equal(tabs.selected, "project-scratchpad");
+  await tabs.close("project-scratchpad");
+  assert.equal(tabs.selected, "project-scratchpad");
+  assert.deepEqual(ids(), ["one"]); assert.deepEqual(visits, []);
+  assert.deepEqual(setup(storage).ids(), ["one"]);
+  const focused = [];
+  tabs.reveal = id => focused.push(id);
+  tabs.keydown({key: "ArrowRight", preventDefault() {}}, null);
+  assert.deepEqual(focused, ["project-scratchpad"]);
+  await tabs.activate("one");
+  assert.equal(tabs.selected, "one");
+});
+
 test("closing tabs only navigates, preserves thread lifecycle, and returns to overview after the last", async () => {
   const {tabs, visits, ids} = setup(), a = thread("a"), b = thread("b"), c = thread("c");
   tabs.open(a); tabs.open(b); tabs.open(c); tabs.open(b);

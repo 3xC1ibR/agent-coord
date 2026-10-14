@@ -267,6 +267,7 @@ normal behavior, and Undo, Redo, Cut, Copy, Paste, and Select All use macOS edit
 | Command | Shortcut |
 | --- | --- |
 | Command palette | ⌘K |
+| Toggle project scratchpad | ⌘⇧S |
 | Next / previous session in current view | ⌃Tab / ⌃⇧Tab |
 | Roll up waiting threads | ⌥⌘R |
 | New session | ⌘N |
@@ -289,7 +290,11 @@ normal behavior, and Undo, Redo, Cut, Copy, Paste, and Select All use macOS edit
 **⌘K** (or **View → Command Palette…**) searches available commands and open
 threads across your saved views. Match a thread's title, project, repository, or
 workspace path; use ↑/↓ and Return to choose a result. Escape or ⌘K closes the
-palette and restores your previous focus. Switching threads preserves drafts
+palette and restores your previous focus. The project **Scratchpad** tab holds
+one plain-text, autosaving note for the selected project directory. **⌘⇧S**
+opens those same notes in a floating editor without leaving the conversation;
+press it again or **Escape** to return to your previous focus and selection.
+The command palette also offers **Toggle project scratchpad**. Switching threads preserves drafts
 within that window. Other open dialogs keep their normal keyboard behavior.
 
 **Control-Tab** and **Control-Shift-Tab** cycle sessions in the current view's
@@ -331,6 +336,8 @@ python3 desktop/macos/build.py
 python3 desktop/macos/smoke_test.py
 # Focused native session-switching check:
 python3 desktop/macos/smoke_test.py --sessions-only
+# Focused project scratchpad, shortcut, autosave, and focus checks:
+python3 desktop/macos/smoke_test.py --scratchpad-only
 ```
 
 The native smoke mode uses a temporary database and preference domain, starts

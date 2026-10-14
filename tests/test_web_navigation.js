@@ -11,6 +11,12 @@ test("dispatcher URLs retain the opt-in page and selected worker without changin
   assert.equal(pageURL({...base, dispatcher: "entry", thread: "worker"}), "/?directory=%2Fwork&dispatcher=entry#worker");
 });
 
+test("project scratchpad URLs retain the project and tab for reload", () => {
+  const snapshot = {directory: "/work", viewId: "all", filters: {}, scratchpad: true, thread: null};
+  assert.equal(pageURL(snapshot), "/?directory=%2Fwork&scratchpad=1");
+  assert.equal(initialLink({search: "?directory=%2Fwork&scratchpad=1"}), null);
+});
+
 test("message links preserve exact turn and item and reject incomplete destinations", () => {
   assert.deepEqual(parse("agentcoord://thread/t?turn=turn%2Fid&item=item%3A1").route,
     {kind: "thread", id: "t", turn: "turn/id", item: "item:1"});

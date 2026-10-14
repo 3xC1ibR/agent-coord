@@ -1,8 +1,9 @@
 "use strict";
 
 class ThreadScratchpad {
-  constructor({panel, input, status, api, view = window}) {
-    Object.assign(this, {panel, input, status, api, view});
+  constructor({panel, input, status, api, view = window, path, draftPrefix = "agent-coord.scratchpad-draft:", onRender}) {
+    Object.assign(this, {panel, input, status, api, view, draftPrefix, onRender});
+    if (path) this.path = entry => path(entry.id);
     this.entries = new Map();
     this.selected = null;
     input.addEventListener("input", () => {
@@ -26,7 +27,7 @@ class ThreadScratchpad {
     });
   }
 
-  key(entry) { return "agent-coord.scratchpad-draft:" + entry.id; }
+  key(entry) { return this.draftPrefix + entry.id; }
   remember(entry) {
     try {
       if (entry.text === entry.saved && !entry.saving) this.view.sessionStorage.removeItem(this.key(entry));
@@ -116,6 +117,7 @@ class ThreadScratchpad {
     if (this.input.value !== text) this.input.value = text;
     this.status.textContent = entry.error || (!entry.loaded ? "Loading…" :
       entry.saving || entry.text !== entry.saved ? "Saving…" : "Saved");
+    this.onRender?.(entry);
   }
 }
 

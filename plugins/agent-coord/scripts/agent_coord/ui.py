@@ -354,8 +354,9 @@ def _handler(
                 else:
                     self._json(HTTPStatus.OK, web_push.status(device))
                 return
-            if parsed.path == "/scratchpad.js":
-                self._send(HTTPStatus.OK, "text/javascript; charset=utf-8", (_WEB_ROOT / "scratchpad.js").read_bytes())
+            if parsed.path in {"/scratchpad.js", "/project-scratchpad.js", "/project-scratchpad.css"}:
+                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
             if parsed.path == "/push-notifications.js":
                 self._send(HTTPStatus.OK, "text/javascript; charset=utf-8", (_WEB_ROOT / "push-notifications.js").read_bytes())
@@ -472,6 +473,9 @@ def _handler(
                 self._json(HTTPStatus.OK, browser_sessions.desktop_projects())
             elif route == "workspaces":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
+            elif route == "workspaces/scratchpad":
+                directory = resolve_workspace(query.get("path", [None])[0], workspace=browser_sessions.cwd)
+                self._json(HTTPStatus.OK, store.threads.project_scratchpad(directory))
             elif route == "speech/settings":
                 self._json(HTTPStatus.OK, speech.settings())
             elif route == "speech/voices":
@@ -739,6 +743,12 @@ def _handler(
                         self._json(HTTPStatus.OK, {"data": views.list()})
                     else:
                         raise CoordinationError("Unknown view action.")
+                    return
+                if route == ["api", "browser", "workspaces", "scratchpad"]:
+                    if set(body) != {"path", "text"}:
+                        raise CoordinationError("Project scratchpad accepts a path and text.")
+                    directory = resolve_workspace(body["path"], workspace=browser_sessions.cwd)
+                    self._json(HTTPStatus.OK, store.threads.project_scratchpad(directory, body["text"]))
                     return
                 if route == ["api", "browser", "workspaces", "open"]:
                     if set(body) != {"path"}:

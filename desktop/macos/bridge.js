@@ -94,6 +94,8 @@
     const result = [];
     const dialog = openDialog();
     if (palette && (!dialog || dialog === palette.dialog)) result.push("commandPalette");
+    if (window.agentCoordProjectScratchpad?.available &&
+        (!dialog || dialog === palette?.dialog || dialog === window.agentCoordProjectScratchpad.dialog)) result.push("projectScratchpad");
     if (destination()) result.push("insertFiles");
     if (dialog || !byID("home")) return result;
     result.push("workspace", "findThread", "newSession", "toggleSidebar", "toggleFiles");
@@ -112,6 +114,9 @@
     if (!commands().includes(name)) return false;
     switch (name) {
       case "commandPalette": return palette.toggle();
+      case "projectScratchpad":
+        if (palette?.dialog.open) palette.close();
+        return window.agentCoordProjectScratchpad.toggle();
       case "workspace": byID("home").click(); break;
       case "findThread": byID("home").click(); byID("search").focus(); byID("search").select(); break;
       case "newSession": byID("new-session").click(); break;
@@ -230,6 +235,7 @@
         const actions = [
           ["newSession", "New session", "⌘N", "create chat"],
           ["openFolder", "Open project", "⌘O", "folder directory recent"],
+          ["projectScratchpad", "Toggle project scratchpad", "⇧⌘S", "notes capture jot floating"],
           ["nextSession", "Next session in current view", "⌃Tab", "switch cycle thread"],
           ["previousSession", "Previous session in current view", "⌃⇧Tab", "switch cycle thread"],
           ["workspace", "Show workspace", "⌘1", "home overview"],

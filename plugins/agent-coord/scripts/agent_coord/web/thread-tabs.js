@@ -2,12 +2,12 @@
 
 // Tabs are a window's working set, independent of thread placement and filters.
 class ThreadTabs {
-  constructor({document, container, storage, scope = "", onSelect, onError, canNavigate = () => true}) {
-    Object.assign(this, {document, container, storage, onSelect, onError, canNavigate});
+  constructor({document, container, storage, scope = "", onSelect, onScratchpad, onError, canNavigate = () => true}) {
+    Object.assign(this, {document, container, storage, onSelect, onScratchpad, onError, canNavigate});
     this.baseKey = "agent-coord.thread-tabs." + scope;
     this.projects = new Map(); this.items = []; this.selected = null;
     container?.setAttribute("role", "tablist");
-    container?.setAttribute("aria-label", "Open conversations");
+    container?.setAttribute("aria-label", "Project tabs");
   }
   setProject(cwd = "") {
     if (this.cwd === cwd) return;
@@ -35,6 +35,7 @@ class ThreadTabs {
     this.selected = thread.thread_id; this.save(); this.render(); this.reveal(this.selected);
   }
   overview() { this.selected = null; this.render(); }
+  scratchpad() { this.selected = "project-scratchpad"; this.render(); this.reveal(this.selected); }
   suspend() { this.selected = undefined; this.render(); }
   update(threads) {
     const available = new Map(threads.map(thread => [thread.thread_id, thread]));
@@ -51,7 +52,10 @@ class ThreadTabs {
   }
   async activate(id) {
     if (id === this.selected || !this.canNavigate()) return;
-    try { await this.onSelect(id); } catch (error) { this.onError?.(error); }
+    try {
+      if (id === "project-scratchpad" && this.cwd && this.onScratchpad) await this.onScratchpad();
+      else await this.onSelect(id);
+    } catch (error) { this.onError?.(error); }
   }
   async close(id) {
     const index = this.items.findIndex(item => item.thread_id === id);
@@ -76,14 +80,14 @@ class ThreadTabs {
   }
   keydown(event, id) {
     if (event.isComposing || event.metaKey || event.ctrlKey) return;
-    if (event.altKey && event.shiftKey && ["ArrowLeft", "ArrowRight"].includes(event.key) && id) {
+    if (event.altKey && event.shiftKey && ["ArrowLeft", "ArrowRight"].includes(event.key) && id && id !== "project-scratchpad") {
       event.preventDefault();
       const index = this.items.findIndex(item => item.thread_id === id);
       this.move(id, index + (event.key === "ArrowLeft" ? -1 : 1)); return;
     }
     if (event.altKey || event.shiftKey) return;
     if (event.key === "Delete" && id) { event.preventDefault(); this.close(id); return; }
-    const ids = [null, ...this.items.map(item => item.thread_id)], index = ids.indexOf(id);
+    const ids = [null, ...(this.cwd && this.onScratchpad ? ["project-scratchpad"] : []), ...this.items.map(item => item.thread_id)], index = ids.indexOf(id);
     const next = event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1
       : event.key === "ArrowRight" ? (index + 1) % ids.length : event.key === "ArrowLeft" ? (index + ids.length - 1) % ids.length : -1;
     if (next >= 0) { event.preventDefault(); this.reveal(ids[next], true); }
@@ -94,7 +98,7 @@ class ThreadTabs {
   render() {
     // Status updates must not replace the native drag source mid-gesture.
     if (!this.container || this.dragging) return;
-    const signature = JSON.stringify([this.selected ?? null, this.selected === undefined,
+    const signature = JSON.stringify([this.selected ?? null, this.selected === undefined, Boolean(this.cwd && this.onScratchpad),
       this.items.map(item => [item.thread_id, item.title, item.response_state, item.unread_result])]);
     if (signature === this.signature) return;
     this.signature = signature;
@@ -102,18 +106,19 @@ class ThreadTabs {
     const scroll = this.container.scrollLeft;
     this.container.replaceChildren();
     const add = (item, id) => {
+      const scratchpad = id === "project-scratchpad";
       const wrapper = this.document.createElement("div"); wrapper.className = "conversation-tab";
       const tab = this.document.createElement("button"); tab.type = "button"; tab.className = "conversation-tab-select";
       tab.dataset.threadTab = id || ""; tab.textContent = item.title; tab.setAttribute("role", "tab");
       tab.setAttribute("aria-selected", String(this.selected === id));
-      tab.setAttribute("aria-controls", id ? "conversation" : "welcome");
+      tab.setAttribute("aria-controls", scratchpad ? "project-scratchpad-page" : id ? "conversation" : "welcome");
       tab.tabIndex = this.selected === id || this.selected === undefined && id === null ? 0 : -1;
-      tab.title = item.title + (item.unread_result ? " · New response" : "") + (id ? " · Alt+Shift+←/→ to reorder" : "");
+      tab.title = scratchpad ? "Project scratchpad · ⌘⇧S to toggle floating notes" : item.title + (item.unread_result ? " · New response" : "") + (id ? " · Alt+Shift+←/→ to reorder" : "");
       tab.dataset.status = item.response_state || "";
       tab.onclick = () => this.activate(id); tab.onkeydown = event => this.keydown(event, id);
       wrapper.dataset.selected = String(this.selected === id);
       wrapper.append(tab);
-      if (id) {
+      if (id && !scratchpad) {
         const close = this.document.createElement("button"); close.type = "button"; close.className = "conversation-tab-close";
         close.textContent = "×"; close.title = "Close tab"; close.setAttribute("aria-label", "Close tab · " + item.title);
         close.onclick = () => this.close(id); wrapper.append(close);
@@ -132,10 +137,11 @@ class ThreadTabs {
           const rect = wrapper.getBoundingClientRect(), after = event.clientX >= rect.left + rect.width / 2;
           this.move(this.dragging, target + (after ? 1 : 0) - (from < target ? 1 : 0)); this.endDrag();
         };
-      } else wrapper.classList.add("overview-tab");
+      } else if (!id) wrapper.classList.add("overview-tab");
       this.container.append(wrapper);
     };
     add({title: "Overview"}, null);
+    if (this.cwd && this.onScratchpad) add({title: "Scratchpad"}, "project-scratchpad");
     for (const item of this.items) add(item, item.thread_id);
     this.container.scrollLeft = scroll;
     if (focused !== undefined) this.reveal(focused || null, true);

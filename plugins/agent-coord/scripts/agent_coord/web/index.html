@@ -57,6 +57,8 @@
   <script src="/dispatcher-workspace.js" defer></script>
   <link rel="stylesheet" href="/dispatcher-workspace.css">
   <script src="/scratchpad.js" defer></script>
+  <script src="/project-scratchpad.js" defer></script>
+  <link rel="stylesheet" href="/project-scratchpad.css">
   <script src="/app.js" defer></script>
   <script src="/thread-hover.js" defer></script>
   <script src="/filter-menu.js" defer></script>
@@ -110,6 +112,13 @@
     <section id="roll-up-bar" class="roll-up-bar" aria-label="Roll up" hidden>
       <span id="roll-up-label" role="status" aria-live="polite"></span>
       <div class="roll-up-controls"><button id="roll-up-handle" class="quiet" type="button" hidden>Dismiss &amp; next</button><button id="roll-up-skip" class="quiet" type="button">Skip</button><button id="roll-up-exit" class="quiet" type="button">Exit</button></div>
+    </section>
+    <section id="project-scratchpad-page" class="project-scratchpad-page" role="tabpanel" aria-label="Project scratchpad" hidden>
+      <div id="project-scratchpad-editor" class="project-scratchpad-editor" hidden>
+        <div class="project-scratchpad-heading"><h2 id="project-scratchpad-title">Scratchpad</h2><span id="scratchpad-project-name" class="scratchpad-project-name"></span><button id="close-project-scratchpad" type="button" class="quiet" aria-label="Close scratchpad" hidden>Esc</button></div>
+        <textarea id="project-scratchpad-text" aria-label="Project scratchpad" placeholder="Keep notes for this project…" maxlength="100000" disabled></textarea>
+        <footer><span id="project-scratchpad-status" role="status" aria-live="polite"></span><span>Autosaves as you type</span></footer>
+      </div>
     </section>
     <section id="welcome" class="welcome" role="tabpanel" aria-labelledby="overview-title">
       <div id="folder-welcome" class="folder-welcome" hidden><h2>Open a project to get started</h2><p>Choose a directory. New agents start there, and conversations stay with the project they were opened from.</p><button id="welcome-folder" class="primary" type="button">Open project…</button></div>
@@ -221,6 +230,7 @@
       <footer class="session-statusbar" aria-label="Session information"><span id="workspace" class="status-cwd"></span><div id="session-settings" class="session-settings" hidden><span id="session-model"></span><span id="session-effort"></span><span id="session-yolo" class="yolo-badge" title="No sandbox or approval prompts" hidden>YOLO</span><button id="edit-permissions" type="button" class="quiet">Permissions</button></div></footer>
     </section>
   </main>
+  <dialog id="project-scratchpad-dialog" class="project-scratchpad-dialog" aria-labelledby="project-scratchpad-title" aria-describedby="scratchpad-project-name"></dialog>
   <dialog id="mobile-thread-sheet" class="mobile-thread-sheet" aria-labelledby="mobile-sheet-title">
     <div class="mobile-sheet-heading"><button id="mobile-sheet-back" class="quiet" type="button" aria-label="Back to thread actions" hidden>←</button><h2 id="mobile-sheet-title">Thread actions</h2><button class="icon-button" type="button" data-close="mobile-thread-sheet" aria-label="Close thread actions">×</button></div>
     <div id="mobile-sheet-actions"></div>

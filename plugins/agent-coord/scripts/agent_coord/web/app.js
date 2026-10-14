@@ -179,6 +179,7 @@ async function switchProject() {
     if (value) manager?.drafts.set("new-session", value);
   }
   state.projectCwd = cwd;
+  state.projectScratchpad?.setProject(state.folders.selected);
   state.threadTabs?.setProject(cwd);
   state.dispatchRestore = true;
   await savedViews.setProject(cwd);
@@ -193,6 +194,7 @@ async function openProjectDirectory(cwd) {
   await switchProject();
 }
 function renderFolders() {
+  state.projectScratchpad?.setProject(state.folders?.selected);
   if (!state.folderPicker) return;
   let context;
   try { context = sessionContext(); } catch { /* Keep unavailable filters visible until the user changes them. */ }
@@ -840,6 +842,7 @@ function sameConversation(first, second) {
     JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.work_thread.browser_session, second.work_thread.client]);
 }
 async function select(id, {rollUp = false, dock = false, focus = true} = {}) {
+  state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.mobileChat?.close();
   if (id === "new-session") return newSession();
@@ -1909,6 +1912,7 @@ function setChatExpanded(expanded) {
 }
 $("expand-chat").onclick = () => setChatExpanded(!document.body.classList.contains("chat-expanded"));
 function goHome({restoreDispatcher = true} = {}) {
+  state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.dispatchRestore = restoreDispatcher;
   state.mobileChat?.close();
@@ -1937,6 +1941,15 @@ function goHome({restoreDispatcher = true} = {}) {
   $("conversation").hidden = true; $("welcome").hidden = false; $("page-location").textContent = "Overview";
   setNavigation(false); renderList(); $("overview-title").focus({preventScroll: true});
   savedViews?.restoreScroll();
+}
+function openProjectScratchpad() {
+  if (!state.projectScratchpad?.available) return;
+  goHome({restoreDispatcher: false});
+  $("welcome").hidden = true;
+  state.projectScratchpad.showTab();
+  state.threadTabs?.scratchpad();
+  $("page-location").textContent = "Scratchpad";
+  navigation?.remember();
 }
 document.querySelector(".brand").onclick = event => { event.preventDefault(); goHome(); };
 $("home").onclick = $("back-home").onclick = goHome;
@@ -2004,6 +2017,11 @@ $("thread-context").addEventListener("toggle", () => {
 compactContext.addEventListener("change", layoutContext);
 layoutContext();
 state.scratchpad = new ThreadScratchpad({panel: $("thread-scratchpad"), input: $("scratchpad-text"), status: $("scratchpad-status"), api});
+if (!state.paneMode) {
+  state.projectScratchpad = new ProjectScratchpad({document, view: window, api});
+  window.agentCoordProjectScratchpad = state.projectScratchpad;
+}
+ProjectScratchpad.bindShortcut(document, () => state.paneMode ? window.parent.agentCoordProjectScratchpad : state.projectScratchpad);
 state.mobileChat = new MobileChat({onBack: goHome, onLayout: () => state.timelineScroll?.layout(), onContextLayout: layoutContext});
 window.agentCoordFindThreads = () => { goHome({restoreDispatcher: false}); $("search").focus(); $("search").select(); };
 document.addEventListener("keydown", event => {
@@ -2449,7 +2467,7 @@ async function boot() {
     notify: (...args) => state.threadActions.notify(...args), onError: showError});
   state.threadTabs = new ThreadTabs({document, container: $("conversation-tabs"), storage: windowStorage,
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
-    canNavigate: canSwitchProject, onError: showError,
+    canNavigate: canSwitchProject, onError: showError, onScratchpad: openProjectScratchpad,
     onSelect: async id => {
       // A tab always opens a full conversation, including when leaving tiled or dispatcher mode.
       if (globalThis.agentCoordPanes?.active || state.dispatchDock?.active) goHome({restoreDispatcher: false});
@@ -2479,6 +2497,7 @@ async function boot() {
   navigation = new agentCoordNavigation.Router({api, history, location, windowId: state.sourceWindowId, onError: showError,
     blocked: () => Boolean(document.querySelector("dialog[open]") || window.agentCoordPanes?.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")),
     capture: () => ({directory: state.projectCwd, viewId: savedViews.activeId, ...savedViews.read(),
+      ...(state.projectScratchpad?.tabActive ? {scratchpad: true} : {}),
       ...(state.dispatchWorkspace?.active ? {dispatcher: state.dispatchWorkspace.id} : {}),
       tiled: Boolean(window.agentCoordPanes?.active && !state.dispatchWorkspace?.active),
       thread: window.agentCoordPanes?.active ? window.agentCoordPanes.selected : state.dispatchDock?.active ? null : state.selected}),
@@ -2517,6 +2536,7 @@ async function boot() {
       else if (snapshot.tiled) window.agentCoordPanes?.restoreView();
       else goHome();
       if (snapshot.thread) await select(snapshot.thread);
+      else if (snapshot.scratchpad) openProjectScratchpad();
     },
   });
   window.agentCoordNavigate = (url, options) => navigation.open(url, options);
@@ -2531,6 +2551,7 @@ async function boot() {
   if (initialNavigation) await navigation.open(initialNavigation, {push: false});
   if (initialDispatcher) await select(initialDispatcher, {dock: true, focus: false});
   if (initialThread && initialThread !== initialDispatcher) await select(initialThread);
+  if (!initialThread && !initialDispatcher && projectQuery.get("scratchpad") === "1") openProjectScratchpad();
   if (initialThread && /^\d+$/.test(initialMessage || "")) focusAgentMessage(initialMessage);
   state.dispatchReady = true;
   syncDispatcherOverview();

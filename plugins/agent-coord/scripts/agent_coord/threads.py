@@ -96,6 +96,10 @@ class ThreadStore:
                     thread_id TEXT PRIMARY KEY REFERENCES work_threads(thread_id),
                     text TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS project_scratchpads (
+                    cwd TEXT PRIMARY KEY,
+                    text TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS turn_completions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     thread_id TEXT NOT NULL REFERENCES work_threads(thread_id),
@@ -290,6 +294,18 @@ class ThreadStore:
                 db.execute("""INSERT INTO thread_scratchpads (thread_id, text) VALUES (?, ?)
                               ON CONFLICT(thread_id) DO UPDATE SET text = excluded.text""", (thread_id, text))
             row = db.execute("SELECT text FROM thread_scratchpads WHERE thread_id = ?", (thread_id,)).fetchone()
+            return {"text": row["text"] if row else ""}
+
+    def project_scratchpad(self, cwd: str, text=UNSET) -> dict:
+        """One note per canonical project directory, independent of its threads."""
+        cwd = str(Path(cwd).expanduser().resolve())
+        if text is not UNSET and (not isinstance(text, str) or len(text) > 100_000):
+            raise CoordinationError("Scratchpad must be text of at most 100,000 characters.")
+        with self.store._connection() as db:
+            if text is not UNSET:
+                db.execute("""INSERT INTO project_scratchpads (cwd, text) VALUES (?, ?)
+                              ON CONFLICT(cwd) DO UPDATE SET text = excluded.text""", (cwd, text))
+            row = db.execute("SELECT text FROM project_scratchpads WHERE cwd = ?", (cwd,)).fetchone()
             return {"text": row["text"] if row else ""}
 
     def list(self, *, archived=False, cwd=None, repository_id=UNSET, project_id=UNSET) -> list[dict]:

@@ -343,6 +343,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         edit.addItem(withTitle: "Send Message", action: #selector(webCommand(_:)), keyEquivalent: "\r").representedObject = "sendMessage"
         let view = menu("View")
         view.addItem(withTitle: "Command Palette…", action: #selector(webCommand(_:)), keyEquivalent: "k").representedObject = "commandPalette"
+        let scratchpad = view.addItem(withTitle: "Toggle Project Scratchpad", action: #selector(webCommand(_:)), keyEquivalent: "S")
+        scratchpad.keyEquivalentModifierMask = [.command, .shift]; scratchpad.representedObject = "projectScratchpad"
         let nextSession = view.addItem(withTitle: "Next Session", action: #selector(webCommand(_:)), keyEquivalent: "\t")
         nextSession.keyEquivalentModifierMask = [.control]; nextSession.representedObject = "nextSession"
         let previousSession = view.addItem(withTitle: "Previous Session", action: #selector(webCommand(_:)), keyEquivalent: "\u{19}")
@@ -973,6 +975,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try await smokeReady(second)
         try smokeCheck("multiple_windows", windows.count == 2 && first.webView !== second.webView)
         try await smokeWorkingFolders(first, second)
+        if CommandLine.arguments.contains("--smoke-scratchpad-only") {
+            _ = try await smokeJS("await switchProject(); return true;", in: second.webView)
+            try await smokeFocus(second)
+            try await smokeScratchpad(second, other: first)
+            finishSmoke(error: nil)
+            return
+        }
         let independent = try await smokeJS("""
             const independent = sessionStorage.getItem('desktop-smoke-window') === null;
             sessionStorage.setItem('desktop-smoke-window', 'second');
@@ -1127,6 +1136,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return restored && blocked;
             """, in: second.webView)
         try smokeCheck("command_palette_focus_and_modal", paletteEscape as? Bool == true)
+        try await smokeScratchpad(second, other: first)
         try smokeCheck("roll_up_shortcut", smokeKey("r", flags: [.command, .option], code: 15))
         let rollUpStarted = try await smokeJS("""
             for (let i = 0; i < 80; i++) {
@@ -1190,6 +1200,77 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
             self.finishSmoke(error: error?.localizedDescription)
         }
+    }
+
+    @MainActor private func smokeScratchpad(_ item: DesktopWindow, other: DesktopWindow) async throws {
+        _ = try await smokeJS("""
+            const search = document.querySelector('#search');
+            search.value = 'Resume here'; search.focus(); search.setSelectionRange(2, 6);
+            return true;
+            """, in: item.webView)
+        try smokeCheck("project_scratchpad_shortcut", smokeKey("s", flags: [.command, .shift], code: 1))
+        let opened = try await smokeJS("""
+            for (let i = 0; i < 80; i++) {
+              const editor = document.querySelector('#project-scratchpad-text');
+              if (document.querySelector('#project-scratchpad-dialog').open && document.activeElement === editor && !editor.disabled) {
+                editor.value = 'Remember the launch feedback';
+                editor.dispatchEvent(new Event('input', {bubbles: true}));
+                return true;
+              }
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            return false;
+            """, in: item.webView)
+        let quiet = try await smokeJS("return !document.querySelector('#project-scratchpad-dialog').open;", in: other.webView)
+        try smokeCheck("project_scratchpad_active_window", opened as? Bool == true && quiet as? Bool == true)
+        try smokeCheck("project_scratchpad_shortcut", smokeKey("s", flags: [.command, .shift], code: 1))
+        let restored = try await smokeJS("""
+            for (let i = 0; i < 80; i++) {
+              const search = document.querySelector('#search');
+              if (!document.querySelector('#project-scratchpad-dialog').open) {
+                const saved = await api('workspaces/scratchpad?path=' + encodeURIComponent(state.folders.selected.cwd));
+                if (saved.text === 'Remember the launch feedback') {
+                  const restored = document.activeElement === search && search.value === 'Resume here' &&
+                    search.selectionStart === 2 && search.selectionEnd === 6;
+                  search.value = '';
+                  return restored;
+                }
+              }
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            return false;
+            """, in: item.webView)
+        try smokeCheck("project_scratchpad_saved_and_focus_restored", restored as? Bool == true)
+        try smokeCheck("project_scratchpad_shortcut", smokeKey("s", flags: [.command, .shift], code: 1))
+        let escaped = try await smokeJS("""
+            for (let i = 0; i < 80; i++) {
+              const editor = document.querySelector('#project-scratchpad-text');
+              if (document.activeElement === editor && !editor.disabled) {
+                editor.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}));
+                return !document.querySelector('#project-scratchpad-dialog').open && document.activeElement?.id === 'search';
+              }
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            return false;
+            """, in: item.webView)
+        try smokeCheck("project_scratchpad_escape", escaped as? Bool == true)
+        let sharedTab = try await smokeJS("""
+            document.querySelector('[data-thread-tab="project-scratchpad"]').click();
+            for (let i = 0; i < 80; i++) {
+              const editor = document.querySelector('#project-scratchpad-text');
+              if (!document.querySelector('#project-scratchpad-page').hidden && !editor.disabled &&
+                  editor.value === 'Remember the launch feedback') {
+                document.querySelector('[data-thread-tab=""]').click();
+                return true;
+              }
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            return false;
+            """, in: item.webView)
+        let separate = try await smokeJS("""
+            return (await api('workspaces/scratchpad?path=' + encodeURIComponent(state.folders.selected.cwd))).text === '';
+            """, in: other.webView)
+        try smokeCheck("project_scratchpad_tab_and_isolation", sharedTab as? Bool == true && separate as? Bool == true)
     }
 
     @MainActor private func smokeWorkingFolders(_ first: DesktopWindow, _ second: DesktopWindow) async throws {

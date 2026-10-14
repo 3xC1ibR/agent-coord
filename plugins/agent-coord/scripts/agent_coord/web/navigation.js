@@ -31,6 +31,7 @@
     const query = new URLSearchParams();
     if (snapshot.directory) query.set("directory", snapshot.directory);
     if (snapshot.dispatcher) query.set("dispatcher", snapshot.dispatcher);
+    if (snapshot.scratchpad) query.set("scratchpad", "1");
     if (snapshot.viewId !== "all") query.set("view", snapshot.viewId);
     else for (const key of ["project", "repository"]) if (snapshot.filters[key]) query.set(key, snapshot.filters[key]);
     return "/" + (query.toString() ? "?" + query : "") + (snapshot.thread ? "#" + encodeURIComponent(snapshot.thread) : "");

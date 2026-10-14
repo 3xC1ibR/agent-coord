@@ -1,0 +1,16 @@
+.project-scratchpad-page { flex: 1; min-height: 0; padding: 24px; overflow: hidden; }
+.project-scratchpad-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 16px; }
+.project-scratchpad-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; }
+.project-scratchpad-heading h2 { margin: 0; font: inherit; font-size: 18px; font-weight: 550; letter-spacing: normal; }
+.project-scratchpad-heading .scratchpad-project-name { min-width: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+.project-scratchpad-heading button { margin-left: auto; }
+.project-scratchpad-editor textarea { flex: 1; min-height: 160px; width: 100%; resize: none; padding: 18px; font: inherit; font-size: 15px; line-height: 1.7; }
+.project-scratchpad-editor footer { display: flex; justify-content: space-between; gap: 16px; color: var(--muted); font-size: 12px; }
+dialog.project-scratchpad-dialog { width: min(660px, calc(100vw - 32px)); max-width: none; height: min(520px, calc(100dvh - 48px)); max-height: none; padding: 24px; }
+:root dialog.project-scratchpad-dialog::backdrop { background: rgb(0 0 0 / 18%); backdrop-filter: none; }
+body.project-scratchpad-active > main > .views-bar { display: none; }
+@media (max-width: 720px) {
+  .project-scratchpad-page { padding: 16px; }
+  dialog.project-scratchpad-dialog { padding: 16px; }
+  .project-scratchpad-editor textarea { font-size: 16px; }
+}

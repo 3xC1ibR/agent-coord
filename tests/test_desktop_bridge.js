@@ -130,6 +130,23 @@ test("session commands cycle the filtered display order with wraparound and over
   await settle();
 });
 
+test("project scratchpad is available from the palette and can toggle closed through its own dialog", () => {
+  const f = fixture(), command = f.env.agentCoordDesktop.command;
+  const dialog = new (f.nodes.get("permissions-dialog").constructor)("project-scratchpad-dialog");
+  f.nodes.set(dialog.id, dialog);
+  f.env.agentCoordProjectScratchpad = {available: true, dialog, toggle() { dialog.open = !dialog.open; return true; }};
+  f.env.document.dispatchEvent(new Event("DOMContentLoaded"));
+  const entry = f.palettes[0].actions().find(action => action.id === "projectScratchpad");
+  assert.equal(entry.shortcut, "⇧⌘S");
+  entry.run(); assert.equal(dialog.open, true);
+  assert.equal(command("projectScratchpad"), true); assert.equal(dialog.open, false);
+  f.nodes.get("permissions-dialog").open = true;
+  assert.equal(command("projectScratchpad"), false);
+  f.nodes.get("permissions-dialog").open = false;
+  f.env.agentCoordProjectScratchpad.available = false;
+  assert.equal(command("projectScratchpad"), false);
+});
+
 test("folder picker asks for one directory and treats cancellation as no selection", async () => {
   const f = fixture();
   f.replies.chooseFiles = [{path: "/work/rig"}];

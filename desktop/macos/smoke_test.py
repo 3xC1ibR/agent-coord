@@ -27,6 +27,7 @@ def main() -> int:
     parser.add_argument("--report", type=Path, default=ROOT / "build/macos/smoke.json")
     parser.add_argument("--files-only", action="store_true", help="Run focused native file-browser checks.")
     parser.add_argument("--sessions-only", action="store_true", help="Run focused native session-switching checks.")
+    parser.add_argument("--scratchpad-only", action="store_true", help="Run focused project scratchpad checks.")
     args = parser.parse_args()
     executable = args.app.expanduser().resolve() / "Contents/MacOS/Agent Coord"
     report = args.report.expanduser().resolve()
@@ -37,6 +38,8 @@ def main() -> int:
         command.append("--smoke-files-only")
     if args.sessions_only:
         command.append("--smoke-sessions-only")
+    if args.scratchpad_only:
+        command.append("--smoke-scratchpad-only")
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as app:
         try:
             _, errors = app.communicate(timeout=50)
@@ -66,6 +69,8 @@ def main() -> int:
                 "roll_up_shortcut", "roll_up_active_window", "roll_up_oldest_waiting", "roll_up_queue_flow",
                 "command_palette_shortcut", "command_palette_active_window", "command_palette_action",
                 "command_palette_toggle", "command_palette_focus_and_modal",
+                "project_scratchpad_shortcut", "project_scratchpad_active_window", "project_scratchpad_escape",
+                "project_scratchpad_saved_and_focus_restored", "project_scratchpad_tab_and_isolation",
                 "mixed_file_drop", "workspace_folder_drop", "window_drafts_and_navigation_isolated",
                 "file_browser_default_collapsed", "file_browser_collapsed_layout", "file_browser_open_shortcut",
                 "file_browser_opened", "file_browser_visible_preference_restored", "file_browser_hidden_preference_restored",
@@ -77,6 +82,8 @@ def main() -> int:
         if args.files_only and not (key.startswith("file_browser_") or key == "ui_loaded"):
             continue
         if args.sessions_only and not (key.startswith(("next_session_", "previous_session_")) or key == "ui_loaded"):
+            continue
+        if args.scratchpad_only and not (key.startswith("project_scratchpad_") or key == "ui_loaded"):
             continue
         if result.get(key) is not True:
             raise RuntimeError(f"Native behavior check failed: {key}")
@@ -90,10 +97,10 @@ def main() -> int:
     result["backend_exited_on_quit"] = True
     report.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
-    if not args.sessions_only:
+    if not args.sessions_only and not args.scratchpad_only:
         print(f"File browser: {report}.files.png")
         print(f"Collapsed file browser: {report}.files-collapsed.png")
-    if not args.files_only and not args.sessions_only:
+    if not args.files_only and not args.sessions_only and not args.scratchpad_only:
         print(f"Screenshot: {report}.png")
         print(f"Command palette: {report}.palette.png")
     return 0
