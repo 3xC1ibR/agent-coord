@@ -151,6 +151,13 @@ class SavedViews {
   }
   storeNavigation() {
     try { this.storage?.setItem(this.key, JSON.stringify(this.navigation)); } catch { /* Optional window state. */ }
+    // Built-in views have no server definition. Retain their filters across
+    // window reopen, while scroll and named-view drafts remain session-local.
+    if (this.navigation.all) {
+      const {filters, group_by, version} = this.navigation.all;
+      try { this.preferences?.setItem(this.key + ".all", JSON.stringify({filters, group_by, version})); }
+      catch { /* Optional preference. */ }
+    }
   }
   effective(view) {
     if (view.id === this.activeId) return this.read();
@@ -201,6 +208,10 @@ class SavedViews {
   }
   async start() {
     this.items = [this.all, ...this.scoped((await this.api("views")).data)];
+    try {
+      const remembered = JSON.parse(this.preferences?.getItem(this.key + ".all") || "null");
+      if (!this.navigation.all && remembered?.version === this.all.version) this.navigation.all = remembered;
+    } catch { /* Optional preference; existing window state takes precedence. */ }
     let active = "all";
     try { active = this.preferences?.getItem(this.key + ".active") || active; } catch { /* Optional preference. */ }
     this.activeId = this.items.some(view => view.id === active) ? active : "all";
@@ -243,6 +254,10 @@ class SavedViews {
     this.activeId = id; this.definition = pending?.definition || target;
     const remembered = this.navigation[id];
     this.apply(pending?.value || (!reset && remembered?.version === target.version ? remembered : target));
+    if (reset) {
+      this.navigation[id] = {...this.read(), version: this.definition.version, scroll: 0};
+      this.storeNavigation();
+    }
     this.saveActive(); this.closeMenu(); this.render();
     const changing = this.onSwitch();
     this.focusActive();
@@ -377,8 +392,9 @@ class SavedViews {
       const button = this.$(id);
       if (button) button.onclick = async () => {
         try {
-          const base = this.activeId === "all" ? this.read() : this.all;
-          await this.overview({...base.filters, show}, base.group_by);
+          const base = this.effective(this.all);
+          const placement = show === "active" && ["attention", "completed"].includes(base.filters.show) ? base.filters.show : show;
+          await this.overview({...base.filters, show: placement}, base.group_by);
           this.focusActive();
         } catch (error) { this.onError(error); }
       };

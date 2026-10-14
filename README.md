@@ -1010,9 +1010,10 @@ Browser directory paths refer to the computer running Ribbon Field.
 **Views** are saved filters within a project, selected below its project tabs.
 Start with **All conversations**, choose group, phase, Show and search filters,
 choose a grouping, then click **＋ View**. Views never select a directory.
-Changing a named view's filters saves them automatically; **All conversations**
-keeps temporary filters local to the window and project. **Reset filters** clears
-those temporary filters. Failed saves offer **Retry saving**; resetting reloads
+Changing a named view's filters saves them automatically. The built-in **Now**,
+**Later**, and **Closed** views retain their filters locally for each window and
+project, including after reopening. **Reset filters** clears those remembered
+filters. Failed saves offer **Retry saving**; resetting reloads
 the saved definition without overwriting another window's changes. The **•••**
 menu renames, duplicates, reorders or deletes views. Deleting a view keeps its
 conversations. New views with the same name can exist in different projects.

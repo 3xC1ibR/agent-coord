@@ -208,6 +208,58 @@ test("automatic filter saving survives a fresh window", async () => {
   assert.equal(other.views.activeId, "rig"); assert.equal(other.controls["phase-filter"].value, "validation");
 });
 
+test("Now restores its filters after visiting a named view", async () => {
+  const c = setup({saved: [{id: "review", name: "Review", filters: {phase: "validation"}}]});
+  await c.views.start();
+  c.controls.project.value = "migration";
+  c.controls["phase-filter"].value = "implementation";
+  c.controls.view.value = "attention";
+  c.controls.search.value = "release";
+  c.controls["group-by"].value = "domain";
+  await c.views.persist();
+  const expected = c.views.read();
+  await c.views.activate("review");
+  await c.controls["show-now"].onclick();
+  assert.deepEqual(c.views.read(), expected);
+  assert.equal(c.controls["show-now"].attributes["aria-pressed"], "true");
+  assert.equal(c.calls.filter(call => call.body).length, 0);
+  assert.equal(c.records[0].filters.phase, "validation");
+});
+
+test("built-in filters survive reopening, stay scoped to their workspace, and reset durably", async () => {
+  const c = setup({saved: [{id: "review", name: "Review", cwd: "/opt/foo"}]});
+  await c.views.setProject("/opt/foo");
+  c.controls.project.value = "migration";
+  c.controls["phase-filter"].value = "implementation";
+  c.controls.search.value = "release";
+  c.controls["group-by"].value = "domain";
+  c.controls.welcome.scrollTop = 340;
+  await c.views.persist();
+  const expected = c.views.read();
+  await c.views.activate("review");
+  const reopened = setup({saved: c.records, preferences: c.preferences});
+  await reopened.views.setProject("/opt/foo");
+  await reopened.controls["show-now"].onclick();
+  assert.deepEqual(reopened.views.read(), expected);
+  assert.equal(reopened.controls.welcome.scrollTop, 0);
+  await reopened.views.setProject("/opt/bar");
+  assert.equal(reopened.controls.project.value, "");
+  assert.equal(reopened.controls["phase-filter"].value, "");
+  await reopened.views.setProject("/opt/foo");
+  assert.deepEqual(reopened.views.read(), expected);
+  await reopened.controls["reset-view"].onclick();
+  const reset = setup({preferences: c.preferences, windowStorage: reopened.windowStorage});
+  await reset.views.setProject("/opt/foo");
+  assert.equal(reset.controls["phase-filter"].value, "");
+  assert.equal(reset.controls.search.value, "");
+  const fresh = setup({preferences: c.preferences});
+  await fresh.views.setProject("/opt/foo");
+  assert.equal(fresh.controls.project.value, "");
+  assert.equal(fresh.controls["phase-filter"].value, "");
+  assert.equal(fresh.controls.search.value, "");
+  assert.equal(fresh.controls["group-by"].value, "phase");
+});
+
 test("polling preserves unsaved changes and refuses to overwrite a newer saved definition", async () => {
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}}]});
   await c.views.start(); await c.views.activate("rig");
