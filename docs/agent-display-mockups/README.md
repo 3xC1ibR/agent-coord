@@ -152,17 +152,78 @@ that landed: the settling field's free canvas, the constellations' blinking
 needs-you dots and hub-and-spoke groups, the orbits' zoom-in, and mission
 control's quiet needs-you panel.
 
-- **One coordinate system, three zoom levels.** Every agent has one position;
-  the camera moves. Level 0 shows all domains as amorphous clusters, placed
-  deterministically and remembered per scenario (drag a cluster to move it; it
-  stays). Level 1 zooms into a domain: a scatter with labels. Level 2 zooms into
-  an orchestrator: its sub-agents bloom out on spokes with labels, grandchildren
-  orbit them. Esc or the background steps back one level. Nothing moves on its
-  own; working dots breathe in place.
-- **Encodings.** Dot size is how many messages the user has exchanged with the
-  agent (a runtime signal). Dot color is age: full accent blue for a tool call
-  just now, fading toward the paper over a day. A ring is state: warm blinking
-  for needs-you, dashed for waiting on something, green for done.
+- **Organic checkpoint contours.** Each territory has a permanent domain seed,
+  low-frequency outline noise, and broad cosine lobes shaped by family sizes.
+  Lobe amplitude is capped at 30% of base radius; only unfinished threads
+  contribute to lobe size, so completed volume cannot enlarge the outline. Noise and lobes taper smoothly to zero inside 30% of the radius, reaching full
+  strength only at the rim. Phase boundaries remain nested, with calm circular
+  centers and organic outer contours. From the center:
+  Needs you, Getting started (no checkpoint), Discussing, Investigating, Planning,
+  Orchestrating, Implementing, Validating, Deploying and Finished. Needs you
+  overrides phase. Populated active phases get at least 52 units (32 for Needs you), growing with
+  `24 × √count` up to 96. Finished stays an 18-unit crust regardless of count.
+  Empty phases are 6-unit gutters (10 for an empty center), and trailing empty
+  phases disappear.
+  The rim adds 20 units of padding. Pinned threads retain a home in their phase.
+  Fit includes the organic rim, pins, external domain captions and the focused
+  domain’s phase ruler. The ruler sits to the right with ticks at each boundary
+  and spaced phase names; node labels turn away from it.
+- **Abstract family symbols and focused lineage.** Every parent gets a stable,
+  procedurally generated form inherited by its children. Uneven scoops, broad
+  swells, varied proportions and shear create smooth, asymmetric silhouettes
+  without repeating petals or a finite icon palette. Parents use a larger mark with an open center;
+  children use smaller solid silhouettes and standalone threads remain circles.
+  There are no double outlines. A child that delegates gets its own branch
+  symbol plus a small copy of its parent's symbol. Assignments persist across
+  reloads and workspace tabs independently of status and position. There are no
+  child counts on the map. The overview uses symbols alone, without links or
+  arrows. Directional parent-to-child links appear in a focused domain or family
+  and hide again when zoomed out; hover and keyboard focus emphasize a family. Selecting any member
+  highlights the family, reveals its finished members and opens an indented tree
+  with full names and status in the side panel. Selecting a tree row opens that
+  agent's details. Color continues to mean attention/activity, not family.
+- **Lineage initializes; users own angles.** Families initially divide the
+  available angle in proportion to membership, sorted by a stable hash. Each
+  node saves its angle, including through phase changes, new arrivals and reloads.
+  Parent-child links track their actual positions even after manual placement.
+  No force simulation runs on thread nodes.
+- **Meaningful motion.** Phase and population changes animate node positions.
+  Reduced-motion preferences disable transitions. Geometry lives in
+  `shared/atlas-layout.js`. Domain centers get a deterministic initial force
+  layout once. Clear saved centers stay fixed; overlapping hull bounds are
+  separated with a small gutter after growth, loading an older layout or a hull
+  drop. The corrected centers persist, so zooming never rearranges them. The
+  dropped hull stays where the user put it and neighbors yield. Free pins keep
+  their canvas positions during collision repair.
+- **Free placement with a legible exception.** Drag around a contour to save an
+  angle and depth within the current phase. Drag outside the territory to pin
+  at that canvas position; a diamond, faint tether and phase-home ghost identify
+  the exception. Drag back inside to release it. **Pin freely** also preserves
+  arbitrary positions inside the hull through phase changes; **Return to phase layout** releases
+  it explicitly. Pins stay fixed when their territory moves. Existing saved
+  territory positions and older pin coordinates migrate.
+- **Sparse labels and real age fading.** Overview captions sit outside territories,
+  with up to three needs-you titles stacked below each domain name and an overflow
+  count. Focused domains label needs-you nodes, the selection and up to three
+  prominent unfinished threads. Hover and keyboard focus reveal other titles
+  and details. Finished nodes fade from their completion timestamp to about 24%
+  opacity at seven days, with a 22% floor. Heartbeats do not rejuvenate finished
+  work. After 48 hours, unpinned finished threads fold into a quiet density band
+  at the rim. Click a density segment or use **Show older finished** in the
+  focused domain to reveal them; **Fold older finished** restores aggregation.
+  Selection, location and explicit pins keep individual threads accessible.
+  Finished ancestors remain visible while any descendant is visible, so family
+  links retain their parent endpoint.
+  Density counts preserve every folded thread; age never closes one. In the
+  overview, needs-you marks have a 6.5-pixel radius, ordinary marks 3.5 pixels,
+  and recent finished marks 2.3 pixels. Family symbols use 8.5-pixel parent radii
+  and 5-pixel child radii at overview scale, constrained by nearby marks.
+  Needs-you family parents have a 9.5-pixel radius.
+  Domains without asks have quieter hulls
+  and contours. Message volume no longer makes gray overview dots larger than asks.
+- **Encodings.** Warm means needs you, blue means running, gray means idle or
+  finished. Size reflects user messages, constrained by nearby marks. Whole
+  hulls remain draggable. Preferences are saved per dataset, scenario and workspace.
 - **Needs-you panel.** Right or bottom, plain: kind, who, from whom, the
   question, a one-click first option, More… for the lens, and "show on map",
   which flies to the node (or to the hub that contains it) and rings it.
@@ -170,8 +231,8 @@ control's quiet needs-you panel.
   fixture between 7 clean domains, 3 coarse, 14 fine, a messy mix (synonyms
   such as "frontend" and "UI", agents in two domains, one-off labels, missing
   labels), and no domain signal at all. The map copes visibly: synonyms merge
-  with "also …" shown, two-domain agents sit on the edge facing the other
-  cluster with a short dashed tie, one-off labels gather into "Other", missing
+  with "also …" shown, two-domain agents retain a short dashed tie to the other
+  cluster while their position follows phase, one-off labels gather into "Other", missing
   labels form "No domain reported", and with no signal the clusters come from
   write scopes, which cost the model nothing.
 

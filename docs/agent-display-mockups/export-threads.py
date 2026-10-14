@@ -125,6 +125,7 @@ def load(path: Path, archived: bool) -> dict:
     workspaces: dict[str, int] = {}
     for t in out:
         workspaces[t["cwd"] or "unknown"] = workspaces.get(t["cwd"] or "unknown", 0) + 1
+    db.close()
     return {"exported_at": time.time(), "source": str(path), "archived_included": archived,
             "workspaces": [{"cwd": k, "count": v} for k, v in sorted(workspaces.items(), key=lambda kv: -kv[1])], "threads": out}
 

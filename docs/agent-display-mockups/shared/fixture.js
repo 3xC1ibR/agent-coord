@@ -166,7 +166,7 @@ const AgentField = (() => {
     a.createdAt = Math.min(a.createdAt, now - (now === BASE_NOW ? 2 * MIN : 0));
     if (a.updatedAt < a.createdAt) a.updatedAt = a.createdAt;
     a.checkpointAt ??= a.updatedAt;
-    if (!a.target) a.target = pick(rand, TARGETS[a.domain]);
+    if (!a.target) a.target = pick(rand, TARGETS[a.domain] || TARGETS[a.domainReported] || TARGETS.web);
     if (!a.plan.length) {
       const steps = PLAN_STEPS[a.role] || PLAN_STEPS.implementer;
       const fraction = a.status === "done" ? 1 : a.phase === "validation" ? 0.8 : a.phase === "deployment" ? 0.9 : a.phase === "implementation" ? 0.4 + rand() * 0.3 : a.phase === "planning" ? 0.1 : a.phase === "orchestrating" ? 0.4 : 0.3;
@@ -323,7 +323,7 @@ const AgentField = (() => {
     const rand = mulberry32(seed);
     if (scale === "real") {
       const snapshot = globalThis.AGENT_COORD_SNAPSHOT;
-      if (snapshot?.threads?.length) return fromSnapshot(snapshot, {workspace, rand});
+      if (snapshot?.threads) return fromSnapshot(snapshot, {workspace, rand});
       console.warn("No snapshot loaded (shared/real-threads.js); falling back to the small fixture.");
       scale = "small";
     }
@@ -337,7 +337,7 @@ const AgentField = (() => {
   /* Real threads from export-threads.py: the same agent shape, built from what the runtime actually has. */
   function fromSnapshot(snapshot, {workspace = "all", rand = mulberry32(7)} = {}) {
     const now = Math.round((snapshot.exported_at || Date.now() / 1000) * 1000);
-    const threads = snapshot.threads.filter(t => workspace === "all" || t.cwd === workspace);
+    const threads = snapshot.threads.filter(t => workspace === "all" || (t.cwd || "unknown") === workspace);
     const ids = new Set(threads.map(t => t.id));
     const ms = v => v ? Math.round(v * 1000) : null;
     const agents = threads.map(t => {
@@ -466,6 +466,7 @@ const AgentField = (() => {
             if (next >= 0) { a.plan[next].state = "active"; a.activity = a.plan[next].label; a.summary = fill(PHASE_SUMMARY[phaseFor(a)], a) + " Step " + (next + 1) + " of " + a.plan.length + ": " + lower(a.plan[next].label) + "."; const p = phaseFor(a); if (p !== a.phase) { a.phase = p; a.history.push({at: field.now, phase: p, summary: a.summary, actor: "agent"}); field.log(a, "phase", a.title + " → " + PHASE_LABELS[p]); } a.updatedAt = a.checkpointAt = field.now; a.stale = false; }
             else if (a.role === "dispatcher") { a.updatedAt = field.now; }
             else finish(a);
+          } else if (field.scenario === "real") { if (r < 0.4) { a.updatedAt = field.now; } // real threads: no invented asks or spawns
           } else if (r < 0.12 + askP && !a.ask && a.role !== "dispatcher") {
             const kind = a.role === "releaser" ? "approval" : a.role === "reviewer" ? "review" : pick(rand, ["decision", "information", "approval", "access"]);
             const t = pick(rand, ASKS[kind]);
@@ -473,7 +474,7 @@ const AgentField = (() => {
             a.status = "waiting"; a.next = {actor: "user", action: a.ask.question}; a.activity = null; const act = a.plan.find(s => s.state === "active"); if (act) act.state = "blocked";
             a.updatedAt = a.checkpointAt = field.now; field.log(a, "ask", a.title + " asks: " + a.ask.question);
           } else if (r < 0.12 + askP + spawnP && a.kind === "app" && field.depth(a.id) < 2 && field.children(a.id).length < 4 && a.role !== "dispatcher") {
-            field.spawn(a.id, {title: pick(rand, ["Explore", "Test", "Search", "Summarize", "Verify"]) + " " + pick(rand, OBJECTS[a.domain])}, false);
+            field.spawn(a.id, {title: pick(rand, ["Explore", "Test", "Search", "Summarize", "Verify"]) + " " + pick(rand, OBJECTS[a.domainReported] || OBJECTS[a.domain] || OBJECTS.web)}, false);
           } else if (r < 0.12 + askP + spawnP + extP && a.kind === "app" && !a.waitingOn.length) {
             const ext = pick(rand, EXTERNALS); a.waitingOn = ["external:" + ext]; a.status = "blocked"; a.activity = null; a.next = {actor: "external", action: "Waiting for " + ext + "."}; a.updatedAt = field.now; field.log(a, "blocked", a.title + " waits for " + ext);
           } else if (r < 0.35) { a.activity = pick(rand, ACTIVITIES); a.updatedAt = field.now; }
@@ -497,7 +498,7 @@ const AgentField = (() => {
     field.spawn = (parentId, {title, role = "subagent", kind = "subagent", client} = {}, announce = true) => {
       const parent = field.byId(parentId); if (!parent) return null;
       const id = "n" + String(agents.length).padStart(3, "0");
-      const a = makeAgent({id, title: title || "Explore " + pick(rand, OBJECTS[parent.domainReported || parent.domain] || OBJECTS.web), role, kind, client: client || parent.client, phase: "implementation", status: "working", domain: parent.domain, target: parent.target, parentId, createdAt: field.now, updatedAt: field.now}, rand, field.now);
+      const a = makeAgent({id, title: title || "Explore " + pick(rand, OBJECTS[parent.domainReported] || OBJECTS[parent.domain] || OBJECTS.web), role, kind, client: client || parent.client, phase: "implementation", status: "working", domain: parent.domain, target: parent.target, parentId, createdAt: field.now, updatedAt: field.now}, rand, field.now);
       a.domains = [...(parent.domains || [parent.domain])]; a.domainReported = parent.domainReported || parent.domain; a.domainSource = parent.domainSource || "reported";
       agents.push(a); parent.plan.push({label: a.title, state: "delegated", agentId: id}); if (kind === "app" && !parent.waitingOn.includes(id)) parent.waitingOn.push(id);
       field.log(parent, "spawned", parent.title + " started " + a.title);

@@ -110,6 +110,11 @@ h1, h2, h3, h4, p { margin: 0; }
 .app-tabs { display: flex; align-items: center; gap: 22px; padding: 10px 28px 0; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); }
 .app-tabs span { display: inline-flex; align-items: center; gap: 8px; padding: 8px 2px 12px; border-bottom: 2px solid transparent; }
 .app-tabs span[aria-current="true"] { color: var(--ink); border-color: var(--ink); }
+.app-tabs:has(.project-tab) { overflow-x: auto; }
+.app-tabs .project-tab { display: inline-flex; flex: none; align-items: center; gap: 8px; padding: 8px 2px 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font: inherit; white-space: nowrap; cursor: pointer; }
+.app-tabs .project-tab[aria-pressed="true"] { color: var(--ink); border-color: var(--ink); }
+.app-tabs .project-tab:hover { color: var(--ink); }
+.app-tabs .project-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .app-tabs small { font: 10px var(--mono); border: 1px solid var(--line-strong); border-radius: 9px; padding: 1px 6px; }
 .app-tabs .tab-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); padding: 0; border: 0; }
 .app-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 28px; }

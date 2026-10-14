@@ -48,10 +48,20 @@ const Mockup = (() => {
     const q = params(); for (const [k, v] of Object.entries(overrides)) { if (v == null) q.delete(k); else q.set(k, v); }
     const s = q.toString(); return href + (s ? "?" + s : "");
   }
-  function chrome() {
+  function chrome({projects = null, project = "all", onProject} = {}) {
     const wrap = $("div", "app-chrome");
     const tabs = $("div", "app-tabs");
-    for (const [name, count, current, dot] of [["agent-coord", 1, false, true], ["rig", 7, true, true], ["stoic", 0, false, false], ["projects", 19, false, true]]) {
+    if (projects) {
+      tabs.setAttribute("aria-label", "Projects");
+      for (const p of projects) {
+        const t = $("button", "project-tab", p.name); t.type = "button"; t.dataset.project = p.id;
+        t.setAttribute("aria-pressed", String(p.id === project));
+        t.append($("small", null, String(p.count)));
+        t.title = (p.path || p.name) + " · " + p.count + (p.count === 1 ? " thread" : " threads");
+        t.onclick = () => { for (const tab of tabs.children) tab.setAttribute("aria-pressed", String(tab === t)); onProject(p.id); };
+        tabs.append(t);
+      }
+    } else for (const [name, count, current, dot] of [["agent-coord", 1, false, true], ["rig", 7, true, true], ["stoic", 0, false, false], ["projects", 19, false, true]]) {
       const t = $("span"); if (current) t.setAttribute("aria-current", "true"); t.append(name); if (count) t.append($("small", null, String(count))); if (dot) t.append($("i", "tab-dot")); tabs.append(t);
     }
     const tools = $("div", "app-tools");
@@ -60,12 +70,19 @@ const Mockup = (() => {
     tools.append(search, $("span", "btn quiet", "Filters ⌄"), seg, $("span", "spacer"), $("span", "btn", "Open dispatcher ↗"), $("span", "btn primary", "New session ＋"));
     wrap.append(tabs, tools); return wrap;
   }
-  function mount({number, title, spectrum = "moderate", summary = "", signals = {current: [], proposed: []}, render, fullBleed = false, showChrome = true, defaultScale = "small", notes = "", domainScenarios = false}) {
+  function mount({number, title, spectrum = "moderate", summary = "", signals = {current: [], proposed: []}, render, fullBleed = false, showChrome = true, defaultScale = "small", notes = "", domainScenarios = false, projectTabs = false}) {
     const q = params();
     const theme = q.get("theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     const snapshot = globalThis.AGENT_COORD_SNAPSHOT;
     const scale = ["small", "medium", "large"].includes(q.get("scale")) || (q.get("scale") === "real" && snapshot) ? q.get("scale") : defaultScale;
-    const workspace = q.get("workspace") || "all";
+    let workspace = q.get("workspace") || "all";
+    const folderName = path => path.replace(/\/$/, "").split("/").pop() || path;
+    const projects = projectTabs && scale === "real" ? [
+      {id: "all", name: "All projects", count: snapshot?.threads?.length || 0},
+      ...(snapshot?.workspaces || []).map(w => ({id: w.cwd, path: w.cwd, count: w.count,
+        name: (snapshot.workspaces.filter(other => folderName(other.cwd) === folderName(w.cwd)).length > 1 ? w.cwd : folderName(w.cwd))})),
+    ] : null;
+    if (projects && !projects.some(p => p.id === workspace)) workspace = "all";
     const domains = domainScenarios && Object.hasOwn(AgentField.DOMAIN_SCENARIOS, q.get("domains") || "") ? q.get("domains") : "clean";
     document.documentElement.dataset.theme = theme; document.documentElement.style.colorScheme = theme;
     document.title = "Ribbon Field mockup " + String(number).padStart(2, "0") + " · " + title;
@@ -88,15 +105,15 @@ const Mockup = (() => {
     shell.append($("span", "mock-spacer"));
     const clock = $("span", "mock-id"); shell.append(clock);
     const scaleOptions = [["small", "16 agents"], ["medium", "≈45 agents"], ["large", "≈160 agents"]];
-    if (snapshot?.threads?.length) scaleOptions.push(["real", "Real snapshot · " + snapshot.threads.length + " threads"]);
+    if (snapshot?.threads) scaleOptions.push(["real", "Real snapshot · " + snapshot.threads.length + " threads"]);
     const scaleSel = $("select"); for (const [v, l] of scaleOptions) { const o = $("option", null, l); o.value = v; o.selected = v === scale; scaleSel.append(o); }
     let workspaceSel = null;
-    if (scale === "real" && snapshot) {
+    if (scale === "real" && snapshot && !projectTabs) {
       workspaceSel = $("select"); const all = $("option", null, "All workspaces · " + snapshot.threads.length); all.value = "all"; all.selected = workspace === "all"; workspaceSel.append(all);
       for (const w of snapshot.workspaces || []) { const o = $("option", null, w.cwd.replace(/^\/opt\/projects\//, "") + " · " + w.count); o.value = w.cwd; o.selected = w.cwd === workspace; workspaceSel.append(o); }
       workspaceSel.title = "Workspace"; workspaceSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {workspace: workspaceSel.value === "all" ? null : workspaceSel.value}); };
     }
-    scaleSel.title = "Data source"; scaleSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {scale: scaleSel.value, workspace: null}); };
+    scaleSel.title = "Data source"; scaleSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {scale: scaleSel.value, workspace: null, project: null}); };
     let domainSel = null;
     if (domainScenarios && scale !== "real") {
       domainSel = $("select"); for (const [v, l] of Object.entries(AgentField.DOMAIN_SCENARIOS)) { const o = $("option", null, l); o.value = v; o.selected = v === domains; domainSel.append(o); }
@@ -114,7 +131,13 @@ const Mockup = (() => {
     shell.append(scaleSel); if (workspaceSel) shell.append(workspaceSel); if (domainSel) shell.append(domainSel); shell.append(themeBtn, transport, nav);
     const noteLine = $("p", "mock-note"); shell.append(noteLine);
     document.body.prepend(shell);
-    if (showChrome) shell.after(chrome());
+    if (showChrome) shell.after(chrome({projects, project: workspace, onProject: id => {
+      if (workspace === id) return;
+      workspace = id; setPlaying(false); closeDrawer(); unpeek();
+      field = AgentField.create({scale, domains, workspace}); field.subscribe(draw);
+      try { history.replaceState(null, "", withParams(location.pathname, {workspace: workspace === "all" ? null : workspace, project: null})); } catch { /* file:// restrictions */ }
+      draw();
+    }}));
     const stage = document.getElementById("stage") || (() => { const s = $("main"); s.id = "stage"; document.body.append(s); return s; })();
     if (fullBleed) stage.classList.add("full-bleed");
 
