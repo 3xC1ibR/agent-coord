@@ -92,6 +92,10 @@ class ThreadStore:
                     UNIQUE(thread_id, kind, target, project_id)
                 );
                 CREATE INDEX IF NOT EXISTS threads_project_idx ON work_threads(project_id, attention);
+                CREATE TABLE IF NOT EXISTS thread_scratchpads (
+                    thread_id TEXT PRIMARY KEY REFERENCES work_threads(thread_id),
+                    text TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS turn_completions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     thread_id TEXT NOT NULL REFERENCES work_threads(thread_id),
@@ -274,6 +278,19 @@ class ThreadStore:
             if row is None:
                 raise CoordinationError("Work thread not found.")
             return self._read(db, row, history=history)
+
+    def scratchpad(self, thread_id: str, text=UNSET) -> dict:
+        """Keep user notes separate from agent context and thread activity."""
+        if text is not UNSET and (not isinstance(text, str) or len(text) > 100_000):
+            raise CoordinationError("Scratchpad must be text of at most 100,000 characters.")
+        with self.store._connection() as db:
+            if not db.execute("SELECT 1 FROM work_threads WHERE thread_id = ?", (thread_id,)).fetchone():
+                raise CoordinationError("Work thread not found.")
+            if text is not UNSET:
+                db.execute("""INSERT INTO thread_scratchpads (thread_id, text) VALUES (?, ?)
+                              ON CONFLICT(thread_id) DO UPDATE SET text = excluded.text""", (thread_id, text))
+            row = db.execute("SELECT text FROM thread_scratchpads WHERE thread_id = ?", (thread_id,)).fetchone()
+            return {"text": row["text"] if row else ""}
 
     def list(self, *, archived=False, cwd=None, repository_id=UNSET, project_id=UNSET) -> list[dict]:
         self.organization.backfill()

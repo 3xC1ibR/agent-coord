@@ -24,10 +24,10 @@ function showError(error) {
   else { $("error").hidden = false; $("error").querySelector("span").textContent = message; }
 }
 $("error").querySelector("button").onclick = () => { $("error").hidden = true; };
-async function api(path, body) {
+async function api(path, body, requestOptions = {}) {
   const viewMutation = body !== undefined && (path === "views" || path.startsWith("views/"));
   if (viewMutation) ++listRequest;
-  const options = {cache: "no-store"};
+  const options = {cache: "no-store", ...requestOptions};
   if (body !== undefined) Object.assign(options, {method: "POST", headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token}, body: JSON.stringify(body)});
   const response = await fetch(base + path, options);
   if (response.status === 401 && location.protocol === "https:") location.reload();
@@ -858,6 +858,7 @@ async function select(id, {rollUp = false, dock = false, focus = true} = {}) {
   if (state.selected) state.drafts.set(state.selected, $("message").value);
   retainConversation();
   state.selected = id;
+  state.scratchpad?.select(id);
   if (dock) state.threadTabs?.suspend();
   else state.threadTabs?.open(state.sessions?.find(thread => thread.thread_id === id)
     || state.conversations?.get(id)?.detail?.work_thread || {thread_id: id, title: "Conversation"});
@@ -1812,6 +1813,7 @@ async function newSession() {
     thread: {turns: []}, requests: [], queuedMessages: [], running: false,
   };
   state.selected = "new-session";
+  state.scratchpad?.select(null);
   state.detail = state.newSessionDraft;
   state.threadTabs?.open(state.newSessionDraft.work_thread);
   state.detailRefreshing = false;
@@ -1924,6 +1926,7 @@ function goHome({restoreDispatcher = true} = {}) {
   retainConversation();
   state.dispatchDock?.hide();
   state.selected = null; state.detail = null; state.titleEdit = null;
+  state.scratchpad?.select(null);
   state.threadTabs?.overview();
   state.detailRefreshing = false;
   if (navigation) navigation.remember();
@@ -2000,6 +2003,7 @@ $("thread-context").addEventListener("toggle", () => {
 });
 compactContext.addEventListener("change", layoutContext);
 layoutContext();
+state.scratchpad = new ThreadScratchpad({panel: $("thread-scratchpad"), input: $("scratchpad-text"), status: $("scratchpad-status"), api});
 state.mobileChat = new MobileChat({onBack: goHome, onLayout: () => state.timelineScroll?.layout(), onContextLayout: layoutContext});
 window.agentCoordFindThreads = () => { goHome({restoreDispatcher: false}); $("search").focus(); $("search").select(); };
 document.addEventListener("keydown", event => {

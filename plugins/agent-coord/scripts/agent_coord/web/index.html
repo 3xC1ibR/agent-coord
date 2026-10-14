@@ -56,6 +56,7 @@
   <link rel="stylesheet" href="/dispatch.css">
   <script src="/dispatcher-workspace.js" defer></script>
   <link rel="stylesheet" href="/dispatcher-workspace.css">
+  <script src="/scratchpad.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/thread-hover.js" defer></script>
   <script src="/filter-menu.js" defer></script>
@@ -210,6 +211,10 @@
       </form>
       </div>
       <aside id="context-panel" class="context-panel" aria-label="Thread context">
+        <section id="thread-scratchpad" class="thread-scratchpad" hidden>
+          <div class="scratchpad-heading"><label for="scratchpad-text">Scratchpad</label><span id="scratchpad-status" role="status" aria-live="polite"></span></div>
+          <textarea id="scratchpad-text" rows="8" maxlength="100000" placeholder="Keep notes for this thread…" disabled></textarea>
+        </section>
         <div class="speech-controls"><button id="speech-toggle" class="quiet" type="button" aria-label="Read replies aloud" title="Read replies aloud on this device" aria-pressed="false" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z M15 8a6 6 0 0 1 0 8 M18 5a10 10 0 0 1 0 14"/></svg><span>Read replies aloud</span></button></div>
         <details id="thread-context" class="thread-context" open><summary>Where you left it <span id="checkpoint-phase"></span></summary><div id="checkpoint"></div><div class="context-actions"><button id="edit-checkpoint" class="quiet">Edit checkpoint</button><button id="add-link" class="quiet">Add link</button><button id="resume-browser" class="primary" hidden>Continue in browser</button></div></details>
       </aside>
@@ -219,7 +224,7 @@
   <dialog id="mobile-thread-sheet" class="mobile-thread-sheet" aria-labelledby="mobile-sheet-title">
     <div class="mobile-sheet-heading"><button id="mobile-sheet-back" class="quiet" type="button" aria-label="Back to thread actions" hidden>←</button><h2 id="mobile-sheet-title">Thread actions</h2><button class="icon-button" type="button" data-close="mobile-thread-sheet" aria-label="Close thread actions">×</button></div>
     <div id="mobile-sheet-actions"></div>
-    <button id="mobile-show-context" class="quiet" type="button">Thread context and links</button>
+    <button id="mobile-show-context" class="quiet" type="button">Scratchpad, context and links</button>
     <div id="mobile-sheet-context" hidden></div>
     <div id="mobile-sheet-info"></div>
   </dialog>

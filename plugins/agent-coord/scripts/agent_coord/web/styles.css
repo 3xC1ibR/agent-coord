@@ -275,6 +275,12 @@ main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; pad
 .session-actions button { font-size: 11px; padding: 7px 10px; }
 .status { font-size: 11px; color: var(--accent); padding: 7px 0; margin-right: 8px; text-transform: capitalize; }
 .context-panel { min-width: 0; min-height: 0; overflow: auto; background: var(--panel); border-left: 1px solid var(--line); scrollbar-width: thin; }
+.thread-scratchpad { padding: 22px; border-bottom: 1px solid var(--line); }
+.scratchpad-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 12px; }
+.scratchpad-heading label { font-weight: 550; }
+.scratchpad-heading span { color: var(--muted); font-size: 10px; }
+.thread-scratchpad textarea { display: block; width: 100%; min-height: 180px; resize: vertical; font-family: inherit; font-size: 13px; line-height: 1.6; }
+.mobile-thread-sheet .thread-scratchpad { padding: 8px 0 20px; }
 .thread-context { padding: 24px 22px; font-size: 12px; line-height: 1.7; }
 .thread-context > summary { font-weight: 550; cursor: pointer; }
 .thread-context > summary span { color: var(--muted); font: 10px var(--mono); font-weight: 400; text-transform: capitalize; }

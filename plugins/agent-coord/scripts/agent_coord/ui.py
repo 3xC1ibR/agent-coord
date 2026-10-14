@@ -354,6 +354,9 @@ def _handler(
                 else:
                     self._json(HTTPStatus.OK, web_push.status(device))
                 return
+            if parsed.path == "/scratchpad.js":
+                self._send(HTTPStatus.OK, "text/javascript; charset=utf-8", (_WEB_ROOT / "scratchpad.js").read_bytes())
+                return
             if parsed.path == "/push-notifications.js":
                 self._send(HTTPStatus.OK, "text/javascript; charset=utf-8", (_WEB_ROOT / "push-notifications.js").read_bytes())
                 return
@@ -516,6 +519,10 @@ def _handler(
                     limit=20, cursor=query.get("cursor", [None])[0],
                     my_messages=query.get("my_messages") == ["true"],
                     thread_ids=[t["thread_id"] for t in threads]))
+            elif route.startswith("threads/") and route.endswith("/scratchpad"):
+                thread_id = unquote(route[8:-11])
+                browser_sessions.work_thread(thread_id, history=False)
+                self._json(HTTPStatus.OK, store.threads.scratchpad(thread_id))
             elif route.startswith("threads/") and route.endswith("/preview"):
                 self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
             elif route.startswith("threads/") and route.endswith("/messages"):
@@ -769,6 +776,11 @@ def _handler(
                     thread_id = unquote(route[3])
                     if len(route) == 4:
                         result = browser_sessions.update_work_thread(thread_id, body)
+                    elif route[4] == "scratchpad":
+                        browser_sessions.work_thread(thread_id, history=False)
+                        if set(body) != {"text"}:
+                            raise CoordinationError("Scratchpad accepts text only.")
+                        result = store.threads.scratchpad(thread_id, body["text"])
                     elif route[4] == "links":
                         result = browser_sessions.link_work_thread(thread_id, body)
                     elif route[4] == "checkpoint":
