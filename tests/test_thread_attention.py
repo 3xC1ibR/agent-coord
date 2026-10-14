@@ -193,6 +193,83 @@ class ThreadAttentionTests(unittest.TestCase):
         self.assertEqual(self.thread()["response_state"], "reply")
         self.assertNotEqual(self.thread()["attention_reason"], "blocked")
 
+    def test_dismiss_saved_blocker_preserves_action_and_changed_blocker_resurfaces(self):
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                if completed:
+                    self.start()
+                self.checkpoint("deployment", "user")
+                if completed:
+                    self.finish()
+                before = self.thread()
+                self.assertTrue(before["can_handle_response"])
+                receipt = {"handled": True, "handled_checkpoint_id": before["checkpoint"]["id"],
+                           "handled_completion_id": (before["turn_completion"] or {}).get("id", 0)}
+                dismissed = self.sessions.update_work_thread("terminal", receipt)
+                self.assertFalse(dismissed["needs_attention"])
+                self.assertFalse(dismissed["can_handle_response"])
+                self.assertEqual(dismissed["response_state"], "input")
+                self.assertEqual(dismissed["attention_reason"], "blocked")
+                self.assertEqual(dismissed["checkpoint"], before["checkpoint"])
+                self.assertEqual(dismissed["attention"], "now")
+                self.assertEqual(dismissed["work_phase"], "deployment")
+                self.assertEqual(self.sessions.rpc.calls, [])
+                self.now += 1
+                self.checkpoint("deployment", "user")
+                self.assertFalse(self.thread()["needs_attention"], "An unchanged heartbeat stays dismissed")
+                self.now += 1
+                self.store.threads.checkpoint("terminal", {
+                    "phase": "deployment", "summary": "A different credential is required.",
+                    "next_actor": "user", "next_action": "Sign in to the deployment account.",
+                })
+                changed = self.thread()
+                self.assertTrue(changed["needs_attention"])
+                self.assertTrue(changed["can_handle_response"])
+                delayed = self.sessions.update_work_thread("terminal", receipt)
+                self.assertTrue(delayed["needs_attention"], "An old receipt cannot dismiss a changed blocker")
+
+    def test_changed_completed_checkpoint_resurfaces_after_dismissal(self):
+        self.start()
+        self.checkpoint()
+        self.finish()
+        before = self.thread()
+        self.sessions.update_work_thread("terminal", {"handled": True,
+            "handled_checkpoint_id": before["checkpoint"]["id"],
+            "handled_completion_id": before["turn_completion"]["id"]})
+        self.now += 1
+        self.checkpoint("investigation", "nobody")
+        changed = self.thread()
+        self.assertTrue(changed["unhandled_response"])
+        self.assertTrue(changed["needs_attention"])
+        self.assertNotEqual(changed["attention_key"], before["attention_key"], "Roll up must treat the changed result as new")
+        self.assertEqual(changed["attention_since"], self.now)
+
+    def test_dismissal_cannot_answer_live_approval_or_resume_running_work(self):
+        thread_id = self.sessions.create({"name": "Paused deployment"})["session"]["thread_id"]
+        self.sessions.send(thread_id, {"message": "Deploy."})
+        self.store.threads.checkpoint(thread_id, {
+            "phase": "deployment", "summary": "Waiting for approval.",
+            "next_actor": "user", "next_action": "Approve the deployment command.",
+        })
+        self.sessions._event({"id": 42, "method": "item/commandExecution/requestApproval",
+                              "params": {"threadId": thread_id}})
+        pending = dict(self.sessions.requests)
+        calls = list(self.sessions.rpc.calls)
+        before = self.sessions.work_thread(thread_id)
+        self.assertTrue(before["needs_attention"])
+        self.assertFalse(before["can_handle_response"])
+        receipt = {"handled": True, "handled_checkpoint_id": before["checkpoint"]["id"],
+                   "handled_completion_id": 0}
+        with self.assertRaises(CoordinationError):
+            self.sessions.update_work_thread(thread_id, receipt)
+        self.assertEqual(self.sessions.requests, pending)
+        self.assertEqual(self.sessions.rpc.calls, calls)
+        self.assertEqual(self.sessions.work_thread(thread_id), before)
+        self.sessions._event({"method": "serverRequest/resolved", "params": {"requestId": 42}})
+        self.assertEqual(self.sessions.work_thread(thread_id)["response_state"], "working")
+        with self.assertRaises(CoordinationError):
+            self.sessions.update_work_thread(thread_id, receipt)
+
     def test_later_hides_existing_response_but_surfaces_new_result_without_moving(self):
         self.start()
         self.checkpoint()

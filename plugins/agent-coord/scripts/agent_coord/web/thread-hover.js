@@ -14,7 +14,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   document.body.append(panel);
   let anchor = null, current = null, openTimer, closeTimer, request = 0, pointerInside = false, pinned = false, trail = [];
   const cache = new Map();
-  const PROVIDERS = {codex: "Codex", claude: "Claude", kimi: "Kimi", antigravity: "Antigravity"};
+  const PROVIDERS = {muse: "Muse Code", codex: "Codex", claude: "Claude", kimi: "Kimi", antigravity: "Antigravity"};
   const VERBS = {run: "Running", edit: "Editing", read: "Reading", tool: "Using"};
   function element(tag, text, className) {
     const el = document.createElement(tag); el.textContent = text; el.className = className || ""; return el;

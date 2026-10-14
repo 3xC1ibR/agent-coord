@@ -72,7 +72,9 @@ class ThreadTabs {
     this.save(true); this.render();
   }
   async activate(id, {force = false} = {}) {
-    if (id === this.selected || !force && !this.canNavigate()) return;
+    // Overview is also shown while a project's saved tab is loading. Honor an
+    // explicit click so it cancels restoration and becomes the saved destination.
+    if (id && id === this.selected || !force && !this.canNavigate()) return;
     try {
       if (id === "project-scratchpad" && this.cwd && this.onScratchpad) await this.onScratchpad();
       else await this.onSelect(id);

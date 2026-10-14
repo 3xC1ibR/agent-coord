@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coor
 from agent_coord.attention import (AttentionClassifier, AttentionStore, ClassificationError,
                                    CHOICES, MODEL, classify, context_for, history_messages, load_config, terminal_messages)
 from agent_coord.codex_app_server import BrowserSessions
-from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.store import CoordinationStore
 from test_codex_app_server import FakeCodex
 
 
@@ -169,15 +169,43 @@ class JevAttentionTests(unittest.TestCase):
                 self.assertEqual(self.thread()["attention_reason"], choice)
                 item = self.sessions.update_work_thread("terminal", {"seen": True})
                 self.assertEqual(item["needs_attention"], choice in {"blocked", "review"})
-                self.assertEqual(item["can_handle_response"], choice == "review")
-                if choice == "blocked":
-                    with self.assertRaises(CoordinationError):
-                        self.handle()
-                elif choice == "review":
-                    self.assertEqual(self.handle()["response_state"], "available")
+                self.assertEqual(item["can_handle_response"], choice in {"blocked", "review"})
+                if choice in {"blocked", "review"}:
+                    handled = self.handle()
+                    self.assertFalse(handled["needs_attention"])
+                    self.assertFalse(handled["can_handle_response"])
+                    self.assertEqual(handled["response_classification"], item["response_classification"])
+                    self.assertEqual(handled["response_state"], "action" if choice == "blocked" else "available")
+                    if choice == "blocked":
+                        self.assertEqual(handled["attention_reason"], "blocked")
                 else:
                     self.assertEqual(item["response_state"], "available")
                 self.assertEqual(item["attention"], "now")
+
+    def test_dismissed_blocker_survives_restart_and_new_reply_resurfaces(self):
+        self.finish()
+        self.request.return_value = decision("blocked")
+        self.worker.scan()
+        before = self.thread()
+        self.handle()
+        other = BrowserSessions(CoordinationStore(self.store.database_path), rpc_factory=FakeCodex)
+        self.addCleanup(other.close)
+        saved = other.work_thread("terminal")
+        self.assertFalse(saved["needs_attention"])
+        self.assertEqual(saved["attention_reason"], "blocked")
+        self.assertEqual(saved["checkpoint"], before["checkpoint"])
+        self.assertEqual(saved["attention"], before["attention"])
+        self.assertEqual(self.sessions.rpc.calls, [])
+        self.finish("next")
+        self.worker.scan()
+        newer = self.thread()
+        self.assertTrue(newer["needs_attention"])
+        self.assertTrue(newer["can_handle_response"])
+        self.assertEqual(newer["attention_reason"], "blocked")
+        delayed = self.sessions.update_work_thread("terminal", {"handled": True,
+            "handled_checkpoint_id": before["checkpoint"]["id"],
+            "handled_completion_id": before["turn_completion"]["id"]})
+        self.assertTrue(delayed["needs_attention"])
 
     def test_classification_keeps_inquiries_and_status_reports_out_of_done(self):
         for choice, prior, expected in (("findings", "investigation", "investigation"),

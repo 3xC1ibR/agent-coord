@@ -79,16 +79,16 @@
         this.$("schedule-effort").replaceChildren();
         this.$("schedule-dialog").showModal();
         if (this.targetThread) return;
-        const results = await Promise.allSettled(["codex", "claude", "antigravity", "kimi"].map(async client => {
+        const results = await Promise.allSettled(["codex", "claude", "antigravity", "kimi", "muse"].map(async client => {
           const models = (await this.api("models?client=" + client)).data;
           this.catalogs.set(client, models);
         }));
-        for (const [index, client] of ["codex", "claude", "antigravity", "kimi"].entries()) {
+        for (const [index, client] of ["codex", "claude", "antigravity", "kimi", "muse"].entries()) {
           if (results[index].status === "rejected") this.catalogs.delete(client);
         }
         const picker = this.$("schedule-model");
         for (const [client, models] of this.catalogs) {
-          const group = this.node("optgroup"); group.label = client === "kimi" ? "Kimi Code" : client === "antigravity" ? "Google Antigravity" : client === "codex" ? "Codex" : "Claude Code";
+          const group = this.node("optgroup"); group.label = client === "muse" ? "Muse Code" : client === "kimi" ? "Kimi Code" : client === "antigravity" ? "Google Antigravity" : client === "codex" ? "Codex" : "Claude Code";
           for (const model of models) {
             const option = this.node("option", model.displayName || model.model);
             option.value = JSON.stringify([client, model.model]); group.append(option);

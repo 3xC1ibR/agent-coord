@@ -91,8 +91,11 @@ Interpret the saved evidence carefully:
   findings, then routine Done / No action needed. Jev uses the requested outcome
   and recent exchange; uncertain classifications remain visible as Reply.
   Reading updates, findings, and success clears attention and returns the thread
-  to its stage. Required answers and approvals stay until resolved. Mark reviewed
-  acknowledges a classified review; a follow-up consumes the prior response.
+  to its stage. Dismiss acknowledges a response, including a blocked reply or saved
+  user-action request, while preserving its blocker and placement. It does not
+  approve or resume work; new responses and changed checkpoints can surface again.
+  Live approval and input dialogs stay pending until answered or cancelled.
+  A follow-up consumes the prior response.
 - Stages are New, Investigating, Planning, Orchestrating, Implementing, Validating,
   Deploying, and Done. Discussion/debugging map to Investigating.
   Orchestrating describes ongoing routing and coordination of specialists, even

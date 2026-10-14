@@ -108,14 +108,16 @@ class ThreadHandlingTests(unittest.TestCase):
         self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
         self.assertTrue(self.sessions.work_thread(thread_id)["needs_attention"])
 
-    def test_required_answers_and_running_approvals_cannot_be_handled_away(self):
+    def test_saved_actions_can_be_acknowledged_while_live_approvals_remain_pending(self):
         required = self.result(actor="user")
         self.assertEqual(required["response_state"], "input")
-        self.assertFalse(required["can_handle_response"])
-        with self.assertRaises(CoordinationError):
-            self.sessions.update_work_thread("terminal", self.receipt(required))
-        with self.assertRaises(CoordinationError):
-            self.store.threads.update("terminal", **self.receipt(required))
+        self.assertTrue(required["can_handle_response"])
+        dismissed = self.sessions.update_work_thread("terminal", self.receipt(required))
+        self.assertFalse(dismissed["needs_attention"])
+        self.assertEqual(dismissed["checkpoint"], required["checkpoint"])
+        self.assertEqual(dismissed["response_state"], "input")
+        duplicate = self.store.threads.update("terminal", **self.receipt(required))
+        self.assertFalse(duplicate["unhandled_response"])
         browser = self.sessions.create({})["session"]["thread_id"]
         self.sessions.send(browser, {"message": "Work."})
         for approval in (False, True):
@@ -168,8 +170,8 @@ class ThreadHandlingTests(unittest.TestCase):
         self.assertFalse(self.sessions.update_work_thread("terminal", self.receipt(failed))["needs_attention"])
         self.assertTrue(self.result("two", status="failed")["needs_attention"])
 
-    def test_http_handling_and_reload_preserve_the_thread(self):
-        before = self.result()
+    def test_http_handling_and_reload_preserve_a_saved_blocker(self):
+        before = self.result(phase="deployment", actor="user")
         server = make_ui_server(self.store, port=0, browser_sessions=self.sessions)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
@@ -186,7 +188,10 @@ class ThreadHandlingTests(unittest.TestCase):
         with urllib.request.urlopen(base + "threads") as response:
             listed = json.load(response)["data"]
         self.assertEqual(len(listed), 1)
-        self.assertEqual(listed[0]["response_state"], "available")
+        self.assertEqual(listed[0]["response_state"], "input")
+        self.assertFalse(listed[0]["needs_attention"])
+        self.assertFalse(listed[0]["can_handle_response"])
+        self.assertEqual(listed[0]["checkpoint"], before["checkpoint"])
         self.assertEqual(listed[0]["original_request"], before["original_request"])
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for browser response controls")

@@ -9,7 +9,7 @@ function setup(api) {
   let timer = 0;
   class Element extends EventTarget {
     constructor(id) { super(); Object.assign(this, {id, children: [], value: "", hidden: false, isConnected: true,
-      selectionStart: 0, selectionEnd: 0, selectionDirection: "forward", scrollTop: 0, scrollLeft: 0, attrs: {}}); }
+      selectionStart: 0, selectionEnd: 0, selectionDirection: "forward", scrollTop: 0, scrollLeft: 0, scrollHeight: 48, style: {}, attrs: {}}); }
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
     setAttribute(key, value) { this.attrs[key] = value; }

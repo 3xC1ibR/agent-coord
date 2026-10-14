@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs"), vm = require("node:vm");
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
 
-for (const client of ["claude", "antigravity", "kimi"]) test(`sending during a ${client} turn queues instead of issuing unsupported steering`, async () => {
+for (const client of ["claude", "antigravity", "kimi", "muse"]) test(`sending during a ${client} turn queues instead of issuing unsupported steering`, async () => {
   const elements = new Map(), calls = [];
   const c = {$: id => { if (!elements.has(id)) elements.set(id, {value: "follow up"}); return elements.get(id); },
     state: {selected: "one", detail: {running: true, activeTurn: "turn", work_thread: {client, browser_session: true}},

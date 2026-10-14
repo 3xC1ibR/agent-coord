@@ -30,6 +30,7 @@
   marks.antigravity = {"viewBox": "10 10 20 20", "paths": [{"path": "M29.6 20.2273C29.6 19.5182 29.5364 18.8364 29.4182 18.1818H20V22.05H25.3818C25.15 23.3 24.4455 24.3591 23.3864 25.0682V27.5773H26.6182C28.5091 25.8364 29.6 23.2727 29.6 20.2273Z", "fill": "#4285F4"}, {"path": "M20 30C22.7 30 24.9636 29.1045 26.6181 27.5773L23.3863 25.0682C22.4909 25.6682 21.3454 26.0227 20 26.0227C17.3954 26.0227 15.1909 24.2636 14.4045 21.9H11.0636V24.4909C12.7091 27.7591 16.0909 30 20 30Z", "fill": "#34A853"}, {"path": "M14.4045 21.9C14.2045 21.3 14.0909 20.6591 14.0909 20C14.0909 19.3409 14.2045 18.7 14.4045 18.1V15.5091H11.0636C10.3864 16.8591 10 18.3864 10 20C10 21.6136 10.3864 23.1409 11.0636 24.4909L14.4045 21.9Z", "fill": "#FBBC04"}, {"path": "M20 13.9773C21.4681 13.9773 22.7863 14.4818 23.8227 15.4727L26.6909 12.6045C24.9591 10.9909 22.6954 10 20 10C16.0909 10 12.7091 12.2409 11.0636 15.5091L14.4045 18.1C15.1909 15.7364 17.3954 13.9773 20 13.9773Z", "fill": "#E94235"}]};
   // A simple K monogram keeps Kimi distinct in the provider picker.
   marks.kimi = {viewBox: "0 0 24 24", path: "M4 3h4v7l8-7h5l-10 9 10 9h-5l-8-7v7H4z"};
+  marks.muse = {viewBox: "0 0 24 24", path: "M3 21V3h4l5 9 5-9h4v18h-4V11l-5 9-5-9v10z"};
   function logo(client, label = null) {
     const mark = Object.hasOwn(marks, client) ? marks[client] : null;
     if (!mark) return null;
@@ -102,7 +103,7 @@
         const provider = isModel ? JSON.parse(group.options[0]?.value || '["codex"]')[0] : null;
         const section = el("div", "model-group"); section.setAttribute("role", "group");
         const heading = el("div", "model-group-heading"); heading.id = prefix + "-group-" + index;
-        if (isModel) heading.append(logo(provider) || logo("codex"), el("span", "", provider === "kimi" ? "Kimi Code" : provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude" : "OpenAI"));
+        if (isModel) heading.append(logo(provider) || logo("codex"), el("span", "", provider === "muse" ? "Meta · Muse Code" : provider === "kimi" ? "Kimi Code" : provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude" : "OpenAI"));
         else heading.textContent = "Reasoning effort";
         section.setAttribute("aria-labelledby", heading.id); section.append(heading);
         for (const option of group.options) {

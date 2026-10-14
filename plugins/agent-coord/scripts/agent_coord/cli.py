@@ -85,7 +85,7 @@ def _parser() -> argparse.ArgumentParser:
 
     register = subcommands.add_parser("register", help="Register or refresh a session.")
     register.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
-    register.add_argument("--client", required=True, choices=["claude", "codex", "antigravity", "kimi"])
+    register.add_argument("--client", required=True, choices=["claude", "codex", "antigravity", "kimi", "muse"])
     register.add_argument("--cwd", default=os.getcwd())
     register.add_argument("--name")
 
@@ -149,7 +149,7 @@ def _parser() -> argparse.ArgumentParser:
     create_agent.add_argument("--from-session", help="Dispatcher; defaults to the current caller.")
     create_agent.add_argument("--cwd", default=os.getcwd())
     create_agent.add_argument("--name", required=True)
-    create_agent.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi"], default="codex")
+    create_agent.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
     create_agent.add_argument("--mode", choices=["orchestration"],
                               help="Record orchestration intent for this creation (default: unspecified).")
     create_agent.add_argument("--model")
@@ -169,7 +169,7 @@ def _parser() -> argparse.ArgumentParser:
     models = thread_commands.add_parser("models", help="Query the running app for supported provider models and effort levels.")
     models.add_argument("--from-session", help="Requester; defaults to the current caller.")
     models.add_argument("--cwd", default=os.getcwd())
-    models.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi"], default="codex")
+    models.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
     for control in (create_agent, settings, models):
         control.add_argument("--request-id", help="Stable idempotency key; reuse the same key when retrying this request.")
         control.add_argument("--wait", type=float, default=5, help="Wait up to 0–30 seconds for confirmation (default 5).")

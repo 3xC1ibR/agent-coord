@@ -87,7 +87,7 @@
         const card = this.node("article", null, "search-hit");
         const title = this.node("a", item.title, "search-title"); title.href = item.url;
         const heading = this.node("h2"); heading.append(title); card.append(heading);
-        const location = this.node("p", [item.cwd?.split("/").filter(Boolean).pop(), item.client === "kimi" ? "Kimi" : item.client === "antigravity" ? "Antigravity" : item.client === "claude" ? "Claude" : "Codex",
+        const location = this.node("p", [item.cwd?.split("/").filter(Boolean).pop(), item.client === "muse" ? "Muse Code" : item.client === "kimi" ? "Kimi" : item.client === "antigravity" ? "Antigravity" : item.client === "claude" ? "Claude" : "Codex",
           {now: "Now", later: "Later", archived: "Closed"}[item.attention]].filter(Boolean).join(" · "), "search-meta");
         location.title = item.cwd || ""; card.append(location);
         for (const match of item.matches) {

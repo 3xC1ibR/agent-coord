@@ -817,8 +817,8 @@ function agentThreadChildren(parent, tree, compact) {
     button.append(node("span", child.title, "agent-row-title"));
     const phase = threadGrouping.phaseLabel(child);
     const provider = child.client === "codex" ? "Codex" : child.client === "claude" ? "Claude Code"
-      : child.client === "kimi" ? "Kimi" : child.client === "antigravity" ? "Antigravity" : "Unknown provider";
-    const logoLabel = child.client === "codex" ? "OpenAI · Codex" : child.client === "claude" ? "Anthropic · Claude Code" : child.client === "kimi" ? "Moonshot · Kimi Code" : "Google · Antigravity";
+      : child.client === "muse" ? "Muse Code" : child.client === "kimi" ? "Kimi" : child.client === "antigravity" ? "Antigravity" : "Unknown provider";
+    const logoLabel = child.client === "codex" ? "OpenAI · Codex" : child.client === "claude" ? "Anthropic · Claude Code" : child.client === "muse" ? "Meta · Muse Code" : child.client === "kimi" ? "Moonshot · Kimi Code" : "Google · Antigravity";
     const logo = globalThis.providerLogo?.(child.client, logoLabel);
     const labels = [!logo && provider, phase, status.key !== "running" && status.label !== phase && status.label].filter(Boolean);
     const metadata = node("span", labels.join(" · "), "agent-row-status");
@@ -1126,7 +1126,7 @@ function renderSessionSettings() {
   $("workspace").textContent = session?.cwd || state.detail?.work_thread?.cwd || "";
   $("workspace").title = $("workspace").textContent;
   $("session-settings").hidden = !browserSession;
-  const providerName = session?.client === "kimi" ? "Kimi" : session?.client === "antigravity" ? "Antigravity" : session?.client === "claude" ? "Claude Code" : "Codex";
+  const providerName = session?.client === "muse" ? "Muse Code" : session?.client === "kimi" ? "Kimi" : session?.client === "antigravity" ? "Antigravity" : session?.client === "claude" ? "Claude Code" : "Codex";
   $("session-model").textContent = "Model · " + providerName + " · " + (session?.model || "Default");
   $("session-effort").textContent = "Reasoning · " + (session?.effort || "Model default");
   $("session-yolo").hidden = !session?.yolo;
@@ -1144,6 +1144,8 @@ function openSessionPermissions() {
   $("edit-yolo").checked = !!detail.session?.yolo;
   $("permissions-description").textContent = detail.session?.client === "claude"
     ? "With YOLO off, Claude Code uses its configured permissions and asks before restricted tool actions. Changes apply to the next turn."
+    : detail.session?.client === "muse"
+      ? "Muse workspace sandbox with approval for protected actions"
     : detail.session?.client === "kimi"
     ? "With YOLO off, Kimi uses manual tool approvals. Changes apply to the next turn."
     : detail.session?.client === "antigravity"
@@ -1181,7 +1183,7 @@ function renderStatus() {
     state.dispatchWorkspace?.update(state.viewThreads, state.detail);
   }
   if ($("dispatch-direct-label")) $("dispatch-direct-label").hidden = !dispatcher;
-  const composerLabel = dispatcher ? "Send a request" : work?.client === "kimi" ? "Message Kimi" : work?.client === "antigravity" ? "Message Antigravity" : work?.client === "claude" ? "Message Claude" : "Message Codex";
+  const composerLabel = dispatcher ? "Send a request" : work?.client === "muse" ? "Message Muse" : work?.client === "kimi" ? "Message Kimi" : work?.client === "antigravity" ? "Message Antigravity" : work?.client === "claude" ? "Message Claude" : "Message Codex";
   $("message-label").textContent = composerLabel;
   $("message").placeholder = composerLabel + " or drop images…";
   const archived = work?.attention === "archived";
@@ -1366,7 +1368,7 @@ function renderTimeline() {
           const images = (item.content || []).filter(c => c.type === "image");
           if (images.length) ChatImageAttachments.appendPreviews(document, body, images);
         }
-        message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
+        message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "muse" ? "Muse Code" : state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
         message.append(body);
         fragment.append(message);
       } else {
@@ -1502,7 +1504,7 @@ function renderRequests() {
     const box = node("section", null, "request"), params = request.params;
     const actions = node("div", null, "actions");
     if (request.method === "item/tool/requestUserInput") {
-      box.append(node("h3", (state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " has a question"));
+      box.append(node("h3", (state.detail?.work_thread?.client === "muse" ? "Muse Code" : state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " has a question"));
       const fields = [];
       for (const question of params.questions || []) {
         const label = node("label", question.question);
@@ -1539,7 +1541,7 @@ function renderRequests() {
       }
       actions.append(requestButton("Continue", "accept", request, () => ({content: Object.fromEntries(fields.map(([key, schema, input]) => [key, schema.type === "boolean" ? input.checked : ["number", "integer"].includes(schema.type) ? Number(input.value) : input.value]))})), requestButton("Cancel", "cancel", request));
     } else if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(request.method)) {
-      box.append(node("h3", (state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " is requesting approval"));
+      box.append(node("h3", (state.detail?.work_thread?.client === "muse" ? "Muse Code" : state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " is requesting approval"));
       if (params.reason) box.append(node("p", params.reason));
       box.append(node("pre", params.command || (params.permissions || params.networkApprovalContext ? JSON.stringify(params.permissions || params.networkApprovalContext, null, 2) : params.grantRoot || "Apply the file changes shown above.")));
       const choices = params.availableDecisions || (request.method === "item/permissions/requestApproval" ? ["accept", "decline"] : ["accept", "acceptForSession", "decline", "cancel"]);
@@ -1733,14 +1735,14 @@ function renderModelPicker() {
   const session = state.detail?.session, picker = $("model-picker");
   if (!session) { picker.disabled = true; globalThis.modelPicker?.sync(); renderEffortPicker(); return; }
   const draft = isSessionDraft(), client = session.client || "codex";
-  const clients = draft ? ["codex", "claude", "antigravity", "kimi"] : [client];
+  const clients = draft ? ["codex", "claude", "antigravity", "kimi", "muse"] : [client];
   const catalogs = state.modelCatalogs ||= new Map();
   const signature = JSON.stringify([clients, session.model, [...catalogs]]);
   if (picker.dataset.signature !== signature) {
     picker.dataset.signature = signature;
     picker.replaceChildren();
     for (const provider of clients) {
-      const group = node("optgroup"); group.label = provider === "kimi" ? "Kimi Code" : provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude Code" : "Codex";
+      const group = node("optgroup"); group.label = provider === "muse" ? "Muse Code" : provider === "kimi" ? "Kimi Code" : provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude Code" : "Codex";
       if (draft || !session.model) group.append(new Option(group.label + " default", modelValue(provider, "")));
       const models = catalogs.get(provider) || [];
       for (const model of models) group.append(new Option(model.displayName || model.model, modelValue(provider, model.model)));
@@ -1753,8 +1755,8 @@ function renderModelPicker() {
   picker.value = modelValue(client, session.model);
   picker.disabled = state.busy || state.detailRefreshing || !!state.detail.running || state.detail.work_thread?.attention === "archived" || !!state.newSessionDraft?.createdId && draft;
   const errors = clients.filter(provider => state.modelErrors?.has(provider));
-  $("model-picker-status").textContent = errors.length ? errors.map(provider => (provider === "kimi" ? "Kimi" : provider === "antigravity" ? "Antigravity" : provider === "claude" ? "Claude Code" : "Codex") + " models unavailable").join(" · ") : "";
-  if (["antigravity", "kimi"].includes(client) && state.modelErrors?.has(client)) $("model-picker-status").textContent = state.modelErrors.get(client);
+  $("model-picker-status").textContent = errors.length ? errors.map(provider => (provider === "muse" ? "Muse Code" : provider === "kimi" ? "Kimi" : provider === "antigravity" ? "Antigravity" : provider === "claude" ? "Claude Code" : "Codex") + " models unavailable").join(" · ") : "";
+  if (["antigravity", "kimi", "muse"].includes(client) && state.modelErrors?.has(client)) $("model-picker-status").textContent = state.modelErrors.get(client);
   globalThis.modelPicker?.sync();
   renderEffortPicker();
 }
@@ -1806,7 +1808,7 @@ async function loadModelCatalog(client) {
   return loading.get(client);
 }
 async function loadSessionModels() {
-  const clients = isSessionDraft() ? ["codex", "claude", "antigravity", "kimi"] : [state.detail?.session?.client || "codex"];
+  const clients = isSessionDraft() ? ["codex", "claude", "antigravity", "kimi", "muse"] : [state.detail?.session?.client || "codex"];
   // Share completed and in-flight requests with slash autocomplete.
   await Promise.all(clients.map(client => loadModelCatalog(client).catch(() => {})));
 }
@@ -2093,7 +2095,7 @@ $("search").onkeydown = event => {
   if (event.key === "Escape") { $("search").value = ""; filtersChanged(); }
 };
 async function sendMessage(mode = "steer") {
-  if (state.detail?.running && ["claude", "antigravity", "kimi"].includes(state.detail?.work_thread?.client)) mode = "queue";
+  if (state.detail?.running && ["claude", "antigravity", "kimi", "muse"].includes(state.detail?.work_thread?.client)) mode = "queue";
   const detail = state.detail;
   const dispatcher = !!detail?.work_thread?.dispatcher;
   const id = state.selected, text = $("message").value;

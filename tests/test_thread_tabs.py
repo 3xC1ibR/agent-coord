@@ -16,7 +16,8 @@ class ThreadTabsTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is required for conversation tab tests")
     def test_browser_behavior(self):
         result = subprocess.run(
-            ["node", "--test", str(Path(__file__).with_name("test_web_thread_tabs.js"))],
+            ["node", "--test", str(Path(__file__).with_name("test_web_thread_tabs.js")),
+             str(Path(__file__).with_name("test_web_session_cache.js"))],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

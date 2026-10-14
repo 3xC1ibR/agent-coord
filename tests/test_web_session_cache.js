@@ -330,7 +330,7 @@ test("project tabs respect Overview and the replacement selected after closing a
   await c.state.threadTabs.close("one");
   await c.switchTo("/b"); await c.switchTo("/a");
   assert.equal(c.state.selected, null); assert.equal(c.$("welcome").hidden, false);
-  await c.select("two"); c.goHome();
+  await c.state.threadTabs.activate("two"); await c.state.threadTabs.activate(null);
   await c.switchTo("/b"); await c.switchTo("/a");
   assert.equal(c.state.selected, null, "choosing Overview is remembered even with open tabs");
 });
@@ -380,6 +380,22 @@ test("project restoration does not overwrite newer navigation while loading the 
   const switching = c.switchTo("/a");
   await c.select("two"); gate.resolve(); await switching;
   assert.equal(c.state.selected, "two");
+});
+
+test("choosing Overview while a project loads cancels its remembered conversation", async () => {
+  const values = new Map(), storage = {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)};
+  const c = projectSetup(storage);
+  await c.select("one"); await c.switchTo("/b");
+  const gate = deferred(); c.savedViews.setProject = () => gate.promise;
+  const switching = c.switchTo("/a");
+  await c.state.threadTabs.activate(null);
+  gate.resolve(); await switching;
+  assert.equal(c.state.selected, null, "an explicit Overview click cancels pending restoration");
+  assert.equal(c.$("welcome").hidden, false);
+  await c.switchTo("/b"); await c.switchTo("/a");
+  assert.equal(c.state.selected, null, "returning to the project keeps Overview");
+  const reopened = projectSetup(storage); await reopened.restoreProjectTab();
+  assert.equal(reopened.state.selected, null, "Overview remains selected after reload");
 });
 
 test("new-session drafts and attachments remain separate for each project", async () => {

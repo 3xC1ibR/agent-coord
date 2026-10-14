@@ -4,20 +4,24 @@
   function describe(thread, handoff) {
     const state = thread.response_state, checkpoint = !thread.checkpoint_stale && thread.checkpoint;
     const completion = thread.turn_completion;
+    const acknowledged = ["input", "action"].includes(state) && thread.needs_attention === false &&
+      thread.unhandled_response === false && thread.can_handle_response === false &&
+      !["running", "needs input"].includes(thread.status);
     let kind, label;
-    if (["input", "action", "failed", "interrupted", "reply"].includes(state)) {
+    if (!acknowledged && ["input", "action", "failed", "interrupted", "reply"].includes(state)) {
       kind = "needs";
       label = ({input: "Needs your answer", action: "Needs your review", failed: "Failed", interrupted: "Interrupted", reply: "Response to check"})[state];
     } else if (state === "working" || thread.status === "running") { kind = "running"; label = "Working"; }
     else if (handoff && routed.has(handoff.state) &&
         (handoff.state !== "accepted" || !completion || completion.completed_at < handoff.createdAt)) {
       kind = "running"; label = handoff.state === "queued" ? "Queued" : "Starting";
-    } else if (completion || ["available", "update"].includes(state)) {
+    } else if (acknowledged || completion || ["available", "update"].includes(state)) {
       kind = "results";
-      label = ({findings: "Findings", done: "Completed", update: "Update"})[thread.response_classification?.choice] || "Result";
+      label = ({blocked: "Blocked", review: "Review requested", findings: "Findings", done: "Completed", update: "Update"})[
+        thread.attention_reason || thread.response_classification?.choice] || "Result";
     } else { kind = "running"; label = "Waiting"; }
     return {thread, kind, label, unread: !!thread.unread_result,
-      summary: kind === "needs" && checkpoint?.next_actor === "user" && checkpoint.next_action
+      summary: (kind === "needs" || acknowledged) && checkpoint?.next_actor === "user" && checkpoint.next_action
         ? checkpoint.next_action : checkpoint?.summary || (kind === "running" ? "Waiting for the next update." : "Open the conversation to read the response."),
       time: completion?.completed_at || thread.last_work_at || 0};
   }

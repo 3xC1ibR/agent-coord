@@ -43,8 +43,8 @@ class SendWorkPalette {
     const cwd = this.workspace();
     if (this.cwd !== cwd) { this.input.value = ""; this.locked = null; }
     this.cwd = cwd;
-    this.$("project").textContent = cwd.split("/").filter(Boolean).pop() || cwd;
-    this.$("project").title = cwd;
+    this.dialog.setAttribute("aria-label", "Send work in " + cwd);
+    this.input.title = "Send work in " + cwd;
     this.dialog.showModal(); this.changed(); this.input.focus({preventScroll: true});
     return true;
   }
@@ -80,10 +80,12 @@ class SendWorkPalette {
   }
   changed() {
     this.cancelSuggestions(); this.error.hidden = true;
+    this.input.style.height = "auto";
+    this.input.style.height = Math.min(180, this.input.scrollHeight) + "px";
     this.rows = this.choices(SendWorkPalette.matches(this.threads(), this.cwd, this.input.value));
     if (this.locked && !this.rows.some(r => r.id === this.locked.id)) this.rows.unshift(this.locked);
     this.active = this.locked ? this.rows.findIndex(r => r.id === this.locked.id) : 0;
-    this.hint.textContent = "Only your typed request is sent."; this.render();
+    this.hint.textContent = ""; this.hint.hidden = true; this.render();
     const message = this.input.value.trim();
     if (message.length < 2 || this.locked) return;
     const generation = this.generation;
@@ -98,7 +100,10 @@ class SendWorkPalette {
         }
         this.rows = this.choices([...merged.values()].slice(0, 8)); this.active = 0; this.render();
       } catch (error) {
-        if (generation === this.generation && error.name !== "AbortError") this.hint.textContent = "Showing local matches. You can still choose a destination.";
+        if (generation === this.generation && error.name !== "AbortError") {
+          this.hint.textContent = "Showing local matches. You can still choose a destination.";
+          this.hint.hidden = false;
+        }
       }
     }, 450);
   }

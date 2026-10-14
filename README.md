@@ -792,6 +792,52 @@ events refresh the agent's activity timestamp.
 The integration follows [T3 Code's Antigravity ACP support](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/acp/AntigravityAcpSupport.ts)
 and [runtime setup](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/antigravityAuthSupport.ts).
 
+Muse conversations use [Muse Code](https://dev.meta.ai/docs/muse-code) through
+its native `muse serve` session protocol. Install Muse Code and run `muse login`
+on the machine running Ribbon Field, then select **Muse Code** in the model
+picker. Model and reasoning choices come from the runtime; Muse Wonder Full
+requires access through a Muse Code subscription. Ribbon Field does not store
+the account's credentials or call the model API itself.
+
+The adapter is tested with Muse Code **1.4.8** and checks its exported stable
+schema fingerprint before starting a session. An unsupported fingerprint reports
+a setup error instead of attempting an incompatible conversation. Set
+`AGENT_COORD_MUSE_BIN` to a compatible executable if it is not on PATH.
+The usual `~/.local/bin/muse`, Homebrew, and
+`<Agent Coord state directory>/providers/muse/runtime/muse` locations are also
+discovered. App-owned hosts disable the launcher's automatic update; upgrade
+Muse deliberately after verifying adapter compatibility.
+
+Each conversation owns a Muse host. Default permissions select Muse's native
+`:ask-me` profile: workspace sandboxing and approval for protected actions.
+YOLO selects `:unrestricted` and disables the host sandbox. The adapter verifies
+the committed profile on both start and resume before sending a turn, including
+when changing back from full permissions. Muse's workspace trust still applies: open the workspace
+in Muse to review and trust its rules, skills, and project hooks. Hooks for
+coordination are merged with user hooks in a private temporary settings overlay;
+Muse 1.4.8 does not load hooks supplied with `-c hooks`. Credentials, trust and
+plugin files remain linked to the user's configuration, and global settings are
+not rewritten. The hooks explicitly carry the Ribbon Field session
+identity through Muse's filtered hook environment and guard structured file
+writes. Native Muse children share that write scope without consuming their
+parent's coordination inbox. As with other providers, shell-authored writes are
+outside the coordination path gate; Muse's native permission policy still applies.
+In default mode, coordination commands that access state outside the primary
+workspace need native shell elevation (`sandbox_permissions: require_escalated`)
+and its approval prompt. Muse receives this instruction with each turn. Approving
+an ordinary sandboxed command alone does not widen filesystem access; full
+permissions avoid these prompts.
+
+Follow-ups queue while Muse runs. Stop affects only that conversation; the next
+message resumes its native session, including after an app restart. Workspace
+changes require a new Muse conversation. Approvals preserve native choice and
+requirement identifiers, including changes to a pending approval. Single-choice
+questions accept custom text; multiple-choice questions use the native options.
+Fork and native terminal-session import are not exposed for Muse.
+
+The protocol contract and upstream test transcripts are published in
+[Meta's Muse Code SDK](https://github.com/meta-models/muse-code-sdk).
+
 Kimi conversations use the current [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code)
 through `kimi acp`. Install and authenticate it on the machine running Ribbon Field:
 
@@ -1117,11 +1163,14 @@ Attention shows the reason each thread surfaced. With Jev enabled, the order is
 **Blocked**, **Review requested**, **Update** about execution, **Findings ready**,
 then routine **✓ Done · No action needed**. Required input and failed turns take
 precedence. Reading an update, findings, or success clears its notification and
-returns the thread to its stage. Required actions stay until resolved. Uncertain
-or unavailable classifications remain visible as Reply and can be marked handled.
-**Mark reviewed** acknowledges a classified review; explicit checkpoint actions
-and active approvals require an answer or resolution. A follow-up consumes the
-previous response only when the new turn starts.
+returns the thread to its stage. **Dismiss** acknowledges a response, including
+a blocked reply or saved request for user action, and clears its current Attention
+item. The blocker, explanation, and thread placement remain unchanged; dismissal
+does not approve or resume work. A new response or changed checkpoint can surface
+the thread again. Live approval and input dialogs remain pending until answered
+or cancelled. Uncertain or unavailable classifications remain visible as Reply
+and can also be dismissed. A follow-up consumes the previous response only when
+the new turn starts.
 
 A delivered thread stays quietly visible in Done until you close it or move it.
 Pins order cards within a stage and never hide attention or override its priority.

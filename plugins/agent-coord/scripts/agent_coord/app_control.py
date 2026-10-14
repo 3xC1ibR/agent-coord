@@ -64,7 +64,7 @@ class AppControl:
             if not Path(cwd).is_dir():
                 raise CoordinationError("Choose an existing workspace directory.")
             payload["cwd"] = cwd
-            if payload.get("client", "codex") not in {"codex", "claude", "antigravity", "kimi"}:
+            if payload.get("client", "codex") not in {"codex", "claude", "antigravity", "kimi", "muse"}:
                 raise CoordinationError("Choose Codex, Claude Code, Google Antigravity, or Kimi Code as the session provider.")
         if operation == "create":
             if payload.get("mode") not in (None, "orchestration"):

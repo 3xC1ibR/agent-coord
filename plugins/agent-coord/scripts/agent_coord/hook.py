@@ -26,7 +26,7 @@ PATCH_PATH = re.compile(
 
 def _client() -> str:
     configured = os.environ.get("AGENT_COORD_CLIENT")
-    if configured in {"claude", "codex", "kimi", "antigravity"}:
+    if configured in {"claude", "codex", "kimi", "antigravity", "muse"}:
         return configured
     return "codex" if os.environ.get("PLUGIN_ROOT") else "claude"
 
@@ -144,7 +144,7 @@ def _record_tool(
 def _ensure_registered(
     store: CoordinationStore, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    session_id = (os.environ.get("AGENT_COORD_SESSION_ID") if _client() == "kimi" else None) or payload.get("session_id")
+    session_id = (os.environ.get("AGENT_COORD_SESSION_ID") if _client() in {"kimi", "muse"} else None) or payload.get("session_id")
     cwd = payload.get("cwd") or os.getcwd()
     if not isinstance(session_id, str) or not session_id:
         raise CoordinationError("Hook input does not contain a session_id.")
@@ -217,9 +217,30 @@ def handle(
     payload: dict[str, Any], store: CoordinationStore | None = None
 ) -> dict[str, Any]:
     coordination = store or CoordinationStore()
+    if _client() == "muse":
+        payload = dict(payload)
+        payload["tool_name"] = {"write_file": "Write", "edit_file": "Edit"}.get(payload.get("tool_name"), payload.get("tool_name"))
+        tool_input = payload.get("tool_input")
+        if payload.get("tool_name") == "apply_patch":
+            if isinstance(tool_input, str):
+                payload["tool_input"] = {"command": tool_input}
+            elif isinstance(tool_input, dict):
+                payload["tool_input"] = {**tool_input, "command": tool_input.get("patch", tool_input.get("input", tool_input.get("command")))}
     event = payload.get("hook_event_name")
     if not isinstance(event, str):
         raise CoordinationError("Hook input does not contain hook_event_name.")
+    owner = os.environ.get("AGENT_COORD_SESSION_ID")
+    if _client() == "muse" and owner and payload.get("session_id") != owner:
+        # Native reminder/subagent hooks inherit the parent's configuration.
+        # They share its write scope, but must never drain its inbox or change
+        # its registered workspace or turn state.
+        if event == "PreToolUse" and payload.get("tool_name") in WRITE_TOOLS:
+            session = coordination.get_session(owner)
+            paths, has_outside = _extract_paths(payload, session["cwd"])
+            reason = check_write(coordination, owner, paths, has_outside=has_outside)
+            if reason:
+                return _deny(event, reason)
+        return {}
     session = _ensure_registered(coordination, payload)
     session_id = session["session_id"]
 
@@ -398,7 +419,7 @@ def main() -> int:
             tool_name = payload.get("tool_name")
         if _client() == "antigravity":
             result = {"decision": "deny", "reason": f"Agent coordination check failed closed: {exc}"}
-        elif event == "PreToolUse" and tool_name in WRITE_TOOLS:
+        elif event == "PreToolUse" and (tool_name in WRITE_TOOLS or _client() == "muse" and tool_name in {"write_file", "edit_file"}):
             result = _deny(event, f"Agent coordination check failed closed: {exc}")
         else:
             result = {"systemMessage": f"Agent coordination hook warning: {exc}"}

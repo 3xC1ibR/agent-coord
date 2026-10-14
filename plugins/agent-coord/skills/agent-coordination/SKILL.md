@@ -373,7 +373,8 @@ agent-coord thread create \
 ```
 
 Use `--client claude` for Claude Code, `--client antigravity` for Google
-Antigravity, or `--client kimi` for Kimi Code. Model and effort are optional; select
+Antigravity, `--client kimi` for Kimi Code, or `--client muse` for Muse Code
+(including Muse Wonder when available to the account). Model and effort are optional; select
 them when the user authorized that choice. Add `--yolo` only with explicit
 authorization for full machine access without approval prompts. Defaults do
 not inherit the dispatcher's YOLO mode. Creation does not bypass hook trust.
@@ -548,7 +549,7 @@ then supplies the durable body and thread metadata. This keeps terminal workers
 alive while their delegation is unfinished and lets them coordinate with their
 parent or with one another.
 The loopback-only UI home page creates and manages independent Codex, Claude Code,
-Google Antigravity, and Kimi Code sessions through their native protocols: streamed conversations, approvals and
+Google Antigravity, Kimi Code, and Muse Code sessions through their native protocols: streamed conversations, approvals and
 questions, stop, rename, close, reopen, and resume. Browser sessions do not
 require a parent or Bead. **New session** and native **⌘N** open a draft conversation
 in the current workspace. Choose a provider's model in the composer’s
@@ -561,6 +562,19 @@ including K3 when available, come from the runtime. Kimi uses native approvals,
 queues follow-ups, and resumes the same native session after Stop. Its workspace
 is fixed when created; changing directories requires a new conversation. Native
 Kimi permissions are not an OS sandbox. The archived Python `kimi-cli` is unsupported.
+Muse uses `muse serve` and existing authentication from `muse login`. Models and
+reasoning levels come from `thread models --client muse`. It uses Muse's native
+`:ask-me` permission profile by default and `:unrestricted` for explicitly
+authorized full permissions. The selected profile is verified on start and
+resume. Follow-ups queue, Stop affects only that conversation, and the next
+message resumes the same native session. Its workspace is fixed; create a new
+conversation to change directories. Muse app agents can send and receive Agent
+Coord messages and create other app agents with the same CLI commands above.
+Native Muse children share the parent's write scope but do not consume its inbox.
+In default-mode Muse sessions, use the native bash tool's
+`sandbox_permissions: require_escalated` for Agent Coord commands when its
+database is outside the primary workspace, and allow Muse to request approval.
+Ordinary command approval does not grant access outside that shell sandbox.
 Claude uses the installed
 CLI and its configured permission rules; approvals and questions appear in the
 chat. Claude follow-ups queue while a turn runs, and Stop ends only that

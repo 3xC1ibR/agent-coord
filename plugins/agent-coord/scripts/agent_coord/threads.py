@@ -262,8 +262,11 @@ class ThreadStore:
         result["unread"] = bool(result["unread_result"] or (latest and latest["id"] > row["seen_checkpoint_id"]))
         result["unhandled_response"] = bool(
             (completion and completion["status"] != "interrupted" and completion["id"] > row["handled_completion_id"])
+            # A changed checkpoint after completion is a new result too. An
+            # unchanged heartbeat keeps its ID and does not revive attention.
             # Legacy threads may have a saved result without turn receipts.
-            or (not row["turn_key"] and latest and latest["id"] > row["handled_checkpoint_id"]))
+            or (latest and not result["checkpoint_stale"] and latest["id"] > row["handled_checkpoint_id"]
+                and (not row["turn_key"] or completion and completion["status"] != "interrupted")))
         result["links"] = [dict(link) for link in db.execute("SELECT * FROM thread_links WHERE thread_id = ? ORDER BY id", (row["thread_id"],))]
         if history:
             result["checkpoints"] = [dict(cp) for cp in db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC", (row["thread_id"],))]
@@ -424,13 +427,8 @@ class ThreadStore:
                            ("later" if snoozed_until is not UNSET else "now",
                             snoozed_until if snoozed_until is not UNSET else None, thread_id))
             if handled:
-                current = self._read(db, db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone())
-                checkpoint = current["checkpoint"] if not current["checkpoint_stale"] else None
-                if checkpoint and checkpoint["next_actor"] == "user" and checkpoint["next_action"]:
-                    raise CoordinationError("Answer the pending question or resolve the requested action before marking this response handled.")
-                classification = current["response_classification"]
-                if classification and classification["status"] == "classified" and classification["choice"] == "blocked":
-                    raise CoordinationError("Resolve the blocker before marking this response handled.")
+                # This receipt acknowledges the displayed result. It does not
+                # resolve its blocker, answer provider input, or resume work.
                 self._mark_receipts(db, thread_id, handled_checkpoint_id, handled_completion_id, kind="handled")
             if seen:
                 self._mark_seen(db, thread_id, seen_checkpoint_id, seen_completion_id)

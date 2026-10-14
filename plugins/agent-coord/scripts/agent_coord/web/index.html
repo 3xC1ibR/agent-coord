@@ -289,13 +289,16 @@
   <dialog id="project-dialog" aria-labelledby="project-title"><form id="project-form"><h2 id="project-title">New group</h2><p class="muted">Give related threads a shared home. You can add existing threads or start new sessions in this group.</p><label>Group name<input id="project-name" required maxlength="160" placeholder="Anthropic migration" autocomplete="off"></label><p id="project-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="project-dialog">Cancel</button><button id="save-project" class="primary" type="submit">Create group</button></div></form></dialog>
   <dialog id="organization-dialog" aria-labelledby="organization-title"><form id="organization-form"><h2 id="organization-title">Group</h2><p class="muted">Choose an existing group, create one, or select No group to remove this thread from its group.</p><div class="organization-fields"><label>Group (optional)<select id="edit-project"></select></label><label hidden>Repository<select id="edit-repository"></select></label></div><label id="edit-project-input" hidden>Group name<input id="edit-project-value" maxlength="160" placeholder="Anthropic migration"></label><label id="edit-repository-input" hidden>Repository directory<input id="edit-repository-value" maxlength="4000" placeholder="/path/to/repository"></label><p id="edit-organization-error" class="dialog-error" role="alert" hidden></p><p id="organization-workspace" class="muted"></p><div class="dialog-actions"><button type="button" class="quiet" data-close="organization-dialog">Cancel</button><button id="save-organization" class="primary">Save</button></div></form></dialog>
   <dialog id="project-target-dialog" aria-labelledby="project-target-title"><form method="dialog"><h2 id="project-target-title">Open project</h2><p id="project-target-path" class="muted"></p><div class="dialog-actions"><button value="cancel" class="quiet">Cancel</button><button value="window" class="quiet">New window</button><button value="tab" class="primary" autofocus>New tab</button></div></form></dialog>
-  <dialog id="send-work-dialog" class="send-work-dialog" aria-labelledby="send-work-title">
-    <header><h2 id="send-work-title">Send work</h2><span id="send-work-project"></span><button id="send-work-close" type="button" class="quiet" aria-label="Close Send work">Close</button></header>
-    <textarea id="send-work-input" rows="2" maxlength="100000" placeholder="What would you like to do?" role="combobox" aria-label="Request to send" aria-autocomplete="list" aria-expanded="true" aria-controls="send-work-results"></textarea>
+  <dialog id="send-work-dialog" class="send-work-dialog" aria-label="Send work">
+    <div class="send-work-entry">
+      <textarea id="send-work-input" rows="1" maxlength="100000" placeholder="What would you like to do?" role="combobox" aria-label="Request to send" aria-autocomplete="list" aria-expanded="true" aria-controls="send-work-results"></textarea>
+      <button id="send-work-close" type="button" class="quiet" aria-label="Close Send work">Esc</button>
+    </div>
     <div id="send-work-target" hidden>To <strong id="send-work-target-name"></strong><button id="send-work-unlock" class="quiet" type="button">Change</button></div>
     <ul id="send-work-results" role="listbox" aria-label="Send to a conversation"></ul>
     <p id="send-work-error" class="dialog-error" role="alert" hidden></p>
-    <footer><div><p id="send-work-status" role="status">Only your typed request is sent.</p><p class="send-work-keyboard-help">↑ ↓ Choose · Tab Lock destination · Enter Send</p><p class="send-work-touch-help">Tap a destination, then Send.</p></div><button id="send-work-submit" class="primary" type="button">Send</button></footer>
+    <p id="send-work-status" role="status" hidden></p>
+    <footer><p class="send-work-keyboard-help">↑ ↓ Choose · Tab Lock · ↵ Send</p><p class="send-work-touch-help">Choose a destination</p><button id="send-work-submit" class="quiet" type="button">Send</button></footer>
   </dialog>
   <div id="send-work-notice" role="status" aria-live="polite" hidden></div>
 </body>

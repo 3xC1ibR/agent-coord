@@ -142,6 +142,33 @@ test("dispatcher dismissal survives failure and cannot acknowledge required inpu
   assert.equal(workspace.threads[0].turn_completion.id, 9);
 });
 
+test("dismissed blockers leave dispatcher attention while retaining their explanation", async () => {
+  for (const response_state of ["action", "input"]) {
+    const {workspace, lists} = renderedWorkspace();
+    const item = completed("blocked", {response_state, attention_reason: "blocked",
+      needs_attention: true, unhandled_response: true, can_handle_response: true,
+      response_classification: {status: "classified", choice: "blocked"},
+      checkpoint: {id: 12, next_actor: "user", next_action: "Sign in to deploy.", summary: "Deployment is paused."}});
+    workspace.model.ids.add(item.thread_id);
+    workspace.dismissThread = async displayed => {
+      assert.equal(displayed, item);
+      workspace.update([{...item, needs_attention: false, unhandled_response: false, can_handle_response: false}]);
+    };
+    workspace.update([item]);
+    const card = lists["dispatcher-attention"].children[0];
+    await card.children.find(child => child.dataset.dispatchAction === "dismiss").onclick();
+    assert.equal(lists["dispatcher-attention"].children.length, 0);
+    assert.equal(lists["dispatcher-results"].children.length, 1);
+    const saved = describe(workspace.threads[0]);
+    assert.equal(saved.kind, "results");
+    assert.equal(saved.label, "Blocked");
+    assert.equal(saved.summary, "Sign in to deploy.");
+    assert.equal(saved.thread.attention, "now");
+    workspace.update([{...item, checkpoint: {...item.checkpoint, id: 13}}]);
+    assert.equal(lists["dispatcher-attention"].children.length, 1);
+  }
+});
+
 test("resizing to mobile retains the selected conversation even when geometry capacity is unchanged", async () => {
   const {workspace, panes, media, callbacks} = workspaceLifecycle({width: 800, height: 700});
   media.matches = false;

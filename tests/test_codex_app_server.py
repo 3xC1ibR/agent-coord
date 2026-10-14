@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
 import sys
 import tempfile
 import threading
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1008,6 +1010,129 @@ class BrowserSessionTests(unittest.TestCase):
         self.store.attach_delegation("delegated", "child")
         self.assertEqual([t["thread_id"] for t in self.sessions.list_work_threads()], [parent])
         self.assertEqual([t["thread_id"] for t in self.sessions.work_thread(parent)["children"]], ["child"])
+
+
+class DatabaseContentionTests(unittest.TestCase):
+    setUp = BrowserSessionTests.setUp
+    create = BrowserSessionTests.create
+
+    @contextmanager
+    def database_locked(self):
+        connect = self.store._connect
+
+        def short_timeout():
+            connection = connect()
+            connection.execute("PRAGMA busy_timeout = 20")
+            return connection
+
+        blocker = connect()
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            with patch.object(self.store, "_connect", short_timeout):
+                yield
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+    def test_locked_history_does_not_disconnect_rpc_or_lose_completion(self):
+        identity = self.create()
+        turn = self.sessions.send(identity, {"message": "Start"})["turn"]["id"]
+        client = CodexRPC(self.store, self.sessions._event, command=[sys.executable, "-u", "-c", '''
+import json,sys
+for line in sys.stdin:
+    message=json.loads(line)
+    if 'id' not in message: continue
+    if message['method']=='emit': print(json.dumps(message['params']),flush=True)
+    print(json.dumps({'id':message['id'],'result':{'ok':True}}),flush=True)
+'''])
+        self.addCleanup(client.close)
+        client.start()
+        calls_before = list(self.sessions.rpc.calls)
+        with self.database_locked():
+            item = {"id": "answer", "type": "agentMessage", "text": "Saved once"}
+            client.request("emit", {"method": "item/completed", "params": {
+                "threadId": identity, "turnId": turn, "item": item}}, timeout=2)
+            client.request("emit", {"method": "turn/completed", "params": {
+                "threadId": identity, "turn": {"id": turn, "status": "completed"}}}, timeout=2)
+            self.assertEqual(client.request("still-responsive", timeout=2), {"ok": True})
+            self.assertTrue(client.ready)
+            self.assertIsNone(client.process.poll())
+            self.assertNotIn(identity, self.sessions.active)
+            self.assertFalse(self.sessions.persistence.flush(timeout=.02))
+        self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        with self.store._connection() as db:
+            history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0])
+            completions = db.execute("SELECT status FROM turn_completions WHERE thread_id=?", (identity,)).fetchall()
+        self.assertEqual([row[0] for row in completions], ["completed"])
+        self.assertEqual([i["text"] for i in history["turns"][0]["items"] if i["type"] == "agentMessage"], ["Saved once"])
+        self.assertFalse(self.store.get_session(identity)["turn_active"])
+        self.assertNotIn(identity, self.sessions.dirty_histories)
+        self.assertEqual(self.sessions.rpc.calls, calls_before)  # No provider replay.
+
+    def test_disconnect_clears_runtime_state_before_database_recovers(self):
+        identity = self.create()
+        self.sessions.send(identity, {"message": "Start"})
+        other = self.create()
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_sessions SET client='claude' WHERE thread_id=?", (other,))
+        self.sessions.loaded_clients[other] = "claude"
+        self.sessions.active[other] = "other-turn"
+        self.sessions.requests = {"codex": {"params": {"threadId": identity}},
+                                  "claude": {"params": {"threadId": other}}}
+        self.sessions.queue.enqueue(identity, {"message": "Do not send automatically"})
+        with self.database_locked():
+            self.sessions._event({"method": "bridge/disconnected", "params": {}})
+            self.assertNotIn(identity, self.sessions.active)
+            self.assertNotIn(identity, self.sessions.loaded)
+            self.assertIn(other, self.sessions.active)
+            self.assertIn(other, self.sessions.loaded)
+            self.assertEqual(set(self.sessions.requests), {"claude"})
+            self.assertEqual(self.sessions.events[-1]["method"], "bridge/disconnected")
+        self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        self.assertIsNotNone(self.store.get_session(identity)["ended_at"])
+        self.assertIsNone(self.store.get_session(other)["ended_at"])
+        self.assertEqual(self.sessions.queue.list(identity)[0]["state"], "paused")
+
+    def test_next_prompt_waits_for_deferred_completion_without_resubmission(self):
+        identity = self.create()
+        first = self.sessions.send(identity, {"message": "First"})["turn"]["id"]
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with self.database_locked():
+                turn = self.sessions.rpc.threads[identity]["turns"][-1]
+                turn["status"] = "completed"
+                self.sessions._event({"method": "turn/completed", "params": {
+                    "threadId": identity, "turn": turn}})
+                sending = executor.submit(self.sessions.send, identity, {"message": "Second"})
+                with self.assertRaises(FutureTimeoutError):
+                    sending.result(timeout=.03)
+                self.assertEqual(len(self.sessions.rpc.threads[identity]["turns"]), 1)
+            second = sending.result(timeout=3)["turn"]["id"]
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(self.sessions.rpc.threads[identity]["turns"]), 2)
+        self.assertEqual(self.sessions.active[identity], second)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT turn_id FROM work_threads WHERE thread_id=?", (identity,)).fetchone()[0], second)
+            self.assertEqual(db.execute("SELECT turn_key FROM turn_completions WHERE thread_id=?", (identity,)).fetchone()[0], first)
+
+    def test_turn_bookkeeping_retries_in_order_without_reapplying_deltas(self):
+        identity = self.create()
+        with self.database_locked():
+            for turn in ("first", "second"):
+                self.sessions._event({"method": "turn/started", "params": {
+                    "threadId": identity, "turn": {"id": turn, "items": []}}})
+                self.sessions._event({"method": "item/started", "params": {
+                    "threadId": identity, "turnId": turn,
+                    "item": {"id": turn + "-answer", "type": "agentMessage", "text": ""}}})
+                self.sessions._event({"method": "item/agentMessage/delta", "params": {
+                    "threadId": identity, "turnId": turn, "itemId": turn + "-answer", "delta": "once"}})
+                self.sessions._event({"method": "turn/completed", "params": {
+                    "threadId": identity, "turn": {"id": turn, "status": "completed"}}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        with self.store._connection() as db:
+            completions = db.execute("SELECT turn_key FROM turn_completions WHERE thread_id=? ORDER BY id", (identity,)).fetchall()
+            history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0])
+        self.assertEqual([r[0] for r in completions], ["first", "second"])
+        self.assertEqual([t["items"][0]["text"] for t in history["turns"]], ["once", "once"])
 
 
 class RPCProcessTests(unittest.TestCase):

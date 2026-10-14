@@ -42,38 +42,40 @@ function cardSetup(item) {
   return c;
 }
 
-test("Dismiss on attention and ordinary overview cards handles the displayed result without opening it", async () => {
+test("Dismiss handles replies and saved blockers without opening the card", async () => {
   for (const inAttention of [true, false]) {
-    const item = response({links: [], status: "idle"}), c = cardSetup(item);
-    c.api = async (path, body) => {
-      assert.equal(path, "threads/one");
-      assert.equal(body.handled, true);
-      assert.equal(body.handled_checkpoint_id, 12);
-      assert.equal(body.handled_completion_id, 8);
-      return {...item, can_handle_response: false};
-    };
-    const card = c.threadCard(item, false, inAttention);
-    const controls = card.children.find(child => child.className === "card-actions");
-    const endActions = controls.children.find(child => child.className === "card-end-actions");
-    const dismiss = endActions.children.find(child => child.dataset.action === "handle");
-    assert.deepEqual(Array.from(endActions.children, child => child.dataset.action), ["handle"]);
-    const more = card.children.find(child => child.className === "card-title-actions").children.find(child => child.dataset.action === "more");
-    assert.equal(more.textContent, "…");
-    let menu;
-    c.state.threadActions = {notify() {}, showMenu: (trigger, title, items) => { menu = items; }};
-    more.onclick({stopPropagation() {}});
-    assert.deepEqual(Array.from(menu, item => item.label), ["Add to group", "Pin", "Move to Later…"]);
-    assert.ok(dismiss);
-    assert.equal(dismiss.textContent, "Dismiss");
-    assert.equal(dismiss.attributes["aria-label"], "Dismiss · Recommendation");
-    let stopped = false;
-    await dismiss.onclick({stopPropagation() { stopped = true; }});
-    assert.equal(stopped, true);
-    assert.equal(c.state.selected, null);
+    for (const response_state of ["reply", "action", "input"]) {
+      const item = response({links: [], status: "idle", response_state}), c = cardSetup(item);
+      c.api = async (path, body) => {
+        assert.equal(path, "threads/one");
+        assert.equal(body.handled, true);
+        assert.equal(body.handled_checkpoint_id, 12);
+        assert.equal(body.handled_completion_id, 8);
+        return {...item, can_handle_response: false};
+      };
+      const card = c.threadCard(item, false, inAttention);
+      const controls = card.children.find(child => child.className === "card-actions");
+      const endActions = controls.children.find(child => child.className === "card-end-actions");
+      const dismiss = endActions.children.find(child => child.dataset.action === "handle");
+      assert.deepEqual(Array.from(endActions.children, child => child.dataset.action), ["handle"]);
+      const more = card.children.find(child => child.className === "card-title-actions").children.find(child => child.dataset.action === "more");
+      assert.equal(more.textContent, "…");
+      let menu;
+      c.state.threadActions = {notify() {}, showMenu: (trigger, title, items) => { menu = items; }};
+      more.onclick({stopPropagation() {}});
+      assert.deepEqual(Array.from(menu, item => item.label), ["Add to group", "Pin", "Move to Later…"]);
+      assert.ok(dismiss);
+      assert.equal(dismiss.textContent, "Dismiss");
+      assert.equal(dismiss.attributes["aria-label"], "Dismiss · Recommendation");
+      let stopped = false;
+      await dismiss.onclick({stopPropagation() { stopped = true; }});
+      assert.equal(stopped, true);
+      assert.equal(c.state.selected, null);
+    }
   }
 });
 
-test("Dismiss is absent for required input and disabled while the card is saving or closing", () => {
+test("Dismiss is absent for live input and disabled while the card is saving or closing", () => {
   const item = response({links: []}), c = cardSetup(item);
   const control = () => c.threadCard(item, false, true).children
     .find(child => child.className === "card-actions")?.children.find(child => child.className === "card-end-actions")
@@ -131,7 +133,7 @@ test("repeated clicks submit once, and a newer response returned by the API rema
   assert.equal(grouping.awaitsUser(c.state.sessions[0]), true);
 });
 
-test("required input cannot be dismissed with the generic handled action", async () => {
+test("live input cannot be dismissed with the generic handled action", async () => {
   const c = setup(); c.api = () => assert.fail("must not submit");
   await c.markThreadHandled(response({response_state: "input", can_handle_response: false}));
 });

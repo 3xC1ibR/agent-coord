@@ -29,7 +29,7 @@ WAKEABLE_ACTIVITIES = {"idle", "waiting"}
 WAKE_TRANSPORTS = {"managed-pty", "zellij"}
 LEASE_MODES = {"write", "validation"}
 MESSAGE_CLASSIFICATIONS = {"action_required", "informational", "closure"}
-CLIENTS = {"claude", "codex", "antigravity", "kimi"}
+CLIENTS = {"claude", "codex", "antigravity", "kimi", "muse"}
 SCOPE_REQUEST_THREAD_PREFIX = "scope-request:"
 _WILDCARD = re.compile(r"[*?[]")
 
@@ -893,7 +893,7 @@ class CoordinationStore:
         if not session_id.strip():
             raise CoordinationError("Session ID must not be empty.")
         if client not in CLIENTS:
-            raise CoordinationError("Client must be claude, codex, antigravity, or kimi.")
+            raise CoordinationError("Client must be claude, codex, antigravity, kimi, or muse.")
         repository = str(Path(cwd).resolve())
         now = self.clock()
         with self._connection() as connection:

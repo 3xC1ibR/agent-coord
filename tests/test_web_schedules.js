@@ -26,6 +26,7 @@ function setup(t) {
     claude: [{model: "sonnet", defaultReasoningEffort: "low", supportedReasoningEfforts: [{reasoningEffort: "low"}]}],
     antigravity: [{model: "gemini-test", displayName: "Gemini Test", supportedReasoningEfforts: []}],
     kimi: [{model: "k3", displayName: "K3", defaultReasoningEffort: "high", supportedReasoningEfforts: [{reasoningEffort: "low"}, {reasoningEffort: "high"}, {reasoningEffort: "max"}]}],
+    muse: [{model: "muse-wonder-1.0", displayName: "Muse Wonder", defaultReasoningEffort: "high", supportedReasoningEfforts: [{reasoningEffort: "high"}, {reasoningEffort: "max"}]}],
   };
   let draft = {message: "Run the backfill", settings: {cwd: "/repo", model: "luna", effort: "high", yolo: true}};
   const ui = new ScheduledPromptsUI({document, getDraft: () => draft, onSaved: item => saved.push(item),
@@ -111,6 +112,17 @@ test("model selection updates supported reasoning and permissions stay opt-in", 
   const post = c.calls.find(call => call.path === "schedules" && call.body);
   assert.equal(post.body.settings.client, "kimi");
   assert.equal(post.body.settings.effort, "max");
+});
+
+test("Muse schedules retain the chosen native model and reasoning effort", async t => {
+  const c = setup(t);
+  c.setDraft({message: "Review changes", settings: {cwd: "/repo", client: "muse", model: "muse-wonder-1.0", effort: "max"}});
+  await c.ui.open();
+  assert.equal(c.$("schedule-model").value, JSON.stringify(["muse", "muse-wonder-1.0"]));
+  assert.deepEqual(c.$("schedule-effort").options.map(option => option.value), ["high", "max"]);
+  await c.ui.save();
+  assert.deepEqual(c.calls.find(call => call.path === "schedules" && call.body).body.settings,
+    {cwd: "/repo", client: "muse", model: "muse-wonder-1.0", effort: "max", yolo: false});
 });
 
 test("unavailable saved model requires a new explicit selection", async t => {
