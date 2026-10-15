@@ -172,7 +172,6 @@ class OrganizationStore:
         return visited
 
     def list(self) -> dict:
-        self.backfill()
         with self.store._connection() as db:
             return {
                 "repositories": [dict(row) for row in db.execute("SELECT * FROM work_repositories ORDER BY name COLLATE NOCASE, root")],
@@ -180,21 +179,31 @@ class OrganizationStore:
             }
 
     @staticmethod
-    def describe(db, thread: dict) -> dict:
+    def describe(db, thread: dict, *, association=UNSET) -> dict:
         """Expose logical associations while preserving legacy artifact context."""
         thread["workspace_id"] = thread.pop("project_id")
         thread["workspace_root"] = thread.pop("project_root")
-        association = db.execute("""SELECT o.repository_id, r.name AS repository_name,
+        if association is UNSET:
+            association = OrganizationStore.association(db, thread["thread_id"])
+        if association is None:
+            # An older client may create a thread after startup repair. Repair
+            # that record only; ordinary reads never scan unrelated threads.
+            OrganizationStore.ensure_thread(db, thread["thread_id"], thread["cwd"])
+            association = OrganizationStore.association(db, thread["thread_id"])
+        thread.update(dict(association))
+        for link in thread["links"]:
+            link["workspace_id"] = link.pop("project_id")
+        return thread
+
+    @staticmethod
+    def association(db, thread_id):
+        return db.execute("""SELECT o.repository_id, r.name AS repository_name,
                                             r.root AS repository_root, o.project_id,
                                             p.name AS project_name
                                      FROM thread_organization o
                                      LEFT JOIN work_repositories r ON r.id = o.repository_id
                                      LEFT JOIN named_projects p ON p.id = o.project_id
-                                     WHERE o.thread_id = ?""", (thread["thread_id"],)).fetchone()
-        thread.update(dict(association))
-        for link in thread["links"]:
-            link["workspace_id"] = link.pop("project_id")
-        return thread
+                                     WHERE o.thread_id = ?""", (thread_id,)).fetchone()
 
     def create_project(self, name: str, cwd: str | None = None) -> dict:
         if not isinstance(name, str) or not name.strip() or len(name) > 160:

@@ -692,26 +692,35 @@ class BrowserSessions:
             return [{k: v for k, v in request.items() if k not in {"id", "notification_claimed"}}
                     for request in self.requests.values() if request["params"].get("threadId") == thread_id]
 
-    def _app_agent_creators(self) -> dict:
-        with self.store._connection() as db:
+    def _app_agent_creators(self, *, db=None) -> dict:
+        if db is None:
+            with self.store._connection() as connection:
+                creators = app_agent_creators(connection)
+        else:
             creators = app_agent_creators(db)
         for creator in creators.values():
             cwd = creator.pop("cwd")
             creator["available"] = bool(cwd and matches_workspace(cwd, self.cwd))
         return creators
 
-    def work_thread(self, thread_id: str, *, history=True, _creators=None) -> dict:
-        thread = self.store.threads.get(thread_id, history=history)
+    def work_thread(self, thread_id: str, *, history=True, _creators=None, _inventory=None) -> dict:
+        thread = (self.store.threads.get(thread_id, history=history) if _inventory is None
+                  else _inventory.projected[thread_id])
         if not matches_workspace(thread["cwd"], self.cwd):
             raise CoordinationError("Work thread not found in this workspace.")
         creators = self._app_agent_creators() if _creators is None else _creators
         thread["created_by"] = creators.get(thread_id)
         thread["created_by_thread_id"] = thread["created_by"]["thread_id"] if thread["created_by"] else None
         thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
-        with self.store._connection() as db:
-            thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
-        thread["dispatcher"] = self.dispatch.settings(thread_id)["enabled"] if hasattr(self, "dispatch") else False
-        session = self.store.get_session(thread_id)
+        if _inventory is None:
+            with self.store._connection() as db:
+                thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
+            thread["dispatcher"] = self.dispatch.settings(thread_id)["enabled"] if hasattr(self, "dispatch") else False
+            session = self.store.get_session(thread_id)
+        else:
+            thread["browser_session"] = thread_id in _inventory.browser
+            thread["dispatcher"] = thread_id in _inventory.dispatchers
+            session = _inventory.sessions[thread_id]
         thread["last_tool"] = session.get("last_tool")
         with self.lock:
             waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
@@ -793,12 +802,17 @@ class BrowserSessions:
                                   and (thread["browser_session"] or session["presence"] == "offline"))
         thread["forked_from"] = None
         if thread["forked_from_thread_id"]:
-            source = self.store.threads.get(thread["forked_from_thread_id"])
-            thread["forked_from"] = {"thread_id": source["thread_id"], "title": source["title"]}
-        with self.store._connection() as db:
-            thread["forked_sessions"] = [dict(row) for row in db.execute(
-                """SELECT thread_id, title, created_at, forked_from_turn_id FROM work_threads
-                   WHERE forked_from_thread_id = ? ORDER BY created_at, thread_id""", (thread_id,))]
+            source_id = thread["forked_from_thread_id"]
+            source_title = (self.store.threads.get(source_id)["title"] if _inventory is None
+                            else _inventory.titles[source_id])
+            thread["forked_from"] = {"thread_id": source_id, "title": source_title}
+        if _inventory is None:
+            with self.store._connection() as db:
+                thread["forked_sessions"] = [dict(row) for row in db.execute(
+                    """SELECT thread_id, title, created_at, forked_from_turn_id FROM work_threads
+                       WHERE forked_from_thread_id = ? ORDER BY created_at, thread_id""", (thread_id,))]
+        else:
+            thread["forked_sessions"] = _inventory.forks[thread_id]
         if history:
             with self.store._connection() as db:
                 children = db.execute("SELECT DISTINCT d.child_session_id FROM delegations d JOIN work_threads t ON t.thread_id = d.child_session_id WHERE d.parent_session_id = ?", (thread_id,)).fetchall()
@@ -806,12 +820,15 @@ class BrowserSessions:
         return thread
 
     def list_work_threads(self, *, archived=False) -> list[dict]:
+        from .thread_inventory import ThreadInventory
         with self.store._connection() as db:
-            children = {row[0] for row in db.execute("SELECT child_session_id FROM delegations d JOIN work_threads p ON p.thread_id = d.parent_session_id WHERE child_session_id IS NOT NULL")}
-        creators = self._app_agent_creators()
-        return [self.work_thread(t["thread_id"], history=False, _creators=creators)
-                for t in self.store.threads.list(archived=archived)
-                if t["thread_id"] not in children and matches_workspace(t["cwd"], self.cwd)]
+            inventory = ThreadInventory(self.store.threads, db, archived=archived)
+            inventory.load_runtime(db)
+            inventory.creators = self._app_agent_creators(db=db)
+            inventory.projected = {row["thread_id"]: inventory.read(db, row) for row in inventory.rows
+                                   if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)}
+        return [self.work_thread(thread_id, history=False, _creators=inventory.creators, _inventory=inventory)
+                for thread_id in inventory.projected]
 
     def update_work_thread(self, thread_id: str, body: dict) -> dict:
         with self._thread_lock(thread_id):

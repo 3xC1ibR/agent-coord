@@ -227,30 +227,35 @@ class ThreadStore:
                 self._save_link(db, session_id, ("bead", session["bead_id"], session["bead_id"], existing["project_id"] if existing else project_id))
         return self.get(session_id)
 
-    def _read(self, db, row, *, history=False):
+    def _read(self, db, row, *, history=False, inventory=None):
         result = dict(row)
         result["project_cwd"] = result["project_cwd"] or result["cwd"]
         deadline = row["snoozed_until"]
         result["snoozed"] = bool(deadline is not None and row["attention"] == "later" and deadline > self.store.clock())
         result["snooze_due"] = bool(deadline is not None and row["attention"] == "now" and deadline <= self.store.clock())
         result["pinned"] = bool(row["pinned"])
-        latest = db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1", (row["thread_id"],)).fetchone()
+        latest = (inventory.latest.get(row["thread_id"]) if inventory is not None else
+                  db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1", (row["thread_id"],)).fetchone())
         result["checkpoint"] = dict(latest) if latest else None
         result["checkpoint_stale"] = bool(latest and row["turn_started_at"] and latest["refreshed_at"] < row["turn_started_at"])
-        completion = db.execute("""SELECT id, status, completed_at FROM turn_completions
+        completion = inventory.completion(row["thread_id"]) if inventory is not None else db.execute("""SELECT id, status, completed_at FROM turn_completions
                                    WHERE thread_id = ? AND turn_key = ?""",
                                 (row["thread_id"], row["turn_key"])).fetchone()
         result["turn_completion"] = dict(completion) if completion else None
-        result["response_classification"] = self.attention.read(db, result)
+        result["response_classification"] = (inventory.classification(result) if inventory is not None
+                                              else self.attention.read(db, result))
         # Completing a reply does not advance an investigation to delivery. Keep
         # its last real activity, including checkpoints written by older clients.
         phase = latest["phase"] if latest else "new"
         classification = result["response_classification"]
         choice = classification["choice"] if classification and classification["status"] == "classified" else None
         if phase == "finished":
-            previous = db.execute("""SELECT phase FROM thread_checkpoints WHERE thread_id = ?
-                                     AND phase != 'finished' ORDER BY id DESC LIMIT 1""", (row["thread_id"],)).fetchone()
-            prior = previous["phase"] if previous else "new"
+            if inventory is not None:
+                prior = inventory.prior.get(row["thread_id"], "new")
+            else:
+                previous = db.execute("""SELECT phase FROM thread_checkpoints WHERE thread_id = ?
+                                         AND phase != 'finished' ORDER BY id DESC LIMIT 1""", (row["thread_id"],)).fetchone()
+                prior = previous["phase"] if previous else "new"
             if choice == "findings":
                 phase = prior if prior in {"discussion", "investigation", "planning", "orchestrating"} else "investigation"
             elif choice in {"update", "blocked", "review"}:
@@ -268,9 +273,12 @@ class ThreadStore:
             # Legacy threads may have a saved result without turn receipts.
             or (latest and not result["checkpoint_stale"] and latest["id"] > row["handled_checkpoint_id"]
                 and (not row["turn_key"] or completion and completion["status"] != "interrupted")))
-        result["links"] = [dict(link) for link in db.execute("SELECT * FROM thread_links WHERE thread_id = ? ORDER BY id", (row["thread_id"],))]
+        result["links"] = [dict(link) for link in (inventory.links[row["thread_id"]] if inventory is not None else
+                           db.execute("SELECT * FROM thread_links WHERE thread_id = ? ORDER BY id", (row["thread_id"],)))]
         if history:
             result["checkpoints"] = [dict(cp) for cp in db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC", (row["thread_id"],))]
+        if inventory is not None:
+            return self.organization.describe(db, result, association=inventory.associations.get(row["thread_id"]))
         return self.organization.describe(db, result)
 
     _SELECT = """SELECT t.*, p.name AS project_name, p.root AS project_root,
@@ -279,7 +287,6 @@ class ThreadStore:
                  JOIN sessions s ON s.session_id = t.thread_id"""
 
     def get(self, thread_id: str, *, history=False) -> dict:
-        self.organization.backfill()
         with self.store._connection() as db:
             self._wake_snoozes(db)
             row = db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone()
@@ -313,11 +320,11 @@ class ThreadStore:
             return {"text": row["text"] if row else ""}
 
     def list(self, *, archived=False, cwd=None, repository_id=UNSET, project_id=UNSET) -> list[dict]:
-        self.organization.backfill()
+        from .thread_inventory import ThreadInventory
         with self.store._connection() as db:
-            self._wake_snoozes(db)
-            rows = db.execute(self._SELECT + " WHERE (t.attention = 'archived') = ? ORDER BY t.updated_at DESC, t.thread_id", (int(archived),)).fetchall()
-            threads = [self._read(db, row) for row in rows if cwd is None or row["project_root"] == project_root(cwd)]
+            inventory = ThreadInventory(self, db, archived=archived)
+            root = project_root(cwd) if cwd is not None else None
+            threads = [inventory.read(db, row) for row in inventory.rows if root is None or row["project_root"] == root]
             return [thread for thread in threads
                     if (repository_id is UNSET or thread["repository_id"] == repository_id)
                     and (project_id is UNSET or thread["project_id"] == project_id)]
@@ -360,7 +367,6 @@ class ThreadStore:
                       WHERE attention = 'later' AND snoozed_until <= ?""", (now,))
 
     def snooze_notifications(self, *, include_claimed=False) -> list[dict]:
-        self.organization.backfill()
         with self.store._connection() as db:
             self._wake_snoozes(db)
             rows = db.execute("""SELECT n.id, n.thread_id, n.snoozed_until, 'snooze' AS status,
@@ -521,7 +527,6 @@ class ThreadStore:
             return db.execute("SELECT COALESCE(MAX(id), 0) FROM turn_completions").fetchone()[0]
 
     def completions_after(self, sequence: int) -> dict:
-        self.organization.backfill()
         with self.store._connection() as db:
             latest = db.execute("SELECT COALESCE(MAX(id), 0) FROM turn_completions").fetchone()[0]
             rows = db.execute("""SELECT c.id, c.thread_id, c.status, c.completed_at,

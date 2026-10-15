@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
@@ -186,6 +187,37 @@ class OrganizationTests(unittest.TestCase):
         self.assertEqual(self.organization.list()["projects"], [])
         with self.store._connection() as db:
             self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_normal_reads_never_run_global_backfill(self):
+        with patch.object(self.store.threads.organization, "backfill", side_effect=AssertionError("global repair")):
+            self.store.threads.get("code")
+            self.store.threads.list()
+            self.store.threads.organization.list()
+            self.store.threads.snooze_notifications()
+            self.store.threads.completions_after(0)
+
+    def test_late_legacy_record_is_repaired_without_touching_other_records(self):
+        with self.store._connection() as db:
+            db.execute("DELETE FROM thread_organization")
+        with patch.object(self.store.threads.organization, "backfill", side_effect=AssertionError("global repair")):
+            thread = self.store.threads.get("code")
+        self.assertEqual(thread["repository_root"], str(self.repo))
+        self.assertIsNone(thread["project_id"])
+        with self.store._connection() as db:
+            self.assertEqual([row[0] for row in db.execute("SELECT thread_id FROM thread_organization")], ["code"])
+
+    def test_current_creation_writes_organization_before_returning(self):
+        describe = self.store.threads.organization.describe
+
+        def verify_before_read(db, thread, **kwargs):
+            self.assertIsNotNone(db.execute("SELECT 1 FROM thread_organization WHERE thread_id = ?",
+                                            (thread["thread_id"],)).fetchone())
+            return describe(db, thread, **kwargs)
+
+        with patch.object(self.store.threads.organization, "backfill", side_effect=AssertionError("global repair")), \
+             patch.object(self.store.threads.organization, "describe", side_effect=verify_before_read):
+            self.store.register(session_id="new", client="codex", cwd=str(self.repo))
+        self.assertEqual(self.association("new")["repository_id"], self.association("code")["repository_id"])
 
 
 if __name__ == "__main__":
