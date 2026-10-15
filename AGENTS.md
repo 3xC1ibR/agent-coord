@@ -64,6 +64,7 @@ After changing a file under `plugins/agent-coord/`, follow **Refresh installed
 plugins after changes** in `README.md` before live testing. Use the documented
 cachebuster helper and reinstall commands. Do not hand-edit marketplace files
 or reuse a session that loaded the previous plugin version.
+Commit your changes once you are done.
 
 This project supports **bd** (beads) as optional issue tracking. When using it, run `bd prime` for full workflow context.
 

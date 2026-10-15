@@ -60,6 +60,7 @@ After changing a file under `plugins/agent-coord/`, follow **Refresh installed
 plugins after changes** in `README.md` before live testing. Use the documented
 cachebuster helper and reinstall commands. Do not hand-edit marketplace files
 or reuse a session that loaded the previous plugin version.
+Commit your changes once you are done.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
