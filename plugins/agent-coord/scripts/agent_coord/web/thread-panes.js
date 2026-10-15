@@ -195,6 +195,7 @@ class ThreadPanes {
       button.textContent = thread.title;
       button.title = thread.title + (thread.unread_result ? " · New response" : "");
       button.dataset.status = thread.response_state || "";
+      button.dataset.unread = thread.unread_result ? "true" : "false";
     }
   }
   receive(batch) { for (const record of this.records.values()) record.api?.receive(batch); }
@@ -407,6 +408,7 @@ class ThreadPanes {
         wrapper.append(tab, close);
       }
       tab.dataset.paneThread = id; tab.dataset.status = thread.response_state || "";
+      tab.dataset.unread = thread.unread_result ? "true" : "false";
       tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(layout.tabs[slot] === id));
       tab.tabIndex = layout.tabs[slot] === id ? 0 : -1;
       tab.draggable = true; tab.title += " · Drag to an edge to split";

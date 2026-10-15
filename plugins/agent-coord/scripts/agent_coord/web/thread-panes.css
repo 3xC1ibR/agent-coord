@@ -13,8 +13,14 @@
 .pane-tabs { display: flex; align-items: stretch; flex: 1; overflow-x: auto; min-width: 0; scrollbar-width: thin; }
 .pane-tabs:not(.conversation-tabs) button { max-width: 220px; min-width: 60px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; padding: 4px 8px; border-radius: 4px; }
 .pane-tabs:not(.conversation-tabs) button[aria-selected=true] { background: var(--surface); color: var(--ink); box-shadow: inset 0 -2px var(--ink); }
-.pane-tabs:not(.conversation-tabs) button[data-status=working]::before { content: "● "; color: var(--accent); }
-.pane-tabs:not(.conversation-tabs) button[data-status=input]::before { content: "● "; color: var(--warm); }
+.pane-tabs:not(.conversation-tabs) button[data-status=working]::before { content: "● "; color: var(--accent); animation: tab-working-blink 1.4s ease-in-out infinite; }
+.pane-tabs:not(.conversation-tabs) button[data-status=input]::before,
+.pane-tabs:not(.conversation-tabs) button[data-status=action]::before,
+.pane-tabs:not(.conversation-tabs) button[data-status=failed]::before { content: "● "; color: var(--warm); }
+.pane-tabs:not(.conversation-tabs) button[data-unread=true]:not([data-status=working]):not([data-status=input]):not([data-status=action]):not([data-status=failed])::before { content: "● "; color: var(--responded); }
+@media (prefers-reduced-motion: reduce) {
+  .pane-tabs:not(.conversation-tabs) button[data-status=working]::before { animation: none; }
+}
 .pane-tabs [draggable=true] { cursor: grab; }
 .pane-tabs [data-drop-side=before] { box-shadow: inset 3px 0 var(--accent); }
 .pane-tabs [data-drop-side=after] { box-shadow: inset -3px 0 var(--accent); }

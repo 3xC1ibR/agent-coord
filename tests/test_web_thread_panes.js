@@ -394,6 +394,30 @@ test("group tab controls focus and close the requested tab without touching neig
   assert.equal(state.threadTabs.items.some(item => item.thread_id === "b"), false);
 });
 
+test("pane tabs expose status and unread-response indicators that follow thread updates", () => {
+  const {shell, state} = shellFixture();
+  state.threadTabs.open({...thread("run"), response_state: "working", unread_result: true});
+  state.threadTabs.open({...thread("blocked"), response_state: "input"});
+  state.threadTabs.open({...thread("answered"), response_state: "reply", unread_result: true});
+  state.threadTabs.open(thread("calm"));
+  state.selected = "run";
+  shell.onDrop(thread("calm"), 0, "right");
+  shell.slots = [];
+  const strip = shell.renderPane(0).children[0].children[0];
+  const tabOf = id => strip.children.find(wrapper => wrapper.children[0].dataset.paneThread === id)?.children[0];
+  const indicator = id => { const tab = tabOf(id); return tab && {status: tab.dataset.status, unread: tab.dataset.unread}; };
+  assert.deepEqual(indicator("run"), {status: "working", unread: "true"});
+  assert.deepEqual(indicator("blocked"), {status: "input", unread: "false"});
+  assert.deepEqual(indicator("answered"), {status: "reply", unread: "true"});
+  // A later read marks the response seen without touching the other tabs.
+  const record = shell.records.get("answered"), source = {};
+  record.frame = {contentWindow: source};
+  shell.chrome = {querySelectorAll: () => [tabOf("answered")]};
+  shell.changed(source, {...record.thread, unread_result: false});
+  assert.deepEqual(indicator("answered"), {status: "reply", unread: "false"});
+  assert.deepEqual(indicator("run"), {status: "working", unread: "true"});
+});
+
 test("moving and merging groups preserves their edited order in the remaining normal strip", async () => {
   const {shell, state} = shellFixture();
   for (const id of ["a", "b", "c", "d"]) state.threadTabs.open(thread(id));
