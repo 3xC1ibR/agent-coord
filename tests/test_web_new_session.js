@@ -93,6 +93,34 @@ test("New session opens a draft with all provider groups before creating any pro
   assert.equal(c.state.newSessionDraft, null);
 });
 
+test("slash selection updates draft settings and creates the selected provider on first send", async () => {
+  const c = setup(); await c.newSession();
+  c.state.detail.session.effort = "high";
+  c.selectDraftModel({client: "claude", model: "sonnet"});
+  assert.equal(c.state.detail.session.client, "claude");
+  assert.equal(c.state.detail.work_thread.client, "claude");
+  assert.equal(c.state.detail.session.model, "sonnet");
+  assert.equal(c.state.detail.session.effort, null);
+  assert.equal(c.$("model-picker").value, c.modelValue("claude", "sonnet"));
+  assert.equal(c.calls.filter(call => call.body).length, 0);
+  await c.sendSessionDraft("/model sonnet", []);
+  const create = c.calls.find(call => call.path === "sessions");
+  assert.equal(create.body.client, "claude");
+  assert.equal(create.body.model, "sonnet");
+});
+
+test("provider selection is locked after creation, including a failed first send", async () => {
+  const c = setup(); await c.newSession();
+  c.selectDraftModel({client: "claude", model: "sonnet"});
+  c.state.newSessionDraft.createdId = "created";
+  assert.deepEqual(Array.from(c.sessionModelClients()), ["claude"]);
+  c.selectDraftModel({client: "codex", model: "gpt-test"});
+  assert.equal(c.state.detail.session.client, "claude");
+  c.state.selected = "created"; c.state.newSessionDraft = null;
+  c.selectDraftModel({client: "codex", model: "gpt-test"});
+  assert.equal(c.state.detail.session.client, "claude");
+});
+
 test("Antigravity selection is sent to the backend and its setup error is visible", async () => {
   const c = setup();
   const api = c.api;

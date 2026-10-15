@@ -12,8 +12,10 @@
 
   class ChatSlashCommands {
     constructor({input, menu, getThread, getSession = () => ({}), loadModels = async () => [], loadSkills = async () => [],
-      catalogs = new Map(), canComplete, onReplace = () => {}, onChange}) {
-      Object.assign(this, {input, menu, getThread, getSession, loadModels, loadSkills, canComplete, onReplace, onChange});
+      catalogs = new Map(), getModelClients = () => [getSession()?.client || "codex"],
+      onSelectModel = () => {}, canComplete, onReplace = () => {}, onChange}) {
+      Object.assign(this, {input, menu, getThread, getSession, loadModels, loadSkills, getModelClients,
+        onSelectModel, canComplete, onReplace, onChange});
       this.catalogs = catalogs;
       this.skillCatalogs = new Map();
       this.skillLoading = new Set();
@@ -66,8 +68,7 @@
         model: name === "/model" && index === 2 ? unquote(tokens[1][0]) : this.getSession()?.model};
     }
 
-    models() {
-      const client = this.getSession()?.client || "codex";
+    models(client = this.getSession()?.client || "codex") {
       if (!this.catalogs.has(client) && !this.loading.has(client)) {
         this.loading.add(client);
         Promise.resolve().then(() => this.loadModels(client)).then(models => {
@@ -91,9 +92,15 @@
         {name: "default", arguments: "", description: "Configured permissions with approval prompts"},
         {name: "yolo", arguments: "", description: "Full machine access without approval prompts"},
       ];
+      if (query.kind === "model") {
+        const clients = this.getModelClients();
+        const labels = {codex: "Codex", claude: "Claude Code", antigravity: "Google Antigravity", kimi: "Kimi Code", muse: "Muse Code"};
+        return clients.flatMap(client => this.models(client).map(model => ({name: model.model, client,
+          group: clients.length > 1 ? labels[client] || client : null,
+          arguments: [clients.length > 1 ? labels[client] || client : "", model.displayName || ""].filter(Boolean).join(" · "),
+          description: model.description || ""})));
+      }
       const models = this.models();
-      if (query.kind === "model") return models.map(model => ({name: model.model,
-        arguments: model.displayName || "", description: model.description || ""}));
       const model = models.find(model => model.model === query.model);
       return (model?.supportedReasoningEfforts || []).map(effort => ({name: effort.reasoningEffort,
         arguments: "", description: effort.description || ""}));
@@ -140,7 +147,16 @@
       this.input.setAttribute("aria-expanded", "true");
       this.menu.replaceChildren();
       const doc = this.input.ownerDocument;
+      this.options = [];
+      let group = null, groupName = null;
       for (const [index, command] of matches.entries()) {
+        if (command.group && command.group !== groupName) {
+          groupName = command.group;
+          group = doc.createElement("div");
+          group.setAttribute("role", "group");
+          group.setAttribute("aria-label", groupName);
+          this.menu.append(group);
+        }
         const option = doc.createElement("div");
         option.id = this.menu.id + "-" + index;
         option.className = "slash-command";
@@ -151,7 +167,8 @@
         const description = doc.createElement("small"); description.textContent = command.description;
         option.append(name, usage, description);
         option.addEventListener("click", () => this.choose(index));
-        this.menu.append(option);
+        (command.group ? group : this.menu).append(option);
+        this.options.push(option);
       }
       this.input.setAttribute("aria-activedescendant", this.menu.id + "-" + this.index);
     }
@@ -168,6 +185,7 @@
       this.dismissed = next && next.kind !== query.kind ? null :
         JSON.stringify([this.getThread(), this.input.value, this.input.selectionStart]);
       this.close();
+      if (query.kind === "model") this.onSelectModel({client: command.client, model: command.name});
       this.onChange();
       this.render();
     }
@@ -188,7 +206,7 @@
       else {
         this.index = (this.index + (event.key === "ArrowDown" ? 1 : -1) + this.matches.length) % this.matches.length;
         this.render(true);
-        this.menu.children[this.index].scrollIntoView({block: "nearest"});
+        this.options[this.index].scrollIntoView({block: "nearest"});
       }
       return true;
     }

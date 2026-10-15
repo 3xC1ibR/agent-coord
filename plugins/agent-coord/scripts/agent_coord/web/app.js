@@ -1829,11 +1829,21 @@ function sessionBusy() {
   return !!state.busy || !!state.sending?.has(isSessionDraft() ? state.newSessionDraft : state.selected);
 }
 function modelValue(client, model) { return JSON.stringify([client, model || ""]); }
+function sessionModelClients() {
+  return isSessionDraft() && !state.newSessionDraft.createdId ?
+    ["codex", "claude", "antigravity", "kimi", "muse"] : [state.detail?.session?.client || "codex"];
+}
+function selectDraftModel({client, model}) {
+  if (!isSessionDraft() || state.newSessionDraft.createdId || state.busy || state.detailRefreshing) return;
+  Object.assign(state.newSessionDraft.session, {client, model: model || null, effort: null});
+  state.newSessionDraft.work_thread.client = client;
+  renderStatus();
+}
 function renderModelPicker() {
   const session = state.detail?.session, picker = $("model-picker");
   if (!session) { picker.disabled = true; globalThis.modelPicker?.sync(); renderEffortPicker(); return; }
   const draft = isSessionDraft(), client = session.client || "codex";
-  const clients = draft ? ["codex", "claude", "antigravity", "kimi", "muse"] : [client];
+  const clients = sessionModelClients();
   const catalogs = state.modelCatalogs ||= new Map();
   const signature = JSON.stringify([clients, session.model, [...catalogs]]);
   if (picker.dataset.signature !== signature) {
@@ -1906,7 +1916,7 @@ async function loadModelCatalog(client) {
   return loading.get(client);
 }
 async function loadSessionModels() {
-  const clients = isSessionDraft() ? ["codex", "claude", "antigravity", "kimi", "muse"] : [state.detail?.session?.client || "codex"];
+  const clients = sessionModelClients();
   // Share completed and in-flight requests with slash autocomplete.
   await Promise.all(clients.map(client => loadModelCatalog(client).catch(() => {})));
 }
@@ -1914,15 +1924,11 @@ async function changeSessionModel() {
   const id = state.selected, [client, model] = JSON.parse($("model-picker").value);
   const draft = isSessionDraft();
   if (sessionBusy() || state.detailRefreshing || state.detail?.running || draft && state.newSessionDraft.createdId) return;
+  if (draft) { selectDraftModel({client, model}); return; }
   state.busy = true;
   try {
-    if (draft) {
-      Object.assign(state.newSessionDraft.session, {client, model: model || null, effort: null});
-      state.newSessionDraft.work_thread.client = client;
-    } else {
-      const session = await api(sessionPath(id), {model});
-      if (state.selected === id) state.detail.session = session;
-    }
+    const session = await api(sessionPath(id), {model});
+    if (state.selected === id) state.detail.session = session;
   } finally { state.busy = false; renderStatus(); }
 }
 $("model-picker").onchange = () => action(changeSessionModel);
@@ -2545,6 +2551,8 @@ async function boot() {
     getThread: () => state.selected,
     getSession: () => ({...state.detail?.session, cwd: state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config?.cwd}),
     catalogs: (state.modelCatalogs ||= new Map()),
+    getModelClients: sessionModelClients,
+    onSelectModel: selectDraftModel,
     loadModels: loadModelCatalog,
     loadSkills: async session => (await api("skills", {client: session.client || "codex", cwd: session.cwd})).data,
     canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !sessionBusy() &&

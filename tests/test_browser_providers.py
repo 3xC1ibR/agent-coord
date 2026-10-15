@@ -186,6 +186,33 @@ class ProviderTests(unittest.TestCase):
             self.sessions.send(thread, {"message": "steer", "expectedTurnId": self.sessions.active[thread]})
         self.assertTrue(self.sessions.read(thread)["running"])
 
+    def test_claude_context_alias_survives_another_sessions_catalog_refresh(self):
+        for advertised, chosen in (("fable", "fable[1m]"), ("fable[1m]", "fable")):
+            with self.subTest(advertised=advertised, chosen=chosen):
+                self.sessions.claude.catalog = [{"model": advertised,
+                    "supportedReasoningEfforts": [{"reasoningEffort": "max"}]}]
+                thread = self.create(model=chosen, effort="max")
+                self.sessions.claude.catalog = [{"model": advertised,
+                    "supportedReasoningEfforts": [{"reasoningEffort": "max"}]}]
+                self.sessions.update(thread, {"model": chosen, "effort": "max"})
+                self.sessions.send(thread, {"message": "Hello"})
+                options = self.sessions.claude.connections[thread].options
+                self.assertEqual((options["model"], options["effort"]), (chosen, "max"))
+                self.finish(thread)
+
+    def test_context_alias_matching_preserves_availability_and_effort_checks(self):
+        self.sessions.claude.catalog = [{"model": "fable[1m]",
+            "supportedReasoningEfforts": [{"reasoningEffort": "max"}]}]
+        for model, effort, error in (("missing", "max", "available model"),
+                                     ("fable[2m]", "max", "available model"),
+                                     ("fable", "unsupported", "not supported")):
+            with self.subTest(model=model, effort=effort):
+                with self.assertRaisesRegex(CoordinationError, error):
+                    self.create(model=model, effort=effort)
+        codex_model = self.sessions.models("codex")[0]["model"]
+        with self.assertRaisesRegex(CoordinationError, "available model"):
+            self.sessions.create({"model": codex_model + "[1m]"})
+
     def test_close_reopen_and_failed_result(self):
         thread = self.create()
         self.start(thread)

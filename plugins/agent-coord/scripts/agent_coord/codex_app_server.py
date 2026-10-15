@@ -1050,7 +1050,13 @@ class BrowserSessions:
             db.execute("UPDATE browser_sessions SET model = ?, effort = ? WHERE thread_id = ?", (model, effort, thread_id))
 
     def _validate_settings(self, model: str | None, effort: str | None, client: str = "codex") -> dict:
-        selected = next((m for m in self.models(client) if m["model"] == model), None)
+        def model_key(value):
+            # Claude's catalog reflects the initializing session's context
+            # selection (e.g. fable vs fable[1m]). Other sessions can refresh
+            # that shared catalog after the browser has loaded its choices.
+            return value.removesuffix("[1m]") if client == "claude" and isinstance(value, str) else value
+
+        selected = next((m for m in self.models(client) if model_key(m["model"]) == model_key(model)), None)
         if not selected:
             raise CoordinationError("Choose an available model. Use /model to list models.")
         self._validate_effort(selected, effort)

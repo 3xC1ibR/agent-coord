@@ -6,7 +6,8 @@ const vm = require("node:vm");
 const path = require("node:path");
 const web = path.join(__dirname, "../plugins/agent-coord/scripts/agent_coord/web");
 
-function setup({loadModels = async () => [], loadSkills = async () => [], onReplace = () => {}} = {}) {
+function setup({loadModels = async () => [], loadSkills = async () => [], onReplace = () => {},
+  getModelClients, onSelectModel = () => {}} = {}) {
   const doc = {addEventListener() {}, createElement: () => new Element()};
   class Element {
     constructor() { this.ownerDocument = doc; this.children = []; this.attributes = {}; this.listeners = {}; this.hidden = true; }
@@ -30,7 +31,7 @@ function setup({loadModels = async () => [], loadSkills = async () => [], onRepl
   const f = {input, menu, doc, context, enabled: true, thread: "one", changes: 0,
     session: {client: "codex", model: "first-model"}};
   f.complete = new context.ChatSlashCommands({input, menu, getThread: () => f.thread,
-    getSession: () => f.session, loadModels, loadSkills, onReplace,
+    getSession: () => f.session, loadModels, loadSkills, onReplace, getModelClients, onSelectModel,
     canComplete: () => f.enabled, onChange: () => f.changes++});
   f.type = (value, caret = value.length) => {
     input.value = value; input.selectionStart = input.selectionEnd = caret;
@@ -40,7 +41,7 @@ function setup({loadModels = async () => [], loadSkills = async () => [], onRepl
     const event = {key, preventDefault() { this.defaultPrevented = true; }, ...extra};
     f.complete.keydown(event); return event;
   };
-  f.names = () => menu.children.map(option => option.children[0].textContent);
+  f.names = () => Array.from(f.complete.options || [], option => option.children[0].textContent);
   return f;
 }
 
@@ -62,6 +63,52 @@ const models = [
   {model: "second-model", supportedReasoningEfforts: [{reasoningEffort: "medium"}]},
 ];
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test("new draft model completion groups providers and selects provider with model", async () => {
+  const clients = ["codex", "claude", "antigravity", "kimi", "muse"], selected = [], loads = [];
+  const f = setup({getModelClients: () => clients,
+    loadModels: async client => {
+      loads.push(client);
+      return [{model: "shared-model", displayName: client + " model"}];
+    }, onSelectModel: choice => { selected.push({...choice}); f.session.client = choice.client; }});
+  f.type("/model "); await settle();
+  assert.deepEqual(loads, clients);
+  assert.deepEqual(f.menu.children.map(group => group.attributes["aria-label"]),
+    ["Codex", "Claude Code", "Google Antigravity", "Kimi Code", "Muse Code"]);
+  assert.deepEqual(f.names(), clients.map(() => "shared-model"));
+  assert.match(f.menu.children[1].children[0].children[1].textContent, /Claude Code/);
+  f.key("ArrowDown");
+  assert.equal(f.complete.options[1].scrolled, true);
+  assert.equal(f.input.attributes["aria-activedescendant"], "slash-commands-1");
+  f.key("Tab");
+  assert.deepEqual(selected, [{client: "claude", model: "shared-model"}]);
+  assert.equal(f.input.value, "/model shared-model ");
+  assert.equal(f.changes, 1);
+  f.type("/model shared");
+  f.menu.children[3].children[0].emit("click");
+  assert.deepEqual(selected[1], {client: "kimi", model: "shared-model"});
+});
+
+test("draft model completion filters across catalogs and tolerates unavailable providers", async () => {
+  const clients = ["codex", "claude", "antigravity"], pending = {};
+  const f = setup({getModelClients: () => clients,
+    loadModels: client => new Promise((resolve, reject) => { pending[client] = {resolve, reject}; })});
+  f.type("/model "); await settle();
+  pending.claude.resolve([{model: "sonnet", supportedReasoningEfforts: [{reasoningEffort: "high"}]}]);
+  pending.antigravity.reject(new Error("Not installed")); await settle();
+  assert.deepEqual(f.names(), ["sonnet"]);
+  pending.codex.resolve(models); await settle();
+  assert.deepEqual(f.names(), ["first-model", "second-model", "sonnet"]);
+  f.type("/model so");
+  assert.deepEqual(f.names(), ["sonnet"]);
+  assert.equal(f.menu.children[0].attributes["aria-label"], "Claude Code");
+  // Effort remains specific to the selected provider even when model names collide.
+  f.session = {client: "claude", model: "sonnet"};
+  f.type("/effort "); assert.deepEqual(f.names(), ["high"]);
+  f.key("Escape");
+  pending.antigravity.resolve([{model: "late-model"}]); await settle();
+  assert.equal(f.menu.hidden, true);
+});
 
 const skills = [
   {name: "agent-coord:manage-threads", description: "Review work threads", scope: "user"},
@@ -133,6 +180,16 @@ test("skill completion preserves native editing, dismisses with Escape, and refr
   f.type("$"); f.enabled = false; f.complete.render(); assert.equal(f.menu.hidden, true);
 });
 
+function bindAppSlash(f, app, state) {
+  state.newSessionDraft = state.detail;
+  f.context.renderStatus = () => {};
+  vm.runInContext(app.slice(app.indexOf("function isSessionDraft()"),
+    app.indexOf("function renderModelPicker()")), f.context);
+  vm.runInContext(app.slice(app.indexOf("  state.slashCommands = new ChatSlashCommands("),
+    app.indexOf("  state.attachments = new ChatImageAttachments(")), f.context);
+  f.complete = state.slashCommands;
+}
+
 test("new-session skill lookup uses its selected working folder and saves the completed draft", async () => {
   const f = setup(), calls = [];
   const elements = {message: f.input, "slash-commands": f.menu, composer: {hidden: false}};
@@ -141,9 +198,7 @@ test("new-session skill lookup uses its selected working folder and saves the co
   Object.assign(f.context, {state, $: id => elements[id], loadModelCatalog: async () => [],
     api: async (path, body) => { calls.push([path, {...body}]); return {data: skills}; }});
   const app = fs.readFileSync(path.join(web, "app.js"), "utf8");
-  vm.runInContext(app.slice(app.indexOf("  state.slashCommands = new ChatSlashCommands("),
-    app.indexOf("  state.attachments = new ChatImageAttachments(")), f.context);
-  f.complete = state.slashCommands;
+  bindAppSlash(f, app, state);
   f.type("Use $skill"); await settle(); f.key("Tab");
   assert.deepEqual(calls, [["skills", {client: "codex", cwd: "/chosen"}]]);
   assert.equal(state.drafts.get("new-session"), "Use $skill-creator ");
@@ -153,23 +208,23 @@ test("new-session composer completes commands, provider models and effort before
   const f = setup(), calls = [];
   const elements = {message: f.input, "slash-commands": f.menu, composer: {hidden: false}};
   const state = {selected: "new-session", drafts: new Map(), closing: new Set(),
-    detail: {session: {client: "claude", model: "first-model"},
+    detail: {session: {client: "codex", model: null},
       work_thread: {browser_session: true, attention: "now"}}};
   Object.assign(f.context, {state, $: id => elements[id], isSessionDraft: () => true,
-    loadModelCatalog: async client => { calls.push("models?client=" + client); return models; },
+    loadModelCatalog: async client => { calls.push("models?client=" + client); return client === "claude" ? models : []; },
     api: async path => { calls.push(path); return {data: models}; }});
   const app = fs.readFileSync(path.join(web, "app.js"), "utf8");
-  vm.runInContext(app.slice(app.indexOf("  state.slashCommands = new ChatSlashCommands("),
-    app.indexOf("  state.attachments = new ChatImageAttachments(")), f.context);
-  f.complete = state.slashCommands;
+  bindAppSlash(f, app, state);
   f.type("/");
   assert.equal(f.menu.hidden, false);
   assert(f.names().includes("/help"));
   f.type("/mo"); f.key("Tab"); await settle();
-  assert.deepEqual(calls, ["models?client=claude"]);
+  assert.deepEqual(calls, ["codex", "claude", "antigravity", "kimi", "muse"].map(client => "models?client=" + client));
   assert.deepEqual(f.names(), ["first-model", "second-model"]);
   f.key("Tab");
   assert.equal(f.input.value, "/model first-model ");
+  assert.equal(state.detail.session.client, "claude");
+  assert.equal(state.detail.work_thread.client, "claude");
   assert.deepEqual(f.names(), ["low", "high"]);
   f.key("ArrowDown"); f.key("Tab");
   assert.equal(state.drafts.get("new-session"), "/model first-model high ");
@@ -188,16 +243,15 @@ test("new-session composer completes commands, provider models and effort before
 test("slash model suggestions use an already-loaded picker catalog synchronously", () => {
   const f = setup();
   const elements = {message: f.input, "slash-commands": f.menu, composer: {hidden: false}};
-  const state = {selected: "new-session", modelCatalogs: new Map([["codex", models]]),
+  const state = {selected: "new-session", modelCatalogs: new Map([["codex", models],
+    ...["claude", "antigravity", "kimi", "muse"].map(client => [client, []])]),
     drafts: new Map(), closing: new Set(), detail: {session: f.session,
       work_thread: {browser_session: true, attention: "now"}}};
   Object.assign(f.context, {state, $: id => elements[id], isSessionDraft: () => true,
     loadModelCatalog: () => assert.fail("The picker already loaded these models"),
     api: () => assert.fail("The picker already loaded these models")});
   const app = fs.readFileSync(path.join(web, "app.js"), "utf8");
-  vm.runInContext(app.slice(app.indexOf("  state.slashCommands = new ChatSlashCommands("),
-    app.indexOf("  state.attachments = new ChatImageAttachments(")), f.context);
-  f.complete = state.slashCommands;
+  bindAppSlash(f, app, state);
   f.type("/model ");
   assert.equal(f.menu.hidden, false);
   assert.deepEqual(f.names(), ["first-model", "second-model"]);
