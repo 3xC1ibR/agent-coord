@@ -417,6 +417,50 @@ class MuseTests(unittest.TestCase):
         self.assertEqual(turn["items"][-1]["tool"], "futureKind")
         self.assertEqual(turn["error"]["message"], "Quota exhausted")
 
+    def test_newer_schema_supports_catalog_turns_approvals_and_resume(self):
+        native_request = FakeMuse.request
+        def newer_host(connection, method, params, **kwargs):
+            if method == "initialize":
+                return {"schema": {"version": 1, "fingerprint": "sha256:future"},
+                        "sessionDurability": "durable", "futureField": {"enabled": True}}
+            result = native_request(connection, method, params, **kwargs)
+            result["futureField"] = True
+            if "session" in result:
+                result["session"]["futureField"] = True
+            return result
+        with patch.object(FakeMuse, "initialize", MuseConnection.initialize), \
+                patch.object(FakeMuse, "request", newer_host), \
+                self.assertLogs("agent_coord.muse_code", level="WARNING"):
+            self.assertTrue(self.sessions.models("muse"))
+            thread = self.create()
+            connection = self.start(thread)
+            self.assertIn({"method": "initialized"}, connection.writes)
+            self.event(thread, "future/notification", futureField={"enabled": True})
+            pending = self.permission(thread)
+            self.sessions.answer(thread, pending["key"], {"decision": "accept"})
+            self.assertEqual(connection.calls[-1][0], "approval/decide")
+            self.replay(thread, "text-run-single-turn")
+            self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1]["status"], "completed")
+            self.sessions.muse._shutdown(thread)
+            resumed = self.start(thread)
+            self.assertEqual(resumed.native_id, thread)
+            self.assertIn("session/resume", [m for m, _ in resumed.calls])
+            self.complete(thread)
+
+    def test_wrong_session_identity_prevents_turn_start(self):
+        native_request = FakeMuse.request
+        def wrong_identity(connection, method, params, **kwargs):
+            result = native_request(connection, method, params, **kwargs)
+            if method in {"session/start", "session/resume"}:
+                result["session"]["sessionId"] = "another-session"
+            return result
+        thread = self.create()
+        with patch.object(FakeMuse, "request", wrong_identity):
+            with self.assertRaisesRegex(CoordinationError, "different session identity"):
+                self.start(thread)
+        self.assertTrue(self.connections[-1].closed)
+        self.assertNotIn("turn/start", [m for m, _ in self.connections[-1].calls])
+
 
 class MuseSetupTests(unittest.TestCase):
     def setUp(self):
@@ -501,7 +545,7 @@ class MuseSetupTests(unittest.TestCase):
             self.assertIn("ROOT_ONLY_TASK", delivered["hookSpecificOutput"]["additionalContext"])
         self.assertFalse(self.store.inbox("parent"))
 
-    def test_transport_fingerprint_gate_and_nonblocking_notifications(self):
+    def test_transport_fingerprint_warning_and_nonblocking_notifications(self):
         script = self.root / "host.py"
         script.write_text('''import json,sys
 for line in sys.stdin:
@@ -520,15 +564,41 @@ for line in sys.stdin:
         connection = MuseConnection(self.store, callback, {"cwd": str(self.root)},
             command=[sys.executable, "-u", str(script), SCHEMA_FINGERPRINT])
         self.addCleanup(connection.close)
-        connection.initialize()
+        with self.assertNoLogs("agent_coord.muse_code", level="WARNING"):
+            connection.initialize()
         self.assertTrue(connection.request("test", {}, timeout=1)["ok"])
         self.assertTrue(entered.wait(1))
         release.set()
         connection.close()
-        bad = MuseConnection(self.store, lambda _: None, {"cwd": str(self.root)}, command=[sys.executable, "-u", str(script), "unknown"])
-        self.addCleanup(bad.close)
-        with self.assertRaisesRegex(CoordinationError, "Unsupported Muse protocol"):
-            bad.initialize()
+        newer = MuseConnection(self.store, lambda _: None, {"cwd": str(self.root)}, command=[sys.executable, "-u", str(script), "unknown"])
+        self.addCleanup(newer.close)
+        with self.assertLogs("agent_coord.muse_code", level="WARNING") as logs:
+            newer.initialize()
+        self.assertIn("received unknown", logs.output[0])
+        self.assertTrue(newer.request("test", {}, timeout=1)["ok"])
+
+    def test_handshake_rejects_unsupported_schema_and_nondurable_sessions(self):
+        script = self.root / "host.py"
+        script.write_text('''import json,sys
+for line in sys.stdin:
+ m=json.loads(line)
+ if 'id' in m: print(json.dumps({'id':m['id'],'result':json.loads(sys.argv[1])}),flush=True)
+''')
+        cases = [({"schema": schema}, "schema version") for schema in
+                 ({"version": 2, "fingerprint": SCHEMA_FINGERPRINT}, {}, None)]
+        cases.append(({"schema": {"version": 1, "fingerprint": "future"},
+                       "sessionDurability": "ephemeral"}, "retain session history"))
+        for result, error in cases:
+            with self.subTest(result=result):
+                connection = MuseConnection(self.store, lambda _: None, {"cwd": str(self.root)},
+                    command=[sys.executable, "-u", str(script), json.dumps(result)])
+                try:
+                    with patch.object(connection, "write", wraps=connection.write) as write:
+                        with self.assertRaisesRegex(CoordinationError, error):
+                            connection.initialize()
+                        self.assertFalse(any(c.args[0].get("method") == "initialized" for c in write.call_args_list))
+                finally:
+                    connection.close()
 
     def test_missing_binary_reports_actionable_setup(self):
         with patch.dict(os.environ, {"AGENT_COORD_MUSE_BIN": str(self.root / "missing")}):

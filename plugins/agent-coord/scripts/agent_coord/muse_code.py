@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 from pathlib import Path
 import queue
@@ -39,7 +40,7 @@ class MuseConnection(ACPConnection):
         removed = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT_COORD_DELEGATION_ID", "AGENT_COORD_ZELLIJ_WAKE"}
         env = {k: v for k, v in os.environ.items() if k not in removed and not k.startswith("ZELLIJ")}
         env = client_environment(env, store.database_path, "muse", session_id=options.get("threadId"))
-        # A pinned connection must not upgrade its binary between launches.
+        # Starting a conversation should not trigger a shared runtime update.
         env["MUSE_NO_AUTO_UPDATE"] = "1"
         self.configuration = host_config(store, options["threadId"]) if options.get("threadId") else None
         if self.configuration:
@@ -71,11 +72,17 @@ class MuseConnection(ACPConnection):
         result = self.request("initialize", {"clientInfo": {"name": "ribbon_field", "version": "0.1.0"},
             "capabilities": {"userInputDialogs": True, "experimentalApi": True}})
         schema = result.get("schema", {})
-        if schema.get("version") != 1 or schema.get("fingerprint") != SCHEMA_FINGERPRINT:
-            raise CoordinationError(f"Unsupported Muse protocol. Ribbon Field was tested with Muse Code {TESTED_VERSION}; "
-                                    "select that executable with AGENT_COORD_MUSE_BIN or update Ribbon Field.")
+        if not isinstance(schema, dict) or schema.get("version") != 1:
+            raise CoordinationError("Unsupported Muse protocol schema version. Ribbon Field supports schema version 1; "
+                                    "update Ribbon Field or select a compatible executable with AGENT_COORD_MUSE_BIN.")
         if result.get("sessionDurability", "durable") != "durable":
             raise CoordinationError("Muse must retain session history to support Ribbon Field conversations.")
+        # MSP evolves additively. A fingerprint identifies a schema, not an
+        # incompatibility; keep it diagnostic so routine host upgrades work.
+        if schema.get("fingerprint") != SCHEMA_FINGERPRINT:
+            logging.getLogger(__name__).warning(
+                "Muse schema fingerprint differs from the Muse Code %s reference: expected %s, received %s. "
+                "Continuing with schema version 1.", TESTED_VERSION, SCHEMA_FINGERPRINT, schema.get("fingerprint"))
         self.write({"method": "initialized"})
         return result
 

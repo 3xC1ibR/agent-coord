@@ -71,7 +71,7 @@ test("New session opens a draft with all provider groups before creating any pro
   assert.equal(c.state.selected, "new-session");
   assert.equal(c.$("conversation").hidden, false);
   assert.equal(c.calls.filter(call => call.path === "sessions").length, 0);
-  assert.deepEqual(c.$("model-picker").children.map(group => group.label), ["Codex", "Claude Code", "Google Antigravity", "Kimi Code"]);
+  assert.deepEqual(c.$("model-picker").children.map(group => group.label), ["Codex", "Claude Code", "Google Antigravity", "Kimi Code", "Muse Code"]);
   assert.equal(c.$("new-session").onclick, c.$("welcome-new").onclick);
   c.$("model-picker").value = c.modelValue("claude", "sonnet");
   await c.changeSessionModel();
@@ -166,7 +166,7 @@ test("repeat New session restores the same draft and chosen model", async () => 
   assert.equal(c.state.detail.session.project_id, null);
   assert.equal(c.$("message").value, "Keep this");
   assert.equal(c.state.detail.session.model, "sonnet");
-  assert.equal(c.calls.filter(call => call.path.startsWith("models?")).length, 4);
+  assert.equal(c.calls.filter(call => call.path.startsWith("models?")).length, 5);
 });
 
 test("model menus share an in-flight catalog request and reuse its result", async () => {

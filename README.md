@@ -801,14 +801,17 @@ picker. Model and reasoning choices come from the runtime; Muse Wonder Full
 requires access through a Muse Code subscription. Ribbon Field does not store
 the account's credentials or call the model API itself.
 
-The adapter is tested with Muse Code **1.4.8** and checks its exported stable
-schema fingerprint before starting a session. An unsupported fingerprint reports
-a setup error instead of attempting an incompatible conversation. Set
-`AGENT_COORD_MUSE_BIN` to a compatible executable if it is not on PATH.
+The adapter uses Muse protocol schema version **1**, with Muse Code **1.4.8**
+as its reference fingerprint. A different fingerprint is logged for diagnostics
+and does not block a conversation: Muse can add compatible fields and events
+in routine updates. Unsupported schema versions and failures to apply the
+requested permission profile or preserve session identity still stop startup.
+This follows [Muse's wire compatibility guidance](https://meta-models.github.io/muse-code-sdk/next/compatibility/#the-wire-protocol).
+Set `AGENT_COORD_MUSE_BIN` to choose an executable if it is not on PATH.
 The usual `~/.local/bin/muse`, Homebrew, and
 `<Agent Coord state directory>/providers/muse/runtime/muse` locations are also
-discovered. App-owned hosts disable the launcher's automatic update; upgrade
-Muse deliberately after verifying adapter compatibility.
+discovered. App-owned hosts disable the launcher's automatic update for their
+own launches; other uses of the shared launcher can still update Muse.
 
 Each conversation owns a Muse host. Default permissions select Muse's native
 `:ask-me` profile: workspace sandboxing and approval for protected actions.
