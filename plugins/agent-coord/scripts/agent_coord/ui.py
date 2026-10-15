@@ -535,6 +535,9 @@ def _handler(
                     limit=20, cursor=query.get("cursor", [None])[0],
                     my_messages=query.get("my_messages") == ["true"],
                     thread_ids=[t["thread_id"] for t in threads]))
+            elif route.startswith("threads/") and route.endswith("/close-plan"):
+                from .subagent_close import close_plan
+                self._json(HTTPStatus.OK, close_plan(browser_sessions, unquote(route[8:-11])))
             elif route.startswith("threads/") and route.endswith("/scratchpad"):
                 thread_id = unquote(route[8:-11])
                 browser_sessions.work_thread(thread_id, history=False)
@@ -842,11 +845,13 @@ def _handler(
                         if set(body) != {"cwd"}:
                             raise CoordinationError("Moving a thread accepts its destination cwd only.")
                         result = move_work_thread(browser_sessions, thread_id, body["cwd"])
-                    elif route[4] in {"close", "reopen"}:
+                    elif route[4] == "close":
+                        from .subagent_close import close_with_subagents
+                        result = close_with_subagents(browser_sessions, thread_id, body)
+                    elif route[4] == "reopen":
                         if body:
                             raise CoordinationError("Close and reopen accept an empty object.")
-                        result = (browser_sessions.close_work_thread(thread_id) if route[4] == "close"
-                                  else browser_sessions.reopen_work_thread(thread_id))
+                        result = browser_sessions.reopen_work_thread(thread_id)
                     else:
                         raise CoordinationError("Unknown thread action.")
                     self._json(HTTPStatus.OK, result)

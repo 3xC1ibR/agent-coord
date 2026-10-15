@@ -2352,8 +2352,15 @@ $("queue").onclick = () => action(() => sendMessage("queue"));
 $("stop").onclick = () => action(async () => { await api(sessionPath(state.selected) + "/interrupt", {}); }, $("stop"));
 async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess = () => {}) {
   const id = thread?.thread_id || state.selected;
-  if (!id || !thread || state.closing.has(id)) return;
+  if (!id || !thread || state.closing.has(id) || state.confirmingCloses?.has(id)) return;
   const reopening = thread.attention === "archived";
+  let closeOptions = {body: {}, subagents: []};
+  if (!reopening && state.threadActions?.prepareClose) {
+    state.confirmingCloses ||= new Set(); state.confirmingCloses.add(id);
+    try { closeOptions = await state.threadActions.prepareClose(id, api); }
+    finally { state.confirmingCloses.delete(id); }
+    if (!closeOptions) return;
+  }
   const previous = {...thread, thread_id: id};
   const snapshot = reopening ? null : state.threadActions?.captureClose(id);
   // Hide closing cards immediately, but keep their records for rollback. Polls
@@ -2364,31 +2371,53 @@ async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess 
   state.closing.add(id); renderStatus();
   renderList();
   try {
-    const result = await api(threadPath(id) + (reopening ? "/reopen" : "/close"), {});
+    const result = await api(threadPath(id) + (reopening ? "/reopen" : "/close"), closeOptions.body);
     ++listRequest;
+    if (!reopening && result?.closed_thread_ids) {
+      const closedIds = new Set(result.closed_thread_ids);
+      state.sessions = state.sessions.filter(item => !closedIds.has(item.thread_id));
+      state.viewThreads = state.viewThreads?.filter(item => !closedIds.has(item.thread_id));
+      // Remove stopped child tabs too, without navigating away from the parent.
+      for (const child of result.closed_thread_ids.filter(child => child !== id)) {
+        await state.threadTabs?.close(child, {force: true});
+      }
+      if (result.subagent_close_errors?.length) {
+        refreshList().catch(showError);
+        const errors = result.subagent_close_errors.map(item => {
+          const child = closeOptions.subagents.find(child => child.thread_id === item.thread_id);
+          return (child?.title || item.thread_id) + ": " + item.error;
+        });
+        throw new Error(`${closedIds.size} subagent thread${closedIds.size === 1 ? "" : "s"} closed. Parent kept open. ` + errors.join(" "));
+      }
+    }
     onSuccess();
     if (!reopening) {
       state.sessions = state.sessions.filter(item => item.thread_id !== id);
       state.viewThreads = state.viewThreads?.filter(item => item.thread_id !== id);
-      let reopened = false;
-      state.threadActions?.notify("close:" + id, result?.close_notice || "Thread closed · " + (thread.title || "Available in Closed"), async () => {
+      const restored = new Set();
+      const notice = result?.close_notice || (closeOptions.subagents.length
+        ? `Thread and ${closeOptions.subagents.length} subagent thread${closeOptions.subagents.length === 1 ? "" : "s"} closed`
+        : "Thread closed · " + (thread.title || "Available in Closed"));
+      state.threadActions?.notify("close:" + id, notice, async () => {
         if (state.closing.has(id)) throw new Error("Wait for the thread to finish closing.");
         state.closing.add(id);
         try {
           // Do not undo a later decision made in another tab or conversation.
-          const current = await api(threadPath(id));
-          if (current.attention !== "archived" && !reopened) return;
-          await api(threadPath(id) + "/reopen", {});
-          reopened = true;
-          if (previous.attention === "later") {
-            const body = previous.snoozed_until > Date.now() / 1000
-              ? {snoozed_until: previous.snoozed_until} : {attention: "later"};
-            await api(threadPath(id), body);
+          for (const saved of [previous, ...closeOptions.subagents]) {
+            const current = await api(threadPath(saved.thread_id));
+            if (current.attention !== "archived" && !restored.has(saved.thread_id)) continue;
+            await api(threadPath(saved.thread_id) + "/reopen", {});
+            restored.add(saved.thread_id);
+            if (saved.attention === "later") {
+              const body = saved.snoozed_until > Date.now() / 1000
+                ? {snoozed_until: saved.snoozed_until} : {attention: "later"};
+              await api(threadPath(saved.thread_id), body);
+            }
           }
           // Reopening restores visibility only; never submit or resume work.
           await refreshList();
           if (state.selected === id) await refreshDetail();
-        } finally { state.closing.delete(id); renderStatus(); }
+        } finally { state.closing.delete(id); renderStatus(); renderList(); }
       });
       state.threadActions?.closed(snapshot);
       if (state.selected === id) $("view").value = "active";

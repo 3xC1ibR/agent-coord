@@ -278,3 +278,75 @@ test("Undo does not overwrite a thread already reopened elsewhere", async () => 
   await undo();
   assert.equal(c.state.closing.size, 0);
 });
+
+test("cancelled subagent prompt leaves parent, tabs and composer unchanged and suppresses duplicate prompts", async () => {
+  const c = setup(), t = withTabs(c); let resolve, prompts = 0, success = 0;
+  c.state.threadActions = {prepareClose: () => { prompts++; return new Promise(done => { resolve = done; }); }};
+  c.api = () => assert.fail("cancel must not close anything");
+  const closing = c.toggleThreadClosed(undefined, () => { success++; });
+  await c.toggleThreadClosed();
+  assert.equal(prompts, 1);
+  resolve(null); await closing;
+  assert.deepEqual(t.ids(), ["one"]);
+  assert.equal(c.state.sessions.length, 1);
+  assert.equal(c.state.closing.size, 0);
+  assert.equal(success, 0);
+});
+
+test("Yes removes child tabs and Undo restores the entire group without resuming agents", async () => {
+  const c = setup(), t = withTabs(c, ["one", "child", "other"]), calls = [];
+  const child = {thread_id: "child", attention: "later"};
+  c.state.sessions.push(child, {thread_id: "other"});
+  let undo, closingAtLastRender;
+  const render = c.renderList;
+  c.renderList = () => { closingAtLastRender = c.state.closing.has("one"); render(); };
+  c.state.threadActions = {captureClose() {}, closed() {}, prepareClose: async () => ({body: {subagent_thread_ids: ["child"]}, subagents: [child]}),
+    notify: (key, text, callback) => { undo = callback; assert.match(text, /1 subagent thread closed/); }};
+  c.api = async (path, body) => {
+    calls.push({path, body});
+    if (path.endsWith("/close")) {
+      assert.deepEqual(body.subagent_thread_ids, ["child"]);
+      return {closed_thread_ids: ["child", "one"], subagent_close_errors: []};
+    }
+    return {attention: "archived"};
+  };
+  await c.toggleThreadClosed();
+  assert.deepEqual(t.ids(), ["other"]);
+  assert.deepEqual(c.state.sessions.map(item => item.thread_id), ["other"]);
+  await undo();
+  assert.equal(closingAtLastRender, false, "Undo must redraw restored cards after releasing its busy state");
+  assert.deepEqual(calls.map(call => call.path), ["threads/one/close", "threads/one", "threads/one/reopen", "threads/child", "threads/child/reopen", "threads/child"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1).body)), {attention: "later"});
+});
+
+test("partial failure reconciles closed children and preserves the parent and failed child for retry", async () => {
+  const c = setup(), t = withTabs(c, ["one", "child", "failed"]);
+  c.state.sessions.push({thread_id: "child"}, {thread_id: "failed"});
+  c.state.threadActions = {captureClose() {}, prepareClose: async () => ({body: {subagent_thread_ids: ["child", "failed"]},
+    subagents: [{thread_id: "child"}, {thread_id: "failed", title: "Running agent"}]})};
+  c.api = async () => ({closed_thread_ids: ["child"], subagent_close_errors: [{thread_id: "failed", error: "Still stopping"}]});
+  await assert.rejects(c.toggleThreadClosed(), /Parent kept open.*Running agent: Still stopping/);
+  assert.deepEqual(t.ids(), ["one", "failed"]);
+  assert.deepEqual(c.state.sessions.map(item => item.thread_id), ["one", "failed"]);
+  assert.equal(c.state.selected, "one");
+  assert.equal(c.state.closing.size, 0);
+});
+
+test("overview render cache rebuilds when a close or Undo changes button availability", () => {
+  const c = setup(), rebuilding = new Error("Rebuilding overview");
+  Object.assign(c, {savedViews: null, conversationSearch: null, renderClosedToggle() {},
+    threadsInProject: threads => threads, threadOrganization: {matches: () => true},
+    threadViews: {matches: () => true}, upcomingSchedules: () => []});
+  Object.assign(c.state, {pinning: new Set(), updatingThreads: new Set(),
+    overviewMotion: {capture() { throw rebuilding; }}});
+  for (const id of ["search", "view", "group-by", "phase-filter", "repository", "project", "group-by-domain", "back-home", "results-count"]) {
+    Object.assign(c.$(id), {value: "", setAttribute() {}});
+  }
+  vm.runInContext(source.slice(source.indexOf("function renderList()"), source.indexOf("function upcomingSchedules(")), c);
+  assert.throws(() => c.renderList(), error => error === rebuilding);
+  assert.doesNotThrow(() => c.renderList(), "unchanged inventory can use the cache");
+  c.state.closing.add("one");
+  assert.throws(() => c.renderList(), error => error === rebuilding);
+  c.state.closing.delete("one");
+  assert.throws(() => c.renderList(), error => error === rebuilding);
+});

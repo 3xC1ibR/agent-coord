@@ -136,7 +136,56 @@ function createThreadActions(doc, win) {
     const stop = () => { animation.cancel(); copy.remove(); flights.delete(stop); };
     flights.add(stop); animation.finished.then(stop, stop);
   }
-  return {menu, showMenu, closeMenu, notify, captureClose, closed};
+  // Serialize prompts so concurrent card actions cannot stack modal dialogs.
+  let closeChoice = Promise.resolve();
+  async function prepareClose(id, api) {
+    const plan = await api("threads/" + encodeURIComponent(id) + "/close-plan");
+    const subagents = plan.subagents || [];
+    if (!subagents.length) return {body: {}, subagents: []};
+    const choose = async () => {
+      let saved;
+      try { saved = win.localStorage.getItem("agent-coord:close-subagents"); } catch (_) {}
+      if (saved === "yes" || saved === "no") return saved;
+      return new Promise(resolve => {
+        const dialog = make("dialog"), title = make("h2", "Close subagent threads?");
+        title.id = "close-subagents-title";
+        dialog.setAttribute("aria-labelledby", title.id);
+        const running = subagents.filter(item => item.running).length;
+        const description = make("p", `${subagents.length} attached subagent thread${subagents.length === 1 ? "" : "s"}, including nested subagents. ` +
+          (running ? `${running} still running. Yes stops running agents managed by Ribbon Field before closing their threads. Work in external apps may continue. ` : "") +
+          "No closes only this thread and lets subagents continue. Conversation history is kept.");
+        description.id = "close-subagents-description";
+        dialog.setAttribute("aria-describedby", description.id);
+        const label = make("label", "", "yolo-option"), remember = make("input");
+        remember.type = "checkbox";
+        label.append(remember, make("span", "Don’t ask me again"));
+        const actions = make("div", "", "dialog-actions");
+        const no = make("button", "No", "quiet"), yes = make("button", "Yes", "primary");
+        no.type = yes.type = "button";
+        let settled = false;
+        const finish = choice => {
+          if (settled) return;
+          settled = true;
+          if (choice && remember.checked) {
+            try { win.localStorage.setItem("agent-coord:close-subagents", choice); } catch (_) {}
+          }
+          dialog.close(); dialog.remove(); resolve(choice);
+        };
+        no.onclick = () => finish("no"); yes.onclick = () => finish("yes");
+        dialog.addEventListener("cancel", event => { event.preventDefault(); finish(null); });
+        dialog.addEventListener("close", () => finish(null));
+        actions.append(no, yes); dialog.append(title, description, label, actions);
+        doc.body.append(dialog); dialog.showModal(); no.focus();
+      });
+    };
+    const pending = closeChoice.then(choose);
+    closeChoice = pending.catch(() => {});
+    const choice = await pending;
+    if (choice === null) return null;
+    return {body: choice === "yes" ? {subagent_thread_ids: subagents.map(item => item.thread_id)} : {},
+      subagents: choice === "yes" ? subagents : []};
+  }
+  return {menu, showMenu, closeMenu, notify, captureClose, closed, prepareClose};
 }
 
 if (typeof module !== "undefined") module.exports = createThreadActions;
