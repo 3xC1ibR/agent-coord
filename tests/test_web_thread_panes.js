@@ -209,6 +209,9 @@ test("toggle respects modal/send guards and view restoration returns to that vie
   doc.querySelector = () => null; state.busy = true;
   assert.equal(await shell.toggleCurrent(), false); assert.equal(errors.length, 1);
   state.busy = false;
+  state.sending = new Set(["a"]);
+  assert.equal(await shell.toggleCurrent(), false); assert.equal(errors.length, 2);
+  state.sending.clear();
   shell.leave(); state.selected = null; setView("second"); await shell.toggleCurrent();
   assert.equal(shell.viewId, "second");
   shell.leave(); setView("first"); shell.restoreView();

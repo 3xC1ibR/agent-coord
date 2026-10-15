@@ -31,17 +31,17 @@ class ThreadTabs {
     this.items = this.projects.get(cwd); this.selected = null; this.render();
   }
   get scratchpadOpen() { return Boolean(this.cwd && this.onScratchpad && this.scratchpads.get(this.cwd)); }
-  destination() {
-    const id = this.selections.get(this.cwd);
-    return id !== "new-session" && (id === "project-scratchpad" && this.scratchpadOpen
-      || this.items.some(item => item.thread_id === id)) ? id : null;
+  destination(cwd = this.cwd) {
+    const id = this.selections.get(cwd);
+    return id !== "new-session" && (id === "project-scratchpad" && cwd && this.onScratchpad && this.scratchpads.get(cwd)
+      || this.projects.get(cwd)?.some(item => item.thread_id === id)) ? id : null;
   }
-  save(rememberSelection = false) {
+  save(rememberSelection = false, cwd = this.cwd) {
     if (rememberSelection) this.selections.set(this.cwd, this.selected ?? null);
-    try { this.storage?.setItem(this.baseKey + ":" + this.cwd, JSON.stringify({
-      items: this.items.filter(item => item.thread_id !== "new-session").map(({thread_id, title}) => ({thread_id, title})),
-      selected: this.destination(),
-      scratchpadOpen: this.scratchpads.get(this.cwd) === true,
+    try { this.storage?.setItem(this.baseKey + ":" + cwd, JSON.stringify({
+      items: (this.projects.get(cwd) || []).filter(item => item.thread_id !== "new-session").map(({thread_id, title}) => ({thread_id, title})),
+      selected: this.destination(cwd),
+      scratchpadOpen: this.scratchpads.get(cwd) === true,
     })); } catch { /* Tabs still work without storage. */ }
   }
   open(thread) {
@@ -63,13 +63,19 @@ class ThreadTabs {
     for (const item of this.items) if (available.has(item.thread_id)) Object.assign(item, available.get(item.thread_id));
     this.save(); this.render();
   }
-  replace(id, thread) {
-    const index = this.items.findIndex(item => item.thread_id === id);
+  replace(id, thread, {cwd = this.cwd} = {}) {
+    const items = this.projects.get(cwd) || [];
+    const index = items.findIndex(item => item.thread_id === id);
     if (index < 0) return;
-    this.items.splice(index, 1);
-    if (!this.items.some(item => item.thread_id === thread.thread_id)) this.items.splice(index, 0, {...thread});
-    if (this.selected === id) this.selected = thread.thread_id;
-    this.save(true); this.render();
+    items.splice(index, 1);
+    if (!items.some(item => item.thread_id === thread.thread_id)) items.splice(index, 0, {...thread});
+    if (cwd === this.cwd) {
+      if (this.selected === id) this.selected = thread.thread_id;
+      this.save(true); this.render();
+    } else {
+      if (this.selections.get(cwd) === id) this.selections.set(cwd, thread.thread_id);
+      this.save(false, cwd);
+    }
   }
   async activate(id, {force = false} = {}) {
     // Overview is also shown while a project's saved tab is loading. Honor an

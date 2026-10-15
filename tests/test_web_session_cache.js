@@ -400,22 +400,23 @@ test("choosing Overview while a project loads cancels its remembered conversatio
 
 test("new-session drafts and attachments remain separate for each project", async () => {
   const c = projectSetup();
+  vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
   await c.newSession();
   c.$("message").value = "New A";
-  c.state.attachments.drafts.set("new-session", ["image A"]);
-  c.state.mentions.drafts.set("new-session", ["file A"]);
+  c.state.attachments.drafts.set(c.composerDraftId(), ["image A"]);
+  c.state.mentions.drafts.set(c.composerDraftId(), ["file A"]);
   await c.switchTo("/b"); await c.newSession();
   c.$("message").value = "New B";
-  c.state.attachments.drafts.set("new-session", ["image B"]);
+  c.state.attachments.drafts.set(c.composerDraftId(), ["image B"]);
   await c.switchTo("/a");
   assert.equal(c.state.selected, "new-session"); assert.equal(c.state.detail.session.cwd, "/a");
   assert.equal(c.$("message").value, "New A");
-  assert.deepEqual(c.state.attachments.drafts.get("new-session"), ["image A"]);
-  assert.deepEqual(c.state.mentions.drafts.get("new-session"), ["file A"]);
+  assert.deepEqual(c.state.attachments.drafts.get(c.composerDraftId()), ["image A"]);
+  assert.deepEqual(c.state.mentions.drafts.get(c.composerDraftId()), ["file A"]);
   await c.switchTo("/b");
   assert.equal(c.state.selected, "new-session"); assert.equal(c.state.detail.session.cwd, "/b");
   assert.equal(c.$("message").value, "New B");
-  assert.deepEqual(c.state.attachments.drafts.get("new-session"), ["image B"]);
+  assert.deepEqual(c.state.attachments.drafts.get(c.composerDraftId()), ["image B"]);
 });
 
 test("project switching restores split selection and its full-conversation return target", async () => {

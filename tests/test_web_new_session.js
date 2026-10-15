@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs"), vm = require("node:vm");
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
 const {newThreadContext} = require("../plugins/agent-coord/scripts/agent_coord/web/folders.js");
+const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
+const ChatImageAttachments = require("../plugins/agent-coord/scripts/agent_coord/web/image-attachments.js");
+const {ThreadMentions} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-mentions.js");
 function setup() {
   const elements = new Map(), calls = [];
   const element = () => ({value: "", dataset: {}, children: [], classList: {add() {}, remove() {}},
@@ -12,7 +15,7 @@ function setup() {
     $: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); },
     node: (tag, text) => Object.assign(element(), {tag, textContent: text}),
     Option: function(text, value) { return {text, value}; }, navigation: null,
-    state: {config: {cwd: "/server-process"}, folders: {selected: {cwd: "/workspace"}}, organization: {repositories: [], projects: []}, drafts: new Map(), commandFeedback: new Map(), closing: new Set()},
+    state: {busy: false, config: {cwd: "/server-process"}, folders: {selected: {cwd: "/workspace"}}, organization: {repositories: [], projects: []}, drafts: new Map(), commandFeedback: new Map(), closing: new Set()},
     threadOrganization: {NONE: "__none__"}, action: fn => fn(), sessionPath: id => "sessions/" + id,
     api: async (path, body) => {
       calls.push({path, body});
@@ -225,7 +228,7 @@ test("failed first send preserves the draft and retries the already-created sess
   await assert.rejects(c.sendSessionDraft("Keep this", []), /Unavailable/);
   assert.equal(c.state.selected, "new-session");
   assert.equal(c.$("message").value, "Keep this");
-  assert.equal(c.state.creatingSession, false);
+  assert.equal(c.sessionBusy(), false);
   fail = false; await c.sendSessionDraft("Keep this", []);
   assert.equal(c.calls.filter(call => call.path === "sessions").length, 1);
   assert.equal(c.state.selected, "created");
@@ -322,4 +325,177 @@ test("effort saves or resets existing settings, preserves errors and ignores rep
   };
   c.$("effort-picker").value = "high"; await c.changeSessionEffort();
   assert.equal(c.state.detail.session.effort, "low");
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return {promise, resolve, reject};
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+function projectSetup(readFile = async () => "data:image/png;base64,YQ==") {
+  const c = setup();
+  c.state.projectCwd = "/workspace";
+  c.state.threadTabs = new ThreadTabs({});
+  c.state.threadTabs.setProject(c.state.projectCwd);
+  c.state.attachments = new ChatImageAttachments({getThread: () => c.composerDraftId(),
+    canAttach: () => true, onChange() {}, onError: error => c.errors.push(error), readFile});
+  c.state.mentions = Object.assign(Object.create(ThreadMentions.prototype), {
+    drafts: new Map(), getThread: () => c.composerDraftId(), input: c.$("message"), render() {},
+  });
+  c.errors = [];
+  c.renderList = () => {};
+  c.refreshDetail = async () => {};
+  c.showError = error => c.errors.push(error);
+  c.savedViews = {setProject: async () => {}, restoreScroll() {}};
+  vm.runInContext(source.slice(source.indexOf("async function switchProject("), source.indexOf("function renderFolders()")), c);
+  c.switchTo = async cwd => {
+    c.state.folders.selected = {cwd};
+    await c.switchProject();
+  };
+  c.select = async id => {
+    if (id === "new-session") return c.newSession();
+    if (c.state.selected) c.state.drafts.set(c.state.selected, c.$("message").value);
+    c.state.selected = id;
+    c.state.detail = {session: {client: "codex"}, work_thread: {thread_id: id, browser_session: true, attention: "now"}};
+    c.$("message").value = c.state.drafts.get(id) || "";
+    c.state.threadTabs.open({thread_id: id, title: id});
+  };
+  return c;
+}
+const image = name => ({name, type: "image/png", size: 1});
+
+test("first sends stay with their projects while another project's draft is created and sent", async () => {
+  for (const phase of ["creation", "message"]) {
+    const c = projectSetup(); await c.newSession();
+    const a = c.state.newSessionDraft, gates = {a: deferred(), b: deferred()};
+    c.$("message").value = "Send A";
+    await c.state.attachments.add([image("A.png")]);
+    let creations = 0;
+    c.api = async (path, body) => {
+      c.calls.push({path, body});
+      if (path === "sessions") {
+        const id = ++creations === 1 ? "a" : "b";
+        if (phase === "creation") await gates[id].promise;
+        return {session: {thread_id: id}};
+      }
+      if (phase === "message") await gates[path.split("/")[1]].promise;
+      return {};
+    };
+    const first = c.sendMessage(); await settle();
+    assert.equal(c.sessionBusy(), true);
+    await c.sendMessage(); assert.equal(creations, 1, "duplicate submission stays blocked");
+    c.$("message").value = "Next A";
+    c.state.mentions.draft().text = "Next A";
+    await c.state.attachments.add([image("next-A.png")]);
+    await c.switchTo("/other"); await c.newSession();
+    const b = c.state.newSessionDraft;
+    assert.notEqual(a.draftId, b.draftId);
+    assert.equal(c.sessionBusy(), false);
+    c.$("message").value = "Send B";
+    await c.state.attachments.add([image("B.png")]);
+    c.state.mentions.draft().text = "Send B";
+    const second = c.sendMessage(); await settle();
+    assert.equal(creations, 2);
+    gates.a.resolve(); await first;
+    assert.equal(c.state.selected, "new-session");
+    assert.equal(c.state.newSessionDraft, b);
+    assert.equal(c.$("message").value, "Send B");
+    assert.equal(c.state.mentions.draft().text, "Send B");
+    assert.equal(c.state.attachments.snapshot()[0].name, "B.png");
+    assert.equal(c.sessionBusy(), true, "A's completion must not release B's pending send");
+    assert.equal(c.state.drafts.get("a"), "Next A");
+    assert.equal(c.state.attachments.snapshot("a")[0].name, "next-A.png");
+    assert.equal(c.state.mentions.draft("a").text, "Next A");
+    assert.equal(c.state.threadTabs.projects.get("/workspace")[0].thread_id, "a");
+    gates.b.resolve(); await second;
+    assert.equal(c.state.selected, "b");
+    await c.switchTo("/workspace");
+    assert.equal(c.state.selected, "a");
+    assert.equal(c.$("message").value, "Next A");
+    assert.equal(c.state.newSessionDraft, null);
+    assert.equal(c.state.sending.size, 0);
+  }
+});
+
+test("failed first send preserves its originating draft for retry after switching projects", async () => {
+  const c = projectSetup(); await c.newSession();
+  const a = c.state.newSessionDraft, gate = deferred();
+  c.$("message").value = "Keep A";
+  await c.state.attachments.add([image("A.png")]);
+  const api = c.api; let failed = false;
+  c.api = async (path, body) => {
+    if (path.endsWith("/messages") && !failed) { failed = true; return gate.promise; }
+    return api(path, body);
+  };
+  const sending = c.sendMessage(); await settle();
+  await c.switchTo("/other"); await c.newSession();
+  c.$("message").value = "Keep B";
+  gate.reject(new Error("Unavailable"));
+  await assert.rejects(sending, /Unavailable/);
+  assert.equal(c.$("message").value, "Keep B"); assert.equal(c.sessionBusy(), false);
+  await c.switchTo("/workspace");
+  assert.equal(c.state.newSessionDraft, a);
+  assert.equal(c.$("message").value, "Keep A");
+  assert.equal(c.state.attachments.snapshot()[0].name, "A.png");
+  await c.sendMessage();
+  assert.equal(c.calls.filter(call => call.path === "sessions").length, 1);
+  assert.equal(c.state.selected, "created");
+});
+
+test("returning to a draft during creation retains its pending send and completes in that project", async () => {
+  const c = projectSetup(); await c.newSession();
+  const gate = deferred(), api = c.api;
+  c.$("message").value = "Send A";
+  c.api = async (path, body) => { if (path === "sessions") await gate.promise; return api(path, body); };
+  const sending = c.sendMessage(); await settle();
+  await c.switchTo("/other"); await c.newSession();
+  await c.switchTo("/workspace");
+  assert.equal(c.sessionBusy(), true);
+  gate.resolve(); await sending;
+  assert.equal(c.state.projectCwd, "/workspace"); assert.equal(c.state.selected, "created");
+  assert.equal(c.state.sending.size, 0);
+});
+
+test("image reads and failures stay with their draft across project switches", async () => {
+  for (const failure of [false, true]) {
+    const gate = deferred(), c = projectSetup(file => file.name === "A.png" ? gate.promise : "data:image/png;base64,YQ==");
+    await c.newSession(); const a = c.state.newSessionDraft;
+    const reading = c.state.attachments.add([image("A.png")]); await settle();
+    c.$("message").value = "Do not send incomplete A";
+    await c.sendMessage(); assert.equal(c.calls.some(call => call.path === "sessions"), false);
+    await c.switchTo("/other"); await c.newSession();
+    const b = c.state.newSessionDraft;
+    await c.state.attachments.add([image("B.png")]);
+    if (failure) gate.reject(new Error("Read failed")); else gate.resolve("data:image/png;base64,YQ==");
+    await reading;
+    assert.equal(c.state.newSessionDraft, b);
+    assert.equal(c.state.attachments.snapshot()[0].name, "B.png");
+    await c.switchTo("/workspace");
+    assert.equal(c.state.newSessionDraft, a);
+    assert.equal(c.state.attachments.pending(), false);
+    assert.equal(c.state.attachments.snapshot().length, failure ? 0 : 1);
+    assert.equal(c.errors.length, failure ? 1 : 0);
+  }
+});
+
+test("an existing send and its refresh cannot block another project's send or clear its draft", async () => {
+  const c = projectSetup(); await c.select("a");
+  c.$("message").value = "Send A";
+  const gate = deferred(), refresh = deferred(), api = c.api;
+  c.api = async (path, body) => path === "sessions/a/messages" ? gate.promise : api(path, body);
+  const first = c.sendMessage(); await settle();
+  // Leave while the original HTTP request is pending; the next project is usable immediately.
+  c.refreshList = async () => {};
+  await c.switchTo("/other"); await c.select("b"); c.$("message").value = "Send B";
+  const second = c.sendMessage(); await second;
+  assert.equal(c.sessionBusy(), false);
+  c.$("message").value = "Next B";
+  c.refreshList = () => refresh.promise;
+  gate.resolve({}); await settle();
+  assert.equal(c.sessionBusy(), false, "A's refresh must not disable B's composer");
+  assert.equal(c.$("message").value, "Next B");
+  refresh.resolve(); await first;
+  assert.equal(c.state.drafts.has("a"), false);
+  assert.equal(c.state.sending.size, 0);
 });

@@ -21,10 +21,17 @@
     pending(id = this.getThread()) { return this.items(id).some(item => !item.url); }
     snapshot(id = this.getThread()) { return this.items(id).filter(item => item.url); }
     remove(id, item) {
+      // A first send may have moved this draft while a later image was reading.
+      if (!this.items(id).includes(item)) id = [...this.drafts].find(([, items]) => items.includes(item))?.[0];
+      if (id === undefined) return;
       const remaining = this.items(id).filter(other => other !== item);
       if (remaining.length) this.drafts.set(id, remaining);
       else this.drafts.delete(id);
       this.onChange();
+    }
+    move(from, to) {
+      if (this.drafts.has(from)) this.drafts.set(to, this.drafts.get(from));
+      this.drafts.delete(from);
     }
     sent(id, items) {
       // Preserve images added while a request was in flight, even in another thread.

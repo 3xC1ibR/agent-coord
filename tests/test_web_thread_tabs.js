@@ -242,3 +242,17 @@ test("startup restores the saved tab only when no explicit destination was reque
       || (destination.scratchpad ? "scratchpad" : "restore")]);
   }
 });
+
+test("a background draft completion updates only its original project's tabs and saved destination", () => {
+  const {tabs, storage} = setup();
+  tabs.open(thread("new-session"));
+  tabs.setProject("/other"); tabs.open(thread("new-session"));
+  tabs.replace("new-session", thread("created"), {cwd: "/work"});
+  assert.equal(tabs.cwd, "/other");
+  assert.equal(tabs.selected, "new-session");
+  assert.deepEqual(tabs.items.map(item => item.thread_id), ["new-session"]);
+  assert.deepEqual(tabs.projects.get("/work").map(item => item.thread_id), ["created"]);
+  const reopened = setup(storage);
+  assert.equal(reopened.tabs.destination(), "created");
+  assert.deepEqual(reopened.ids(), ["created"]);
+});

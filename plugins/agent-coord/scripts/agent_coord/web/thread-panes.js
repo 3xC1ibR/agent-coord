@@ -538,7 +538,7 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
   const returnTarget = () => ({thread: state.selected, scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop});
   function canChangeLayout() {
     if (document.querySelector("dialog[open]") || shell.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")) return false;
-    if (state.busy || state.attachments.pending()) { showError(new Error("Wait for the current send or image attachment to finish before tiling.")); return false; }
+    if (state.busy || state.sending?.size || state.attachments.pending()) { showError(new Error("Wait for the current send or image attachment to finish before tiling.")); return false; }
     return true;
   }
   function syncDrafts() {

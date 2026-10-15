@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = {config: null, creatingSession: false, sessions: [], organization: {repositories: [], projects: []}, selected: null, detail: null, drafts: new Map(), closing: new Set(), pinning: new Set(), updatingThreads: new Set(), groupExpansion: new Map(), phaseScroll: new Map(), commandFeedback: new Map(), busy: false, listSignature: ""};
+const state = {config: null, sessions: [], organization: {repositories: [], projects: []}, selected: null, detail: null, drafts: new Map(), closing: new Set(), pinning: new Set(), updatingThreads: new Set(), groupExpansion: new Map(), phaseScroll: new Map(), commandFeedback: new Map(), busy: false, listSignature: ""};
 state.threadActions = createThreadActions(document, window);
 let notifications;
 let savedViews;
@@ -157,13 +157,6 @@ function sessionContext() {
   return newThreadContext(state.organization, {project: $("project").value}, state.folders?.selected);
 }
 function threadsInProject(threads) { return threads.filter(thread => inProject(thread, state.folders?.selected?.cwd)); }
-function canSwitchProject() {
-  if (state.busy || state.creatingSession || state.attachments?.pending()) {
-    showError(new Error("Wait for the current message or attachment to finish before switching projects."));
-    return false;
-  }
-  return true;
-}
 async function switchProject({restoreConversation = true} = {}) {
   const cwd = state.folders.selected?.cwd || "";
   if (state.projectCwd === cwd) { renderFolders(); return; }
@@ -174,15 +167,10 @@ async function switchProject({restoreConversation = true} = {}) {
   goHome({restoreDispatcher: false, rememberTab: false});
   const revision = state.navigationRevision;
   const drafts = state.projectDrafts ||= new Map();
-  drafts.set(state.projectCwd, {detail: state.newSessionDraft, text: state.drafts.get("new-session"),
-    images: state.attachments?.drafts.get("new-session"), mentions: state.mentions?.drafts.get("new-session")});
+  drafts.set(state.projectCwd, {detail: state.newSessionDraft, text: state.drafts.get("new-session")});
   const draft = drafts.get(cwd);
   state.newSessionDraft = draft?.detail || null;
   state.drafts.set("new-session", draft?.text || "");
-  for (const [manager, value] of [[state.attachments, draft?.images], [state.mentions, draft?.mentions]]) {
-    manager?.drafts.delete("new-session");
-    if (value) manager?.drafts.set("new-session", value);
-  }
   state.projectCwd = cwd;
   state.projectScratchpad?.setProject(state.folders.selected);
   state.threadTabs?.setProject(cwd);
@@ -1130,14 +1118,14 @@ function renderSessionSettings() {
   $("session-model").textContent = "Model · " + providerName + " · " + (session?.model || "Default");
   $("session-effort").textContent = "Reasoning · " + (session?.effort || "Model default");
   $("session-yolo").hidden = !session?.yolo;
-  $("edit-permissions").disabled = !browserSession || state.detailRefreshing || !!state.detail?.running || state.detail?.work_thread?.attention === "archived" || state.busy || state.closing.has(state.selected);
+  $("edit-permissions").disabled = !browserSession || state.detailRefreshing || !!state.detail?.running || state.detail?.work_thread?.attention === "archived" || sessionBusy() || state.closing.has(state.selected);
   $("command-feedback").textContent = state.commandFeedback.get(state.selected) || "";
   $("command-feedback").hidden = !browserSession || !state.commandFeedback.has(state.selected);
   renderModelPicker();
 }
 function openSessionPermissions() {
   const detail = state.detail, work = detail?.work_thread;
-  if (!work?.browser_session || state.detailRefreshing || detail.running || work.attention === "archived" || state.busy || state.closing.has(state.selected)) return;
+  if (!work?.browser_session || state.detailRefreshing || detail.running || work.attention === "archived" || sessionBusy() || state.closing.has(state.selected)) return;
   const dialog = $("permissions-dialog");
   dialog.dataset.threadId = state.selected;
   $("permissions-thread").textContent = work.title || detail.session?.name || "This session";
@@ -1197,7 +1185,7 @@ function renderStatus() {
   state.mobileChat?.status(state.detail?.requests?.length ? "Needs input" : active ? "Working" : status?.label || "Ready",
     state.detail?.requests?.length ? "input" : active ? "running" : status?.key || "idle");
   $("composer").hidden = !work?.browser_session;
-  $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (!dispatcher && running && !state.detail.activeTurn) || archived || state.busy || !!state.attachments?.pending() || state.closing.has(state.selected);
+  $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (!dispatcher && running && !state.detail.activeTurn) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
   $("send").textContent = dispatcher ? "Send ↑" : running ? (work?.client !== "codex" ? "Queue ↑" : "Steer ↑") : "Send ↑";
   $("queue").hidden = dispatcher || !running || work?.client !== "codex";
   $("queue").disabled = $("send").disabled;
@@ -1731,6 +1719,12 @@ $("organization-form").onsubmit = event => {
   }, $("save-organization"));
 };
 function isSessionDraft() { return state.selected === "new-session" && !!state.newSessionDraft; }
+function composerDraftId(id = state.selected) {
+  return id === "new-session" ? state.newSessionDraft?.draftId || id : id;
+}
+function sessionBusy() {
+  return !!state.busy || !!state.sending?.has(isSessionDraft() ? state.newSessionDraft : state.selected);
+}
 function modelValue(client, model) { return JSON.stringify([client, model || ""]); }
 function renderModelPicker() {
   const session = state.detail?.session, picker = $("model-picker");
@@ -1754,7 +1748,7 @@ function renderModelPicker() {
     }
   }
   picker.value = modelValue(client, session.model);
-  picker.disabled = state.busy || state.detailRefreshing || !!state.detail.running || state.detail.work_thread?.attention === "archived" || !!state.newSessionDraft?.createdId && draft;
+  picker.disabled = sessionBusy() || state.detailRefreshing || !!state.detail.running || state.detail.work_thread?.attention === "archived" || !!state.newSessionDraft?.createdId && draft;
   const errors = clients.filter(provider => state.modelErrors?.has(provider));
   $("model-picker-status").textContent = errors.length ? errors.map(provider => (provider === "muse" ? "Muse Code" : provider === "kimi" ? "Kimi" : provider === "antigravity" ? "Antigravity" : provider === "claude" ? "Claude Code" : "Codex") + " models unavailable").join(" · ") : "";
   if (["antigravity", "kimi", "muse"].includes(client) && state.modelErrors?.has(client)) $("model-picker-status").textContent = state.modelErrors.get(client);
@@ -1782,7 +1776,7 @@ function renderEffortPicker() {
 }
 async function changeSessionEffort() {
   const id = state.selected, draft = isSessionDraft(), effort = $("effort-picker").value || null;
-  if ($("effort-picker").disabled || state.busy || state.detail?.running || draft && state.newSessionDraft.createdId) return;
+  if ($("effort-picker").disabled || sessionBusy() || state.detail?.running || draft && state.newSessionDraft.createdId) return;
   state.busy = true;
   renderStatus();
   try {
@@ -1816,7 +1810,7 @@ async function loadSessionModels() {
 async function changeSessionModel() {
   const id = state.selected, [client, model] = JSON.parse($("model-picker").value);
   const draft = isSessionDraft();
-  if (state.busy || state.detailRefreshing || state.detail?.running || draft && state.newSessionDraft.createdId) return;
+  if (sessionBusy() || state.detailRefreshing || state.detail?.running || draft && state.newSessionDraft.createdId) return;
   state.busy = true;
   try {
     if (draft) {
@@ -1832,7 +1826,7 @@ $("model-picker").onchange = () => action(changeSessionModel);
 $("model-picker").onfocus = () => { loadSessionModels(); };
 async function newSession() {
   state.mobileChat?.close();
-  if (!state.config || state.creatingSession || state.choosingSessionFolder) return;
+  if (!state.config || state.choosingSessionFolder) return;
   let body = state.newSessionDraft?.session;
   if (!body) {
     body = sessionContext();
@@ -1847,6 +1841,7 @@ async function newSession() {
   }
   goHome({restoreDispatcher: false});
   state.newSessionDraft ||= {
+    draftId: "new-session:" + (state.draftSequence = (state.draftSequence || 0) + 1),
     session: {...body, client: "codex", model: null, effort: null, yolo: false},
     work_thread: {thread_id: "new-session", title: "New session", ...body, project_cwd: body.cwd, client: "codex", browser_session: true, attention: "now", links: []},
     thread: {turns: []}, requests: [], queuedMessages: [], running: false,
@@ -1875,37 +1870,39 @@ async function newSession() {
 }
 async function sendSessionDraft(text, images, mentions = []) {
   const draft = state.newSessionDraft;
-  state.creatingSession = true;
-  try {
-    if (!draft.createdId) {
-      const result = await api("sessions", {...draft.session});
-      draft.createdId = result.session.thread_id;
-    }
-    const body = {message: text, windowId: state.sourceWindowId};
-    if (mentions.length) body.mentions = mentions;
-    if (images.length) body.images = images.map(({name, url}) => ({name, url}));
-    const result = await api(sessionPath(draft.createdId) + "/messages", body);
-    state.attachments?.sent("new-session", images);
-    state.mentions?.sent("new-session", text, mentions);
-    state.mentions?.move("new-session", draft.createdId);
-    const remainingImages = state.attachments?.items("new-session") || [];
-    if (remainingImages.length) {
-      state.attachments.drafts.set(draft.createdId, remainingImages);
-      state.attachments.drafts.delete("new-session");
-    }
-    if (result.command) state.commandFeedback.set(draft.createdId, result.command.message);
-    // Preserve edits typed while creation or sending was in flight.
-    const remaining = isSessionDraft() ? $("message").value : state.drafts.get("new-session");
-    if (remaining && remaining !== text) state.drafts.set(draft.createdId, remaining);
+  const cwd = state.projectCwd || draft.session.cwd, draftId = draft.draftId || "new-session";
+  if (!draft.createdId) {
+    const result = await api("sessions", {...draft.session});
+    draft.createdId = result.session.thread_id;
+  }
+  const body = {message: text, windowId: state.sourceWindowId};
+  if (mentions.length) body.mentions = mentions;
+  if (images.length) body.images = images.map(({name, url}) => ({name, url}));
+  const result = await api(sessionPath(draft.createdId) + "/messages", body);
+  state.attachments?.sent(draftId, images);
+  state.mentions?.sent(draftId, text, mentions);
+  state.mentions?.move(draftId, draft.createdId);
+  state.attachments?.move(draftId, draft.createdId);
+  if (result.command) state.commandFeedback.set(draft.createdId, result.command.message);
+  // Preserve edits typed while creation or sending was in flight.
+  const current = state.newSessionDraft === draft;
+  const saved = state.projectDrafts?.get(cwd);
+  const remaining = current ? (isSessionDraft() ? $("message").value : state.drafts.get("new-session"))
+    : saved?.detail === draft ? saved.text : "";
+  if (remaining && remaining !== text) state.drafts.set(draft.createdId, remaining);
+  if (saved?.detail === draft) state.projectDrafts.delete(cwd);
+  if (current) {
     state.drafts.delete("new-session");
     state.newSessionDraft = null;
-    state.threadTabs?.replace("new-session", {thread_id: draft.createdId, title: "Conversation"});
-    if (state.selected === "new-session") {
-      $("message").value = "";
-      await select(draft.createdId);
-    }
-    await refreshList();
-  } finally { state.creatingSession = false; }
+  }
+  state.threadTabs?.replace("new-session", {thread_id: draft.createdId, title: "Conversation"}, {cwd});
+  const destination = state.projectDestinations?.get(cwd);
+  if (destination?.tab === "new-session") destination.tab = draft.createdId;
+  if (current && state.selected === "new-session") {
+    $("message").value = "";
+    await select(draft.createdId);
+  }
+  await refreshList();
 }
 $("new-session").onclick = $("welcome-new").onclick = () => action(newSession);
 function filtersChanged() { savedViews?.persist(); navigation?.remember(); renderList(); }
@@ -1987,7 +1984,7 @@ function openProjectScratchpad() {
   $("page-location").textContent = "Scratchpad";
   navigation?.remember();
 }
-$("open-project-scratchpad").onclick = () => { if (canSwitchProject()) openProjectScratchpad(); };
+$("open-project-scratchpad").onclick = () => openProjectScratchpad();
 document.querySelector(".brand").onclick = event => { event.preventDefault(); goHome(); };
 $("home").onclick = $("back-home").onclick = goHome;
 const mobileNavigation = window.matchMedia("(max-width: 720px)");
@@ -2100,17 +2097,19 @@ async function sendMessage(mode = "steer") {
   const detail = state.detail;
   const dispatcher = !!detail?.work_thread?.dispatcher;
   const id = state.selected, text = $("message").value;
+  const draft = isSessionDraft() ? state.newSessionDraft : null, sendKey = draft || id;
+  const draftId = draft?.draftId || id;
   const ticket = state.rollUp?.ticket(id);
-  const images = state.attachments?.snapshot(id) || [];
-  if (state.busy || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
-      (!dispatcher && detail.running && !detail.activeTurn) || state.attachments?.pending(id) || (!text.trim() && !images.length)) return;
-  const mentions = state.mentions?.snapshot(id, text) || [];
+  const images = state.attachments?.snapshot(draftId) || [];
+  if (state.busy || state.sending?.has(sendKey) || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
+      (!dispatcher && detail.running && !detail.activeTurn) || state.attachments?.pending(draftId) || (!text.trim() && !images.length)) return;
+  const mentions = state.mentions?.snapshot(draftId, text) || [];
   const body = {message: text};
   if (mentions.length) body.mentions = mentions;
   if (state.sourceWindowId) body.windowId = state.sourceWindowId;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
   if (!dispatcher && detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
-  state.busy = true; renderStatus();
+  (state.sending ||= new Set()).add(sendKey); renderStatus();
   let dispatchReceived = false;
   try {
     const command = text.trim().split(/\s+/)[0].toLowerCase();
@@ -2121,7 +2120,7 @@ async function sendMessage(mode = "steer") {
     if (isSessionDraft()) {
       if (command === "/fork") throw new Error("Send a message before forking this conversation.");
       if (command === "/close") {
-        state.drafts.delete("new-session"); state.attachments?.drafts.delete("new-session");
+        state.drafts.delete("new-session"); state.attachments?.drafts.delete(draftId); state.mentions?.drafts.delete(draftId);
         $("message").value = ""; state.newSessionDraft = null; goHome(); return;
       }
       await sendSessionDraft(text, images, mentions); return;
@@ -2168,7 +2167,7 @@ async function sendMessage(mode = "steer") {
     }
     throw error;
   }
-  finally { state.busy = false; renderStatus(); if (state.paneMode) globalThis.agentCoordPane?.saveDraft(); }
+  finally { state.sending.delete(sendKey); renderStatus(); if (state.paneMode) globalThis.agentCoordPane?.saveDraft(); }
 }
 $("composer").onsubmit = event => { event.preventDefault(); action(sendMessage); };
 async function toggleDispatcher(thread = state.detail?.work_thread) {
@@ -2418,7 +2417,7 @@ async function boot() {
         if (thread && key in thread) settings[key] = thread[key];
       }
       return {settings, source: state.selected, message: state.selected ? $("message").value : "",
-        images: state.attachments?.items(state.selected) || [], mentions: state.mentions?.snapshot() || []};
+        images: state.attachments?.items(composerDraftId()) || [], mentions: state.mentions?.snapshot() || []};
     },
     onSaved: draft => {
       if (draft.source && state.selected === draft.source && $("message").value === draft.message) {
@@ -2426,7 +2425,7 @@ async function boot() {
       }
     }});
   state.mentions = new ThreadMentions({input: $("message"), menu: $("thread-mentions"), references: $("thread-references"),
-    getThread: () => state.selected,
+    getThread: () => composerDraftId(),
     getWorkspace: () => state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config.cwd,
     loadFiles: async query => {
       const root = state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config.cwd;
@@ -2436,7 +2435,7 @@ async function boot() {
       const results = await Promise.all([api("threads"), api("threads?archived=true")]);
       return [...results[0].data, ...results[1].data];
     },
-    canComplete: () => state.slashCommands?.query()?.kind !== "skill" && !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !state.busy &&
+    canComplete: () => state.slashCommands?.query()?.kind !== "skill" && !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !sessionBusy() &&
       state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
     onChange: () => { state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
   state.slashCommands = new ChatSlashCommands({input: $("message"), menu: $("slash-commands"),
@@ -2445,11 +2444,11 @@ async function boot() {
     catalogs: (state.modelCatalogs ||= new Map()),
     loadModels: loadModelCatalog,
     loadSkills: async session => (await api("skills", {client: session.client || "codex", cwd: session.cwd})).data,
-    canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !state.busy &&
+    canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !sessionBusy() &&
       state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
     onReplace: (start, end, text) => state.mentions?.draft().edit(start, end, text),
     onChange: () => { state.mentions?.render(); state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
-  state.attachments = new ChatImageAttachments({document, getThread: () => state.selected,
+  state.attachments = new ChatImageAttachments({document, getThread: () => composerDraftId(),
     canAttach: () => !!state.detail?.work_thread?.browser_session && state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
     onChange: renderStatus, onError: showError});
   state.attachments.bind();
@@ -2501,8 +2500,8 @@ async function boot() {
     }).catch(() => {}), {once: true});
   }
   state.folderPicker = new FolderPicker({document, folders: state.folders, api, desktop, remote: state.config.remote,
-    onError: showError, onOpened: switchProject, canSwitch: canSwitchProject});
-  state.projectTabs = new ProjectTabs({document, folders: state.folders, onSwitch: switchProject, onError: showError, canSwitch: canSwitchProject});
+    onError: showError, onOpened: switchProject});
+  state.projectTabs = new ProjectTabs({document, folders: state.folders, onSwitch: switchProject, onError: showError});
   savedViews = new SavedViews({document, api, storage: windowStorage, preferences,
     onRefresh: refreshList,
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
@@ -2523,7 +2522,7 @@ async function boot() {
   state.threadTabs = new ThreadTabs({document, container: $("conversation-tabs"),
     storage: desktop ? preferences : windowStorage, fallbackStorage: desktop ? windowStorage : null,
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
-    canNavigate: canSwitchProject, onError: showError, onScratchpad: openProjectScratchpad,
+    onError: showError, onScratchpad: openProjectScratchpad,
     onSelect: async id => {
       if (await globalThis.agentCoordPanes?.selectTab(id)) return;
       // Explicit overview tiling and dispatcher workspaces remain separate destinations.

@@ -211,3 +211,17 @@ test("mobile chooser reuses attachment validation, supports reselection, and ign
   c.enabled = false; c.attachments.render(); button.onclick();
   assert.equal(button.disabled, true); assert.equal(clicks, 3);
 });
+
+test("an image read failure after draft promotion removes only that image from its new owner", async () => {
+  let fail;
+  const c = setup(() => new Promise((resolve, reject) => { fail = reject; }));
+  const reading = c.attachments.add([file("pending.png")]); await Promise.resolve();
+  c.attachments.move("one", "created");
+  c.selected = "two";
+  c.attachments.readFile = async () => url;
+  await c.attachments.add([file("other.png")]);
+  fail(new Error("Read failed")); await reading;
+  assert.equal(c.attachments.pending("created"), false);
+  assert.equal(c.attachments.items("created").length, 0);
+  assert.equal(c.attachments.snapshot()[0].name, "other.png");
+});

@@ -8,7 +8,7 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 
 function setup() {
   const values = new Map(), elements = new Map(), calls = [], warnings = [];
-  const c = {state: {selected: "dispatcher", config: {token: "test"}, drafts: new Map(),
+  const c = {state: {busy: false, selected: "dispatcher", config: {token: "test"}, drafts: new Map(),
     closing: new Set(), commandFeedback: new Map(), detail: {running: false,
       work_thread: {browser_session: true, dispatcher: true, attention: "now"}}},
     base: "/api/browser/", listRequest: 0, location: {protocol: "http:"},
