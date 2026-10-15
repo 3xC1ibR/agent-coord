@@ -88,6 +88,7 @@ Routine writes (`register`, `set-activity`, `checkpoint`, `thread update`,
 `begin-work`, `end-work`, `unregister`, `send`, `ack`) return compact JSON
 receipts. Add `--full` to retain the previous complete output; read commands
 such as `status` and `thread show` still return complete state.
+Checkpoint writes return only `status` and `checkpoint_id` by default.
 The stable launcher is refreshed by rerunning `install-cli` from the new
 installed plugin. It refuses to replace an unmanaged executable.
 
@@ -1267,15 +1268,19 @@ and a conversation you are already viewing in a focused tab stays quiet. Click
 **Notifications on** to disable alerts. Terminal sessions must load the refreshed
 plugin to record turn completions.
 
-Agents maintain checkpoints with:
+Agents prefer the plugin's `update_checkpoint` tool. It accepts changed fields
+directly, for example `{"phase":"validation"}` or
+`{"summary":"Tests passed.","next_step":null}`. Pass the registered
+`session_id` announced by the hook when the MCP process has no inherited caller
+identity. The bundled server uses Python's standard library and MCP over stdio;
+Codex and Claude load the same implementation. The CLI is the fallback:
 
 ```bash
 agent-coord checkpoint --json '{
   "title": "Database write performance",
   "phase": "investigation",
   "summary": "Compared two approaches; no implementation has started.",
-  "next_action": "Choose an approach.",
-  "next_actor": "user",
+  "next_step": {"actor": "user", "action": "Choose an approach."},
   "links": [{"kind": "document", "label": "Findings", "target": "docs/findings.md"}]
 }'
 agent-coord thread show --session-id <id>
@@ -1283,8 +1288,17 @@ agent-coord thread list
 agent-coord thread update --session-id <id> --attention later
 ```
 
-Checkpoints infer the current session from `AGENT_COORD_SESSION_ID`, then
-`CODEX_THREAD_ID`; agents do not need to look up or pass their own ID. Use
+The first checkpoint requires `phase` and `summary`. Later updates preserve
+every omitted field, including the next step. Set `next_step` to `null` to clear
+it; otherwise send its `actor` and `action` together. Legacy CLI payloads with
+`next_actor` and `next_action` remain supported as a pair; do not combine them
+with `next_step`. Updates merge atomically and save complete history snapshots.
+Links are added or updated without removing earlier links. Both tool and CLI
+success responses contain only `{"status":"ok","checkpoint_id":123}`; use
+`thread show` or the CLI's `--full` option for complete state and history.
+
+Caller identity defaults to `AGENT_COORD_SESSION_ID`, then
+`CODEX_THREAD_ID`. Use
 `--session-id` to target another thread or when running outside an agent's
 shell context. Hooks announce the session ID for that fallback.
 
@@ -1293,8 +1307,9 @@ Phases are `discussion`, `investigation`, `planning`, `orchestrating`, `implemen
 investigations and plans. Use `finished` for delivered implementation or execution,
 including requested validation/deployment. The UI exposes a separate `work_phase`
 that retains the last activity for older inquiry checkpoints marked finished.
-Next actors are `user`, `agent`,
-`external`, and `nobody` (with an empty next action). `--json -` reads stdin.
+Next-step actors are `user`, `agent`, and `external`; `null` means no next step.
+Stored snapshots retain `next_actor` and `next_action` for existing readers.
+`--json -` reads stdin.
 Hooks and browser launch instructions ask agents to save a factual checkpoint
 before returning control, when the phase changes, or after a significant result.
 Starting another turn marks an older checkpoint as potentially out of date.

@@ -63,7 +63,10 @@ is the user's choice; checkpoints and activity do not change placement. Routing
 new actionable work to a closed app conversation automatically moves it into Now.
 
 Before returning control to the user, at a phase change, or after a significant
-result, save a short factual checkpoint with the bundled CLI:
+result, save a short factual checkpoint with the `update_checkpoint` tool when
+available. Send fields directly, such as `{"phase":"validation"}`. If the MCP
+process has no inherited caller identity, pass your registered `session_id` from
+hook context; never infer it from cwd or another session. Otherwise use the CLI:
 
 ```bash
 agent-coord checkpoint --json '{
@@ -71,11 +74,18 @@ agent-coord checkpoint --json '{
   "domain": "backend",
   "phase": "investigation",
   "summary": "Compared the two approaches and documented the findings.",
-  "next_action": "",
-  "next_actor": "nobody",
+  "next_step": null,
   "links": [{"kind": "document", "label": "Findings", "target": "docs/findings.md"}]
 }'
 ```
+
+The first checkpoint requires `phase` and `summary`. Later updates send only
+changed fields; omission preserves all saved values, including a pending next
+step. Set `next_step` to `null` to clear it, or send `actor` and `action` together.
+Legacy CLI `next_actor` and `next_action` fields remain supported as a pair;
+do not mix them with `next_step`. Each update saves a complete snapshot in
+history. Tool and CLI success responses contain only `status` and
+`checkpoint_id`; read state/history with `thread show` or CLI `--full`.
 
 Use phases `discussion`, `investigation`, `planning`, `orchestrating`, `implementation`,
 `validation`, `deployment`, or `finished`. Describe what was established or
@@ -83,9 +93,9 @@ changed in one or two sentences. Use `orchestrating` for ongoing routing and coo
 including while a specialist implements or deploys. Coordination does not itself
 require a user action. Distinguish proposals, implemented changes,
 validation results, and deployment. Record the next required action and its
-actual owner (`user`, `agent`, or `external`). Set `next_actor: "user"` only when
+actual owner (`user`, `agent`, or `external`). Set `next_step.actor` to `user` only when
 progress or completion requires a specific user answer, approval, decision, or
-action, and describe that requirement in `next_action`. Ending an agent turn
+action, and describe that requirement in `next_step.action`. Ending an agent turn
 does not create a required user action.
 
 Keep optional advice, invitations to continue, and nonblocking reminders in
@@ -93,9 +103,9 @@ Keep optional advice, invitations to continue, and nonblocking reminders in
 `investigation`, a completed plan stays `planning`, and a status question during
 deployment stays `deployment`. Use `finished` only after delivering the requested
 implementation or execution, including validation/deployment if requested, with
-nothing remaining. Use an empty `next_action` and `next_actor: "nobody"` when
+nothing remaining. Set `next_step` to `null` when
 there is no required next step. Required user review belongs in `validation`
-with `next_actor: "user"`. If work remains, keep its actual phase and assign
+with `next_step.actor` set to `user`. If work remains, keep its actual phase and assign
 any required next step to its actual owner; do not invent follow-up tasks.
 Skip unchanged checkpoints. The command preserves history and the original
 request; it does not mark a Bead complete or close the thread.

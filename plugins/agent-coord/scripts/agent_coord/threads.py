@@ -549,21 +549,19 @@ class ThreadStore:
                        (request, " ".join(request.split())[:100], session_id))
 
     def checkpoint(self, session_id: str, payload: dict, *, author="agent") -> dict:
-        if not isinstance(payload, dict) or set(payload) - {"phase", "summary", "next_action", "next_actor", "links", "turn_id", "title", "domain"}:
-            raise CoordinationError("Checkpoint accepts phase, summary, next_action, next_actor, links, turn_id, and optional title and domain.")
-        phase, actor = payload.get("phase"), payload.get("next_actor", "nobody")
-        if not isinstance(phase, str) or phase not in PHASES:
-            raise CoordinationError("Choose a supported checkpoint phase: " + ", ".join(sorted(PHASES)))
-        if not isinstance(actor, str) or actor not in NEXT_ACTORS:
-            raise CoordinationError("Next actor must be user, agent, external, or nobody.")
-        summary = _text(payload.get("summary"), "Checkpoint summary", 2000)
-        action = _text(payload.get("next_action", ""), "Next action", 1000, empty=True)
+        if not isinstance(payload, dict) or set(payload) - {"phase", "summary", "next_step", "next_action", "next_actor", "links", "turn_id", "title", "domain"}:
+            raise CoordinationError("Checkpoint accepts phase, summary, next_step, links, turn_id, title, domain, and legacy next_action/next_actor.")
+        legacy_step = {"next_action", "next_actor"} & payload.keys()
+        if "next_step" in payload and legacy_step:
+            raise CoordinationError("Use next_step or legacy next_action/next_actor, not both.")
+        step = payload.get("next_step")
+        if "next_step" in payload and step is not None:
+            if not isinstance(step, dict) or set(step) != {"actor", "action"}:
+                raise CoordinationError("Next step must contain actor and action, or be null to clear it.")
         title = _text(payload["title"], "Thread title", 160) if "title" in payload else None
         domain = payload.get("domain", UNSET)
         if domain is not UNSET and not (domain is None and author == "user"):
             domain = _domain(domain)
-        if bool(action) != (actor != "nobody"):
-            raise CoordinationError("A next action needs an owner; use nobody with an empty next action.")
         thread = self.ensure(session_id)
         links = payload.get("links", [])
         if not isinstance(links, list) or len(links) > 100:
@@ -577,6 +575,25 @@ class ThreadStore:
             if turn_id is not None and (not isinstance(turn_id, str) or turn_id != current["turn_id"]):
                 raise CoordinationError("Checkpoint belongs to an older or unknown turn.")
             latest = db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+            if latest is None and not {"phase", "summary"} <= payload.keys():
+                raise CoordinationError("The first checkpoint requires phase and summary.")
+            phase = payload.get("phase", latest["phase"] if latest else None)
+            summary = _text(payload.get("summary", latest["summary"] if latest else None), "Checkpoint summary", 2000)
+            action, actor = (latest["next_action"], latest["next_actor"]) if latest else ("", "nobody")
+            if "next_step" in payload:
+                action, actor = (step["action"], step["actor"]) if step is not None else ("", "nobody")
+                if step is not None and actor == "nobody":
+                    raise CoordinationError("Next step actor must be user, agent, or external; use null to clear it.")
+            elif legacy_step:
+                # Retain legacy defaults for old clients, including next_actor=nobody alone.
+                action, actor = payload.get("next_action", ""), payload.get("next_actor", "nobody")
+            if not isinstance(phase, str) or phase not in PHASES:
+                raise CoordinationError("Choose a supported checkpoint phase: " + ", ".join(sorted(PHASES)))
+            if not isinstance(actor, str) or actor not in NEXT_ACTORS:
+                raise CoordinationError("Next actor must be user, agent, external, or nobody.")
+            action = _text(action, "Next action", 1000, empty=True)
+            if bool(action) != (actor != "nobody"):
+                raise CoordinationError("A next action needs an owner; use nobody with an empty next action.")
             content = (phase, summary, action, actor)
             if latest and tuple(latest[key] for key in ("phase", "summary", "next_action", "next_actor")) == content and latest["turn_id"] == turn_id and latest["author"] == author:
                 db.execute("UPDATE thread_checkpoints SET refreshed_at = ? WHERE id = ?", (now, latest["id"]))
@@ -645,22 +662,24 @@ class ThreadStore:
             identity = " --session-id " + shlex.quote(session_id)
         text = (
             "Maintain the Agent Coord work-thread checkpoint before returning control to the user, "
-            "at a phase change, or after a significant result. Run " + command +
-            " checkpoint" + identity + " --json '<object>'. "
-            'The object has phase (discussion, investigation, planning, orchestrating, implementation, validation, deployment, finished), '
-            'summary (1–2 factual sentences), next_action (empty if none), next_actor (user, agent, external, nobody), '
+            "at a phase change, or after a significant result. Prefer the update_checkpoint tool when available. "
+            "Run " + command + " checkpoint" + identity + " --json '<object>' as the CLI fallback. "
+            'Send only changed fields; omitted fields keep their saved values. The first checkpoint requires phase and summary. '
+            'Fields are phase (discussion, investigation, planning, orchestrating, implementation, validation, deployment, finished), '
+            'summary (1–2 factual sentences), next_step ({"actor":"user|agent|external","action":"required action"}, or null to clear), '
             'optional title (a concise 3–6 word thread name), optional domain (a short assignment category), and optional links [{"kind":"document","label":"Design","target":"docs/design.md"}]. '
+            'The tool accepts session_id from your hook context if caller identity is unavailable. Success returns only status and checkpoint_id. '
             "Set title at the first meaningful checkpoint when title_source is auto. "
             "Keep established conversation names stable across assignments: omit title on later checkpoints. Use thread update --title only for a deliberate rename. "
             "User-chosen titles (title_source user) take precedence and cannot be overwritten by agent checkpoints. "
             "Set domain once per assignment and omit it on later checkpoints until the work moves; reuse a workspace domain unless the work is clearly elsewhere, and preserve a user-chosen domain (domain_source user). "
             "Use summary for the changing current/latest work, keeping its first sentence concise and descriptive. Update it when a new assignment starts; describe completed or failed results as outcomes, never as ongoing work. Preserve useful progress detail in the following sentence. Distinguish proposals, implemented changes, validation, and deployment. "
-            'Set next_actor to user only when progress or completion requires a specific user answer, approval, decision, or action; describe it in next_action. '
+            'Set next_step.actor to user only when progress or completion requires a specific user answer, approval, decision, or action; describe it in next_step.action. '
             "Keep optional advice, invitations to continue, and nonblocking reminders in summary. "
             'Use phase for the underlying activity, not whether you finished replying: an answered investigation stays investigation, and a completed plan stays planning. '
             'Use orchestrating for ongoing routing and coordination of specialist agents, including while a specialist implements or deploys; it does not itself require user action. '
-            'Use finished only after actually delivering the requested implementation or execution, including validation/deployment if requested, with nothing remaining; use next_action "" and next_actor nobody. '
-            'For a status question during deployment, keep deployment. Required user review belongs in validation with next_actor user. '
+            'Use finished only after actually delivering the requested implementation or execution, including validation/deployment if requested, with nothing remaining; clear next_step with null. '
+            'For a status question during deployment, keep deployment. Required user review belongs in validation with next_step.actor user. '
             "If work remains, keep its actual phase and assign any required next step to its actual owner. Ending an agent turn does not create a required user action. "
             "Record unresolved decisions without inventing follow-up work. Skip unchanged checkpoints. "
             "Use exact artifact references; link kinds are pull_request, document, issue, bead, branch, other. "

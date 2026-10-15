@@ -86,13 +86,13 @@ class CliContextTests(unittest.TestCase):
         payload = json.dumps({"phase": "implementation", "summary": "Changed the CLI", "title": "Short CLI commands"})
         code, receipt = self.invoke("checkpoint", "--json", payload)
         self.assertEqual(code, 0)
-        self.assertEqual(receipt["phase"], "implementation")
-        self.assertEqual(receipt["title"], "Short CLI commands")
-        self.assertNotIn("checkpoints", receipt)
-        self.assertNotIn("original_request", receipt)
-        self.assertLess(len(json.dumps(receipt)), 500)
+        self.assertEqual(receipt, {"status": "ok", "checkpoint_id": receipt["checkpoint_id"]})
         full = self.invoke("checkpoint", "--full", "--json", payload)[1]
         self.assertEqual(full["checkpoint"]["id"], receipt["checkpoint_id"])
+        self.assertEqual(full["title"], "Short CLI commands")
+        partial = self.invoke("checkpoint", "--json", '{"phase":"validation"}')[1]
+        self.assertEqual(set(partial), {"status", "checkpoint_id"})
+        self.assertEqual(self.invoke("thread", "show")[1]["checkpoint"]["phase"], "validation")
         self.assertEqual(self.invoke("thread", "show")[1]["checkpoint"]["summary"], "Changed the CLI")
         self.assertEqual(self.invoke("end-work")[1]["write_scope"], [])
 
@@ -164,7 +164,7 @@ class CliContextTests(unittest.TestCase):
                 payload = json.dumps({"phase": "investigation", "summary": event})
                 code, receipt = self.invoke(*shlex.split(command)[1:], "--json", payload)
                 self.assertEqual(code, 0)
-                self.assertEqual(receipt["thread_id"], "one")
+                self.assertEqual(receipt["checkpoint_id"], self.store.threads.get("one")["checkpoint"]["id"])
                 self.assertEqual(self.store.threads.get("one")["checkpoint"]["summary"], event)
                 if event == "SessionStart":
                     self.assertIn("begin-work --scope", text)

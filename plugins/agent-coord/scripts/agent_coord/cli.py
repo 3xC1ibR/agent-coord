@@ -913,15 +913,14 @@ def mutation_receipt(arguments, result):
     """Keep reads and rich workflow results intact; summarize routine writes."""
     if not hasattr(arguments, "full") or arguments.full:
         return result
+    if arguments.command == "checkpoint":
+        return {"status": "ok", "checkpoint_id": result["checkpoint"]["id"]}
     receipt = {"status": "ok", "command": arguments.command}
     if isinstance(result, dict):
         fields = ("session_id", "thread_id", "id", "activity", "bead_id", "write_scope", "lease_mode",
                   "title", "attention", "project_id", "repository_id", "recipient_session_id",
                   "classification", "reply_required", "in_reply_to", "acknowledged_at", "acknowledged", "message_ids", "sender_session_id")
         receipt.update({key: result[key] for key in fields if key in result})
-        if arguments.command == "checkpoint":
-            checkpoint = result["checkpoint"]
-            receipt.update(checkpoint_id=checkpoint["id"], phase=checkpoint["phase"])
     elif isinstance(result, list):
         receipt["count"] = len(result)
     return receipt

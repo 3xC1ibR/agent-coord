@@ -380,6 +380,62 @@ class WorkThreadTests(unittest.TestCase):
         self.assertTrue(changed["unread"])
         self.assertEqual(len(changed["checkpoints"]), 2)
 
+    def test_partial_checkpoints_preserve_values_and_save_complete_snapshots(self):
+        self.save(title="Database performance", domain="backend", links=[{"kind": "issue", "target": "issue-1"}])
+        changed = self.threads.checkpoint("conversation", {"phase": "planning"})
+        self.assertEqual(changed["checkpoint"]["summary"], "Two options remain.")
+        self.assertEqual(changed["checkpoint"]["next_actor"], "user")
+        self.assertEqual(changed["checkpoint"]["next_action"], "Choose an approach.")
+        self.assertEqual(changed["title"], "Database performance")
+        self.assertEqual(changed["domain"], "backend")
+        self.assertEqual(changed["links"][0]["target"], "issue-1")
+        self.assertEqual([cp["phase"] for cp in changed["checkpoints"]], ["planning", "investigation"])
+        updated = self.threads.checkpoint("conversation", {"summary": "Decision recorded.", "next_step": None})
+        self.assertEqual(updated["checkpoint"]["phase"], "planning")
+        self.assertEqual((updated["checkpoint"]["next_action"], updated["checkpoint"]["next_actor"]), ("", "nobody"))
+        repeated = self.threads.checkpoint("conversation", {"summary": "Decision recorded."})
+        self.assertEqual(repeated["checkpoint"]["id"], updated["checkpoint"]["id"])
+
+    def test_first_checkpoint_requires_phase_and_summary(self):
+        for payload in ({}, {"summary": "Incomplete"}, {"phase": "discussion"}):
+            with self.subTest(payload=payload), self.assertRaisesRegex(CoordinationError, "first checkpoint"):
+                self.threads.checkpoint("conversation", payload)
+        self.assertIsNone(self.threads.get("conversation")["checkpoint"])
+        saved = self.threads.checkpoint("conversation", {"phase": "discussion", "summary": "Started."})
+        self.assertEqual(saved["checkpoint"]["next_actor"], "nobody")
+
+    def test_next_step_is_atomic_and_invalid_patches_cannot_change_state(self):
+        self.save()
+        saved = self.threads.checkpoint("conversation", {"next_step": {"actor": "external", "action": "Wait for CI."}})
+        self.assertEqual(saved["checkpoint"]["next_actor"], "external")
+        self.assertEqual(saved["checkpoint"]["next_action"], "Wait for CI.")
+        for payload in ({"next_step": {}}, {"next_step": {"actor": "user"}},
+                        {"next_step": {"actor": "nobody", "action": ""}},
+                        {"next_step": {"actor": "user", "action": ""}},
+                        {"next_step": {"actor": [], "action": "Do it"}},
+                        {"next_step": None, "next_actor": "nobody", "next_action": ""},
+                        {"next_actor": "agent"}, {"next_action": "Do it"},
+                        {"phase": None}, {"summary": None}):
+            with self.subTest(payload=payload), self.assertRaises(CoordinationError):
+                self.threads.checkpoint("conversation", {**payload, "title": "Must not rename", "domain": "web",
+                                                         "links": [{"kind": "issue", "target": "issue-2"}]})
+            self.assertEqual(self.threads.get("conversation", history=True), saved)
+        cleared = self.threads.checkpoint("conversation", {"next_actor": "nobody", "next_action": ""})
+        self.assertEqual(cleared["checkpoint"]["next_actor"], "nobody")
+
+    def test_partial_updates_keep_turn_guards_and_protected_metadata(self):
+        self.threads.start_turn("conversation", turn_id="first")
+        self.save()
+        self.threads.update("conversation", title="User name", domain="research")
+        self.now += 10
+        self.threads.start_turn("conversation", turn_id="second")
+        with self.assertRaisesRegex(CoordinationError, "older"):
+            self.threads.checkpoint("conversation", {"phase": "validation", "turn_id": "first"})
+        saved = self.threads.checkpoint("conversation", {"summary": "Continued.", "title": "Agent name", "domain": "web"})
+        self.assertFalse(saved["checkpoint_stale"])
+        self.assertEqual(saved["checkpoint"]["turn_id"], "second")
+        self.assertEqual((saved["title"], saved["domain"]), ("User name", "research"))
+
     def test_stale_turn_cannot_overwrite_checkpoint(self):
         self.threads.start_turn("conversation", turn_id="current")
         self.save(title="Current investigation")
