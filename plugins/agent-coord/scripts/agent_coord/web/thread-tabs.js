@@ -152,6 +152,7 @@ class ThreadTabs {
       tab.tabIndex = this.selected === id || this.selected === undefined && id === null ? 0 : -1;
       tab.title = scratchpad ? "Project scratchpad · ⌘⇧S to toggle floating notes" : item.title + (item.unread_result ? " · New response" : "") + (id ? " · Alt+Shift+←/→ to reorder" : "");
       tab.dataset.status = item.response_state || "";
+      tab.dataset.unread = item.unread_result ? "true" : "false";
       tab.onclick = () => this.activate(id); tab.onkeydown = event => this.keydown(event, id);
       wrapper.dataset.selected = String(this.selected === id);
       wrapper.append(tab);

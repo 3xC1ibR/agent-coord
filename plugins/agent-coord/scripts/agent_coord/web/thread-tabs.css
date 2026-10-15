@@ -7,8 +7,15 @@
 .conversation-tab[data-selected=true] .conversation-tab-select { color: var(--ink); }
 .conversation-tab-close { flex-shrink: 0; padding: 6px 9px; font-size: 17px; }
 .conversation-tab[data-selected=false]:not(:hover) .conversation-tab-close { visibility: hidden; }
-.conversation-tab-select[data-status=working]::before { content: "● "; color: var(--accent); }
-.conversation-tab-select[data-status=input]::before { content: "● "; color: var(--warm); }
+.conversation-tab-select[data-status=working]::before { content: "● "; color: var(--accent); animation: tab-working-blink 1.4s ease-in-out infinite; }
+@keyframes tab-working-blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
+.conversation-tab-select[data-status=input]::before,
+.conversation-tab-select[data-status=action]::before,
+.conversation-tab-select[data-status=failed]::before { content: "● "; color: var(--warm); }
+.conversation-tab-select[data-unread=true]:not([data-status=working]):not([data-status=input]):not([data-status=action]):not([data-status=failed])::before { content: "● "; color: var(--responded); }
+@media (prefers-reduced-motion: reduce) {
+  .conversation-tab-select[data-status=working]::before { animation: none; }
+}
 .conversation-tab button:focus-visible { outline-offset: -3px; }
 .overview-tab { position: sticky; left: 0; z-index: 1; background: var(--paper); }
 .pane-document .conversation-tabs { display: none; }

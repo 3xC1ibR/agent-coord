@@ -227,6 +227,30 @@ test("legacy session tabs migrate once without reviving a closed persistent tab 
   assert.equal(stale.destination(), null);
 });
 
+test("tabs expose active, blocked, unread-response, and idle indicators", () => {
+  const element = () => ({children: [], dataset: {}, scrollLeft: 0, classList: {add() {}},
+    append(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
+    setAttribute() {}, contains: () => false, querySelectorAll: () => []});
+  const container = element(), document = {createElement: element};
+  const tabs = new ThreadTabs({container, document}); tabs.setProject("/work");
+  tabs.open({...thread("run"), response_state: "working", unread_result: true});
+  tabs.open({...thread("blocked"), response_state: "input"});
+  tabs.open({...thread("failed"), response_state: "failed"});
+  tabs.open({...thread("answered"), response_state: "reply", unread_result: true});
+  tabs.open({...thread("calm"), response_state: "available"});
+  const state = id => {
+    const wrapper = container.children.find(child => child.children[0].dataset.threadTab === id);
+    return wrapper && {status: wrapper.children[0].dataset.status, unread: wrapper.children[0].dataset.unread};
+  };
+  assert.deepEqual(state("run"), {status: "working", unread: "true"});
+  assert.deepEqual(state("blocked"), {status: "input", unread: "false"});
+  assert.deepEqual(state("failed"), {status: "failed", unread: "false"});
+  assert.deepEqual(state("answered"), {status: "reply", unread: "true"});
+  assert.deepEqual(state("calm"), {status: "available", unread: "false"});
+  tabs.update([{...thread("answered"), response_state: "reply", unread_result: false}]);
+  assert.deepEqual(state("answered"), {status: "reply", unread: "false"});
+});
+
 test("startup restores the saved tab only when no explicit destination was requested", async () => {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const startup = source.slice(source.indexOf("  if (initialNavigation) await navigation.open"), source.indexOf("  state.dispatchReady = true;"));
