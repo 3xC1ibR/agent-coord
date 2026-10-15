@@ -2504,6 +2504,7 @@ async function boot() {
     onError: showError, onOpened: switchProject, canSwitch: canSwitchProject});
   state.projectTabs = new ProjectTabs({document, folders: state.folders, onSwitch: switchProject, onError: showError, canSwitch: canSwitchProject});
   savedViews = new SavedViews({document, api, storage: windowStorage, preferences,
+    onRefresh: refreshList,
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
     onSwitch: async () => { goHome(); await refreshList(); window.agentCoordPanes?.restoreView(); }, onError: showError});
   state.projectCwd = state.folders.selected?.cwd || "";

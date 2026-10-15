@@ -49,8 +49,9 @@ const threadViews = (() => {
 })();
 
 class SavedViews {
-  constructor({document, api, onSwitch, onError, storage, preferences, scope = ""}) {
+  constructor({document, api, onSwitch, onRefresh, onError, storage, preferences, scope = ""}) {
     this.doc = document; this.api = api; this.onSwitch = onSwitch; this.onError = onError;
+    this.onRefresh = onRefresh;
     this.storage = storage; this.preferences = preferences;
     this.key = "agent-coord.views." + (scope || "all");
     this.baseKey = this.key;
@@ -291,7 +292,58 @@ class SavedViews {
       tab?.scrollIntoView({block: "nearest", inline: "nearest"});
     } else this.$("add-view").focus({preventScroll: true});
   }
-  closeMenu() { this.$("view-menu").open = false; this.$("filter-menu").open = false; }
+  closeMenu() { this.$("view-menu").open = false; this.$("filter-menu").open = false; this.closeGroupMenu(); }
+  closeGroupMenu(focus = false) {
+    this.$("group-context-menu").hidden = true;
+    if (focus) this.groupMenuTrigger?.focus();
+    this.contextGroup = null;
+  }
+  openGroupMenu(view, trigger, event) {
+    event.preventDefault(); event.stopPropagation();
+    this.closeMenu(); this.contextGroup = view; this.groupMenuTrigger = trigger;
+    const menu = this.$("group-context-menu"), rect = trigger.getBoundingClientRect();
+    menu.hidden = false;
+    const bounds = menu.getBoundingClientRect(), win = this.doc.defaultView;
+    const x = event.type === "contextmenu" ? event.clientX : rect.left;
+    const y = event.type === "contextmenu" ? event.clientY : rect.bottom;
+    menu.style.left = Math.max(8, Math.min(x, (win?.innerWidth || 1024) - bounds.width - 8)) + "px";
+    menu.style.top = Math.max(8, Math.min(y, (win?.innerHeight || 768) - bounds.height - 8)) + "px";
+    this.$("context-remove-group").focus();
+  }
+  async requestGroupRemoval(view) {
+    if (!view?.projectId || this.busy) return;
+    const cwd = this.cwd, request = this.groupRemovalRequest = (this.groupRemovalRequest || 0) + 1;
+    this.closeMenu();
+    const group = await this.api("projects/" + encodeURIComponent(view.projectId));
+    if (cwd !== this.cwd || request !== this.groupRemovalRequest) return;
+    if (!group.thread_count) return this.removeGroup(group);
+    this.removeTarget = group;
+    this.$("remove-group-title").textContent = "Remove “" + group.name + "”?";
+    this.$("remove-group-description").textContent = "Its " + group.thread_count +
+      (group.thread_count === 1 ? " conversation will" : " conversations will") +
+      " become ungrouped. All conversations will be kept, and running work will continue.";
+    this.$("remove-group-error").hidden = true;
+    this.$("remove-group-dialog").showModal(); this.$("cancel-remove-group").focus();
+  }
+  async removeGroup(group) {
+    return this.mutation(async () => {
+      this.$("confirm-remove-group").disabled = true;
+      try {
+        await this.api("projects/" + encodeURIComponent(group.id) + "/delete", {thread_count: group.thread_count});
+        const id = "group-" + group.id, active = this.activeId === id;
+        this.groups = this.groups.filter(item => item.id !== group.id);
+        this.items = this.items.filter(item => item.id !== id);
+        delete this.navigation[id]; this.storeNavigation();
+        this.removeTarget = null; this.$("remove-group-dialog").close();
+        if (active) await this.activate("all", true);
+        else { await this.onRefresh?.(); this.render(); this.focusActive(); }
+      } catch (error) {
+        if (!this.$("remove-group-dialog").open) throw error;
+        this.$("remove-group-error").textContent = error.message;
+        this.$("remove-group-error").hidden = false;
+      } finally { this.$("confirm-remove-group").disabled = false; }
+    });
+  }
   changed() {
     const dirty = this.dirty(), custom = this.activeId !== "all";
     const pending = this.saves.get(this.activeId);
@@ -301,6 +353,8 @@ class SavedViews {
     this.$("update-view").disabled = this.busy || Boolean(pending?.promise);
     this.$("view-menu").hidden = !custom && !this.mobile?.matches;
     this.$("view-custom-actions").hidden = !custom;
+    this.$("group-remove").hidden = this.current().kind !== "group";
+    this.$("group-remove").disabled = this.busy;
     const f = this.read().filters;
     const count = [f.repository, f.project, f.phase, ["attention", "completed"].includes(f.show)].filter(Boolean).length;
     this.$("filter-count").textContent = String(count);
@@ -356,6 +410,12 @@ class SavedViews {
         dot.setAttribute("aria-hidden", "true"); tab.append(dot);
       }
       tab.onclick = () => this.activate(view.id).catch(this.onError);
+      if (view.kind === "group") {
+        tab.oncontextmenu = event => this.openGroupMenu(view, tab, event);
+        tab.onkeydown = event => {
+          if (event.key === "ContextMenu" || event.shiftKey && event.key === "F10") this.openGroupMenu(view, tab, event);
+        };
+      }
       tabs.append(tab);
     });
     picker.value = this.activeId;
@@ -415,6 +475,13 @@ class SavedViews {
       return this.activate(custom[next].id).catch(this.onError);
     };
     this.$("mobile-view").onchange = () => this.activate(this.$("mobile-view").value).catch(this.onError);
+    this.$("group-remove").onclick = () => this.requestGroupRemoval(this.current()).catch(this.onError);
+    this.$("context-remove-group").onclick = () => this.requestGroupRemoval(this.contextGroup).catch(this.onError);
+    this.$("remove-group-form").onsubmit = event => {
+      event.preventDefault();
+      if (this.removeTarget) return this.removeGroup(this.removeTarget);
+    };
+    this.$("remove-group-dialog").onclose = () => { this.removeTarget = null; };
     this.$("add-view").onclick = () => this.openDialog("create").catch(this.onError);
     this.$("reset-view").onclick = () => this.activate(this.activeId, true).catch(this.onError);
     this.$("update-view").onclick = () => this.persist();
@@ -456,14 +523,21 @@ class SavedViews {
       });
     };
     this.doc.addEventListener("keydown", event => {
+      if (!this.$("group-context-menu").hidden && ["Escape", "Tab"].includes(event.key)) {
+        if (event.key === "Escape") event.preventDefault();
+        this.closeGroupMenu(true); return;
+      }
       if (this.doc.querySelector("dialog[open]") || this.doc.body.classList.contains("navigation-open")) return;
       if (event.key === "Escape" && this.$("view-menu").open) {
         event.preventDefault(); this.closeMenu(); this.$("view-menu-toggle").focus();
       }
     });
     this.doc.addEventListener("pointerdown", event => {
+      if (!this.$("group-context-menu").contains(event.target)) this.closeGroupMenu();
       if (!this.$("view-menu").contains(event.target)) this.$("view-menu").open = false;
     });
+    this.doc.defaultView?.addEventListener("scroll", () => this.closeGroupMenu(), {capture: true, passive: true});
+    this.doc.defaultView?.addEventListener("resize", () => this.closeGroupMenu());
   }
 }
 

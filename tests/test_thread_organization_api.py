@@ -9,6 +9,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
@@ -261,6 +262,41 @@ class ThreadOrganizationTests(unittest.TestCase):
         self.assertEqual(request("projects", {"name": "launch"}), parent)
         self.assertEqual(request("projects", {"name": "launch", "cwd": str(self.repo)}), child)
         self.assertIn(child, request("organization")["projects"])
+
+    def test_http_group_removal_ungroups_all_placements_without_starting_or_closing_threads(self):
+        request = self.start_ui()
+        group = request("projects", {"name": "Remove this"})
+        other = request("projects", {"name": "Keep this"})
+        for attention in ("now", "later", "archived"):
+            thread_id = "keep-" + attention
+            self.store.register(session_id=thread_id, client="claude", cwd=str(self.repo))
+            self.store.threads.update(thread_id, project_id=group["id"], attention=attention)
+        before = {id: request("threads/" + id) for id in ("keep-now", "keep-later", "keep-archived")}
+        calls = list(self.sessions.rpc.calls)
+        plan = request("projects/" + group["id"])
+        self.assertEqual(plan, {**group, "thread_count": 3})
+        for body in ({}, {"thread_count": 0}, {"thread_count": True}, {"thread_count": 3, "extra": True}):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                request("projects/" + group["id"] + "/delete", body)
+            self.assertEqual(error.exception.code, 400)
+            error.exception.close()
+        self.assertEqual(request("projects/" + group["id"] + "/delete", {"thread_count": 3}), plan)
+        self.assertIn(other, request("organization")["projects"])
+        self.assertNotIn(group, request("organization")["projects"])
+        for id, original in before.items():
+            self.assertEqual(request("threads/" + id), {**original, "project_id": None, "project_name": None})
+        self.assertEqual(self.sessions.rpc.calls, calls)
+
+    def test_group_removal_keeps_scheduled_work_usable_without_the_group(self):
+        group = self.store.threads.organization.create_project("Scheduled", str(self.root))
+        scheduled = self.sessions.schedules.create({
+            "id": str(uuid.uuid4()), "message": "Continue planned work", "run_at": self.store.clock() + 3600,
+            "timezone": "UTC", "settings": {"cwd": str(self.root), "model": "available-model", "project_id": group["id"]}})
+        self.store.threads.organization.delete_project(group["id"], expected_count=0)
+        updated = next(item for item in self.sessions.schedules.list() if item["id"] == scheduled["id"])
+        self.assertEqual(updated["settings"], {**scheduled["settings"], "project_id": None})
+        for field in ("message", "run_at", "timezone", "state", "cwd"):
+            self.assertEqual(updated[field], scheduled[field])
 
     def test_standalone_projects_and_existing_terminal_threads(self):
         request = self.start_ui()

@@ -210,6 +210,45 @@ class OrganizationStore:
                        (str(uuid.uuid4()), name, key, cwd))
             return dict(db.execute("SELECT id, name, cwd FROM named_projects WHERE name_key = ?", (key,)).fetchone())
 
+    @staticmethod
+    def _project(db, project_id: str) -> dict:
+        group = db.execute("SELECT id, name, cwd FROM named_projects WHERE id = ?", (project_id,)).fetchone()
+        if group is None:
+            raise CoordinationError("This group no longer exists.")
+        count = db.execute("SELECT COUNT(*) FROM thread_organization WHERE project_id = ?", (project_id,)).fetchone()[0]
+        return {**dict(group), "thread_count": count}
+
+    def get_project(self, project_id: str) -> dict:
+        with self.store._connection() as db:
+            return self._project(db, project_id)
+
+    def delete_project(self, project_id: str, *, expected_count: int) -> dict:
+        if type(expected_count) is not int or expected_count < 0:
+            raise CoordinationError("Removing a group requires its current conversation count.")
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            group = self._project(db, project_id)
+            if group["thread_count"] != expected_count:
+                raise CoordinationError("Group membership changed. Try removing the group again.")
+            db.execute("UPDATE thread_organization SET project_id = NULL WHERE project_id = ?", (project_id,))
+            # Keep saved filters usable after their optional group is removed.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'saved_views'").fetchone():
+                for row in db.execute("SELECT id, filters FROM saved_views").fetchall():
+                    filters = json.loads(row["filters"])
+                    if filters.get("project") == project_id:
+                        filters["project"] = ""
+                        db.execute("UPDATE saved_views SET filters = ?, version = version + 1 WHERE id = ?",
+                                   (json.dumps(filters), row["id"]))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'scheduled_prompts'").fetchone():
+                for row in db.execute("SELECT id, settings_json FROM scheduled_prompts WHERE state IN ('scheduled', 'missed')").fetchall():
+                    settings = json.loads(row["settings_json"])
+                    if settings.get("project_id") == project_id:
+                        settings["project_id"] = None
+                        db.execute("UPDATE scheduled_prompts SET settings_json = ?, version = version + 1 WHERE id = ?",
+                                   (json.dumps(settings), row["id"]))
+            db.execute("DELETE FROM named_projects WHERE id = ?", (project_id,))
+            return group
+
     def add_repository(self, path: str) -> dict:
         if not isinstance(path, str) or not path.strip() or len(path) > 4000:
             raise CoordinationError("Choose a Git repository path.")

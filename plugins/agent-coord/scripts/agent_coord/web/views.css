@@ -30,6 +30,9 @@
 .view-menu-panel small { padding: 6px 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .view-menu-panel #view-delete { color: var(--warm); border-top: 1px solid var(--line); border-radius: 0; margin-top: 4px; }
 .view-menu-panel > div { display: grid; gap: 3px; }
+.group-context-menu { position: fixed; z-index: 1200; right: auto; max-width: calc(100vw - 16px); }
+.group-context-menu[hidden] { display: none; }
+#group-remove, #context-remove-group { color: var(--warm); }
 .mobile-new-label { display: none; }
 .mobile-overview { display: none; align-items: center; min-width: 0; flex: 1; padding-block: 8px; }
 .mobile-view-picker { display: flex; align-items: center; min-width: 0; gap: 8px; }

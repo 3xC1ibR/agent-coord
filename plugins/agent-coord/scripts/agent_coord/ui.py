@@ -485,6 +485,8 @@ def _handler(
                 self._json(HTTPStatus.OK, {"data": browser_sessions.schedules.list()})
             elif route == "organization":
                 self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.list())
+            elif route.startswith("projects/") and len(route.split("/")) == 2:
+                self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.get_project(unquote(route[9:])))
             elif route == "views":
                 self._json(HTTPStatus.OK, {"data": views.list()})
             elif route == "models":
@@ -777,6 +779,12 @@ def _handler(
                         directory = browser_sessions.cwd or str(Path.cwd())
                     cwd = resolve_workspace(directory, workspace=browser_sessions.cwd)
                     self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.create_project(body["name"], cwd))
+                    return
+                if route[:3] == ["api", "browser", "projects"] and len(route) == 5 and route[4] == "delete":
+                    if set(body) != {"thread_count"}:
+                        raise CoordinationError("Removing a group requires its current conversation count.")
+                    self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.delete_project(
+                        unquote(route[3]), expected_count=body["thread_count"]))
                     return
                 if route == ["api", "browser", "repositories"]:
                     if set(body) != {"path"}:

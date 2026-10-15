@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coor
 
 from agent_coord.organization import OrganizationStore, repository_root
 from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.views import ViewStore
 
 
 class OrganizationTests(unittest.TestCase):
@@ -115,6 +116,48 @@ class OrganizationTests(unittest.TestCase):
         self.assertEqual(groups[legacy["id"]]["cwd"], str(self.repo))
         self.assertEqual(groups[scoped["id"]], scoped)
         self.assertEqual(self.association("code")["project_id"], legacy["id"])
+
+    def test_removing_group_preserves_threads_and_clears_only_matching_saved_filters(self):
+        group = self.organization.create_project("Launch", str(self.repo))
+        other = self.organization.create_project("Other", str(self.repo))
+        for thread_id, attention in (("code", "later"), ("idea", "archived")):
+            self.store.threads.start_turn(thread_id, prompt="Keep this work", turn_id="one")
+            self.store.threads.checkpoint(thread_id, {"phase": "implementation", "summary": "Running work."})
+            self.store.threads.update(thread_id, project_id=group["id"], attention=attention)
+            self.store.threads.add_link(thread_id, {"kind": "document", "target": "plan.md"})
+        views = ViewStore(self.store)
+        saved = views.create({"name": "Review", "filters": {"project": group["id"], "show": "attention", "search": "work"}})
+        unrelated = views.create({"name": "Other", "filters": {"project": other["id"]}})
+        before = {id: self.store.threads.get(id, history=True) for id in ("code", "idea")}
+        sessions = {id: self.store.get_session(id) for id in before}
+        self.assertEqual(self.organization.get_project(group["id"])["thread_count"], 2)
+        removed = self.organization.delete_project(group["id"], expected_count=2)
+        self.assertEqual(removed["id"], group["id"])
+        for id, thread in before.items():
+            self.assertEqual(self.store.threads.get(id, history=True), {**thread, "project_id": None, "project_name": None})
+            self.assertEqual(self.store.get_session(id), sessions[id])
+        updated = next(view for view in views.list() if view["id"] == saved["id"])
+        self.assertEqual(updated, {**saved, "filters": {**saved["filters"], "project": ""}, "version": saved["version"] + 1})
+        self.assertIn(unrelated, views.list())
+        self.assertEqual(self.organization.list()["projects"], [other])
+        self.assertNotEqual(self.organization.create_project("Launch", str(self.repo))["id"], group["id"])
+
+    def test_group_removal_rechecks_membership_and_invalid_requests_are_atomic(self):
+        group = self.organization.create_project("Empty", str(self.repo))
+        self.assertEqual(self.organization.get_project(group["id"])["thread_count"], 0)
+        with self.store._connection() as db:
+            self.organization.update(db, "code", project_id=group["id"])
+        for count in (0, -1, True, "1", None):
+            with self.subTest(count=count), self.assertRaises(CoordinationError):
+                self.organization.delete_project(group["id"], expected_count=count)
+            self.assertEqual(self.association("code")["project_id"], group["id"])
+        self.organization.delete_project(group["id"], expected_count=1)
+        for operation in (lambda: self.organization.get_project(group["id"]),
+                          lambda: self.organization.delete_project(group["id"], expected_count=0)):
+            with self.assertRaises(CoordinationError):
+                operation()
+        empty = self.organization.create_project("Empty", str(self.repo))
+        self.assertEqual(self.organization.delete_project(empty["id"], expected_count=0)["thread_count"], 0)
 
     def test_invalid_assignments_are_atomic(self):
         before = self.association("code")

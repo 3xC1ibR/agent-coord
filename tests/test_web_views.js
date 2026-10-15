@@ -93,6 +93,9 @@ function setup({saved = [], windowStorage = storage(), preferences = storage()} 
     "view-rename", "view-duplicate", "view-delete", "view-menu-toggle", "view-custom-actions", "filter-count",
     "mobile-view", "mobile-view-attention", "mobile-view-activity", "saved-view-tabs", "show-now", "show-later", "show-closed"];
   const controls = Object.fromEntries(ids.map(id => [id, new Element(id)]));
+  for (const id of ["group-remove", "group-context-menu", "context-remove-group", "remove-group-dialog", "remove-group-form",
+    "remove-group-title", "remove-group-description", "remove-group-error", "confirm-remove-group", "cancel-remove-group"]) controls[id] = new Element(id);
+  controls["group-context-menu"].hidden = true;
   controls.view.value = "active"; controls["group-by"].value = "phase";
   doc.getElementById = id => controls[id]; doc.createElement = () => new Element();
   const records = saved.map(v => ({...v, filters: threadViews.filters(v.filters), version: v.version || 1, group_by: v.group_by || "phase"}));
