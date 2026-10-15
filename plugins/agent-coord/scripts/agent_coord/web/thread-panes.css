@@ -11,10 +11,10 @@
 .pane-header { display: flex; align-items: center; gap: 3px; padding: 3px 5px; flex-shrink: 0; min-width: 0; height: 35px; background: var(--panel); }
 .pane-header > button { flex-shrink: 0; padding: 3px 7px; }
 .pane-tabs { display: flex; align-items: stretch; flex: 1; overflow-x: auto; min-width: 0; scrollbar-width: thin; }
-.pane-tabs button { max-width: 220px; min-width: 60px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; padding: 4px 8px; border-radius: 4px; }
-.pane-tabs button[aria-selected=true] { background: var(--surface); color: var(--ink); box-shadow: inset 0 -2px var(--ink); }
-.pane-tabs button[data-status=working]::before { content: "● "; color: var(--accent); }
-.pane-tabs button[data-status=input]::before { content: "● "; color: var(--warm); }
+.pane-tabs:not(.conversation-tabs) button { max-width: 220px; min-width: 60px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; padding: 4px 8px; border-radius: 4px; }
+.pane-tabs:not(.conversation-tabs) button[aria-selected=true] { background: var(--surface); color: var(--ink); box-shadow: inset 0 -2px var(--ink); }
+.pane-tabs:not(.conversation-tabs) button[data-status=working]::before { content: "● "; color: var(--accent); }
+.pane-tabs:not(.conversation-tabs) button[data-status=input]::before { content: "● "; color: var(--warm); }
 .pane-tabs [draggable=true] { cursor: grab; }
 .pane-tabs [data-drop-side=before] { box-shadow: inset 3px 0 var(--accent); }
 .pane-tabs [data-drop-side=after] { box-shadow: inset -3px 0 var(--accent); }
@@ -37,8 +37,13 @@
 .pane-maximized > .pane-divider, .pane-maximized .pane-column > .pane-divider,
 .pane-maximized > .pane-column:not(.maximized-column) { display: none; }
 body.panes-visible #welcome, body.panes-visible > main > #conversation { display: none !important; }
-body.panes-visible .conversation-tabs { display: none; }
-body.panes-visible main > .views-bar { display: flex; }
+body.panes-visible > main > .conversation-tabs { display: none; }
+body.panes-visible:not(.conversation-split) main > .views-bar { display: flex; }
+body.conversation-split main > .views-bar { display: none; }
+body.conversation-split .pane-layout { padding: 0; }
+body.conversation-split .thread-pane { border: 0; border-radius: 0; box-shadow: none; }
+body.conversation-split .pane-header { height: auto; padding: 0; gap: 0; background: var(--paper); border-bottom: 1px solid var(--line); }
+body.conversation-split .pane-tabs { padding: 0; border-bottom: 0; }
 body.pane-document { display: block; height: 100dvh; }
 .pane-document > .sidebar, .pane-document > .sidebar-backdrop, .pane-document .workspace-bar,
 .pane-document .views-bar, .pane-document #welcome, .pane-document .context-panel,

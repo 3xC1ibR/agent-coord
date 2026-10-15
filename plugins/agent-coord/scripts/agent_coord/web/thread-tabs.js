@@ -91,8 +91,9 @@ class ThreadTabs {
     if (index < 0 || !force && !this.canNavigate()) return;
     const selected = this.selected === id;
     this.items.splice(index, 1); this.save(); this.render();
+    const handled = await this.onClose?.(id);
     // Only navigate. Closing a tab never changes the thread or its running agent.
-    if (selected) await this.activate(this.items[Math.min(index, this.items.length - 1)]?.thread_id
+    if (selected && !handled) await this.activate(this.items[Math.min(index, this.items.length - 1)]?.thread_id
       || (this.scratchpadOpen ? "project-scratchpad" : null), {force});
     this.reveal(this.selected, true);
   }

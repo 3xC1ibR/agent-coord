@@ -104,11 +104,11 @@ test("repeated moves and splits preserve every conversation and valid tree refer
 });
 
 function setup() {
-  const classes = () => { const set = new Set(); return {add: c => set.add(c), contains: c => set.has(c),
-    remove: c => set.delete(c), toggle(c, on) { if (on) set.add(c); else set.delete(c); }}; };
+  const classes = () => { const set = new Set(); return {add: (...cs) => cs.forEach(c => set.add(c)), contains: c => set.has(c),
+    remove: (...cs) => cs.forEach(c => set.delete(c)), toggle(c, on) { if (on) set.add(c); else set.delete(c); }}; };
   const element = () => ({style: {}, hidden: false, children: [], dataset: {}, classList: classes(),
     append(...children) { this.children.push(...children); }, replaceChildren() { this.children = []; },
-    setAttribute() {}, querySelectorAll() { return []; },
+    attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, querySelectorAll() { return []; },
     getBoundingClientRect: () => ({width: 1000, height: 800, left: 0, top: 0})});
   const doc = {createElement: element, hasFocus: () => true};
   const focus = [], exits = [];
@@ -140,10 +140,20 @@ function shellFixture() {
   const select = async id => {
     assert.equal(shell.active, false);
     visits.push(id); state.selected = id;
+    state.threadTabs.open(thread(id));
     doc.getElementById("message").value = state.drafts.get(id) || "";
   };
-  shell = context.setupPaneShell({state, document: doc, api() {}, select,
-    goHome() { shell.leave(); visits.push(null); state.selected = null; }, refreshList: async () => {},
+  const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
+  state.threadTabs = new ThreadTabs({onSelect: async id => {
+    if (!await shell.selectTab(id)) {
+      shell.leave();
+      if (id) await select(id);
+      else { state.selected = null; state.threadTabs.overview(); }
+    }
+  }});
+  state.threadTabs.setProject("/work");
+  shell = context.setupPaneShell({state, document: doc, api: async path => thread(decodeURIComponent(path.split("/").at(-1))), select,
+    goHome() { shell.leave(); visits.push(null); state.selected = null; state.threadTabs.overview(); }, refreshList: async () => {},
     getView: () => view, getThreads: () => threads, showError: error => errors.push(error), notifications: () => null});
   return {shell, state, doc, controls, visits, errors, listeners,
     setView: value => { view = value; }, setThreads: value => { threads = value; }};
@@ -261,7 +271,7 @@ test("manual tab moves reuse live documents, drafts and scroll, including after 
 
 test("dragging from conversation tabs seeds just the working set and retains the original draft", () => {
   const {shell, state, doc, setThreads} = shellFixture();
-  state.threadTabs = {items: [thread("a"), thread("b"), thread("c")]};
+  for (const id of ["a", "b", "c"]) state.threadTabs.open(thread(id));
   state.selected = "a"; doc.getElementById("message").value = "Keep this draft";
   doc.getElementById("timeline").scrollTop = 123;
   setThreads([thread("unopened")]);
@@ -272,6 +282,172 @@ test("dragging from conversation tabs seeds just the working set and retains the
   assert.equal(shell.records.get("a").initialDraft.text, "Keep this draft");
   assert.equal(shell.records.get("a").initialDraft.scroll, 123);
   assert.equal(shell.selected, "b");
+  assert.equal(shell.viewId, "first");
+  assert.equal(state.threadTabs.selected, "b");
+  assert.equal(doc.body.classList.contains("conversation-split"), true);
+  assert.equal(doc.getElementById("leave-tiles").hidden, true);
+  assert.equal(doc.getElementById("page-location").textContent, "Conversation");
+});
+
+test("normal tab navigation stays in the split and returns from Overview without retiling", async () => {
+  const {shell, state, doc, visits} = shellFixture();
+  for (const id of ["a", "b", "c"]) state.threadTabs.open(thread(id));
+  state.selected = "a";
+  shell.onDrop(thread("b"), 0, "right");
+  const layout = shell.layout, record = shell.records.get("b");
+  await state.threadTabs.activate("c");
+  assert.equal(shell.active, true); assert.equal(shell.layout, layout);
+  assert.equal(shell.selected, "c"); assert.equal(state.threadTabs.selected, "c");
+  assert.deepEqual(visits, []);
+  await state.threadTabs.activate(null);
+  assert.equal(shell.active, false); assert.equal(state.threadTabs.selected, null);
+  assert.equal(doc.body.classList.contains("conversation-split"), false);
+  await state.threadTabs.activate("b");
+  assert.equal(shell.active, true); assert.equal(shell.layout, layout);
+  assert.equal(shell.records.get("b"), record); assert.equal(state.threadTabs.selected, "b");
+  assert.equal(doc.getElementById("page-location").textContent, "Conversation");
+});
+
+test("closing the last split collapses to a normal tab and preserves draft, images, mentions and scroll", async () => {
+  const {shell, state, doc, visits} = shellFixture();
+  for (const id of ["a", "b"]) state.threadTabs.open(thread(id));
+  state.selected = "a";
+  shell.onDrop(thread("b"), 0, "right");
+  const draft = {text: "Unsent draft", images: [{id: "image"}], mentions: [{id: "reference"}], scroll: 272};
+  let mentions;
+  state.mentions = {restore: (...args) => { mentions = args; }};
+  shell.records.get("a").api = {exportDraft: () => draft, setActive() {}, focus() {}};
+  shell.close(shell.layout.groups.findIndex(group => group.includes("b")));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shell.active, false); assert.equal(shell.layouts.has("first"), false);
+  assert.equal(doc.body.classList.contains("conversation-split"), false);
+  assert.deepEqual(visits, ["a"]); assert.equal(state.threadTabs.selected, "a");
+  assert.deepEqual(state.threadTabs.items.map(t => t.thread_id), ["a"]);
+  assert.equal(doc.getElementById("message").value, draft.text);
+  assert.equal(doc.getElementById("timeline").scrollTop, 272);
+  assert.deepEqual(state.attachments.drafts.get("a"), draft.images);
+  assert.deepEqual(mentions, ["a", draft.text, draft.mentions]);
+});
+
+test("merging split groups returns to normal tabs without losing any open conversation", async () => {
+  const {shell, state, visits} = shellFixture();
+  for (const id of ["a", "b", "c"]) state.threadTabs.open(thread(id));
+  state.selected = "a";
+  shell.onDrop(thread("b"), 0, "right");
+  shell.moveThread(thread("b"), 0, "center");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shell.active, false); assert.equal(state.threadTabs.selected, "b");
+  assert.deepEqual(state.threadTabs.items.map(t => t.thread_id), ["a", "c", "b"]);
+  assert.deepEqual(visits, ["b"]);
+});
+
+test("splitting eight tabs moves only the dragged tab and renders one standard strip per group", () => {
+  const {shell, state} = shellFixture();
+  const ids = ["a", "b", "c", "d", "e", "f", "g", "h"];
+  for (const id of ids) state.threadTabs.open(thread(id));
+  state.selected = "c";
+  shell.onDrop(thread("g"), 0, "right");
+  assert.deepEqual(Array.from(shell.layout.groups[0]), ["a", "b", "c", "d", "e", "f", "h"]);
+  assert.deepEqual(Array.from(shell.layout.groups[1]), ["g"]);
+  assert.equal(shell.layout.tabs[0], "c", "the original group keeps its selection");
+  shell.slots = [];
+  const panes = shell.layout.groups.map((_, slot) => shell.renderPane(slot));
+  const strips = panes.map(pane => pane.children[0].children[0]);
+  assert.equal(strips.length, 2);
+  for (const strip of strips) {
+    assert.equal(strip.className, "pane-tabs conversation-tabs");
+    assert.equal(strip.attributes.role, "tablist");
+    assert.ok(strip.children.every(wrapper => wrapper.className.startsWith("conversation-tab")));
+    for (const wrapper of strip.children) {
+      assert.equal(wrapper.children[0].className, "conversation-tab-select");
+      if (wrapper.children[0].dataset.paneThread) {
+        assert.equal(wrapper.children[1].className, "conversation-tab-close");
+        assert.equal(wrapper.children[0].draggable, true);
+      }
+    }
+  }
+  assert.equal(strips[0].children[0].children[0].textContent, "Overview");
+  const renderedIds = strips.flatMap(strip => strip.children.map(wrapper => wrapper.children[0].dataset.paneThread).filter(Boolean));
+  assert.deepEqual(Array.from(renderedIds).sort(), ids);
+  assert.equal(new Set(renderedIds).size, 8, "each conversation occurs in just one group");
+  assert.equal(panes[0].children[0].children.length, 2, "the group header has its tab strip and maximize control, without an extra close-pane button");
+});
+
+test("group tab controls focus and close the requested tab without touching neighboring tabs", async () => {
+  const {shell, state} = shellFixture();
+  for (const id of ["a", "b", "c", "d"]) state.threadTabs.open(thread(id));
+  state.selected = "a";
+  shell.onDrop(thread("d"), 0, "right");
+  shell.slots = [];
+  const strip = shell.renderPane(0).children[0].children[0];
+  const b = strip.children.find(wrapper => wrapper.children[0].dataset.paneThread === "b");
+  b.children[0].onclick();
+  assert.equal(shell.selected, "b");
+  b.children[1].onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(Array.from(shell.layout.groups[0]), ["a", "c"]);
+  assert.deepEqual(Array.from(shell.layout.groups[1]), ["d"]);
+  assert.equal(shell.selected, "c", "closing a tab selects its neighbor in the same group");
+  assert.equal(state.threadTabs.items.some(item => item.thread_id === "b"), false);
+});
+
+test("moving and merging groups preserves their edited order in the remaining normal strip", async () => {
+  const {shell, state} = shellFixture();
+  for (const id of ["a", "b", "c", "d"]) state.threadTabs.open(thread(id));
+  shell.onDrop(thread("d"), 0, "right");
+  shell.moveThread(thread("c"), 0, "center", 0);
+  shell.moveThread(thread("b"), 1, "center", 0);
+  assert.deepEqual(Array.from(shell.layout.groups[0]), ["c", "a"]);
+  assert.deepEqual(Array.from(shell.layout.groups[1]), ["b", "d"]);
+  shell.moveThread(thread("b"), 0, "center", 1);
+  shell.moveThread(thread("d"), 0, "center", 2);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shell.active, false);
+  assert.deepEqual(state.threadTabs.items.map(t => t.thread_id), ["c", "b", "d", "a"]);
+});
+
+test("dropping directly on a group tab inserts the conversation and collapses the empty group", async () => {
+  const {shell, state} = shellFixture();
+  for (const id of ["a", "b", "c"]) state.threadTabs.open(thread(id));
+  shell.onDrop(thread("c"), 0, "right");
+  shell.slots = [];
+  const strip = shell.renderPane(0).children[0].children[0];
+  const target = strip.children.find(wrapper => wrapper.children[0].dataset.paneThread === "b").children[0];
+  shell.dragging = thread("c");
+  let accepted = false;
+  const event = {clientX: 0, dataTransfer: {}, preventDefault() { accepted = true; }, stopPropagation() {}};
+  target.ondragover(event);
+  assert.equal(accepted, true);
+  assert.equal(event.dataTransfer.dropEffect, "move");
+  target.ondrop(event);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shell.active, false);
+  assert.deepEqual(state.threadTabs.items.map(t => t.thread_id), ["a", "c", "b"]);
+});
+
+test("closing a background tab updates the split without changing focus", async () => {
+  const {shell, state} = shellFixture();
+  for (const id of ["a", "b", "c"]) state.threadTabs.open(thread(id));
+  shell.onDrop(thread("b"), 0, "right");
+  await state.threadTabs.close("c");
+  assert.equal(shell.active, true); assert.equal(shell.selected, "b");
+  assert.equal(state.threadTabs.selected, "b");
+  assert.deepEqual(Array.from(shell.layout.order), ["a", "b"]);
+  assert.equal(shell.layout.groups.length, 2);
+});
+
+test("project view restoration retains the tab split presentation", () => {
+  const {shell, state, doc, setView} = shellFixture();
+  for (const id of ["a", "b"]) state.threadTabs.open(thread(id));
+  shell.onDrop(thread("b"), 0, "right");
+  const layout = shell.layout;
+  shell.leave(); setView("second"); shell.tileCurrent();
+  assert.equal(doc.body.classList.contains("conversation-split"), false);
+  assert.equal(doc.getElementById("page-location").textContent, "Tiled threads");
+  shell.leave(); setView("first"); shell.restoreView();
+  assert.equal(shell.layout, layout); assert.equal(shell.active, true);
+  assert.equal(doc.body.classList.contains("conversation-split"), true);
+  assert.equal(doc.getElementById("page-location").textContent, "Conversation");
 });
 
 test("Escape removes drag shields without changing conversation layout or focus", () => {
@@ -439,7 +615,7 @@ test("explicit overview links leave old tiles; Back restores tiling only for a t
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const panes = {active: true, selected: "draft-thread", restoreView() { this.active = true; }};
   const state = {selected: null, sourceWindowId: "window", organization: {repositories: [], projects: []}};
-  const views = {activeId: "all", filters: {}, read() { return {filters: this.filters}; }, sync() {},
+  const views = {activeId: "all", filters: {}, current() { return {}; }, read() { return {filters: this.filters}; }, sync() {},
     async overview(filters) { this.activeId = "all"; this.filters = filters; panes.restoreView(); },
     async activate(id) { this.activeId = id; panes.restoreView(); }};
   const c = vm.createContext({window: {agentCoordPanes: panes}, state, savedViews: views,

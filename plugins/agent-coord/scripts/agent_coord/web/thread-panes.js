@@ -120,6 +120,7 @@ class ThreadPanes {
     return button;
   }
   get layout() { return this.layouts.get(this.viewId); }
+  get tabLayout() { return this.layout?.presentation === "tabs"; }
   get selected() { return this.active ? this.layout?.selected || null : null; }
   get focusedRecord() { return this.records.get(this.selected); }
   tile(viewId, threads) {
@@ -240,6 +241,7 @@ class ThreadPanes {
   close(index) {
     const layout = this.layout, id = layout.tabs[index];
     if (this.workspaceClose) { this.workspaceClose(id); return; }
+    if (this.tabLayout && this.closeConversation) { this.closeConversation(id); return; }
     const group = layout.groups[index]; group.splice(group.indexOf(id), 1);
     if (group.length) layout.tabs[index] = group[0];
     else paneLayout.removeGroup(layout, index);
@@ -252,7 +254,7 @@ class ThreadPanes {
   }
   moveThread(thread, slot, edge = "center", position) {
     if (!this.active || !paneLayout.move(this.layout, thread.thread_id, slot, edge, position)) return false;
-    this.record(thread); this.render(); this.focus(thread.thread_id); return true;
+    this.record(thread); this.render(); this.focus(thread.thread_id); this.onLayoutChange?.(); return true;
   }
   startDrag(thread, event) {
     if (!thread?.thread_id || thread.thread_id === "new-session" || this.canDrag?.(thread) === false) return false;
@@ -376,30 +378,56 @@ class ThreadPanes {
     const pane = this.el("section", "thread-pane"); pane.dataset.slot = String(slot);
     pane.hidden = layout.maximized != null && layout.maximized !== slot;
     pane.setAttribute("aria-label", "Conversation pane " + (slot + 1));
-    const header = this.el("div", "pane-header"), tabs = this.el("div", "pane-tabs");
-    tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "Threads in pane " + (slot + 1));
+    const header = this.el("div", "pane-header"), tabs = this.el("div", this.tabLayout ? "pane-tabs conversation-tabs" : "pane-tabs");
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", (this.tabLayout ? "Conversation tabs in group " : "Threads in pane ") + (slot + 1));
     this.bindTabDrop(tabs, slot);
+    if (this.tabLayout && slot === 0) {
+      for (const item of this.navigationTabs?.() || []) {
+        const wrapper = this.el("div", "conversation-tab" + (item.close ? "" : " overview-tab"));
+        const tab = this.button(item.title, item.title, item.select); tab.className = "conversation-tab-select";
+        tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", "false");
+        wrapper.append(tab);
+        if (item.close) {
+          const close = this.button("×", "Close tab · " + item.title, item.close);
+          close.className = "conversation-tab-close"; wrapper.append(close);
+        }
+        tabs.append(wrapper);
+      }
+    }
     for (const id of layout.groups[slot]) {
       const thread = this.records.get(id).thread;
       const tab = this.button(thread.title, thread.title, () => this.focus(id));
+      const wrapper = this.tabLayout ? this.el("div", "conversation-tab") : tab;
+      if (this.tabLayout) {
+        tab.className = "conversation-tab-select";
+        wrapper.dataset.selected = String(layout.tabs[slot] === id);
+        const close = this.button("×", "Close tab · " + thread.title, () => this.closeConversation?.(id));
+        close.className = "conversation-tab-close";
+        wrapper.append(tab, close);
+      }
       tab.dataset.paneThread = id; tab.dataset.status = thread.response_state || "";
       tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(layout.tabs[slot] === id));
       tab.tabIndex = layout.tabs[slot] === id ? 0 : -1;
       tab.draggable = true; tab.title += " · Drag to an edge to split";
       tab.ondragstart = event => { if (!this.startDrag(thread, event)) event.preventDefault(); };
       tab.ondragend = () => this.endDrag();
-      this.bindTabDrop(tab, slot, layout.groups[slot].indexOf(id));
+      this.bindTabDrop(wrapper, slot, layout.groups[slot].indexOf(id));
+      if (wrapper !== tab) this.bindTabDrop(tab, slot, layout.groups[slot].indexOf(id));
       tab.onkeydown = event => {
+        if (this.tabLayout && event.key === "Delete" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+          event.preventDefault(); this.closeConversation?.(id); return;
+        }
         if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || event.ctrlKey || event.altKey || event.metaKey) return;
         event.preventDefault(); const group = layout.groups[slot], current = group.indexOf(id);
         const next = event.key === "Home" ? 0 : event.key === "End" ? group.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + group.length) % group.length;
         this.focus(group[next], false);
         this.chrome.querySelector('[data-pane-thread="' + CSS.escape(group[next]) + '"]')?.focus();
       };
-      tabs.append(tab);
+      tabs.append(wrapper);
     }
-    header.append(tabs, this.button(layout.maximized === slot ? "↙" : "⤢", layout.maximized === slot ? "Restore panes" : "Maximize pane (Ctrl+Alt+Enter)", () => this.maximize(slot)),
-      this.button("×", "Close pane — keep thread and draft", () => this.close(slot)));
+    header.append(tabs, this.button(layout.maximized === slot ? "↙" : "⤢", layout.maximized === slot ? "Restore panes" : "Maximize pane (Ctrl+Alt+Enter)", () => this.maximize(slot)));
+    if (!this.tabLayout) header.append(this.button("×", "Close pane — keep thread and draft", () => this.close(slot)));
     const body = this.el("div", "pane-content");
     pane.append(header, body); this.slots.push({pane, body, id: layout.tabs[slot]});
     return pane;
@@ -469,7 +497,13 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
       if (shell.active && state.selected === id) $("message").value = draft.text;
       state.mentions?.restore(id, draft.text, draft.mentions || []);
     },
-    onFocus: () => { notifications()?.syncFocus(); window.dispatchEvent(new Event("agent-coord-pane-state")); },
+    onFocus: id => {
+      if (shell.tabLayout) {
+        state.threadTabs?.open(shell.records.get(id)?.thread);
+        $("page-location").textContent = "Conversation";
+      }
+      notifications()?.syncFocus(); window.dispatchEvent(new Event("agent-coord-pane-state"));
+    },
     onExit: () => goHome(), onTile: () => shell.toggleCurrent(), onError: showError});
   window.agentCoordPanes = shell;
   shell.requestList = options => refreshList(options).catch(showError);
@@ -493,10 +527,13 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
       }
     } catch (error) { showError(error); }
   };
-  const show = () => {
+  const show = (tabLayout = shell.tabLayout) => {
     document.body.classList.remove("chat-expanded"); document.body.classList.add("panes-visible");
-    $("leave-tiles").hidden = false; $("tile-threads").textContent = "Retile threads";
-    $("page-location").textContent = "Tiled threads";
+    document.body.classList.toggle("conversation-split", tabLayout);
+    container.setAttribute("aria-label", tabLayout ? "Conversation panes" : "Tiled conversations");
+    $("leave-tiles").hidden = tabLayout;
+    $("tile-threads").textContent = tabLayout ? "Tile threads" : "Retile threads";
+    $("page-location").textContent = tabLayout ? "Conversation" : "Tiled threads";
   };
   const returnTarget = () => ({thread: state.selected, scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop});
   function canChangeLayout() {
@@ -522,16 +559,80 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
       const threads = tabThreads(), ids = threads.map(item => item.thread_id);
       if (!ids.includes(thread.thread_id)) return;
       const selected = ids.includes(state.selected) ? state.selected : ids[0];
-      const layout = {order: [...ids], columns: [1], groups: [ids], tabs: [selected], selected,
+      const layout = {presentation: "tabs", order: [...ids], columns: [1], groups: [ids], tabs: [selected], selected,
         maximized: null, returnTarget: returnTarget()};
       if (!paneLayout.move(layout, thread.thread_id, slot, edge, position)) return;
+      if (layout.groups.length === 1) {
+        state.threadTabs.move(thread.thread_id, layout.groups[0].indexOf(thread.thread_id));
+        return;
+      }
       for (const item of threads) shell.record(item);
       shell.layouts.set(getView(), layout); shell.viewId = getView();
       show(); shell.active = true; container.hidden = false;
       syncDrafts(); shell.render(); shell.focus(thread.thread_id);
     } else shell.moveThread(thread, slot, edge, position);
   };
+  shell.navigationTabs = () => [
+    {title: "Overview", select: () => state.threadTabs.activate(null)},
+    ...(state.threadTabs?.scratchpadOpen ? [{title: "Scratchpad",
+      select: () => state.threadTabs.activate("project-scratchpad"),
+      close: () => state.threadTabs.close("project-scratchpad").then(() => shell.render())}] : []),
+  ];
+  // A tab split is a layout of the normal working set. Keep tab selection and
+  // closing in sync, and return to the regular conversation at one pane.
+  shell.collapseSplit = async () => {
+    if (!shell.active || !shell.tabLayout || shell.layout.groups.length !== 1) return;
+    const id = shell.selected, draft = shell.exportDraft(id);
+    if (draft) shell.onDraft(id, draft);
+    // The remaining group becomes the normal strip, including its tab order.
+    const order = new Map(shell.layout.groups[0].map((threadId, index) => [threadId, index]));
+    state.threadTabs.items.sort((a, b) => (order.get(a.thread_id) ?? Infinity) - (order.get(b.thread_id) ?? Infinity));
+    shell.layouts.delete(shell.viewId);
+    shell.leave();
+    await select(id);
+    if (state.selected === id && Number.isFinite(draft?.scroll)) {
+      if (state.timelineScroll) state.timelineScroll.restore(draft.scroll);
+      else $("timeline").scrollTop = draft.scroll;
+    }
+  };
+  shell.onLayoutChange = () => shell.collapseSplit().catch(showError);
+  shell.closeConversation = id => state.threadTabs.close(id).catch(showError);
+  shell.closeTab = async id => {
+    const layout = shell.layouts.get(getView());
+    if (layout?.presentation !== "tabs") return false;
+    const active = shell.active && shell.layout === layout;
+    const index = layout.groups.findIndex(group => group.includes(id));
+    if (index < 0) return false;
+    const group = layout.groups[index], position = group.indexOf(id); group.splice(position, 1);
+    if (!group.length) paneLayout.removeGroup(layout, index);
+    else if (layout.tabs[index] === id) layout.tabs[index] = group[Math.min(position, group.length - 1)];
+    layout.order = layout.order.filter(value => value !== id);
+    if (layout.selected === id) layout.selected = layout.tabs[Math.min(index, layout.tabs.length - 1)];
+    layout.maximized = null;
+    if (!layout.groups.length) {
+      shell.layouts.delete(getView());
+      if (active) { shell.leave(); goHome(); return true; }
+      return false;
+    }
+    if (!active) return false;
+    shell.render(); shell.focus(layout.selected);
+    await shell.collapseSplit();
+    return true;
+  };
+  shell.selectTab = async id => {
+    if (!id || id === "new-session" || state.dispatchWorkspace?.active) return false;
+    const layout = shell.layouts.get(getView());
+    if (layout?.presentation !== "tabs") return false;
+    if (!shell.active) {
+      state.projectScratchpad?.hideTab();
+      shell.show(getView()); show(); syncDrafts();
+    }
+    await shell.openThread(id);
+    await shell.collapseSplit();
+    return true;
+  };
   if (state.threadTabs) {
+    state.threadTabs.onClose = id => shell.closeTab(id);
     state.threadTabs.onDragStart = (thread, event) => shell.startDrag(thread, event);
     state.threadTabs.onDragEnd = () => shell.endDrag();
     shell.onDragEnd = () => { state.threadTabs.dragging = null; state.threadTabs.render(); };
@@ -542,7 +643,7 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     if (!threads.some(t => t.attention !== "archived")) { showError(new Error("This view has no open threads to tile.")); return false; }
     const wasActive = shell.active;
     const previous = wasActive ? shell.layout.returnTarget : returnTarget();
-    show(); container.hidden = false;
+    show(false); container.hidden = false;
     shell.tile(getView(), threads);
     shell.layout.returnTarget = previous;
     if (!wasActive) syncDrafts();
@@ -554,7 +655,7 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     if (shell.show(getView())) { shell.layout.returnTarget = previous; show(); shell.position(); }
   };
   shell.leave = () => {
-    shell.hide(); document.body.classList.remove("panes-visible");
+    shell.hide(); document.body.classList.remove("panes-visible", "conversation-split");
     $("leave-tiles").hidden = true; $("tile-threads").textContent = "Tile threads";
   };
   let toggling = false;
@@ -575,7 +676,7 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
         } else goHome();
       } else if (shell.layouts.get(getView())?.groups.length) {
         const previous = returnTarget();
-        show(); shell.show(getView());
+        shell.show(getView()); show();
         shell.layout.returnTarget = previous;
         syncDrafts();
         shell.focus(shell.selected);

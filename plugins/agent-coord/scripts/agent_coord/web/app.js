@@ -2524,7 +2524,8 @@ async function boot() {
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
     canNavigate: canSwitchProject, onError: showError, onScratchpad: openProjectScratchpad,
     onSelect: async id => {
-      // A tab always opens a full conversation, including when leaving tiled or dispatcher mode.
+      if (await globalThis.agentCoordPanes?.selectTab(id)) return;
+      // Explicit overview tiling and dispatcher workspaces remain separate destinations.
       if (globalThis.agentCoordPanes?.active || state.dispatchDock?.active) goHome({restoreDispatcher: false});
       if (id) await select(id);
       else goHome({restoreDispatcher: false});
@@ -2545,7 +2546,10 @@ async function boot() {
     return args[0].startsWith("threads?") ? {...result, data: threadsInProject(result.data)} : result;
   }, select, action, markHandled: markThreadHandled});
   window.addEventListener("agent-coord-pane-state", () => {
-    if (window.agentCoordPanes?.active) { state.rollUp.stop(); state.threadTabs?.suspend(); }
+    if (window.agentCoordPanes?.active) {
+      state.rollUp.stop();
+      if (!window.agentCoordPanes.tabLayout) state.threadTabs?.suspend();
+    }
   });
   await refreshList(); connect();
   savedViews.restoreScroll();
