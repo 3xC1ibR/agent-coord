@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const {RollUp, setupRollUp} = require("../plugins/agent-coord/scripts/agent_coord/web/roll-up.js");
+const {inProject} = require("../plugins/agent-coord/scripts/agent_coord/web/folders.js");
 const thread = (id, since, extra = {}) => ({thread_id: id, attention: "now", needs_attention: true,
   attention_since: since, attention_key: id + ":1", ...extra});
 function setup(threads) {
@@ -212,4 +213,106 @@ test("Handled advances only after a successful acknowledgement", async () => {
   c.api = async () => ({...thread, needs_attention: false});
   await c.markThreadHandled(thread);
   assert.equal(advanced.length, 1);
+});
+
+function projectAppFixture({known = true} = {}) {
+  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+  const items = [thread("second", 20, {project_cwd: "/second"}), thread("first", 10, {project_cwd: "/first"}),
+    thread("third", 30, {project_cwd: "/third"}), thread("later", 1, {project_cwd: "/first", attention: "later"}),
+    thread("quiet", 2, {project_cwd: "/first", needs_attention: false})];
+  const elements = new Map();
+  const $ = id => {
+    if (!elements.has(id)) elements.set(id, {value: "", hidden: false, dataset: {}, options: [],
+      classList: {remove() {}}, setAttribute() {}, focus() {}, querySelector: () => null,
+      replaceChildren(...options) { this.options = options; }, append(option) { this.options.push(option); }});
+    return elements.get(id);
+  };
+  const c = {listRequest: 0, state: {projectCwd: "/home", selected: null, drafts: new Map(), updatingThreads: new Set(),
+    sessions: known ? items.slice() : [], viewThreads: [],
+    folders: {selected: {cwd: "/home"}, adopt(folder) { this.selected = folder; }}}, $, items,
+    document: {getElementById: $, querySelector: () => null, addEventListener() {}}, setupRollUp,
+    Option: function (text, value) { Object.assign(this, {text, value}); },
+    inProject,
+    savedViews: {remember() {}, restoreScroll() {}, sync() {}, setProject: async () => {}},
+    navigation: {remember() {}}, notifications: {syncFocus() {}}, threadOrganization: {NONE: "__none__"},
+    renderFolders() {}, renderList() {}, renderStatus() {}, renderTitle() {}, setNavigation() {}, setChatExpanded() {},
+    retainConversation() {}, restoreProjectTab: async () => {}, conversationEntry: () => ({detail: null}), node: () => ({}),
+    overlayPendingAttention: item => item, threadPath: id => "threads/" + id, action: fn => fn(), markThreadHandled() {},
+    refreshDetail: async () => { c.state.detail = {work_thread: items.find(item => item.thread_id === c.state.selected)}; },
+    api: async (path, body) => {
+      if (path.startsWith("threads?")) return {data: items.slice()};
+      if (path === "organization") return {repositories: [], projects: []};
+      if (path === "views") return {data: []};
+      if (path.startsWith("threads/") && body?.seen) return {};
+      throw new Error("Unexpected API call: " + path);
+    }};
+  vm.createContext(c);
+  for (const [start, end] of [["async function refreshList(", "function currentProjectDispatcher("],
+    ["function threadsInProject(", "async function restoreProjectTab("],
+    ["async function openProjectDirectory(", "function renderFolders("],
+    ["async function select(", "async function refreshDetail("],
+    ["function goHome(", "function openProjectScratchpad("],
+    ["  setupRollUp(", '  window.addEventListener("agent-coord-pane-state"']]) {
+    const from = source.indexOf(start), to = source.indexOf(end, from);
+    assert.ok(from >= 0 && to > from, "Load actual app integration: " + start);
+    vm.runInContext(source.slice(from, to), c);
+  }
+  return c;
+}
+const queued = c => Array.from(c.state.rollUp.queue, item => item.thread_id);
+
+test("app Roll up retains all projects and queue order through refresh and cross-project advance", async () => {
+  const c = projectAppFixture(), roll = c.state.rollUp;
+  await roll.start();
+  assert.equal(c.state.selected, "first");
+  assert.equal(c.state.projectCwd, "/first");
+  assert.equal(roll.active, true);
+  assert.equal(c.$("roll-up-bar").hidden, false);
+  assert.deepEqual(queued(c), ["first", "second", "third"]);
+  c.items.push(thread("arrival", 5, {project_cwd: "/arrival"}));
+  await c.refreshList();
+  assert.equal(c.state.selected, "first", "background refresh must not navigate");
+  assert.deepEqual(queued(c), ["first", "second", "third", "arrival"], "arrivals append after retained work");
+  c.$("message").value = "Unsent draft";
+  await roll.responded(roll.ticket());
+  assert.equal(c.state.selected, "second");
+  assert.equal(c.state.projectCwd, "/second");
+  assert.equal(c.state.drafts.get("first"), "Unsent draft");
+  assert.equal(roll.active, true);
+  assert.deepEqual(queued(c), ["second", "third", "arrival"]);
+  await roll.skip();
+  assert.equal(c.state.selected, "third");
+  assert.equal(c.state.projectCwd, "/third");
+  assert.deepEqual(queued(c), ["third", "arrival"]);
+});
+
+test("app Roll up preserves its pass when a thread's project is learned from fresh detail", async () => {
+  const c = projectAppFixture({known: false});
+  await c.state.rollUp.start();
+  assert.equal(c.state.selected, "first");
+  assert.equal(c.state.projectCwd, "/first");
+  assert.equal(c.state.rollUp.active, true);
+  assert.deepEqual(queued(c), ["first", "second", "third"]);
+});
+
+test("manual project or conversation navigation still stops the app Roll up pass", async () => {
+  for (const destination of ["project", "conversation"]) {
+    const c = projectAppFixture();
+    await c.state.rollUp.start();
+    c.$("message").value = "Keep my draft";
+    if (destination === "project") {
+      c.state.folders.adopt({cwd: "/manual"});
+      await c.switchProject();
+      assert.equal(c.state.projectCwd, "/manual");
+      assert.equal(c.state.selected, null);
+    } else {
+      await c.select("second");
+      assert.equal(c.state.projectCwd, "/second");
+      assert.equal(c.state.selected, "second");
+    }
+    assert.equal(c.state.rollUp.active, false, destination);
+    assert.deepEqual(queued(c), [], destination);
+    assert.equal(c.$("roll-up-bar").hidden, true, destination);
+    assert.equal(c.state.drafts.get("first"), "Keep my draft", destination);
+  }
 });

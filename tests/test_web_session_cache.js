@@ -307,6 +307,49 @@ test("project tabs restore independent conversations, drafts and reading positio
   assert.equal(c.state.selected, "three", "clicking the current project keeps its conversation");
 });
 
+test("project restoration shows cached history before views, inventory or session requests finish", async () => {
+  const c = projectSetup();
+  await c.select("one");
+  c.$("message").value = "Draft A"; c.$("timeline").scrollTop = 321;
+  const original = c.$("timeline").childNodes[0];
+  await c.switchTo("/b"); await c.select("three");
+  const views = deferred(), inventory = deferred();
+  c.savedViews.setProject = () => views.promise;
+  c.gate = {id: "one", ...deferred()};
+  let refreshes = 0;
+  c.refreshList = () => { refreshes++; return inventory.promise; };
+  const renders = [];
+  c.renderList = () => renders.push(c.state.selected);
+  const switching = c.switchTo("/a");
+  assert.equal(c.state.selected, "one"); assert.equal(c.state.threadTabs.selected, "one");
+  assert.equal(c.$("welcome").hidden, true); assert.equal(c.$("conversation").hidden, false);
+  assert.equal(c.$("timeline").childNodes[0], original);
+  assert.equal(c.$("message").value, "Draft A"); assert.equal(c.$("timeline").scrollTop, 321);
+  assert.ok(renders.length); assert.equal(renders.includes(null), false, "returning to a conversation must not render Overview");
+  assert.equal(refreshes, 0);
+  views.resolve(); c.gate.resolve(clone(c.replies.get("one")));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(refreshes, 1, "one inventory refresh is sufficient for the restored project");
+  assert.equal(c.state.selected, "one"); assert.equal(c.$("welcome").hidden, true);
+  inventory.resolve(); await switching;
+});
+
+test("rapid project switches do not wait for or return to an earlier restoration", async () => {
+  const c = projectSetup();
+  await c.select("one"); await c.switchTo("/b"); await c.select("three");
+  const views = deferred();
+  c.savedViews.setProject = cwd => cwd === "/a" ? views.promise : Promise.resolve();
+  c.gate = {id: "one", ...deferred()};
+  const earlier = c.switchTo("/a");
+  assert.equal(c.state.selected, "one");
+  await c.switchTo("/b");
+  assert.equal(c.state.selected, "three");
+  views.resolve(); c.gate.reject(Object.assign(new Error("Old session unavailable"), {status: 503}));
+  await earlier;
+  assert.equal(c.state.projectCwd, "/b"); assert.equal(c.state.selected, "three");
+  assert.equal(c.$("welcome").hidden, true);
+});
+
 test("restart restores the active conversation and each project's saved tab", async () => {
   const values = new Map(), storage = {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)};
   const first = projectSetup(storage);
@@ -431,4 +474,18 @@ test("project switching restores split selection and its full-conversation retur
   assert.equal(layout.selected, "two");
   assert.deepEqual(layout.returnTarget, {thread: "one", scroll: 123});
   assert.equal(c.state.threadTabs.selected, undefined);
+});
+
+test("tiled projects restore only after their own saved view is selected", async () => {
+  const c = projectSetup(); await c.select("one");
+  let view = "/a";
+  const gate = deferred(), restored = [];
+  c.savedViews.setProject = async cwd => { if (cwd === "/a") await gate.promise; view = cwd; };
+  c.agentCoordPanes = {active: true, layout: {}, leave() { this.active = false; },
+    restoreView() { restored.push(view); this.active = true; }};
+  await c.switchTo("/b");
+  const switching = c.switchTo("/a");
+  assert.deepEqual(restored, []);
+  gate.resolve(); await switching;
+  assert.deepEqual(restored, ["/a"]);
 });

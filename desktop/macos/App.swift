@@ -1674,6 +1674,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return state.selected === 'roll-new-session' && state.rollUp.queue.length === 2 &&
                 !document.querySelector('#roll-up-bar').hidden;
             """, in: window.webView)
+        if oldest as? Bool != true {
+            smokeResults["roll_up_debug"] = try await smokeJS("""
+                return {selected: state.selected, project: state.projectCwd, active: state.rollUp.active,
+                  done: state.rollUp.done, busy: state.rollUp.busy,
+                  queue: state.rollUp.queue.map(thread => thread.thread_id),
+                  barHidden: document.querySelector('#roll-up-bar').hidden,
+                  threads: (await api('threads?archived=false')).data.map(thread => ({
+                    id: thread.thread_id, cwd: thread.cwd, attention: thread.attention,
+                    needsAttention: thread.needs_attention, since: thread.attention_since,
+                    response: thread.response_state, checkpointStale: thread.checkpoint_stale}))};
+                """, in: window.webView)
+        }
         try smokeCheck("roll_up_oldest_waiting", oldest as? Bool == true)
         let picture: NSImage = try await withCheckedThrowingContinuation { continuation in
             window.webView.takeSnapshot(with: nil) { image, error in
