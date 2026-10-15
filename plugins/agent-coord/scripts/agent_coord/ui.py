@@ -772,7 +772,10 @@ def _handler(
                 if route == ["api", "browser", "projects"]:
                     if set(body) - {"name", "cwd"} or "name" not in body:
                         raise CoordinationError("Group creation accepts a name and project directory.")
-                    cwd = resolve_workspace(body["cwd"], workspace=browser_sessions.cwd) if body.get("cwd") is not None else None
+                    directory = body.get("cwd")
+                    if directory is None:
+                        directory = browser_sessions.cwd or str(Path.cwd())
+                    cwd = resolve_workspace(directory, workspace=browser_sessions.cwd)
                     self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.create_project(body["name"], cwd))
                     return
                 if route == ["api", "browser", "repositories"]:

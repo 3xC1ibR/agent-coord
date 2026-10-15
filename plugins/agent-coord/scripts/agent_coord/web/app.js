@@ -83,7 +83,7 @@ async function loadThreadList(view, request) {
   state.organization = organization;
   for (const field of ["repository", "project"]) {
     const select = $(field), selected = select.value, choices = organization[field === "repository" ? "repositories" : "projects"]
-      .filter(item => field === "repository" || !item.cwd || item.cwd === state.folders?.selected?.cwd);
+      .filter(item => field === "repository" || item.cwd === state.folders?.selected?.cwd);
     const signature = JSON.stringify(choices);
     if (select.dataset.signature === signature) continue;
     select.dataset.signature = signature;
@@ -1676,7 +1676,7 @@ async function fillAssignments(prefix, thread = null) {
   for (const item of state.organization.repositories) repository.append(new Option(item.name + " · " + item.root, item.id));
   repository.append(new Option("Add a repository…", "__new__"));
   project.replaceChildren(new Option("No group", ""));
-  for (const item of state.organization.projects.filter(item => !item.cwd || item.cwd === (thread?.project_cwd || state.folders?.selected?.cwd))) project.append(new Option(item.name, item.id));
+  for (const item of state.organization.projects.filter(item => item.cwd === (thread?.project_cwd || thread?.cwd || state.folders?.selected?.cwd))) project.append(new Option(item.name, item.id));
   project.append(new Option("Create a group…", "__new__"));
   repository.value = thread ? thread.repository_id || "" : "__auto__";
   if (!thread) {

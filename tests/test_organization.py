@@ -82,6 +82,40 @@ class OrganizationTests(unittest.TestCase):
         self.assertNotEqual(self.association("code")["repository_id"], self.association("frontend")["repository_id"])
         self.assertIsNone(self.association("idea")["repository_id"])
 
+    def test_legacy_group_ownership_uses_first_members_original_project(self):
+        legacy = self.organization.create_project("Launch")
+        empty = self.organization.create_project("Empty")
+        scoped = self.organization.create_project("Scoped", str(self.root))
+        for group, thread_id in ((legacy, "code"), (legacy, "idea"), (scoped, "code")):
+            with self.store._connection() as db:
+                self.organization.update(db, thread_id, project_id=group["id"])
+        with self.store._connection() as db:
+            self.organization.update(db, "code", project_id=legacy["id"])
+            db.execute("UPDATE work_threads SET created_at = 0 WHERE thread_id = 'code'")
+        # Execution may leave the original project before the migration runs.
+        self.store.register(session_id="code", client="codex", cwd=str(self.root))
+        before = {id: self.store.threads.get(id) for id in ("code", "idea")}
+        reopened = OrganizationStore(CoordinationStore(self.store.database_path))
+        groups = {group["id"]: group for group in reopened.list()["projects"]}
+        self.assertEqual(groups[legacy["id"]]["cwd"], str(self.repo))
+        self.assertEqual(groups[scoped["id"]]["cwd"], str(self.root))
+        self.assertIsNone(groups[empty["id"]]["cwd"])
+        self.assertEqual(reopened.create_project("launch", str(self.repo))["id"], legacy["id"])
+        for id, thread in before.items():
+            self.assertEqual(self.store.threads.get(id), thread)
+        self.assertEqual(OrganizationStore(self.store).list(), reopened.list())
+
+    def test_legacy_group_migration_preserves_ids_when_scoped_name_exists(self):
+        legacy = self.organization.create_project("Launch")
+        scoped = self.organization.create_project("Launch", str(self.repo))
+        with self.store._connection() as db:
+            self.organization.update(db, "code", project_id=legacy["id"])
+        reopened = OrganizationStore(CoordinationStore(self.store.database_path))
+        groups = {group["id"]: group for group in reopened.list()["projects"]}
+        self.assertEqual(groups[legacy["id"]]["cwd"], str(self.repo))
+        self.assertEqual(groups[scoped["id"]], scoped)
+        self.assertEqual(self.association("code")["project_id"], legacy["id"])
+
     def test_invalid_assignments_are_atomic(self):
         before = self.association("code")
         for value in ("missing", "", 1, [], {}):

@@ -202,6 +202,10 @@ class ThreadOrganizationTests(unittest.TestCase):
         def cli(*args):
             return run(_parser().parse_args(["--db", str(self.store.database_path), *args]))
         project = cli("project", "create", "--name", "Performance")
+        self.assertEqual(project["cwd"], str(Path.cwd().resolve()))
+        local = cli("project", "create", "--name", "Performance", "--cwd", str(self.repo))
+        self.assertEqual(local["cwd"], str(self.repo))
+        self.assertNotEqual(local["id"], project["id"])
         repository = cli("repository", "add", "--path", str(self.repo))
         thread_id = self.create()
         updated = cli("thread", "update", "--session-id", thread_id, "--project", project["id"], "--repository", repository["id"])
@@ -234,6 +238,7 @@ class ThreadOrganizationTests(unittest.TestCase):
     def test_http_organization_and_assignment_routes(self):
         request = self.start_ui()
         project = request("projects", {"name": "New initiative"})
+        self.assertEqual(project["cwd"], str(self.root))
         repository = request("repositories", {"path": str(self.repo)})
         choices = request("organization")
         self.assertIn(project, choices["projects"])
@@ -247,6 +252,15 @@ class ThreadOrganizationTests(unittest.TestCase):
             request("projects", {"name": "Bad", "extra": True})
         self.assertEqual(error.exception.code, 400)
         error.exception.close()
+
+    def test_groups_created_in_different_projects_have_independent_identity(self):
+        request = self.start_ui()
+        parent = request("projects", {"name": "Launch", "cwd": str(self.root)})
+        child = request("projects", {"name": "Launch", "cwd": str(self.repo)})
+        self.assertNotEqual(parent["id"], child["id"])
+        self.assertEqual(request("projects", {"name": "launch"}), parent)
+        self.assertEqual(request("projects", {"name": "launch", "cwd": str(self.repo)}), child)
+        self.assertIn(child, request("organization")["projects"])
 
     def test_standalone_projects_and_existing_terminal_threads(self):
         request = self.start_ui()

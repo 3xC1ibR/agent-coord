@@ -91,6 +91,33 @@ class OrganizationStore:
             if "cwd" not in {row["name"] for row in db.execute("PRAGMA table_info(named_projects)")}:
                 db.execute("ALTER TABLE named_projects ADD COLUMN cwd TEXT")
         self.backfill()
+        self.backfill_group_directories()
+
+    def backfill_group_directories(self):
+        """Give legacy groups an owner without moving or ungrouping threads.
+
+        Old groups could span projects. Keep their identity and use the earliest
+        member's original project; current execution directories can change.
+        Empty legacy groups have no reliable owner and stay unscoped.
+        """
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for group in db.execute("SELECT id, name FROM named_projects WHERE cwd IS NULL").fetchall():
+                member = db.execute("""SELECT t.project_cwd FROM thread_organization o
+                    JOIN work_threads t ON t.thread_id = o.thread_id
+                    WHERE o.project_id = ? AND t.project_cwd IS NOT NULL
+                    ORDER BY t.created_at, t.thread_id LIMIT 1""", (group["id"],)).fetchone()
+                if member is None:
+                    continue
+                # Preserve IDs, including when a newer scoped group has the same
+                # name. The legacy key remains valid until the group is renamed.
+                key = group["name"].casefold() + "\0" + member["project_cwd"]
+                if db.execute("SELECT 1 FROM named_projects WHERE name_key = ?", (key,)).fetchone():
+                    db.execute("UPDATE named_projects SET cwd = ? WHERE id = ?",
+                               (member["project_cwd"], group["id"]))
+                else:
+                    db.execute("UPDATE named_projects SET cwd = ?, name_key = ? WHERE id = ?",
+                               (member["project_cwd"], key, group["id"]))
 
     def backfill(self):
         """Migrate once per thread, including threads created by older clients."""

@@ -240,6 +240,7 @@ def _parser() -> argparse.ArgumentParser:
     project_commands.add_parser("list")
     project_create = project_commands.add_parser("create")
     project_create.add_argument("--name", required=True)
+    project_create.add_argument("--cwd", default=str(Path.cwd()), help="Project directory that owns this group (default: current directory).")
     repository = subcommands.add_parser("repository", help="List or register Git repositories without changing a workspace.")
     repository_commands = repository.add_subparsers(dest="repository_command", required=True)
     repository_commands.add_parser("list")
@@ -704,7 +705,7 @@ def run(arguments: argparse.Namespace) -> Any:
                                     **({"domain": arguments.domain} if hasattr(arguments, "domain") else {}), **associations)
     if command == "project":
         if arguments.project_command == "create":
-            return store.threads.organization.create_project(arguments.name)
+            return store.threads.organization.create_project(arguments.name, arguments.cwd)
         return store.threads.organization.list()["projects"]
     if command == "repository":
         if arguments.repository_command == "add":

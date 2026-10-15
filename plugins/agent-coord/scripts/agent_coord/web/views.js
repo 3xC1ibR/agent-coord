@@ -108,6 +108,11 @@ class SavedViews {
   }
   $(id) { return this.doc.getElementById(id); }
   scoped(items) { return items.filter(view => this.cwd === undefined || view.cwd === this.cwd); }
+  groupItems() {
+    return this.groups.filter(group => this.cwd === undefined || group.cwd === this.cwd)
+      .map(group => ({id: "group-" + group.id, kind: "group", projectId: group.id, name: group.name,
+        cwd: this.cwd, version: 1, filters: threadViews.filters({project: group.id}), group_by: "phase"}));
+  }
   async setProject(cwd) {
     this.remember();
     await Promise.all([...this.saves.values()].map(pending => pending.promise));

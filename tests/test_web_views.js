@@ -631,3 +631,16 @@ test("built-in view navigation leaves saved filters intact and keeps Closed sele
   assert.equal(c.controls["phase-filter"].value, "validation");
   assert.equal(c.controls["show-closed"].attributes["aria-pressed"], "false");
 });
+
+test("project groups exclude unowned groups and identical names in other projects", () => {
+  const c = setup();
+  c.views.groups = [
+    {id: "a", name: "Launch", cwd: "/projects"},
+    {id: "b", name: "Launch", cwd: "/projects/website"},
+    {id: "legacy", name: "Old group", cwd: null},
+  ];
+  for (const [cwd, expected] of [["/projects", ["group-a"]], ["/projects/website", ["group-b"]], ["/other", []]]) {
+    c.views.cwd = cwd;
+    assert.deepEqual(c.views.groupItems().map(view => view.id), expected);
+  }
+});
