@@ -39,13 +39,19 @@ class BrowserInboxWake:
     def _eligible(self, db, thread_id, *, submitting=False):
         if self.stopped.is_set() or self.sessions.closed:
             return False
-        row = db.execute("""SELECT s.turn_active,
+        row = db.execute("""SELECT s.turn_active, t.attention,
                 w.paused, w.dispatching
             FROM browser_sessions b JOIN work_threads t ON t.thread_id = b.thread_id
             JOIN sessions s ON s.session_id = b.thread_id
             LEFT JOIN browser_inbox_wake w ON w.thread_id = b.thread_id
             WHERE b.thread_id = ?""", (thread_id,)).fetchone()
         if (not row or row["turn_active"] or row["paused"] or (row["dispatching"] and not submitting)):
+            return False
+        if row["attention"] == "archived" and not db.execute("""SELECT 1 FROM messages
+                WHERE recipient_session_id = ? AND delivered_at IS NULL
+                AND classification = 'action_required' AND thread_id NOT LIKE 'event:%'""", (thread_id,)).fetchone():
+            # Stored subscriptions wait for explicit reopening. Avoid even
+            # loading/unarchiving a cold provider conversation for these events.
             return False
         # User follow-ups, including paused ones, take priority over inbox work.
         if db.execute("SELECT 1 FROM browser_message_queue WHERE thread_id = ?", (thread_id,)).fetchone():
@@ -62,6 +68,8 @@ class BrowserInboxWake:
                 SELECT 1 FROM message_wake_attempts a JOIN messages m ON m.id = a.message_id
                 WHERE a.session_id = ? AND a.outcome = 'claimed'
                 AND m.delivered_at IS NULL AND m.classification = 'action_required'
+                AND (m.thread_id NOT LIKE 'event:%' OR EXISTS (
+                    SELECT 1 FROM work_threads t WHERE t.thread_id = a.session_id AND t.attention != 'archived'))
                 """, (thread_id,)).fetchone())
 
     def _claim(self, thread_id):
@@ -73,6 +81,8 @@ class BrowserInboxWake:
                 LEFT JOIN message_wake_attempts a ON a.message_id = m.id
                 WHERE m.recipient_session_id = ? AND m.delivered_at IS NULL
                 AND m.classification = 'action_required' AND a.message_id IS NULL
+                AND (m.thread_id NOT LIKE 'event:%' OR EXISTS (
+                    SELECT 1 FROM work_threads t WHERE t.thread_id = m.recipient_session_id AND t.attention != 'archived'))
                 ORDER BY m.id""", (thread_id,)).fetchall()
             ids = [row[0] for row in rows]
             if ids:

@@ -247,6 +247,8 @@ class BrowserSessions:
         self.classifier = AttentionClassifier(self)
         self.schedules = ScheduledPrompts(self)
         self.inbox_wake = BrowserInboxWake(self)
+        from .event_subscriptions import EventSubscriptions
+        self.event_subscriptions = EventSubscriptions(store, cwd=self.cwd)
         from .dispatch_runtime import DispatchRuntime
         self.dispatch = DispatchRuntime(self)
 
@@ -1446,6 +1448,7 @@ class BrowserSessions:
             self.changed.notify_all()
         self.classifier.close()
         self.dispatch.close()
+        self.event_subscriptions.close()
         self.inbox_wake.close()
         self.rpc.close()
         self.claude.close()

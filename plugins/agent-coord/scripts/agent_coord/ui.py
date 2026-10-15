@@ -937,6 +937,7 @@ def make_ui_server(
     server.app_control.start()
     sessions.schedules.start()
     sessions.inbox_wake.start()
+    sessions.event_subscriptions.start()
     sessions.dispatch.wake()
     return server
 

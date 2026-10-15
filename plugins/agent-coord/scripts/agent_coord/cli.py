@@ -83,6 +83,43 @@ def _parser() -> argparse.ArgumentParser:
     antigravity = subcommands.add_parser("antigravity", help="Install or sign in to Google Antigravity.")
     antigravity.add_argument("antigravity_command", choices=["install", "login", "status"])
 
+    subscribe = subcommands.add_parser("subscribe", help="Resume this conversation when watched turns or jobs finish.")
+    subscribe.add_argument("--session-id", help="Subscriber; defaults to the current caller.")
+    subscribe.add_argument("--session", dest="watched_sessions", action="append", default=[], help="Watch this session's current or most recent turn; repeat for several agents.")
+    subscribe.add_argument("--turn", action="append", default=[], metavar="SESSION:TURN", help="Watch an exact turn; repeat for several turns.")
+    subscribe.add_argument("--job", action="append", default=[], help="Watch an owned managed job; repeat for several jobs.")
+    subscribe.add_argument("--mode", choices=["each", "any", "all"], default="all", help="Wake for each target, the first target, or all targets (default all).")
+    subscribe.add_argument("--continue", dest="continuation", default="", help="Instructions to include when the event resumes this conversation.")
+    subscribe.add_argument("--timeout", type=float, help="Wake with a timeout event after this many seconds.")
+    subscribe.add_argument("--subscription-id", help="Stable idempotency key for retries.")
+
+    subscription = subcommands.add_parser("subscription", help="Inspect or cancel durable event subscriptions.")
+    subscription_commands = subscription.add_subparsers(dest="subscription_command", required=True)
+    for name in ("list", "show", "cancel"):
+        operation = subscription_commands.add_parser(name)
+        operation.add_argument("--session-id", help="Subscriber; defaults to the current caller.")
+        if name != "list":
+            operation.add_argument("subscription_id")
+
+    job = subcommands.add_parser("job", help="Run and inspect command jobs independently of an agent turn.")
+    job_commands = job.add_subparsers(dest="job_command", required=True)
+    job_start = job_commands.add_parser("start")
+    job_start.add_argument("--session-id", help="Owner; defaults to the current caller.")
+    job_start.add_argument("--cwd", help="Command working directory; defaults to the owner's workspace.")
+    job_start.add_argument("--timeout", type=float, help="Terminate the command after this many seconds.")
+    job_start.add_argument("--job-id", help="Stable idempotency key for retries.")
+    job_start.add_argument("--wake-self", action="store_true", help="Save a completion subscription before starting the command.")
+    job_start.add_argument("--continue", dest="continuation", default="", help="Instructions for the completion turn; requires --wake-self.")
+    job_start.add_argument("argv", nargs=argparse.REMAINDER, help="Command and arguments after --; passed directly without a shell.")
+    for name in ("list", "show", "cancel", "logs"):
+        operation = job_commands.add_parser(name)
+        operation.add_argument("--session-id", help="Owner; defaults to the current caller.")
+        if name != "list":
+            operation.add_argument("job_id")
+        if name == "logs":
+            operation.add_argument("--offset", type=int, default=0)
+            operation.add_argument("--limit", type=int, default=8000)
+
     register = subcommands.add_parser("register", help="Register or refresh a session.")
     register.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     register.add_argument("--client", required=True, choices=["claude", "codex", "antigravity", "kimi", "muse"])
@@ -550,6 +587,53 @@ def run(arguments: argparse.Namespace) -> Any:
         except (OSError, sqlite3.Error, ValueError) as exc:
             raise CoordinationError("Cannot evaluate routing records: " + str(exc)) from exc
     store = CoordinationStore(arguments.db)
+    if command in {"subscribe", "subscription"}:
+        from .event_subscriptions import EventSubscriptions
+        subscriptions = EventSubscriptions(store)
+        if command == "subscribe":
+            turns = []
+            for value in arguments.turn:
+                session_id, separator, turn_id = value.partition(":")
+                if not separator or not session_id or not turn_id:
+                    raise CoordinationError("Use --turn SESSION_ID:TURN_ID.")
+                turns.append({"session_id": session_id, "turn_id": turn_id})
+            return subscriptions.create(arguments.session_id, sessions=arguments.watched_sessions,
+                                        turns=turns, jobs=arguments.job, mode=arguments.mode,
+                                        continuation=arguments.continuation, timeout=arguments.timeout,
+                                        subscription_id=arguments.subscription_id)
+        if arguments.subscription_command == "list":
+            return subscriptions.list(arguments.session_id)
+        if arguments.subscription_command == "show":
+            return subscriptions.get(arguments.session_id, arguments.subscription_id)
+        return subscriptions.cancel(arguments.session_id, arguments.subscription_id)
+    if command == "job":
+        from .jobs import ManagedJobs
+        jobs = ManagedJobs(store)
+        if arguments.job_command == "start":
+            if arguments.continuation and not arguments.wake_self:
+                raise CoordinationError("--continue requires --wake-self.")
+            argv = arguments.argv[1:] if arguments.argv[:1] == ["--"] else arguments.argv
+            record = jobs.create(arguments.session_id, argv, cwd=arguments.cwd,
+                                 timeout=arguments.timeout, job_id=arguments.job_id)
+            subscription = None
+            if arguments.wake_self:
+                import uuid
+                from .event_subscriptions import EventSubscriptions
+                # Save the continuation before a fast command can finish. The
+                # deterministic ID keeps retries from scheduling another wake.
+                subscription_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:job:" + record["id"]))
+                subscription = EventSubscriptions(store).create(arguments.session_id, jobs=[record["id"]],
+                                                                 continuation=arguments.continuation,
+                                                                 subscription_id=subscription_id)
+            result = jobs.launch(arguments.session_id, record["id"])
+            return {**result, "subscription": subscription}
+        if arguments.job_command == "list":
+            return jobs.list(arguments.session_id)
+        if arguments.job_command == "show":
+            return jobs.get(arguments.session_id, arguments.job_id)
+        if arguments.job_command == "cancel":
+            return jobs.cancel(arguments.session_id, arguments.job_id)
+        return jobs.logs(arguments.session_id, arguments.job_id, offset=arguments.offset, limit=arguments.limit)
     if command == "register":
         return store.register(
             session_id=arguments.session_id,

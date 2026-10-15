@@ -246,6 +246,50 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
   `--all-unread`. Acknowledgement is a silent transport update and never sends
   a conversational receipt.
 
+## Resume on turn and command events
+
+Use a durable subscription when waiting is the only remaining work. Save it,
+record your checkpoint, then end the turn; do not keep a model turn alive with
+repeated sleep or status commands. Ribbon Field's running backend matches the
+event and resumes this same conversation through its inbox. Subscriptions survive
+backend restarts and match results that finished before registration.
+
+```bash
+agent-coord subscribe --session <worker-session-id> \
+  --continue 'Read the worker result and continue the task.'
+agent-coord subscribe --session <a> --session <b> --mode all --timeout 1800
+agent-coord subscribe --turn <session-id>:<exact-turn-id>
+agent-coord job start --wake-self --timeout 600 \
+  --continue 'Read the output and continue.' -- <command> <arguments>
+agent-coord job start --wake-self -- \
+  gh run watch <exact-run-id> --repo <owner/repo> --exit-status
+```
+
+`subscribe --session` captures the current or most recent retained turn; it does
+not subscribe to every future turn. Use exact turn IDs when the intended turn
+may already have been followed by another. A turn ending is not the same as its
+assignment completing. Modes are `all` (default, one event after all targets),
+`any` (one event after the first), and `each` (one event per target). Repeated
+`--session`, `--turn`, and `--job` targets may be combined. Failure/interruption
+are terminal results as well. Subscription `--timeout` emits a timeout event;
+job `--timeout` terminates the owned command. `--continue` saves instructions
+for the resumed turn. Do not subscribe to your own turn.
+
+Jobs run in a detached supervisor outside the provider process, with bounded
+output and owner-scoped inspection. `job start --wake-self` saves the completion
+subscription before launching even a fast command. Commands take argv after
+`--`; shell syntax requires an explicit shell. For external work, correlate the
+exact run ID. The watcher may poll without using model turns.
+
+Inspect with `subscription list`, `subscription show <id>`, `job list`,
+`job show <id>`, and `job logs <id> --offset 0 --limit 8000`. Cancel with
+`subscription cancel <id>` or `job cancel <id>`. Use a stable `--subscription-id`
+or `--job-id` when retrying a request. Busy recipients retain events; Stop pauses
+wakes, and Closed conversations wait for explicit reopening. An uncertain wake
+is retained for review rather than blindly resubmitted. Events require no reply:
+read their outcomes and continuation, act within the original user request,
+and acknowledge the event message after handling it.
+
 ## Atomic handoff and thread closure
 
 Atomic handoff requires a scope declaration; a Beads issue is optional. Use one transactional

@@ -1360,6 +1360,74 @@ Thread placement and checkpoint phases are independent of Beads. Linking an
 issue does not import the backlog or change issue status. Delegation and atomic
 handoff also work without an issue.
 
+## Resume agents when work finishes
+
+Agents can save a durable subscription, end their turn, and resume the same
+conversation when another agent's turn or a managed command job finishes. The
+Ribbon Field backend matches events and uses the ordinary inbox wake mechanism;
+waiting does not require model turns. Keep the backend running for automatic
+delivery. Saved subscriptions catch up after a backend restart.
+
+```bash
+# Resume after this agent's current (or most recent) turn finishes.
+agent-coord subscribe --session <worker-session-id> \
+  --continue 'Review the result and continue the original task.'
+
+# Resume once all four captured turns have finished, including failures.
+agent-coord subscribe --session <a> --session <b> --session <c> --session <d> \
+  --mode all --timeout 1800 --continue 'Collect the four results.'
+
+# Watch an exact earlier turn, even if a newer turn has already started.
+agent-coord subscribe --turn <worker-session-id>:<turn-id>
+
+# Start a command outside the agent process and resume on completion.
+agent-coord job start --wake-self --timeout 600 \
+  --continue 'Read the test output and fix any failures.' -- python3 -m unittest
+
+# After triggering a workflow, watch its exact run ID in the same way.
+agent-coord job start --wake-self \
+  --continue 'Inspect the workflow result and report it.' -- \
+  gh run watch <run-id> --repo <owner/repo> --exit-status
+```
+
+Subscriptions default to `--mode all`. `--mode any` resumes once when the first
+target finishes; `--mode each` emits one event for each target. Targets are
+one-shot and tied to captured turn IDs or stable job IDs. A finished turn is not
+evidence that the agent's full assignment is complete. Terminal outcomes include
+failure, interruption, cancellation, and timeout; the event includes result
+references and the saved continuation. `--timeout` on `subscribe` bounds the
+wait, while `--timeout` on `job start` terminates the managed command.
+
+Inspect and cancel without polling model turns:
+
+```bash
+agent-coord subscription list
+agent-coord subscription show <subscription-id>
+agent-coord subscription cancel <subscription-id>
+agent-coord job list
+agent-coord job show <job-id>
+agent-coord job logs <job-id> --offset 0 --limit 8000
+agent-coord job cancel <job-id>
+```
+
+Commands are passed as an argument array without an implicit shell. Jobs retain
+bounded output beside the coordination database and survive the launching
+agent's exit. Use a stable `--job-id` or `--subscription-id` to retry a request
+without creating duplicate work. Ownership follows the caller identity, with
+explicit `--session-id` available as for other coordination commands. Managed
+jobs and their logs are visible only through their owner's commands.
+
+Events arriving during a turn wait for an eligible idle turn. Stop pauses
+automatic wakes; Closed conversations retain events until explicitly reopened.
+Cancellation suppresses an event that has not yet been delivered. Delivery
+records prevent duplicate event scheduling; an uncertain provider submission is
+not blindly retried. GitHub watching may poll in the command process, without
+consuming model turns.
+
+If a supervisor is forcibly terminated, its command may still be running and
+the result is reported as `unknown`. The command is never relaunched
+automatically from that state; inspect the result before starting replacement work.
+
 ## Wake ordinary idle Zellij sessions (optional compatibility)
 
 An idle agent has no model turn in which a hook can run. Enable the optional
