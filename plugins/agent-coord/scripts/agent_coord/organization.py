@@ -219,6 +219,21 @@ class OrganizationStore:
                        (str(uuid.uuid4()), name, key, cwd))
             return dict(db.execute("SELECT id, name, cwd FROM named_projects WHERE name_key = ?", (key,)).fetchone())
 
+    def rename_project(self, project_id: str, name: str) -> dict:
+        if not isinstance(name, str) or not name.strip() or len(name) > 160:
+            raise CoordinationError("Group name must contain 1–160 characters.")
+        name = name.strip()
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            group = db.execute("SELECT id, name, cwd FROM named_projects WHERE id = ?", (project_id,)).fetchone()
+            if group is None:
+                raise CoordinationError("This group no longer exists.")
+            key = name.casefold() + ("\0" + group["cwd"] if group["cwd"] else "")
+            if db.execute("SELECT id FROM named_projects WHERE name_key = ? AND id != ?", (key, project_id)).fetchone():
+                raise CoordinationError("A group with that name already exists in this project.")
+            db.execute("UPDATE named_projects SET name = ?, name_key = ? WHERE id = ?", (name, key, project_id))
+            return {"id": project_id, "name": name, "cwd": group["cwd"]}
+
     @staticmethod
     def _project(db, project_id: str) -> dict:
         group = db.execute("SELECT id, name, cwd FROM named_projects WHERE id = ?", (project_id,)).fetchone()

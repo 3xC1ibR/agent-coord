@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const {test} = require("node:test");
 const TurnNotifications = require("../plugins/agent-coord/scripts/agent_coord/web/notifications.js");
 
-function fixture(shared = {}) {
+function fixture(shared = {}, controls = true) {
   shared.values ||= new Map(); shared.claims ||= new Set(); shared.approvalClaims ||= new Set(); shared.snoozeClaims ||= new Set(); shared.shown ||= [];
   const listeners = new Map(), opened = [], errors = [];
   let selected = null, focused = false, permissionRequests = 0;
@@ -23,7 +23,7 @@ function fixture(shared = {}) {
     setInterval: () => 1, clearInterval() {}, focus: () => { focused = true; },
   };
   const client = new TurnNotifications({
-    button,
+    button: controls ? button : null,
     claim: async id => { if (shared.claims.has(id)) return false; shared.claims.add(id); return true; },
     claimApproval: async key => { if (shared.approvalClaims.has(key)) return false; shared.approvalClaims.add(key); return true; },
     claimSnooze: async id => { if (shared.snoozeClaims.has(id)) return false; shared.snoozeClaims.add(id); return true; },
@@ -38,6 +38,20 @@ function fixture(shared = {}) {
 const completion = (id = 1, values = {}) => ({id, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "completed", ...values});
 const approval = (key = "request-one", values = {}) => ({request_key: key, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "approval", ...values});
 const snooze = (id = 1, values = {}) => ({id, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "snooze", ...values});
+
+test("notification delivery works without a sidebar button and honors the Settings preference", async () => {
+  const shared = {}, settings = fixture(shared), workspace = fixture(shared, false);
+  await settings.button.onclick();
+  workspace.env.Notification.permission = "granted";
+  await workspace.client.receive([completion()]);
+  assert.equal(shared.shown.length, 1);
+  await shared.shown[0].onclick();
+  assert.deepEqual(workspace.opened, ["thread-one"]);
+  await settings.button.onclick();
+  await workspace.client.receive([completion(2)]);
+  assert.equal(shared.shown.length, 1);
+  settings.client.destroy(); workspace.client.destroy();
+});
 
 test("snooze expiry alerts once across tabs with thread context and opens its conversation", async () => {
   const shared = {}, first = fixture(shared), second = fixture(shared);

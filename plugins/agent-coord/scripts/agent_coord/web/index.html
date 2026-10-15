@@ -21,14 +21,12 @@
   <link rel="stylesheet" href="/image-attachments.css">
   <link rel="stylesheet" href="/views.css">
   <link rel="stylesheet" href="/folders.css">
-  <link rel="stylesheet" href="/remote-access.css">
   <link rel="stylesheet" href="/thread-panes.css">
   <link rel="stylesheet" href="/thread-tabs.css">
   <link rel="stylesheet" href="/theme.css">
   <link rel="stylesheet" href="/conversation-search.css">
   <link rel="stylesheet" href="/speech.css">
   <script src="/speech.js" defer></script>
-  <script src="/remote-access.js" defer></script>
   <script src="/thread-groups.js" defer></script>
   <script src="/organization.js" defer></script>
   <script src="/notifications.js" defer></script>
@@ -69,46 +67,52 @@
   <a class="skip-link" href="#main">Skip to workspace</a>
   <button id="sidebar-backdrop" class="sidebar-backdrop" aria-label="Close navigation" hidden></button>
   <aside id="sidebar" class="sidebar" aria-label="Workspace navigation">
-    <a class="brand" href="/" aria-label="Ribbon Field home"><span class="brand-mark" aria-hidden="true">rf<span></span></span><span>Ribbon Field<small>A place for work in progress</small></span></a>
-    <button id="new-session" class="primary"><span aria-hidden="true">＋</span> New session <span aria-hidden="true">↗</span></button>
-    <button id="send-work-open" class="quiet" type="button" title="Send work without leaving this conversation · ⌘⇧K">Send work <span aria-hidden="true">↗</span></button>
-    <div class="folder-control"><label for="working-folder">Project directory</label><select id="working-folder" aria-label="Project directory"><option value="">Open a project</option></select><button id="open-folder" class="quiet" type="button">Open project…</button></div>
-    <button id="home" class="nav-home" aria-current="page"><span aria-hidden="true">▦</span> Workspace <span id="thread-count" class="nav-count">0</span></button>
-    <button id="scheduled-prompts" class="quiet" type="button">Scheduled prompts</button>
-    <button id="open-project-scratchpad" class="quiet" type="button" disabled>Open project scratchpad</button>
-    <button id="roll-up-start" class="quiet" type="button" aria-pressed="false" title="Work through waiting threads · ⌥⌘R">Roll up waiting threads</button>
-    <div class="list-heading">YOUR THREADS<span aria-hidden="true">↓</span></div>
+    <div class="sidebar-tools" role="group" aria-label="Thread navigation">
+      <button id="sidebar-search" class="sidebar-icon sidebar-search" type="button" aria-label="Search threads" title="Search threads · /"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><span>Search</span></button>
+      <details id="sidebar-projects" class="sidebar-projects"><summary class="sidebar-icon" aria-label="Filter threads by project" title="Filter threads by project"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l3 3h8a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/></svg></summary><div class="sidebar-project-panel folder-control"><label for="working-folder">Project</label><select id="working-folder" aria-label="Filter threads by project"><option value="">Open a project</option></select></div></details>
+      <button id="open-folder" class="sidebar-icon" type="button" aria-label="Add project" title="Add project · ⌘O"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l3 3h8a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z M12 10v7 M8.5 13.5h7"/></svg></button>
+      <button id="new-session" class="sidebar-icon" type="button" aria-label="New thread" title="New thread · ⌘N"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7 M14 5l5-3 3 3-3 5-8 8-5 1 1-5Z M17 4l3 3"/></svg></button>
+    </div>
     <nav id="sessions" aria-label="Work threads"><p class="muted">Loading threads…</p></nav>
-    <div class="sidebar-footer"><label class="theme-control">Appearance<select data-theme-select aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button id="notifications" class="notification-toggle" type="button" aria-pressed="false">Enable notifications</button><a id="monitor" href="/monitor"><span aria-hidden="true">⌁</span> Coordination monitor <span aria-hidden="true">↗</span></a></div>
+    <div class="sidebar-footer" role="group" aria-label="Workspace tools">
+      <button id="scheduled-prompts" class="sidebar-icon" type="button" aria-label="Scheduled prompts" title="Scheduled prompts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button>
+      <button id="roll-up-start" class="sidebar-icon" type="button" aria-label="Roll up waiting threads" aria-pressed="false" title="Roll up waiting threads · ⌥⌘R"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16 M4 11h11 M4 17h7 M16 14l4 4-4 4 M13 18h7"/></svg></button>
+      <button id="open-project-scratchpad" class="sidebar-icon" type="button" aria-label="Open project scratchpad" title="Project scratchpad · ⌘⇧S" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h13a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6V3Z M3 7h5 M3 12h5 M3 17h5 M11 8h5 M11 12h5"/></svg></button>
+      <button id="send-work-open" class="sidebar-icon" type="button" aria-label="Send work" title="Send work · ⌘⇧K"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 19 9-19 9 4-9-4-9Z M7 12h15"/></svg></button>
+      <a id="open-settings" class="sidebar-icon" href="/settings" target="ribbon-field-settings" aria-label="Settings" title="Settings · ⌘,"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-1 3-3 1-2 4 2 2v3l3 2 1 3h6l1-3 3-2v-3l2-2-2-4-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></svg></a>
+    </div>
   </aside>
   <main id="main" tabindex="-1">
     <header class="workspace-bar"><div class="breadcrumb"><button id="menu-toggle" class="icon-button" type="button" aria-label="Hide sidebar" title="Hide sidebar" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path></svg></button><button id="back-home" class="quiet">Workspace</button><span aria-hidden="true">/</span><span id="page-location">Overview</span></div><div class="dispatcher-mobile-nav"><button id="dispatcher-projects-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="project-navigation">Projects</button><button id="dispatcher-mobile-conversation" class="quiet" type="button" aria-label="Dispatcher conversation" aria-expanded="false" aria-controls="dispatcher-body">Chat</button></div><span id="connection" class="connection" role="status">Connecting…</span></header>
     <div id="project-navigation" class="projects-bar"><div id="view-tabs" class="view-tabs" role="tablist" aria-label="Projects"></div><button id="open-project-tab" class="quiet" type="button" aria-label="Open project" title="Open project">＋</button></div>
     <div id="conversation-tabs" class="conversation-tabs" role="tablist" aria-label="Open conversations"></div>
     <div class="views-bar">
-      <div id="saved-view-tabs" class="saved-view-tabs" role="tablist" aria-label="Saved views" hidden></div>
+      <div id="saved-view-tabs" class="saved-view-tabs" role="tablist" aria-label="Conversation groups" hidden></div>
     <div id="mobile-overview" class="mobile-overview">
-      <div class="mobile-view-picker"><select id="mobile-view" aria-label="Saved view"></select><span id="mobile-view-attention" class="view-attention" hidden></span><span id="mobile-view-activity" hidden></span></div>
+      <div class="mobile-project-picker"><select id="mobile-project" aria-label="Project"></select><span id="mobile-project-attention" class="view-attention" hidden></span><span id="mobile-project-activity" hidden></span></div>
+      <div class="mobile-view-picker"><span class="mobile-view-label" aria-hidden="true">View</span><select id="mobile-view" aria-label="Conversation group or saved filters"></select><span id="mobile-view-attention" class="view-attention" hidden></span><span id="mobile-view-activity" hidden></span></div>
     </div>
       <div class="view-actions">
         <button id="tile-threads" type="button" class="quiet" title="Ctrl+Option+Command+T">Tile threads</button>
         <button id="leave-tiles" type="button" class="quiet" hidden>Overview</button>
         <button id="reset-view" type="button" class="quiet" hidden>Reset filters</button>
         <button id="update-view" type="button" class="quiet" hidden>Save filters</button>
-        <button id="add-view" type="button" class="quiet" title="Save current filters and grouping as a view">＋ View</button>
+        <button id="add-group" type="button" class="quiet">＋ Group</button>
         <details id="view-menu" class="view-menu" hidden>
-          <summary id="view-menu-toggle" aria-label="View options" title="View options">•••</summary>
+          <summary id="view-menu-toggle" aria-label="Overview options" title="Overview options">•••</summary>
           <div id="view-menu-panel" class="view-menu-panel">
             <div id="mobile-view-actions"></div>
+            <button id="mobile-close-project" type="button">Close project</button>
+            <button id="group-rename" type="button" hidden>Rename group</button>
             <button id="group-remove" type="button" hidden>Remove group</button>
             <div id="view-custom-actions">
-            <button id="view-rename" type="button">Rename view</button>
-            <button id="view-duplicate" type="button">Duplicate view</button>
+            <button id="view-rename" type="button">Rename saved filters</button>
+            <button id="view-duplicate" type="button">Duplicate saved filters</button>
             <button id="view-move-left" type="button">Move left</button>
             <button id="view-move-right" type="button">Move right</button>
             <small>Ctrl + Shift + ← / → to switch projects</small>
-            <button id="view-delete" type="button">Delete view</button>
-            <small>Deleting a view keeps all its threads.</small>
+            <button id="view-delete" type="button">Delete saved filters</button>
+            <small>Deleting saved filters keeps all conversations.</small>
             </div>
           </div>
         </details>
@@ -133,21 +137,23 @@
         <div class="view-filters">
           <button id="group-by-domain" type="button" class="quiet domain-toggle" aria-pressed="false">Group by domain</button>
           <details id="filter-menu" class="filter-menu">
-            <summary id="filter-toggle">Filters <span id="filter-count" hidden></span><span aria-hidden="true">⌄</span></summary>
+            <summary id="filter-toggle"><span id="filter-label">Filters</span><span id="filter-count" hidden></span><span aria-hidden="true">⌄</span></summary>
             <div class="filter-panel">
-              <label class="grouping-control" for="group-by"><span>Group by</span><select id="group-by"><option value="phase">Phase</option><option value="domain">Domain</option><option value="project">Group</option><option value="none">None</option></select></label>
+              <label class="grouping-control" for="group-by"><span>Arrange by</span><select id="group-by"><option value="phase">Stage</option><option value="domain">Domain</option><option value="project">Group</option><option value="none">None</option></select></label>
               <div class="filter-fields">
                 <label for="view">Show<select id="view"><option value="active">Now</option><option value="attention">Attention</option><option value="completed">Done</option><option value="later">Later</option><option value="archived">Closed</option></select></label>
                 <label for="phase-filter">Stage<select id="phase-filter"><option value="">All stages</option><option value="new">New</option><option value="discussion" hidden>Investigating</option><option value="investigation">Investigating</option><option value="planning">Planning</option><option value="orchestrating">Orchestrating</option><option value="implementation">Implementing</option><option value="validation">Validating</option><option value="deployment">Deploying</option><option value="finished">Done</option></select></label>
                 <select id="repository" hidden aria-hidden="true"><option value=""></option></select>
                 <div class="filter-project"><div class="filter-project-heading"><label for="project">Group</label><button id="create-project" class="quiet" type="button">＋ New group</button></div><select id="project"><option value="">All groups</option></select></div>
               </div>
+              <label for="saved-filter">Saved filters<select id="saved-filter"><option value="">Choose saved filters…</option></select></label>
+              <button id="add-view" type="button" class="quiet">Save current filters…</button>
               <button id="clear-filters" class="quiet" type="button">Clear filters</button>
             </div>
           </details>
           <div class="placement-switch" role="group" aria-label="Thread placement"><button id="show-now" type="button" class="quiet" aria-pressed="true">Now</button><button id="show-later" type="button" class="quiet" aria-pressed="false">Later</button><button id="show-closed" type="button" class="quiet closed-toggle" aria-pressed="false" title="Show closed threads">Closed</button></div>
         </div>
-        <div class="workspace-actions"><button id="welcome-project" class="quiet" hidden>New group</button><button id="start-dispatcher" class="quiet dispatcher-entry" type="button" title="Send work to the right conversation" disabled>Start dispatcher <span aria-hidden="true">↗</span></button><button id="send-work-mobile-open" class="quiet send-work-mobile" type="button" aria-haspopup="dialog" aria-controls="send-work-dialog">Send work <span aria-hidden="true">↗</span></button><button id="welcome-new" class="primary" aria-label="New session"><span class="new-session-label">New session</span><span class="mobile-new-label">New</span> <span aria-hidden="true">＋</span></button></div>
+        <div class="workspace-actions"><button id="welcome-project" class="quiet" hidden>New group</button><button id="start-dispatcher" class="quiet dispatcher-entry" type="button" title="Send work to the right conversation" disabled>Start dispatcher <span aria-hidden="true">↗</span></button><button id="send-work-mobile-open" class="quiet send-work-mobile" type="button" aria-haspopup="dialog" aria-controls="send-work-dialog" aria-label="Send work" title="Send work"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m3 3 19 9-19 9 4-9-4-9Z M7 12h15"/></svg></button><button id="welcome-new" class="primary" aria-label="New session"><span class="new-session-label">New session</span><span class="mobile-new-label">New</span> <span aria-hidden="true">＋</span></button></div>
       </div>
       <div id="search-options" class="search-options" hidden>
         <label for="search-scope">Search in<select id="search-scope"><option value="all">This project, including closed</option><option value="current">Current view</option></select></label>
@@ -236,6 +242,7 @@
       <footer class="session-statusbar" aria-label="Session information"><span id="workspace" class="status-cwd"></span><div id="session-settings" class="session-settings" hidden><span id="session-model"></span><span id="session-effort"></span><span id="session-yolo" class="yolo-badge" title="No sandbox or approval prompts" hidden>YOLO</span><button id="edit-permissions" type="button" class="quiet">Permissions</button></div></footer>
     </section>
   </main>
+  <dialog id="settings-dialog" class="settings-dialog" aria-label="Settings"><iframe id="settings-frame" title="Settings"></iframe></dialog>
   <dialog id="project-scratchpad-dialog" class="project-scratchpad-dialog" aria-labelledby="project-scratchpad-title" aria-describedby="scratchpad-project-name"></dialog>
   <dialog id="mobile-thread-sheet" class="mobile-thread-sheet" aria-labelledby="mobile-sheet-title">
     <div class="mobile-sheet-heading"><button id="mobile-sheet-back" class="quiet" type="button" aria-label="Back to thread actions" hidden>←</button><h2 id="mobile-sheet-title">Thread actions</h2><button class="icon-button" type="button" data-close="mobile-thread-sheet" aria-label="Close thread actions">×</button></div>
@@ -275,7 +282,7 @@
   </form></dialog>
   <div id="group-context-menu" class="view-menu-panel group-context-menu" role="menu" aria-label="Group options" hidden><button id="context-remove-group" type="button" role="menuitem">Remove group</button></div>
   <dialog id="remove-group-dialog" aria-labelledby="remove-group-title" aria-describedby="remove-group-description"><form id="remove-group-form"><h2 id="remove-group-title">Remove group?</h2><p id="remove-group-description"></p><p id="remove-group-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button id="cancel-remove-group" type="button" class="quiet" data-close="remove-group-dialog">Cancel</button><button id="confirm-remove-group" class="primary" type="submit">Remove group</button></div></form></dialog>
-  <dialog id="view-dialog" aria-labelledby="view-dialog-title"><form id="view-form"><h2 id="view-dialog-title">Save view</h2><p id="view-dialog-description" class="muted">Save the current filters and grouping as a tab.</p><label>View name<input id="view-name" required maxlength="160" placeholder="Rig, Stoic, or Ready to review" autocomplete="off"></label><p id="view-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="view-dialog">Cancel</button><button id="save-view" class="primary" type="submit">Save view</button></div></form></dialog>
+  <dialog id="view-dialog" aria-labelledby="view-dialog-title"><form id="view-form"><h2 id="view-dialog-title">Save filters</h2><p id="view-dialog-description" class="muted">Save the current filters and display settings.</p><label>Name<input id="view-name" required maxlength="160" placeholder="Needs me or Ready to review" autocomplete="off"></label><p id="view-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="view-dialog">Cancel</button><button id="save-view" class="primary" type="submit">Save filters</button></div></form></dialog>
   <dialog id="permissions-dialog" aria-labelledby="permissions-title"><form id="permissions-form"><h2 id="permissions-title">Session permissions</h2><p id="permissions-thread" class="muted"></p><label class="yolo-option"><input id="edit-yolo" type="checkbox"><span>Use --yolo<small>No sandbox or approval prompts. Gives this session full machine access.</small></span></label><p id="permissions-description" class="muted">With YOLO off, Codex uses workspace access and asks for additional permissions. Changes apply to the next turn.</p><p id="permissions-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="permissions-dialog">Cancel</button><button id="save-permissions" class="primary" type="submit">Save permissions</button></div></form></dialog>
   <dialog id="checkpoint-dialog" aria-labelledby="checkpoint-title"><form id="checkpoint-form">
     <h2 id="checkpoint-title">Edit checkpoint</h2>

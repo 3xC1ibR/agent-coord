@@ -1,0 +1,25 @@
+body.settings-page { display: block; height: auto; min-height: 100dvh; background: var(--paper); }
+.settings-header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px max(24px, calc((100% - 650px) / 2)); background: var(--paper); border-bottom: 1px solid var(--line); }
+.settings-header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.settings-content { display: block; width: min(100%, 698px); margin: 0 auto; padding: 8px 24px 40px; }
+.settings-section { padding: 24px 0; border-bottom: 1px solid var(--line); }
+.settings-section:last-child { border: 0; }
+.settings-section h2 { margin: 0 0 14px; font-size: 15px; font-weight: 600; }
+.settings-section h3 { margin: 24px 0 8px; font-size: 14px; }
+.settings-section p { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 8px 0 16px; }
+.settings-section a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.settings-section label { display: grid; gap: 7px; margin: 14px 0; font-size: 13px; }
+.settings-section input, .settings-section select { box-sizing: border-box; width: 100%; min-height: 40px; padding: 9px 11px; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; }
+.settings-section input:disabled, .settings-section select:disabled { opacity: .65; }
+.settings-actions, .settings-section footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.settings-actions small { flex-basis: 100%; color: var(--muted); line-height: 1.6; }
+.settings-section button { min-height: 38px; padding: 8px 12px; font-size: 12px; }
+.settings-section audio { width: 100%; margin-top: 16px; }
+#settings-error { color: var(--danger); padding: 14px; border: 1px solid var(--danger); border-radius: 6px; }
+.settings-section .remote-access-heading { display: block; margin: 0; }
+.settings-section .remote-link-box { margin-top: 12px; }
+@media (max-width: 540px) {
+  .settings-header { padding: 16px 20px; }
+  .settings-content { padding-inline: 20px; }
+  .settings-section button, .settings-section input, .settings-section select { min-height: 44px; }
+}

@@ -540,6 +540,21 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(len(self.request(path)[1]["thread"]["turns"]), 2)
         self.assertEqual(self.request(path + "/queue", {"message": "Denied"}, {"X-Agent-Coord-Token": "wrong"})[0], 403)
 
+    def test_settings_page_serves_preferences_without_a_second_workspace(self):
+        status, settings = self.request("/settings")
+        self.assertEqual(status, 200)
+        for control in ("settings-theme", "notifications", "speech-settings", "remote-settings", "choose-file-editor"):
+            self.assertIn('id="' + control + '"', settings)
+        self.assertNotIn('src="/app.js"', settings)
+        for asset in ("/settings.js", "/settings.css", "/speech.js", "/remote-access.js"):
+            self.assertEqual(self.request(asset)[0], 200)
+        for path in ("/settings", "/settings.js", "/settings.css"):
+            self.assertEqual(self.request(path, headers={"Host": "attacker.example"})[0], 403)
+        for path, framed in (("/settings", False), ("/settings?embedded=0", False), ("/settings?embedded=1", True)):
+            with urllib.request.urlopen(self.url + path, timeout=2) as response:
+                self.assertEqual(response.headers["X-Frame-Options"], "SAMEORIGIN" if framed else "DENY")
+                self.assertIn("frame-ancestors " + ("'self'" if framed else "'none'"), response.headers["Content-Security-Policy"])
+
     def test_browser_create_chat_interrupt_archive_and_restore(self):
         status, shell = self.request("/")
         self.assertEqual(status, 200)

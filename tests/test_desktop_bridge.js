@@ -60,10 +60,11 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
       return super.dispatchEvent(event);
     }
   }
-  for (const id of ["home", "new-session", "message", "composer", "conversation", "search", "send", "menu-toggle",
+  for (const id of ["back-home", "sidebar-search", "new-session", "message", "composer", "conversation", "search", "send", "menu-toggle",
     "expand-chat", "session-name", "image-drop-hint", "attach-image", "image-picker", "error", "new-cwd", "workspace-choice", "workspace-path-label",
     "create-dialog", "permissions-dialog"]) nodes.set(id, new Element(id));
   nodes.get("error").hidden = true;
+  nodes.get("sidebar-search").onclick = () => { nodes.get("search").focus(); nodes.get("search").select(); };
   Object.assign(document, {visibilityState: "hidden", hasFocus: () => false, body: new Element(),
     getElementById: id => nodes.get(id), createElement: () => new Element(),
     querySelector: selector => selector === "dialog[open]" ?
@@ -150,7 +151,7 @@ test("project scratchpad is available from the palette and can toggle closed thr
 
 test("opening the scratchpad tab from the palette is separate from floating capture", () => {
   const f = fixture(), command = f.env.agentCoordDesktop.command;
-  const button = new (f.nodes.get("home").constructor)("open-project-scratchpad");
+  const button = new (f.nodes.get("back-home").constructor)("open-project-scratchpad");
   f.nodes.set(button.id, button);
   let floats = 0;
   f.env.agentCoordProjectScratchpad = {available: true, toggle() { floats++; return true; }};
@@ -550,6 +551,9 @@ test("the palette uses existing navigation and available commands, and Command K
   const actions = palette.actions();
   assert(actions.some(item => item.id === "focusMessage"));
   assert(!actions.some(item => item.id === "sendMessage"));
+  assert(!actions.some(item => /monitor/i.test(item.id + item.label)));
+  await actions.find(item => item.id === "settings").run();
+  assert(f.messages.some(m => m.action === "openSettings"));
   actions.find(item => item.id === "newWindow").run();
   assert.equal(f.messages.filter(m => m.action === "newWindow").at(-1).url, "/");
   const threads = await palette.loadThreads(new AbortController().signal);
@@ -562,4 +566,35 @@ test("the palette uses existing navigation and available commands, and Command K
   assert.equal(palette.dialog.open, false);
   f.nodes.get("permissions-dialog").open = true;
   assert.equal(f.env.agentCoordDesktop.command("commandPalette"), false);
+});
+
+test("Settings window exposes native preferences without workspace commands", async () => {
+  const f = fixture();
+  f.env.location.pathname = "/settings";
+  f.env.document.dispatchEvent(new Event("DOMContentLoaded"));
+  const state = f.messages.find(m => m.action === "windowState");
+  assert.equal(state.title, "Settings");
+  assert.deepEqual(state.commands, []);
+  assert.equal(f.palettes.length, 0);
+  assert.equal(f.nodes.has("desktop-new-window"), false);
+  f.replies.fileEditor = {name: "Editor", path: "/Applications/Editor.app"};
+  assert.equal((await f.env.agentCoordDesktop.fileEditor("get")).name, "Editor");
+  await f.env.agentCoordDesktop.closeSettings();
+  assert(f.messages.some(m => m.action === "fileEditor" && m.operation === "get"));
+  assert(f.messages.some(m => m.action === "closeSettings"));
+});
+
+test("notification permission refreshes after another window changes Settings", async () => {
+  const f = fixture();
+  await settle();
+  assert.equal(f.env.Notification.permission, "default");
+  f.replies.permission = "granted";
+  const changed = new Event("storage");
+  Object.assign(changed, {key: "agent-coord.notifications.enabled"});
+  f.env.dispatchEvent(changed);
+  await settle();
+  assert.equal(f.env.Notification.permission, "granted");
+  const requests = f.messages.filter(m => m.action === "permission").length;
+  await settle();
+  assert.equal(f.messages.filter(m => m.action === "permission").length, requests, "focus refresh must not loop");
 });

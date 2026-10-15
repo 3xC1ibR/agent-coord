@@ -99,7 +99,7 @@ async function loadThreadList(view, request) {
     }
     select.value = selected;
   }
-  savedViews?.sync(views.data);
+  savedViews?.sync(views.data, organization.projects);
   renderFolders();
   if (view !== $("view").value) return refreshList();
   renderList();
@@ -588,9 +588,8 @@ function renderList() {
   const groupBy = $("group-by").value;
   $("group-by-domain").setAttribute("aria-pressed", String(groupBy === "domain"));
   const viewId = (state.projectCwd || "") + ":" + (savedViews?.activeId || "all");
-  const signature = JSON.stringify([threads, upcoming, state.selected, [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
-  $("home").setAttribute("aria-current", state.selected && !state.dispatchDock?.active ? "false" : "page");
-  $("thread-count").textContent = String(threads.length);
+  const signature = JSON.stringify([threads, upcoming, state.selected, [...(state.closing || [])], [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
+  $("back-home").setAttribute("aria-current", state.selected && !state.dispatchDock?.active ? "false" : "page");
   const projects = new Set(threads.map(t => t.project_id).filter(Boolean)).size;
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
     " · " + projects + (projects === 1 ? " group" : " groups") +
@@ -616,8 +615,10 @@ function renderList() {
     section.setAttribute("aria-label", label); overview.setAttribute("aria-label", label);
     overview.dataset.group = key;
     overview.dataset.empty = String(items.length === 0);
-    section.append(groupHeading(label));
-    overview.append(groupHeading(label));
+    const sidebarHeading = groupHeading(label), overviewHeading = groupHeading(label);
+    if (key === "priority") { sidebarHeading.className += " sr-only"; overviewHeading.className += " sr-only"; }
+    section.append(sidebarHeading);
+    overview.append(overviewHeading);
     if (description) overview.append(node("p", description, "group-description"));
     const cards = node("div", null, "thread-cards");
     for (const thread of sidebarItems) section.append(agentThreadCard(thread, agentTree, true));
@@ -1701,7 +1702,7 @@ function newProject() {
   $("project-dialog").showModal();
   $("project-name").focus();
 }
-$("create-project").onclick = $("welcome-project").onclick = newProject;
+$("add-group").onclick = $("create-project").onclick = $("welcome-project").onclick = newProject;
 $("project-form").onsubmit = event => {
   event.preventDefault();
   action(async () => {
@@ -1709,11 +1710,8 @@ $("project-form").onsubmit = event => {
     if (!name) throw new Error("Enter a group name.");
     const project = await api("projects", {name, cwd: state.folders.selected.cwd});
     $("project-dialog").close();
-    $("view").value = "active";
-    $("search").value = ""; $("phase-filter").value = ""; $("repository").value = "";
     await refreshList();
-    $("project").value = project.id;
-    goHome();
+    await savedViews.openGroup(project.id);
   }, $("save-project"));
 };
 function assignmentFields(prefix) {
@@ -2026,7 +2024,15 @@ $("show-closed").onclick = () => {
   renderClosedToggle();
   return $("view").onchange();
 };
-$("repository").onchange = $("project").onchange = $("phase-filter").onchange = filtersChanged;
+$("repository").onchange = $("phase-filter").onchange = filtersChanged;
+$("project").onchange = () => {
+  const id = $("project").value;
+  if (savedViews?.local(savedViews.current()) && id !== threadOrganization.NONE) {
+    return action(() => savedViews.openGroup(id));
+  }
+  if (savedViews?.current().kind === "group") return action(() => savedViews.overview({project: id}));
+  filtersChanged();
+};
 try { const saved = localStorage.getItem("agent-coord-group-by"); if (["phase", "domain", "repository", "project", "none"].includes(saved)) $("group-by").value = saved; } catch (_) { /* Preferences are optional. */ }
 $("group-by").onchange = () => {
   if (!savedViews || savedViews.activeId === "all") {
@@ -2094,8 +2100,31 @@ function openProjectScratchpad() {
   navigation?.remember();
 }
 $("open-project-scratchpad").onclick = () => openProjectScratchpad();
-document.querySelector(".brand").onclick = event => { event.preventDefault(); goHome(); };
-$("home").onclick = $("back-home").onclick = goHome;
+$("back-home").onclick = goHome;
+$("sidebar-search").onclick = () => { goHome(); $("search").focus(); $("search").select(); };
+const sidebarProjects = $("sidebar-projects");
+document.addEventListener("pointerdown", event => { if (!sidebarProjects.contains(event.target)) sidebarProjects.open = false; });
+sidebarProjects.addEventListener("change", () => { sidebarProjects.open = false; });
+sidebarProjects.addEventListener("keydown", event => {
+  if (event.key === "Escape" && sidebarProjects.open) {
+    event.preventDefault(); event.stopPropagation(); sidebarProjects.open = false; sidebarProjects.querySelector("summary").focus();
+  }
+});
+$("open-settings").onclick = event => {
+  event.preventDefault();
+  if (window.agentCoordDesktop?.openSettings) { window.agentCoordDesktop.openSettings().catch(showError); return; }
+  setNavigation(false);
+  if (!$("settings-frame").getAttribute("src")) $("settings-frame").src = "/settings?embedded=1";
+  $("settings-dialog").showModal();
+};
+window.addEventListener("message", event => {
+  if (event.origin === location.origin && event.source === $("settings-frame").contentWindow && event.data?.type === "ribbon-field-close-settings") $("settings-dialog").close();
+});
+$("settings-dialog").addEventListener("close", () => {
+  $("settings-frame").removeAttribute("src");
+  const button = $("open-settings").getClientRects().length ? $("open-settings") : $("menu-toggle");
+  button.focus({preventScroll: true});
+});
 const mobileNavigation = window.matchMedia("(max-width: 720px)");
 let sidebarCollapsed = false;
 try { sidebarCollapsed = localStorage.getItem("agent-coord.sidebar-collapsed") === "true"; } catch { /* Storage may be unavailable. */ }
@@ -2110,7 +2139,7 @@ function setNavigation(open) {
   $("menu-toggle").setAttribute("aria-label", label);
   $("menu-toggle").title = label;
   $("main").inert = open;
-  if (open) document.querySelector(".brand").focus();
+  if (open) $("sidebar-search").focus();
   else if (!expanded && $("sidebar").contains(document.activeElement)) $("menu-toggle").focus();
 }
 $("menu-toggle").onclick = () => {
@@ -2187,7 +2216,7 @@ document.addEventListener("keydown", event => {
   if (document.body.classList.contains("navigation-open")) {
     if (event.key === "Escape") { event.preventDefault(); setNavigation(false); $("menu-toggle").focus(); }
     if (event.key === "Tab") {
-      const items = [...$("sidebar").querySelectorAll("a, button:not(:disabled), select")];
+      const items = [...$("sidebar").querySelectorAll("a, button:not(:disabled), select, summary")].filter(item => item.getClientRects().length);
       const first = items[0], last = items[items.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
@@ -2582,7 +2611,6 @@ async function boot() {
     onError: showError,
   });
   if (state.config.remote) notifications.start().catch(showError);
-  $("monitor").href = "/monitor" + location.search;
   let windowStorage, preferences;
   try { windowStorage = sessionStorage; preferences = localStorage; } catch { /* Views work without browser storage. */ }
   const desktop = window.agentCoordDesktop;
@@ -2622,7 +2650,7 @@ async function boot() {
   state.viewDrops = ViewDrops.create({document, api,
     getThread: id => state.closing.has(id) || state.updatingThreads.has(id) ? null
       : state.sessions.find(thread => thread.thread_id === id),
-    getViews: () => savedViews.items.filter(view => view.id !== "all").map(view => ({...view,
+    getViews: () => savedViews.items.filter(view => view.kind === "group").map(view => ({...view,
       ...savedViews.effective(view), cwd: savedViews.cwd, pending: savedViews.saves.has(view.id)})),
     getProjects: () => state.organization.projects,
     onChanged: async thread => {
@@ -2667,6 +2695,7 @@ async function boot() {
   navigation = new agentCoordNavigation.Router({api, history, location, windowId: state.sourceWindowId, onError: showError,
     blocked: () => Boolean(document.querySelector("dialog[open]") || window.agentCoordPanes?.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")),
     capture: () => ({directory: state.projectCwd, viewId: savedViews.activeId, ...savedViews.read(),
+      ...(savedViews.current().kind === "group" ? {groupId: savedViews.current().projectId} : {}),
       ...(state.projectScratchpad?.tabActive ? {scratchpad: true} : {}),
       ...(state.dispatchWorkspace?.active ? {dispatcher: state.dispatchWorkspace.id} : {}),
       tiled: Boolean(window.agentCoordPanes?.active && !state.dispatchWorkspace?.active),
@@ -2694,7 +2723,9 @@ async function boot() {
         if (repository) await openProjectDirectory(repository.root);
         const group = state.organization.projects.find(item => item.id === route.filters.project);
         if (group?.cwd) await openProjectDirectory(group.cwd);
-        await savedViews.overview({...route.filters, repository: ""}); goHome();
+        if (group) await savedViews.openGroup(group.id);
+        else await savedViews.overview({...route.filters, repository: ""});
+        goHome();
       }
     },
     restore: async snapshot => {

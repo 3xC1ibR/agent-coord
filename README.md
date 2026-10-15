@@ -1063,33 +1063,36 @@ Accessing files in a child directory, changing a shell directory, or using
 projects preserves separate new-session drafts, attachments, filters and views.
 Browser directory paths refer to the computer running Ribbon Field.
 
-**Views** are saved filters within a project, selected below its project tabs.
-Start with **All conversations**, choose group, phase, Show and search filters,
-choose a grouping, then click **＋ View**. Views never select a directory.
-Changing a named view's filters saves them automatically. The built-in **Now**,
-**Later**, and **Closed** views retain their filters locally for each window and
-project, including after reopening. **Reset filters** clears those remembered
-filters. Failed saves offer **Retry saving**; resetting reloads
-the saved definition without overwriting another window's changes. The **•••**
-menu renames, duplicates, reorders or deletes views. Deleting a view keeps its
-conversations. New views with the same name can exist in different projects.
-Legacy views without a project remain available within each opened project;
-the active project's exact directory always limits their conversations.
+**Groups** are optional named collections within a project, directly accessible
+beside **All conversations**. Choose **＋ Group**, or create one through a
+conversation’s **Add to group** menu. A new group immediately appears in
+navigation; there is no separate view to create or name. Opening a new group
+shows its conversations arranged by stage. Each group remembers its filters,
+arrangement (including optional domains), and scroll position independently.
+Display preferences survive reopening on the same device; scroll is window-local.
+**Now**, **Later**, and **Closed** stay within the selected group. **Reset filters**
+restores the group’s default display without removing its membership.
 
-Drag an overview card onto a saved view tab to assign it to that view’s group
-(or remove its group for a **No group** view). Valid destinations highlight while
-dragging; the thread must already match the view’s other filters. Drops change
-only the group, keep the current view open, and offer **Undo**. Views without a
-group filter, Closed views, and views containing a search do not accept drops.
-The card menu’s **Add to group** / **Change group** remains available without dragging.
+Drag an overview card onto a group tab to assign it directly. Drops preserve the
+conversation’s stage and Now/Later placement, offer **Undo**, and do not depend
+on the destination’s display filters. Reopen closed conversations before moving
+them this way. **Add to group** / **Change group** remains available without
+dragging. **No group** removes the association. New sessions inherit the selected
+group. The group’s **••• → Rename group** changes its name everywhere.
 
-**Groups** are optional named collections within a project. Use **New group**
-in the overview, or **Add to group** / **Change group** in a conversation, to
-create or select one. **No group** removes the association. New sessions inherit
-the selected group; All groups and No group start unassigned. Groups never change
-execution directories or file access. Existing unscoped groups remain available
-for compatibility. Internal `project` CLI commands, API fields and deep links
-continue to identify these groups; they retain their existing identifiers.
+**Saved filters** are available in the **Filters** menu for reusable selections
+such as “Needs me” across groups. Existing saved views remain available there,
+with their identifiers, filters, display settings, and links preserved. Use
+**Save current filters…** to create one. Changing selected saved filters saves
+their definition automatically; failed saves offer **Retry saving**. Their
+**•••** menu renames, duplicates, reorders, or deletes them. Deleting saved
+filters keeps every conversation. On mobile, the overview picker includes groups
+and explicitly labeled saved filters.
+
+Groups and saved filters never change execution directories or file access.
+Existing unscoped groups remain available for compatibility. Internal `project`
+CLI commands, API fields, and deep links continue to identify groups. Domains
+remain optional descriptions of the current work and do not change membership.
 
 Typing in **Search conversations** searches the active project's conversations,
 including Later and Closed. **Current view** also applies its placement, group
@@ -1100,8 +1103,8 @@ part of the UI. Legacy repository metadata and CLI links remain compatible.
 
 Use **Ctrl + Shift + Left/Right** to cycle project tabs outside text fields.
 With a project tab focused, Left/Right, Home and End navigate projects. Each
-project tab shows its attention count. Views retain their own filters, grouping
-and scroll position, and their selector indicates attention and ongoing work.
+project tab shows its attention count. Groups and saved filters retain their own display settings and scroll position.
+The navigation indicates attention and ongoing work.
 
 The overview keeps durable work threads with attention first and Now, Later
 and Closed controls. Group by phase, group or none. Cards show title, optional

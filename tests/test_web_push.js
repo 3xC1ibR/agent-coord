@@ -7,7 +7,7 @@ const {MessageChannel} = require('node:worker_threads');
 const crypto = require('node:crypto').webcrypto;
 const PhoneNotifications = require('../plugins/agent-coord/scripts/agent_coord/web/push-notifications.js');
 
-function fixture() {
+function fixture({listen = true, controls = true} = {}) {
   const element = () => ({disabled: false, hidden: false, textContent: '', setAttribute() {}, after() {}});
   const calls = [], opened = [], listeners = new Map(), pageListeners = new Map(), documentListeners = new Map();
   let permissionRequests = 0, subscription = null, enabled = false;
@@ -45,10 +45,33 @@ function fixture() {
     return {available: true, publicKey: 'BAAA', enabled};
   };
   const button = element();
-  const phone = new PhoneNotifications({button, api, openThread: id => opened.push(id), onError: error => {throw error;}}, env);
+  const phone = new PhoneNotifications({button: controls ? button : null, listen, api, openThread: id => opened.push(id), onError: error => {throw error;}}, env);
   return {phone, button, env, calls, opened, listeners, pageListeners, documentListeners,
     permissionRequests: () => permissionRequests};
 }
+
+test('Settings controls do not receive or recover notification destinations', async () => {
+  const f = fixture({listen: false});
+  await f.phone.start();
+  await f.phone.toggle();
+  assert.equal(f.button.textContent, 'Phone notifications on');
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.pageListeners.has('pageshow'), false);
+  assert.equal(f.documentListeners.has('visibilitychange'), false);
+  assert.equal(f.phone.navigationReady, false);
+  assert.deepEqual(f.opened, []);
+  f.pageListeners.get('pagehide')({persisted: false});
+  assert.equal(f.pageListeners.size, 0);
+});
+
+test('conversation notification navigation works without sidebar controls', async () => {
+  const f = fixture({controls: false});
+  await f.phone.start();
+  f.listeners.get('message')({data: {type: 'agent-coord-open-notification', url: '/#thread-one'}});
+  await f.phone.ready();
+  assert.deepEqual(f.opened, ['thread-one']);
+  assert.equal(f.button.textContent, '');
+});
 
 test('permission is requested only on a tap; subscriptions go to authenticated API', async () => {
   const f = fixture();

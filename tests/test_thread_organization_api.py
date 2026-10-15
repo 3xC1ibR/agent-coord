@@ -263,6 +263,20 @@ class ThreadOrganizationTests(unittest.TestCase):
         self.assertEqual(request("projects", {"name": "launch", "cwd": str(self.repo)}), child)
         self.assertIn(child, request("organization")["projects"])
 
+    def test_group_rename_updates_thread_labels_and_preserves_saved_filters(self):
+        request = self.start_ui()
+        group = request("projects", {"name": "Launch", "cwd": str(self.root)})
+        thread_id = self.create(project_id=group["id"])
+        saved = request("views", {"name": "Needs me", "filters": {"project": group["id"], "show": "attention"}})
+        before = request("threads/" + thread_id)
+        updated = request("projects/" + group["id"], {"name": "Launch readiness"})
+        self.assertEqual(updated, {**group, "name": "Launch readiness"})
+        after = request("threads/" + thread_id)
+        self.assertEqual(after["project_name"], "Launch readiness")
+        for field in ("project_id", "cwd", "attention", "domain", "checkpoint"):
+            self.assertEqual(after[field], before[field])
+        self.assertEqual(request("views")["data"], [saved])
+
     def test_http_group_removal_ungroups_all_placements_without_starting_or_closing_threads(self):
         request = self.start_ui()
         group = request("projects", {"name": "Remove this"})

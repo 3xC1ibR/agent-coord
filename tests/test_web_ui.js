@@ -197,12 +197,12 @@ test("closing a card and later polling preserve the overview and sidebar scroll 
   c.renderList();
   assert.equal(c.$("welcome").scrollTop, 780);
   assert.equal(c.$("sessions").scrollTop, 320);
-  assert.equal(c.$("thread-count").textContent, "1");
+  assert.match(c.$("results-count").textContent, /^1 thread/);
   c.$("welcome").scrollTop = 910;
   c.state.sessions[1].updated_at = 2; c.renderList();
   assert.equal(c.$("welcome").scrollTop, 910, "polling preserves the user's latest position");
   c.state.pendingCloses.clear(); c.renderList();
-  assert.equal(c.$("thread-count").textContent, "2", "rollback restores the closing card");
+  assert.match(c.$("results-count").textContent, /^2 threads/, "rollback restores the closing card");
   assert.equal(c.$("welcome").scrollTop, 910);
 });
 

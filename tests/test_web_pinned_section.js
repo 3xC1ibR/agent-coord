@@ -59,7 +59,7 @@ test("pinned replies appear once while attention badges and sidebar navigation r
     assert.deepEqual(cardIds(sections[0]), view === "active" ? ["pin", "pinned-reply"] : ["pinned-reply"]);
     assert.deepEqual(attentionCards(c), ["reply"]);
     assert.deepEqual(sidebarAttentionIds(c), ["pinned-reply", "reply"]);
-    assert.equal(c.$("thread-count").textContent, view === "active" ? "3" : "2");
+    assert.match(c.$("results-count").textContent, view === "active" ? /^3 threads/ : /^2 threads/);
     assert.equal(c.threadViews.badges(c.state.sessions, {}).attention, 2);
     assert.ok(!c.$("sessions").children.some(el => el.className.includes("pinned")));
   }
@@ -97,7 +97,7 @@ test("pinning removes stage and organization cards, preserves navigation, and un
       assert.deepEqual(cardIds(c.$("overview").children[0]), ["pin"]);
       assert.deepEqual(boardCards(), ["other"]);
       assert.ok(sidebarCards().includes("pin"));
-      assert.equal(c.$("thread-count").textContent, "2");
+      assert.match(c.$("results-count").textContent, /^2 threads/);
       assert.equal(c.state.sessions[0].work_phase, phase);
       c.state.sessions[0].pinned = false;
       c.renderList();
@@ -120,5 +120,5 @@ test("Pinned obeys search and placement filters; snoozed pins stay in Later", ()
  c.$("search").value="missing"; c.renderList(); assert.ok(!c.$("overview").children.some(e=>e.dataset.group==="pinned"));
  c.$("search").value=""; c.$("view").value="later"; c.renderList();
  assert.equal(c.$("overview").children[0].dataset.group,"later");
- assert.equal(c.$("thread-count").textContent,"1");
+ assert.match(c.$("results-count").textContent, /^1 thread/);
 });

@@ -183,3 +183,20 @@ test("No group drops clear the association and Undo can recover from a network f
   c.failSave = true; await assert.rejects(c.notices[0].undo(), /Offline/);
   c.failSave = false; await c.notices[0].undo(); assert.equal(c.remote.project_id, "old");
 });
+
+test("direct group drops ignore display filters and preserve placement, with stale membership checks and Undo", async () => {
+  const target = view({phase: "validation", search: "unrelated", show: "archived"},
+    {id: "group-group", kind: "group", projectId: "group"});
+  for (const attention of ["now", "later"]) assert.equal(plan(thread({attention}), target, projects).allowed, true);
+  assert.equal(plan(thread({attention: "archived"}), target, projects).allowed, false);
+  const c = setup(); c.localViews = [target]; c.remote.attention = "later";
+  await c.ui.assign("card", target.id);
+  assert.equal(c.remote.project_id, "group"); assert.equal(c.remote.attention, "later");
+  assert.equal(c.calls.some(call => call.path === "views"), false);
+  await c.notices[0].undo(); assert.equal(c.remote.project_id, "old");
+  const stale = setup(); stale.localViews = [target];
+  const request = stale.request;
+  stale.request = (path, body) => path === "organization" ? {projects: []} : request(path, body);
+  await assert.rejects(stale.ui.assign("card", target.id), /no longer available/);
+  assert.equal(stale.writes().length, 0);
+});

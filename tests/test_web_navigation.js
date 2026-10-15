@@ -138,3 +138,15 @@ test("a destination removed or superseded during navigation is not acknowledged 
   assert.equal(c.calls.at(-1).body.status, "failed");
   assert.equal(c.entries.length, 1);
 });
+
+test("group navigation reloads through existing project links and acknowledges the displayed group", async () => {
+  const snapshot = {directory: "/work", viewId: "group-launch", groupId: "launch", filters: {project: "launch"}, thread: null};
+  const url = pageURL(snapshot);
+  assert.equal(url, "/?directory=%2Fwork&project=launch");
+  assert.equal(initialLink({search: url.slice(1)}), "agentcoord://overview?project=launch");
+  const c = setup();
+  c.router.apply = async () => Object.assign(c.snapshot(), snapshot);
+  const result = await c.router.open("agentcoord://overview?project=launch&request=" + request);
+  assert.equal(result.status, "displayed");
+  assert.equal(c.calls.at(-1).body.status, "displayed");
+});

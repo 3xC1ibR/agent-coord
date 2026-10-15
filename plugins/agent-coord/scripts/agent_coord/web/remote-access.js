@@ -2,10 +2,11 @@
 (() => {
   "use strict";
   class RemoteAccessPanel {
-    constructor({document, request, clipboard}) {
+    constructor({document, request, clipboard, container}) {
       this.document = document; this.request = request; this.clipboard = clipboard;
-      this.dialog = document.createElement("dialog");
-      this.dialog.className = "remote-access-dialog";
+      this.embedded = !!container;
+      this.dialog = container || document.createElement("dialog");
+      if (!container) this.dialog.className = "remote-access-dialog";
       this.dialog.setAttribute("aria-labelledby", "remote-access-title");
       this.dialog.innerHTML = `<form method="dialog" class="remote-access-heading"><h2 id="remote-access-title">Remote access</h2><button aria-label="Close remote access">Close</button></form>
         <p>Continue conversations on your iPhone. Keep this Mac awake and connect both devices to the same Tailscale network.</p>
@@ -18,7 +19,8 @@
         <button class="remote-create-link" type="button">Create pairing link</button>
         <div class="remote-link-box" hidden><label>Pairing link <input class="remote-link" type="text" readonly spellcheck="false"></label><button class="remote-copy" type="button">Copy link</button><small>Keep this link private. Creating another link replaces it.</small></div>
         <h3>Paired devices</h3><div class="remote-devices"></div></section>`;
-      document.body.append(this.dialog);
+      if (container) this.find(".remote-access-heading button").remove();
+      else document.body.append(this.dialog);
       this.find(".remote-enable").onclick = () => this.run(async () => this.render(await request("enable", {port: Number(this.find(".remote-port").value)})));
       this.find(".remote-disable").onclick = () => this.run(async () => {
         this.clearLink(); this.render(await request("disable", {}));
@@ -55,7 +57,7 @@
       finally { buttons.forEach(button => { button.disabled = false; }); this.busy = false; }
     }
     load() { return this.run(async () => this.render(await this.request("status"))); }
-    open() { this.dialog.showModal(); return this.load(); }
+    open() { if (!this.embedded) this.dialog.showModal(); return this.load(); }
     render(status) {
       this.find(".remote-status").textContent = status.error || (status.enabled ? "Tailscale HTTPS is enabled." : "Remote access is off.");
       this.find(".remote-port").value = status.port;
@@ -78,25 +80,5 @@
   }
   if (typeof module !== "undefined") module.exports = {RemoteAccessPanel};
   if (typeof window === "undefined") return;
-  window.addEventListener("DOMContentLoaded", async () => {
-    const footer = document.querySelector(".sidebar-footer");
-    if (!footer) return;
-    try {
-      const response = await fetch("/api/browser/config", {cache: "no-store"});
-      if (!response.ok) return;
-      const config = await response.json();
-      if (config.remote) return;
-      const request = async (action, body) => {
-        const options = {cache: "no-store"};
-        if (body !== undefined) Object.assign(options, {method: "POST", headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": config.token}, body: JSON.stringify(body)});
-        const result = await fetch("/api/remote/" + action, options), data = await result.json();
-        if (!result.ok) throw Error(data.error || "Remote access request failed.");
-        return data;
-      };
-      const panel = new RemoteAccessPanel({document, request, clipboard: navigator.clipboard});
-      const button = document.createElement("button"); button.type = "button";
-      button.className = "notification-toggle"; button.textContent = "Remote access";
-      button.onclick = () => panel.open(); footer.prepend(button);
-    } catch { /* The main app reports connection errors and can be reloaded. */ }
-  });
+  window.RemoteAccessPanel = RemoteAccessPanel;
 })();

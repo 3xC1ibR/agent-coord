@@ -95,6 +95,7 @@ class ProjectTabs {
   constructor({document, folders, onSwitch, onError, canSwitch = () => true}) {
     Object.assign(this, {doc: document, folders, onSwitch, onError, canSwitch});
     this.setupHeader();
+    this.bindMobilePicker();
     document.addEventListener("keydown", event => {
       if (document.querySelector("dialog[open]") || event.target.closest("input, textarea, select, [contenteditable]")) return;
       const tabs = document.getElementById("view-tabs"), items = folders.projects;
@@ -111,52 +112,74 @@ class ProjectTabs {
     if (!header || !projects || !desktop) return;
     // Keep one set of controls and restore their original positions on phones.
     const home = this.doc.createComment("project navigation position"); projects.before(home);
-    const menu = this.doc.createElement("details"); menu.className = "workspace-switcher";
-    const toggle = this.doc.createElement("summary");
-    toggle.textContent = "Ribbon Field"; toggle.setAttribute("aria-label", "Ribbon Field workspace menu");
-    const chevron = this.doc.createElement("span"); chevron.textContent = "▾"; chevron.setAttribute("aria-hidden", "true");
-    toggle.append(chevron); menu.append(toggle);
-    const panel = this.doc.createElement("div"); panel.className = "workspace-switcher-panel";
-    for (const [label, id] of [["Workspace overview", "home"], ["Open project…", "open-folder"],
-      ["Scheduled prompts", "scheduled-prompts"]]) {
-      const button = this.doc.createElement("button"); button.type = "button"; button.textContent = label;
-      button.onclick = () => { menu.open = false; this.doc.getElementById(id)?.click(); };
-      panel.append(button);
-    }
-    const monitor = this.doc.createElement("a"); monitor.href = "/monitor"; monitor.textContent = "Coordination monitor";
-    const scratchpad = this.doc.getElementById("open-project-scratchpad");
-    const scratchpadHome = this.doc.createComment("scratchpad navigation position"); scratchpad?.before(scratchpadHome);
-    panel.append(monitor); menu.append(panel);
-    header.querySelector(".breadcrumb").append(menu);
-    menu.addEventListener("click", event => {
-      if (event.target.closest(".workspace-switcher-panel button, .workspace-switcher-panel a")) menu.open = false;
-    });
-    this.doc.addEventListener("pointerdown", event => { if (!menu.contains(event.target)) menu.open = false; });
-    this.doc.addEventListener("keydown", event => {
-      if (event.key === "Escape" && menu.open) { menu.open = false; toggle.focus(); event.preventDefault(); }
-    });
     const sync = () => {
-      menu.open = false; menu.hidden = !desktop.matches;
       header.classList.toggle("header-tabs", desktop.matches);
       if (desktop.matches) header.insertBefore(projects, header.querySelector(".dispatcher-mobile-nav"));
       else home.after(projects);
-      if (scratchpad) {
-        if (desktop.matches) panel.insertBefore(scratchpad, monitor);
-        else scratchpadHome.after(scratchpad);
-      }
     };
     desktop.addEventListener("change", sync); sync();
   }
+  // Phones replace the tab strip with one project picker in the header.
+  bindMobilePicker() {
+    const picker = this.doc.getElementById("mobile-project"), close = this.doc.getElementById("mobile-close-project");
+    if (picker) picker.onchange = () => {
+      const cwd = picker.value;
+      picker.value = this.folders.selected?.cwd || "";
+      if (cwd === "__open__") this.doc.getElementById("open-project-tab")?.click();
+      else if (cwd) this.activate(cwd).catch(this.onError);
+    };
+    if (close) close.onclick = () => {
+      this.doc.getElementById("view-menu")?.removeAttribute("open");
+      if (this.folders.selected) this.close(this.folders.selected.cwd).catch(this.onError);
+    };
+  }
+  async close(cwd) {
+    if (!this.canSwitch()) return;
+    const active = this.folders.selected?.cwd === cwd;
+    this.folders.close(cwd);
+    if (active) await this.onSwitch();
+    this.render();
+  }
+  renderMobilePicker(threads) {
+    const picker = this.doc.getElementById("mobile-project");
+    if (!picker) return;
+    picker.replaceChildren();
+    let selectedCounts = {};
+    for (const project of this.folders.projects) {
+      const option = this.doc.createElement("option"), selected = project.cwd === this.folders.selected?.cwd;
+      const counts = threadViews.badges(threads.filter(t => inProject(t, project.cwd)), {});
+      if (selected) selectedCounts = counts;
+      option.value = project.cwd;
+      option.textContent = (project.cwd.split("/").filter(Boolean).pop() || "/") + (selected ? "" :
+        (counts.attention ? " · " + counts.attention + " need attention" : "") +
+        (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
+      picker.append(option);
+    }
+    const open = this.doc.createElement("option"); open.value = "__open__"; open.textContent = "Open project…";
+    picker.append(open);
+    picker.value = this.folders.selected?.cwd || "";
+    const attention = this.doc.getElementById("mobile-project-attention"), activity = this.doc.getElementById("mobile-project-activity");
+    if (attention) {
+      attention.textContent = String(selectedCounts.attention || ""); attention.hidden = !selectedCounts.attention;
+      attention.setAttribute("aria-label", (selectedCounts.attention || 0) + " need attention");
+    }
+    if (activity) {
+      activity.hidden = !selectedCounts.active && !selectedCounts.completed;
+      activity.className = selectedCounts.active ? "view-active" : "view-completed";
+      activity.setAttribute("aria-label", selectedCounts.active ? "Active work" : "New responses");
+    }
+    const close = this.doc.getElementById("mobile-close-project");
+    if (close) close.hidden = !this.folders.selected;
+  }
   async activate(cwd) {
-    this.pending = (this.pending || Promise.resolve()).catch(() => {}).then(async () => {
-      if (!this.canSwitch()) return;
-      this.folders.activate(cwd);
-      await this.onSwitch(); this.render();
-      const tab = this.doc.getElementById("view-tabs").querySelector('[aria-selected="true"]');
-      tab?.focus({preventScroll: true});
-      tab?.scrollIntoView({block: "nearest", inline: "nearest"});
-    });
-    return this.pending;
+    if (!this.canSwitch()) return;
+    this.folders.activate(cwd);
+    const changing = this.onSwitch();
+    this.render();
+    const tab = this.doc.getElementById("view-tabs").querySelector('[aria-selected="true"]');
+    tab?.focus({preventScroll: true});
+    tab?.scrollIntoView({block: "nearest", inline: "nearest"});
+    await changing;
   }
   render(threads = this.threads || []) {
     this.threads = threads;
@@ -165,6 +188,7 @@ class ProjectTabs {
       threads.map(t => [t.thread_id, t.project_cwd, t.attention, t.needs_attention, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
     if (signature === this.signature) return;
     this.signature = signature;
+    this.renderMobilePicker(threads);
     const focused = tabs.contains(this.doc.activeElement) ? this.doc.activeElement?.dataset.projectCwd : null;
     tabs.replaceChildren();
     for (const project of this.folders.projects) {
@@ -191,12 +215,7 @@ class ProjectTabs {
       tab.onclick = () => this.activate(project.cwd).catch(this.onError);
       const close = this.doc.createElement("button"); close.type = "button"; close.className = "project-tab-close"; close.textContent = "×";
       close.setAttribute("aria-label", "Close project " + project.cwd); close.title = "Close project tab; agents keep running";
-      close.onclick = async () => {
-        if (!this.canSwitch()) return;
-        const active = this.folders.selected?.cwd === project.cwd;
-        this.folders.close(project.cwd);
-        try { if (active) await this.onSwitch(); this.render(); } catch (error) { this.onError(error); }
-      };
+      close.onclick = () => this.close(project.cwd).catch(this.onError);
       wrapper.append(tab, close); tabs.append(wrapper);
       if (focused === project.cwd) tab.focus({preventScroll: true});
     }

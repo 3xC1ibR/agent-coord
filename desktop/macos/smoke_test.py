@@ -74,12 +74,13 @@ def main() -> int:
                 "mixed_file_drop", "workspace_folder_drop", "window_drafts_and_navigation_isolated",
                 "file_browser_default_collapsed", "file_browser_collapsed_layout", "file_browser_open_shortcut",
                 "file_browser_opened", "file_browser_visible_preference_restored", "file_browser_hidden_preference_restored",
-                "file_browser_editor_menu_enabled", "file_browser_editor_picker_opens", "file_browser_editor_picker_cancels",
+                "settings_opened", "settings_single_window", "settings_preferences_shared", "settings_closed",
+                "settings_conversations_preserved", "settings_editor_picker_opens", "settings_editor_picker_cancels",
                 "file_browser_follows_conversation", "file_browser_window_isolation", "file_browser_lazy_expansion",
                 "file_browser_preview", "file_browser_inserts_without_sending", "file_browser_refresh",
                 "file_browser_shortcut", "file_browser_collapsed",
                 "external_window_rejected", "secondary_window_closed", "one_shared_backend"):
-        if args.files_only and not (key.startswith("file_browser_") or key == "ui_loaded"):
+        if args.files_only and not (key.startswith(("file_browser_", "settings_")) or key == "ui_loaded"):
             continue
         if args.sessions_only and not (key.startswith(("next_session_", "previous_session_")) or key == "ui_loaded"):
             continue

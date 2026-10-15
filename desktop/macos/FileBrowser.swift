@@ -43,8 +43,8 @@ private final class FileBrowserBackground: NSView {
     private let hidden = NSButton(checkboxWithTitle: "Hidden files", target: nil, action: nil)
     private let insert = NSButton(title: "Insert Path", target: nil, action: nil)
     private let open = NSButton(title: "Open", target: nil, action: nil)
-    private let editor = NSPopUpButton(frame: .zero, pullsDown: false)
-    private static let editorKey = "fileBrowserEditorApplication"
+    static let editorKey = "fileBrowserEditorApplication"
+    var preferences = UserDefaults.standard
     var insertPaths: (([String]) -> Void)?
     var canInsert = false { didSet { updateActions() } }
     private(set) var root = ""
@@ -58,7 +58,7 @@ private final class FileBrowserBackground: NSView {
 
     override func loadView() {
         view = FileBrowserBackground()
-        let title = NSTextField(labelWithString: "FILES")
+        let title = NSTextField(labelWithString: "Files")
         title.font = .systemFont(ofSize: 11, weight: .semibold)
         title.textColor = .secondaryLabelColor
         let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseFolder))
@@ -111,14 +111,7 @@ private final class FileBrowserBackground: NSView {
         insert.target = self; insert.action = #selector(insertSelected)
         open.target = self; open.action = #selector(openSelected)
         let actions = NSStackView(views: [insert, open]); actions.spacing = 8
-        editor.target = self; editor.action = #selector(editorChanged)
-        editor.setAccessibilityLabel("File editor")
-        editor.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let editorRow = NSStackView(views: [NSTextField(labelWithString: "Editor:"), editor])
-        editorRow.spacing = 6
-        refreshEditor()
-        NotificationCenter.default.addObserver(self, selector: #selector(refreshEditor), name: UserDefaults.didChangeNotification, object: nil)
-        let stack = NSStackView(views: [toolbar, heading, location, options, scroll, status, previewTitle, previewScroll, editorRow, actions])
+        let stack = NSStackView(views: [toolbar, heading, location, options, scroll, status, previewTitle, previewScroll, actions])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
@@ -130,7 +123,7 @@ private final class FileBrowserBackground: NSView {
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 110),
             previewScroll.heightAnchor.constraint(equalToConstant: 180),
         ])
-        for child in [toolbar, heading, location, options, scroll, status, previewTitle, previewScroll, editorRow] {
+        for child in [toolbar, heading, location, options, scroll, status, previewTitle, previewScroll] {
             child.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         updateActions()
@@ -141,43 +134,11 @@ private final class FileBrowserBackground: NSView {
             }
         }
     }
-    deinit { timer?.invalidate(); NotificationCenter.default.removeObserver(self) }
+    deinit { timer?.invalidate() }
 
     private var editorURL: URL? {
-        guard let path = UserDefaults.standard.string(forKey: Self.editorKey), !path.isEmpty else { return nil }
+        guard let path = preferences.string(forKey: Self.editorKey), !path.isEmpty else { return nil }
         return URL(fileURLWithPath: path)
-    }
-    @objc private func refreshEditor() {
-        editor.removeAllItems()
-        editor.addItem(withTitle: "System Default")
-        if let url = editorURL {
-            editor.addItem(withTitle: FileManager.default.displayName(atPath: url.path))
-            editor.lastItem?.toolTip = url.path
-            editor.selectItem(at: 1)
-        }
-        editor.menu?.addItem(.separator())
-        editor.addItem(withTitle: "Choose Application…")
-        editor.lastItem?.tag = 1
-    }
-    @objc private func editorChanged() {
-        if editor.selectedItem?.tag != 1 {
-            if editor.indexOfSelectedItem == 0 { UserDefaults.standard.removeObject(forKey: Self.editorKey) }
-            refreshEditor()
-            return
-        }
-        refreshEditor()
-        guard let window = view.window, window.attachedSheet == nil else { return }
-        let panel = NSOpenPanel()
-        panel.title = "Choose File Editor"; panel.prompt = "Use Editor"
-        panel.canChooseFiles = true; panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false; panel.treatsFilePackagesAsDirectories = false
-        panel.allowedContentTypes = [.applicationBundle]
-        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            UserDefaults.standard.set(url.path, forKey: Self.editorKey)
-            self?.refreshEditor()
-        }
     }
     private func showOpenError(_ message: String) {
         let alert = NSAlert()
@@ -312,7 +273,7 @@ private final class FileBrowserBackground: NSView {
     func openFile(_ url: URL, completion: @escaping (String?) -> Void) {
         if let application = editorURL {
             guard FileManager.default.fileExists(atPath: application.path) else {
-                completion("The selected editor is no longer at \(application.path). Choose another application from the Editor menu.")
+                completion("The selected editor is no longer at \(application.path). Choose another application in Settings.")
                 return
             }
             NSWorkspace.shared.open([url], withApplicationAt: application, configuration: NSWorkspace.OpenConfiguration()) { _, error in
@@ -320,7 +281,7 @@ private final class FileBrowserBackground: NSView {
             }
         } else {
             completion(NSWorkspace.shared.open(url) ? nil :
-                "macOS could not open this file. Choose an application from the Editor menu.")
+                "macOS could not open this file. Choose an application in Settings.")
         }
     }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

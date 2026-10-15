@@ -32,7 +32,8 @@
     if (snapshot.directory) query.set("directory", snapshot.directory);
     if (snapshot.dispatcher) query.set("dispatcher", snapshot.dispatcher);
     if (snapshot.scratchpad) query.set("scratchpad", "1");
-    if (snapshot.viewId !== "all") query.set("view", snapshot.viewId);
+    if (snapshot.groupId) query.set("project", snapshot.groupId);
+    else if (snapshot.viewId !== "all") query.set("view", snapshot.viewId);
     else for (const key of ["project", "repository"]) if (snapshot.filters[key]) query.set(key, snapshot.filters[key]);
     return "/" + (query.toString() ? "?" + query : "") + (snapshot.thread ? "#" + encodeURIComponent(snapshot.thread) : "");
   }
@@ -76,7 +77,7 @@
         const snapshot = this.capture();
         const route = target.route;
         const displayed = route.kind === "thread" ? snapshot.thread === route.id : !snapshot.thread &&
-          (route.kind === "view" ? snapshot.viewId === route.id : snapshot.viewId === "all" &&
+          (route.kind === "view" ? snapshot.viewId === route.id : (snapshot.viewId === "all" || (snapshot.groupId && snapshot.groupId === route.filters.project)) &&
             ["project", "repository"].every(key => key === "repository" && snapshot.directory ? !snapshot.filters.repository :
               (snapshot.filters[key] || "") === (route.filters[key] || "")));
         if (!displayed) throw new Error("The destination changed before it could be displayed. Open the link again.");

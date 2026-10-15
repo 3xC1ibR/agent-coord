@@ -26,6 +26,11 @@ class SendWorkPalette {
     });
     this.dialog.addEventListener("cancel", event => { event.preventDefault(); this.close(); });
     this.dialog.addEventListener("close", () => this.restoreFocus());
+    this.dialog.addEventListener("click", event => {
+      if (event.target !== this.dialog) return;
+      const rect = this.dialog.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) this.close();
+    });
   }
   get available() { return Boolean(this.workspace()); }
   canToggle() {

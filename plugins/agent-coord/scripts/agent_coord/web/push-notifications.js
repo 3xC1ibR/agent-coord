@@ -1,8 +1,11 @@
 "use strict";
 
 class PhoneNotifications {
-  constructor({button, api, openThread, onError}, env = globalThis) {
+  constructor({button, api, openThread, onError, listen = true}, env = globalThis) {
     Object.assign(this, {button, api, openThread, onError, env});
+    // Conversation pages receive navigation events; only Settings mounts controls.
+    this.button ||= env.document.createElement("button");
+    button = this.button;
     this.busy = false;
     this.info = {};
     this.subscription = null;
@@ -38,14 +41,16 @@ class PhoneNotifications {
         }
       } catch { /* Ignore malformed worker messages. */ }
     };
-    env.navigator.serviceWorker?.addEventListener("message", this.messageHandler);
+    if (listen) env.navigator.serviceWorker?.addEventListener("message", this.messageHandler);
     this.recoverHandler = () => {
       if (this.navigationReady && !env.document.hidden) this.recoverDestination();
     };
     this.hideHandler = event => { if (!event.persisted) this.destroy(); };
-    env.navigator.serviceWorker?.addEventListener("controllerchange", this.recoverHandler);
-    env.addEventListener("pageshow", this.recoverHandler);
-    env.document.addEventListener("visibilitychange", this.recoverHandler);
+    if (listen) {
+      env.navigator.serviceWorker?.addEventListener("controllerchange", this.recoverHandler);
+      env.addEventListener("pageshow", this.recoverHandler);
+      env.document.addEventListener("visibilitychange", this.recoverHandler);
+    }
     env.addEventListener("pagehide", this.hideHandler);
   }
 

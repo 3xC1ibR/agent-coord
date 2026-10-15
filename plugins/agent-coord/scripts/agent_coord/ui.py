@@ -58,7 +58,7 @@ _UI_HTML = r"""<!doctype html>
 <link rel="stylesheet" href="/theme.css">
 </head>
 <body class="monitor-page">
-<header class="monitor-header"><a class="monitor-brand" href="/">rf <span>Ribbon Field</span></a><span class="monitor-heading">Coordination monitor</span><a class="monitor-back" href="/">← Workspace</a><label class="theme-control">Appearance<select data-theme-select aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><span class="muted" id="health" role="status">Loading…</span></header>
+<header class="monitor-header"><a class="monitor-brand" href="/">rf <span>Ribbon Field</span></a><span class="monitor-heading">Coordination monitor</span><a class="monitor-back" href="/">← Workspace</a><a href="/settings" target="ribbon-field-settings">Settings</a><span class="muted" id="health" role="status">Loading…</span></header>
 <div class="shell"><nav aria-label="Process tree"><div class="tree-tools"><p class="label">Process tree</p><select id="sort" aria-label="Sort process tree"><option value="last_activity">Last activity</option><option value="created">Created</option><option value="name">Name</option></select></div><div id="tree"><div class="empty" role="status">Loading agent processes…</div></div></nav><main id="detail"><div class="empty">Select a process to see its activity.</div></main></div>
 <script src="/navigation.js"></script>
 <script src="/markdown.js"></script>
@@ -288,15 +288,17 @@ def _handler(
                 if cookie:
                     self.send_header("Set-Cookie", cookie)
                 parsed = urlparse(getattr(self, "path", ""))
-                pane = (status == HTTPStatus.OK and content_type.startswith("text/html")
-                        and parsed.path == "/" and parse_qs(parsed.query).get("pane") == ["1"]
-                        and self._authorized())
-                self.send_header("X-Frame-Options", "SAMEORIGIN" if pane else "DENY")
+                query = parse_qs(parsed.query)
+                embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
+                            and ((parsed.path == "/" and query.get("pane") == ["1"])
+                                 or (parsed.path == "/settings" and query.get("embedded") == ["1"]))
+                            and self._authorized())
+                self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded else "DENY")
                 self.send_header(
                     "Content-Security-Policy",
                     "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                     "script-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors "
-                    + ("'self'" if pane else "'none'"),
+                    + ("'self'" if embedded else "'none'"),
                 )
                 self.end_headers()
                 self.wfile.write(body)
@@ -372,6 +374,13 @@ def _handler(
                 return
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
+                return
+            if parsed.path == "/settings":
+                self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "settings.html").read_bytes())
+                return
+            if parsed.path in {"/settings.js", "/settings.css"}:
+                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
             if parsed.path in {"/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
@@ -779,6 +788,11 @@ def _handler(
                         directory = browser_sessions.cwd or str(Path.cwd())
                     cwd = resolve_workspace(directory, workspace=browser_sessions.cwd)
                     self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.create_project(body["name"], cwd))
+                    return
+                if route[:3] == ["api", "browser", "projects"] and len(route) == 4:
+                    if set(body) != {"name"}:
+                        raise CoordinationError("Renaming a group accepts a name.")
+                    self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.rename_project(unquote(route[3]), body["name"]))
                     return
                 if route[:3] == ["api", "browser", "projects"] and len(route) == 5 and route[4] == "delete":
                     if set(body) != {"thread_count"}:

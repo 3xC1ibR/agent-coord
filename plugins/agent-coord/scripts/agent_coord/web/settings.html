@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script src="/theme.js"></script>
+  <title>Settings — Ribbon Field</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/remote-access.css">
+  <link rel="stylesheet" href="/settings.css">
+  <script src="/notifications.js" defer></script>
+  <script src="/push-notifications.js" defer></script>
+  <script src="/speech.js" defer></script>
+  <script src="/remote-access.js" defer></script>
+  <script src="/settings.js" defer></script>
+</head>
+<body class="settings-page">
+  <header class="settings-header"><h1>Settings</h1><button id="close-settings" class="quiet" type="button">Done</button></header>
+  <main class="settings-content">
+    <p id="settings-error" role="alert" hidden></p>
+    <section class="settings-section" aria-labelledby="appearance-title">
+      <h2 id="appearance-title">Appearance</h2>
+      <label for="settings-theme">Theme<select id="settings-theme" data-theme-select><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+    </section>
+    <section class="settings-section" aria-labelledby="notifications-title">
+      <h2 id="notifications-title">Notifications</h2>
+      <p id="notification-description">Alerts for finished turns, approvals, and reminders on this device.</p>
+      <div class="settings-actions"><button id="notifications" type="button" aria-pressed="false" disabled>Loading notifications…</button></div>
+    </section>
+    <section id="file-settings" class="settings-section" aria-labelledby="file-settings-title" hidden>
+      <h2 id="file-settings-title">File editor</h2><p>Open file links and files from the Files pane with this application.</p>
+      <p id="file-editor-name" role="status"></p>
+      <div class="settings-actions"><button id="choose-file-editor" type="button">Choose application…</button><button id="reset-file-editor" type="button">Use system default</button></div>
+    </section>
+    <section id="speech-settings" class="settings-section" aria-labelledby="speech-heading"><h2 id="speech-heading">Speech</h2><p>Loading speech settings…</p></section>
+    <section id="remote-settings" class="settings-section" aria-labelledby="remote-access-title" hidden></section>
+  </main>
+</body>
+</html>

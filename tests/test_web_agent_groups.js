@@ -50,7 +50,7 @@ test("only explicit orchestration creations nest across phases without changing 
   const before = JSON.stringify(records), c = harness(records);
   assert.deepEqual(c.cards(), ["dispatch", "user", "parent"]);
   assert.deepEqual(c.rows().map(n => n.dataset.thread), ["orchestrated"]);
-  assert.equal(c.$("thread-count").textContent, "4");
+  assert.match(c.$("results-count").textContent, /^4 threads/);
   assert.equal(JSON.stringify(records), before);
   assert.equal(withClass(c.rows()[0], "agent-row-status")[0].textContent, "Unknown provider · Deploying");
   assert.equal(withClass(c.rows()[0], "sr-only")[0].textContent, "Working");

@@ -191,9 +191,6 @@
     };
     $("speech-play").onclick = () => controller.retryCurrent();
     $("speech-stop").onclick = () => controller.stop();
-    const button = document.createElement("button"); button.type = "button"; button.className = "notification-toggle";
-    button.textContent = "Speech settings"; button.onclick = () => openSettings();
-    document.querySelector(".sidebar-footer")?.prepend(button);
     window.addEventListener("storage", event => {
       if (event.key?.startsWith("ribbon.speech.enabled:")) {
         const id = event.key.slice("ribbon.speech.enabled:".length);
@@ -204,15 +201,14 @@
     window.addEventListener("pagehide", () => controller.stop());
     controller.update(selected, detail);
   }
-  async function openSettings() {
+  async function mountSettings(container, settings) {
+    config = settings;
     if (!dialog) {
-      dialog = document.createElement("dialog"); dialog.className = "speech-dialog"; dialog.setAttribute("aria-labelledby", "speech-heading");
+      dialog = container; dialog.setAttribute("aria-labelledby", "speech-heading");
       dialog.innerHTML = `<h2 id="speech-heading">Speech</h2><p>Read replies aloud with Kokoro running on your Mac. Use the speaker button in a chat to read new replies automatically on this device.</p>
         <p>For a fresh setup, install and start <a href="https://github.com/remsky/Kokoro-FastAPI#readme" target="_blank" rel="noreferrer">Kokoro-FastAPI</a>, then enter its address here. No scripts or checkout paths are needed. Keep the Mac awake when listening on your phone.</p>
         <form><label>Kokoro address<input name="base_url" type="url" required placeholder="http://127.0.0.1:8880/v1"></label><label>Voice<select name="voice" required></select></label><label>Speed<input name="speed" type="number" min="0.5" max="2" step="0.1" required></label>
-        <p class="speech-settings-status" role="status"></p><footer><button type="submit" class="primary">Save</button><button type="button" class="speech-refresh">Refresh voices</button><button type="button" class="speech-test">Test voice</button><button type="button" class="speech-close">Close</button></footer></form>`;
-      document.body.append(dialog);
-      dialog.querySelector(".speech-close").onclick = () => dialog.close();
+        <p class="speech-settings-status" role="status"></p><footer><button type="submit" class="primary">Save</button><button type="button" class="speech-refresh">Refresh voices</button><button type="button" class="speech-test">Test voice</button></footer></form>`;
       const status = dialog.querySelector(".speech-settings-status");
       const form = dialog.querySelector("form");
       const save = async () => request("speech/settings", {base_url: form.elements.base_url.value.trim(), voice: form.elements.voice.value.trim(), speed: Number(form.elements.speed.value)});
@@ -220,14 +216,14 @@
       dialog.querySelector(".speech-refresh").onclick = () => loadVoices();
       let testAudio, testURL;
       const cleanup = () => { testAudio?.pause(); testAudio?.remove(); testAudio = null; if (testURL) URL.revokeObjectURL(testURL); testURL = null; };
-      dialog.addEventListener("close", cleanup);
+      window.addEventListener("pagehide", cleanup);
       dialog.querySelector(".speech-test").onclick = async event => {
         const button = event.currentTarget; button.disabled = true; status.textContent = "Preparing a voice sample…";
-        cleanup(); controller.stop();
+        cleanup(); controller?.stop();
         try {
           if (!config.remote) await save();
           const blob = await request("speech/audio", {test: true});
-          if (!dialog.open) return;
+          if (!dialog.isConnected) return;
           testURL = URL.createObjectURL(blob); testAudio = new Audio(testURL); testAudio.controls = true;
           dialog.querySelector("audio")?.remove(); dialog.append(testAudio);
           status.textContent = "Voice sample ready.";
@@ -236,7 +232,6 @@
         finally { button.disabled = false; }
       };
     }
-    dialog.showModal();
     const form = dialog.querySelector("form"), status = dialog.querySelector(".speech-settings-status");
     const loading = ++voiceLoad;
     dialog.querySelector(".speech-refresh").disabled = true;
@@ -244,13 +239,13 @@
     status.textContent = "Loading speech settings…";
     try {
       const settings = await request("speech/settings");
-      if (!dialog.open || loading !== voiceLoad) return;
+      if (!dialog.isConnected || loading !== voiceLoad) return;
       setVoiceChoices([], settings.voice);
       for (const name of ["base_url", "voice", "speed"]) { form.elements[name].value = settings[name]; form.elements[name].disabled = config.remote; }
       form.querySelector("button[type=submit]").hidden = config.remote;
       await loadVoices();
     } catch (error) {
-      if (dialog.open && loading === voiceLoad) status.textContent = error.message;
+      if (dialog.isConnected && loading === voiceLoad) status.textContent = error.message;
     }
   }
   function setVoiceChoices(voices, current) {
@@ -267,17 +262,18 @@
     select.disabled = true; refresh.disabled = true; status.textContent = "Loading voices…";
     try {
       const result = await request("speech/voices");
-      if (!dialog.open || loading !== voiceLoad) return;
+      if (!dialog.isConnected || loading !== voiceLoad) return;
       setVoiceChoices(result.voices, current);
       status.textContent = message || (config.remote ? "Configure Kokoro on your Mac. You can test playback here." :
         "Changes apply to all devices. Chat speech switches are saved on each device.");
     } catch (error) {
-      if (dialog.open && loading === voiceLoad) status.textContent = (message ? message + " " : "") + error.message + " Choose Refresh voices to try again.";
+      if (dialog.isConnected && loading === voiceLoad) status.textContent = (message ? message + " " : "") + error.message + " Choose Refresh voices to try again.";
     } finally {
-      if (dialog.open && loading === voiceLoad) { select.disabled = config.remote; refresh.disabled = false; }
+      if (dialog.isConnected && loading === voiceLoad) { select.disabled = config.remote; refresh.disabled = false; }
     }
   }
   window.agentCoordSpeech = {
+    mountSettings,
     update(id, snapshot, settings) { selected = id; detail = snapshot; config = settings; initialize(); controller?.update(id, snapshot); },
     receive(events) { controller?.receive(events); },
   };

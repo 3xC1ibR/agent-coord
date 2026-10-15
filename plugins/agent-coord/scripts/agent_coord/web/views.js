@@ -56,7 +56,7 @@ class SavedViews {
     this.key = "agent-coord.views." + (scope || "all");
     this.baseKey = this.key;
     this.all = {id: "all", name: "All conversations", filters: threadViews.filters(), group_by: this.$("group-by").value || "phase", version: 1};
-    this.items = [this.all]; this.activeId = "all"; this.definition = this.all;
+    this.items = [this.all]; this.groups = []; this.saved = []; this.activeId = "all"; this.definition = this.all;
     this.navigation = {}; this.threads = []; this.switchVersion = 0; this.busy = false; this.signature = "";
     this.saves = new Map();
     try { this.navigation = JSON.parse(storage?.getItem(this.key) || "{}"); } catch { /* Optional window state. */ }
@@ -75,9 +75,10 @@ class SavedViews {
     bar.prepend(navigation); bar.append(utilities);
     const placement = this.doc.querySelector(".placement-switch"), search = this.doc.querySelector(".search-field");
     const filters = this.doc.querySelector(".view-filters"), actions = this.doc.querySelector(".workspace-actions");
-    const elements = ["welcome-new", "view-menu", "add-view", "reset-view", "update-view", "saved-view-tabs",
-      "tile-threads", "leave-tiles", "group-by-domain", "start-dispatcher"].map(id => this.$(id));
-    const homes = [...elements, placement, search, filters, actions].map(element => {
+    const elements = ["welcome-new", "view-menu", "add-group", "reset-view", "update-view", "saved-view-tabs",
+      "tile-threads", "leave-tiles", "group-by-domain", "start-dispatcher", "send-work-mobile-open"].map(id => this.$(id));
+    const viewPicker = host.querySelector(".mobile-view-picker");
+    const homes = [...elements, viewPicker, placement, search, filters, actions].map(element => {
       const marker = this.doc.createComment("overview control position");
       element.before(marker);
       return {element, marker};
@@ -89,11 +90,13 @@ class SavedViews {
       tools.classList.toggle("tools-in-header", !this.mobile.matches);
       if (this.mobile.matches) {
         this.doc.querySelector(".workspace-bar").insertBefore(host, this.$("connection"));
-        host.append(this.$("welcome-new"), this.$("view-menu"));
-        this.$("mobile-view-actions").append(this.$("add-view"), this.$("reset-view"), this.$("update-view"));
+        // Phones keep one header row: project, Send work, New, and options. Group choice lives in Filters.
+        host.append(this.$("send-work-mobile-open"), this.$("welcome-new"), this.$("view-menu"));
+        this.$("mobile-view-actions").append(this.$("add-group"), this.$("reset-view"), this.$("update-view"));
+        this.doc.querySelector(".filter-panel").prepend(viewPicker, this.$("group-by-domain"));
       } else {
         hostHome.after(host);
-        navigation.append(placement, this.$("saved-view-tabs"), this.$("add-view"), this.$("view-menu"),
+        navigation.append(this.$("saved-view-tabs"), this.$("add-group"), this.$("view-menu"), placement,
           this.$("reset-view"), this.$("update-view"));
         utilities.append(search, filters, this.$("tile-threads"), this.$("leave-tiles"));
         this.doc.querySelector(".filter-panel").prepend(this.$("group-by-domain"));
@@ -109,30 +112,39 @@ class SavedViews {
   }
   $(id) { return this.doc.getElementById(id); }
   scoped(items) { return items.filter(view => this.cwd === undefined || view.cwd === this.cwd); }
+  local(view) { return view.id === "all" || view.kind === "group"; }
   groupItems() {
     return this.groups.filter(group => this.cwd === undefined || group.cwd === this.cwd)
       .map(group => ({id: "group-" + group.id, kind: "group", projectId: group.id, name: group.name,
         cwd: this.cwd, version: 1, filters: threadViews.filters({project: group.id}), group_by: "phase"}));
   }
+  rebuild() { this.items = [this.all, ...this.groupItems(), ...this.scoped(this.saved)]; }
+  async openGroup(id) { return this.activate(id ? "group-" + id : "all"); }
   async setProject(cwd) {
     this.remember();
+    const version = ++this.switchVersion;
     await Promise.all([...this.saves.values()].map(pending => pending.promise));
+    if (version !== this.switchVersion) return;
     this.cwd = cwd || "";
     this.key = this.baseKey + ":project:" + this.cwd;
     this.navigation = {};
     try { this.navigation = JSON.parse(this.storage?.getItem(this.key) || "{}"); } catch { /* Optional window state. */ }
     if (!this.navigation || typeof this.navigation !== "object" || Array.isArray(this.navigation)) this.navigation = {};
     this.activeId = "all"; this.definition = this.all;
-    await this.start();
+    // Definitions are shared across projects and refreshed by the inventory.
+    // Switching only needs this project's local selection and filter state.
+    await this.start({refresh: !this.loaded});
   }
   current() { return this.items.find(view => view.id === this.activeId) || this.all; }
   read() {
-    return {filters: threadViews.filters({repository: this.$("repository").value, project: this.$("project").value,
+    return {filters: threadViews.filters({repository: this.$("repository").value,
+      project: this.current().kind === "group" ? this.current().projectId : this.$("project").value,
       phase: this.$("phase-filter").value, show: this.$("view").value, search: this.$("search").value}),
       group_by: this.$("group-by").value};
   }
   apply(value) {
     const f = threadViews.filters(value.filters);
+    if (this.current().kind === "group") f.project = this.current().projectId;
     if (this.cwd !== undefined) f.repository = "";
     for (const field of ["repository", "project"]) {
       const control = this.$(field);
@@ -157,11 +169,11 @@ class SavedViews {
   }
   storeNavigation() {
     try { this.storage?.setItem(this.key, JSON.stringify(this.navigation)); } catch { /* Optional window state. */ }
-    // Built-in views have no server definition. Retain their filters across
-    // window reopen, while scroll and named-view drafts remain session-local.
-    if (this.navigation.all) {
-      const {filters, group_by, version} = this.navigation.all;
-      try { this.preferences?.setItem(this.key + ".all", JSON.stringify({filters, group_by, version})); }
+    // Groups remember their display preferences without a second named object.
+    for (const view of this.items.filter(view => this.local(view))) {
+      if (!this.navigation[view.id]) continue;
+      const {filters, group_by, version} = this.navigation[view.id];
+      try { this.preferences?.setItem(this.key + "." + view.id, JSON.stringify({filters, group_by, version})); }
       catch { /* Optional preference. */ }
     }
   }
@@ -171,12 +183,13 @@ class SavedViews {
     return pending?.value || (remembered?.version === view.version ? remembered : view);
   }
   persist() {
+    if (this.current().kind === "group") this.$("project").value = this.current().projectId;
     this.remember();
     return this.save(this.definition, this.read());
   }
   save(definition, value) {
     const id = definition.id;
-    if (id === "all") { this.render(); return Promise.resolve(); }
+    if (this.local(definition)) { this.render(); return Promise.resolve(); }
     let pending = this.saves.get(id);
     if (!pending && threadViews.same(definition, value)) return Promise.resolve();
     if (!pending) {
@@ -193,6 +206,7 @@ class SavedViews {
           const updated = await this.api("views/" + encodeURIComponent(id),
             {filters: pending.value.filters, group_by: pending.value.group_by, version: pending.definition.version});
           pending.definition = updated;
+          this.saved = this.saved.map(view => view.id === id ? updated : view);
           this.items = this.items.map(view => view.id === id ? updated : view);
           if (this.activeId === id) this.definition = updated;
           if (this.navigation[id]) this.navigation[id].version = updated.version;
@@ -212,12 +226,21 @@ class SavedViews {
     this.render();
     return pending.promise;
   }
-  async start() {
-    this.items = [this.all, ...this.scoped((await this.api("views")).data)];
-    try {
-      const remembered = JSON.parse(this.preferences?.getItem(this.key + ".all") || "null");
-      if (!this.navigation.all && remembered?.version === this.all.version) this.navigation.all = remembered;
-    } catch { /* Optional preference; existing window state takes precedence. */ }
+  async start({refresh = true} = {}) {
+    const version = this.switchVersion;
+    if (refresh) {
+      const [views, organization] = await Promise.all([this.api("views"), this.api("organization")]);
+      if (version !== this.switchVersion) return;
+      this.saved = views.data; this.groups = organization.projects;
+      this.loaded = true;
+    }
+    this.rebuild();
+    for (const view of this.items.filter(view => this.local(view))) {
+      try {
+        const remembered = JSON.parse(this.preferences?.getItem(this.key + "." + view.id) || "null");
+        if (!this.navigation[view.id] && remembered?.version === view.version) this.navigation[view.id] = remembered;
+      } catch { /* Optional preference; existing window state takes precedence. */ }
+    }
     let active = "all";
     try { active = this.preferences?.getItem(this.key + ".active") || active; } catch { /* Optional preference. */ }
     this.activeId = this.items.some(view => view.id === active) ? active : "all";
@@ -227,12 +250,12 @@ class SavedViews {
     this.render();
     // Retain filters remembered by older clients instead of silently widening
     // their named views on upgrade. Never replace a newer saved definition.
-    await Promise.all(this.items.filter(view => view.id !== "all" && this.navigation[view.id]?.version === view.version)
+    await Promise.all(this.items.filter(view => !this.local(view) && this.navigation[view.id]?.version === view.version)
       .map(view => this.save(view, this.navigation[view.id])));
   }
-  sync(items) {
+  sync(items, groups = this.groups) {
     const dirty = this.dirty();
-    this.items = [this.all, ...this.scoped(items)];
+    this.saved = items; this.groups = groups; this.rebuild();
     const exists = this.items.some(view => view.id === this.activeId);
     if (!exists || (!dirty && !this.saves.has(this.activeId) && this.definition.version !== this.current().version)) {
       if (!exists) this.activeId = "all";
@@ -240,6 +263,7 @@ class SavedViews {
       this.saveActive();
       return true;
     }
+    if (this.current().kind === "group") this.definition = this.current();
     return false;
   }
   saveActive() {
@@ -283,14 +307,11 @@ class SavedViews {
   }
   focusActive() {
     if (this.mobile?.matches) this.$("mobile-view").focus({preventScroll: true});
-    else if (this.activeId === "all" && this.$("show-now")) {
-      const show = this.read().filters.show;
-      this.$(show === "later" ? "show-later" : show === "archived" ? "show-closed" : "show-now").focus({preventScroll: true});
-    } else if (!this.$("saved-view-tabs").hidden) {
+    else if (this.local(this.current()) && !this.$("saved-view-tabs").hidden) {
       const tab = this.$("saved-view-tabs").querySelector('[aria-selected="true"]');
       tab?.focus({preventScroll: true});
       tab?.scrollIntoView({block: "nearest", inline: "nearest"});
-    } else this.$("add-view").focus({preventScroll: true});
+    } else this.$("filter-toggle").focus({preventScroll: true});
   }
   closeMenu() { this.$("view-menu").open = false; this.$("filter-menu").open = false; this.closeGroupMenu(); }
   closeGroupMenu(focus = false) {
@@ -345,31 +366,35 @@ class SavedViews {
     });
   }
   changed() {
-    const dirty = this.dirty(), custom = this.activeId !== "all";
+    const dirty = this.dirty(), custom = !this.local(this.current()), group = this.current().kind === "group";
     const pending = this.saves.get(this.activeId);
     this.$("reset-view").hidden = !dirty || (custom && !pending?.error);
     this.$("update-view").hidden = !dirty || !custom;
     this.$("update-view").textContent = pending?.promise ? "Saving…" : pending?.error ? "Retry saving" : "Save filters";
     this.$("update-view").disabled = this.busy || Boolean(pending?.promise);
-    this.$("view-menu").hidden = !custom && !this.mobile?.matches;
+    this.$("view-menu").hidden = !custom && !group && !this.mobile?.matches;
     this.$("view-custom-actions").hidden = !custom;
+    this.$("group-rename").hidden = !group;
     this.$("group-remove").hidden = this.current().kind !== "group";
     this.$("group-remove").disabled = this.busy;
     const f = this.read().filters;
-    const count = [f.repository, f.project, f.phase, ["attention", "completed"].includes(f.show)].filter(Boolean).length;
+    const count = [f.repository, !group && f.project, f.phase, ["attention", "completed"].includes(f.show)].filter(Boolean).length;
     this.$("filter-count").textContent = String(count);
     this.$("filter-count").hidden = !count;
-    this.$("view-move-left").disabled = this.items.indexOf(this.current()) <= 1 || this.busy;
-    this.$("view-move-right").disabled = this.current() === this.items.at(-1) || this.busy;
+    this.$("filter-label").textContent = custom ? this.current().name : "Filters";
+    const saved = this.items.filter(view => !this.local(view));
+    this.$("view-move-left").disabled = saved.indexOf(this.current()) <= 0 || this.busy;
+    this.$("view-move-right").disabled = this.current() === saved.at(-1) || this.busy;
     this.$("back-home").textContent = this.cwd ? this.cwd.split("/").filter(Boolean).pop() || "/" : this.cwd === "" ? "Open project" : this.current().name;
     this.$("back-home").title = this.cwd || "";
     this.$("add-view").disabled = this.cwd === "";
+    this.$("add-group").disabled = this.cwd === "";
     this.$("mobile-view").disabled = this.cwd === "";
-    this.$("saved-view-tabs").hidden = this.cwd === "" || this.items.length <= 1;
+    this.$("saved-view-tabs").hidden = this.cwd === "";
     this.$("overview-title").textContent = this.current().name + " overview";
     if (this.$("show-closed")) this.$("show-closed").title = "Show closed threads";
     for (const [id, show] of [["show-now", "active"], ["show-later", "later"], ["show-closed", "archived"]]) {
-      const active = !custom && (show === "active" ? !["later", "archived"].includes(f.show) : f.show === show);
+      const active = show === "active" ? !["later", "archived"].includes(f.show) : f.show === show;
       this.$(id)?.setAttribute("aria-pressed", String(active));
     }
   }
@@ -384,18 +409,24 @@ class SavedViews {
     tabs.replaceChildren();
     const picker = this.$("mobile-view");
     picker.replaceChildren();
+    const savedPicker = this.$("saved-filter");
+    const placeholder = this.doc.createElement("option"); placeholder.value = ""; placeholder.textContent = "Choose saved filters…";
+    savedPicker.replaceChildren(placeholder);
     this.items.forEach((view, index) => {
       const option = this.doc.createElement("option"), counts = badges[index];
       option.value = view.id;
-      option.textContent = view.name + (view.id === this.activeId ? "" :
+      option.textContent = (this.local(view) ? "" : "Saved filters: ") + view.name + (view.id === this.activeId ? "" :
         (counts.attention ? " · " + counts.attention + " need attention" : "") +
         (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
       picker.append(option);
-      if (view.id === "all") return;
+      if (!this.local(view)) {
+        const savedOption = this.doc.createElement("option"); savedOption.value = view.id; savedOption.textContent = view.name;
+        savedPicker.append(savedOption); return;
+      }
       const tab = this.doc.createElement("button"), selected = view.id === this.activeId;
       tab.type = "button"; tab.className = "saved-view-tab"; tab.dataset.viewId = view.id;
       tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(selected));
-      tab.setAttribute("aria-controls", "welcome"); tab.tabIndex = selected || (this.activeId === "all" && index === 1) ? 0 : -1;
+      tab.setAttribute("aria-controls", "welcome"); tab.tabIndex = selected || (!this.local(this.current()) && index === 0) ? 0 : -1;
       tab.title = view.name;
       tab.setAttribute("aria-label", view.name + (counts.attention ? " · " + counts.attention + " need attention" : "") +
         (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
@@ -419,6 +450,7 @@ class SavedViews {
       tabs.append(tab);
     });
     picker.value = this.activeId;
+    savedPicker.value = this.local(this.current()) ? "" : this.activeId;
     const counts = badges[this.items.indexOf(this.current())];
     const attention = this.$("mobile-view-attention"), activity = this.$("mobile-view-activity");
     attention.textContent = String(counts.attention); attention.hidden = !counts.attention;
@@ -443,12 +475,13 @@ class SavedViews {
     this.closeMenu();
     // Capture the target and definition so polling or navigation cannot retarget a save.
     const view = this.current();
-    this.edit = {mode, id: view.id, version: this.definition.version, cwd,
+    this.edit = {mode, id: view.id, projectId: view.projectId, version: this.definition.version, cwd,
       value: mode === "duplicate" ? {filters: view.filters, group_by: view.group_by} : this.read()};
-    this.$("view-dialog-title").textContent = mode === "rename" ? "Rename view" : mode === "duplicate" ? "Duplicate view" : "Save view";
-    this.$("view-dialog-description").textContent = mode === "rename" ? "Give this view a new name."
-      : mode === "duplicate" ? "Create a view with the same saved filters and grouping in this workspace." : "Save these filters and grouping within the current workspace.";
-    this.$("view-name").value = mode === "rename" ? view.name : mode === "duplicate" ? view.name + " copy" : "";
+    this.$("view-dialog-title").textContent = mode === "group-rename" ? "Rename group" : mode === "rename" ? "Rename saved filters" : mode === "duplicate" ? "Duplicate saved filters" : "Save filters";
+    this.$("view-dialog-description").textContent = mode === "group-rename" ? "Change the name wherever this group appears."
+      : mode === "rename" ? "Give these saved filters a new name." : "Save these filters and display settings in this project.";
+    this.$("view-name").value = ["rename", "group-rename"].includes(mode) ? view.name : mode === "duplicate" ? view.name + " copy" : "";
+    this.$("save-view").textContent = ["rename", "group-rename"].includes(mode) ? "Rename" : "Save filters";
     this.$("view-error").hidden = true;
     this.$("view-dialog").showModal(); this.$("view-name").focus();
   }
@@ -457,16 +490,16 @@ class SavedViews {
       const button = this.$(id);
       if (button) button.onclick = async () => {
         try {
-          const base = this.effective(this.all);
+          const base = this.read();
           const placement = show === "active" && ["attention", "completed"].includes(base.filters.show) ? base.filters.show : show;
-          await this.overview({...base.filters, show: placement}, base.group_by);
-          this.focusActive();
+          this.apply({...base, filters: {...base.filters, show: placement}});
+          await this.persist(); await this.onSwitch(); button.focus({preventScroll: true});
         } catch (error) { this.onError(error); }
       };
     }
     this.$("saved-view-tabs").onkeydown = event => {
       if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
-      const custom = this.items.filter(view => view.id !== "all");
+      const custom = this.items.filter(view => this.local(view));
       if (!custom.length) return;
       const focused = event.target?.dataset?.viewId || this.activeId;
       const next = threadViews.shortcut(event, Math.max(0, custom.findIndex(view => view.id === focused)), custom.length, true);
@@ -475,6 +508,10 @@ class SavedViews {
       return this.activate(custom[next].id).catch(this.onError);
     };
     this.$("mobile-view").onchange = () => this.activate(this.$("mobile-view").value).catch(this.onError);
+    this.$("saved-filter").onchange = () => {
+      if (this.$("saved-filter").value) return this.activate(this.$("saved-filter").value).catch(this.onError);
+    };
+    this.$("group-rename").onclick = () => this.openDialog("group-rename").catch(this.onError);
     this.$("group-remove").onclick = () => this.requestGroupRemoval(this.current()).catch(this.onError);
     this.$("context-remove-group").onclick = () => this.requestGroupRemoval(this.contextGroup).catch(this.onError);
     this.$("remove-group-form").onsubmit = event => {
@@ -498,7 +535,7 @@ class SavedViews {
       return this.mutation(async () => {
         const result = await this.api("views/" + encodeURIComponent(id) + "/delete",
           {version: (pending?.definition || definition).version});
-        this.items = [this.all, ...this.scoped(result.data)];
+        this.saved = result.data; this.rebuild();
         if (this.activeId === id) await this.activate("all");
         this.saves.delete(id); delete this.navigation[id]; this.remember();
       });
@@ -507,15 +544,23 @@ class SavedViews {
       event.preventDefault();
       return this.mutation(async () => {
         const edit = this.edit, name = this.$("view-name").value.trim();
-        if (!name) throw new Error("Enter a view name.");
+        if (!name) throw new Error("Enter a name.");
+        if (edit.mode === "group-rename") {
+          const group = await this.api("projects/" + encodeURIComponent(edit.projectId), {name});
+          this.groups = this.groups.map(item => item.id === group.id ? group : item); this.rebuild();
+          if (this.activeId === edit.id) this.definition = this.current();
+          this.$("view-dialog").close(); await this.onSwitch(); this.focusActive(); return;
+        }
         const result = await this.api(edit.mode === "rename" ? "views/" + encodeURIComponent(edit.id) : "views",
           edit.mode === "rename" ? {name, version: edit.version} : {name, ...edit.value, ...(edit.cwd ? {cwd: edit.cwd} : {})});
         if (edit.mode === "rename") {
+          this.saved = this.saved.map(view => view.id === result.id ? result : view);
           this.items = this.items.map(view => view.id === result.id ? result : view);
           if (this.activeId === result.id) this.definition = {...this.definition, name: result.name, version: result.version};
-        } else if (this.scoped([result]).length) {
-          // A workspace switch or poll may finish while the save is in flight.
-          this.items = [...this.items.filter(view => view.id !== result.id), result];
+        } else {
+          // Keep the shared definition even if its project is no longer visible.
+          this.saved = [...this.saved.filter(view => view.id !== result.id), result];
+          if (this.scoped([result]).length) this.items = [...this.items.filter(view => view.id !== result.id), result];
         }
         this.$("view-dialog").close();
         if (edit.mode !== "rename") await this.activate(result.id, true);

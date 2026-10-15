@@ -7,7 +7,8 @@ const ViewDrops = (() => {
     if (!thread || !view) return reject("This thread or view is no longer available.");
     if (view.pending) return reject("Wait for this view’s filters to finish saving.");
     if (view.cwd && view.cwd !== (thread.project_cwd || thread.cwd)) return reject("This view belongs to another workspace.");
-    const filters = views.filters(view.filters);
+    const directGroup = view.kind === "group";
+    const filters = views.filters(directGroup ? {project: view.projectId} : view.filters);
     if (!filters.project) return reject("This view has no group filter.");
     if (filters.search) return reject("Views with a search cannot accept cards.");
     if (thread.attention === "archived" || filters.show === "archived") return reject("Reopen closed threads before changing their group here.");
@@ -16,12 +17,12 @@ const ViewDrops = (() => {
     if (projectId && !project) return reject("This view’s group is no longer available.");
     if (project?.cwd && project.cwd !== (thread.project_cwd || thread.cwd)) return reject("This group belongs to another workspace.");
     const result = {...thread, project_id: projectId, project_name: project?.name || null};
-    if (!views.matches(result, {show: filters.show})) {
+    if (!directGroup && !views.matches(result, {show: filters.show})) {
       return reject({attention: "This view only shows threads that need attention.", completed: "This view only shows finished threads.",
         later: "This view only shows threads in Later.", active: "This thread does not match this view’s Now filter."}[filters.show] || "This thread does not match the view’s placement filter.");
     }
-    if (!views.matches(result, {show: filters.show, phase: filters.phase})) return reject("This thread does not match the view’s stage filter.");
-    if (!views.matches(result, filters)) return reject("This thread does not match the view’s other filters.");
+    if (!directGroup && !views.matches(result, {show: filters.show, phase: filters.phase})) return reject("This thread does not match the view’s stage filter.");
+    if (!directGroup && !views.matches(result, filters)) return reject("This thread does not match the view’s other filters.");
     if ((thread.project_id || null) === projectId) return reject("This thread already belongs to this view’s group.");
     return {allowed: true, projectId, message: project ? "Assign to " + project.name : "Remove from group"};
   }
@@ -49,8 +50,8 @@ const ViewDrops = (() => {
         tab.classList.toggle("view-drop-over", allowed && tab === target);
       }
       message(target ? choice(target.dataset.viewId).message : available
-        ? "Drop onto a highlighted view to change this thread’s group."
-        : "No saved views can accept this thread.");
+        ? "Drop onto a highlighted group to move this conversation."
+        : "No groups can accept this conversation.");
     }
     async function assign(threadId, viewId) {
       if (pending.has(threadId)) return;
@@ -61,9 +62,9 @@ const ViewDrops = (() => {
       try {
         // Recheck saved filters and current thread state without opening its conversation.
         const [thread, inventory, organization] = await Promise.all([
-          api("threads/" + encodeURIComponent(threadId)), api("views"), api("organization"),
+          api("threads/" + encodeURIComponent(threadId)), target.kind === "group" ? null : api("views"), api("organization"),
         ]);
-        const latest = inventory.data.find(view => view.id === viewId);
+        const latest = target.kind === "group" ? target : inventory.data.find(view => view.id === viewId);
         if (!latest || latest.version !== target.version || !views.same(latest, target)) throw new Error("This view changed. Try dropping the card again.");
         const assignment = plan(thread, {...latest, cwd: latest.cwd || target.cwd}, organization.projects);
         if (!assignment.allowed) throw new Error(assignment.message);

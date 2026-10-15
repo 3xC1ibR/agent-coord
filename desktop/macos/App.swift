@@ -1,6 +1,7 @@
 import AppKit
 import WebKit
 import UserNotifications
+import UniformTypeIdentifiers
 import Darwin
 
 private struct BackendConfiguration: Decodable {
@@ -181,6 +182,7 @@ private final class SessionWindow: NSWindow {
 private final class DesktopWindow {
     let id = UUID().uuidString.lowercased()
     var folderSlot = 0
+    var isSettings = false
     let window: NSWindow
     let webView: WKWebView
     let status: NSStackView
@@ -212,7 +214,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private let websiteDataStore = WKWebsiteDataStore.nonPersistent()
     private var current: DesktopWindow? {
         windows.first { $0.window === NSApp.keyWindow } ??
-        windows.first { $0.window === NSApp.mainWindow } ?? windows.last
+        windows.first { $0.window === NSApp.mainWindow } ?? windows.last { !$0.isSettings } ?? windows.last
     }
     private var window: NSWindow! { current?.window }
     private var webView: WKWebView! { current?.webView }
@@ -274,9 +276,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 guard let self = self else { return }
                 self.serverURL = url
                 for item in self.windows {
-                    item.files.connect(BackendWorkspaceFiles(baseURL: url, local: true))
+                    if !item.isSettings { item.files.connect(BackendWorkspaceFiles(baseURL: url, local: true)) }
                     self.configureScripts(item.webView)
-                    item.webView.load(URLRequest(url: url))
+                    item.webView.load(URLRequest(url: item.isSettings ? url.appendingPathComponent("settings") : url))
                 }
             }
             backend.exited = { [weak self] message in
@@ -314,6 +316,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         let app = menu("Ribbon Field")
         app.addItem(withTitle: "About Ribbon Field", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
         app.addItem(.separator())
         app.addItem(withTitle: "Hide Ribbon Field", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         app.addItem(.separator())
@@ -389,16 +392,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     @discardableResult private func makeWindow(url: URL? = nil) -> DesktopWindow {
+        let settings = url?.path == "/settings"
+        if settings, let existing = windows.first(where: { $0.isSettings }) {
+            existing.window.deminiaturize(nil)
+            existing.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return existing
+        }
         let previous = current?.window
-        let window = SessionWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 820),
+        let window = SessionWindow(contentRect: NSRect(x: 0, y: 0, width: settings ? 720 : 1240, height: settings ? 760 : 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = url?.path == "/monitor" ? "Coordination Monitor — Ribbon Field" : "Ribbon Field"
-        window.minSize = NSSize(width: 720, height: 520)
+        window.title = settings ? "Settings — Ribbon Field" : url?.path == "/monitor" ? "Coordination Monitor — Ribbon Field" : "Ribbon Field"
+        window.minSize = settings ? NSSize(width: 480, height: 420) : NSSize(width: 720, height: 520)
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.tabbingMode = .disallowed
-        if smokeReport == nil && windows.isEmpty { window.setFrameAutosaveName("AgentCoordWorkspace") }
-        if let previous = previous {
+        if smokeReport == nil && (settings || windows.isEmpty) { window.setFrameAutosaveName(settings ? "AgentCoordSettings" : "AgentCoordWorkspace") }
+        if settings {
+            if smokeReport != nil || !window.setFrameUsingName("AgentCoordSettings") { window.center() }
+        } else if let previous = previous {
             window.setFrame(previous.frame.offsetBy(dx: 24, dy: -24), display: false)
         } else if smokeReport != nil || !window.setFrameUsingName("AgentCoordWorkspace") { window.center() }
         let config = WKWebViewConfiguration()
@@ -429,6 +441,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         ])
         let item = DesktopWindow(window: window, webView: webView, status: status, label: statusLabel,
                                  spinner: spinner, retry: retry)
+        item.isSettings = settings
+        item.files.preferences = preferences
         // Stable slots restore each window's folder without reusing its runtime identity.
         while windows.contains(where: { $0.folderSlot == item.folderSlot }) { item.folderSlot += 1 }
         window.cycleSession = { [weak item] backwards in
@@ -438,27 +452,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 arguments: ["command": command], in: nil, in: .page) { _ in }
             return true
         }
-        // Keep the native file pane independent of the conversation renderer.
-        let chat = NSViewController()
-        let content = window.contentView!
-        chat.view = content
-        item.split.addSplitViewItem(NSSplitViewItem(viewController: chat))
-        let filePane = NSSplitViewItem(viewController: item.files)
-        filePane.minimumThickness = 260; filePane.maximumThickness = 500
-        filePane.canCollapse = true
-        filePane.holdingPriority = .defaultHigh
-        item.split.addSplitViewItem(filePane); item.filesItem = filePane
-        window.contentViewController = item.split
-        item.split.splitView.setPosition(max(440, window.frame.width - 310), ofDividerAt: 0)
-        filePane.isCollapsed = !preferences.bool(forKey: "fileBrowserVisible")
-        item.files.insertPaths = { [weak item] paths in
-            guard let item = item, item.loaded else { return }
-            item.webView.callAsyncJavaScript("return window.agentCoordDesktop.insertPaths(paths, target)",
-                arguments: ["paths": paths, "target": item.fileTarget], in: nil, in: .page) { _ in }
+        // Settings shares the web preferences store without a conversation or Files pane.
+        if !settings {
+            // Keep the native file pane independent of the conversation renderer.
+            let chat = NSViewController()
+            let content = window.contentView!
+            chat.view = content
+            item.split.addSplitViewItem(NSSplitViewItem(viewController: chat))
+            let filePane = NSSplitViewItem(viewController: item.files)
+            filePane.minimumThickness = 260; filePane.maximumThickness = 500
+            filePane.canCollapse = true
+            filePane.holdingPriority = .defaultHigh
+            item.split.addSplitViewItem(filePane); item.filesItem = filePane
+            window.contentViewController = item.split
+            item.split.splitView.setPosition(max(440, window.frame.width - 310), ofDividerAt: 0)
+            filePane.isCollapsed = !preferences.bool(forKey: "fileBrowserVisible")
+            item.files.insertPaths = { [weak item] paths in
+                guard let item = item, item.loaded else { return }
+                item.webView.callAsyncJavaScript("return window.agentCoordDesktop.insertPaths(paths, target)",
+                    arguments: ["paths": paths, "target": item.fileTarget], in: nil, in: .page) { _ in }
+            }
         }
         windows.append(item)
         if let destination = url ?? serverURL {
-            if let serverURL = serverURL { item.files.connect(BackendWorkspaceFiles(baseURL: serverURL, local: true)) }
+            if !settings, let serverURL = serverURL { item.files.connect(BackendWorkspaceFiles(baseURL: serverURL, local: true)) }
             configureScripts(webView)
             webView.load(URLRequest(url: destination))
         }
@@ -471,8 +488,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func item(for view: WKWebView) -> DesktopWindow? { windows.first { $0.webView === view } }
 
     func windowWillClose(_ notification: Notification) {
-        guard windows.count > 1, let closing = notification.object as? NSWindow,
-              let item = windows.first(where: { $0.window === closing }) else { return }
+        guard let closing = notification.object as? NSWindow,
+              let item = windows.first(where: { $0.window === closing }),
+              item.isSettings || windows.filter({ !$0.isSettings }).count > 1 else { return }
         item.webView.stopLoading()
         item.webView.configuration.userContentController.removeScriptMessageHandler(forName: "desktop", contentWorld: .page)
         item.webView.navigationDelegate = nil
@@ -484,6 +502,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     @objc private func newWindow() { makeWindow() }
+    @objc private func showSettings() {
+        guard let url = serverURL else { return }
+        makeWindow(url: url.appendingPathComponent("settings"))
+    }
     @objc private func duplicateWindow() { makeWindow(url: webView?.url) }
     @objc private func webCommand(_ sender: NSMenuItem) {
         guard let command = sender.representedObject as? String else { return }
@@ -499,6 +521,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         view.pageZoom = sender.tag == 0 ? 1 : min(2, max(0.5, view.pageZoom + Double(sender.tag) * 0.1))
     }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(showSettings) { return serverURL != nil }
+        if menuItem.action == #selector(toggleFiles) { return current?.filesItem != nil }
+        if menuItem.action == #selector(duplicateWindow) && current?.isSettings == true { return false }
         if let command = menuItem.representedObject as? String { return current?.commands.contains(command) == true }
         if menuItem.action == #selector(goBack) { return webView?.canGoBack == true }
         if menuItem.action == #selector(goForward) { return webView?.canGoForward == true }
@@ -513,6 +538,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         NSApp.activate(ignoringOtherApps: true)
     }
     @objc private func showWorkspace() {
+        if current?.isSettings == true {
+            let workspace = windows.last { !$0.isSettings } ?? makeWindow()
+            workspace.window.makeKeyAndOrderFront(nil)
+        }
         showWindow()
         if current?.commands.contains("workspace") == true { runCommand("workspace") }
         else if let url = serverURL, webView?.url?.path != "/" { webView.load(URLRequest(url: url)) }
@@ -521,7 +550,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     @objc private func retryLoad() {
         if let url = serverURL {
             showStatus("Opening Ribbon Field…", failed: false, in: current)
-            webView.load(URLRequest(url: url))
+            webView.load(URLRequest(url: current?.isSettings == true ? url.appendingPathComponent("settings") : url))
         } else { startBackend() }
     }
     // App links also create history outside a web-page gesture. WebKit's native
@@ -578,7 +607,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         guard !windows.isEmpty else { pendingAppLinks.append(url); return }
         let targetID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "window" }?.value
         var target = preferred ?? windows.first { $0.id == targetID?.lowercased() } ?? current!
-        if target.webView.url?.path == "/monitor" { target = makeWindow() }
+        if target.isSettings || target.webView.url?.path == "/monitor" {
+            target = windows.last { !$0.isSettings && $0.webView.url?.path != "/monitor" } ?? makeWindow()
+        }
         target.pendingLinks.append(url)
         target.window.deminiaturize(nil)
         target.window.makeKeyAndOrderFront(nil)
@@ -702,6 +733,35 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         let center = UNUserNotificationCenter.current()
         switch action {
+        case "openSettings":
+            showSettings()
+            replyHandler(true, nil)
+        case "closeSettings":
+            guard owner.isSettings else { replyHandler(nil, "This is not the Settings window."); return }
+            replyHandler(true, nil)
+            DispatchQueue.main.async { owner.window.performClose(nil) }
+        case "fileEditor":
+            guard owner.isSettings, let operation = body["operation"] as? String,
+                  ["get", "choose", "reset"].contains(operation) else {
+                replyHandler(nil, "Open Settings to choose a file editor."); return
+            }
+            let result = { [self] () -> [String: String] in
+                let path = preferences.string(forKey: FileBrowserController.editorKey) ?? ""
+                return ["path": path, "name": path.isEmpty ? "System default" : FileManager.default.displayName(atPath: path)]
+            }
+            if operation == "reset" { preferences.removeObject(forKey: FileBrowserController.editorKey) }
+            guard operation == "choose" else { replyHandler(result(), nil); return }
+            guard owner.window.attachedSheet == nil else { replyHandler(nil, "Finish the open file panel first."); return }
+            let panel = NSOpenPanel()
+            panel.title = "Choose File Editor"; panel.prompt = "Use Editor"
+            panel.canChooseFiles = true; panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false; panel.treatsFilePackagesAsDirectories = false
+            panel.allowedContentTypes = [.applicationBundle]
+            panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+            panel.beginSheetModal(for: owner.window) { [self] response in
+                if response == .OK, let url = panel.url { preferences.set(url.path, forKey: FileBrowserController.editorKey) }
+                replyHandler(result(), nil)
+            }
         case "openFile":
             guard let path = body["path"] as? String, let workspace = body["workspace"] as? String else {
                 replyHandler(nil, "Choose a file in the conversation’s working folder."); return
@@ -722,9 +782,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 owner.window.title = String(title.prefix(160)) + " — Ribbon Field"
             }
             owner.commands = Set((body["commands"] as? [String] ?? []).prefix(32))
-            owner.fileTarget = body["fileTarget"] as? String ?? ""
-            owner.files.canInsert = owner.commands.contains("insertFiles")
-            owner.files.setConversationRoot(body["workspace"] as? String ?? "")
+            if !owner.isSettings {
+                owner.fileTarget = body["fileTarget"] as? String ?? ""
+                owner.files.canInsert = owner.commands.contains("insertFiles")
+                owner.files.setConversationRoot(body["workspace"] as? String ?? "")
+            }
             replyHandler(true, nil)
         case "toggleFiles":
             if let pane = owner.filesItem {
@@ -965,7 +1027,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             localStorage.setItem('agent-coord.smoke', 'persisted');
             sessionStorage.setItem('desktop-smoke-window', 'first');
             document.querySelector('#message').value = 'First window draft';
-            document.querySelector('#home').focus();
+            document.querySelector('#back-home').focus();
             return Notification.agentCoordNative === true;
             """, in: first.webView)
         try smokeCheck("notification_bridge", bridge as? Bool == true)
@@ -1034,7 +1096,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             message.dispatchEvent(new DragEvent('drop', {bubbles: true, cancelable: true, dataTransfer: transfer}));
             for (let i = 0; i < 80; i++) {
               if (message.value.includes('notes with spaces.md') && window.smokeAttachments.snapshot().length === 1)
-                return message.value.startsWith('Second window draft\\n') && document.querySelector('#thread-count').textContent === '0';
+                return message.value.startsWith('Second window draft\\n') && document.querySelectorAll('#sessions button[data-thread]').length === 0;
               await new Promise(resolve => setTimeout(resolve, 25));
             }
             throw new Error(document.querySelector('#error span').textContent || 'Native file drop did not reach the draft');
@@ -1063,6 +1125,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             """, in: second.webView)
         try smokeCheck("workspace_folder_drop", workspaceDrop as? Bool == true)
         try await smokeFiles(second, other: first)
+        try await smokeSettings(first, second)
         if CommandLine.arguments.contains("--smoke-files-only") { finishSmoke(error: nil); return }
 
         _ = try await smokeJS("""
@@ -1307,14 +1370,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try smokeCheck("project_scratchpad_escape", escaped as? Bool == true)
         let sharedTab = try await smokeJS("""
             if (document.querySelector('[data-thread-tab="project-scratchpad"]')) return false;
-            document.querySelector('.workspace-switcher > summary').click();
-            document.querySelector('.workspace-switcher #open-project-scratchpad').click();
+            document.querySelector('#open-project-scratchpad').click();
             for (let i = 0; i < 80; i++) {
               const editor = document.querySelector('#project-scratchpad-text');
               if (!document.querySelector('#project-scratchpad-page').hidden && !editor.disabled &&
                   editor.value === 'Remember the launch feedback') {
                 const tab = document.querySelector('[data-thread-tab="project-scratchpad"]');
                 tab.parentElement.querySelector('.conversation-tab-close').click();
+                // Tab close awaits pane navigation before hiding the scratchpad.
+                for (let j = 0; j < 80; j++) {
+                  if (!document.querySelector('[data-thread-tab="project-scratchpad"]') &&
+                      document.querySelector('#project-scratchpad-page').hidden) break;
+                  await new Promise(resolve => setTimeout(resolve, 25));
+                }
                 if (document.querySelector('[data-thread-tab="project-scratchpad"]') ||
                     !document.querySelector('#project-scratchpad-page').hidden) return false;
                 if (!window.agentCoordDesktop.command('openProjectScratchpad')) return false;
@@ -1377,6 +1445,82 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return restored.selected.cwd === expected && state.folders.selected.cwd === expected;
             """, in: first.webView)
         try smokeCheck("working_folder_restored", restored as? Bool == true)
+    }
+
+    @MainActor private func smokeSettings(_ first: DesktopWindow, _ second: DesktopWindow) async throws {
+        let snapshot = "return JSON.stringify([location.href, state.selected, document.querySelector('#message').value]);"
+        let firstBefore = try await smokeJS(snapshot, in: first.webView) as? String
+        let secondBefore = try await smokeJS(snapshot, in: second.webView) as? String
+        _ = try await smokeJS("document.querySelector('#open-settings').click(); return true;", in: second.webView)
+        for _ in 0..<80 {
+            if windows.contains(where: { $0.isSettings && $0.loaded }) { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        guard let settings = windows.first(where: { $0.isSettings }) else {
+            try smokeCheck("settings_opened", false); return
+        }
+        let ready = try await smokeJS("""
+            for (let i = 0; i < 80; i++) {
+              if (document.querySelector('#file-settings')?.hidden === false &&
+                  document.querySelector('#file-editor-name')?.textContent) return true;
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            return false;
+            """, in: settings.webView)
+        try smokeCheck("settings_opened", ready as? Bool == true && settings.filesItem == nil && windows.count == 3)
+        try await smokeFocus(settings)
+        let shortcut = smokeKey(",", flags: [.command], code: 43)
+        _ = try await smokeJS("await window.agentCoordDesktop.openSettings(); return true;", in: first.webView)
+        try smokeCheck("settings_single_window", shortcut && windows.count == 3 &&
+            windows.first(where: { $0.isSettings }) === settings && NSApp.keyWindow === settings.window)
+        _ = try await smokeJS("""
+            const theme = document.querySelector('#settings-theme');
+            theme.value = 'dark'; theme.dispatchEvent(new Event('change'));
+            localStorage.setItem('agent-coord.smoke-settings', 'shared');
+            return true;
+            """, in: settings.webView)
+        var shared = true
+        for conversation in [first, second] {
+            let updated = try await smokeJS("""
+                for (let i = 0; i < 80; i++) {
+                  if (document.documentElement.dataset.theme === 'dark' &&
+                      localStorage.getItem('agent-coord.theme') === 'dark' &&
+                      localStorage.getItem('agent-coord.smoke-settings') === 'shared') return true;
+                  await new Promise(resolve => setTimeout(resolve, 25));
+                }
+                return false;
+                """, in: conversation.webView)
+            shared = shared && updated as? Bool == true
+        }
+        try smokeCheck("settings_preferences_shared", shared &&
+            preferences.dictionary(forKey: "webPreferences")?["agent-coord.theme"] as? String == "dark")
+        let editorBefore = preferences.string(forKey: FileBrowserController.editorKey)
+        _ = try await smokeJS("document.querySelector('#choose-file-editor').click(); return true;", in: settings.webView)
+        for _ in 0..<60 {
+            if settings.window.attachedSheet is NSOpenPanel { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        let panel = settings.window.attachedSheet as? NSOpenPanel
+        try smokeCheck("settings_editor_picker_opens", panel?.title == "Choose File Editor" && panel?.canChooseFiles == true)
+        panel?.cancel(nil)
+        for _ in 0..<60 {
+            if settings.window.attachedSheet == nil { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        try smokeCheck("settings_editor_picker_cancels", settings.window.attachedSheet == nil &&
+            preferences.string(forKey: FileBrowserController.editorKey) == editorBefore)
+        _ = try await smokeJS("document.querySelector('#close-settings').click(); return true;", in: settings.webView)
+        for _ in 0..<60 {
+            if !windows.contains(where: { $0.isSettings }) { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        try smokeCheck("settings_closed", windows.count == 2 && settings.window.contentView == nil)
+        let firstAfter = try await smokeJS(snapshot, in: first.webView) as? String
+        let secondAfter = try await smokeJS(snapshot, in: second.webView) as? String
+        try smokeCheck("settings_conversations_preserved", firstBefore != nil && firstBefore == firstAfter &&
+            secondBefore != nil && secondBefore == secondAfter && first.window.isVisible && second.window.isVisible &&
+            backend.process?.isRunning == true)
+        try await smokeFocus(second)
     }
 
     @MainActor private func smokeFiles(_ item: DesktopWindow, other: DesktopWindow) async throws {
@@ -1487,36 +1631,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             try await Task.sleep(nanoseconds: 25_000_000)
         }
         try smokeCheck("file_browser_refresh", item.files.previewText.string == "Changed by an agent\n")
-        // Exercise the native chooser after web editing checks; the file panel
-        // changes native focus independently of the web-view test fixture.
-        item.files.outline.deselectAll(nil)
-        func editorPicker(in view: NSView) -> NSPopUpButton? {
-            if let picker = view as? NSPopUpButton { return picker }
-            return view.subviews.lazy.compactMap { editorPicker(in: $0) }.first
-        }
-        guard let picker = editorPicker(in: item.files.view) else {
-            try smokeCheck("file_browser_editor_menu_enabled", false); return
-        }
-        picker.menu?.update()
-        try smokeCheck("file_browser_editor_menu_enabled",
-            item.files.outline.selectedRow == -1 && picker.itemArray.filter { !$0.isSeparatorItem }.allSatisfy { $0.isEnabled })
-        let responderBeforePicker = item.window.firstResponder
-        picker.selectItem(withTitle: "Choose Application…")
-        picker.sendAction(picker.action, to: picker.target)
-        for _ in 0..<60 {
-            if item.window.attachedSheet is NSOpenPanel { break }
-            try await Task.sleep(nanoseconds: 25_000_000)
-        }
-        let editorPanel = item.window.attachedSheet as? NSOpenPanel
-        try smokeCheck("file_browser_editor_picker_opens",
-            editorPanel?.title == "Choose File Editor" && editorPanel?.canChooseFiles == true)
-        editorPanel?.cancel(nil)
-        for _ in 0..<60 {
-            if item.window.attachedSheet == nil { break }
-            try await Task.sleep(nanoseconds: 25_000_000)
-        }
-        try smokeCheck("file_browser_editor_picker_cancels", item.window.attachedSheet == nil)
-        item.window.makeFirstResponder(responderBeforePicker)
         if let content = item.window.contentView, let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
             content.cacheDisplay(in: content.bounds, to: bitmap)
             if let data = bitmap.representation(using: .png, properties: [:]) {

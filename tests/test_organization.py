@@ -84,6 +84,23 @@ class OrganizationTests(unittest.TestCase):
         self.assertNotEqual(self.association("code")["repository_id"], self.association("frontend")["repository_id"])
         self.assertIsNone(self.association("idea")["repository_id"])
 
+    def test_renaming_a_group_preserves_identity_and_rejects_duplicate_names(self):
+        group = self.organization.create_project("Launch", str(self.repo))
+        self.organization.create_project("Other", str(self.repo))
+        self.organization.create_project("Ship", str(self.root))
+        with self.store._connection() as db:
+            self.organization.update(db, "code", project_id=group["id"])
+        renamed = self.organization.rename_project(group["id"], " Ship ")
+        self.assertEqual(renamed, {**group, "name": "Ship"})
+        self.assertEqual(self.organization.create_project("ship", str(self.repo)), renamed)
+        self.assertEqual(self.association("code")["project_id"], group["id"])
+        for name in ("Other", "", "  ", None, "a" * 161):
+            with self.subTest(name=name), self.assertRaises(CoordinationError):
+                self.organization.rename_project(group["id"], name)
+        self.assertEqual(self.organization.create_project("Ship", str(self.repo)), renamed)
+        with self.assertRaises(CoordinationError):
+            self.organization.rename_project("missing", "Name")
+
     def test_legacy_group_ownership_uses_first_members_original_project(self):
         legacy = self.organization.create_project("Launch")
         empty = self.organization.create_project("Empty")

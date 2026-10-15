@@ -11,7 +11,7 @@ class TurnNotifications {
     this.focusKey = "agent-coord.notifications.focus";
     this.changed = () => { this.syncFocus(); this.render(); };
     this.pagehide = () => this.destroy();
-    this.button.onclick = () => this.toggle().catch(onError);
+    if (this.button) this.button.onclick = () => this.toggle().catch(onError);
     for (const event of ["focus", "blur", "storage"]) env.addEventListener(event, this.changed);
     env.document.addEventListener("visibilitychange", this.changed);
     env.addEventListener("pagehide", this.pagehide);
@@ -34,6 +34,7 @@ class TurnNotifications {
   enabled() { return this.supported() && this.env.Notification.permission === "granted" && this.read(this.preferenceKey) === "true"; }
 
   render() {
+    if (!this.button) return;
     const supported = this.supported(), denied = supported && this.env.Notification.permission === "denied";
     const enabled = this.enabled();
     this.button.disabled = !supported || denied;

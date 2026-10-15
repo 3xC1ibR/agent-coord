@@ -1,7 +1,7 @@
 "use strict";
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
-const {WorkingFolders, FolderPicker, newThreadContext, inProject} = require("../plugins/agent-coord/scripts/agent_coord/web/folders.js");
+const {WorkingFolders, ProjectTabs, FolderPicker, newThreadContext, inProject} = require("../plugins/agent-coord/scripts/agent_coord/web/folders.js");
 const rig = {id: "rig", root: "/projects/rig"};
 const stoic = {id: "stoic", root: "/projects/stoic"};
 const organization = {repositories: [rig, stoic], projects: [{id: "evaluation"}]};
@@ -199,4 +199,50 @@ test("a new project window can discard copied tabs without changing the originat
   destination.reset(); await destination.open("/notes");
   assert.deepEqual(destination.projects.map(p => p.cwd), ["/notes"]);
   assert.deepEqual(source.projects.map(p => p.cwd), [rig.root, rig.root + "/src"]);
+});
+
+test("project clicks activate immediately while an earlier project's refresh is pending", async () => {
+  const folders = new WorkingFolders({storage: storage(), api});
+  await folders.open("/a"); await folders.open("/b"); folders.activate("/a");
+  let release, renders = 0, focused = 0;
+  const delayed = new Promise(resolve => { release = resolve; }), visits = [];
+  const tab = {focus() { focused++; }, scrollIntoView() {}};
+  const tabs = Object.assign(Object.create(ProjectTabs.prototype), {folders, canSwitch: () => true,
+    doc: {getElementById: () => ({querySelector: () => tab})}, render() { renders++; },
+    onSwitch() { visits.push(folders.selected.cwd); return folders.selected.cwd === "/b" ? delayed : Promise.resolve(); }});
+  const first = tabs.activate("/b");
+  assert.equal(folders.selected.cwd, "/b"); assert.equal(renders, 1); assert.equal(focused, 1);
+  await tabs.activate("/a");
+  assert.equal(folders.selected.cwd, "/a"); assert.deepEqual(visits, ["/b", "/a"]);
+  release(); await first;
+  assert.equal(folders.selected.cwd, "/a"); assert.equal(focused, 2, "old refreshes must not steal focus");
+});
+
+test("phones switch, open, and close projects from one header picker", async () => {
+  global.threadViews = {badges: threads => ({attention: threads.filter(t => t.needs_attention).length, active: 0, completed: 0})};
+  const folders = new WorkingFolders({storage: storage(), api});
+  await folders.open("/p/a"); await folders.open("/p/b"); folders.activate("/p/a");
+  const node = tag => ({tag, children: [], hidden: false, attrs: {}, value: "", textContent: "",
+    append(...items) { this.children.push(...items); }, replaceChildren() { this.children = []; },
+    setAttribute(name, value) { this.attrs[name] = value; }, removeAttribute(name) { delete this.attrs[name]; }});
+  const ids = {"mobile-project": node("select"), "mobile-project-attention": node("span"), "mobile-project-activity": node("span"),
+    "mobile-close-project": node("button"), "view-menu": node("details"), "open-project-tab": node("button")};
+  let opened = 0, switches = 0; ids["open-project-tab"].click = () => { opened++; };
+  const tabs = Object.assign(Object.create(ProjectTabs.prototype), {folders, canSwitch: () => true, onError: error => { throw error; },
+    doc: {getElementById: id => ids[id] || null, createElement: node}, onSwitch: async () => { switches++; },
+    activate: async cwd => { folders.activate(cwd); await tabs.onSwitch(); tabs.renderMobilePicker([]); },
+    render() { this.renderMobilePicker([{project_cwd: "/p/b", needs_attention: true}, {project_cwd: "/p/a", needs_attention: true}]); }});
+  tabs.bindMobilePicker(); tabs.render();
+  const picker = ids["mobile-project"];
+  assert.deepEqual(picker.children.map(o => [o.value, o.textContent]), [["/p/a", "a"], ["/p/b", "b · 1 need attention"], ["__open__", "Open project…"]]);
+  assert.equal(picker.value, "/p/a");
+  assert.equal(ids["mobile-project-attention"].textContent, "1"); assert.equal(ids["mobile-project-attention"].hidden, false);
+  picker.value = "__open__"; picker.onchange();
+  assert.equal(opened, 1); assert.equal(picker.value, "/p/a", "Open project… must not stay selected");
+  picker.value = "/p/b"; picker.onchange(); await new Promise(setImmediate);
+  assert.equal(folders.selected.cwd, "/p/b");
+  ids["view-menu"].attrs.open = ""; ids["mobile-close-project"].onclick(); await new Promise(setImmediate);
+  assert.equal(ids["view-menu"].attrs.open, undefined);
+  assert.deepEqual(folders.projects.map(p => p.cwd), ["/p/a"]); assert.equal(folders.selected.cwd, "/p/a"); assert.equal(switches, 2);
+  delete global.threadViews;
 });

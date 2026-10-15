@@ -101,7 +101,7 @@
     if (window.agentCoordProjectScratchpad?.available && byID("open-project-scratchpad") &&
         !byID("open-project-scratchpad").disabled && (!dialog || dialog === palette?.dialog)) result.push("openProjectScratchpad");
     if (destination()) result.push("insertFiles");
-    if (dialog || !byID("home")) return result;
+    if (dialog || !byID("back-home")) return result;
     result.push("workspace", "findThread", "newSession", "toggleSidebar", "toggleFiles");
     if (byID("open-folder")) result.push("openFolder");
     if (sessionOrder().length) result.push("nextSession", "previousSession");
@@ -127,8 +127,8 @@
       case "openProjectScratchpad":
         if (palette?.dialog.open) palette.close();
         byID("open-project-scratchpad").click(); break;
-      case "workspace": byID("home").click(); break;
-      case "findThread": byID("home").click(); byID("search").focus(); byID("search").select(); break;
+      case "workspace": byID("back-home").click(); break;
+      case "findThread": byID("sidebar-search").click(); break;
       case "newSession": byID("new-session").click(); break;
       case "openFolder": byID("open-folder").click(); break;
       case "nextSession": return cycleSession(1);
@@ -166,6 +166,9 @@
     folderSlot: "native-__AGENT_COORD_FOLDER_SLOT__",
     chooseFolder: async () => (await send({action: "chooseFiles", workspace: true}))[0]?.path || null,
     newWindow: url => send({action: "newWindow", url}),
+    openSettings: () => send({action: "openSettings"}),
+    closeSettings: () => send({action: "closeSettings"}),
+    fileEditor: operation => send({action: "fileEditor", operation}),
     navigationReady: () => send({action: "navigationReady"}).catch(reportError),
   });
 
@@ -239,6 +242,10 @@
   }, true);
 
   function ready() {
+    if (location.pathname === "/settings") {
+      send({action: "windowState", title: "Settings", commands: []}).catch(reportError);
+      return;
+    }
     palette = new DesktopCommandPalette({document, onError: reportError,
       actions: () => {
         const available = commands();
@@ -263,7 +270,7 @@
           ({id, label, shortcut, keywords, run: () => command(id)}));
         actions.push({id: "newWindow", label: "New window", shortcut: "⇧⌘N", run: () => openWindow("/" + location.search)},
           {id: "duplicateWindow", label: "Open current view in new window", shortcut: "⌥⌘N", run: () => openWindow(location.href)},
-          {id: "monitor", label: "Open coordination monitor", keywords: "agents workers", run: () => openWindow("/monitor" + location.search)});
+          {id: "settings", label: "Settings", shortcut: "⌘,", keywords: "preferences appearance notifications speech remote access editor", run: () => send({action: "openSettings"})});
         return actions;
       },
       loadThreads: async signal => {
@@ -276,7 +283,7 @@
       selectThread: id => typeof window.select === "function" ? window.select(id) :
         location.assign("/" + location.search + "#" + encodeURIComponent(id)),
     });
-    if (!byID("home")) {
+    if (!byID("back-home")) {
       // The monitor can use the palette, too, without workspace-only controls.
       send({action: "windowState", title: "Coordination monitor", commands: ["commandPalette"]}).catch(() => {});
       return;
@@ -349,8 +356,15 @@
     item.dispatchEvent(event);
     if (typeof item.onclick === "function") item.onclick(event);
   };
-  send({action: "permission"}).then(value => {
-    permission = value;
-    window.dispatchEvent(new Event("focus"));
-  }).catch(() => {});
+  let checkingPermission = false;
+  function refreshPermission() {
+    if (checkingPermission) return;
+    checkingPermission = true;
+    send({action: "permission"}).then(value => {
+      if (permission !== value) { permission = value; window.dispatchEvent(new Event("focus")); }
+    }).catch(() => {}).finally(() => { checkingPermission = false; });
+  }
+  window.addEventListener("focus", refreshPermission);
+  window.addEventListener("storage", event => { if (event.key === "agent-coord.notifications.enabled") refreshPermission(); });
+  refreshPermission();
 })();
