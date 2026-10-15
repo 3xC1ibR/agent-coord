@@ -203,6 +203,13 @@ class BrowserSessionTests(unittest.TestCase):
         grandchild = reopened.fork_work_thread(child)
         self.assertEqual(grandchild["project_id"], group["id"])
         self.assertEqual(grandchild["forked_from"]["thread_id"], child)
+        self.store.threads.update(child, title="Renamed fork", attention="archived")
+        forks = reopened.work_thread(parent)["forked_sessions"]
+        self.assertEqual([(f["thread_id"], f["title"], f["forked_from_turn_id"]) for f in forks],
+                         [(child, "Renamed fork", "turn-0")])
+        self.assertEqual(reopened.work_thread(child)["forked_sessions"][0]["thread_id"], grandchild["thread_id"])
+        listed = {t["thread_id"]: t for t in reopened.list_work_threads()}
+        self.assertEqual(listed[parent]["forked_sessions"], forks)
         self.store.threads.update(parent, project_id=None)
         self.assertEqual(reopened.work_thread(child)["project_id"], group["id"])
 

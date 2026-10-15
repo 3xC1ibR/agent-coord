@@ -795,6 +795,10 @@ class BrowserSessions:
         if thread["forked_from_thread_id"]:
             source = self.store.threads.get(thread["forked_from_thread_id"])
             thread["forked_from"] = {"thread_id": source["thread_id"], "title": source["title"]}
+        with self.store._connection() as db:
+            thread["forked_sessions"] = [dict(row) for row in db.execute(
+                """SELECT thread_id, title, created_at, forked_from_turn_id FROM work_threads
+                   WHERE forked_from_thread_id = ? ORDER BY created_at, thread_id""", (thread_id,))]
         if history:
             with self.store._connection() as db:
                 children = db.execute("SELECT DISTINCT d.child_session_id FROM delegations d JOIN work_threads t ON t.thread_id = d.child_session_id WHERE d.parent_session_id = ?", (thread_id,)).fetchall()

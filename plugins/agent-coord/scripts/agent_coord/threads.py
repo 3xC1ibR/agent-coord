@@ -142,6 +142,7 @@ class ThreadStore:
             for field in ("forked_from_thread_id", "forked_from_turn_id"):
                 if field not in columns:
                     db.execute(f"ALTER TABLE work_threads ADD COLUMN {field} TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS threads_fork_source_idx ON work_threads(forked_from_thread_id)")
             # Reading a response or finishing work never established that the
             # user handled it. Existing open responses therefore remain pending.
             for field in ("handled_checkpoint_id", "handled_completion_id"):

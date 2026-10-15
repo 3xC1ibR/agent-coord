@@ -754,9 +754,11 @@ function agentThreadTree(threads) {
 function agentThreadCard(thread, tree, compact = false, inAttention = false) {
   const card = threadCard(thread, compact, inAttention);
   const children = tree.children.get(thread.thread_id) || [];
-  if (!children.length && !thread.created_by_thread_id) return card;
+  const forks = compact && (thread.forked_from || thread.forked_sessions?.length);
+  if (!children.length && !thread.created_by_thread_id && !forks) return card;
   const group = node("div", null, "agent-thread-group" + (compact ? " compact-agent-group" : ""));
   group.append(card);
+  if (forks) group.append(forkLinks(thread));
   if (thread.created_by_thread_id) {
     const creator = thread.created_by;
     const origin = node("button", "Created by " + (creator?.title || "another agent"), "agent-origin");
@@ -851,6 +853,8 @@ function retainConversation() {
   (state.conversationPositions ||= new Map()).set(state.selected, {scroll: entry.scroll, following: entry.following});
 }
 function sameConversation(first, second) {
+  if (first && JSON.stringify([first.work_thread.forked_from, first.work_thread.forked_from_turn_id, first.work_thread.forked_sessions]) !==
+    JSON.stringify([second.work_thread.forked_from, second.work_thread.forked_from_turn_id, second.work_thread.forked_sessions])) return false;
   return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.work_thread.browser_session, first.work_thread.client]) ===
     JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.work_thread.browser_session, second.work_thread.client]);
 }
@@ -994,7 +998,11 @@ async function refreshThread() {
   const revision = state.attentionMutations?.get(id)?.revision || 0;
   const thread = await api(threadPath(id));
   if (id !== state.selected || !state.detail) return;
+  const previous = state.detail.work_thread;
+  const forksChanged = JSON.stringify([previous.forked_from, previous.forked_from_turn_id, previous.forked_sessions]) !==
+    JSON.stringify([thread.forked_from, thread.forked_from_turn_id, thread.forked_sessions]);
   state.detail.work_thread = reconcileAttentionSnapshot(thread, revision); renderThread(); renderStatus();
+  if (forksChanged) { conversationEntry(id).nodes = null; renderTimeline(); }
 }
 function renderThread() {
   const detail = state.detail, work = detail.work_thread, checkpoint = work.checkpoint;
@@ -1039,6 +1047,7 @@ function renderThread() {
     row.append(remove); links.append(row);
   }
   $("checkpoint").append(links);
+  if (work.forked_from || work.forked_sessions?.length) $("checkpoint").append(forkLinks(work));
   if (work.children?.length) {
     const children = node("details"); children.dataset.section = "children"; children.open = sameThread && opened.has("children"); children.append(node("summary", "Delegated sessions · " + work.children.length));
     for (const child of work.children) { const button = node("button", child.title + " · " + (child.checkpoint?.phase || "No checkpoint yet"), "quiet"); button.onclick = () => action(() => select(child.thread_id)); children.append(button); }
@@ -1270,6 +1279,34 @@ function itemText(item) {
   if (item.type === "plan") return item.text || "";
   return JSON.stringify(item, null, 2);
 }
+function forkRelations(work) {
+  const relations = [];
+  if (work?.forked_from) relations.push({label: "Forked from", thread: work.forked_from, turnId: work.forked_from_turn_id});
+  for (const thread of work?.forked_sessions || []) relations.push({label: "Forked session", thread, turnId: thread.forked_from_turn_id});
+  return relations;
+}
+function forkLink(thread) {
+  const link = node("a", thread.title);
+  link.href = "#" + encodeURIComponent(thread.thread_id);
+  link.onclick = event => {
+    if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault(); action(() => select(thread.thread_id));
+  };
+  return link;
+}
+function forkLinks(work) {
+  const links = node("div", null, "fork-links");
+  for (const relation of forkRelations(work)) {
+    const row = node("p");
+    row.append(relation.label + " ", forkLink(relation.thread)); links.append(row);
+  }
+  return links;
+}
+function forkMarker(relation) {
+  const marker = node("p", null, "fork-marker");
+  marker.append(node("span", relation.label + " "), forkLink(relation.thread));
+  return marker;
+}
 function timelineDisclosures() {
   const entry = conversationEntry(state.selected);
   if (!entry.disclosures) {
@@ -1307,6 +1344,13 @@ function renderTimeline() {
   const turns = globalThis.DispatchUI && (state.detail?.work_thread?.dispatcher || state.detail?.dispatchRequests?.length)
     ? DispatchUI.turns(sourceTurns, state.detail.dispatchRequests || []) : sourceTurns;
   const entries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
+  const pendingForks = new Set(forkRelations(state.detail?.work_thread));
+  const appendForks = (turnId, remaining = false) => {
+    for (const relation of pendingForks) if (remaining || (relation.turnId || null) === turnId) {
+      fragment.append(forkMarker(relation)); pendingForks.delete(relation);
+    }
+  };
+  appendForks(null);
   const workGroups = new Map();
   const conversation = conversationEntry(state.selected);
   const previousTools = conversation.toolNodes || new Map(), toolNodes = new Map();
@@ -1409,7 +1453,10 @@ function renderTimeline() {
     }
     if (!entry.item && turn.error) fragment.append(node("p", turn.error.message || "This turn failed.", "empty"));
     if (!entry.item && turn.status === "interrupted") fragment.append(node("p", "Turn stopped.", "empty"));
+    if (!entry.item) appendForks(turn.id);
   }
+  // Retain navigation even when the provider cannot return the boundary turn.
+  appendForks(null, true);
   el.replaceChildren(fragment);
   conversation.toolNodes = toolNodes;
   const disclosureThread = state.selected;

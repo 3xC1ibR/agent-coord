@@ -107,6 +107,8 @@ class ClaudeForkTests(unittest.TestCase):
         detail = self.sessions.read(child)["work_thread"]
         self.assertEqual((detail["project_id"], detail["project_name"]), (group["id"], "Source group"))
         self.assertEqual(detail["forked_from"], {"thread_id": parent, "title": "Source"})
+        forks = self.sessions.work_thread(parent)["forked_sessions"]
+        self.assertEqual({f["thread_id"] for f in forks}, {ungrouped["thread_id"], child})
         grandchild = self.sessions.fork_work_thread(child)
         self.assertEqual(grandchild["project_id"], group["id"])
         self.assertEqual(grandchild["forked_from"]["thread_id"], child)
