@@ -6,6 +6,7 @@ import threading
 import uuid
 
 from .store import CoordinationError
+from .session_close import is_external_codex_session
 from .workspaces import matches_workspace
 
 RUNTIME_LEASE_SECONDS = 60
@@ -46,6 +47,13 @@ class ThreadControl:
                 );
             """)
 
+    def _is_closed(self, thread_id, thread):
+        if thread["attention"] != "archived":
+            return False
+        return thread["ended_at"] is not None or (
+            not self.store.threads.is_browser_session(thread_id)
+            and is_external_codex_session(self.store.get_session(thread_id)))
+
     def _reconcile(self, db):
         now = self.store.clock()
         # A new turn also cancels requests from clients predating cancel_pending.
@@ -61,7 +69,7 @@ class ThreadControl:
         for request in abandoned:
             thread = db.execute("""SELECT t.attention, s.ended_at FROM work_threads t
                 JOIN sessions s ON s.session_id = t.thread_id WHERE t.thread_id = ?""", (request["thread_id"],)).fetchone()
-            closed = thread["attention"] == "archived" and thread["ended_at"] is not None
+            closed = self._is_closed(request["thread_id"], thread)
             db.execute("UPDATE thread_close_requests SET status = ?, error = ?, updated_at = ? WHERE request_id = ?",
                        ("closed" if closed else "failed", None if closed else
                         "The closing runtime stopped. Inspect the thread and retry close.", now, request["request_id"]))
@@ -88,7 +96,7 @@ class ThreadControl:
             thread = db.execute("""SELECT t.turn_key, t.attention, s.turn_active, s.ended_at
                 FROM work_threads t JOIN sessions s ON s.session_id = t.thread_id
                 WHERE t.thread_id = ?""", (thread_id,)).fetchone()
-            if thread["attention"] == "archived" and thread["ended_at"] is not None:
+            if self._is_closed(thread_id, thread):
                 return {"thread_id": thread_id, "status": "closed", "request_id": None}
             if after_turn and thread["turn_active"] and not thread["turn_key"]:
                 raise CoordinationError("The active turn has no recorded identity; cannot safely queue an after-turn close.")
@@ -126,7 +134,7 @@ class ThreadControl:
                 return self._describe(db, row)
             thread = db.execute("""SELECT t.attention, s.ended_at FROM work_threads t
                 JOIN sessions s ON s.session_id = t.thread_id WHERE t.thread_id = ?""", (thread_id,)).fetchone()
-            closed = thread["attention"] == "archived" and thread["ended_at"] is not None
+            closed = self._is_closed(thread_id, thread)
             return {"thread_id": thread_id, "status": "closed" if closed else "none", "request_id": None}
 
     def cancel(self, thread_id: str) -> dict:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import unittest
 from unittest.mock import patch
@@ -106,6 +107,53 @@ class WorkThreadCloseTests(unittest.TestCase):
         self.sessions.close_work_thread("terminal")
         self.assertEqual(self.sessions.work_thread("terminal")["attention"], "archived")
         self.assertEqual(self.sessions.rpc.calls, [])
+
+    def test_external_codex_close_preserves_history_and_never_stops_shared_server(self):
+        thread_id = "01a13b96-fe3e-7d40-bc68-9242bc3c4c99"
+        transcript = self.root / "sessions" / ("rollout-" + thread_id + ".jsonl")
+        transcript.parent.mkdir()
+        transcript.write_text(json.dumps({"type": "session_meta", "payload": {
+            "id": thread_id, "source": "vscode"}}) + "\n")
+        self.store.register(session_id=thread_id, client="codex", cwd=str(self.root))
+        self.store.threads.start_turn(thread_id, turn_id="external-turn", prompt="Keep my history.")
+        self.store.threads.finish_turn(thread_id, turn_id="external-turn")
+        self.store.touch(thread_id, activity="idle", turn_active=False)
+        self.store.threads.checkpoint(thread_id, {"phase": "finished", "summary": "A saved result."})
+        before = self.store.threads.get(thread_id)
+        with patch.dict("os.environ", {"CODEX_HOME": str(self.root)}), \
+                patch("agent_coord.session_close.os.kill") as kill, \
+                patch("agent_coord.codex_app_server.stop_terminal_session") as stop:
+            closed = self.sessions.close_work_thread(thread_id)
+            self.sessions.close_work_thread(thread_id)
+        self.assertEqual(closed["attention"], "archived")
+        self.assertEqual(closed["original_request"], before["original_request"])
+        self.assertEqual(closed["checkpoint"], before["checkpoint"])
+        self.assertEqual(closed["turn_completion"], before["turn_completion"])
+        self.assertIn("Work may continue in Codex", closed["close_notice"])
+        self.assertEqual(transcript.read_text().count("\n"), 1)
+        self.assertEqual(self.sessions.rpc.calls, [])
+        kill.assert_not_called()
+        stop.assert_not_called()
+        self.assertEqual(self.sessions.list_work_threads(), [])
+        self.sessions.reopen_work_thread(thread_id)
+        self.assertEqual(self.sessions.work_thread(thread_id)["attention"], "now")
+
+    def test_running_external_close_retains_activity_and_scope_without_false_interruption(self):
+        self.store.register(session_id="external", client="codex", cwd=str(self.root))
+        self.store.threads.start_turn("external", turn_id="still-running")
+        self.store.begin_work(session_id="external", scopes=["src/**"])
+        self.store.touch("external", turn_active=True)
+        with patch("agent_coord.codex_app_server.is_external_codex_session", return_value=True), \
+                patch("agent_coord.codex_app_server.stop_terminal_session") as stop:
+            closed = self.sessions.close_work_thread("external")
+        self.assertEqual(closed["attention"], "archived")
+        self.assertIsNone(closed["turn_completion"])
+        self.assertIn("Work may continue", closed["close_notice"])
+        session = self.store.get_session("external")
+        self.assertTrue(session["turn_active"])
+        self.assertIsNone(session["ended_at"])
+        self.assertEqual(session["write_scope"], ["src/**"])
+        stop.assert_not_called()
 
     def test_interrupt_timeout_keeps_thread_open_and_does_not_archive(self):
         thread_id = self.create()

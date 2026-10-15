@@ -2207,14 +2207,14 @@ async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess 
   state.closing.add(id); renderStatus();
   renderList();
   try {
-    await api(threadPath(id) + (reopening ? "/reopen" : "/close"), {});
+    const result = await api(threadPath(id) + (reopening ? "/reopen" : "/close"), {});
     ++listRequest;
     onSuccess();
     if (!reopening) {
       state.sessions = state.sessions.filter(item => item.thread_id !== id);
       state.viewThreads = state.viewThreads?.filter(item => item.thread_id !== id);
       let reopened = false;
-      state.threadActions?.notify("close:" + id, "Thread closed · " + (thread.title || "Available in Closed"), async () => {
+      state.threadActions?.notify("close:" + id, result?.close_notice || "Thread closed · " + (thread.title || "Available in Closed"), async () => {
         if (state.closing.has(id)) throw new Error("Wait for the thread to finish closing.");
         state.closing.add(id);
         try {

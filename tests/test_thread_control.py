@@ -165,6 +165,37 @@ class ThreadControlTests(unittest.TestCase):
         self.assertEqual(self.control.status("terminal")["error"], "Exit in terminal")
         self.assertEqual(self.store.threads.get("terminal")["attention"], "now")
 
+    def test_external_close_is_durable_and_idempotent_without_ending_its_process(self):
+        thread_id = "01a13b94-9dd4-7b12-acf6-7956501ddaf7"
+        transcript = self.root / "sessions" / ("rollout-" + thread_id + ".jsonl")
+        transcript.parent.mkdir()
+        transcript.write_text(json.dumps({"type": "session_meta", "payload": {
+            "id": thread_id, "source": "vscode"}}) + "\n")
+        self.store.register(session_id=thread_id, client="codex", cwd=str(self.root))
+        self.store.threads.start_turn(thread_id, turn_id="external-turn")
+        self.store.touch(thread_id, turn_active=True)
+        with patch.dict("os.environ", {"CODEX_HOME": str(self.root)}), \
+                patch("agent_coord.session_close.os.kill") as kill:
+            self.assertEqual(self.cli("close", thread_id)["status"], "queued")
+            self.worker.process_once()
+            self.assertEqual(self.cli("close-status", thread_id)["status"], "closed")
+            self.assertEqual(self.cli("close", thread_id)["status"], "closed")
+            # Closure through the UI may not have a durable CLI receipt.
+            with self.store._connection() as db:
+                db.execute("DELETE FROM thread_close_requests WHERE thread_id = ?", (thread_id,))
+            self.assertEqual(self.cli("close-status", thread_id)["status"], "closed")
+            self.sessions.reopen_work_thread(thread_id)
+            request = self.control.request_close(thread_id)
+            self.assertTrue(self.control.claim(request["request_id"], "dead-runtime"))
+            self.sessions.close_work_thread(thread_id)
+            with self.store._connection() as db:
+                db.execute("UPDATE thread_close_requests SET updated_at = 0 WHERE thread_id = ?", (thread_id,))
+            self.assertEqual(self.control.status(thread_id)["status"], "closed")
+        kill.assert_not_called()
+        self.assertTrue(self.store.get_session(thread_id)["turn_active"])
+        self.assertIsNone(self.store.threads.get(thread_id)["turn_completion"])
+        self.assertEqual(self.sessions.rpc.calls, [])
+
     def test_worker_does_not_take_another_workspace_or_live_browser_owner(self):
         thread_id = self.create()
         self.control.request_close(thread_id)

@@ -36,7 +36,7 @@ from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
 from .organization import app_agent_creators
-from .session_close import stop_terminal_session
+from .session_close import is_external_codex_session, stop_terminal_session
 from .workspaces import matches_workspace, workspace_choices
 
 
@@ -850,13 +850,14 @@ class BrowserSessions:
         return self.work_thread(thread_id)
 
     def close_work_thread(self, thread_id: str, *, stop_timeout: float = 10) -> dict:
-        """End execution before moving a conversation out of the open workspace.
+        """Stop owned execution, or hide an externally owned conversation.
 
         The persisted `archived` value remains the compatibility representation
         of Closed. A closed thread is retained, not marked task-complete.
         """
         with self._thread_lock(thread_id):
             thread = self.work_thread(thread_id)
+            external = False
             if thread["browser_session"]:
                 record = self._record(thread_id)
                 self.queue.pause(thread_id, "The thread closed. Reopen it to resume queued messages.")
@@ -879,13 +880,25 @@ class BrowserSessions:
                     self.active.pop(thread_id, None)
                     self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") != thread_id}
             else:
-                stop_terminal_session(self.store.get_session(thread_id))
-                if thread["turn_active"]:
+                session = self.store.get_session(thread_id)
+                external = is_external_codex_session(session)
+                if not external:
+                    stop_terminal_session(session)
+                if thread["turn_active"] and not external:
                     self.store.threads.finish_turn(thread_id, turn_id=thread["turn_id"], status="interrupted")
-            from .thread_control import finish_close
-            finish_close(self.store, thread_id)
+            if external:
+                # This runtime does not own the provider's execution. Preserve
+                # live activity and reservations, and do not invent a completion.
+                self.store.disable_wake(thread_id)
+                self.store.threads.update(thread_id, attention="archived")
+            else:
+                from .thread_control import finish_close
+                finish_close(self.store, thread_id)
             self._publish("browser/changed", {"threadId": thread_id})
-            return self.work_thread(thread_id)
+            closed = self.work_thread(thread_id)
+            if external:
+                closed["close_notice"] = "Thread closed in Ribbon Field. Work may continue in Codex."
+            return closed
 
     def reopen_work_thread(self, thread_id: str) -> dict:
         with self._thread_lock(thread_id):

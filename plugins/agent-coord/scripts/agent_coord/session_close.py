@@ -38,10 +38,7 @@ def _is_terminal_codex(pid: int) -> bool:
                 and not {"app-server", "exec", "exec-server", "review"}.intersection(command[1:]))
 
 
-def stop_terminal_session(session: dict, *, timeout: float = 5) -> None:
-    """Never signal a shared app-server, shell, or a remembered/reused pane ID."""
-    if session["presence"] == "offline":
-        return
+def _transcript(session: dict) -> tuple[Path, dict]:
     error = "Cannot safely stop this session from the UI. Exit it in its terminal, then close this thread."
     if session["client"] != "codex":
         raise CoordinationError(error)
@@ -50,7 +47,8 @@ def stop_terminal_session(session: dict, *, timeout: float = 5) -> None:
     except (ValueError, TypeError) as exc:
         raise CoordinationError(error) from exc
     root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    transcripts = list((root / "sessions").glob(f"**/*-{session_id}.jsonl"))
+    transcripts = [path for folder in ("sessions", "archived_sessions")
+                   for path in (root / folder).glob(f"**/*-{session_id}.jsonl")]
     if len(transcripts) != 1:
         raise CoordinationError(error)
     transcript = transcripts[0]
@@ -62,6 +60,29 @@ def stop_terminal_session(session: dict, *, timeout: float = 5) -> None:
             raise CoordinationError(error)
     except (OSError, ValueError) as exc:
         raise CoordinationError(error) from exc
+    return transcript, metadata["payload"]
+
+
+def is_external_codex_session(session: dict) -> bool:
+    """Recognize desktop/IDE conversations from their own validated metadata.
+
+    Codex records these as `vscode`, including conversations kept open by its
+    shared app-server daemon. Missing or unknown metadata retains the terminal
+    ownership guard rather than assuming that closure is safe.
+    """
+    try:
+        _, metadata = _transcript(session)
+    except CoordinationError:
+        return False
+    return metadata.get("source") == "vscode"
+
+
+def stop_terminal_session(session: dict, *, timeout: float = 5) -> None:
+    """Never signal a shared app-server, shell, or a remembered/reused pane ID."""
+    if session["presence"] == "offline":
+        return
+    error = "Cannot safely stop this session from the UI. Exit it in its terminal, then close this thread."
+    transcript, _ = _transcript(session)
     owners = _owners(transcript)
     if len(owners) != 1:
         raise CoordinationError(error)

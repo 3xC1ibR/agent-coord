@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
-from agent_coord.session_close import _is_terminal_codex, stop_terminal_session
+from agent_coord.session_close import _is_terminal_codex, is_external_codex_session, stop_terminal_session
 from agent_coord.store import CoordinationError
 
 
@@ -19,7 +19,7 @@ class TerminalCloseTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.session = {"session_id": "01a11269-04c4-7ca3-bcc2-d495885e590f", "client": "codex", "presence": "online"}
-        transcript = self.root / "sessions/2026/10/06" / ("rollout-2026-10-06-" + self.session["session_id"] + ".jsonl")
+        transcript = self.transcript = self.root / "sessions/2026/10/06" / ("rollout-2026-10-06-" + self.session["session_id"] + ".jsonl")
         transcript.parent.mkdir(parents=True)
         transcript.write_text(json.dumps({"type": "session_meta", "payload": {"id": self.session["session_id"]}}) + "\n")
         self.addCleanup(patch.stopall)
@@ -33,6 +33,42 @@ class TerminalCloseTests(unittest.TestCase):
         stop_terminal_session(self.session)
         self.assertEqual(self.owners.call_count, 2)
         self.assertEqual(self.kill.call_args_list[0].args, (43210, signal.SIGTERM))
+
+    def test_external_identity_requires_matching_desktop_metadata(self):
+        for source, session_id, expected in [
+            ("vscode", self.session["session_id"], True),
+            ("cli", self.session["session_id"], False),
+            (None, self.session["session_id"], False),
+            ("unknown", self.session["session_id"], False),
+            ("vscode", "another-session", False),
+        ]:
+            with self.subTest(source=source, session_id=session_id):
+                self.transcript.write_text(json.dumps({"type": "session_meta", "payload": {
+                    "id": session_id, "source": source}}) + "\n")
+                self.assertEqual(is_external_codex_session(self.session), expected)
+        self.owners.assert_not_called()
+        self.kill.assert_not_called()
+
+    def test_missing_invalid_and_ambiguous_transcripts_do_not_bypass_terminal_guard(self):
+        self.transcript.write_text("invalid json\n")
+        self.assertFalse(is_external_codex_session(self.session))
+
+        self.transcript.write_text(json.dumps({"type": "session_meta", "payload": {
+            "id": self.session["session_id"], "source": "vscode"}}) + "\n")
+        duplicate = self.transcript.with_name("duplicate-" + self.session["session_id"] + ".jsonl")
+        duplicate.write_text(self.transcript.read_text())
+        self.assertFalse(is_external_codex_session(self.session))
+        duplicate.unlink()
+        self.transcript.unlink()
+        self.assertFalse(is_external_codex_session(self.session))
+
+    def test_external_conversation_can_already_be_archived_in_codex(self):
+        archived = self.root / "archived_sessions" / self.transcript.name
+        archived.parent.mkdir()
+        archived.write_text(json.dumps({"type": "session_meta", "payload": {
+            "id": self.session["session_id"], "source": "vscode"}}) + "\n")
+        self.transcript.unlink()
+        self.assertTrue(is_external_codex_session(self.session))
 
     def test_reused_owner_shared_server_or_ambiguous_identity_is_never_signalled(self):
         for owners, terminal in [([{43210}, {43211}], True), ([{43210, 43211}], True), ([set()], True), ([{43210}], False)]:

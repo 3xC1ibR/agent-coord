@@ -260,6 +260,15 @@ test("a failed close never offers Undo or animates", async () => {
   await assert.rejects(c.toggleThreadClosed(), /Offline/);
 });
 
+test("external closure explains that Codex work may continue and retains Undo", async () => {
+  const c = setup(); let notice, undo;
+  c.state.threadActions = {captureClose() {}, closed() {}, notify: (key, text, callback) => { notice = text; undo = callback; }};
+  c.api = async () => ({close_notice: "Thread closed in Ribbon Field. Work may continue in Codex."});
+  await c.toggleThreadClosed({thread_id: "one", title: "External", status: "running", attention: "now"});
+  assert.equal(notice, "Thread closed in Ribbon Field. Work may continue in Codex.");
+  assert.equal(typeof undo, "function");
+});
+
 test("Undo does not overwrite a thread already reopened elsewhere", async () => {
   const c = setup(); let undo;
   c.state.threadActions = {captureClose() {}, closed() {}, notify: (key, text, callback) => { undo = callback; }};
