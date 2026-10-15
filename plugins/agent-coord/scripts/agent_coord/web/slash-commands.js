@@ -11,9 +11,12 @@
   ];
 
   class ChatSlashCommands {
-    constructor({input, menu, getThread, getSession = () => ({}), loadModels = async () => [], catalogs = new Map(), canComplete, onChange}) {
-      Object.assign(this, {input, menu, getThread, getSession, loadModels, canComplete, onChange});
+    constructor({input, menu, getThread, getSession = () => ({}), loadModels = async () => [], loadSkills = async () => [],
+      catalogs = new Map(), canComplete, onReplace = () => {}, onChange}) {
+      Object.assign(this, {input, menu, getThread, getSession, loadModels, loadSkills, canComplete, onReplace, onChange});
       this.catalogs = catalogs;
+      this.skillCatalogs = new Map();
+      this.skillLoading = new Set();
       this.loading = new Set();
       this.matches = [];
       this.index = 0;
@@ -24,20 +27,25 @@
       });
       input.addEventListener("compositionstart", () => { this.composing = true; this.close(); });
       input.addEventListener("compositionend", () => { this.composing = false; this.render(); });
-      input.addEventListener("focus", () => { this.dismissed = null; this.render(); });
+      input.addEventListener("focus", () => { this.dismissed = null; this.skillCatalogs.clear(); this.render(); });
       input.addEventListener("blur", () => this.close());
       input.addEventListener("click", () => this.render());
       input.addEventListener("keyup", () => this.render());
       input.ownerDocument.addEventListener("selectionchange", () => this.render());
       // Keep the caret in the composer when choosing a suggestion with a pointer.
       menu.addEventListener("mousedown", event => event.preventDefault());
+      menu.addEventListener("pointerdown", event => event.preventDefault());
     }
 
     query() {
       const input = this.input;
       if (this.composing || !this.canComplete() || input.disabled || input.ownerDocument.activeElement !== input ||
           input.selectionStart !== input.selectionEnd) return null;
-      const command = /^([ \t]*)(\/[^\s]*)/.exec(input.value), caret = input.selectionStart;
+      const caret = input.selectionStart;
+      const skill = /(?:^|[\s(\[{])\$([\w:.-]*)$/.exec(input.value.slice(0, caret));
+      if (skill) return {kind: "skill", prefix: "$" + skill[1].toLowerCase(), start: caret - skill[1].length - 1,
+        end: caret + /^[\w:.-]*/.exec(input.value.slice(caret))[0].length};
+      const command = /^([ \t]*)(\/[^\s]*)/.exec(input.value);
       if (!command || caret <= command[1].length) return null;
       if (caret <= command[0].length) return {kind: "command",
         prefix: input.value.slice(command[1].length, caret).toLowerCase(), start: command[1].length, end: command[0].length};
@@ -76,6 +84,8 @@
     }
 
     suggestions(query) {
+      if (query.kind === "skill") return this.skills().map(skill => ({name: "$" + skill.name,
+        arguments: skill.scope || "", description: skill.description || ""}));
       if (query.kind === "command") return commands;
       if (query.kind === "permissions") return [
         {name: "default", arguments: "", description: "Configured permissions with approval prompts"},
@@ -87,6 +97,19 @@
       const model = models.find(model => model.model === query.model);
       return (model?.supportedReasoningEfforts || []).map(effort => ({name: effort.reasoningEffort,
         arguments: "", description: effort.description || ""}));
+    }
+
+    skills() {
+      const session = this.getSession() || {}, key = JSON.stringify([session.client || "codex", session.cwd || ""]);
+      if (!this.skillCatalogs.has(key) && !this.skillLoading.has(key)) {
+        this.skillLoading.add(key);
+        Promise.resolve().then(() => this.loadSkills(session)).then(skills => {
+          this.skillLoading.delete(key);
+          this.skillCatalogs.set(key, skills);
+          this.render();
+        }, () => { this.skillLoading.delete(key); });
+      }
+      return this.skillCatalogs.get(key) || [];
     }
 
     close() {
@@ -101,7 +124,8 @@
       const query = this.query();
       const key = JSON.stringify([this.getThread(), this.input.value, this.input.selectionStart]);
       if (!query || this.dismissed === key) { this.close(); return; }
-      const matches = this.suggestions(query).filter(command => command.name.toLowerCase().startsWith(query.prefix));
+      const matches = this.suggestions(query).filter(command => query.kind === "skill" ?
+        command.name.slice(1).toLowerCase().includes(query.prefix.slice(1)) : command.name.toLowerCase().startsWith(query.prefix));
       if (!matches.length) { this.close(); return; }
       const signature = JSON.stringify(matches);
       if (!force && !this.menu.hidden && key === this.key && signature === this.signature) return;
@@ -112,7 +136,7 @@
       this.menu.hidden = false;
       this.input.setAttribute("aria-controls", this.menu.id);
       this.menu.setAttribute("aria-label", query.kind === "model" ? "Models" : query.kind === "effort" ? "Reasoning effort" :
-        query.kind === "permissions" ? "Permissions" : "Slash commands");
+        query.kind === "permissions" ? "Permissions" : query.kind === "skill" ? "Skills" : "Slash commands");
       this.input.setAttribute("aria-expanded", "true");
       this.menu.replaceChildren();
       const doc = this.input.ownerDocument;
@@ -138,6 +162,7 @@
       const suffix = this.input.value.slice(query.end);
       // Replace only the active token; retain arguments already entered.
       const completion = command.name + (suffix ? "" : " ");
+      this.onReplace(query.start, query.end, completion);
       this.input.setRangeText(completion, query.start, query.end, "end");
       const next = this.query();
       this.dismissed = next && next.kind !== query.kind ? null :

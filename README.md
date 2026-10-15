@@ -910,7 +910,11 @@ lists these commands. Commands do not create model turns; changes apply to the
 next message and persist across server restarts. Wait for a running turn to
 finish before changing settings. When switching models, an unsupported effort
 falls back to the new model's advertised default.
-The slash menu completes model names and supported effort levels. In the UI,
+The slash menu completes model names and supported effort levels. In Codex chats,
+type `$` anywhere in the message to browse enabled skills for the current working
+folder. Keep typing to filter skill names, use arrow keys to move, and Enter or
+Tab to insert a shortcut; Escape dismisses the menu. Skill selection updates the
+draft without sending it. In the UI,
 `/fork` opens a new thread from the current idle Codex or Claude conversation. `/close`
 stops any running turn and closes the current thread, keeping its history and
 returning to the overview. These two commands take no arguments or images and

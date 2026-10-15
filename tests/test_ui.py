@@ -389,6 +389,14 @@ class BrowserHTTPTests(unittest.TestCase):
             content = response.read().decode()
             return response.status, json.loads(content) if response.headers.get_content_type() == "application/json" else content
 
+    def test_skill_catalog_requires_csrf_and_restricts_workspace_without_starting_a_turn(self):
+        body = {"client": "codex", "cwd": str(self.root)}
+        with patch.object(self.sessions.rpc, "request", return_value={"data": []}) as rpc:
+            self.assertEqual(self.request("/api/browser/skills", body, {"X-Agent-Coord-Token": ""})[0], 403)
+            self.assertEqual(self.request("/api/browser/skills", {**body, "cwd": str(self.root.parent)})[0], 400)
+            self.assertEqual(self.request("/api/browser/skills", body), (200, {"data": []}))
+            rpc.assert_called_once_with("skills/list", {"cwds": [str(self.root)], "forceReload": True})
+
     def test_database_contention_returns_json_without_replaying_operations(self):
         for operation, path, body in (
             ("list_work_threads", "/api/browser/threads?archived=false", None),

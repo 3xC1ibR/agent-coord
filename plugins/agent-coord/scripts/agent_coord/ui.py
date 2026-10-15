@@ -32,6 +32,7 @@ from .native_push import NativePush
 from .workspaces import matches_workspace, resolve_workspace
 from .organization import repository_root
 from .workspace_files import workspace_files
+from .skill_catalog import skill_catalog
 from .speech import Speech, spoken_text
 
 DEFAULT_UI_HOST = "127.0.0.1"
@@ -656,6 +657,9 @@ def _handler(
                     return
                 if len(route) == 4 and route[:3] == ["api", "browser", "files"]:
                     self._json(HTTPStatus.OK, workspace_files(route[3], body, browser_sessions.cwd))
+                    return
+                if route == ["api", "browser", "skills"]:
+                    self._json(HTTPStatus.OK, {"data": skill_catalog(browser_sessions, body)})
                     return
                 if route == ["api", "browser", "desktop-projects"]:
                     if not self._local_request():

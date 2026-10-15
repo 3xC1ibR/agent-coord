@@ -1213,6 +1213,7 @@ function renderStatus() {
   $("session-name").disabled = !state.detail || isSessionDraft();
   $("organize-thread").disabled = !state.detail;
   $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (work?.client !== "codex" ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
+  if (!archived && !running && work?.client === "codex") $("composer-hint").textContent += " · $ skills";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
   state.attachments?.render();
   state.slashCommands?.render();
@@ -2179,8 +2180,8 @@ async function toggleDispatcher(thread = state.detail?.work_thread) {
 }
 function composerKeydown(event) {
   if (event.isComposing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
-  if (state.mentions?.keydown(event)) return;
   if (state.slashCommands?.keydown(event)) return;
+  if (state.mentions?.keydown(event)) return;
   if (event.key === "Enter") {
     event.preventDefault();
     if (!$("send").disabled) $("composer").requestSubmit();
@@ -2435,17 +2436,19 @@ async function boot() {
       const results = await Promise.all([api("threads"), api("threads?archived=true")]);
       return [...results[0].data, ...results[1].data];
     },
-    canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !state.busy &&
+    canComplete: () => state.slashCommands?.query()?.kind !== "skill" && !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !state.busy &&
       state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
     onChange: () => { state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
   state.slashCommands = new ChatSlashCommands({input: $("message"), menu: $("slash-commands"),
     getThread: () => state.selected,
-    getSession: () => state.detail?.session,
+    getSession: () => ({...state.detail?.session, cwd: state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config?.cwd}),
     catalogs: (state.modelCatalogs ||= new Map()),
     loadModels: loadModelCatalog,
+    loadSkills: async session => (await api("skills", {client: session.client || "codex", cwd: session.cwd})).data,
     canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !state.busy &&
       state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
-    onChange: () => { state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
+    onReplace: (start, end, text) => state.mentions?.draft().edit(start, end, text),
+    onChange: () => { state.mentions?.render(); state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
   state.attachments = new ChatImageAttachments({document, getThread: () => state.selected,
     canAttach: () => !!state.detail?.work_thread?.browser_session && state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
     onChange: renderStatus, onError: showError});

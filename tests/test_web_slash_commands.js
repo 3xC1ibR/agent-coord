@@ -6,7 +6,7 @@ const vm = require("node:vm");
 const path = require("node:path");
 const web = path.join(__dirname, "../plugins/agent-coord/scripts/agent_coord/web");
 
-function setup({loadModels = async () => []} = {}) {
+function setup({loadModels = async () => [], loadSkills = async () => [], onReplace = () => {}} = {}) {
   const doc = {addEventListener() {}, createElement: () => new Element()};
   class Element {
     constructor() { this.ownerDocument = doc; this.children = []; this.attributes = {}; this.listeners = {}; this.hidden = true; }
@@ -30,7 +30,7 @@ function setup({loadModels = async () => []} = {}) {
   const f = {input, menu, doc, context, enabled: true, thread: "one", changes: 0,
     session: {client: "codex", model: "first-model"}};
   f.complete = new context.ChatSlashCommands({input, menu, getThread: () => f.thread,
-    getSession: () => f.session, loadModels,
+    getSession: () => f.session, loadModels, loadSkills, onReplace,
     canComplete: () => f.enabled, onChange: () => f.changes++});
   f.type = (value, caret = value.length) => {
     input.value = value; input.selectionStart = input.selectionEnd = caret;
@@ -62,6 +62,92 @@ const models = [
   {model: "second-model", supportedReasoningEfforts: [{reasoningEffort: "medium"}]},
 ];
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+const skills = [
+  {name: "agent-coord:manage-threads", description: "Review work threads", scope: "user"},
+  {name: "skill-creator", description: "Create a reusable skill", scope: "system"},
+];
+
+test("dollar opens skills inline, filters namespaced names, and inserts without submitting", async () => {
+  const f = setup({loadSkills: async () => skills});
+  f.type("Please use $"); await settle();
+  assert.deepEqual(f.names(), ["$agent-coord:manage-threads", "$skill-creator"]);
+  assert.equal(f.menu.attributes["aria-label"], "Skills");
+  assert.equal(f.menu.children[0].children[2].textContent, "Review work threads");
+  f.key("ArrowDown"); assert.equal(f.input.attributes["aria-activedescendant"], "slash-commands-1");
+  f.key("Enter"); assert.equal(f.input.value, "Please use $skill-creator ");
+  assert.equal(f.changes, 1); assert.equal(f.menu.hidden, true);
+  assert.equal(f.key("Enter").defaultPrevented, undefined);
+  f.type("Use $MANAGE"); assert.deepEqual(f.names(), ["$agent-coord:manage-threads"]);
+  f.key("Tab"); assert.equal(f.input.value, "Use $agent-coord:manage-threads ");
+  f.type("Use $missing"); assert.equal(f.menu.hidden, true);
+});
+
+test("skill insertion replaces the whole active token and preserves neighboring text and references", async () => {
+  const {ThreadMentionDraft} = require(path.join(web, "thread-mentions.js"));
+  const text = "Use $sk-old with @Other thread";
+  const ref = {start: text.indexOf("@"), end: text.length, text: "@Other thread", session_id: "other"};
+  const draft = new ThreadMentionDraft(text, [ref]);
+  const f = setup({loadSkills: async () => skills, onReplace: (start, end, value) => draft.edit(start, end, value)});
+  f.type(text, 7); await settle(); f.key("Tab");
+  assert.equal(f.input.value, "Use $skill-creator with @Other thread");
+  assert.equal(draft.text, f.input.value);
+  assert.equal(draft.snapshot()[0].start, f.input.value.indexOf("@"));
+  f.type("First line\n($manage)", 19); await settle(); f.key("Enter");
+  assert.equal(f.input.value, "First line\n($agent-coord:manage-threads)");
+});
+
+test("skill catalogs follow cwd and provider, ignore late responses, and retry after failure", async () => {
+  const requests = [];
+  const f = setup({loadSkills: session => new Promise((resolve, reject) => requests.push({session, resolve, reject}))});
+  f.session = {client: "codex", cwd: "/one"};
+  f.type("$"); await settle();
+  f.session = {client: "codex", cwd: "/two"};
+  f.complete.render(); await settle();
+  requests[0].resolve(skills); await settle(); assert.equal(f.menu.hidden, true);
+  requests[1].resolve([{name: "two"}]); await settle(); assert.deepEqual(f.names(), ["$two"]);
+  f.session = {client: "claude", cwd: "/two"};
+  f.complete.render(); await settle(); requests[2].reject(new Error("unavailable")); await settle();
+  assert.equal(f.menu.hidden, true);
+  f.type("$"); await settle(); assert.equal(requests.length, 4);
+  requests[3].resolve([]); await settle();
+  assert.equal(f.key("Enter").defaultPrevented, undefined);
+});
+
+test("skill completion preserves native editing, dismisses with Escape, and refreshes on focus", async () => {
+  let loads = 0;
+  const f = setup({loadSkills: async () => { loads++; return skills; }});
+  f.type("$"); await settle();
+  for (const extra of [{shiftKey: true}, {ctrlKey: true}, {isComposing: true}]) {
+    assert.equal(f.key("Enter", extra).defaultPrevented, undefined);
+  }
+  f.key("Escape"); f.complete.render(); assert.equal(f.menu.hidden, true);
+  f.type("$skill"); assert.equal(f.menu.hidden, false);
+  f.input.emit("blur"); assert.equal(f.menu.hidden, true);
+  f.input.emit("focus"); await settle(); assert.equal(loads, 2);
+  f.input.emit("compositionstart"); assert.equal(f.menu.hidden, true);
+  f.input.emit("compositionend"); assert.equal(f.menu.hidden, false);
+  for (const text of ["cost$skill", "\\$skill", "${skill}", "$skill with ordinary text"]) {
+    f.type(text); assert.equal(f.menu.hidden, true, text);
+  }
+  f.type("$"); f.enabled = false; f.complete.render(); assert.equal(f.menu.hidden, true);
+});
+
+test("new-session skill lookup uses its selected working folder and saves the completed draft", async () => {
+  const f = setup(), calls = [];
+  const elements = {message: f.input, "slash-commands": f.menu, composer: {hidden: false}};
+  const state = {selected: "new-session", drafts: new Map(), closing: new Set(),
+    detail: {session: {client: "codex", cwd: "/chosen"}, work_thread: {browser_session: true, attention: "now"}}};
+  Object.assign(f.context, {state, $: id => elements[id], loadModelCatalog: async () => [],
+    api: async (path, body) => { calls.push([path, {...body}]); return {data: skills}; }});
+  const app = fs.readFileSync(path.join(web, "app.js"), "utf8");
+  vm.runInContext(app.slice(app.indexOf("  state.slashCommands = new ChatSlashCommands("),
+    app.indexOf("  state.attachments = new ChatImageAttachments(")), f.context);
+  f.complete = state.slashCommands;
+  f.type("Use $skill"); await settle(); f.key("Tab");
+  assert.deepEqual(calls, [["skills", {client: "codex", cwd: "/chosen"}]]);
+  assert.equal(state.drafts.get("new-session"), "Use $skill-creator ");
+});
 
 test("new-session composer completes commands, provider models and effort before the first message", async () => {
   const f = setup(), calls = [];
