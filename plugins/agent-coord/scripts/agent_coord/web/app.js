@@ -452,6 +452,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     more.onclick = event => {
       const items = [
         {label: thread.project_id ? "Change group" : "Add to group", run: () => action(() => organizeThread(thread))},
+        {label: "Move to project…", disabled: !!threadMoveUnavailable(thread), run: () => openThreadMove(thread)},
         {label: thread.pinned ? "Unpin" : "Pin", run: () => action(() => toggleThreadPinned(thread))},
         {label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)},
       ];
@@ -1209,6 +1210,8 @@ function renderStatus() {
   $("add-link").disabled = !state.detail;
   $("session-name").disabled = !state.detail || isSessionDraft();
   $("organize-thread").disabled = !state.detail;
+  $("move-thread").disabled = !!threadMoveUnavailable(work) || state.detailRefreshing;
+  $("move-thread").title = threadMoveUnavailable(work);
   $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (work?.client !== "codex" ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
   if (!archived && !running && work?.client === "codex") $("composer-hint").textContent += " · $ skills";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
@@ -1268,6 +1271,13 @@ function renderQueuedMessages() {
     resume.onclick = () => change({action: "resume"});
     area.append(resume);
   }
+}
+function threadMoveUnavailable(thread) {
+  if (!thread?.browser_session) return "Only app conversations can move projects.";
+  if (!["codex", "claude"].includes(thread.client)) return "This provider requires a new conversation in the destination project.";
+  if (thread.attention === "archived") return "Reopen the thread before moving it.";
+  if (thread.turn_active || ["running", "needs input"].includes(thread.status)) return "Wait for this turn to finish before moving the thread.";
+  return "";
 }
 function itemText(item) {
   if (item.type === "userMessage") return (item.content || []).map(c => c.text ||
@@ -1608,6 +1618,16 @@ function scheduleTimelineRender() {
 function applyEvent(event) {
   const cached = state.conversations?.get(event.params.threadId);
   if (cached) cached.revision++;
+  if (event.method === "browser/changed" && event.params.projectCwd) {
+    for (const list of [state.sessions, state.viewThreads]) for (const thread of list || []) {
+      if (thread.thread_id === event.params.threadId) Object.assign(thread, {project_cwd: event.params.projectCwd, cwd: event.params.projectCwd});
+    }
+    if (cached?.detail?.work_thread) Object.assign(cached.detail.work_thread, {project_cwd: event.params.projectCwd, cwd: event.params.projectCwd});
+    if (state.selected === event.params.threadId && !state.paneMode && state.threadMoveSubmitting !== event.params.threadId) {
+      select(event.params.threadId).catch(showError);
+      return;
+    }
+  }
   if (!state.detail || event.params.threadId !== state.selected) return;
   const {method, params} = event;
   if (method === "coordination/messages") { refreshAgentMessages().catch(showError); return; }
@@ -1744,6 +1764,42 @@ for (const prefix of ["edit"]) {
   for (const field of ["repository", "project"]) $(prefix + "-" + field).onchange = () => assignmentFields(prefix);
 }
 let organizationThread = null;
+let movingThread = null;
+
+function openThreadMove(thread) {
+  if (threadMoveUnavailable(thread)) return;
+  movingThread = thread;
+  $("move-thread-directory").value = "";
+  $("move-thread-projects").replaceChildren(...(state.folders?.projects || [])
+    .filter(project => project.cwd !== thread.project_cwd).map(project => new Option(project.cwd, project.cwd)));
+  $("move-thread-error").hidden = true;
+  $("move-thread-dialog").showModal();
+  $("move-thread-directory").focus();
+}
+async function submitThreadMove() {
+  const thread = movingThread;
+  if (!thread || state.threadMoveSubmitting) return;
+  state.threadMoveSubmitting = thread.thread_id;
+  try {
+    const moved = await api(threadPath(thread.thread_id) + "/move", {cwd: $("move-thread-directory").value.trim()});
+    $("move-thread-dialog").close();
+    if (state.selected === thread.thread_id) {
+      await state.threadTabs?.close(thread.thread_id, {force: true});
+      await openProjectDirectory(moved.project_cwd);
+      await select(thread.thread_id);
+    } else await refreshList();
+  } catch (error) {
+    $("move-thread-error").textContent = error.message;
+    $("move-thread-error").hidden = false;
+  } finally {
+    state.threadMoveSubmitting = null;
+  }
+}
+$("move-thread").onclick = () => openThreadMove(state.detail?.work_thread);
+$("move-thread-form").onsubmit = event => {
+  event.preventDefault();
+  action(submitThreadMove, $("save-thread-move"));
+};
 $("organize-thread").onclick = () => action(() => organizeThread(state.detail?.work_thread), $("organize-thread"));
 async function organizeThread(thread) {
   if (!thread) return;

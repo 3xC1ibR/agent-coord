@@ -823,6 +823,11 @@ def _handler(
                         if body:
                             raise CoordinationError("Fork accepts an empty object.")
                         result = browser_sessions.fork_work_thread(thread_id)
+                    elif route[4] == "move":
+                        from .thread_move import move_work_thread
+                        if set(body) != {"cwd"}:
+                            raise CoordinationError("Moving a thread accepts its destination cwd only.")
+                        result = move_work_thread(browser_sessions, thread_id, body["cwd"])
                     elif route[4] in {"close", "reopen"}:
                         if body:
                             raise CoordinationError("Close and reopen accept an empty object.")

@@ -51,13 +51,20 @@ class AppControl:
 
     def request(self, operation, sender_session_id, payload, *, thread_id=None, request_id=None):
         self.store.get_session(sender_session_id)
-        if operation not in {"create", "settings", "models"}:
+        if operation not in {"create", "settings", "models", "move"}:
             raise CoordinationError("Unknown app control operation.")
         payload = dict(payload)
-        if operation == "settings":
+        if operation in {"settings", "move"}:
             record = self.settings(thread_id)
             cwd = record["cwd"]
-            if not payload or set(payload) - {"model", "effort", "yolo"}:
+            if operation == "move":
+                from .thread_move import destination_directory
+                if set(payload) != {"cwd"}:
+                    raise CoordinationError("Moving a thread accepts its destination cwd only.")
+                payload["cwd"] = destination_directory(payload["cwd"])
+                if record["client"] not in {"codex", "claude"}:
+                    raise CoordinationError("This provider keeps its original workspace. Start a new conversation in the destination project.")
+            elif not payload or set(payload) - {"model", "effort", "yolo"}:
                 raise CoordinationError("Choose model, effort, or permissions to change.")
         else:
             cwd = str(Path(payload.get("cwd") or self.store.get_session(sender_session_id)["cwd"]).expanduser().resolve())
@@ -92,11 +99,11 @@ class AppControl:
                     old_payload.pop("reply_required")
                 # thread_id on create is filled in as soon as the provider replies.
                 if (previous["operation"] != operation or previous["sender_session_id"] != sender_session_id
-                        or old_payload != payload or previous["cwd"] != cwd
-                        or (operation == "settings" and previous["thread_id"] != thread_id)):
+                        or old_payload != payload or (operation != "move" and previous["cwd"] != cwd)
+                        or (operation in {"settings", "move"} and previous["thread_id"] != thread_id)):
                     raise CoordinationError("Request ID already belongs to a different app request.")
             else:
-                if operation == "settings":
+                if operation in {"settings", "move"}:
                     payload["expected_settings"] = {key: record[key] for key in SETTINGS}
                 now = self.store.clock()
                 db.execute("""INSERT INTO app_control_requests
@@ -127,7 +134,7 @@ class AppControl:
             result = {key: row[key] for key in ("request_id", "operation", "status", "thread_id", "error")}
             result["result"] = json.loads(row["result_json"]) if row["result_json"] else None
             if row["status"] == "queued":
-                result["message"] = "Queued for Ribbon Field. The app must be running in this workspace; settings changes wait for idle."
+                result["message"] = "Queued for Ribbon Field. The app must be running in this workspace; settings and project moves wait for idle."
             if row["status"] in TERMINAL or time.monotonic() >= deadline:
                 return result
             time.sleep(min(.1, max(0, deadline - time.monotonic())))
@@ -204,7 +211,7 @@ class AppControlWorker:
             if not matches_workspace(request["cwd"], self.sessions.cwd):
                 continue
             thread_id = request["thread_id"]
-            if request["operation"] == "settings":
+            if request["operation"] in {"settings", "move"}:
                 with self.sessions._thread_lock(thread_id):
                     self.control.settings(thread_id)
                     closed = self.control.store.threads.get(thread_id)["attention"] == "archived"
@@ -215,7 +222,7 @@ class AppControlWorker:
                     # Do not resume a thread owned by another running app-server.
                     if not closed and not loaded and session["ended_at"] is None:
                         continue
-                    if not closed and (busy or self.sessions.queue.list(thread_id)):
+                    if not closed and (busy or session["turn_active"] or self.sessions.queue.list(thread_id)):
                         continue
                     self._execute(request)
             else:
@@ -229,6 +236,11 @@ class AppControlWorker:
         try:
             if request["operation"] == "models":
                 result = {"client": payload.get("client", "codex"), "models": self.sessions.models(payload.get("client", "codex"))}
+            elif request["operation"] == "move":
+                from .thread_move import move_work_thread
+                thread_id = request["thread_id"]
+                move_work_thread(self.sessions, thread_id, payload["cwd"], expected_settings=payload["expected_settings"])
+                result = {**self.control.settings(thread_id), "project_cwd": payload["cwd"]}
             elif request["operation"] == "settings":
                 thread_id = request["thread_id"]
                 expected = payload.pop("expected_settings")

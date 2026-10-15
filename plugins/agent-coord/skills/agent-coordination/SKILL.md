@@ -167,6 +167,27 @@ Move a thread only at the user's request, using the UI or `thread update
 --session-id <id> --attention now|later|archived`. Parking preserves conversation
 state and does not interrupt a running turn or release a file scope. Call
 `end-work` independently when you no longer own that scope.
+To move a Codex or Claude app conversation to another project directory at the
+user's request, use the `move_thread` tool with an absolute `cwd`. Omit
+`session_id` for your own thread, or provide the target ID. Pass `from_session`
+from hook context if caller identity is unavailable. The shared CLI alternative is:
+
+```bash
+agent-coord thread move --session-id <thread-id> --cwd /absolute/destination --request-id <unique-key> --wait 0
+agent-coord thread request-status --request-id <unique-key>
+```
+
+The move changes both the thread's project and execution directory, preserves
+history and links, detects the destination repository, and clears a group from
+the old project. It uses the same provider directory mechanism as `/cd`, without
+adding a model message. Release the target thread's work scope with `end-work`
+before requesting a move. The owning app waits for idle and queued messages;
+your own active thread moves after your turn ends. A queued receipt is not
+confirmation. Reuse the request ID for retries, inspect `request-status`, or
+cancel a queued move with `thread cancel-request`. Closed threads must reopen;
+providers with fixed workspaces require a new conversation instead. Terminal
+sessions cannot be moved this way.
+
 The CLI's legacy `archived` placement appears as **Closed** in the UI. To close
 a session, use `thread close --session-id <id>`; the owning Ribbon Field runtime
 performs the same lifecycle action as **Close thread** / **Stop and close**.

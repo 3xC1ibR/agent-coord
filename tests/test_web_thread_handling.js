@@ -38,6 +38,8 @@ function cardSetup(item) {
     associationLabel: () => "Workspace", relativeTime: () => "now",
     action: callback => callback(), select: () => assert.fail("Dismiss must not open the card")});
   c.state.closing = new Set(); c.state.pinning = new Set();
+  const moveHelper = source.indexOf("function threadMoveUnavailable(");
+  vm.runInContext(source.slice(moveHelper, source.indexOf("\n}", moveHelper) + 2), c);
   vm.runInContext(source.slice(source.indexOf("function threadCard("), source.indexOf("function groupHeading(")), c);
   return c;
 }
@@ -63,7 +65,7 @@ test("Dismiss handles replies and saved blockers without opening the card", asyn
       let menu;
       c.state.threadActions = {notify() {}, showMenu: (trigger, title, items) => { menu = items; }};
       more.onclick({stopPropagation() {}});
-      assert.deepEqual(Array.from(menu, item => item.label), ["Add to group", "Pin", "Move to Later…"]);
+      assert.deepEqual(Array.from(menu, item => item.label), ["Add to group", "Move to project…", "Pin", "Move to Later…"]);
       assert.ok(dismiss);
       assert.equal(dismiss.textContent, "Dismiss");
       assert.equal(dismiss.attributes["aria-label"], "Dismiss · Recommendation");

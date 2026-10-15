@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agent-coord": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-mcp"]
+    }
+  }
+}

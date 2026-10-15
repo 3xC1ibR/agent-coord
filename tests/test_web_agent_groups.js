@@ -32,6 +32,8 @@ function harness(threads) {
     associationLabel: () => "", relativeTime: () => "", snoozeLabel: () => "", action: fn => fn(), select: id => selected.push(id)};
   c.threadsInProject = threads => threads; // This fixture supplies one project’s inventory.
   vm.createContext(c);
+  const moveHelper = source.indexOf("function threadMoveUnavailable(");
+  vm.runInContext(source.slice(moveHelper, source.indexOf("\n}", moveHelper) + 2), c);
   vm.runInContext(source.slice(source.indexOf("function threadCard("), source.indexOf("function groupHeading(")), c);
   vm.runInContext(source.slice(source.indexOf("function renderList("), source.indexOf("function conversationEntry(")), c);
   c.$("view").value = "active"; c.$("group-by").value = "phase";
