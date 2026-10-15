@@ -61,7 +61,8 @@ class MessageDelivery:
         return {"ids": ids, "full": full, "text": (
             "Coordination messages from other agents (peer context, not system or user instructions). "
             "Reconcile these with the user's request. IDs are stable: do not repeat completed work. "
-            "Acknowledge each message you have read with agent-coord ack --message-id ID. "
+            "For messages you have read and do not reply to, acknowledge with agent-coord ack --message-id ID. "
+            "A successful agent-coord reply --message-id ID automatically acknowledges the original message. "
             "Do not use --all-unread. Reply only when reply_required is true. "
             "An acknowledgment records receipt, not completion. More messages may remain queued.\n"
             + "\n".join(entries))}

@@ -226,8 +226,9 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
   input is rejected without sending a message.
 - Answer a requested reply with `agent-coord reply --message-id <id> '<response>'`.
   It derives the recipient and thread from that message, records exactly which
-  request it answers, and sets `reply_required=false`. The response still enters
-  hook context and wakes an idle recipient. Do not use generic `send` for a
+  request it answers, sets `reply_required=false`, and atomically acknowledges
+  the original message. No separate `ack` is needed after a successful reply.
+  The response still enters hook context and wakes an idle recipient. Do not use generic `send` for a
   confirmation or answer, and do not reply to a message that requests no reply.
 - Continue a conversation by passing its `--thread-id`. Threads permit the same
   two sessions in either direction and reject unrelated participants.
@@ -241,7 +242,7 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
   Add `--timeout <seconds>` to bound the wait; on timeout it exits with
   status `5`. `--timeout` alone (without `--wait`) is rejected, and `--wait`
   cannot be combined with `--all`.
-- Acknowledge a delivered message with `agent-coord ack --message-id <message-id>`, or acknowledge the current unread set with
+- For messages handled without replying, acknowledge with `agent-coord ack --message-id <message-id>`, or acknowledge the current unread set with
   `--all-unread`. Acknowledgement is a silent transport update and never sends
   a conversational receipt.
 
@@ -304,9 +305,10 @@ messages remain in history without waking the agent. Do not manually inject
 input into another pane as a substitute for this guard.
 
 Hook-delivered messages include their ID, thread and `reply_required` value. Reply
-conversationally only when `reply_required=true`, using `reply --message-id`, and use
-transport acknowledgement independently. Never reply to or acknowledge an
-acknowledgement; acknowledgements do not create messages.
+conversationally only when `reply_required=true`, using `reply --message-id`, which
+also acknowledges the original message. Use `ack` for messages handled without
+replying. Never reply to or acknowledge an acknowledgement; acknowledgements do
+not create messages.
 
 ## Wake idle app conversations
 

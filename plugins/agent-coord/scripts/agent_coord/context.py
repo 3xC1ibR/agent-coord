@@ -69,8 +69,10 @@ def coordination_bootstrap(store, session_id, *, caller_context=True, command=No
         f"\n{command} inbox{identity} --unread"
         f"\n{command} ack{identity} --message-id <id>"
         f"\n{command} end-work{identity}"
-        "\nAcknowledge handled messages silently. Reply only when reply_required=true, using "
-        f"{command} reply --message-id <id> '<response>'."
+        "\nAcknowledge handled messages silently with ack when not replying. "
+        "Reply only when reply_required=true, using "
+        f"{command} reply --message-id <id> '<response>'; a successful reply automatically "
+        "acknowledges the original message."
     )
     return text + "\n\n" + store.threads.instructions(session_id, caller_context=caller_context, command=command)
 

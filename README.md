@@ -229,8 +229,9 @@ records that message ID as `in_reply_to`, and sets `reply_required=false`.
 Replies remain `action_required` so they enter hook context and wake the
 recipient to process the answer. Only the original recipient can reply; replies
 to messages requesting no reply, closed exchanges, or superseded requests are
-rejected. Replying does not acknowledge the original message; use `ack`
-independently. Starting new work or asking a follow-up question uses `send`
+rejected. A successful reply also acknowledges the original message in the same
+transaction; no separate `ack` is needed. Use `ack` for messages handled without
+replying. Starting new work or asking a follow-up question uses `send`
 with an explicit reply choice.
 
 Continue a conversation with the same `--thread-id`. A thread accepts only the
@@ -783,8 +784,9 @@ command instead of a partial body. Use `agent-coord message --message-id <id>`
 to read up to 8,000 characters. Use its `next_offset` with `--offset` to read the
 next page. The sender and recipient can use this command to inspect submission
 state, pending age, delivery errors, wake blockers, and recipient activity.
-Reading a page does not acknowledge the message. The agent must acknowledge each
-read message by ID. Submission is evidence of transport, not task completion.
+Reading a page does not acknowledge the message. A successful explicit reply
+acknowledges its original message; otherwise, the agent must acknowledge each
+read message by ID with `ack`. Submission is evidence of transport, not task completion.
 Unacknowledged messages can be delivered again on a later user turn. Stable IDs
 prevent repeated delivery attempts within one app turn. Native output and tool
 events refresh the agent's activity timestamp.

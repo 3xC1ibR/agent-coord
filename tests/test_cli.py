@@ -555,6 +555,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(receipt["in_reply_to"], original["id"])
             self.assertFalse(receipt["reply_required"])
             self.assertEqual(receipt["classification"], "action_required")
+            unread = self._run(database, "inbox", "--session-id", "two", "--unread")
+            self.assertEqual(json.loads(unread.stdout), [])
             inbox = self._run(database, "inbox", "--session-id", "one", "--peek")
             self.assertEqual(json.loads(inbox.stdout)[0]["body"], "Received, thanks!")
             invalid = self._run(database, "reply", "--from-session", "one", "--message-id",

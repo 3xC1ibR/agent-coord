@@ -70,11 +70,11 @@ def _format_messages(messages: list[dict[str, Any]]) -> str:
             f"{sender}{bead}: {message['body']}"
         )
     lines.append(
-        "Acknowledge each handled message silently with agent-coord ack --message-id <id>. "
+        "For handled messages you do not reply to, acknowledge silently with agent-coord ack --message-id <id>. "
         "Answer the user directly when requested; keep receipt bookkeeping out of "
         "the answer unless asked. Reply to the sender only where reply_required=true, "
         "using agent-coord reply --message-id <id> '<response>'; this delivers the "
-        "reply without requesting another. "
+        "reply without requesting another and automatically acknowledges the original message. "
         "For new messages, send requires --reply-required or --no-reply-required."
     )
     return "\n".join(lines)

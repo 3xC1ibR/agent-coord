@@ -2610,7 +2610,7 @@ class CoordinationStore:
     def reply_message(
         self, *, sender_session_id: str, message_id: int, body: str
     ) -> dict[str, Any]:
-        """Answer exactly one request without creating another reply obligation."""
+        """Atomically answer and acknowledge one request without another reply obligation."""
         if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
             raise CoordinationError("Reply message ID must be a positive integer.")
         if not body.strip():
@@ -2632,6 +2632,7 @@ class CoordinationStore:
                 raise CoordinationError("Cannot reply to a closed or superseded exchange. Use send with an explicit reply choice for new work.")
             if not original["reply_required"]:
                 raise CoordinationError(f"Message {message_id} does not request a reply. Use send with an explicit reply choice for new work.")
+            now = self.clock()
             row, _ = self._insert_message(
                 connection,
                 sender_session_id=sender_session_id,
@@ -2641,7 +2642,16 @@ class CoordinationStore:
                 thread_id=original["thread_id"],
                 reply_required=False,
                 in_reply_to=message_id,
-                now=self.clock(),
+                now=now,
+            )
+            connection.execute(
+                """
+                UPDATE messages
+                SET delivered_at = COALESCE(delivered_at, ?),
+                    acknowledged_at = COALESCE(acknowledged_at, ?)
+                WHERE id = ?
+                """,
+                (now, now, message_id),
             )
         result = self._row_to_message(row)
         result.update(

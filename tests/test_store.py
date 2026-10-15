@@ -550,10 +550,12 @@ class CoordinationStoreTests(unittest.TestCase):
         self.assertFalse(informational["reply_required"])
         self.assertFalse(closure["reply_required"])
 
-    def test_reply_is_actionable_without_reply_obligation_or_transport_ack(self) -> None:
+    def test_reply_is_actionable_and_acknowledges_only_its_original_request(self) -> None:
         self.register("one")
         self.register("two", "claude")
         original = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Please confirm")
+        other = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Another request",
+                                        thread_id=original["thread_id"])
         reply = self.store.reply_message(sender_session_id="two", message_id=original["id"], body="  Received, thanks!  ")
         self.assertEqual(reply["recipient_session_id"], "one")
         self.assertEqual(reply["thread_id"], original["thread_id"])
@@ -562,12 +564,49 @@ class CoordinationStoreTests(unittest.TestCase):
         self.assertEqual(reply["classification"], "action_required")
         self.assertFalse(reply["reply_required"])
         self.assertIsNone(reply["delivered_at"])
-        original_record = self.store.inbox("two", include_delivered=True, mark_delivered=False)[0]
-        self.assertIsNone(original_record["acknowledged_at"])
-        self.assertIsNone(original_record["delivered_at"])
+        self.assertIsNone(reply["acknowledged_at"])
+        reopened = CoordinationStore(self.store.database_path, clock=self.clock)
+        original_record, other_record = reopened.inbox("two", include_delivered=True, mark_delivered=False)
+        self.assertEqual(original_record["acknowledged_at"], reply["created_at"])
+        self.assertEqual(original_record["delivered_at"], reply["created_at"])
+        self.assertIsNone(other_record["acknowledged_at"])
+        self.assertIsNone(other_record["delivered_at"])
+        self.assertEqual([m["id"] for m in reopened.inbox("two", unread_only=True, mark_delivered=False)], [other["id"]])
         with self.assertRaisesRegex(CoordinationError, "does not request a reply"):
             self.store.reply_message(sender_session_id="one", message_id=reply["id"], body="Thanks again")
-        self.assertEqual(len(self.store.inbox("two", include_delivered=True, mark_delivered=False)), 1)
+        self.assertEqual(len(self.store.inbox("two", include_delivered=True, mark_delivered=False)), 2)
+
+    def test_reply_preserves_existing_receipt_timestamps(self) -> None:
+        self.register("one")
+        self.register("two")
+        for acknowledge_first in (False, True):
+            with self.subTest(acknowledge_first=acknowledge_first):
+                original = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Question")
+                self.store.inbox("two")
+                if acknowledge_first:
+                    self.store.acknowledge("two", original["id"])
+                self.clock.now += 10
+                reply = self.store.reply_message(sender_session_id="two", message_id=original["id"], body="Answer")
+                with self.store._connection() as db:
+                    record = db.execute("SELECT delivered_at, acknowledged_at FROM messages WHERE id = ?", (original["id"],)).fetchone()
+                self.assertEqual(record["delivered_at"], self.clock.now - 10)
+                self.assertEqual(record["acknowledged_at"], self.clock.now - 10 if acknowledge_first else self.clock.now)
+
+    def test_reply_and_acknowledgment_roll_back_together(self) -> None:
+        self.register("one")
+        self.register("two")
+        original = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Question")
+        with self.store._connection() as db:
+            db.execute("""
+                CREATE TRIGGER reject_ack BEFORE UPDATE OF acknowledged_at ON messages
+                BEGIN SELECT RAISE(ABORT, 'ack failed'); END
+            """)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "ack failed"):
+            self.store.reply_message(sender_session_id="two", message_id=original["id"], body="Answer")
+        self.assertEqual(self.store.inbox("one", include_delivered=True, mark_delivered=False), [])
+        pending = self.store.inbox("two", unread_only=True, mark_delivered=False)
+        self.assertEqual([m["id"] for m in pending], [original["id"]])
+        self.assertIsNone(pending[0]["delivered_at"])
 
     def test_invalid_replies_do_not_write_messages(self) -> None:
         for session in ("one", "two", "three"):
@@ -581,6 +620,9 @@ class CoordinationStoreTests(unittest.TestCase):
                 self.store.reply_message(sender_session_id=sender, message_id=message_id, body=body)
         with self.store._connection() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
+            record = db.execute("SELECT delivered_at, acknowledged_at FROM messages WHERE id = ?", (original["id"],)).fetchone()
+            self.assertIsNone(record["delivered_at"])
+            self.assertIsNone(record["acknowledged_at"])
 
     def test_reply_cannot_reopen_closed_or_superseded_exchange(self) -> None:
         self.register("one")

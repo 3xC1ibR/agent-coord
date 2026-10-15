@@ -43,6 +43,17 @@ class MessageDeliveryTests(unittest.TestCase):
         self.assertEqual(reopened.read('sender', ident)['delivery']['state'], 'acknowledged')
         self.assertIsNone(reopened.prepare('recipient', 'turn2'))
 
+    def test_reply_stops_redelivery_of_original_but_delivers_response(self):
+        ident = self.send()
+        batch = self.delivery.prepare('recipient', 'turn1')
+        self.delivery.attempted('turn1', batch)
+        self.delivery.submitted('recipient', 'turn1', batch)
+        reply = self.store.reply_message(sender_session_id='recipient', message_id=ident, body='Answer')
+        reopened = MessageDelivery(CoordinationStore(self.store.database_path))
+        self.assertEqual(reopened.read('sender', ident)['delivery']['state'], 'acknowledged')
+        self.assertIsNone(reopened.prepare('recipient', 'turn2'))
+        self.assertEqual(reopened.prepare('sender', 'turn2')['ids'], [reply['id']])
+
     def test_batches_preserve_complete_bodies_and_leave_excess_queued(self):
         ids = [self.send('line\n' * 600 + str(n)) for n in range(12)]
         batch = self.delivery.prepare('recipient', 'turn')
