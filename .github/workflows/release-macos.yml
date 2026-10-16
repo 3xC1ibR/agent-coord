@@ -1,0 +1,207 @@
+name: Release macOS
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (X.Y.Z)'
+        required: true
+        type: string
+      publish:
+        description: 'Publish to downloads.ribbonfield.com after release approval'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release identity
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$REQUESTED_VERSION"
+            [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Manual releases must run from main'; exit 1; }
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Version must be X.Y.Z'; exit 1; }
+          commit=$(git rev-parse HEAD)
+          git merge-base --is-ancestor "$commit" origin/main
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Test release source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+          python3 scripts/plugin_tools.py validate
+          python3 -m compileall -q plugins/agent-coord/scripts scripts tests desktop/macos
+          node --test tests/*.js
+          python3 -W error::ResourceWarning -m unittest discover -s tests -v
+
+  build:
+    needs: validate
+    environment: macos-signing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+      RELEASE_ARCH: ${{ matrix.arch }}
+      SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.13.1'
+          enable-cache: false
+      - name: Install signing and notarization credentials
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in CERTIFICATE_BASE64 CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_PASSWORD APPLE_TEAM_ID SIGN_IDENTITY; do
+            [[ -n "${!name}" ]] || { echo "Missing release setting: $name"; exit 1; }
+          done
+          [[ "$(uname -m)" == "$RELEASE_ARCH" ]]
+          umask 077
+          keychain="$RUNNER_TEMP/release-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+          security default-keychain -d user -s "$keychain"
+          xcrun notarytool store-credentials ribbon-field-ci --keychain "$keychain" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+      - name: Build signed and notarized DMG
+        run: |
+          python3 desktop/macos/build.py --standalone --arch "$RELEASE_ARCH" \
+            --version "$RELEASE_VERSION" --build-number "$GITHUB_RUN_NUMBER" \
+            --sign-identity "$SIGN_IDENTITY" --notary-profile ribbon-field-ci \
+            --output "build/release-app/Ribbon Field.app" \
+            --dmg "build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.dmg"
+      - name: Verify the packaged distribution
+        run: |
+          dmg="build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+          python3 desktop/macos/verify_distribution.py --dmg "$dmg" --report "$dmg.validation.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          version, arch = os.environ['RELEASE_VERSION'], os.environ['RELEASE_ARCH']
+          Path(f'build/release/Ribbon-Field-{version}-{arch}.dmg.provenance.json').write_text(json.dumps({
+              'version': version, 'source_commit': os.environ['RELEASE_COMMIT'],
+              'build_number': os.environ['GITHUB_RUN_NUMBER'],
+              'run_url': f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }, indent=2) + '\n')
+          PY
+      - name: Retain release files and validation reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-release-${{ matrix.arch }}
+          path: build/release/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Remove signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          if [[ -f "$RUNNER_TEMP/release-signing.keychain-db" ]]; then
+            security delete-keychain "$RUNNER_TEMP/release-signing.keychain-db"
+          fi
+
+  publish:
+    needs: [validate, build]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Configure a required reviewer on this environment before enabling uploads.
+    # Download and test the retained DMGs before approving this job.
+    environment:
+      name: macos-release
+      url: https://downloads.ribbonfield.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: macos-release-*
+          path: build/release
+          merge-multiple: true
+      - name: Upload immutable releases and verify public downloads
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: 'true'
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test -n "$AWS_ACCESS_KEY_ID" && test -n "$AWS_SECRET_ACCESS_KEY"
+          aws --version
+          python3 scripts/publish_macos_release.py --directory build/release \
+            --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --publish | tee release-result.json
+          {
+            echo '### Published macOS downloads'
+            echo
+            echo "https://downloads.ribbonfield.com/releases/$RELEASE_VERSION/release.json"
+            echo
+            echo '```json'
+            cat release-result.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
