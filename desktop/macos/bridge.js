@@ -172,6 +172,83 @@
     navigationReady: () => send({action: "navigationReady"}).catch(reportError),
   });
 
+  // WebKit's native HTML dragend reports the same result for Escape and an
+  // unhandled external drop. Pointer capture gives us an unambiguous release
+  // outside the window, and reuses the existing HTML reorder/split handlers.
+  let tabDrag = null, transferring = false, suppressTabClick = false;
+  const dragEvent = (type, event, drag) => new DragEvent(type, {bubbles: true, cancelable: true,
+    dataTransfer: drag.transfer, clientX: event.clientX, clientY: event.clientY});
+  function finishTabDrag(event, cancel = false) {
+    const drag = tabDrag;
+    if (!drag || event.pointerId != null && event.pointerId !== drag.pointerId) return;
+    tabDrag = null;
+    drag.tab.releasePointerCapture?.(drag.pointerId);
+    if (!drag.started) return;
+    suppressTabClick = true; setTimeout(() => { suppressTabClick = false; }, 0);
+    let accepted = false;
+    if (!cancel) {
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      if (target) {
+        const over = dragEvent("dragover", event, drag); target.dispatchEvent(over);
+        if (over.defaultPrevented) {
+          const drop = dragEvent("drop", event, drag); target.dispatchEvent(drop);
+          accepted = drop.defaultPrevented;
+        }
+      }
+    }
+    drag.source.dispatchEvent(dragEvent("dragend", event, drag));
+    drag.ghost?.remove();
+    if (cancel || accepted || transferring) return;
+    const transfer = window.agentCoordConversationTransfer;
+    const payload = transfer?.capture(drag.id);
+    if (!payload) return;
+    transferring = true;
+    transfer.lock(drag.id, true);
+    send({action: "detachConversation", payload, x: event.clientX, y: event.clientY})
+      .then(moved => moved ? transfer.release(drag.id, payload.sourceCwd ?? payload.cwd, payload) : null)
+      .catch(reportError).finally(() => { transfer.lock(drag.id, false); transferring = false; });
+  }
+  document.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || event.isPrimary === false || tabDrag || transferring || openDialog()) return;
+    const tab = event.target.closest?.("[data-thread-tab], [data-pane-thread]");
+    const id = tab?.dataset.threadTab || tab?.dataset.paneThread;
+    if (!id || id === "new-session" || id === "project-scratchpad" || !window.agentCoordConversationTransfer) return;
+    const source = tab.dataset.paneThread ? tab : tab.closest(".conversation-tab") || tab;
+    event.preventDefault(); tab.focus({preventScroll: true});
+    tabDrag = {id, tab, source, pointerId: event.pointerId, x: event.clientX, y: event.clientY, started: false};
+    tab.setPointerCapture(event.pointerId);
+  }, true);
+  document.addEventListener("pointermove", event => {
+    const drag = tabDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.started) {
+      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
+      drag.transfer = new DataTransfer();
+      const start = dragEvent("dragstart", event, drag);
+      drag.source.dispatchEvent(start);
+      if (start.defaultPrevented) { finishTabDrag(event, true); return; }
+      drag.started = true;
+      drag.ghost = drag.source.cloneNode(true);
+      Object.assign(drag.ghost.style, {position: "fixed", pointerEvents: "none", zIndex: "10000", opacity: ".85"});
+      document.body.append(drag.ghost);
+    }
+    event.preventDefault();
+    Object.assign(drag.ghost.style, {left: event.clientX + 12 + "px", top: event.clientY + 12 + "px"});
+    document.elementFromPoint(event.clientX, event.clientY)?.dispatchEvent(dragEvent("dragover", event, drag));
+  }, true);
+  document.addEventListener("pointerup", event => finishTabDrag(event), true);
+  document.addEventListener("pointercancel", event => finishTabDrag(event, true), true);
+  document.addEventListener("lostpointercapture", event => finishTabDrag(event, true), true);
+  document.addEventListener("keydown", event => {
+    if (tabDrag && event.key === "Escape") {
+      event.preventDefault(); event.stopImmediatePropagation(); finishTabDrag(event, true);
+    }
+  }, true);
+  document.addEventListener("click", event => {
+    if (suppressTabClick) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  window.addEventListener("pagehide", event => finishTabDrag(event, true));
+
   const hasFiles = event => Array.from(event.dataTransfer?.types || []).includes("Files");
   const clearDropHint = () => {
     chatByID("conversation")?.classList.remove("image-drag-over");

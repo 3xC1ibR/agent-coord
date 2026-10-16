@@ -87,7 +87,7 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
       toggle() { this.dialog.open = !this.dialog.open; return true; }
     },
     location: {hash: "#thread-one", pathname: "/", search: "", href: "http://127.0.0.1:1234/#thread-one"},
-    setInterval: () => 1, clearInterval() {}, focus() {}, isSecureContext: true,
+    setInterval: () => 1, clearInterval() {}, setTimeout, focus() {}, isSecureContext: true,
     webkit: {messageHandlers: {desktop: {async postMessage(body) {
       messages.push(JSON.parse(JSON.stringify(body)));
       if (Object.hasOwn(replies, body.action)) return replies[body.action];
@@ -597,4 +597,68 @@ test("notification permission refreshes after another window changes Settings", 
   const requests = f.messages.filter(m => m.action === "permission").length;
   await settle();
   assert.equal(f.messages.filter(m => m.action === "permission").length, requests, "focus refresh must not loop");
+});
+
+function tabDragFixture(pane = false) {
+  const f = fixture(), tab = new EventTarget(), source = new EventTarget(), events = [], released = [];
+  tab.dataset = pane ? {paneThread: 'thread-one'} : {threadTab: 'thread-one'};
+  tab.focus = () => {};
+  tab.setPointerCapture = () => {}; tab.releasePointerCapture = () => {};
+  tab.closest = selector => selector === '.conversation-tab' ? source : tab;
+  const dragSource = pane ? tab : source;
+  Object.assign(dragSource, {setPointerCapture() {}, releasePointerCapture() {},
+    cloneNode: () => ({style: {}, remove() {}})});
+  dragSource.addEventListener('dragstart', () => events.push('start'));
+  dragSource.addEventListener('dragend', () => events.push('end'));
+  f.env.document.body.append = () => {};
+  f.env.document.elementFromPoint = () => null;
+  f.env.agentCoordConversationTransfer = {capture: id => ({thread: {thread_id: id}, cwd: '/work', draft: {text: 'Draft'}}),
+    lock() {},
+    release: id => released.push(id)};
+  const pointer = (type, x = -200) => {
+    const event = new Event(type, {cancelable: true});
+    Object.defineProperties(event, {target: {value: tab}, pointerId: {value: 1}, button: {value: 0},
+      clientX: {value: x}, clientY: {value: 40}});
+    f.env.document.dispatchEvent(event);
+  };
+  return {...f, events, released, pointer};
+}
+
+test('desktop tab release confirms the new window before removing the source, including pane tabs', async () => {
+  for (const pane of [false, true]) {
+    const f = tabDragFixture(pane);
+    let confirm;
+    f.replies.detachConversation = new Promise(resolve => { confirm = resolve; });
+    f.pointer('pointerdown', 50); f.pointer('pointermove'); f.pointer('pointerup');
+    assert.deepEqual(f.events, ['start', 'end']);
+    assert.deepEqual(f.released, []);
+    assert.equal(f.messages.at(-1).action, 'detachConversation');
+    confirm(true); await settle();
+    assert.deepEqual(f.released, ['thread-one']);
+  }
+});
+
+test('Escape, pointer cancellation, lost capture, clicks and failed window creation retain the original tab', async () => {
+  for (const cancellation of ['Escape', 'pointercancel', 'lostpointercapture', 'click', 'failed']) {
+    const f = tabDragFixture();
+    f.replies.detachConversation = false;
+    f.pointer('pointerdown', 50);
+    if (cancellation !== 'click') f.pointer('pointermove');
+    if (cancellation === 'Escape') {
+      const event = new Event('keydown', {cancelable: true}); Object.defineProperty(event, 'key', {value: 'Escape'});
+      f.env.document.dispatchEvent(event);
+    } else if (['pointercancel', 'lostpointercapture'].includes(cancellation)) f.pointer(cancellation);
+    f.pointer('pointerup'); await settle();
+    assert.deepEqual(f.released, []);
+    if (cancellation !== 'failed') assert.equal(f.messages.some(body => body.action === 'detachConversation'), false);
+  }
+});
+
+test('an accepted reorder or split uses the existing drop handlers and never opens a window', async () => {
+  const f = tabDragFixture(), target = new EventTarget(), drops = [];
+  target.addEventListener('dragover', event => event.preventDefault());
+  target.addEventListener('drop', event => { event.preventDefault(); drops.push(event.dataTransfer); });
+  f.env.document.elementFromPoint = () => target;
+  f.pointer('pointerdown', 50); f.pointer('pointermove', 200); f.pointer('pointerup', 200); await settle();
+  assert.equal(drops.length, 1); assert.equal(f.messages.some(body => body.action === 'detachConversation'), false);
 });

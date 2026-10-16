@@ -707,7 +707,8 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
   const $ = id => document.getElementById(id);
   document.body.classList.add("pane-document");
   let active = false, seen = "", restoredScroll = null;
-  const exportDraft = () => ({text: $("message").value, mentions: state.mentions?.snapshot() || [], images: state.attachments.items(), scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop});
+  const exportDraft = () => ({text: $("message").value, mentions: state.mentions?.snapshot() || [], images: state.attachments.items(),
+    scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop, following: state.timelineScroll?.following});
   const markSeen = async () => {
     const work = state.detail?.work_thread;
     if (!active || !document.hasFocus() || !work) return;
@@ -721,6 +722,12 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
   };
   const pane = window.agentCoordPane = {
     exportDraft,
+    canTransfer: () => !state.busy && !state.sending?.size && !state.attachments.pending() && !document.querySelector("dialog[open]"),
+    setTransferLock: locked => {
+      state.transferLocks ||= new Set();
+      if (locked) state.transferLocks.add(state.selected); else state.transferLocks.delete(state.selected);
+      renderStatus();
+    },
     focusMessage: id => window.agentCoordFocusMessage?.(id),
     saveDraft: () => {
       if (!state.selected) return;

@@ -195,6 +195,8 @@ private final class DesktopWindow {
     var navigationReady = false
     var navigating = false
     var pendingLinks: [URL] = []
+    var incomingConversation: [String: Any]?
+    var conversationReply: ((Any?, String?) -> Void)?
     let files = FileBrowserController()
     let split = NSSplitViewController()
     var filesItem: NSSplitViewItem?
@@ -495,6 +497,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         guard let closing = notification.object as? NSWindow,
               let item = windows.first(where: { $0.window === closing }),
               item.isSettings || windows.filter({ !$0.isSettings }).count > 1 else { return }
+        let reply = item.conversationReply
+        item.conversationReply = nil
+        reply?(nil, "The new window closed before the conversation was ready. The original tab is still available.")
         item.webView.stopLoading()
         item.webView.configuration.userContentController.removeScriptMessageHandler(forName: "desktop", contentWorld: .page)
         item.webView.navigationDelegate = nil
@@ -805,6 +810,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             owner.navigationReady = true
             deliverLinks(to: owner)
             replyHandler(true, nil)
+            if let payload = owner.incomingConversation {
+                owner.incomingConversation = nil
+                source.callAsyncJavaScript("return await window.agentCoordConversationTransfer.restore(payload)",
+                    arguments: ["payload": payload], in: nil, in: .page) { [weak owner] result in
+                    guard let owner = owner, let reply = owner.conversationReply else { return }
+                    owner.conversationReply = nil
+                    switch result {
+                    case .success(let value) where value as? Bool == true:
+                        owner.window.makeKeyAndOrderFront(nil)
+                        NSApp.activate(ignoringOtherApps: true)
+                        reply(true, nil)
+                    default:
+                        owner.window.close()
+                        reply(nil, "The conversation could not be restored in the new window. The original tab is still available.")
+                    }
+                }
+            }
         case "windowState":
             if let title = body["title"] as? String {
                 owner.window.title = String(title.prefix(160)) + " — Ribbon Field"
@@ -830,6 +852,46 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
             makeWindow(url: destination)
             replyHandler(true, nil)
+        case "detachConversation":
+            guard !owner.isSettings, owner.window.attachedSheet == nil,
+                  let x = body["x"] as? Double, let y = body["y"] as? Double,
+                  x.isFinite, y.isFinite, abs(x) < 100_000, abs(y) < 100_000,
+                  let payload = body["payload"] as? [String: Any],
+                  let thread = payload["thread"] as? [String: Any],
+                  let id = thread["thread_id"] as? String, !id.isEmpty, id.count <= 200, id != "new-session",
+                  let cwd = payload["cwd"] as? String,
+                  JSONSerialization.isValidJSONObject(payload),
+                  let data = try? JSONSerialization.data(withJSONObject: payload), data.count <= 32 * 1024 * 1024,
+                  let base = serverURL else {
+                replyHandler(nil, "The conversation cannot be detached yet."); return
+            }
+            // DOM coordinates are relative to the web view, including points
+            // captured outside it. AppKit handles negative/multiple-display origins.
+            let local = NSPoint(x: x * source.pageZoom,
+                y: source.isFlipped ? y * source.pageZoom : source.bounds.height - y * source.pageZoom)
+            let drop = owner.window.convertPoint(toScreen: source.convert(local, to: nil))
+            guard !owner.window.frame.contains(drop) else { replyHandler(false, nil); return }
+            var destination = URLComponents(url: base, resolvingAgainstBaseURL: false)!
+            destination.path = "/"
+            destination.queryItems = [URLQueryItem(name: "directory", value: cwd), URLQueryItem(name: "detached", value: "1")]
+            destination.fragment = nil
+            let target = makeWindow(url: destination.url!)
+            target.incomingConversation = payload
+            target.conversationReply = replyHandler
+            let screen = NSScreen.screens.first { $0.frame.contains(drop) } ?? owner.window.screen ?? NSScreen.main
+            var frame = target.window.frame
+            frame.origin = NSPoint(x: drop.x - 100, y: drop.y - frame.height + 20)
+            if let visible = screen?.visibleFrame {
+                frame.origin.x = max(visible.minX, min(frame.minX, visible.maxX - frame.width))
+                frame.origin.y = max(visible.minY, min(frame.minY, visible.maxY - frame.height))
+            }
+            target.window.setFrame(frame, display: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak target] in
+                guard let target = target, let reply = target.conversationReply else { return }
+                target.conversationReply = nil
+                target.window.close()
+                reply(nil, "Opening the detached conversation timed out. The original tab is still available.")
+            }
         case "dropFiles":
             guard let names = body["names"] as? [String], !names.isEmpty, names.count <= 32 else {
                 replyHandler(nil, "Drop up to 32 files or folders at a time."); return
@@ -1053,6 +1115,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if CommandLine.arguments.contains("--smoke-sessions-only") {
             try await smokeFocus(first)
             try await smokeSessionCycling(first)
+            finishSmoke(error: nil)
+            return
+        }
+        if CommandLine.arguments.contains("--smoke-detach-only") {
+            try await smokeDetach(first)
             finishSmoke(error: nil)
             return
         }
@@ -2043,6 +2110,120 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try smokeCheck("pane_toggle_returns_to_single_thread", toThread as? Bool == true)
         try await smokeSessionCycling(first)
         _ = try await smokeJS("goHome(); return true;", in: first.webView)
+    }
+
+    @MainActor private func smokeDetach(_ first: DesktopWindow) async throws {
+        _ = try smokePython("""
+            import sys
+            from agent_coord.store import CoordinationStore
+            store = CoordinationStore(sys.argv[1])
+            for name in ['detach-one', 'detach-two']:
+                store.register(session_id=name, client='claude', cwd=str(store.database_path.parent))
+                store.threads.update(name, title=name)
+            for index in range(40):
+                store.send_message(sender_session_id='detach-two', recipient_session_id='detach-one',
+                    body=f'Saved message {index}\\n' + 'History preserved through detachment. ' * 25,
+                    classification='informational', reply_required=False)
+            print('{}')
+            """)
+        _ = try await smokeJS("""
+            await refreshList(); await select('detach-one'); await select('detach-two');
+            window.detachEvents = [];
+            for (const kind of ['pointerdown', 'pointerup', 'pointermove', 'click'])
+              document.addEventListener(kind, e => detachEvents.push({kind, x: e.clientX, y: e.clientY, target: e.target.outerHTML?.slice(0, 240)}), true);
+            return true;
+            """, in: first.webView)
+        try await smokeFocus(first)
+        func pointer(_ type: NSEvent.EventType, _ x: Double, _ y: Double) {
+            let view = first.webView
+            let location = view.convert(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y), to: nil)
+            if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: first.window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) {
+                first.window.sendEvent(event)
+            }
+        }
+        var tab = try await smokeJS("const rect = document.querySelector('[data-thread-tab=\"detach-one\"]').getBoundingClientRect(); return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};", in: first.webView) as! [String: Double]
+        pointer(.leftMouseDown, tab["x"]!, tab["y"]!)
+        pointer(.leftMouseUp, tab["x"]!, tab["y"]!)
+        for _ in 0..<100 {
+            if (try await smokeJS("return state.selected === 'detach-one' && state.detail?.work_thread.thread_id === 'detach-one' && !state.detailRefreshing;", in: first.webView)) as? Bool == true { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        smokeResults["detach_click_debug"] = try await smokeJS("return {selected: state.selected, events: detachEvents, width: innerWidth, height: innerHeight};", in: first.webView)
+        smokeResults["detach_click_target"] = tab
+        try smokeCheck("detach_normal_tab_click", (try await smokeJS("return state.selected === 'detach-one';", in: first.webView)) as? Bool == true)
+        pointer(.leftMouseDown, tab["x"]!, tab["y"]!)
+        pointer(.leftMouseDragged, -250, 80)
+        _ = try await smokeJS("return state.threadTabs.dragging;", in: first.webView)
+        _ = smokeWebKey("\u{1b}", flags: [], code: 53)
+        _ = try await smokeJS("return true;", in: first.webView)
+        pointer(.leftMouseUp, -250, 80)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let cancelled = try await smokeJS("return !state.threadTabs.dragging && state.threadTabs.items.length === 2 && !document.querySelector('.pane-drop-surface');", in: first.webView)
+        try smokeCheck("detach_escape_cancelled", cancelled as? Bool == true && windows.count == 1)
+        let other = try await smokeJS("const rect = document.querySelector('[data-thread-tab=\"detach-two\"]').getBoundingClientRect(); return {x: rect.right - 3, y: rect.y + rect.height / 2};", in: first.webView) as! [String: Double]
+        pointer(.leftMouseDown, tab["x"]!, tab["y"]!)
+        pointer(.leftMouseDragged, other["x"]!, other["y"]!)
+        pointer(.leftMouseUp, other["x"]!, other["y"]!)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let reordered = try await smokeJS("return state.threadTabs.items.map(item => item.thread_id).join(',') === 'detach-two,detach-one';", in: first.webView)
+        try smokeCheck("detach_reorder_preserved", reordered as? Bool == true && windows.count == 1)
+        tab = try await smokeJS("const rect = document.querySelector('[data-thread-tab=\"detach-one\"]').getBoundingClientRect(); return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};", in: first.webView) as! [String: Double]
+        _ = try await smokeJS("""
+            const input = document.querySelector('#message');
+            input.value = 'Keep detached draft'; input.setSelectionRange(2, 8);
+            state.drafts.set('detach-one', input.value);
+            state.attachments.drafts.set('detach-one', [{name: 'pixel.png', url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg=='}]);
+            const timeline = document.querySelector('#timeline');
+            const firstMessage = timeline.querySelector('details[data-id]');
+            firstMessage.open = true; rememberDisclosure(firstMessage, timelineDisclosures());
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            state.timelineScroll.restore(260);
+            return true;
+            """, in: first.webView)
+        pointer(.leftMouseDown, tab["x"]!, tab["y"]!)
+        pointer(.leftMouseDragged, -250, 80)
+        pointer(.leftMouseUp, -250, 80)
+        for _ in 0..<150 {
+            if windows.count == 2 && windows.last?.navigationReady == true,
+               (try await smokeJS("return !state.threadTabs.items.some(item => item.thread_id === 'detach-one');", in: first.webView)) as? Bool == true { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard let second = windows.last, second !== first else { try smokeCheck("detach_window_created", false); return }
+        try smokeCheck("detach_window_created", windows.count == 2)
+        let restored = try await smokeJS("""
+            const input = document.querySelector('#message');
+            return state.selected === 'detach-one' && state.detail.work_thread.thread_id === 'detach-one' &&
+              input.value === 'Keep detached draft' && input.selectionStart === 2 && input.selectionEnd === 8 &&
+              state.attachments.items('detach-one')[0]?.name === 'pixel.png' &&
+              state.threadTabs.items.length === 1 && state.threadTabs.items[0].thread_id === 'detach-one';
+            """, in: second.webView)
+        try smokeCheck("detach_state_restored", restored as? Bool == true)
+        let reading = try await smokeJS("""
+            return document.querySelectorAll('#timeline .agent-message').length === 40 &&
+              document.querySelector('#timeline details[data-id]')?.open === true &&
+              Math.abs(state.timelineScroll.position() - 260) < 3;
+            """, in: second.webView)
+        smokeResults["detach_reading_debug"] = try await smokeJS("return {scroll: state.timelineScroll.position(), messages: document.querySelectorAll('#timeline .agent-message').length, expanded: document.querySelector('#timeline details[data-id]')?.open};", in: second.webView)
+        try smokeCheck("detach_history_and_reading", reading as? Bool == true)
+        try smokeCheck("detach_window_focused", NSApp.keyWindow === second.window)
+        let remaining = try await smokeJS("""
+            return state.selected === 'detach-two' &&
+              !state.threadTabs.items.some(item => item.thread_id === 'detach-one') &&
+              state.threadTabs.items.some(item => item.thread_id === 'detach-two');
+            """, in: first.webView)
+        try smokeCheck("detach_remaining_tabs", remaining as? Bool == true)
+        let inside = try await smokeJS("""
+            return await webkit.messageHandlers.desktop.postMessage({action: 'detachConversation',
+              payload: agentCoordConversationTransfer.capture('detach-one'), x: 100, y: 80}) === false;
+            """, in: second.webView)
+        try smokeCheck("detach_inside_window_ignored", inside as? Bool == true && windows.count == 2)
+        _ = try await smokeJS("await agentCoordConversationTransfer.release('detach-one'); return true;", in: second.webView)
+        let last = try await smokeJS("return state.selected === null && !state.threadTabs.items.length && !document.querySelector('#welcome').hidden;", in: second.webView)
+        try smokeCheck("detach_last_tab_overview", last as? Bool == true && second.window.isVisible)
+        try smokeCheck("detach_shared_backend", backend.process?.isRunning == true)
+        second.window.close()
     }
 
     @MainActor private func smokeSessionCycling(_ item: DesktopWindow) async throws {

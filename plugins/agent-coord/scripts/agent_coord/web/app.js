@@ -1217,7 +1217,7 @@ function renderStatus() {
   $("send").textContent = dispatcher ? "Send ↑" : running ? (work?.client !== "codex" ? "Queue ↑" : "Steer ↑") : "Send ↑";
   $("queue").hidden = dispatcher || !running || work?.client !== "codex";
   $("queue").disabled = $("send").disabled;
-  $("message").disabled = archived;
+  $("message").disabled = archived || !!state.transferLocks?.has(state.selected);
   $("stop").hidden = !running;
   $("close-thread").textContent = archived ? "Reopen" : running || ["running", "needs input"].includes(work?.status) ? "Stop and close" : "Close thread";
   $("close-thread").disabled = !state.detail || state.closing.has(state.selected);
@@ -1841,7 +1841,7 @@ function composerDraftId(id = state.selected) {
   return id === "new-session" ? state.newSessionDraft?.draftId || id : id;
 }
 function sessionBusy() {
-  return !!state.busy || !!state.sending?.has(isSessionDraft() ? state.newSessionDraft : state.selected);
+  return !!state.busy || !!state.transferLocks?.has(state.selected) || !!state.sending?.has(isSessionDraft() ? state.newSessionDraft : state.selected);
 }
 function modelValue(client, model) { return JSON.stringify([client, model || ""]); }
 function sessionModelClients() {
@@ -2549,6 +2549,109 @@ async function forkThread(onSuccess = () => {}, source = state.selected) {
     if (state.selected === selected) await select(fork.thread_id);
   } finally { state.forking = false; renderStatus(); }
 }
+// Only presentation state crosses windows. The backend remains the sole owner
+// of the provider session, active turn, transcript, queue and pending requests.
+function setupConversationTransfer({state, document, select, goHome, renderStatus}) {
+  const $ = id => document.getElementById(id);
+  const panes = () => window.agentCoordPanes;
+  const field = id => panes()?.active && panes().records.get(id)?.api
+    ? panes().records.get(id).frame.contentDocument.getElementById("message")
+    : state.selected === id ? $("message") : null;
+  return {
+    capture(id) {
+      const shell = panes(), record = shell?.records.get(id);
+      const thread = state.threadTabs.items.find(item => item.thread_id === id) || record?.thread
+        || [...state.threadTabs.projects.values()].flat().find(item => item.thread_id === id);
+      if (!thread || id === "new-session" || record?.api?.canTransfer?.() === false || state.busy || state.sending?.size || state.attachments.pending(id) ||
+          document.querySelector("dialog[open]") || record?.frame?.contentDocument?.querySelector("dialog[open]")) return null;
+      const input = field(id), position = state.conversationPositions?.get(id) || state.conversations?.get(id);
+      const draft = shell?.active && record ? record.api?.exportDraft() || record.initialDraft || shell.getDraft(id) : {
+        text: input?.value ?? state.drafts.get(id) ?? "",
+        images: state.attachments.items(id), mentions: state.mentions?.snapshot(id, input?.value ?? state.drafts.get(id) ?? "") || [],
+        scroll: input ? state.timelineScroll?.position() ?? $("timeline").scrollTop : position?.scroll,
+        following: input ? state.timelineScroll?.following : position?.following,
+      };
+      if (draft.images?.some(image => !image.url)) return null;
+      let disclosures = [];
+      try { disclosures = JSON.parse(sessionStorage.getItem("timeline-disclosures:" + id) || "[]"); }
+      catch { /* Optional expansion state. */ }
+      return {thread: {thread_id: id, title: thread.title}, cwd: thread.project_cwd || thread.cwd || state.projectCwd,
+        sourceCwd: state.projectCwd,
+        draft: {...draft, following: draft.following ?? !Number.isFinite(draft.scroll), disclosures,
+          selectionStart: input?.selectionStart, selectionEnd: input?.selectionEnd}};
+    },
+    lock(id, locked) {
+      state.transferLocks ||= new Set();
+      if (locked) state.transferLocks.add(id); else state.transferLocks.delete(id);
+      panes()?.records.get(id)?.api?.setTransferLock?.(locked);
+      renderStatus();
+    },
+    async restore(payload) {
+      const id = payload?.thread?.thread_id, draft = payload?.draft;
+      if (typeof id !== "string" || !id || id === "new-session" || !draft || typeof draft.text !== "string")
+        throw new Error("The detached conversation state is invalid.");
+      state.drafts.set(id, draft.text);
+      state.attachments.drafts.set(id, draft.images || []);
+      state.mentions?.restore(id, draft.text, draft.mentions || []);
+      const disclosures = Array.isArray(draft.disclosures) ? draft.disclosures : [];
+      try { sessionStorage.setItem("timeline-disclosures:" + id, JSON.stringify(disclosures)); }
+      catch { /* Optional expansion state. */ }
+      if (state.conversations?.has(id)) state.conversations.get(id).disclosures = new Set(disclosures);
+      (state.conversationPositions ||= new Map()).set(id, {scroll: draft.scroll || 0, following: draft.following === true});
+      await select(id, {focus: false});
+      if (state.selected !== id || state.detail?.work_thread?.thread_id !== id)
+        throw new Error("The conversation could not be opened. Its original tab is still available.");
+      $("message").value = draft.text;
+      if (Number.isFinite(draft.selectionStart)) $("message").setSelectionRange(draft.selectionStart, draft.selectionEnd);
+      renderStatus(); state.resizeComposer?.();
+      // Wait for the composer and transcript to receive their final geometry.
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      if (draft.following) state.timelineScroll?.latest();
+      else if (Number.isFinite(draft.scroll)) {
+        if (state.timelineScroll) state.timelineScroll.restore(draft.scroll);
+        else $("timeline").scrollTop = draft.scroll;
+      }
+      $("message").focus({preventScroll: true});
+      return true;
+    },
+    async release(id, cwd = state.projectCwd, expected) {
+      if (expected) {
+        const current = this.capture(id);
+        const content = draft => JSON.stringify([draft?.text, draft?.images || [], draft?.mentions || []]);
+        if (!current || content(current.draft) !== content(expected.draft))
+          throw new Error("Your draft changed while the window was opening. The original tab has been kept.");
+      }
+      // Closing a tab is navigation only; it never closes/stops its conversation.
+      if (cwd === state.threadTabs.cwd) await state.threadTabs.close(id, {force: true});
+      else {
+        const items = state.threadTabs.projects.get(cwd) || [], index = items.findIndex(item => item.thread_id === id);
+        if (index >= 0) items.splice(index, 1);
+        if (state.threadTabs.selections.get(cwd) === id) state.threadTabs.selections.set(cwd, items[Math.min(index, items.length - 1)]?.thread_id || null);
+        state.threadTabs.save(false, cwd);
+      }
+      const shell = panes();
+      for (const [key, layout] of shell?.layouts || []) {
+        const slot = layout.groups.findIndex(group => group.includes(id));
+        if (slot < 0) continue;
+        const group = layout.groups[slot]; group.splice(group.indexOf(id), 1);
+        if (!group.length) paneLayout.removeGroup(layout, slot);
+        else if (layout.tabs[slot] === id) layout.tabs[slot] = group[0];
+        layout.order = layout.order.filter(value => value !== id);
+        if (layout.selected === id) layout.selected = layout.tabs[0];
+        layout.maximized = null;
+        if (!layout.groups.length) {
+          shell.layouts.delete(key);
+          if (shell.active && shell.viewId === key) { shell.leave(); goHome({restoreDispatcher: false}); }
+        } else if (shell.active && shell.viewId === key) { shell.render(); shell.focus(layout.selected); }
+      }
+      const record = shell?.records.get(id);
+      record?.frame?.remove(); shell?.records.delete(id);
+      // Prevent navigation history from restoring the moved draft in this window.
+      state.drafts.delete(id); state.attachments.drafts.delete(id); state.mentions?.drafts.delete(id);
+    },
+  };
+}
+
 function setupComposerSizing(input) {
   let frame = 0, width;
   const resize = () => {
@@ -2651,7 +2754,7 @@ async function boot() {
     onReplace: (start, end, text) => state.mentions?.draft().edit(start, end, text),
     onChange: () => { state.mentions?.render(); state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
   state.attachments = new ChatImageAttachments({document, getThread: () => composerDraftId(),
-    canAttach: () => !!state.detail?.work_thread?.browser_session && state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
+    canAttach: () => !!state.detail?.work_thread?.browser_session && state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected) && !state.transferLocks?.has(state.selected),
     onChange: renderStatus, onError: showError});
   state.attachments.bind();
   const turnTimer = setInterval(() => { if (!document.hidden) renderTurnElapsed(); }, 1000);
@@ -2732,6 +2835,11 @@ async function boot() {
       else goHome({restoreDispatcher: false});
     }});
   state.threadTabs.setProject(state.projectCwd);
+  if (projectQuery.get("detached") === "1") {
+    state.threadTabs.items.splice(0);
+    state.threadTabs.scratchpads.set(state.projectCwd, false);
+    state.threadTabs.overview();
+  }
   setupPaneShell({state, document, api, select, goHome, refreshList, showError, notifications: () => notifications,
     getView: () => state.projectCwd + ":" + savedViews.activeId,
     getThreads: () => threadsInProject(state.sessions).filter(thread => threadViews.matches(thread, savedViews.read().filters))});
@@ -2812,13 +2920,14 @@ async function boot() {
   if (initialDispatcher) await select(initialDispatcher, {dock: true, focus: false});
   if (initialThread && initialThread !== initialDispatcher) await select(initialThread);
   if (!initialThread && !initialDispatcher && projectQuery.get("scratchpad") === "1") openProjectScratchpad();
-  if (!initialNavigation && !initialThread && !initialDispatcher && projectQuery.get("scratchpad") !== "1") {
+  if (!initialNavigation && !initialThread && !initialDispatcher && projectQuery.get("scratchpad") !== "1" && projectQuery.get("detached") !== "1") {
     await restoreProjectTab().catch(showError);
   }
   if (initialThread && /^\d+$/.test(initialMessage || "")) focusAgentMessage(initialMessage);
   state.dispatchReady = true;
   syncDispatcherOverview();
   navigation.remember();
+  window.agentCoordConversationTransfer = setupConversationTransfer({state, document, select, goHome, renderStatus});
   window.agentCoordDesktop?.navigationReady();
   if (state.config.remote) await notifications.ready();
   // Checkpoints written by terminal agents arrive through the shared database.
