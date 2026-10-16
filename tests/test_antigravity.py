@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 from concurrent.futures import Future
@@ -15,6 +16,7 @@ from unittest.mock import patch
 from test_codex_app_server import FakeCodex, BrowserSessions, CoordinationStore, CoordinationError
 from agent_coord.antigravity import AntigravityConnection, AntigravityRPC, AUTH_PREFIX
 from agent_coord.antigravity_setup import install_runtime, provider_directory, resolve_runtime
+from agent_coord.acp import ACPError
 
 
 CONFIG = [{"id": "model", "category": "model", "type": "select", "currentValue": "gemini-test",
@@ -214,6 +216,106 @@ class AntigravityTests(unittest.TestCase):
         self.assertEqual(self.sessions.antigravity.native[thread], native)
         with self.assertRaisesRegex(CoordinationError, "steering"):
             self.sessions.send(thread, {"message": "steer", "expectedTurnId": self.sessions.active[thread]})
+
+    def test_internal_error_retires_live_process_and_next_send_resumes(self):
+        thread = self.create(model="gemini-test", yolo=True)
+        connection = self.start(thread)
+        native = self.sessions.antigravity.native[thread]
+        self.assertIsNone(connection.poll())
+        connection.future.set_exception(ACPError("Antigravity: Internal error", -32603))
+        self.assertTrue(connection.closed)
+        self.assertNotIn(thread, self.sessions.antigravity.connections)
+        self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1]["status"], "failed")
+
+        resumed = self.start(thread)
+        self.assertIsNot(resumed, connection)
+        self.assertIn(("session/resume", {"cwd": str(self.root), "mcpServers": [], "sessionId": native}), resumed.calls)
+        self.assertNotIn("session/new", [m for m, _ in resumed.calls])
+        selections = [p for m, p in resumed.calls if m == "session/set_config_option"]
+        self.assertIn({"sessionId": native, "configId": "model", "value": "gemini-test"}, selections)
+        self.assertIn({"sessionId": native, "configId": "mode", "value": "yolo"}, selections)
+        resumed.future.set_result({"stopReason": "end_turn"})
+        self.assertIs(self.start(thread), resumed)  # Healthy processes remain reusable.
+
+    def test_runtime_failure_text_is_failed_even_with_end_turn(self):
+        diagnostics = [
+            "Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 1 hour, 10 minutes.",
+            "Agent connection was lost and could not be re-established: Failed to rebuild agent: received 1000 (OK); then sent 1000 (OK)",
+        ]
+        for diagnostic in diagnostics:
+            with self.subTest(diagnostic=diagnostic):
+                thread = self.create()
+                connection = self.start(thread)
+                native = self.sessions.antigravity.native[thread]
+                for chunk in [diagnostic[:12], diagnostic[12:]]:
+                    self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": chunk})
+                connection.future.set_result({"stopReason": "end_turn"})
+                turn = self.sessions.read(thread)["thread"]["turns"][-1]
+                self.assertEqual(turn["status"], "failed")
+                self.assertEqual(turn["error"]["message"], diagnostic)
+                self.assertTrue(connection.closed)
+                self.assertNotIn(thread, self.sessions.antigravity.connections)
+                self.assertFalse(self.sessions.read(thread)["running"])
+                resumed = self.start(thread)
+                self.assertEqual(self.sessions.antigravity.native[thread], native)
+                self.assertIn("session/resume", [m for m, _ in resumed.calls])
+
+    def test_discussing_runtime_errors_is_not_a_failed_turn(self):
+        thread = self.create()
+        connection = self.start(thread)
+        self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text":
+            'The message "Usage Limit Reached" means the provider quota is exhausted. Internal error can require a reconnect.'})
+        connection.future.set_result({"stopReason": "end_turn"})
+        self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1]["status"], "completed")
+        self.assertFalse(connection.closed)
+
+    def test_disconnect_retires_process_and_late_events_cannot_fail_retry(self):
+        thread = self.create()
+        old = self.start(thread)
+        old.callback({"method": "disconnected", "params": {"error": "Lost transport"}})
+        self.assertTrue(old.closed)
+        resumed = self.start(thread)
+        old.callback({"method": "disconnected", "params": {"error": "Late disconnect"}})
+        old.callback({"method": "session/update", "params": {
+            "sessionId": self.sessions.antigravity.native[thread], "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Stale output"}}}})
+        self.assertTrue(self.sessions.read(thread)["running"])
+        self.assertEqual(len(self.sessions.antigravity.turns[thread]["items"]), 1)
+        resumed.future.set_result({"stopReason": "end_turn"})
+
+    def test_prompt_failure_can_close_real_transport_from_reader_callback(self):
+        script = self.root / "failing_acp.py"
+        script.write_text('''import sys,json
+for line in sys.stdin:
+ m=json.loads(line)
+ if m["method"]=="session/prompt":
+  reply={"error":{"code":-32603,"message":"Internal error"}}
+ else:
+  result={"protocolVersion":2,"agentInfo":{"name":"antigravity-acp"},"agentCapabilities":{"loadSession":True}}
+  if m["method"].startswith("session/"): result={"sessionId":"saved-native","configOptions":[]}
+  reply={"result":result}
+ print(json.dumps({"id":m["id"],**reply}),flush=True)
+''')
+        provider = self.sessions.antigravity
+        provider.connection_factory = lambda store, callback, options: AntigravityConnection(
+            store, callback, options, command=[sys.executable, "-u", str(script)])
+        finished = threading.Event()
+        original = provider.on_event
+
+        def on_event(event):
+            original(event)
+            if event["method"] == "turn/completed":
+                finished.set()
+
+        provider.on_event = on_event
+        thread = self.create()
+        connection = provider.connections[thread]
+        self.sessions.send(thread, {"message": "Hello"})
+        self.assertTrue(finished.wait(5), "Transport cleanup blocked turn completion")
+        self.assertTrue(connection.closed)
+        self.assertIsNotNone(connection.process.poll())
+        self.assertFalse(self.sessions.read(thread)["running"])
+        self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1]["status"], "failed")
 
     def test_unknown_client_rpc_is_rejected_and_replay_is_ignored(self):
         thread = self.create()

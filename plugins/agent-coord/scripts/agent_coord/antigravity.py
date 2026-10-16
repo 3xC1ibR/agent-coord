@@ -190,7 +190,7 @@ class AntigravityRPC:
 
     def _connection(self, thread_id, options):
         current = self.connections.get(thread_id)
-        if current and (current.process.poll() is not None or self.options.get(thread_id) != options):
+        if current and (current.closed or current.process.poll() is not None or self.options.get(thread_id) != options):
             self.connections.pop(thread_id, None)
             current.close()
             current = None
@@ -198,7 +198,15 @@ class AntigravityRPC:
             return current
         with self.store._connection() as db:
             row = db.execute("SELECT native_id FROM antigravity_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
-        connection = self.connection_factory(self.store, lambda m: self._message(thread_id, m), {**options, "threadId": thread_id})
+        connection = None
+
+        def on_message(message):
+            # A retired process can still drain buffered output while closing.
+            # It must never complete or append to a replacement process's turn.
+            if connection is not None and self.connections.get(thread_id) is connection:
+                self._message(thread_id, message)
+
+        connection = self.connection_factory(self.store, on_message, {**options, "threadId": thread_id})
         self.connections[thread_id] = connection
         try:
             initialized = connection.initialize()
@@ -337,6 +345,10 @@ class AntigravityRPC:
         try:
             result = future.result()
             reason = result.get("stopReason", "end_turn")
+            error = self._runtime_failure(thread_id)
+            if error:
+                self._finish(thread_id, "failed", error)
+                return
             state = self.delivery_turns.get(thread_id)
             if state and state["cancel_at"] is not None:
                 # The original prompt response is the cancellation barrier. A
@@ -349,6 +361,22 @@ class AntigravityRPC:
             self._finish(thread_id, "interrupted" if reason in {"cancelled", "canceled"} else "completed")
         except Exception as exc:
             self._finish(thread_id, "failed", str(exc))
+
+    def _runtime_failure(self, thread_id):
+        # ACP 1.3.0 emits these runtime diagnostics as assistant text followed
+        # by end_turn, including when its inner agent has already died. Match
+        # only its known diagnostic prefixes, after streaming chunks coalesce.
+        with self.lock:
+            items = self.turns.get(thread_id, {}).get("items", [])
+            item = items[-1] if items else {}
+            if item.get("type") != "agentMessage":
+                return None
+            text = item.get("text", "").strip()
+        if text.startswith("Agent connection was lost and could not be re-established:"):
+            return text
+        if text.startswith("Usage Limit Reached\n") and "You have reached your current quota for this period." in text:
+            return text
+        return None
 
     def _submit_prompt(self, thread_id, turn_id, connection, prompt, *, batch=None):
         prepared = batch is not None
@@ -503,6 +531,13 @@ class AntigravityRPC:
             if error:
                 turn["error"] = {"message": str(error)}
             self.requests = {k: v for k, v in self.requests.items() if v[0] != thread_id}
+            # A live ACP wrapper does not imply a healthy inner agent. Retire
+            # failed processes before publishing completion, so the next user
+            # send resumes the saved native session in a fresh process. Never
+            # replay a failed prompt automatically: its tools may have run.
+            connection = self.connections.pop(thread_id, None) if status == "failed" else None
+        if connection:
+            connection.close()
         self._emit("turn/completed", thread_id, turn=copy.deepcopy(turn))
 
     def _message(self, thread_id, message):
