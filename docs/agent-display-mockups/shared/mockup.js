@@ -32,6 +32,7 @@ const Mockup = (() => {
     ["26-comms-matrix.html", "Comms matrix", "radical"],
     ["27-critical-path.html", "Critical path", "radical"],
     ["28-office-floor.html", "Office floor", "radical"],
+    ["29-orchestration-atlas.html", "Orchestration atlas", "synthesis"],
   ];
   const CURRENT_SIGNALS = {
     title: "checkpoint title (3–6 words, auto/agent/user source)", phase: "checkpoint phase (8 values)", summary: "checkpoint summary (1–2 sentences)",
@@ -124,7 +125,7 @@ const Mockup = (() => {
     shell.append($("span", "mock-spacer"));
     const clock = $("span", "mock-id"); shell.append(clock);
     const scaleOptions = [["small", "16 agents"], ["medium", "≈45 agents"], ["large", "≈160 agents"]];
-    if (snapshot?.threads) scaleOptions.push(["real", "Real snapshot · " + snapshot.threads.length + " threads"]);
+    if (snapshot?.threads) scaleOptions.push(["real", "Real · " + snapshot.threads.length]);
     const scaleSel = $("select"); for (const [v, l] of scaleOptions) { const o = $("option", null, l); o.value = v; o.selected = v === scale; scaleSel.append(o); }
     let workspaceSel = null;
     if (scale === "real" && snapshot && !projectTabs) {

@@ -9,6 +9,10 @@ window.AGENT_COORD_SNAPSHOT so a mockup opened from file:// can load it.
 
     python3 docs/agent-display-mockups/export-threads.py            # Now and Later threads
     python3 docs/agent-display-mockups/export-threads.py --archived # include closed threads
+    python3 docs/agent-display-mockups/export-threads.py --message-days 30
+
+Agent-to-agent messages from the last --message-days days (default 14) are
+included when either side is an exported thread; bodies are truncated.
 
 Nothing here writes to the database.
 """
@@ -51,7 +55,47 @@ def creators_fallback(db):
     return out
 
 
-def load(path: Path, archived: bool) -> dict:
+def load_messages(db, ids: list, days: float) -> tuple[list, dict]:
+    """Messages touching the exported threads, plus names for counterparts outside the snapshot."""
+    known = set(ids)
+    since = time.time() - days * 86400
+    created = set()
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
+        for r in db.execute("SELECT result_json FROM app_control_requests WHERE operation = 'create' AND status = 'completed'"):
+            try:
+                mid = json.loads(r["result_json"] or "{}").get("message_id")
+            except Exception:
+                mid = None
+            if type(mid) is int:
+                created.add(mid)
+    closed = {}
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'message_threads'").fetchone():
+        cols = [c[1] for c in db.execute("PRAGMA table_info(message_threads)")]
+        if "closed_at" in cols:
+            closed = {r["thread_id"]: r["closed_at"] for r in db.execute("SELECT thread_id, closed_at FROM message_threads")}
+    out, others = [], set()
+    for r in db.execute("""SELECT id, sender_session_id, recipient_session_id, body, created_at, delivered_at, acknowledged_at, classification,
+            thread_id, reply_required, in_reply_to, wake_turn_id, suppressed_at FROM messages WHERE created_at >= ? ORDER BY id""", (since,)):
+        a, b = r["sender_session_id"], r["recipient_session_id"]
+        if a not in known and b not in known:
+            continue
+        others.update(x for x in (a, b) if x not in known)
+        body = r["body"] or ""
+        out.append({"id": r["id"], "from": a, "to": b, "body": body[:240] + ("…" if len(body) > 240 else ""), "at": r["created_at"],
+                    "delivered_at": r["delivered_at"], "acked_at": r["acknowledged_at"], "classification": r["classification"],
+                    "exchange": r["thread_id"], "reply_required": bool(r["reply_required"]), "in_reply_to": r["in_reply_to"],
+                    "creation": r["id"] in created, "woke_turn": bool(r["wake_turn_id"]), "suppressed": bool(r["suppressed_at"]),
+                    "exchange_closed": bool(closed.get(r["thread_id"]))})
+    parties = {}
+    if others:
+        marks = ",".join("?" * len(others))
+        for r in db.execute(f"""SELECT s.session_id, s.client, s.name, s.cwd, t.title FROM sessions s LEFT JOIN work_threads t ON t.thread_id = s.session_id
+                WHERE s.session_id IN ({marks})""", list(others)):
+            parties[r["session_id"]] = {"title": r["title"] or r["name"] or r["session_id"][:8], "client": r["client"], "cwd": r["cwd"]}
+    return out, parties
+
+
+def load(path: Path, archived: bool, message_days: float = 14) -> dict:
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
     placement = "" if archived else "WHERE attention != 'archived'"
@@ -122,28 +166,31 @@ def load(path: Path, archived: bool) -> dict:
             "session": ({"activity": s.get("activity"), "write_scope": scope, "last_seen_at": s.get("last_seen_at"), "ended_at": s.get("ended_at"),
                          "turn_active": bool(s.get("turn_active")), "last_tool": last_tool, "name": s.get("name")} if s else None),
         })
+    messages, parties = load_messages(db, ids, message_days)
     workspaces: dict[str, int] = {}
     for t in out:
         workspaces[t["cwd"] or "unknown"] = workspaces.get(t["cwd"] or "unknown", 0) + 1
     db.close()
     return {"exported_at": time.time(), "source": str(path), "archived_included": archived,
-            "workspaces": [{"cwd": k, "count": v} for k, v in sorted(workspaces.items(), key=lambda kv: -kv[1])], "threads": out}
+            "workspaces": [{"cwd": k, "count": v} for k, v in sorted(workspaces.items(), key=lambda kv: -kv[1])], "threads": out,
+            "message_days": message_days, "messages": messages, "parties": parties}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--db", help="Database path (defaults to the agent-coord state database).")
     parser.add_argument("--archived", action="store_true", help="Include closed threads.")
+    parser.add_argument("--message-days", type=float, default=14, help="Include agent messages from the last N days (default 14).")
     parser.add_argument("--out", default=str(HERE / "shared" / "real-threads.js"))
     args = parser.parse_args()
     path = Path(args.db).expanduser() if args.db else (default_database_path() if default_database_path else Path.home() / ".local/state/agent-coord/state.sqlite3")
     if not path.exists():
         print(f"database not found: {path}", file=sys.stderr)
         return 1
-    snapshot = load(path, args.archived)
+    snapshot = load(path, args.archived, args.message_days)
     body = "/* Generated by export-threads.py. A read-only snapshot of real work threads for the mockups. */\nwindow.AGENT_COORD_SNAPSHOT = " + json.dumps(snapshot, ensure_ascii=False) + ";\n"
     Path(args.out).write_text(body, encoding="utf-8")
-    print(f"wrote {args.out}: {len(snapshot['threads'])} threads across {len(snapshot['workspaces'])} workspaces")
+    print(f"wrote {args.out}: {len(snapshot['threads'])} threads across {len(snapshot['workspaces'])} workspaces, {len(snapshot['messages'])} messages")
     return 0
 
 

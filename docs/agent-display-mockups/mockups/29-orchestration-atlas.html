@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 29 · Orchestration atlas</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Atlas with orchestration as the subject: families are territories, messages are dots
+       floating between agents, replayed from the real message log. */
+    html, body { height: 100%; } body { height: 100dvh; overflow: hidden; }
+    #stage { display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+    .canvas { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--paper); }
+    .canvas > svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+    .canvas.panning > svg { cursor: grabbing; }
+
+    /* Territories */
+    .hull { fill: color-mix(in srgb, var(--ink) 2.2%, transparent); stroke: color-mix(in srgb, var(--ink) 24%, transparent); stroke-width: .8; vector-effect: non-scaling-stroke; cursor: pointer; }
+    .terr.commons .hull { fill: transparent; stroke-dasharray: 2 4; stroke: color-mix(in srgb, var(--ink) 18%, transparent); }
+    .terr.has-needs .hull { stroke: color-mix(in srgb, var(--warm) 45%, var(--line-strong)); }
+    .terr.dim { opacity: .28; }
+    .terr.focused .hull { fill: color-mix(in srgb, var(--ink) 3.5%, transparent); stroke: color-mix(in srgb, var(--ink) 38%, transparent); cursor: default; }
+    .lineage { fill: none; stroke: color-mix(in srgb, var(--ink) 22%, transparent); stroke-width: .8; vector-effect: non-scaling-stroke; pointer-events: none; }
+
+    /* Agents: size = message volume, ring = state, fill = recency. */
+    .agent { cursor: pointer; }
+    .agent .core { stroke: var(--paper); stroke-width: 1; vector-effect: non-scaling-stroke; }
+    .agent.done { opacity: var(--age-opacity, .5); }
+    .agent .hub-hole { fill: var(--paper); pointer-events: none; }
+    .agent .ring { fill: none; vector-effect: non-scaling-stroke; display: none; }
+    .agent.needs .ring { display: block; stroke: var(--warm); stroke-width: 2.2; animation: blink 1.3s steps(2, start) infinite; }
+    .agent.failed .ring { display: block; stroke: var(--danger); stroke-width: 2; }
+    .agent.blocked .ring { display: block; stroke: var(--muted); stroke-width: 1.3; stroke-dasharray: 2 2; }
+    .agent .halo { display: none; }
+    .agent.working .halo { display: block; fill: var(--accent); opacity: .16; animation: breathe 2.6s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+    .agent .mark { fill: none; stroke: var(--ink); stroke-width: 1.4; vector-effect: non-scaling-stroke; display: none; }
+    .agent.located .mark { display: block; animation: locate 1.6s ease-out 3; transform-box: fill-box; transform-origin: center; }
+    .agent:hover .mark, .agent:focus .mark { display: block; }
+    .agent:focus { outline: none; }
+    .agent .pin { fill: var(--ink); pointer-events: none; }
+    @keyframes blink { 50% { opacity: .25; } }
+    @keyframes breathe { 50% { transform: scale(1.35); opacity: .06; } }
+    @keyframes locate { 0% { transform: scale(2.6); opacity: 0; } 40% { opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+
+    /* Screen-space overlay: labels, message dots, trails, waiting requests. */
+    .cap { font: 500 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--ink); letter-spacing: -.01em; paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+    .cap.commons { font-size: 11px; fill: var(--muted); font-weight: 450; }
+    .cap-sub { font: 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--muted); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; pointer-events: none; }
+    .cap-needs { font: 500 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--warm); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; pointer-events: none; }
+    .cap.dim, .cap-sub.dim, .cap-needs.dim { opacity: .3; }
+    .lbl { font: 500 10.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--ink); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+    .lbl.hub { font-weight: 650; font-size: 11.5px; }
+    .lbl.needs { fill: var(--warm); }
+    .lbl-sub { font: 9.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--muted); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; pointer-events: none; }
+    .lbl-sub.working { fill: var(--accent); }
+    .msg { pointer-events: none; }
+    .msg circle { fill: var(--accent); }
+    .msg.warm circle { fill: var(--warm); } .msg.ok circle { fill: var(--ok); }
+    .msg.open circle { fill: var(--paper); stroke: var(--accent); stroke-width: 1.6; stroke-dasharray: 2 1.5; }
+    .msg.open.warm circle { stroke: var(--warm); } .msg.open.ok circle { stroke: var(--ok); }
+    .trail { fill: none; stroke: var(--accent); stroke-width: 1.2; pointer-events: none; }
+    .trail.warm { stroke: var(--warm); } .trail.ok { stroke: var(--ok); }
+    .absorb { fill: none; stroke: var(--accent); stroke-width: 1.2; pointer-events: none; }
+    .absorb.warm { stroke: var(--warm); } .absorb.ok { stroke: var(--ok); }
+    .tick { pointer-events: none; }
+    .pending { display: none; pointer-events: none; }
+    svg[data-live="on"] .pending, .pending.in-focus { display: inline; }
+    .pending circle { fill: var(--paper); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 2 1.6; animation: wait-pulse 2.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+    .pending.old circle { stroke: var(--warm); }
+    .pending line { stroke: color-mix(in srgb, var(--ink) 25%, transparent); stroke-width: .8; stroke-dasharray: 1 3; }
+    @keyframes wait-pulse { 50% { transform: scale(1.5); opacity: .45; } }
+    .you-mark circle { fill: var(--ink); } .you-mark text { font: 600 9px -apple-system, sans-serif; fill: var(--paper); text-anchor: middle; dominant-baseline: central; }
+    @media (prefers-reduced-motion: reduce) { .agent.needs .ring, .agent.working .halo, .pending circle, .agent.located .mark { animation: none; } }
+
+    /* Chrome over the canvas */
+    .toolbar { position: absolute; z-index: 3; left: 14px; top: 12px; right: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; pointer-events: none; }
+    .toolbar > * { pointer-events: auto; }
+    .crumb { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
+    .crumb button { border: 0; background: transparent; padding: 0; color: var(--muted); cursor: pointer; font: inherit; }
+    .crumb button:hover { color: var(--ink); text-decoration: underline; }
+    .crumb b { font-weight: 550; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .toolbar .hint { color: var(--muted); font-size: 11px; margin-left: 4px; }
+    .toolbar .spacer { flex: 1; }
+    .toolbar .btn { padding: 4px 9px; font-size: 11px; }
+    .exporter { padding: 5px 10px; border: 1px dashed var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 11px; }
+    .exporter code { font: 10.5px var(--mono); color: var(--ink); }
+    .legend { position: absolute; z-index: 3; left: 14px; bottom: 64px; display: flex; flex-wrap: wrap; gap: 4px 14px; max-width: calc(100% - 28px); font: 10px var(--mono); letter-spacing: .03em; color: var(--muted); pointer-events: none; }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+    .legend i.ring { width: 9px; height: 9px; background: transparent; border: 2px solid var(--warm); }
+    .legend i.warm { background: var(--warm); } .legend i.ok { background: var(--ok); }
+    .legend i.open { background: var(--paper); border: 1.5px dashed var(--accent); width: 8px; height: 8px; }
+    .legend i.recency { width: 22px; height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--dot-idle)); }
+
+    /* Replay scrubber */
+    .scrub { position: absolute; z-index: 3; left: 14px; right: 14px; bottom: 12px; display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font-size: 11px; color: var(--muted); }
+    .scrub .btn { padding: 3px 8px; font-size: 11px; }
+    .scrub .seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; }
+    .scrub .seg button { border: 0; background: transparent; color: var(--muted); padding: 2px 7px; border-radius: 4px; font: 10.5px var(--mono); cursor: pointer; }
+    .scrub .seg button[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .track { position: relative; flex: 1; min-width: 120px; height: 26px; cursor: pointer; }
+    .track svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .track .bar { fill: color-mix(in srgb, var(--ink) 18%, transparent); }
+    .track .bar.played { fill: color-mix(in srgb, var(--accent) 55%, transparent); }
+    .track .cursor { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: var(--accent); border-radius: 1px; pointer-events: none; }
+    .scrub .when { min-width: 118px; font: 10.5px var(--mono); color: var(--ink); text-align: right; }
+    .scrub .live { font: 600 10px var(--mono); letter-spacing: .06em; }
+    .scrub .live[aria-pressed="true"] { color: var(--warm); border-color: var(--warm); background: var(--warm-tint); }
+
+    .tip { position: absolute; z-index: 5; max-width: 300px; padding: 7px 9px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: 0 10px 26px var(--shadow); font-size: 11px; line-height: 1.4; pointer-events: none; display: grid; gap: 2px; }
+    .tip b { font-size: 12px; font-weight: 600; }
+    .tip .muted { font-size: 10.5px; }
+    .tip .now { color: var(--accent); }
+    .tip .ask { padding: 4px 6px; font-size: 10.5px; }
+
+    /* Side panel */
+    .panel { min-width: 0; min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; }
+    .panel-head { flex: none; padding: 12px 16px 8px; font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+    .panel-head i { width: 6px; height: 6px; border-radius: 50%; background: var(--warm); }
+    .panel-head small { margin-left: auto; font: 10px var(--mono); font-weight: 400; }
+    .item { display: grid; gap: 4px; padding: 10px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+    .item:hover { background: var(--hover-bg); }
+    .item.located { background: color-mix(in srgb, var(--warm-tint) 60%, var(--surface)); }
+    .item .top { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; }
+    .item .kind { flex: none; font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+    .item .kind.req { color: var(--muted); }
+    .item .top b { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item .top small { flex: none; color: var(--muted); font-size: 10px; white-space: nowrap; margin-left: auto; }
+    .item .from { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item .q { font-size: 11.5px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .item .act { display: flex; gap: 5px; align-items: center; margin-top: 2px; }
+    .item .act .btn { padding: 3px 9px; font-size: 11px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item .act .locate { margin-left: auto; font-size: 10px; color: var(--muted); }
+    .panel .calm { padding: 14px 16px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+    .family { flex: none; border-bottom: 1px solid var(--line); padding: 12px 12px 10px; display: grid; gap: 8px; }
+    .family-head { display: flex; align-items: center; gap: 8px; padding: 0 4px; }
+    .family-head h2 { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tree { list-style: none; margin: 0; padding: 0; max-height: 30vh; overflow: auto; }
+    .tree li button { display: flex; align-items: center; gap: 7px; width: 100%; padding: 4px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--ink); font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-align: left; cursor: pointer; }
+    .tree li button:hover { background: var(--hover-bg); }
+    .tree li button span:nth-child(2) { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tree li button small { flex: none; color: var(--muted); font-size: 10px; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .log { display: grid; gap: 6px; padding: 0 4px; }
+    .log h3 { font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .log article { display: grid; gap: 1px; font-size: 11px; line-height: 1.4; border-left: 2px solid var(--line); padding-left: 8px; }
+    .log article.open { border-left-color: var(--accent); border-left-style: dashed; }
+    .log article small { font: 9.5px var(--mono); color: var(--muted); }
+    .log article small i { font-style: normal; color: var(--accent); }
+    .log article span { color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .log .note { font-size: 10px; color: var(--muted); }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/real-threads.js"></script>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el, NS = "http://www.w3.org/2000/svg";
+  const svgEl = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs || {})) if (v != null) e.setAttribute(k, v); if (parent) parent.append(e); return e; };
+  const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
+  const TAU = Math.PI * 2;
+  const WINDOWS = {"1h": HOUR, "24h": DAY, "7d": 7 * DAY};
+  const SWEEP_MS = 60_000, MAX_DOTS = 40, DOT_MS = 1500, TRAIL_MS = 2600;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const snapshot = globalThis.AGENT_COORD_SNAPSHOT;
+  const hash = text => { let h = 2166136261; for (const ch of String(text)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  const ident = a => a.name || a.title;
+  const short = (t, n = 30) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+  const folder = p => (p || "").replace(/\/$/, "").split("/").pop() || p || "unknown";
+
+  /* View state: camera, territory centers, pins, focus, replay. Persisted per dataset and workspace. */
+  const ui = {key: null, cam: null, centers: new Map(), pins: new Map(), focus: null, located: null, fieldRef: null, lastMsgId: 0,
+    replay: {playing: !reduced, speed: 1, window: "24h", cursor: null, hold: 0, live: false}, hover: null};
+  const storeKey = field => "orch-atlas:v1:" + field.scale + ":" + (field.scale === "real" ? (field.workspace || "all") : "sim");
+  function load(field) {
+    ui.key = storeKey(field); ui.cam = null; ui.centers = new Map(); ui.pins = new Map();
+    try { const s = JSON.parse(localStorage.getItem(ui.key) || "null"); if (s) { ui.cam = s.cam || null; ui.centers = new Map(Object.entries(s.centers || {})); ui.pins = new Map(Object.entries(s.pins || {})); } } catch { /* private mode */ }
+  }
+  let saveTimer = null;
+  function save() { clearTimeout(saveTimer); saveTimer = setTimeout(() => { try { localStorage.setItem(ui.key, JSON.stringify({cam: ui.cam, centers: Object.fromEntries(ui.centers), pins: Object.fromEntries(ui.pins)})); } catch { /* private mode */ } }, 250); }
+
+  /* Persistent DOM: the canvas keeps its listeners and the in-flight dots across re-renders. */
+  const canvas = $("div", "canvas");
+  const svg = svgEl("svg", {"aria-label": "Orchestration atlas"}); canvas.append(svg);
+  const world = svgEl("g", {class: "world"}, svg);
+  const overlay = svgEl("g", {class: "overlay"}, svg);
+  const labelsG = svgEl("g", null, overlay), waitG = svgEl("g", null, overlay), trailsG = svgEl("g", null, overlay), dotsG = svgEl("g", null, overlay), youG = svgEl("g", {class: "you-mark"}, overlay);
+  const toolbar = $("div", "toolbar"), legend = $("div", "legend"), scrub = $("div", "scrub"), tip = $("div", "tip"); tip.hidden = true;
+  canvas.append(toolbar, legend, scrub, tip);
+  const panel = $("aside", "panel");
+  let ctx = null; // latest field, api, positions, territories
+
+  /* ---------- Layout ---------- */
+  // A family is a root with sub-agents: hub at the center, children around it, deeper agents orbiting their parent.
+  function familyLayout(field, root, rOf) {
+    const local = new Map(); local.set(root.id, {x: 0, y: 0});
+    const weight = a => 1 + 0.7 * field.descendants(a.id).length;
+    const kids = field.children(root.id);
+    const total = kids.reduce((s, k) => s + weight(k), 0);
+    const R1 = Math.max(46, total * 26 / TAU, kids.reduce((s, k) => s + 2 * rOf(k) + 14, 0) / TAU, rOf(root) + 30);
+    let angle = hash(root.id) * TAU;
+    for (const k of kids) {
+      const span = TAU * weight(k) / total, mid = angle + span / 2; angle += span;
+      local.set(k.id, {x: Math.cos(mid) * R1, y: Math.sin(mid) * R1});
+      orbit(k, mid, Math.min(span, 2.2));
+    }
+    // Deeper agents fan outward from their parent, spaced by their dot sizes.
+    function orbit(p, dir, spread) {
+      const ks = field.children(p.id); if (!ks.length) return;
+      const pp = local.get(p.id), rk = Math.max(...ks.map(rOf));
+      const dist = rOf(p) + rk + 14 + Math.max(0, ks.length - 2) * 4;
+      const fan = Math.min(TAU * .75, Math.max(.9, spread, ks.length * (2 * rk + 9) / dist));
+      ks.forEach((k, i) => {
+        const a = dir + (ks.length === 1 ? 0 : (i / (ks.length - 1) - .5) * fan);
+        local.set(k.id, {x: pp.x + Math.cos(a) * dist, y: pp.y + Math.sin(a) * dist});
+        orbit(k, a, fan * .6);
+      });
+    }
+    return local;
+  }
+  // Solo threads gather in a commons: a sunflower spiral, the ones that need you at the center.
+  function commonsLayout(field, list) {
+    const order = [...list].sort((a, b) => Number(field.needsUser(b)) - Number(field.needsUser(a)) || Number(b.status === "working") - Number(a.status === "working") || field.lastActivity(b) - field.lastActivity(a));
+    const local = new Map();
+    order.forEach((a, i) => { const r = 12 * Math.sqrt(i + .4), t = i * 2.39996; local.set(a.id, {x: Math.cos(t) * r, y: Math.sin(t) * r}); });
+    return local;
+  }
+  // Organic outline: the farthest member along each ray, smoothed, with a little per-territory noise.
+  function hullPath(points, pad, seed) {
+    const steps = 72, r = new Array(steps).fill(pad);
+    for (let i = 0; i < steps; i++) {
+      const t = i / steps * TAU, ux = Math.cos(t), uy = Math.sin(t);
+      for (const p of points) {
+        const along = p.x * ux + p.y * uy, perp2 = p.x * p.x + p.y * p.y - along * along, rad = pad + (p.r || 0);
+        if (perp2 <= rad * rad) r[i] = Math.max(r[i], along + Math.sqrt(rad * rad - perp2));
+      }
+    }
+    for (let pass = 0; pass < 3; pass++) { const c = [...r]; for (let i = 0; i < steps; i++) r[i] = Math.max(c[i], (c[(i + steps - 2) % steps] + 2 * c[(i + steps - 1) % steps] + 3 * c[i] + 2 * c[(i + 1) % steps] + c[(i + 2) % steps]) / 9); }
+    const pts = r.map((v, i) => { const t = i / steps * TAU, n = 1 + .04 * Math.sin(3 * t + seed * TAU) + .025 * Math.cos(5 * t - seed * 11); return {x: Math.cos(t) * v * n, y: Math.sin(t) * v * n}; });
+    let d = "";
+    for (let i = 0; i < pts.length; i++) {
+      const p0 = pts[(i - 1 + pts.length) % pts.length], p1 = pts[i], p2 = pts[(i + 1) % pts.length], p3 = pts[(i + 2) % pts.length];
+      if (!i) d += `M${p1.x.toFixed(1)},${p1.y.toFixed(1)}`;
+      d += ` C${(p1.x + (p2.x - p0.x) / 6).toFixed(1)},${(p1.y + (p2.y - p0.y) / 6).toFixed(1)} ${(p2.x - (p3.x - p1.x) / 6).toFixed(1)},${(p2.y - (p3.y - p1.y) / 6).toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
+    }
+    return {d: d + "Z", radius: Math.max(...r) * 1.07};
+  }
+
+  function territories(field, rOf) {
+    const out = [], solos = new Map();
+    const commonsKey = a => field.scale === "real" ? ((field.workspace && field.workspace !== "all") ? (a.domain || "no domain") : folder(a.workspace)) : (AgentField.DOMAIN_LABELS[a.domain] || a.domain || "general");
+    for (const r of field.roots()) {
+      if (field.children(r.id).length) out.push({key: "f:" + r.id, kind: "family", root: r, members: [r, ...field.descendants(r.id)], local: familyLayout(field, r, rOf)});
+      else { const k = commonsKey(r); if (!solos.has(k)) solos.set(k, []); solos.get(k).push(r); }
+    }
+    for (const [k, list] of solos) out.push({key: "c:" + k, kind: "commons", label: k, root: null, members: list, local: commonsLayout(field, list)});
+    return out;
+  }
+
+  /* Message volume per agent (sent + received) sets dot size. */
+  function volumes(field) { const v = new Map(); for (const m of field.messages) { v.set(m.from, (v.get(m.from) || 0) + 1); v.set(m.to, (v.get(m.to) || 0) + 1); } return v; }
+  const dotR = (n, hub) => Math.min(10, (hub ? 4.5 : 2.6) + 1.15 * Math.sqrt(n));
+
+  /* Place territories: saved centers stay; new ones take the first free spot on a spiral. */
+  function place(terrs) {
+    const placed = [];
+    for (const t of terrs) { const c = ui.centers.get(t.key); if (c) { t.cx = c.x; t.cy = c.y; placed.push(t); } }
+    const fresh = terrs.filter(t => !ui.centers.has(t.key)).sort((a, b) => b.radius - a.radius || a.key.localeCompare(b.key));
+    for (const t of fresh) {
+      const gap = 56;
+      for (let i = 0; i < 4000; i++) {
+        const r = 14 * Math.sqrt(i), a = i * 2.39996 + hash(t.key);
+        const x = Math.cos(a) * r * 1.35, y = Math.sin(a) * r;
+        if (placed.every(o => Math.hypot(o.cx - x, o.cy - y) > o.radius + t.radius + gap)) { t.cx = x; t.cy = y; break; }
+      }
+      t.cx ??= 0; t.cy ??= 0; placed.push(t); ui.centers.set(t.key, {x: Math.round(t.cx), y: Math.round(t.cy)});
+    }
+    if (fresh.length) save();
+  }
+
+  /* ---------- Camera ---------- */
+  const size = () => ({w: canvas.clientWidth || 1000, h: canvas.clientHeight || 700});
+  const toScreen = (x, y) => ({x: ui.cam.x + ui.cam.k * x, y: ui.cam.y + ui.cam.k * y});
+  const toWorld = (sx, sy) => ({x: (sx - ui.cam.x) / ui.cam.k, y: (sy - ui.cam.y) / ui.cam.k});
+  function fitCam(bounds, pad = 70) {
+    const {w, h} = size(), bw = Math.max(40, bounds.r - bounds.l), bh = Math.max(40, bounds.b - bounds.t);
+    const usableH = h - 130, k = Math.max(.2, Math.min(4, Math.min((w - pad * 2) / bw, (usableH - pad) / bh)));
+    return {k, x: w / 2 - k * (bounds.l + bounds.r) / 2, y: 50 + usableH / 2 - k * (bounds.t + bounds.b) / 2};
+  }
+  const boundsOf = list => ({l: Math.min(...list.map(t => t.cx - t.radius)), r: Math.max(...list.map(t => t.cx + t.radius)), t: Math.min(...list.map(t => t.cy - t.radius - 30)), b: Math.max(...list.map(t => t.cy + t.radius))});
+  let camAnim = null;
+  function flyTo(cam) {
+    if (reduced) { ui.cam = cam; applyCamera(); save(); return; }
+    camAnim = {from: {...ui.cam}, to: cam, t0: performance.now(), dur: 520};
+  }
+  function applyCamera() {
+    world.setAttribute("transform", `translate(${ui.cam.x.toFixed(1)},${ui.cam.y.toFixed(1)}) scale(${ui.cam.k.toFixed(4)})`);
+    drawLabels(); drawWaiting(); if (reduced) drawTicks();
+  }
+
+  /* ---------- Render (on every field change) ---------- */
+  function render(field, stage, api) {
+    if (ui.fieldRef !== field) {
+      const first = !ui.fieldRef; ui.fieldRef = field;
+      if (ui.key !== storeKey(field)) { load(field); ui.focus = null; }
+      ui.lastMsgId = field.messages.reduce((m, x) => Math.max(m, x.id), 0);
+      if (first) ui.replay.window = field.scale === "real" ? "24h" : "24h";
+      ui.replay.cursor = field.now - WINDOWS[ui.replay.window]; ui.replay.hold = 0;
+      dotsG.replaceChildren(); trailsG.replaceChildren(); flights.length = 0; trails.length = 0;
+    }
+    stage.replaceChildren(canvas, panel);
+
+    const vol = volumes(field);
+    const terrs = territories(field, a => dotR(vol.get(a.id) || 0, !a.parentId && field.children(a.id).length > 0));
+    const pos = new Map(); // agent id → {x, y, r, terr}
+    for (const t of terrs) {
+      for (const a of t.members) {
+        const p = t.local.get(a.id), pin = ui.pins.get(a.id);
+        const r = dotR(vol.get(a.id) || 0, t.kind === "family" && a.id === t.root.id);
+        pos.set(a.id, {lx: pin && pin.key === t.key ? pin.x : p.x, ly: pin && pin.key === t.key ? pin.y : p.y, r, t});
+      }
+      const pts = t.members.map(a => ({x: pos.get(a.id).lx, y: pos.get(a.id).ly, r: pos.get(a.id).r}));
+      const hull = hullPath(pts, t.kind === "family" ? 20 : 16, hash(t.key)); t.hull = hull.d; t.radius = hull.radius;
+      t.needs = t.members.filter(field.needsUser);
+      t.last = Math.max(...t.members.map(field.lastActivity));
+    }
+    place(terrs);
+    for (const [id, p] of pos) { p.x = p.t.cx + p.lx; p.y = p.t.cy + p.ly; }
+    if (ui.focus && !terrs.some(t => t.key === ui.focus)) ui.focus = null;
+    if (!ui.cam) { ui.cam = fitCam(boundsOf(terrs)); save(); }
+    const focusT = terrs.find(t => t.key === ui.focus) || null;
+    ctx = {field, api, terrs, pos, focusT, byKey: new Map(terrs.map(t => [t.key, t]))};
+
+    /* World: hulls, lineage (focused family only), agents. */
+    world.replaceChildren();
+    const sorted = [...terrs].sort((a, b) => (a.key === ui.focus) - (b.key === ui.focus));
+    for (const t of sorted) {
+      const g = svgEl("g", {class: "terr " + t.kind + (t.needs.length ? " has-needs" : "") + (ui.focus && t.key !== ui.focus ? " dim" : "") + (t.key === ui.focus ? " focused" : ""), transform: `translate(${t.cx},${t.cy})`}, world);
+      g.dataset.key = t.key; t.g = g;
+      const hull = svgEl("path", {class: "hull", d: t.hull}, g); hull.dataset.key = t.key;
+      if (t.key === ui.focus && t.kind === "family") for (const a of t.members) {
+        if (!a.parentId || !pos.has(a.parentId)) continue; const p = pos.get(a.parentId), c = pos.get(a.id);
+        svgEl("line", {class: "lineage", x1: p.lx, y1: p.ly, x2: c.lx, y2: c.ly}, g);
+      }
+      const order = [...t.members].sort((a, b) => Number(field.needsUser(a)) - Number(field.needsUser(b)));
+      for (const a of order) g.append(agentMark(field, a, pos.get(a.id), t));
+    }
+
+    drawYou(field);
+    drawChrome(field, api, terrs);
+    drawPanel(field, api, terrs);
+    applyCamera();
+    svg.dataset.live = ui.replay.live || ui.replay.hold > 0 ? "on" : "off";
+
+    // Live traffic from Play/Step (simulated fields) launches dots as it happens.
+    const fresh = field.messages.filter(m => m.id > ui.lastMsgId);
+    if (fresh.length) { ui.lastMsgId = Math.max(...fresh.map(m => m.id)); if (ui.replay.live || !ui.replay.playing) for (const m of fresh.slice(-12)) launch(m); }
+    if (ui.replay.live) ui.replay.cursor = field.now;
+  }
+
+  function agentMark(field, a, p, t) {
+    const needs = field.needsUser(a), hub = t.kind === "family" && a.id === t.root.id;
+    const g = svgEl("g", {class: "agent " + a.status + (needs ? " needs" : "") + (ui.located === a.id ? " located" : ""), transform: `translate(${p.lx.toFixed(1)},${p.ly.toFixed(1)})`});
+    g.dataset.id = a.id;
+    if (needs || hub) g.setAttribute("tabindex", "0");
+    if (a.status === "done") g.style.setProperty("--age-opacity", Math.max(.25, .25 + .6 * Math.exp(-field.age(a) / (2 * DAY))).toFixed(2));
+    svgEl("circle", {class: "halo", r: p.r + 5}, g);
+    const age = field.age(a), recent = a.status === "done" ? 0 : Math.round(100 * Math.exp(-age / (6 * HOUR)));
+    const core = svgEl("circle", {class: "core", r: p.r}, g); core.style.fill = `color-mix(in srgb, var(--accent) ${recent}%, var(--dot-idle))`;
+    if (hub) svgEl("circle", {class: "hub-hole", r: Math.max(1.6, p.r * .38)}, g);
+    svgEl("circle", {class: "ring", r: p.r + 3.5}, g);
+    svgEl("circle", {class: "mark", r: p.r + 7}, g);
+    if (ui.pins.has(a.id)) svgEl("circle", {class: "pin", r: 1.3, cx: p.r * .7, cy: -p.r * .7}, g);
+    return g;
+  }
+
+  /* ---------- Overlay: captions and labels in screen space ---------- */
+  function drawLabels() {
+    if (!ctx) return; labelsG.replaceChildren();
+    const {field, terrs, pos} = ctx, k = ui.cam.k, {w, h} = size();
+    const text = (cls, x, y, s, anchor = "middle") => { const e = svgEl("text", {class: cls, x: x.toFixed(1), y: y.toFixed(1), "text-anchor": anchor}, labelsG); e.textContent = s; return e; };
+    // Captions are placed greedily by priority (needs you, then size) and skipped where they would collide; hover reveals the rest.
+    const boxes = [];
+    const free = b => !boxes.some(o => b.l < o.r && b.r > o.l && b.t < o.b && b.b > o.t);
+    const ranked = [...terrs].sort((a, b) => (b.key === ui.focus) - (a.key === ui.focus) || b.needs.length - a.needs.length || b.members.length - a.members.length || b.last - a.last);
+    for (const t of ranked) {
+      const top = toScreen(t.cx, t.cy - t.radius), dim = ui.focus && t.key !== ui.focus ? " dim" : "";
+      if (top.x < -200 || top.x > w + 200 || top.y < -60 || top.y > h + 60) continue;
+      if (t.key === ui.focus && t.kind === "family") continue; // the focused family labels its members instead
+      if (ui.focus && t.key !== ui.focus && !t.needs.length) continue;
+      const name = t.kind === "family" ? short(ident(t.root), 34) : "Commons · " + t.label;
+      const needLine = t.needs.length ? (t.needs.length === 1 ? short(ident(t.needs[0]), 30) + " needs you" : t.needs.length + " need you") : null;
+      const lines = needLine ? 2 : 1, fs = t.kind === "commons" ? 6 : 6.6, width = Math.max(name.length * fs, needLine ? needLine.length * 5.6 : 0);
+      const bottom = top.y - 6, box = {l: top.x - width / 2 - 4, r: top.x + width / 2 + 4, t: bottom - lines * 14 - 2, b: bottom + 2};
+      if (!free(box)) continue;
+      boxes.push(box);
+      let y = bottom - (lines - 1) * 13;
+      text("cap" + (t.kind === "commons" ? " commons" : "") + dim, top.x, y, name);
+      if (needLine) text("cap-needs" + dim, top.x, y + 13, needLine);
+    }
+    // Member labels: everything in the focused family; elsewhere hubs and needs-you agents once zoomed in.
+    let count = 0;
+    const rank = id => { const a = field.byId(id); return (field.needsUser(a) ? 4 : 0) + (pos.get(id).t.root?.id === id ? 3 : 0) + (a.status === "working" ? 2 : 0) - field.age(a) / (30 * DAY); };
+    const members = [...pos.entries()].filter(([id, p]) => p.t.key === ui.focus || !ui.focus).sort((x, y) => rank(y[0]) - rank(x[0]));
+    for (const [id, p] of members) {
+      const a = field.byId(id), inFocus = ui.focus && p.t.key === ui.focus, needs = field.needsUser(a), hub = p.t.root?.id === id;
+      if (!inFocus && !(k >= 1.6 && (hub || needs)) && !(k >= 2.6)) continue;
+      if (ui.focus && !inFocus) continue;
+      const s = toScreen(p.x, p.y); if (s.x < -50 || s.x > w + 50 || s.y < -20 || s.y > h + 20) continue;
+      if (++count > 90) break;
+      const left = p.lx < -4 && inFocus, dx = (p.r * k + 6) * (left ? -1 : 1), anchor = left ? "end" : "start";
+      const name = short(ident(a), inFocus ? 34 : 26), wpx = name.length * 6 + 4, x0 = left ? s.x + dx - wpx : s.x + dx;
+      const box = {l: x0, r: x0 + wpx, t: s.y - 8, b: s.y + (inFocus ? 18 : 6)};
+      const dotBox = {l: s.x - p.r * k, r: s.x + p.r * k, t: s.y - p.r * k, b: s.y + p.r * k};
+      if (!free(box)) continue;
+      boxes.push(box, dotBox);
+      text("lbl" + (hub ? " hub" : "") + (needs ? " needs" : ""), s.x + dx, s.y + 3.5, short(ident(a), inFocus ? 34 : 26), anchor);
+      if (inFocus) { const sub = a.status === "working" ? (field.toolLabel(a) || a.activity || "Working") : (a.surface?.label || a.domain || field.statusLabel(a)); text("lbl-sub" + (a.status === "working" ? " working" : ""), s.x + dx, s.y + 15, short(sub, 38), anchor); }
+    }
+  }
+
+  /* Open requests at the live end: a hollow dot waits at the recipient, leaning toward the sender. */
+  function drawWaiting() {
+    if (!ctx) return; waitG.replaceChildren();
+    const {field, pos} = ctx;
+    for (const m of field.openRequests()) {
+      const a = pos.get(m.to), b = m.from === "user" ? null : pos.get(m.from); if (!a) continue;
+      const inFocus = ui.focus && a.t.key === ui.focus;
+      const s = toScreen(a.x, a.y), o = b ? toScreen(b.x, b.y) : {x: s.x, y: s.y - 40};
+      const dx = o.x - s.x, dy = o.y - s.y, d = Math.hypot(dx, dy) || 1, off = a.r * ui.cam.k + 9;
+      const g = svgEl("g", {class: "pending" + (inFocus ? " in-focus" : "") + (field.now - m.at > 15 * MIN ? " old" : "")}, waitG);
+      if (inFocus && b) svgEl("line", {x1: s.x + dx / d * off, y1: s.y + dy / d * off, x2: o.x, y2: o.y}, g);
+      svgEl("circle", {cx: (s.x + dx / d * off).toFixed(1), cy: (s.y + dy / d * off).toFixed(1), r: 3.4}, g);
+    }
+  }
+
+  function drawYou(field) {
+    youG.replaceChildren();
+    if (!field.messages.some(m => m.from === "user" || m.to === "user")) return;
+    const p = youPoint(); svgEl("circle", {cx: p.x, cy: p.y, r: 11}, youG); const t = svgEl("text", {x: p.x, y: p.y}, youG); t.textContent = "You";
+  }
+  const youPoint = () => ({x: size().w - 34, y: 66});
+
+  /* ---------- Message dots ---------- */
+  const flights = [], trails = [], pulses = [];
+  const dotClass = m => (m.from === "user" || m.to === "user" || m.intent === "blocker" || m.kind === "failure") ? "warm" : (m.intent === "handoff" || m.kind === "closure") ? "ok" : "";
+  function endpoints(m) {
+    const {pos} = ctx; const a = m.from === "user" ? "user" : pos.get(m.from), b = m.to === "user" ? "user" : pos.get(m.to);
+    if (!a || !b) return null;
+    return {a, b};
+  }
+  function curve(a, b, seed) { // screen-space quadratic, bowed to one side
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+    const bow = Math.min(90, len * .22) * (seed < .5 ? 1 : -1);
+    return {a, b, c: {x: mx - dy / len * bow, y: my + dx / len * bow}};
+  }
+  const qp = (q, u) => ({x: (1 - u) * (1 - u) * q.a.x + 2 * (1 - u) * u * q.c.x + u * u * q.b.x, y: (1 - u) * (1 - u) * q.a.y + 2 * (1 - u) * u * q.c.y + u * u * q.b.y});
+  const screenOf = e => e === "user" ? youPoint() : toScreen(e.x, e.y);
+  function launch(m) {
+    if (!ctx || reduced || flights.length >= MAX_DOTS) return;
+    const ends = endpoints(m); if (!ends) return;
+    const g = svgEl("g", {class: "msg " + dotClass(m) + (m.replyRequired && !m.repliedBy && m.kind !== "closure" ? " open" : "")}, dotsG);
+    svgEl("circle", {r: 3.3}, g);
+    flights.push({m, ends, seed: hash(m.id), t0: performance.now(), g});
+  }
+  function frame(now) {
+    const dt = Math.min(100, now - (frame.last || now)); frame.last = now;
+    if (camAnim) {
+      const u = Math.min(1, (now - camAnim.t0) / camAnim.dur), e = u < .5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2;
+      ui.cam = {k: camAnim.from.k + (camAnim.to.k - camAnim.from.k) * e, x: camAnim.from.x + (camAnim.to.x - camAnim.from.x) * e, y: camAnim.from.y + (camAnim.to.y - camAnim.from.y) * e};
+      applyCamera(); if (u >= 1) { camAnim = null; save(); }
+    }
+    if (ctx) advanceReplay(dt);
+    for (let i = flights.length - 1; i >= 0; i--) {
+      const f = flights[i], u = (now - f.t0) / DOT_MS;
+      const q = curve(screenOf(f.ends.a), screenOf(f.ends.b), f.seed);
+      if (u >= 1) {
+        f.g.remove(); flights.splice(i, 1);
+        const cls = dotClass(f.m);
+        trails.push({q: f, t0: now, el: svgEl("path", {class: "trail " + cls}, trailsG)});
+        pulses.push({ends: f.ends, t0: now, el: svgEl("circle", {class: "absorb " + cls}, trailsG)});
+        while (trails.length > 8) trails.shift().el.remove();
+        continue;
+      }
+      const e = u < .5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2, p = qp(q, e);
+      f.g.setAttribute("transform", `translate(${p.x.toFixed(1)},${p.y.toFixed(1)})`);
+      f.g.style.opacity = String(Math.min(1, u * 6, (1 - u) * 6 + .2));
+    }
+    for (let i = trails.length - 1; i >= 0; i--) {
+      const t = trails[i], u = (now - t.t0) / TRAIL_MS;
+      if (u >= 1) { t.el.remove(); trails.splice(i, 1); continue; }
+      const q = curve(screenOf(t.q.ends.a), screenOf(t.q.ends.b), t.q.seed);
+      t.el.setAttribute("d", `M${q.a.x.toFixed(1)},${q.a.y.toFixed(1)} Q${q.c.x.toFixed(1)},${q.c.y.toFixed(1)} ${q.b.x.toFixed(1)},${q.b.y.toFixed(1)}`);
+      t.el.style.opacity = (.32 * (1 - u)).toFixed(3);
+    }
+    for (let i = pulses.length - 1; i >= 0; i--) {
+      const p = pulses[i], u = (now - p.t0) / 650;
+      if (u >= 1) { p.el.remove(); pulses.splice(i, 1); continue; }
+      const s = screenOf(p.ends.b); p.el.setAttribute("cx", s.x.toFixed(1)); p.el.setAttribute("cy", s.y.toFixed(1)); p.el.setAttribute("r", (4 + 10 * u).toFixed(1)); p.el.style.opacity = (1 - u).toFixed(2);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  /* Replay: a cursor sweeps the window in about a minute, launching each message as it passes. Quiet stretches are skipped. */
+  let sortedMsgs = [], sortedFor = null;
+  function msgsByTime(field) { if (sortedFor !== field || sortedMsgs.length !== field.messages.length) { sortedMsgs = [...field.messages].sort((a, b) => a.at - b.at); sortedFor = field; } return sortedMsgs; }
+  function advanceReplay(dt) {
+    const r = ui.replay, field = ctx.field, span = WINDOWS[r.window], start = field.now - span;
+    if (r.live) { r.cursor = field.now; updateScrub(); return; }
+    if (r.hold > 0) { r.hold -= dt; if (r.hold <= 0) { r.cursor = start; svg.dataset.live = "off"; } updateScrub(); return; }
+    if (!r.playing) { updateScrub(); return; }
+    const prev = r.cursor; let next = prev + dt * span / SWEEP_MS * r.speed;
+    const list = msgsByTime(field);
+    const upcoming = list.find(m => m.at > prev);
+    if (upcoming && upcoming.at - prev > span * .06 && next < upcoming.at) next = upcoming.at - span * .004; // skip quiet hours
+    if (next >= field.now) { next = field.now; r.hold = 4500; svg.dataset.live = "on"; }
+    for (const m of list) { if (m.at <= prev) continue; if (m.at > next) break; launch(m); }
+    r.cursor = next; updateScrub();
+  }
+  function drawTicks() { // reduced motion: static ticks for the messages just before the cursor
+    trailsG.replaceChildren(); if (!ctx) return;
+    const r = ui.replay, span = WINDOWS[r.window], list = msgsByTime(ctx.field).filter(m => m.at <= r.cursor && m.at > r.cursor - span / 12).slice(-MAX_DOTS);
+    for (const m of list) {
+      const ends = endpoints(m); if (!ends) continue; const q = curve(screenOf(ends.a), screenOf(ends.b), hash(m.id)), p = qp(q, .82);
+      svgEl("circle", {class: "tick", cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: 2.4, style: `fill:var(--${dotClass(m) === "warm" ? "warm" : dotClass(m) === "ok" ? "ok" : "accent"});opacity:${(.35 + .65 * (1 - (r.cursor - m.at) / (span / 12))).toFixed(2)}`}, trailsG);
+    }
+  }
+
+  /* ---------- Scrubber ---------- */
+  const playBtn = $("button", "btn"), when = $("span", "when"), track = $("div", "track"), cursorEl = $("i", "cursor"), liveBtn = $("button", "btn live", "LIVE");
+  const trackSvg = svgEl("svg", {preserveAspectRatio: "none"}); track.append(trackSvg, cursorEl);
+  const winSeg = $("span", "seg"), speedSeg = $("span", "seg");
+  playBtn.type = liveBtn.type = "button";
+  for (const w of Object.keys(WINDOWS)) { const b = $("button", null, w); b.type = "button"; b.dataset.w = w; b.title = "Replay the last " + w; b.onclick = () => { ui.replay.window = w; ui.replay.live = false; ui.replay.hold = 0; ui.replay.cursor = ctx.field.now - WINDOWS[w]; drawScrub(); }; winSeg.append(b); }
+  for (const s of [1, 4]) { const b = $("button", null, s + "×"); b.type = "button"; b.dataset.s = s; b.onclick = () => { ui.replay.speed = s; drawScrub(); }; speedSeg.append(b); }
+  playBtn.onclick = () => { const r = ui.replay; r.live = false; if (r.hold > 0 || r.cursor >= ctx.field.now) { r.hold = 0; r.cursor = ctx.field.now - WINDOWS[r.window]; } r.playing = !r.playing; drawScrub(); };
+  liveBtn.onclick = () => { const r = ui.replay; r.live = !r.live; r.hold = 0; if (!r.live) r.cursor = ctx.field.now - WINDOWS[r.window]; svg.dataset.live = r.live ? "on" : "off"; drawScrub(); };
+  liveBtn.title = "Jump to now: open requests wait at their recipients; new messages fly as they happen";
+  scrub.append(playBtn, track, when, winSeg, speedSeg, liveBtn);
+  let scrubbing = false;
+  const seek = e => { const rect = track.getBoundingClientRect(), u = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)), r = ui.replay; r.live = false; r.hold = 0; r.cursor = ctx.field.now - WINDOWS[r.window] * (1 - u); svg.dataset.live = u >= .999 ? "on" : "off"; updateScrub(); if (reduced) drawTicks(); };
+  track.addEventListener("pointerdown", e => { scrubbing = true; track.setPointerCapture(e.pointerId); seek(e); });
+  track.addEventListener("pointermove", e => { if (scrubbing) seek(e); });
+  track.addEventListener("pointerup", () => { scrubbing = false; });
+  function drawScrub() {
+    if (!ctx) return; const r = ui.replay, field = ctx.field, span = WINDOWS[r.window], start = field.now - span, bins = 96, counts = new Array(bins).fill(0);
+    for (const m of field.messages) if (m.at > start && m.at <= field.now) counts[Math.min(bins - 1, Math.floor((m.at - start) / span * bins))]++;
+    const max = Math.max(1, ...counts); trackSvg.replaceChildren(); trackSvg.setAttribute("viewBox", `0 0 ${bins} 26`);
+    counts.forEach((c, i) => { if (c) svgEl("rect", {class: "bar", x: i + .15, width: .7, y: 26 - Math.max(1.5, 22 * Math.sqrt(c / max)), height: Math.max(1.5, 22 * Math.sqrt(c / max)), "data-i": i}, trackSvg); });
+    for (const b of winSeg.children) b.setAttribute("aria-pressed", String(b.dataset.w === r.window));
+    for (const b of speedSeg.children) b.setAttribute("aria-pressed", String(Number(b.dataset.s) === r.speed));
+    updateScrub();
+  }
+  let lastScrubLabel = "";
+  function updateScrub() {
+    const r = ui.replay, field = ctx.field, span = WINDOWS[r.window], u = Math.max(0, Math.min(1, 1 - (field.now - r.cursor) / span));
+    cursorEl.style.left = (u * 100).toFixed(2) + "%";
+    const playedBins = Math.floor(u * 96);
+    for (const b of trackSvg.children) b.classList.toggle("played", Number(b.dataset.i) < playedBins);
+    const atEnd = r.live || r.hold > 0 || u >= .999;
+    const label = atEnd ? "now · open requests" : new Date(r.cursor).toLocaleString([], span > DAY ? {weekday: "short", hour: "2-digit", minute: "2-digit"} : {hour: "2-digit", minute: "2-digit"}) + " · " + field.duration(field.now - r.cursor) + " ago";
+    if (label !== lastScrubLabel) { when.textContent = label; lastScrubLabel = label; }
+    playBtn.textContent = r.playing && !r.live ? "❚❚" : "▶"; playBtn.title = r.playing ? "Pause the replay" : "Replay the message log";
+    liveBtn.setAttribute("aria-pressed", String(!!r.live));
+  }
+
+  /* ---------- Toolbar, legend ---------- */
+  function drawChrome(field, api, terrs) {
+    toolbar.replaceChildren();
+    const crumb = $("div", "crumb");
+    if (ui.focus) { const back = $("button", null, "All families"); back.type = "button"; back.onclick = () => unfocus(); crumb.append(back, " › "); const t = ctx.byKey.get(ui.focus); crumb.append($("b", null, t.kind === "family" ? ident(t.root) : "Commons · " + t.label)); }
+    else crumb.append($("b", null, "All families"));
+    toolbar.append(crumb, $("span", "hint", ui.focus ? "Click an agent for its lens · double-click opens the thread · Esc goes back" : "Click a family to zoom in · drag to move it · scroll to zoom"));
+    if (!snapshot) { const ex = $("span", "exporter"); ex.append("Simulated data. For your records run ", $("code", null, "python3 docs/agent-display-mockups/export-threads.py")); toolbar.append(ex); }
+    toolbar.append($("span", "spacer"));
+    const fit = $("button", "btn", "Fit"); fit.type = "button"; fit.onclick = () => flyTo(fitCam(boundsOf(ui.focus ? [ctx.byKey.get(ui.focus)] : terrs)));
+    const reset = $("button", "btn", "Reset layout"); reset.type = "button"; reset.title = "Forget moved families, pinned agents, and the camera";
+    reset.onclick = () => { ui.centers.clear(); ui.pins.clear(); ui.cam = null; ui.focus = null; try { localStorage.removeItem(ui.key); } catch { /* private mode */ } api.rerender(); };
+    toolbar.append(fit, reset);
+    legend.replaceChildren();
+    const lg = (cls, text) => { const s = $("span"); s.append($("i", cls), text); legend.append(s); };
+    lg("", "message"); lg("open", "awaiting reply"); lg("ok", "handoff / closure"); lg("warm", "blocker or you"); lg("ring", "needs you"); lg("recency", "recent → quiet");
+    const s = $("span", null, "size: messages sent + received"); legend.append(s);
+    if (field.scale === "real") legend.append($("span", null, "intent guessed from message text"));
+    if (field.outsideMessages) legend.append($("span", null, field.outsideMessages + " messages with threads outside " + (field.workspace && field.workspace !== "all" ? "this workspace" : "the snapshot") + " not shown"));
+    drawScrub();
+  }
+
+  /* ---------- Panel: focused family, then what needs you ---------- */
+  function drawPanel(field, api, terrs) {
+    panel.replaceChildren();
+    const t = ui.focus && ctx.byKey.get(ui.focus);
+    if (t) {
+      const fam = $("section", "family");
+      const head = $("div", "family-head"); head.append($("h2", null, t.kind === "family" ? ident(t.root) : "Commons · " + t.label));
+      const back = $("button", "btn quiet small", "×"); back.type = "button"; back.setAttribute("aria-label", "Back to all families"); back.onclick = unfocus; head.append(back);
+      fam.append(head);
+      const tree = $("ul", "tree");
+      const rows = t.kind === "family" ? field.treeRows([t.root.id]) : t.members.map(a => ({agent: a, depth: 0}));
+      for (const {agent: a, depth} of rows.slice(0, 60)) {
+        const li = $("li"), b = $("button"); b.type = "button"; b.style.paddingLeft = (6 + depth * 14) + "px";
+        b.append(AgentField.statusDot(a), $("span", null, ident(a)), $("small", null, field.needsUser(a) ? "needs you" : a.status === "working" ? "working" : a.surface?.label || a.domain || ""));
+        b.title = a.title; b.onclick = () => peekAgent(a.id); li.append(b); tree.append(li);
+      }
+      fam.append(tree);
+      const ids = new Set(t.members.map(a => a.id));
+      const msgs = field.messages.filter(m => ids.has(m.from) || ids.has(m.to)).sort((a, b) => b.at - a.at).slice(0, 8);
+      const log = $("div", "log"); log.append($("h3", null, "Recent messages"));
+      if (!msgs.length) log.append($("p", "note", "No messages yet."));
+      for (const m of msgs) {
+        const art = $("article", m.replyRequired && !m.repliedBy && m.kind !== "closure" ? "open" : "");
+        const meta = $("small"); meta.append(short(field.nameOf(m.from), 24) + " → " + short(field.nameOf(m.to), 24) + " · ", $("i", null, (m.intentDerived ? "≈ " : "") + (field.INTENT_LABELS[m.intent] || field.KIND_LABELS[m.kind])), " · " + field.relativeTime(m.at) + (m.replyRequired && !m.repliedBy && m.kind !== "closure" ? " · awaiting reply" : ""));
+        art.append(meta, $("span", null, m.body)); log.append(art);
+      }
+      if (msgs.some(m => m.intentDerived)) log.append($("p", "note", "≈ intent is guessed from the message text; agents do not report it yet."));
+      fam.append(log);
+      panel.append(fam);
+    }
+    const asks = field.asks();
+    const waits = field.openRequests().filter(m => m.from !== "user" && m.to !== "user" && field.now - m.at > 15 * MIN && field.byId(m.from) && field.byId(m.to)).sort((a, b) => a.at - b.at);
+    const head = $("div", "panel-head"); head.append($("i"), "Needs you"); head.append($("small", null, asks.length ? String(asks.length) : "")); panel.append(head);
+    if (!asks.length) panel.append($("p", "calm", "Nothing needs you right now."));
+    for (const a of asks) panel.append(askItem(field, api, a));
+    if (waits.length) {
+      const h2 = $("div", "panel-head"); h2.append("Waiting on each other"); h2.append($("small", null, String(waits.length))); panel.append(h2);
+      for (const m of waits.slice(0, 40)) panel.append(waitItem(field, api, m));
+    }
+  }
+  function askItem(field, api, a) {
+    const it = $("div", "item" + (ui.located === a.id ? " located" : ""));
+    const top = $("div", "top"); top.append($("span", "kind", a.ask ? a.ask.kind : "next step"), AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("b", null, ident(a)), $("small", null, field.relativeTime(a.ask?.askedAt || a.updatedAt)));
+    it.append(top);
+    const chain = field.chain(a.id); const via = a.ask?.via?.map(field.byId).filter(Boolean) || [];
+    const from = chain.length > 1 ? "in " + ident(chain[0]) + (via.length ? " · relayed via " + via.map(ident).join(" → ") : "") : (a.surface?.label || a.domain || folder(a.workspace) || "");
+    if (from) it.append($("div", "from", from));
+    it.append($("div", "q", a.ask?.question || a.next.action));
+    const act = $("div", "act");
+    if (a.ask?.options?.length) {
+      const o = a.ask.options[0], b = $("button", "btn small primary", o.label); b.type = "button"; b.onclick = e => { e.stopPropagation(); field.answer(a.id, o.id); }; act.append(b);
+      const more = $("button", "btn small", "More…"); more.type = "button"; more.onclick = e => { e.stopPropagation(); peekAgent(a.id); }; act.append(more);
+    } else { const open = $("button", "btn small", "Open thread"); open.type = "button"; open.onclick = e => { e.stopPropagation(); api.select(a.id); }; act.append(open); }
+    act.append($("span", "locate", "show on map ↗"));
+    it.append(act); it.onclick = () => locate(a.id);
+    return it;
+  }
+  function waitItem(field, api, m) {
+    const it = $("div", "item" + (ui.located === m.to ? " located" : ""));
+    const top = $("div", "top"); top.append($("span", "kind req", m.kind === "creation" ? "result owed" : "reply owed"), $("b", null, field.nameOf(m.from) + " waits on " + field.nameOf(m.to)), $("small", null, field.duration(field.now - m.at)));
+    it.append(top, $("div", "q", m.body));
+    const act = $("div", "act"); const open = $("button", "btn small", "Open " + short(field.nameOf(m.to), 22)); open.type = "button"; open.onclick = e => { e.stopPropagation(); api.select(m.to); }; act.append(open, $("span", "locate", "show on map ↗"));
+    it.append(act); it.onclick = () => locate(m.to);
+    return it;
+  }
+
+  /* ---------- Navigation ---------- */
+  function focusTerr(key) { ui.focus = key; const t = ctx.byKey.get(key); flyTo(fitCam(boundsOf([t]), 90)); ctx.api.rerender(); }
+  function unfocus() { ui.focus = null; ctx.api.unpeek(); flyTo(fitCam(boundsOf(ctx.terrs))); ctx.api.rerender(); }
+  function locate(id) {
+    const p = ctx.pos.get(id); if (!p) return;
+    ui.located = id; ui.focus = p.t.kind === "family" || p.t.members.length > 1 ? p.t.key : null;
+    const cam = fitCam(boundsOf([p.t]), 90); flyTo(cam); ctx.api.rerender();
+    setTimeout(() => { if (ui.located === id) { ui.located = null; } }, 5200);
+  }
+  function peekAgent(id) {
+    const p = ctx.pos.get(id); if (!p) return;
+    if (ui.focus !== p.t.key) { ui.focus = p.t.key; flyTo(fitCam(boundsOf([p.t]), 90)); ctx.api.rerender(); }
+    setTimeout(() => { const s = toScreen(p.x, p.y), r = canvas.getBoundingClientRect(); ctx.api.peek(id, null, {x: r.left + s.x + p.r * ui.cam.k, y: r.top + s.y}); }, reduced ? 0 : 560);
+  }
+
+  /* ---------- Pointer: pan, zoom, drag families and agents, hover ---------- */
+  let gesture = null;
+  svg.addEventListener("pointerdown", e => {
+    if (e.button !== 0 || !ctx) return;
+    const agentEl = e.target.closest?.(".agent"), hullEl = e.target.closest?.(".hull");
+    gesture = {x: e.clientX, y: e.clientY, moved: false, agent: agentEl?.dataset.id || null, terr: agentEl ? ctx.pos.get(agentEl.dataset.id)?.t.key : hullEl?.dataset.key || null, onHull: !agentEl && !!hullEl, cam: {...ui.cam}};
+    if (gesture.terr) { const c = ui.centers.get(gesture.terr); gesture.c0 = {...c}; }
+    if (gesture.agent) { const p = ctx.pos.get(gesture.agent); gesture.p0 = {x: p.lx, y: p.ly}; }
+    svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener("pointermove", e => {
+    if (!ctx) return;
+    if (!gesture) { hover(e); return; }
+    const dx = e.clientX - gesture.x, dy = e.clientY - gesture.y;
+    if (!gesture.moved && Math.hypot(dx, dy) < 4) return;
+    gesture.moved = true; tip.hidden = true;
+    if (gesture.agent && ui.focus === gesture.terr) { // drag an agent inside its focused family: pin it
+      const p = ctx.pos.get(gesture.agent), nx = gesture.p0.x + dx / ui.cam.k, ny = gesture.p0.y + dy / ui.cam.k;
+      p.lx = nx; p.ly = ny; p.x = p.t.cx + nx; p.y = p.t.cy + ny;
+      svg.querySelector(`.agent[data-id="${CSS.escape(gesture.agent)}"]`)?.setAttribute("transform", `translate(${nx.toFixed(1)},${ny.toFixed(1)})`);
+      ui.pins.set(gesture.agent, {key: gesture.terr, x: Math.round(nx), y: Math.round(ny)}); drawLabels(); drawWaiting();
+    } else if (gesture.terr && (gesture.onHull || gesture.agent) && !(ui.focus && ui.focus === gesture.terr && gesture.onHull)) { // drag a territory
+      const t = ctx.byKey.get(gesture.terr), nx = gesture.c0.x + dx / ui.cam.k, ny = gesture.c0.y + dy / ui.cam.k;
+      t.cx = nx; t.cy = ny; ui.centers.set(t.key, {x: Math.round(nx), y: Math.round(ny)});
+      t.g.setAttribute("transform", `translate(${nx.toFixed(1)},${ny.toFixed(1)})`);
+      for (const a of t.members) { const p = ctx.pos.get(a.id); p.x = nx + p.lx; p.y = ny + p.ly; }
+      drawLabels(); drawWaiting();
+    } else { ui.cam = {...gesture.cam, x: gesture.cam.x + dx, y: gesture.cam.y + dy}; canvas.classList.add("panning"); applyCamera(); }
+  });
+  svg.addEventListener("pointerup", e => {
+    const g = gesture; gesture = null; canvas.classList.remove("panning"); if (!g || !ctx) return;
+    if (g.moved) { save(); if (g.agent && ui.focus === g.terr) ctx.api.rerender(); return; }
+    if (g.agent) {
+      const p = ctx.pos.get(g.agent);
+      if (p.t.kind === "family" && ui.focus !== p.t.key) focusTerr(p.t.key);
+      else { const s = toScreen(p.x, p.y), r = canvas.getBoundingClientRect(); ctx.api.peek(g.agent, null, {x: r.left + s.x + p.r * ui.cam.k, y: r.top + s.y}); }
+    } else if (g.terr && ui.focus !== g.terr) focusTerr(g.terr);
+  });
+  svg.addEventListener("dblclick", e => { const el = e.target.closest?.(".agent"); if (el) { ctx.api.unpeek(); ctx.api.select(el.dataset.id); } });
+  svg.addEventListener("wheel", e => {
+    e.preventDefault(); if (!ctx) return; camAnim = null;
+    const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top, w = toWorld(sx, sy);
+    const k = Math.max(.2, Math.min(7, ui.cam.k * Math.exp(-e.deltaY * .0015)));
+    ui.cam = {k, x: sx - w.x * k, y: sy - w.y * k}; applyCamera(); save();
+  }, {passive: false});
+  svg.addEventListener("pointerleave", () => { tip.hidden = true; });
+  svg.addEventListener("keydown", e => { const el = e.target.closest?.(".agent"); if (el && e.key === "Enter") { const p = ctx.pos.get(el.dataset.id); const s = toScreen(p.x, p.y), r = canvas.getBoundingClientRect(); ctx.api.peek(el.dataset.id, null, {x: r.left + s.x, y: r.top + s.y}); } });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && ui.focus && !document.querySelector(".lens, .drawer") && ctx) unfocus(); });
+
+  function hover(e) {
+    const el = e.target.closest?.(".agent"), hullEl = !el && e.target.closest?.(".hull");
+    if (hullEl) return hoverTerr(e, ctx.byKey.get(hullEl.dataset.key));
+    if (!el) { tip.hidden = true; return; }
+    const {field} = ctx, a = field.byId(el.dataset.id); if (!a) return;
+    tip.replaceChildren();
+    tip.append($("b", null, ident(a)));
+    if (a.name) tip.append($("span", "muted", a.title));
+    const chain = field.chain(a.id);
+    tip.append($("span", "muted", [AgentField.ROLE_LABELS[a.role] && field.scale !== "real" ? AgentField.ROLE_LABELS[a.role] : null, "on " + (a.surface?.label || a.domain || "—"), chain.length > 1 ? "under " + ident(chain.at(-2)) : null].filter(Boolean).join(" · ")));
+    const now = field.needsUser(a) ? "Needs you: " + short(a.ask?.question || a.next.action, 120) : a.status === "working" ? (field.toolLabel(a) || a.activity || "Working") : field.statusLabel(a) + " · " + field.relativeTime(field.lastActivity(a));
+    tip.append($("span", a.status === "working" ? "now" : "", now));
+    const sent = field.messages.filter(m => m.from === a.id).length, got = field.messages.filter(m => m.to === a.id).length;
+    const owes = field.owes(a.id).length, awaits = field.awaiting(a.id).length;
+    tip.append($("span", "muted", sent + " sent · " + got + " received" + (owes ? " · owes " + owes + " repl" + (owes === 1 ? "y" : "ies") : "") + (awaits ? " · awaiting " + awaits : "")));
+    const r = canvas.getBoundingClientRect(); tip.hidden = false;
+    const x = e.clientX - r.left + 14, y = e.clientY - r.top + 12;
+    tip.style.left = Math.min(x, r.width - tip.offsetWidth - 8) + "px"; tip.style.top = Math.min(y, r.height - tip.offsetHeight - 70) + "px";
+  }
+
+  function hoverTerr(e, t) {
+    if (!t) { tip.hidden = true; return; }
+    const {field} = ctx; tip.replaceChildren();
+    tip.append($("b", null, t.kind === "family" ? ident(t.root) : "Commons · " + t.label));
+    const ids = new Set(t.members.map(a => a.id)), day = field.messages.filter(m => m.at > field.now - DAY && (ids.has(m.from) || ids.has(m.to)));
+    const outside = new Set(day.flatMap(m => [m.from, m.to]).filter(x => !ids.has(x) && x !== "user").map(x => ctx.pos.get(x)?.t.key).filter(Boolean));
+    tip.append($("span", "muted", t.members.length + (t.kind === "family" ? " in the family" : " solo threads") + " · " + day.length + " messages in 24 h" + (outside.size ? " · talks with " + outside.size + " other " + (outside.size === 1 ? "group" : "groups") : "")));
+    const working = t.members.filter(a => a.status === "working").length; if (working) tip.append($("span", "now", working + " working now"));
+    if (t.needs.length) tip.append($("span", null, t.needs.map(ident).slice(0, 3).join(", ") + (t.needs.length > 3 ? "…" : "") + " need" + (t.needs.length === 1 ? "s" : "") + " you"));
+    const r = canvas.getBoundingClientRect(); tip.hidden = false;
+    tip.style.left = Math.min(e.clientX - r.left + 14, r.width - tip.offsetWidth - 8) + "px"; tip.style.top = Math.min(e.clientY - r.top + 12, r.height - tip.offsetHeight - 70) + "px";
+  }
+
+  new ResizeObserver(() => { if (ctx) applyCamera(); }).observe(canvas);
+  requestAnimationFrame(frame);
+
+  Mockup.mount({
+    number: 29, title: "Orchestration atlas", spectrum: "synthesis", fullBleed: true, projectTabs: true,
+    defaultScale: snapshot ? "real" : "small",
+    summary: "Atlas with orchestration as the subject: each family is a territory (hub, orbiting sub-agents), solo threads gather in commons, and messages float between agents as dots replayed from the real log.",
+    signals: {
+      current: ["agent_messages", "creation", "created_by", "status", "tool_activity", "age", "updated_at", "title", "client", "next_actor", "next_action", "phase", "write_scope", "scope_cluster"],
+      proposed: ["intent", "name", "surface", "domain", "ask"],
+    },
+    notes: "Everything on the map is free today: families come from created_by, dots from agent-coord messages (kind, reply_required, in_reply_to, delivered and acked times), dot size from message volume, ring from runtime status and next_actor=user, color from the last tool call or update. Intent is guessed from message text in real mode (marked ≈) and would cost one enum on send; names and surfaces fall back to titles and domains. Pan, zoom, moved families and pinned agents persist in localStorage per dataset and workspace.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

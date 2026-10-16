@@ -605,3 +605,96 @@ that need you walk to **your desk** in the corner and queue with their ask
 (answerable there; the relayed path is a trail). Idle agents dim, done agents'
 desks show their deliverable. Zoom from floor to room. At large, rooms shrink to
 occupancy heatmaps until you zoom in.
+
+---
+
+# Real records and message dots (27 revision, 29)
+
+The user asked for a new mockup in the vibe of Atlas (18) but focused on
+orchestration, and for Critical path (27) to lay the agent tree out
+vertically. Both must **use dots floating between agents to show message
+communication**, and both must **render the user's actual records**.
+
+## Real data
+
+`python3 docs/agent-display-mockups/export-threads.py` writes
+`shared/real-threads.js` (git-ignored) with threads **and now messages**:
+`snapshot.messages` (agent-coord messages from the last 14 days touching an
+exported thread; `--message-days N` changes it) and `snapshot.parties` (names
+of counterparts outside the snapshot). Load it before `fixture.js`:
+
+```html
+<script src="../shared/real-threads.js"></script>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+```
+
+With `?scale=real`, `AgentField.fromSnapshot` builds the field and
+`orchestration.js` fills `field.messages` from the real rows: `kind` from the
+database (creation from the create receipt, closure, reply via `in_reply_to`,
+info, request), `replyRequired`, `repliedBy` (as `message_timeline` computes
+it), `closed`, `wokeTurn`, `deliveredAt`, `ackedAt`, real `body`, `at`. `intent`
+is guessed from the body and flagged `intentDerived: true`; say so in the UI.
+`field.outsideMessages` counts messages to threads outside the current
+workspace filter; `field.nameOf` resolves outside parties. In real mode Play
+and Step invent nothing; asks come only from checkpoints with
+`next_actor=user` (free-text, no options). Real fields have up to ~270 agents,
+~1,200 messages (≈600 in the last 24 h), families up to 17 members, depth 2.
+
+Default to the real snapshot when it is present:
+`defaultScale: globalThis.AGENT_COORD_SNAPSHOT ? "real" : "small"`, and use
+`projectTabs: true` like Atlas so the user can switch workspaces. Keep the
+simulated scales working when the snapshot is missing (the file is not
+committed), and show a short hint to run the exporter.
+
+## Message dots
+
+A message is a small dot that travels from sender to receiver along a soft
+curve and is absorbed with a tiny pulse. Colors follow the existing tokens:
+accent for ordinary traffic, warm for blockers and anything involving the user,
+green for handoffs; dashed or hollow dots for requests still awaiting a reply.
+Because the real snapshot is static, dots come from a **replay**: a time
+cursor sweeps through the message log (default: the last 24 h compressed into
+about 60 s, looping), launching each message's dot when the cursor passes its
+timestamp. Provide a compact scrubber (play/pause, speed, window: 1 h / 24 h /
+7 d) and a "live" end where open requests keep a slow, pulsing dot waiting at
+the recipient. With the simulated scales, new messages from Play/Step launch
+dots as they happen. Keep it sparse: never more than ~40 dots in flight, and
+respect `prefers-reduced-motion` (show static ticks instead).
+
+## 27 · Critical path, vertical
+
+Keep everything that works (the "You are blocking N agents" headline, the
+ranked asks rail answered in place, reflow on answer, hover chains, critical
+path versus every wait). Change the layout so the **agent tree runs vertically**:
+the root outcome on top, the agents it waits on below it, deeper waits further
+down, and You at the bottom, as the thing the longest chains end on, or as a
+docked rail. Edges are vertical curves. Message dots travel along those edges
+(and between peers). With real data the dependency graph comes from creation
+lineage, open `replyRequired` messages, unanswered creations, and
+`next_actor=user` asks.
+
+## 29 · Orchestration atlas (synthesis)
+
+Atlas's vibe (calm spatial canvas, territories that keep their place, dots as
+agents, blinking needs-you rings, a quiet needs-you panel that flies you to the
+agent, zoom from overview to a family) with orchestration as the subject:
+
+- **Families are the territories.** Each root and its descendants form an
+  organic hull (reuse `shared/atlas-layout.js` ideas or your own deterministic
+  layout); the root is a hub, children orbit it, grandchildren orbit their
+  parent. Solo threads gather in a quiet commons by workspace or domain.
+- **Messages are dots floating between agents** (above), within a family and
+  across families, so you can see which families talk to each other. Edges are
+  not drawn at rest; a faint trail shows the last few hops and fades.
+- Agent dot size is message volume (sent + received); ring is state; color is
+  recency like Atlas. Labels show identity (name, else title), and the surface
+  or domain on hover.
+- Zoom: overview → a family (its members bloom with labels, a mini log of its
+  recent messages, open requests as dots waiting at the recipient) → an agent
+  (lens via `api.peek` or the drawer via `api.select`).
+- The needs-you panel lists checkpoint asks (answer in place for simulated
+  fields; for real ones "Open thread") and open requests older than ~15 min
+  ("Harbor waits on Gravity · 40m"), each flying the camera to the agent.
+- Pan, zoom, and pinned positions persist in localStorage.

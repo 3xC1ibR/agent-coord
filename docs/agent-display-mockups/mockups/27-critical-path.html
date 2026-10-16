@@ -6,9 +6,10 @@
   <title>Mockup 27 · Critical path</title>
   <link rel="stylesheet" href="../shared/tokens.css">
   <style>
-    /* The user as a node in the dependency graph. Columns run from blocked (left) to unblocking (right);
-       the right edge is You. One lane per team; the chain that finishes last is drawn, the rest fades. */
-    .cp-head { display: grid; gap: 6px; max-width: 980px; margin-bottom: 16px; }
+    /* The user as a node in the dependency graph, laid out vertically: each outcome on top, what it waits on
+       below, deeper waits further down, and You at the bottom of every chain that ends on you. Messages are
+       dots that float along the edges. */
+    .cp-head { display: grid; gap: 6px; max-width: 1000px; margin-bottom: 12px; }
     .cp-headline { font-size: 19px; line-height: 1.4; letter-spacing: -.02em; font-weight: 450; }
     .cp-headline b { font-weight: 650; }
     .cp-headline .you { color: var(--warm); }
@@ -16,49 +17,66 @@
     .cp-sub { font-size: 13px; color: var(--muted); line-height: 1.5; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
     .cp-sub .chain { color: var(--ink); }
     .cp-sub .chain i { font-style: normal; color: var(--muted); margin: 0 3px; }
-    .cp-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 4px 0 14px; font-size: 11px; color: var(--muted); }
-    .cp-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+    .cp-hint { font-size: 11px; color: var(--muted); margin: -4px 0 10px; }
+    .cp-hint code { font: 10.5px var(--mono); color: var(--ink); }
+    .cp-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 4px 0 10px; font-size: 11px; color: var(--muted); }
+    .cp-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; flex: none; }
     .cp-seg .btn { border: 0; border-radius: 0; }
     .cp-seg .btn + .btn { border-left: 1px solid var(--line); }
-    .cp-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
-    .cp-legend span { display: inline-flex; align-items: center; gap: 6px; }
-    .cp-legend svg { width: 26px; height: 8px; overflow: visible; }
+    .cp-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+    .cp-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .cp-legend svg { width: 22px; height: 10px; overflow: visible; }
 
-    .cp-scroll { overflow-x: auto; padding-bottom: 8px; }
-    .cp-board { position: relative; display: grid; column-gap: 34px; row-gap: 0; min-width: 100%; }
-    .cp-colhead { font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 0 0 8px; border-bottom: 1px solid var(--line); align-self: end; }
-    .cp-colhead.axis { display: flex; justify-content: space-between; }
-    .cp-colhead.rail { color: var(--warm); background: color-mix(in srgb, var(--warm-tint) 70%, var(--paper)); padding: 10px 12px 8px; border-radius: 9px 9px 0 0; border-bottom-color: color-mix(in srgb, var(--warm) 30%, var(--line)); position: sticky; right: 0; z-index: 3; font-size: 11px; letter-spacing: .1em; }
-    .cp-section { grid-column: 1 / -1; font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 18px 0 6px; display: flex; gap: 10px; align-items: baseline; }
+    /* Replay: a time cursor sweeps the message log and launches a dot per message. */
+    .cp-replay { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 10px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 11px; color: var(--muted); }
+    .cp-replay .btn { flex: none; }
+    .cp-replay select { font-size: 11px; padding: 3px 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--ink); }
+    .cp-scrub { position: relative; flex: 1 1 320px; min-width: 220px; height: 30px; }
+    .cp-scrub svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .cp-scrub svg rect { fill: color-mix(in srgb, var(--accent) 45%, transparent); }
+    .cp-scrub svg rect.warm { fill: color-mix(in srgb, var(--warm) 70%, transparent); }
+    .cp-scrub input { position: absolute; inset: 0; width: 100%; margin: 0; opacity: 0; cursor: ew-resize; }
+    .cp-scrub .cursor { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); border-radius: 1px; pointer-events: none; }
+    .cp-replay .live { flex: none; font: 600 9px var(--mono); letter-spacing: .08em; color: var(--ok); margin-left: -6px; }
+    .cp-replay .derived { flex: 0 1 auto; }
+    .cp-replay .clock { font: 11px var(--mono); color: var(--ink); min-width: 118px; }
+    .cp-replay .derived { font-size: 10px; }
+
+    .cp-section { flex: 0 0 100%; font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 10px 0 0; display: flex; gap: 10px; align-items: baseline; }
     .cp-section small { font: 11px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: 0; text-transform: none; }
-    .cp-cell { display: flex; flex-direction: column; justify-content: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); min-width: 0; }
-    .cp-cell.rail { position: sticky; right: 0; z-index: 3; padding: 10px 10px; background: color-mix(in srgb, var(--warm-tint) 70%, var(--paper)); border-bottom-color: color-mix(in srgb, var(--warm) 22%, var(--line)); }
-    .cp-cell.rail.last { border-radius: 0 0 9px 9px; }
-    .cp-cell.rail.empty { background: color-mix(in srgb, var(--warm-tint) 30%, var(--paper)); }
-    .cp-cell.label { justify-content: center; gap: 4px; padding-right: 4px; }
-    .cp-lane-name { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; letter-spacing: -.01em; min-width: 0; background: none; border: 0; padding: 0; color: var(--ink); cursor: pointer; text-align: left; }
-    .cp-lane-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .cp-lane-name:hover span { text-decoration: underline; text-underline-offset: 2px; }
-    .cp-lane-eta { font: 11px var(--mono); color: var(--muted); }
-    .cp-lane-eta.you { color: var(--warm); font-weight: 600; }
-    .cp-lane-eta.ext { color: var(--ink); }
-    .cp-lane-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 10px; color: var(--muted); align-items: center; }
-    .cp-lane-meta .btn { padding: 1px 6px; font-size: 10px; }
+    .cp-board { position: relative; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px 16px; }
 
-    /* Nodes: identity, surface, health and the estimate. */
-    .cp-node { position: relative; z-index: 2; display: grid; gap: 3px; width: 100%; max-width: 230px; padding: 7px 9px 7px; text-align: left; cursor: pointer; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; font-size: 11px; line-height: 1.35; transition: opacity .2s, border-color .15s, box-shadow .15s; }
+    /* A team is a vertical tree: outcome on top, rows of deeper waits, You at the bottom. */
+    .cp-team { position: relative; display: flex; flex-direction: column; align-items: stretch; min-width: 290px; padding: 10px 12px 12px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface) 55%, var(--paper)); }
+    .cp-team.moving { background: transparent; border-style: dashed; }
+    .cp-team-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+    .cp-team-name { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; letter-spacing: -.01em; min-width: 0; max-width: 100%; background: none; border: 0; padding: 0; color: var(--ink); cursor: pointer; text-align: left; }
+    .cp-team-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cp-team-name:hover span { text-decoration: underline; text-underline-offset: 2px; }
+    .cp-eta { font: 11px var(--mono); color: var(--muted); }
+    .cp-eta.you { color: var(--warm); font-weight: 600; }
+    .cp-eta.ext { color: var(--ink); }
+    .cp-team-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 10px; color: var(--muted); align-items: center; margin-left: auto; }
+    .cp-team-meta .btn { padding: 1px 6px; font-size: 10px; }
+    .cp-rows { display: flex; flex-direction: column; gap: 30px; align-items: center; }
+    .cp-row { display: flex; justify-content: center; align-items: flex-start; gap: 12px; flex-wrap: nowrap; }
+    .cp-you { margin-top: 30px; padding: 8px; border-radius: 9px; background: color-mix(in srgb, var(--warm-tint) 75%, var(--paper)); border: 1px solid color-mix(in srgb, var(--warm) 28%, var(--line)); display: grid; gap: 8px; }
+    .cp-you > h4 { font: 700 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--warm); display: flex; justify-content: space-between; }
+    .cp-you > h4 small { font: 10px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: 0; text-transform: none; color: var(--muted); font-weight: 400; }
+    .cp-you-cards { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+
+    /* Nodes: identity, surface, and the wait or estimate. */
+    .cp-node { position: relative; z-index: 2; display: grid; gap: 3px; width: 196px; padding: 7px 9px; text-align: left; cursor: pointer; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; font-size: 11px; line-height: 1.35; transition: opacity .2s, border-color .15s, box-shadow .15s; }
     .cp-node:hover, .cp-node:focus-visible { border-color: var(--hover-line); box-shadow: 0 4px 14px var(--shadow); }
     .cp-node.crit { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent); }
     .cp-node.crit.stalled { border-color: color-mix(in srgb, var(--warm) 60%, var(--line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--warm) 22%, transparent); }
-    .cp-node.needs { border-left: 3px solid var(--warm); }
-    .cp-node.fade { opacity: .42; }
+    .cp-node.needs { border-bottom: 3px solid var(--warm); }
+    .cp-node.fade { opacity: .45; }
     .cp-node.fade:hover { opacity: 1; }
     .cp-node .id { display: flex; align-items: center; gap: 5px; min-width: 0; }
     .cp-node .id .provider-logo { width: 12px; height: 12px; }
     .cp-node .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: 12px; letter-spacing: -.01em; }
     .cp-node .nm.is-title { font-weight: 500; text-decoration: underline dotted color-mix(in srgb, var(--muted) 60%, transparent); text-underline-offset: 3px; }
-    .cp-node .role { margin-left: auto; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; color: var(--muted); }
-    .cp-node .act + .role { display: none; }
     .cp-node .on { display: flex; gap: 5px; align-items: baseline; min-width: 0; color: var(--ink); }
     .cp-node .on .k { flex: none; font: 600 8.5px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
     .cp-node .on .v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -69,18 +87,20 @@
     .cp-node .st .chip { padding: 0 5px; font-size: 9px; line-height: 1.45; }
     .cp-node .st .chip.slip { color: var(--ink); border-style: dashed; }
     .cp-node .st .act { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--accent); }
-    .cp-node.compact { padding: 5px 8px; gap: 2px; }
+    .cp-node .role { margin-left: auto; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; color: var(--muted); }
+    .cp-node .act + .role { display: none; }
+    .cp-node.compact { width: 160px; padding: 5px 8px; gap: 2px; }
     .cp-node.compact .nm { font-size: 11px; }
-    .cp-node.arrive { animation: cp-arrive .9s ease-out; }
-    @keyframes cp-arrive { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
-    .cp-ext { position: relative; z-index: 2; display: inline-flex; align-items: center; gap: 6px; max-width: 200px; padding: 4px 9px; border: 1px dashed var(--line-strong); border-radius: 12px; font-size: 10px; color: var(--muted); background: var(--paper); }
+    .cp-node.arrive { animation: cp-arrive .7s ease-out; }
+    @keyframes cp-arrive { 0% { box-shadow: 0 0 0 0 var(--pulse, color-mix(in srgb, var(--accent) 60%, transparent)); } 100% { box-shadow: 0 0 0 10px transparent; } }
+    .cp-ext { position: relative; z-index: 2; display: inline-flex; align-items: center; gap: 6px; max-width: 196px; padding: 4px 9px; border: 1px dashed var(--line-strong); border-radius: 12px; font-size: 10px; color: var(--muted); background: var(--paper); }
     .cp-ext span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .cp-ext.crit { border-color: var(--accent); color: var(--ink); }
 
-    /* The You rail: each lane's asks, aligned with the agents that wait on them. */
-    .cp-ask { position: relative; display: grid; gap: 4px; }
+    /* Asks at the bottom of the tree, ranked across the whole field. */
+    .cp-ask { position: relative; z-index: 2; display: grid; gap: 4px; width: 272px; }
     .cp-ask .path { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; font-size: 10px; color: var(--muted); }
-    .cp-ask .path b { color: var(--ink); font-weight: 600; cursor: pointer; }
+    .cp-ask .path b { color: var(--ink); font-weight: 600; cursor: pointer; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .cp-ask .path b:hover { text-decoration: underline; }
     .cp-ask .path .you { color: var(--warm); font-weight: 700; }
     .cp-ask .rank { display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; background: var(--warm); color: var(--surface); font: 700 10px var(--mono); margin-right: 3px; }
@@ -92,66 +112,86 @@
     .cp-ask .ask .ask-impact { display: none; }
     .cp-ask .ask .ask-options { margin-top: 6px; gap: 5px; }
     .cp-ask .ask > .btn.quiet { padding: 2px 0 0; }
-    .cp-ask.compact .ask-question { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cp-ask .ask-question { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+    .cp-ask.compact .ask-question { -webkit-line-clamp: 2; }
     .cp-ask.compact .ask > .btn.quiet { display: none; }
+    .cp-ask .real-actions { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
     .cp-ask.flash .ask { animation: cp-flash 1.2s ease-out; }
     @keyframes cp-flash { 0%, 40% { box-shadow: 0 0 0 3px var(--warm); } 100% { box-shadow: 0 0 0 0 transparent; } }
     .cp-next { font-size: 11px; line-height: 1.45; border-left: 3px solid var(--warm); padding: 6px 9px; border-radius: 5px; background: var(--surface); }
     .cp-next b { color: var(--warm); font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; display: block; }
-    .cp-free { font-size: 10px; color: var(--muted); text-align: center; padding: 4px 0; }
 
     /* Edges */
     .cp-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; overflow: visible; }
-    .cp-edges path.e { fill: none; stroke: var(--line-strong); stroke-width: 1.2; opacity: .7; }
+    .cp-edges path.e { fill: none; stroke: var(--line-strong); stroke-width: 1.2; opacity: .8; }
     .cp-edges path.e.reply { stroke-dasharray: 5 4; }
     .cp-edges path.e.handoff { stroke-dasharray: 1.5 3.5; stroke-linecap: round; }
     .cp-edges path.e.external { stroke-dasharray: 2 3; }
     .cp-edges path.e.you { stroke: color-mix(in srgb, var(--warm) 55%, var(--line-strong)); }
-    .cp-edges path.e.back { opacity: .35; }
+    .cp-edges path.e.back, .cp-edges path.e.cross { opacity: .4; }
     .cp-edges path.e.crit { stroke: var(--accent); stroke-width: 2.2; opacity: 1; }
     .cp-edges path.e.crit.you, .cp-edges path.e.crit.stalled { stroke: var(--warm); }
     .cp-edges text { font: 9.5px var(--mono); fill: var(--muted); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; }
     .cp-edges text.crit { fill: var(--ink); }
     .cp-edges text.you { fill: var(--warm); font-weight: 600; }
-    .cp-edges .flight { fill: var(--accent); }
-    .cp-edges .flight.you { fill: var(--warm); }
+    .cp-edges marker path { fill: var(--line-strong); }
+    .cp-edges marker.crit path { fill: var(--accent); }
+    .cp-edges marker.warm path { fill: var(--warm); }
+    /* Open requests wait at the recipient as hollow, slowly pulsing dots. */
+    .cp-edges .owed { fill: var(--surface); stroke: var(--accent); stroke-width: 1.6; stroke-dasharray: 2.2 1.6; animation: cp-owed 2.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+    .cp-edges .owed.warm { stroke: var(--warm); }
+    .cp-edges .owed-n { font: 600 8.5px var(--mono); fill: var(--ink); stroke: none; }
+    @keyframes cp-owed { 50% { transform: scale(1.35); opacity: .6; } }
     .cp-board.hovering .cp-node:not(.hl), .cp-board.hovering .cp-ext:not(.hl) { opacity: .25; }
     .cp-board.hovering .cp-ask:not(.hl) { opacity: .5; }
     .cp-board.hovering path.e:not(.hl), .cp-board.hovering .cp-edges text:not(.hl) { opacity: .08; }
     .cp-board.hovering path.e.hl { opacity: 1; stroke-width: 2.2; }
     .cp-board.hovering .cp-node.hl { opacity: 1; }
-    .cp-edges marker path { fill: var(--line-strong); }
-    .cp-edges marker.crit path { fill: var(--accent); }
-    .cp-edges marker.warm path { fill: var(--warm); }
+
+    /* Message dots live in a fixed overlay so they survive re-renders. */
+    .cp-dots { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 40; overflow: visible; }
+    .cp-dots circle { fill: var(--accent); }
+    .cp-dots circle.warm { fill: var(--warm); }
+    .cp-dots circle.ok { fill: var(--ok); }
+    .cp-dots circle.open { fill: var(--surface); stroke: var(--accent); stroke-width: 1.8; }
+    .cp-dots circle.open.warm { stroke: var(--warm); }
+    .cp-dots circle.open.ok { stroke: var(--ok); }
+    .cp-dots circle.trail { opacity: .35; }
 
     .cp-settled { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 18px; font-size: 11px; color: var(--muted); }
-    .cp-settled .btn { display: inline-flex; align-items: center; gap: 6px; }
+    .cp-settled .btn { display: inline-flex; align-items: center; gap: 6px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .cp-settled h4 { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; margin-right: 6px; }
-    @media (prefers-reduced-motion: reduce) { .cp-node, .cp-node.arrive, .cp-ask.flash .ask { animation: none; transition: none; } }
+    @media (prefers-reduced-motion: reduce) { .cp-node, .cp-node.arrive, .cp-ask.flash .ask, .cp-edges .owed { animation: none; transition: none; } }
   </style>
 </head>
 <body>
 <main id="stage"></main>
+<script src="../shared/real-threads.js"></script>
 <script src="../shared/fixture.js"></script>
 <script src="../shared/orchestration.js"></script>
 <script src="../shared/mockup.js"></script>
 <script>
 "use strict";
 (() => {
-  const $ = AgentField.el, MIN = 60_000, EXT_MIN = 15;
+  const $ = AgentField.el, MIN = 60_000, HOUR = 3_600_000, EXT_MIN = 15, NS = "http://www.w3.org/2000/svg";
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
   // View state that survives re-renders.
-  const view = {mode: null, expanded: new Set(), hover: null, focus: null, seenMsg: null, rects: new Map(), lastScale: null, flash: null};
+  const view = {mode: null, expanded: new Set(), hover: null, seenMsg: null, rects: new Map(), lastKey: null, flash: null,
+    replay: {on: !reduced, speed: 1, win: 24 * HOUR, cursor: null, ptr: 0, hold: 0, scrubbing: false}};
 
   const nameOf = a => a.name || a.title;
   const fmt = m => m === Infinity ? "stalled on you" : m < 1 ? "<1m" : m < 60 ? "~" + Math.round(m) + "m" : "~" + Math.floor(m / 60) + "h " + String(Math.round(m % 60)).padStart(2, "0") + "m";
   const ago = (field, t) => field.duration(Math.max(0, field.now - t));
   const ROLE_SHORT = {orchestrator: "orchestrator", implementer: "implementer", reviewer: "reviewer", researcher: "researcher", releaser: "releaser", dispatcher: "dispatcher", subagent: "subagent", delegate: "delegate"};
+  const isReal = field => field.scenario === "real";
+  const snapshot = globalThis.AGENT_COORD_SNAPSHOT;
+  let api = null;
 
   /* The dependency graph. An edge waiter → dependency comes from four places:
        waitingOn (proposed; agent or external), an ask or next_actor=user (→ You),
        an open reply_required request (today: the sender waits on the recipient's reply),
-       and an unanswered creation (today: the creator waits on the child's handoff). */
+       and an unanswered creation (today: the creator waits on the child's handoff). With real records, creation
+       lineage adds one more: a live creator waits on each child that is still working, waiting, or failed. */
   function buildGraph(field) {
     const out = new Map(), into = new Map(), nodes = new Map();
     const node = (id, extra) => { if (!nodes.has(id)) nodes.set(id, {id, ...extra}); return nodes.get(id); };
@@ -172,6 +212,7 @@
         else if (live(field.byId(w))) add(a.id, w, "waits", a.updatedAt);
       }
       if (field.needsUser(a)) add(a.id, "user", a.ask ? "ask" : "next", a.ask?.askedAt ?? a.updatedAt);
+      if (isReal(field)) for (const k of field.children(a.id)) if (["working", "waiting", "failed", "blocked"].includes(k.status)) add(a.id, k.id, "lineage", k.createdAt);
     }
     for (const m of field.openRequests()) {
       if (m.from === "user") continue;
@@ -204,6 +245,7 @@
 
     // Estimates: own remaining work from plan progress and pace; finish = own + latest dependency.
     const own = a => {
+      if (isReal(field)) return 1; // no plan steps in real records: count hops instead of minutes
       // Delegated steps are counted through the child's own finish, so only the agent's own steps count here.
       const p = field.progress(a), elapsed = Math.max(1, (field.now - a.createdAt) / MIN);
       const pace = p.done ? Math.min(20, Math.max(4, elapsed / p.done)) : 12;
@@ -289,7 +331,7 @@
     holders.forEach((h, i) => { h.rank = i + 1; });
     const blockedByYou = field.agents.filter(a => a.status !== "done" && g.reachesUser(a.id));
     const blockedTeams = new Set(blockedByYou.map(a => teamOf(a.id)));
-    return {g, teamOf, crit, critEdges, stalledNodes, teams, holders, blockedByYou, blockedTeams};
+    return {g, teamOf, crit, critEdges, stalledNodes, teams, holders, blockedByYou, blockedTeams, estimates: !isReal(field)};
   }
 
   /* Which nodes a lane shows. Critical mode: the critical path, everyone who reaches You, and anything on
@@ -312,19 +354,20 @@
     if (fade) b.classList.add("fade"); if (compact) b.classList.add("compact");
     const id = $("div", "id");
     id.append(AgentField.statusDot(a), AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
-    const nm = $("span", "nm" + (a.name ? "" : " is-title"), nameOf(a)); id.append(nm);
+    id.append($("span", "nm" + (a.name ? "" : " is-title"), nameOf(a)));
     b.append(id);
     if (!compact || A.crit.has(a.id)) {
       const on = $("div", "on");
-      if (a.surface?.label) on.append($("span", "k", a.surface.kind), $("span", "v", a.surface.label));
+      if (a.surface?.label && a.surface.label !== a.title) on.append($("span", "k", a.surface.kind), $("span", "v", a.surface.label));
       else if (a.scope[0]) on.append($("span", "k", "scope"), $("span", "v mono", a.scope[0]));
       if (on.childNodes.length) b.append(on);
     }
     const st = $("div", "st");
     const f = A.g.finish(a.id), waitsYou = A.g.deps(a.id).some(e => e.to === "user");
     if (field.needsUser(a)) st.append($("span", "eta you", "you · " + ago(field, a.ask?.askedAt ?? a.updatedAt)));
+    else if (!A.estimates) st.append($("span", "eta" + (f === Infinity ? " you" : ""), f === Infinity ? "stalled on you" : (a.status === "working" ? "working" : field.statusLabel(a).toLowerCase()) + " · " + ago(field, field.lastActivity(a))));
     else st.append($("span", "eta" + (f === Infinity ? " you" : ""), f === Infinity ? "stalled on you" : fmt(f) + " left"));
-    if (a.health !== "on-track") st.append($("span", "chip " + (a.health === "stuck" ? "danger" : "slip"), a.health));
+    if (A.estimates && a.health && a.health !== "on-track") st.append($("span", "chip " + (a.health === "stuck" ? "danger" : "slip"), a.health));
     if (!compact && a.status === "working" && !waitsYou) { const act = a.activity || field.toolLabel(a); if (act) st.append($("span", "act", act)); }
     st.append($("span", "role", ROLE_SHORT[a.role] || a.role));
     b.append(st);
@@ -336,7 +379,7 @@
     return b;
   }
 
-  function askEl(field, A, h, compact, api) {
+  function askEl(field, A, h, compact) {
     const a = h.agent, card = $("div", "cp-ask" + (compact ? " compact" : "")); card.dataset.for = a.id;
     if (view.flash === a.id) card.classList.add("flash");
     const path = $("div", "path");
@@ -346,22 +389,30 @@
     for (const v of via) { path.append(" → "); const x = $("b", null, nameOf(v)); x.title = "Relayed by " + v.title; x.onclick = () => api.select(v.id); path.append(x); }
     path.append(" → ", $("span", "you", "you"));
     card.append(path);
-    if (a.ask) card.append(Mockup.askBox(a, field, api.select));
+    if (a.ask && isReal(field)) {
+      // Real asks are a checkpoint's next action for the user: open the thread to answer. The preview only reflows this page.
+      const box = $("div", "ask");
+      box.append($("span", "ask-kind", a.ask.kind + " · next action for you"), $("div", "ask-question", a.ask.question));
+      const acts = $("div", "real-actions");
+      const open = $("button", "btn small primary", "Open thread"); open.type = "button"; open.onclick = () => api.select(a.id);
+      const prev = $("button", "btn small quiet", "Preview as answered"); prev.type = "button"; prev.title = "Reflow this page as if you had answered; nothing is sent"; prev.onclick = () => field.answer(a.id, "Answered (preview)");
+      acts.append(open, prev); box.append(acts); card.append(box);
+    } else if (a.ask) card.append(Mockup.askBox(a, field, api.select));
     else { const n = $("div", "cp-next"); n.append($("b", null, "Your next step"), a.next.action); card.append(n); }
     const others = h.blocked.filter(x => x.id !== a.id);
     const un = $("div", "unblocks");
     if (others.length) {
       un.append("Holds up ", $("b", null, others.length + (others.length === 1 ? " agent" : " agents")));
       un.title = "Waiting behind it: " + others.map(nameOf).join(", ");
-      if (isFinite(h.workAfter)) un.append(" · then " + fmt(h.workAfter) + " of work");
-    } else un.append("Holds up only " + nameOf(a) + (h.workAfter && isFinite(h.workAfter) ? " · then " + fmt(h.workAfter) + " of work" : ""));
+      if (A.estimates && isFinite(h.workAfter)) un.append(" · then " + fmt(h.workAfter) + " of work");
+    } else un.append("Holds up only " + nameOf(a) + (A.estimates && isFinite(h.workAfter) ? " · then " + fmt(h.workAfter) + " of work" : ""));
     card.append(un);
     card.onmouseenter = () => hover(a.id); card.onmouseleave = () => hover(null);
     return card;
   }
 
   /* Hover: light the agent's chain both ways (who waits on it, what it waits on) without re-rendering. */
-  let current = null; // {board, A}
+  let current = null; // {board, A, field}
   function chainOf(A, id) {
     const s = new Set([id]), down = [id], upq = [id];
     while (down.length) { const x = down.pop(); for (const e of A.g.deps(x)) if (!e.back && !s.has(e.to)) { s.add(e.to); down.push(e.to); } }
@@ -380,222 +431,61 @@
     for (const el of board.querySelectorAll("path.e, .cp-edges text")) el.classList.toggle("hl", s.has(el.dataset.from) && s.has(el.dataset.to));
   }
 
-  let api = null;
-  api = Mockup.mount({
-    number: 27, title: "Critical path", spectrum: "radical",
-    summary: "You as a node in the dependency graph: who waits on whom, the chain that finishes last for each outcome, and which answer unblocks the most.",
-    signals: {
-      current: ["title", "status", "created_by", "creation", "agent_messages", "next_actor", "next_action", "pending_approval", "write_scope", "updated_at", "age", "tool_activity", "phase", "client"],
-      proposed: ["name", "role", "surface", "waiting_on", "ask", "escalation", "blocks", "health", "plan", "eta"],
-    },
-    notes: "Today the graph is already drawable from unanswered creations and reply_required messages (who waits on whose reply) plus next_actor=user; waiting_on and a structured ask make it exact, and the estimates come from plan progress and pace, so the model reports nothing new beyond those. Identity: the title is the assignment and changes, so a node leads with a stable name and shows the title underlined as a placeholder until one is reported. On what: the surface (one checkpoint field), falling back to the first write-scope path; phase is dropped from the node because on a critical path what matters is what it is on and when it lands.",
-    render(field, stage, apiRef) {
-      api = apiRef;
-      if (view.lastScale !== field.scale) { view.mode = null; view.expanded.clear(); view.seenMsg = null; view.rects.clear(); view.lastScale = field.scale; }
-      if (field.messages.length && view.seenMsg !== null && field.messages.at(-1).id < view.seenMsg) view.seenMsg = null; // after Reset
-      const large = field.scale === "large";
-      view.mode ??= "critical";
-      const all = view.mode === "all";
 
-      // Remember node positions for the reflow animation.
-      const oldBoard = stage.querySelector(".cp-board");
-      if (oldBoard) { const br = oldBoard.getBoundingClientRect(); view.rects = new Map([...oldBoard.querySelectorAll("[data-id]")].map(el => { const r = el.getBoundingClientRect(); return [el.dataset.id, {x: r.left - br.left, y: r.top - br.top}]; })); }
-      const scrollLeft = stage.querySelector(".cp-scroll")?.scrollLeft || 0;
-      stage.replaceChildren();
-      const A = analyse(field);
-
-      /* Headline: what you block, and which answer unblocks the longest chain. */
-      const head = $("div", "cp-head"), hl = $("p", "cp-headline"), sub = $("div", "cp-sub");
-      const top = A.holders[0];
-      if (A.blockedByYou.length) {
-        hl.append("You are blocking ", $("b", "you", A.blockedByYou.length + (A.blockedByYou.length === 1 ? " agent" : " agents")), " across ", $("b", null, A.blockedTeams.size + (A.blockedTeams.size === 1 ? " team" : " teams")), ". ");
-        if (top) {
-          const kind = top.agent.ask ? (top.agent.ask.kind === "failure" ? "failure" : top.agent.ask.kind) : "next step";
-          hl.append("Answering ", $("b", null, nameOf(top.agent) + "’s " + kind), top.chain.length > 1 ? " unblocks the longest chain." : top.agent.ask?.blocking ? " comes first: nothing waits behind any ask, and it is blocking." : " comes first: it has waited longest.");
-          const ch = $("span", "chain"); top.chain.forEach((c, i) => { if (i) ch.append($("i", null, "→")); ch.append(nameOf(c)); }); ch.append($("i", null, "→"), "you");
-          sub.append(ch);
-          if (isFinite(top.workAfter)) sub.append($("span", null, "· then " + fmt(top.workAfter) + " of agent work until " + nameOf(top.chain[0]) + " finishes"));
-          const go = $("button", "btn small warm", "Show the ask"); go.type = "button";
-          go.onclick = () => { view.flash = top.agent.id; const el = stage.querySelector(`.cp-ask[data-for="${top.agent.id}"]`); el?.scrollIntoView({block: "center", behavior: reduced ? "auto" : "smooth"}); el?.classList.remove("flash"); void el?.offsetWidth; el?.classList.add("flash"); hover(top.agent.id); setTimeout(() => { view.flash = null; hover(null); }, 1400); };
-          sub.append(go);
-        }
-      } else {
-        const latest = [...A.teams.values()].filter(t => t.cp).sort((x, y) => y.finish - x.finish)[0];
-        hl.append($("b", "calm", "Nothing is waiting on you. "));
-        if (latest) {
-          hl.append("The last outcome to land is ", $("b", null, nameOf(latest.root)), ", in about " + fmt(latest.finish).replace("~", "") + ".");
-          const ch = $("span", "chain"); latest.cp.path.forEach((id, i) => { if (i) ch.append($("i", null, "→")); ch.append(id.startsWith("ext:") ? A.g.nodes.get(id).label : nameOf(field.byId(id))); }); sub.append(ch);
-        }
-      }
-      head.append(hl, sub); stage.append(head);
-
-      /* Mode and legend. */
-      const tools = $("div", "cp-tools"), seg = $("div", "cp-seg");
-      for (const [m, l] of [["critical", "Critical paths"], ["all", "Every wait"]]) { const b = $("button", "btn small", l); b.type = "button"; b.setAttribute("aria-pressed", String(view.mode === m)); b.onclick = () => { view.mode = m; field.emit(); }; seg.append(b); }
-      const legend = $("div", "cp-legend");
-      const sw = (cls, label, color) => { const s = $("span"); s.innerHTML = `<svg viewBox="0 0 26 8"><path d="M1 4H25" fill="none" stroke="${color}" stroke-width="${cls.includes("crit") ? 2.2 : 1.4}" ${cls.includes("dash") ? 'stroke-dasharray="5 4"' : cls.includes("dot") ? 'stroke-dasharray="1.5 3.5" stroke-linecap="round"' : ""}/></svg>`; s.append(label); return s; };
-      legend.append(sw("crit", "critical path", "var(--accent)"), sw("crit", "stalled on you", "var(--warm)"), sw("", "waits on", "var(--line-strong)"), sw("dash", "reply owed", "var(--line-strong)"), sw("dot", "handoff owed", "var(--line-strong)"));
-      tools.append(seg, legend); stage.append(tools);
-
-      /* Lanes: teams that wait on you, then teams still moving (latest finish first), then settled. */
-      const lanes = [];
-      for (const t of A.teams.values()) {
-        if (!t.cp && !t.live.length) continue;
-        const you = t.finish === Infinity || t.live.some(a => A.g.reachesUser(a.id));
-        const busy = t.live.some(a => ["working", "blocked", "waiting", "failed"].includes(a.status)) || you;
-        if (!busy) continue;
-        const expanded = all || view.expanded.has(t.root.id);
-        const ids = laneNodes(field, A, t, expanded);
-        // Cross-team: a node on another lane's path that belongs to this team is already included via A.crit.
-        const hidden = t.live.filter(a => !ids.has(a.id)).length;
-        const asks = A.holders.filter(h => h.root === t.root.id);
-        lanes.push({t, you, ids, hidden, asks, expanded});
-      }
-      const settled = [...A.teams.values()].filter(t => !lanes.some(l => l.t === t));
-      const rankOf = l => Math.min(...l.asks.map(h => h.rank), 999);
-      lanes.sort((x, y) => Number(y.you) - Number(x.you) || rankOf(x) - rankOf(y) || y.t.finish - x.t.finish);
-
-      // Columns are computed over what is shown, so a hidden branch does not push a node further left.
-      const shown = new Set(lanes.flatMap(l => [...l.ids])), lv = new Map(), on = new Set();
-      const levelOf = id => {
-        if (lv.has(id)) return lv.get(id); if (on.has(id)) return 0; on.add(id);
-        const ds = A.g.deps(id).filter(e => !e.back && shown.has(e.to));
-        const L = ds.length ? 1 + Math.max(...ds.map(e => levelOf(e.to))) : 0;
-        on.delete(id); lv.set(id, L); return L;
-      };
-      let maxLevel = 0;
-      for (const id of shown) maxLevel = Math.max(maxLevel, levelOf(id));
-      const cols = maxLevel + 1, railW = large ? 280 : 310;
-      const board = $("div", "cp-board");
-      board.style.gridTemplateColumns = `minmax(130px, 170px) repeat(${cols}, minmax(${large ? 150 : 170}px, 1fr)) ${railW}px`;
-      const colOf = L => 2 + (maxLevel - L);
-
-      // Column heads: blocked on the left, unblocking on the right, You at the edge.
-      const h0 = $("div", "cp-colhead", "Outcome"); h0.style.gridColumn = "1"; board.append(h0);
-      for (let L = maxLevel; L >= 0; L--) {
-        const h = $("div", "cp-colhead" + (L === maxLevel && maxLevel > 0 ? " axis" : ""));
-        if (L === maxLevel && maxLevel > 0) h.append($("span", null, "← blocked"), $("span", null, L + " deep"));
-        else h.append(L === 0 ? "Doing the work →" : L + " deep");
-        h.style.gridColumn = String(colOf(L)); board.append(h);
-      }
-      const hy = $("div", "cp-colhead rail", "You"); hy.style.gridColumn = String(cols + 2); board.append(hy);
-
-      const sectionRow = (text, small) => { const s = $("div", "cp-section", text); if (small) s.append($("small", null, small)); board.append(s); };
-      let row = 2, sectionShown = {you: false, moving: false};
-      const railCells = [];
-      for (const l of lanes) {
-        const key = l.you ? "you" : "moving";
-        if (!sectionShown[key]) {
-          sectionShown[key] = true;
-          if (key === "you") sectionRow("Waiting on you", "answer on the right; the graph reflows");
-          else sectionRow("Moving without you", "latest finish first");
-          row++;
-        }
-        const compact = !l.you && (large || field.scale === "medium") && !l.expanded;
-        // Label cell
-        const lab = $("div", "cp-cell label"); lab.style.gridColumn = "1"; lab.style.gridRow = String(row);
-        const nb = $("button", "cp-lane-name"); nb.type = "button"; nb.append(AgentField.statusDot(l.t.root), $("span", null, nameOf(l.t.root))); nb.title = l.t.root.title + " · open thread"; nb.onclick = () => api.select(l.t.root.id);
-        const eta = l.t.finish === Infinity ? $("span", "cp-lane-eta you", "stalled on you") : l.t.ext ? $("span", "cp-lane-eta ext", "waits on " + l.t.ext) : $("span", "cp-lane-eta", "lands " + fmt(l.t.finish));
-        if (l.t.finish === Infinity && isFinite(l.t.after)) eta.title = "Once you answer: about " + fmt(l.t.after).replace("~", "") + " of agent work";
-        const meta = $("div", "cp-lane-meta");
-        if (l.t.done) meta.append($("span", null, "✓ " + l.t.done + " done"));
-        if (l.hidden || view.expanded.has(l.t.root.id)) {
-          const more = $("button", "btn quiet small", view.expanded.has(l.t.root.id) ? "only the path" : "+" + l.hidden + " off the path"); more.type = "button";
-          more.onclick = () => { view.expanded.has(l.t.root.id) ? view.expanded.delete(l.t.root.id) : view.expanded.add(l.t.root.id); field.emit(); };
-          if (!all) meta.append(more); else if (l.hidden) meta.append($("span", null, l.hidden + " idle"));
-        }
-        lab.append(nb, eta); if (meta.childNodes.length) lab.append(meta);
-        board.append(lab);
-        // Graph cells, one per level.
-        const byLevel = new Map();
-        for (const id of l.ids) { const L = lv.get(id) ?? 0; if (!byLevel.has(L)) byLevel.set(L, []); byLevel.get(L).push(id); }
-        for (let L = maxLevel; L >= 0; L--) {
-          const cell = $("div", "cp-cell"); cell.style.gridColumn = String(colOf(L)); cell.style.gridRow = String(row);
-          const list = (byLevel.get(L) || []).sort((x, y) => Number(A.crit.has(y)) - Number(A.crit.has(x)) || Number(A.g.reachesUser(y)) - Number(A.g.reachesUser(x)) || x.localeCompare(y));
-          for (const id of list) {
-            if (id.startsWith("ext:")) { const n = A.g.nodes.get(id); const e = $("div", "cp-ext" + (A.crit.has(id) ? " crit" : "")); e.dataset.id = id; e.title = "Outside the field: " + n.label; e.append("⧗ ", $("span", null, n.label)); cell.append(e); continue; }
-            const a = field.byId(id);
-            cell.append(nodeEl(field, A, a, {compact, fade: !A.crit.has(id) && !A.g.reachesUser(id)}));
-          }
-          board.append(cell);
-        }
-        // Rail cell: this lane's asks.
-        const rail = $("div", "cp-cell rail" + (l.asks.length ? "" : " empty")); rail.style.gridColumn = String(cols + 2); rail.style.gridRow = String(row);
-        for (const h of l.asks) rail.append(askEl(field, A, h, large && h.rank > 3, api));
-        board.append(rail); railCells.push(rail);
-        row++;
-      }
-      if (railCells.length) railCells.at(-1).classList.add("last");
-      if (!lanes.length) { const e = $("div", "cp-section", "No outcome has work in flight."); board.append(e); }
-
-      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.classList.add("cp-edges");
-      board.prepend(svg);
-      const scroll = $("div", "cp-scroll"); scroll.append(board); stage.append(scroll);
-      scroll.scrollLeft = scrollLeft;
-
-      if (settled.length) {
-        const s = $("div", "cp-settled"); s.append($("h4", null, "Settled"));
-        const cap = large ? 24 : 40;
-        for (const t of settled.slice(0, cap)) { const b = $("button", "btn quiet small"); b.type = "button"; b.append(AgentField.statusDot(t.root), nameOf(t.root)); b.title = t.root.title + " · " + field.statusLabel(t.root); b.onclick = () => api.select(t.root.id); s.append(b); }
-        if (settled.length > cap) s.append($("span", null, "+" + (settled.length - cap) + " more"));
-        stage.append(s);
-      }
-
-      current = {board, A};
-      drawEdges(field, A, board, svg);
-      flip(board);
-      flights(field, A, board, svg);
-      if (view.hover) hover(view.hover);
-    },
-  });
-
-  /* Edges are measured from the laid-out DOM. Only edges between visible nodes are drawn; in critical mode
-     only critical edges, edges into You, and edges between the nodes a lane chose to show. */
+  /* Edges are measured from the laid-out DOM and run top to bottom: from the waiting agent's bottom edge to the top
+     of what it waits on. Loops and cross-team waits arc to the side. */
   function drawEdges(field, A, board, svg) {
     const br = board.getBoundingClientRect();
     svg.setAttribute("width", br.width); svg.setAttribute("height", br.height);
-    const NS = "http://www.w3.org/2000/svg";
     svg.innerHTML = `<defs>${["", "crit", "warm"].map(c => `<marker id="cp-arrow-${c || "plain"}" class="${c}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L8 4L0 8z"/></marker>`).join("")}</defs>`;
     const els = new Map([...board.querySelectorAll("[data-id]")].map(el => [el.dataset.id, el]));
     const asks = new Map([...board.querySelectorAll(".cp-ask")].map(el => [el.dataset.for, el]));
-    const rect = el => { const r = el.getBoundingClientRect(); return {l: r.left - br.left, r: r.right - br.left, t: r.top - br.top, b: r.bottom - br.top, cy: r.top - br.top + r.height / 2}; };
-    const paths = [];
+    const rect = el => { const r = el.getBoundingClientRect(); return {l: r.left - br.left, r: r.right - br.left, t: r.top - br.top, b: r.bottom - br.top, cx: r.left - br.left + r.width / 2, cy: r.top - br.top + r.height / 2}; };
     for (const [from, m] of A.g.out) {
       const fe = els.get(from); if (!fe) continue;
       for (const e of m.values()) {
         const te = e.to === "user" ? asks.get(from) : els.get(e.to); if (!te) continue;
         const crit = A.critEdges.has(e), stalled = crit && A.stalledNodes.has(from);
-        const kind = e.to === "user" ? "you" : e.kinds.has("waits") ? "waits" : e.kinds.has("external") ? "external" : e.kinds.has("reply") ? "reply" : "handoff";
+        const kind = e.to === "user" ? "you" : e.kinds.has("waits") || e.kinds.has("lineage") ? "waits" : e.kinds.has("external") ? "external" : e.kinds.has("reply") ? "reply" : "handoff";
+        const cross = fe.closest(".cp-team") !== te.closest(".cp-team");
         const a = rect(fe), b = rect(te);
         let d, lx, ly;
-        if (e.back || b.l < a.r - 4) {
-          // A loop or a dependency in the same column: arc underneath.
-          const x1 = a.l + (a.r - a.l) * .7, x2 = b.l + (b.r - b.l) * .3, y1 = a.b, y2 = b.b, dip = Math.max(y1, y2) + 18;
-          d = `M${x1} ${y1} C${x1} ${dip} ${x2} ${dip} ${x2} ${y2 + 2}`; lx = (x1 + x2) / 2; ly = dip - 2;
+        if (!e.back && b.t > a.b - 2) {
+          const x1 = a.cx, y1 = a.b, x2 = e.to === "user" ? Math.min(b.r - 14, Math.max(b.l + 14, a.cx)) : b.cx, y2 = b.t - 2, k = Math.max(14, (y2 - y1) * .5);
+          d = `M${x1} ${y1} C${x1} ${y1 + k} ${x2} ${y2 - k} ${x2} ${y2}`; lx = (x1 + x2) / 2 + 4; ly = (y1 + y2) / 2 + 3;
         } else {
-          const x1 = a.r, y1 = a.cy, x2 = b.l - 2, y2 = e.to === "user" ? Math.min(b.b - 10, Math.max(b.t + 10, a.cy)) : b.cy, k = Math.max(24, (x2 - x1) * .45);
-          d = `M${x1} ${y1} C${x1 + k} ${y1} ${x2 - k} ${y2} ${x2} ${y2}`; lx = (x1 + x2) / 2; ly = (y1 + y2) / 2 - 4;
+          // A loop or a dependency beside or above: bow out to the side.
+          const right = b.cx >= a.cx, x1 = right ? a.r : a.l, x2 = right ? b.l : b.r, bow = (right ? 1 : -1) * Math.max(30, Math.abs(x2 - x1) * .3);
+          d = `M${x1} ${a.cy} C${x1 + bow} ${a.cy} ${x2 - bow} ${b.cy} ${x2 + (right ? -2 : 2)} ${b.cy}`; lx = (x1 + x2) / 2; ly = (a.cy + b.cy) / 2 - 4;
         }
         const p = document.createElementNS(NS, "path");
         p.setAttribute("d", d); p.dataset.from = from; p.dataset.to = e.to;
-        p.setAttribute("class", ["e", kind, crit && "crit", stalled && "stalled", e.back && "back"].filter(Boolean).join(" "));
+        p.setAttribute("class", ["e", kind, crit && "crit", stalled && "stalled", e.back && "back", cross && "cross"].filter(Boolean).join(" "));
         p.setAttribute("marker-end", `url(#cp-arrow-${crit ? (stalled || kind === "you" ? "warm" : "crit") : kind === "you" ? "warm" : "plain"})`);
-        const why = {waits: "waits on", external: "waits on", reply: "awaits a reply from", handoff: "awaits the handoff from", you: "waits on you"}[kind];
-        const t = document.createElementNS(NS, "title"); t.textContent = field.nameOf(from) + " " + why + (kind === "you" ? "" : " " + (e.to.startsWith("ext:") ? A.g.nodes.get(e.to).label : field.nameOf(e.to))) + " · " + ago(field, e.since) + (e.msgs.at(-1) ? "\n“" + e.msgs.at(-1).body + "”" : "") + (e.back ? "\n(closes a loop)" : "");
-        p.append(t); svg.append(p); paths.push(p);
-        // Labels: wait age on critical edges and owed replies, so the cost of each wait is visible.
-        if ((crit || kind === "reply" || kind === "you") && (lx > 0)) {
-          const txt = document.createElementNS(NS, "text"); txt.setAttribute("x", lx); txt.setAttribute("y", ly); txt.setAttribute("text-anchor", "middle");
+        const why = {waits: e.kinds.has("lineage") ? "waits on its sub-agent" : "waits on", external: "waits on", reply: "awaits a reply from", handoff: "awaits the result from", you: "waits on you"}[kind];
+        const t = document.createElementNS(NS, "title"); t.textContent = field.nameOf(from) + " " + why + (kind === "you" ? "" : " " + (e.to.startsWith("ext:") ? A.g.nodes.get(e.to).label : field.nameOf(e.to))) + " · " + ago(field, e.since) + (e.msgs.at(-1) ? "\n“" + e.msgs.at(-1).body.slice(0, 240) + "”" : "") + (e.back ? "\n(closes a loop)" : "");
+        p.append(t); svg.append(p);
+        if (crit || kind === "reply" || kind === "you") {
+          const txt = document.createElementNS(NS, "text"); txt.setAttribute("x", lx); txt.setAttribute("y", ly); txt.setAttribute("text-anchor", b.t > a.b - 2 && !e.back ? "start" : "middle");
           txt.setAttribute("class", [crit && "crit", kind === "you" && "you"].filter(Boolean).join(" "));
-          txt.dataset.from = from; txt.dataset.to = e.to;
-          txt.textContent = ago(field, e.since);
+          txt.dataset.from = from; txt.dataset.to = e.to; txt.textContent = ago(field, e.since);
           svg.append(txt);
         }
       }
     }
+    // The live end of the replay: open requests wait at the recipient as hollow, pulsing dots (count when several).
+    const owed = new Map();
+    for (const m of field.openRequests()) { if (m.from === "user" || m.to === "user") continue; if (!els.has(m.to)) continue; if (!owed.has(m.to)) owed.set(m.to, []); owed.get(m.to).push(m); }
+    for (const [id, list] of owed) {
+      const r = rect(els.get(id)), warm = list.some(m => m.intent === "blocker");
+      const c = document.createElementNS(NS, "circle"); c.setAttribute("cx", r.r - 2); c.setAttribute("cy", r.t + 2); c.setAttribute("r", list.length > 1 ? 7 : 4.5); c.setAttribute("class", "owed" + (warm ? " warm" : ""));
+      const t = document.createElementNS(NS, "title"); t.textContent = field.nameOf(id) + " owes " + list.length + (list.length === 1 ? " reply" : " replies") + ": " + list.slice(0, 4).map(m => field.nameOf(m.from) + " · " + ago(field, m.at)).join(", "); c.append(t);
+      svg.append(c);
+      if (list.length > 1) { const n = document.createElementNS(NS, "text"); n.setAttribute("x", r.r - 2); n.setAttribute("y", r.t + 5); n.setAttribute("text-anchor", "middle"); n.setAttribute("class", "owed-n"); n.textContent = list.length; svg.append(n); }
+    }
   }
 
-  // Reflow: nodes glide from where they were to their new column (FLIP), so answering visibly moves the graph.
+  // Reflow: nodes glide from where they were to their new row (FLIP), so answering visibly moves the graph.
   function flip(board) {
     if (reduced || !view.rects.size) return;
     const br = board.getBoundingClientRect(); let moved = false;
@@ -609,22 +499,294 @@
     if (moved) board.querySelector(".cp-edges")?.animate([{opacity: 0}, {opacity: 0}, {opacity: 1}], {duration: 520});
   }
 
-  // Messages in flight: a dot travels from sender to recipient for messages that arrived since the last render.
-  function flights(field, A, board, svg) {
+  /* ---- Message dots ----
+     A replay cursor sweeps the log (default: the last 24 h in about 60 s, looping) and launches one dot per message
+     as it passes. Live messages from Play/Step launch immediately. Dots are drawn in a fixed overlay, re-anchored to
+     the current DOM every frame, so they survive re-renders. */
+  const overlay = document.createElementNS(NS, "svg"); overlay.classList.add("cp-dots"); overlay.setAttribute("aria-hidden", "true"); document.body.append(overlay);
+  const dots = [];
+  const MAX_DOTS = 40, FLIGHT = 1100;
+  const dotClass = m => {
+    const warm = m.from === "user" || m.to === "user" || m.intent === "blocker" || m.kind === "failure";
+    const ok = !warm && (m.intent === "handoff" || m.kind === "closure");
+    return [warm ? "warm" : ok ? "ok" : "", m.replyRequired && !m.repliedBy && !m.closed ? "open" : ""].filter(Boolean).join(" ");
+  };
+  function endpoint(id, other) {
+    if (!current) return null;
+    const {board, A} = current;
+    if (id === "user") return board.querySelector(`.cp-ask[data-for="${other}"]`) || document.querySelector(".cp-headline");
+    const el = board.querySelector(`[data-id="${CSS.escape(id)}"]`); if (el) return el;
+    const root = A.teamOf(id);
+    return board.querySelector(`[data-team-head="${CSS.escape(root)}"]`) || document.querySelector(`.cp-settled [data-settled="${CSS.escape(root)}"]`);
+  }
+  function launch(m, now) {
+    const a = endpoint(m.from, m.to), b = endpoint(m.to, m.from);
+    if (!a || !b || a === b) return;
+    if (dots.length >= MAX_DOTS) dots.shift().el.remove();
+    const c = document.createElementNS(NS, "circle"); c.setAttribute("r", m.kind === "creation" ? "4.5" : "3.6"); c.setAttribute("class", dotClass(m));
+    const title = document.createElementNS(NS, "title"); title.textContent = current.field.nameOf(m.from) + " → " + current.field.nameOf(m.to) + " · " + (current.field.INTENT_LABELS[m.intent] || m.kind) + (m.intentDerived ? " (guessed)" : ""); c.append(title);
+    overlay.append(c);
+    const bend = ((m.id * 7919) % 2 ? 1 : -1) * (.12 + ((m.id * 31) % 10) / 100);
+    dots.push({el: c, from: m.from, to: m.to, a, b, start: now, dur: reduced ? 1400 : FLIGHT, bend, warm: c.classList.contains("warm"), ok: c.classList.contains("ok")});
+  }
+  function place(d, now) {
+    const a = d.a.isConnected ? d.a : (d.a = endpoint(d.from, d.to)), b = d.b.isConnected ? d.b : (d.b = endpoint(d.to, d.from));
+    if (!a || !b) return false;
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    const x1 = ra.left + ra.width / 2, y1 = ra.top + ra.height / 2, x2 = rb.left + rb.width / 2, y2 = rb.top + rb.height / 2;
+    let t = Math.min(1, (now - d.start) / d.dur);
+    if (reduced) t = .5; // static tick halfway along the edge
+    else t = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const mx = (x1 + x2) / 2 - (y2 - y1) * d.bend, my = (y1 + y2) / 2 + (x2 - x1) * d.bend;
+    const x = (1 - t) * (1 - t) * x1 + 2 * (1 - t) * t * mx + t * t * x2, y = (1 - t) * (1 - t) * y1 + 2 * (1 - t) * t * my + t * t * y2;
+    d.el.setAttribute("cx", x.toFixed(1)); d.el.setAttribute("cy", y.toFixed(1));
+    return true;
+  }
+  function absorb(d) {
+    d.el.remove();
+    const b = d.b; if (reduced || !b?.isConnected || !b.classList.contains("cp-node")) return;
+    b.style.setProperty("--pulse", d.warm ? "color-mix(in srgb, var(--warm) 60%, transparent)" : d.ok ? "color-mix(in srgb, var(--ok) 60%, transparent)" : "");
+    b.classList.remove("arrive"); void b.offsetWidth; b.classList.add("arrive");
+  }
+
+  // Replay state lives in view.replay; the cursor is a timestamp in field time.
+  function resetReplay(field) {
+    const r = view.replay; r.cursor = field.now - r.win; r.ptr = seek(field, r.cursor); r.hold = 0;
+  }
+  function seek(field, t) { const ms = field.messages; let lo = 0, hi = ms.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (ms[mid].at <= t) lo = mid + 1; else hi = mid; } return lo; }
+  // Live messages from Play/Step launch as they happen.
+  function liveMessages(field) {
     const last = field.messages.at(-1)?.id || 0;
     if (view.seenMsg === null) { view.seenMsg = last; return; }
     const fresh = field.messages.filter(m => m.id > view.seenMsg); view.seenMsg = last;
-    if (reduced || !fresh.length) return;
-    const br = board.getBoundingClientRect(), NS = "http://www.w3.org/2000/svg";
-    const at = (id, forAsk) => { const el = id === "user" ? board.querySelector(`.cp-ask[data-for="${forAsk}"]`) || board.querySelector(".cp-colhead.rail") : board.querySelector(`[data-id="${id}"]`); if (!el) return null; const r = el.getBoundingClientRect(); return {el, x: r.left - br.left + r.width / 2, y: r.top - br.top + r.height / 2}; };
-    for (const m of fresh.slice(-8)) {
-      const a = at(m.from, m.to), b = at(m.to, m.from); if (!a || !b) continue;
-      const c = document.createElementNS(NS, "circle"); c.setAttribute("r", "4"); c.setAttribute("class", "flight" + (m.to === "user" || m.from === "user" ? " you" : ""));
-      svg.append(c);
-      c.animate([{transform: `translate(${a.x}px, ${a.y}px)`}, {transform: `translate(${b.x}px, ${b.y}px)`}], {duration: 850, easing: "ease-in-out", fill: "forwards"}).onfinish = () => c.remove();
-      if (b.el.classList.contains("cp-node")) setTimeout(() => { b.el.classList.remove("arrive"); void b.el.offsetWidth; b.el.classList.add("arrive"); }, 800);
-    }
+    const now = performance.now();
+    for (const m of fresh.slice(-12)) launch(m, now);
   }
+  let lastFrame = performance.now();
+  function frame(now) {
+    const dt = Math.min(100, now - lastFrame); lastFrame = now;
+    const f = current?.field, r = view.replay;
+    if (f && r.cursor != null) {
+      if (r.on && !r.scrubbing) {
+        if (r.cursor >= f.now) { r.hold += dt; if (r.hold > 2500) resetReplay(f); }
+        else {
+          const ms = f.messages;
+          // Skip long silences so the replay spends its time on traffic.
+          if (r.ptr < ms.length && ms[r.ptr].at - r.cursor > r.win * .03) r.cursor = ms[r.ptr].at - r.win * .004;
+          else if (r.ptr >= ms.length && f.now - r.cursor > r.win * .03) r.cursor = f.now - r.win * .004;
+          const prev = r.cursor; r.cursor = Math.min(f.now, r.cursor + dt * (r.win / 60_000) * r.speed);
+          let n = 0;
+          while (r.ptr < ms.length && ms[r.ptr].at <= r.cursor) { if (ms[r.ptr].at > prev && n++ < 3) launch(ms[r.ptr], now); r.ptr++; }
+        }
+      }
+      updateScrub(f);
+    }
+    for (let i = dots.length - 1; i >= 0; i--) {
+      const d = dots[i];
+      if (now - d.start >= d.dur || !place(d, now)) { dots.splice(i, 1); absorb(d); }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  /* Scrubber: play/pause, speed, window (1 h / 24 h / 7 d), a histogram of the log, and the live end. */
+  function replayBar(field) {
+    const r = view.replay, bar = $("div", "cp-replay");
+    const play = $("button", "btn small", r.on ? "❚❚ Replay" : "▶ Replay"); play.type = "button"; play.title = "Replay the message log as dots";
+    play.onclick = () => { r.on = !r.on; if (r.on && r.cursor >= field.now) resetReplay(field); play.textContent = r.on ? "❚❚ Replay" : "▶ Replay"; };
+    const seg = $("div", "cp-seg");
+    for (const [w, l] of [[HOUR, "1 h"], [24 * HOUR, "24 h"], [7 * 24 * HOUR, "7 d"]]) { const b = $("button", "btn small", l); b.type = "button"; b.setAttribute("aria-pressed", String(r.win === w)); b.onclick = () => { r.win = w; resetReplay(field); field.emit(); }; seg.append(b); }
+    const speed = $("select"); speed.title = "Replay speed";
+    for (const s of [.5, 1, 2, 4]) { const o = $("option", null, s + "×"); o.value = s; o.selected = r.speed === s; speed.append(o); }
+    speed.onchange = () => { r.speed = Number(speed.value); };
+    const clock = $("span", "clock");
+    const scrub = $("div", "cp-scrub"), hist = document.createElementNS(NS, "svg");
+    hist.setAttribute("viewBox", "0 0 120 30"); hist.setAttribute("preserveAspectRatio", "none");
+    const from = field.now - r.win, buckets = new Array(120).fill(0), warmB = new Array(120).fill(0);
+    for (let i = seek(field, from); i < field.messages.length; i++) { const m = field.messages[i]; const k = Math.min(119, Math.floor((m.at - from) / r.win * 120)); if (k < 0) continue; buckets[k]++; if (dotClass(m).includes("warm")) warmB[k]++; }
+    const peak = Math.max(1, ...buckets);
+    buckets.forEach((n, i) => { if (!n) return; const h = Math.max(1.5, n / peak * 26); const rc = document.createElementNS(NS, "rect"); rc.setAttribute("x", i + .1); rc.setAttribute("width", .8); rc.setAttribute("y", 30 - h); rc.setAttribute("height", h); if (warmB[i] / n > .4) rc.setAttribute("class", "warm"); hist.append(rc); });
+    const cursor = $("span", "cursor"), input = $("input"); input.type = "range"; input.min = 0; input.max = 1000; input.setAttribute("aria-label", "Replay position");
+    input.oninput = () => { r.scrubbing = true; r.cursor = from + Number(input.value) / 1000 * r.win; r.ptr = seek(field, r.cursor); r.hold = 0; updateScrub(field); };
+    input.onchange = () => { r.scrubbing = false; };
+    scrub.append(hist, cursor, input);
+    const total = field.messages.length - seek(field, from);
+    const info = $("span", "derived", total + " messages" + (isReal(field) ? " · real records · intent guessed from text" : " · simulated") + (field.outsideMessages ? " · " + field.outsideMessages + " with threads outside this view" : ""));
+    const live = $("span", "live", "● LIVE"); live.title = "Open requests wait at their recipient as hollow pulsing dots";
+    bar.append(play, seg, speed, clock, scrub, live, info);
+    bar.dataset.from = from;
+    return bar;
+  }
+  function updateScrub(field) {
+    const r = view.replay, bar = document.querySelector(".cp-replay"); if (!bar) return;
+    const from = Number(bar.dataset.from), p = Math.max(0, Math.min(1, (r.cursor - from) / r.win));
+    const cur = bar.querySelector(".cursor"); if (cur) cur.style.left = `calc(${(p * 100).toFixed(2)}% - 1px)`;
+    const input = bar.querySelector("input"); if (input && !r.scrubbing) input.value = Math.round(p * 1000);
+    const clock = bar.querySelector(".clock");
+    if (clock) { const d = new Date(r.cursor); clock.textContent = r.cursor >= field.now - 1000 ? "live · now" : d.toLocaleString([], {weekday: r.win > 24 * HOUR ? "short" : undefined, hour: "2-digit", minute: "2-digit"}) + " · −" + field.duration(field.now - r.cursor); }
+  }
+
+  // Mount last: render runs immediately and needs everything above.
+  api = Mockup.mount({
+    number: 27, title: "Critical path", spectrum: "radical", defaultScale: snapshot ? "real" : "small", projectTabs: true,
+    summary: "You as a node in the dependency graph, top to bottom: each outcome, what it waits on, and you at the end of the chains; messages float along the edges.",
+    signals: {
+      current: ["title", "status", "created_by", "creation", "agent_messages", "next_actor", "next_action", "pending_approval", "write_scope", "updated_at", "age", "tool_activity", "phase", "client"],
+      proposed: ["name", "role", "surface", "intent", "waiting_on", "ask", "escalation", "blocks", "health", "plan", "eta"],
+    },
+    notes: "With real records the graph is built only from what agent-coord already stores: creation lineage (a live creator waits on its live children), unanswered creations and reply_required messages (the sender waits on the recipient), and next_actor=user checkpoints (the agent waits on you); message kinds come from the database and intent is guessed from the text. waiting_on, a structured ask and plan steps would make it exact and add time estimates (simulated scales show them). Identity: the title is the assignment and changes, so a node leads with a stable name and shows the title underlined as a placeholder until one is reported. On what: the surface (one checkpoint field), else the first write-scope path; phase moves to the tooltip.",
+    render(field, stage, apiRef) {
+      api = apiRef;
+      const key = field.scale + "|" + (field.workspace || "");
+      if (view.lastKey !== key) { view.mode = null; view.expanded.clear(); view.seenMsg = null; view.rects.clear(); view.lastKey = key; resetReplay(field); }
+      if (field.messages.length && view.seenMsg !== null && field.messages.at(-1).id < view.seenMsg) { view.seenMsg = null; resetReplay(field); } // after Reset
+      const real = isReal(field), large = field.scale === "large" || field.agents.length > 120;
+      view.mode ??= "critical";
+      const all = view.mode === "all";
+
+      // Remember node positions for the reflow animation.
+      const oldBoard = stage.querySelector(".cp-board");
+      if (oldBoard) { const br = oldBoard.getBoundingClientRect(); view.rects = new Map([...oldBoard.querySelectorAll("[data-id]")].map(el => { const r = el.getBoundingClientRect(); return [el.dataset.id, {x: r.left - br.left, y: r.top - br.top}]; })); }
+      stage.replaceChildren();
+      const A = analyse(field);
+
+      /* Headline: what you block, and which answer unblocks the longest chain. */
+      const head = $("div", "cp-head"), hl = $("p", "cp-headline"), sub = $("div", "cp-sub");
+      const top = A.holders[0];
+      if (A.blockedByYou.length) {
+        hl.append("You are blocking ", $("b", "you", A.blockedByYou.length + (A.blockedByYou.length === 1 ? " agent" : " agents")), " across ", $("b", null, A.blockedTeams.size + (A.blockedTeams.size === 1 ? " team" : " teams")), ". ");
+        if (top) {
+          const kind = top.agent.ask ? (real ? "next step" : top.agent.ask.kind) : "next step";
+          hl.append("Answering ", $("b", null, nameOf(top.agent) + "’s " + kind), top.chain.length > 1 ? " unblocks the longest chain." : top.agent.ask?.blocking && !real ? " comes first: nothing waits behind any ask, and it is blocking." : " comes first: it has waited longest.");
+          const ch = $("span", "chain"); top.chain.forEach((c, i) => { if (i) ch.append($("i", null, "→")); ch.append(nameOf(c)); }); ch.append($("i", null, "→"), "you");
+          sub.append(ch);
+          if (A.estimates && isFinite(top.workAfter)) sub.append($("span", null, "· then " + fmt(top.workAfter) + " of agent work until " + nameOf(top.chain[0]) + " finishes"));
+          else sub.append($("span", null, "· waiting " + ago(field, top.agent.ask?.askedAt ?? top.agent.updatedAt)));
+          const go = $("button", "btn small warm", "Show the ask"); go.type = "button";
+          go.onclick = () => { view.flash = top.agent.id; const el = stage.querySelector(`.cp-ask[data-for="${top.agent.id}"]`); el?.scrollIntoView({block: "center", behavior: reduced ? "auto" : "smooth"}); el?.classList.remove("flash"); void el?.offsetWidth; el?.classList.add("flash"); hover(top.agent.id); setTimeout(() => { view.flash = null; hover(null); }, 1400); };
+          sub.append(go);
+        }
+      } else {
+        const latest = [...A.teams.values()].filter(t => t.cp).sort((x, y) => y.finish - x.finish)[0];
+        hl.append($("b", "calm", "Nothing is waiting on you. "));
+        if (latest && A.estimates) {
+          hl.append("The last outcome to land is ", $("b", null, nameOf(latest.root)), ", in about " + fmt(latest.finish).replace("~", "") + ".");
+          const ch = $("span", "chain"); latest.cp.path.forEach((id, i) => { if (i) ch.append($("i", null, "→")); ch.append(id.startsWith("ext:") ? A.g.nodes.get(id).label : nameOf(field.byId(id))); }); sub.append(ch);
+        }
+      }
+      head.append(hl, sub); stage.append(head);
+      if (!snapshot) { const h = $("p", "cp-hint"); h.append("Simulated field. Run ", $("code", null, "python3 docs/agent-display-mockups/export-threads.py"), " and reload to see your real records."); stage.append(h); }
+
+      /* Mode and legend. */
+      const tools = $("div", "cp-tools"), seg = $("div", "cp-seg");
+      for (const [m, l] of [["critical", "Critical paths"], ["all", "Every wait"]]) { const b = $("button", "btn small", l); b.type = "button"; b.setAttribute("aria-pressed", String(view.mode === m)); b.onclick = () => { view.mode = m; field.emit(); }; seg.append(b); }
+      const legend = $("div", "cp-legend");
+      const sw = (cls, label, color) => { const s = $("span"); s.innerHTML = `<svg viewBox="0 0 22 10"><path d="M1 5H21" fill="none" stroke="${color}" stroke-width="${cls.includes("crit") ? 2.2 : 1.4}" ${cls.includes("dash") ? 'stroke-dasharray="5 4"' : cls.includes("dot") ? 'stroke-dasharray="1.5 3.5" stroke-linecap="round"' : ""}/></svg>`; s.append(label); return s; };
+      const dot = (cls, label) => { const s = $("span"); s.innerHTML = `<svg viewBox="0 0 22 10"><circle cx="11" cy="5" r="3.6" ${cls === "open" ? 'fill="var(--surface)" stroke="var(--accent)" stroke-width="1.6"' : `fill="var(--${cls})"`}/></svg>`; s.append(label); return s; };
+      legend.append(sw("crit", "critical path", "var(--accent)"), sw("crit", "stalled on you", "var(--warm)"), sw("", real ? "waits on child" : "waits on", "var(--line-strong)"), sw("dash", "reply owed", "var(--line-strong)"), sw("dot", "result owed", "var(--line-strong)"),
+        dot("accent", "message"), dot("warm", "blocker / you"), dot("ok", "handoff"), dot("open", "awaiting reply"));
+      tools.append(seg, legend); stage.append(tools);
+      stage.append(replayBar(field));
+
+      /* Teams: those that wait on you first (by ask rank), then those still moving (latest finish first), then settled. */
+      const blocks = [];
+      for (const t of A.teams.values()) {
+        if (!t.cp && !t.live.length) continue;
+        const you = t.finish === Infinity || t.live.some(a => A.g.reachesUser(a.id));
+        const busy = t.live.some(a => ["working", "blocked", "waiting", "failed"].includes(a.status)) || you;
+        if (!busy) continue;
+        const expanded = all || view.expanded.has(t.root.id);
+        const ids = laneNodes(field, A, t, expanded);
+        if (!ids.size) ids.add(t.root.status !== "done" ? t.root.id : t.live[0].id);
+        const hidden = t.live.filter(a => !ids.has(a.id)).length;
+        const asks = A.holders.filter(h => h.root === t.root.id);
+        blocks.push({t, you, ids, hidden, asks, expanded});
+      }
+      const settled = [...A.teams.values()].filter(t => !blocks.some(l => l.t === t));
+      const rankOf = l => Math.min(...l.asks.map(h => h.rank), 999);
+      blocks.sort((x, y) => Number(y.you) - Number(x.you) || rankOf(x) - rankOf(y) || y.t.finish - x.t.finish || y.t.live.length - x.t.live.length);
+
+      // Rows are computed over what is shown, so a hidden branch does not push a node further down.
+      const shown = new Set(blocks.flatMap(l => [...l.ids])), lv = new Map(), on = new Set();
+      const levelOf = id => {
+        if (lv.has(id)) return lv.get(id); if (on.has(id)) return 0; on.add(id);
+        const ds = A.g.deps(id).filter(e => !e.back && shown.has(e.to));
+        const L = ds.length ? 1 + Math.max(...ds.map(e => levelOf(e.to))) : 0;
+        on.delete(id); lv.set(id, L); return L;
+      };
+      for (const id of shown) levelOf(id);
+
+      const board = $("div", "cp-board");
+      let section = null;
+      for (const l of blocks) {
+        const key2 = l.you ? "you" : "moving";
+        if (section !== key2) {
+          section = key2;
+          const s = $("div", "cp-section", key2 === "you" ? "Waiting on you" : "Moving without you");
+          s.append($("small", null, key2 === "you" ? "outcome on top · what it waits on below · you at the bottom" : A.estimates ? "latest finish first" : "most members first"));
+          board.append(s);
+        }
+        const compact = (!l.you && !l.expanded && (large || field.scale === "medium")) || (large && l.ids.size > 6);
+        const team = $("section", "cp-team " + key2); team.dataset.team = l.t.root.id;
+        const th = $("div", "cp-team-head"); th.dataset.teamHead = l.t.root.id;
+        const nb = $("button", "cp-team-name"); nb.type = "button"; nb.append(AgentField.statusDot(l.t.root), $("span", null, nameOf(l.t.root))); nb.title = l.t.root.title + " · open thread"; nb.onclick = () => api.select(l.t.root.id);
+        const eta = l.t.finish === Infinity ? $("span", "cp-eta you", "stalled on you") : l.t.ext ? $("span", "cp-eta ext", "waits on " + l.t.ext) : $("span", "cp-eta", A.estimates ? "lands " + fmt(l.t.finish) : (l.t.cp?.path.length || 1) + (l.t.cp?.path.length === 1 ? " agent deep" : " agents deep"));
+        if (l.t.finish === Infinity && A.estimates && isFinite(l.t.after)) eta.title = "Once you answer: about " + fmt(l.t.after).replace("~", "") + " of agent work";
+        const meta = $("div", "cp-team-meta");
+        if (l.t.done) meta.append($("span", null, "✓ " + l.t.done + " done"));
+        if (!all && (l.hidden || view.expanded.has(l.t.root.id))) {
+          const more = $("button", "btn quiet small", view.expanded.has(l.t.root.id) ? "only the path" : "+" + l.hidden + " off the path"); more.type = "button";
+          more.onclick = () => { view.expanded.has(l.t.root.id) ? view.expanded.delete(l.t.root.id) : view.expanded.add(l.t.root.id); field.emit(); };
+          meta.append(more);
+        } else if (all && l.hidden) meta.append($("span", null, l.hidden + " idle"));
+        th.append(nb, eta); if (meta.childNodes.length) th.append(meta);
+        team.append(th);
+        // Rows from the outcome (deepest level) down to the work being done.
+        const byLevel = new Map(); let maxL = 0;
+        for (const id of l.ids) { const L = lv.get(id) ?? 0; maxL = Math.max(maxL, L); if (!byLevel.has(L)) byLevel.set(L, []); byLevel.get(L).push(id); }
+        const rows = $("div", "cp-rows"), pos = new Map();
+        for (let L = maxL; L >= 0; L--) {
+          const list = byLevel.get(L); if (!list) continue;
+          // Order under the agents that wait on them to keep edges short.
+          const bary = id => { const ws = A.g.waiters(id).filter(e => pos.has(e.from)).map(e => pos.get(e.from)); return ws.length ? ws.reduce((s, x) => s + x, 0) / ws.length : 999; };
+          list.sort((x, y) => bary(x) - bary(y) || Number(A.crit.has(y)) - Number(A.crit.has(x)) || Number(A.g.reachesUser(y)) - Number(A.g.reachesUser(x)) || x.localeCompare(y));
+          const row = $("div", "cp-row");
+          list.forEach((id, i) => {
+            pos.set(id, i / Math.max(1, list.length - 1));
+            if (id.startsWith("ext:")) { const n = A.g.nodes.get(id); const e = $("div", "cp-ext" + (A.crit.has(id) ? " crit" : "")); e.dataset.id = id; e.title = "Outside the field: " + n.label; e.append("⧗ ", $("span", null, n.label)); row.append(e); return; }
+            row.append(nodeEl(field, A, field.byId(id), {compact, fade: !A.crit.has(id) && !A.g.reachesUser(id)}));
+          });
+          rows.append(row);
+        }
+        team.append(rows);
+        if (l.asks.length) {
+          const you = $("div", "cp-you"), h4 = $("h4", null, "You");
+          h4.append($("small", null, l.asks.length === 1 ? "1 answer needed" : l.asks.length + " answers needed"));
+          const cards = $("div", "cp-you-cards");
+          for (const h of l.asks) cards.append(askEl(field, A, h, large && h.rank > 3));
+          you.append(h4, cards); team.append(you);
+        }
+        board.append(team);
+      }
+      if (!blocks.length) board.append($("div", "cp-section", "No outcome has work in flight."));
+      const svg = document.createElementNS(NS, "svg"); svg.classList.add("cp-edges");
+      board.prepend(svg);
+      stage.append(board);
+
+      if (settled.length) {
+        const s = $("div", "cp-settled"), cap = large ? 30 : 40; s.append($("h4", null, "Settled"));
+        for (const t of settled.slice(0, cap)) { const b = $("button", "btn quiet small"); b.type = "button"; b.dataset.settled = t.root.id; b.append(AgentField.statusDot(t.root), nameOf(t.root)); b.title = t.root.title + " · " + field.statusLabel(t.root); b.onclick = () => api.select(t.root.id); s.append(b); }
+        if (settled.length > cap) s.append($("span", null, "+" + (settled.length - cap) + " more"));
+        stage.append(s);
+      }
+
+      current = {board, A, field};
+      drawEdges(field, A, board, svg);
+      flip(board);
+      liveMessages(field);
+      if (view.hover) hover(view.hover);
+    },
+  });
 })();
 </script>
 </body>

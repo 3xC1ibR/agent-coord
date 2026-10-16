@@ -96,6 +96,7 @@ const Orchestration = (() => {
     /* Proposed signals, derived deterministically so every view shows the same values. */
     for (const a of agents) decorate(a);
     function decorate(a) {
+      if (a.real) { a.surface ??= {kind: SURFACE_KINDS[a.domain] || "area", label: a.domain || a.scope[0] || a.title}; a.health ??= healthOf(a); return; }
       a.surface ??= {kind: SURFACE_KINDS[a.domain] || "module", label: a.target || a.title};
       a.deliverable ??= {kind: DELIVERABLES[a.role] || "result", label: a.links[0]?.label || null,
         state: a.status === "done" ? "delivered" : field.progress(a).total && field.progress(a).done >= field.progress(a).total - 1 ? "ready" : field.progress(a).done ? "draft" : "none"};
@@ -129,7 +130,9 @@ const Orchestration = (() => {
     /* Seed history: the small field gets hand-written exchanges based on real threads. */
     const T = field.now;
     const S = (from, to, minsAgo, opts) => send(from, to, {...opts, at: T - minsAgo * MIN, silent: true});
-    if (field.scale === "small" && field.byId("s01")) {
+    if (field.scenario === "real") {
+      loadReal(globalThis.AGENT_COORD_SNAPSHOT);
+    } else if (field.scale === "small" && field.byId("s01")) {
       const c1 = S("s01", "s02", 300, {kind: "creation", intent: "assign", body: "Own the Rig workspace upload release end to end: backend and UI halves, then deploy and send me the deployment, health, and API handoff. Reply when deployed."});
       const c2 = S("s02", "s03", 240, {kind: "creation", intent: "assign", body: "Implement resumable chunked uploads in rig/api/uploads/**. Keep out of rig/web/upload/**. Reply with the PR and test counts."});
       const c3 = S("s02", "s04", 238, {kind: "creation", intent: "assign", body: "Build the upload page: drag-and-drop, progress, failure recovery. Only rig/web/upload/**. Reply with the PR."});
@@ -190,15 +193,55 @@ const Orchestration = (() => {
     }
     field.messages.sort((x, y) => x.at - y.at || x.id - y.id);
 
+    /* Real records: the snapshot's agent-coord messages between exported threads. Kind and the
+     * reply/closure state come straight from the database; intent is guessed from the body and
+     * marked derived, because agents do not report it yet. */
+    function loadReal(snapshot) {
+      const rows = snapshot?.messages || [];
+      field.parties = snapshot?.parties || {};
+      field.outsideMessages = 0;
+      const byDbId = new Map();
+      for (const r of rows) {
+        const inFrom = !!field.byId(r.from), inTo = !!field.byId(r.to);
+        if (!inFrom || !inTo) { if (inFrom || inTo) field.outsideMessages++; continue; } // only count messages that cross the view's edge
+        const kind = r.creation ? "creation" : r.classification === "closure" ? "closure" : r.in_reply_to ? "reply" : r.classification === "informational" ? "info" : "action_required";
+        const m = {id: nextId++, dbId: r.id, from: r.from, to: r.to, at: Math.round(r.at * 1000), kind, intent: guessIntent(r, kind), intentDerived: true, body: r.body || "",
+          replyRequired: !!r.reply_required, inReplyTo: null, exchange: r.exchange || "m" + r.id, about: null, deliveredAt: r.delivered_at ? Math.round(r.delivered_at * 1000) : null,
+          ackedAt: r.acked_at ? Math.round(r.acked_at * 1000) : null, wokeTurn: !!r.woke_turn, closed: !!r.exchange_closed || !!r.suppressed, real: true};
+        if (r.in_reply_to && byDbId.has(r.in_reply_to)) { const o = byDbId.get(r.in_reply_to); m.inReplyTo = o.id; o.repliedBy ??= m.id; }
+        byDbId.set(r.id, m); field.messages.push(m);
+      }
+      // A later message in the same exchange from the recipient back to the sender counts as the reply (as message_timeline does).
+      const byExchange = new Map(); for (const m of field.messages) { if (!byExchange.has(m.exchange)) byExchange.set(m.exchange, []); byExchange.get(m.exchange).push(m); }
+      for (const list of byExchange.values()) for (const m of list) {
+        if (!m.replyRequired || m.repliedBy) continue;
+        const r = list.find(x => x.at > m.at && x.from === m.to && x.to === m.from && x.kind !== "closure"); if (r) { m.repliedBy = r.id; r.inReplyTo ??= m.id; }
+      }
+    }
+    function guessIntent(r, kind) {
+      const b = (r.body || "").toLowerCase();
+      if (kind === "creation") return "assign";
+      if (kind === "closure") return "status";
+      if (/\b(blocked|blocking|cannot|can't|failed|failure|error|rate.?limit|need (you|your|a decision))\b/.test(b)) return "blocker";
+      if (/\b(scope|begin-work|conflict|overlap|declar)/.test(b)) return "coordinate";
+      if (/\b(review|verdict|findings? (are|were)|approve)\b/.test(b)) return "review";
+      if (/\b(done|complete[d]?|finished|deployed|merged|committed|ready for|handoff|pr #|pull request)\b/.test(b)) return kind === "reply" ? "handoff" : "handoff";
+      if (/\b(found|finding|root cause|confirmed|traced)\b/.test(b)) return "finding";
+      if (/\?\s*$|\?\s|\b(can you|could you|please (check|confirm)|should (i|we))\b/.test(b)) return kind === "reply" ? "answer" : "question";
+      if (kind === "reply") return "answer";
+      if (kind === "action_required") return "assign";
+      return "status";
+    }
+
     /* Queries */
     Object.assign(field, {
       KIND_LABELS, INTENT_LABELS,
-      nameOf: id => id === "user" ? "You" : nameOf(field.byId(id)),
+      nameOf: id => id === "user" ? "You" : field.byId(id) ? nameOf(field.byId(id)) : (field.parties?.[id]?.title || "Outside agent"),
       messagesOf: (id, {since = 0} = {}) => field.messages.filter(m => (m.from === id || m.to === id) && m.at >= since),
       between: (a, b) => field.messages.filter(m => (m.from === a && m.to === b) || (m.from === b && m.to === a)),
       // Messages that still owe a reply, with who owes it and for how long.
       // Pass {creations: false} to leave out the result an assignment owes back to its creator.
-      openRequests: ({creations = true} = {}) => field.messages.filter(m => m.replyRequired && !m.repliedBy && m.kind !== "closure" && (creations || m.kind !== "creation") && !(m.to !== "user" && field.byId(m.to)?.status === "done")),
+      openRequests: ({creations = true} = {}) => field.messages.filter(m => m.replyRequired && !m.repliedBy && !m.closed && m.kind !== "closure" && (creations || m.kind !== "creation") && !(m.to !== "user" && field.byId(m.to)?.status === "done")),
       owes: id => field.openRequests().filter(m => m.to === id),
       awaiting: id => field.openRequests().filter(m => m.from === id),
       // Aggregated edges for drawing: one per unordered pair, with counts each way.
@@ -258,6 +301,7 @@ const Orchestration = (() => {
       if (announce) field.emit(); return k;
     };
     field.tick = () => {
+      if (field.scenario === "real") { baseTick(); return; } // real records: no invented messages
       const before = new Map(agents.map(a => [a.id, {status: a.status, ask: a.ask, phase: a.phase}]));
       baseTick();
       for (const a of agents) {

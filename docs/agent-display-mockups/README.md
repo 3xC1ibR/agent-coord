@@ -296,6 +296,23 @@ Positions the builders converged on independently:
   and who waits on whom. `intent` and `escalation` are the two proposed fields
   that most change what the views can say.
 
+### Real records and message dots (27, 29)
+
+`export-threads.py` now also exports agent-coord messages from the last 14 days
+(`--message-days N`) that touch an exported thread, plus names for
+counterparts outside the snapshot. With `?scale=real`, `orchestration.js` builds
+`field.messages` from those rows. It keeps the database's classification,
+reply obligation, `in_reply_to`, closure, and wake. It guesses `intent` from the
+body and flags it as derived, and it invents nothing on Play. Critical path (27,
+now a vertical tree) and Orchestration atlas (29, Atlas's vibe with families
+as territories) open on the real snapshot when it exists and show messages as
+dots floating between agents. A replay scrubber sweeps through the message log.
+
+```
+python3 docs/agent-display-mockups/export-threads.py
+open "docs/agent-display-mockups/mockups/29-orchestration-atlas.html?scale=real"
+```
+
 ## Who built what
 
 Mockups 01, 11, and 18, the shared fixture, shell, tokens, lens, probe, index,
