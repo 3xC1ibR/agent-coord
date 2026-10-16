@@ -21,6 +21,7 @@ ARCHITECTURES = ("arm64", "x86_64")
 BUCKET = "ribbon-field-downloads"
 DOWNLOAD_URL = "https://downloads.ribbonfield.com"
 ACCOUNT_ID = "af320d6747244dea99edc8895d3d00f4"
+CURRENT_KEY = "releases/current.json"
 
 
 def digest(stream) -> str:
@@ -35,13 +36,15 @@ def file_digest(path: Path) -> str:
         return digest(stream)
 
 
-def release_files(directory: Path, version: str, commit: str) -> tuple[list[Path], dict]:
+def release_files(directory: Path, version: str, commit: str, channel: str = "alpha") -> tuple[list[Path], dict]:
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("Version must be numeric X.Y.Z")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("Source commit must be a full Git SHA")
     files = []
-    release = {"version": version, "source_commit": commit, "downloads": {}}
+    if channel not in {"alpha", "beta", "stable"}:
+        raise ValueError("Invalid release channel")
+    release = {"version": version, "channel": channel, "source_commit": commit, "downloads": {}}
     for arch in ARCHITECTURES:
         name = f"Ribbon-Field-{version}-{arch}.dmg"
         image = directory / name
@@ -72,6 +75,13 @@ def release_files(directory: Path, version: str, commit: str) -> tuple[list[Path
         source = json.loads(provenance.read_text())
         if source.get("source_commit") != commit or source.get("version") != version:
             raise ValueError(f"Source provenance mismatch: {name}")
+        build = {key: source.get(key) for key in ("build_number", "run_url")}
+        if (not re.fullmatch(r"[1-9][0-9]*", str(build["build_number"]))
+                or not re.fullmatch(r"https://github.com/3xC1ibR/agent-coord/actions/runs/[0-9]+", str(build["run_url"]))):
+            raise ValueError(f"Missing CI provenance: {name}")
+        if "run_url" in release and any(release[key] != value for key, value in build.items()):
+            raise ValueError("Architectures came from different CI runs")
+        release.update(build)
         files.extend((image, checksum, metadata, provenance))
         release["downloads"][arch] = {
             "url": f"{DOWNLOAD_URL}/releases/{version}/{name}",
@@ -115,6 +125,32 @@ class R2:
         if result.returncode:
             raise RuntimeError(f"Upload failed for {key}: {result.stderr}")
 
+    def promote(self, path: Path) -> None:
+        """Atomically advance the current release; never silently downgrade it."""
+        candidate = json.loads(path.read_text())
+        with tempfile.TemporaryDirectory(prefix="ribbon-current-") as directory:
+            previous = Path(directory) / "current.json"
+            result = self.run("get-object", "--bucket", BUCKET, "--key", CURRENT_KEY, str(previous))
+            condition = ["--if-none-match", "*"]
+            if result.returncode == 0:
+                old = json.loads(previous.read_text())
+                old_version = tuple(map(int, old["version"].split(".")))
+                new_version = tuple(map(int, candidate["version"].split(".")))
+                if old_version > new_version:
+                    raise ValueError("Refusing to downgrade the current release")
+                if old_version == new_version:
+                    if old != candidate:
+                        raise ValueError("Current version already refers to different release metadata")
+                    return
+                condition = ["--if-match", json.loads(result.stdout)["ETag"]]
+            elif "(404)" not in result.stderr and "(NoSuchKey)" not in result.stderr:
+                raise RuntimeError(f"Cannot inspect current release: {result.stderr}")
+            result = self.run("put-object", "--bucket", BUCKET, "--key", CURRENT_KEY,
+                              "--body", str(path), *condition, "--content-type", "application/json",
+                              "--cache-control", "no-store")
+            if result.returncode:
+                raise RuntimeError(f"Current release promotion failed: {result.stderr}")
+
 
 def verify_download(key: str, path: Path) -> None:
     with urllib.request.urlopen(f"{DOWNLOAD_URL}/{key}", timeout=120) as response:
@@ -122,7 +158,7 @@ def verify_download(key: str, path: Path) -> None:
             raise ValueError(f"Public download checksum mismatch: {key}")
 
 
-def publish(files: list[Path], release: dict, r2: R2) -> None:
+def publish(files: list[Path], release: dict, r2: R2, *, promote_current: bool = False) -> None:
     prefix = f"releases/{release['version']}/"
     with tempfile.TemporaryDirectory(prefix="ribbon-release-") as directory:
         manifest = Path(directory) / "release.json"
@@ -137,6 +173,9 @@ def publish(files: list[Path], release: dict, r2: R2) -> None:
             if not existing[key]:
                 r2.put(key, path)
             verify_download(key, path)
+        if promote_current:
+            r2.promote(manifest)
+            verify_download(CURRENT_KEY, manifest)
 
 
 def main() -> None:
@@ -144,11 +183,15 @@ def main() -> None:
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--channel", choices=("alpha", "beta", "stable"), default="alpha")
     parser.add_argument("--publish", action="store_true", help="Upload verified files to the public R2 bucket")
+    parser.add_argument("--promote-current", action="store_true", help="Advance the website release after every artifact verifies")
     args = parser.parse_args()
-    files, release = release_files(args.directory, args.version, args.commit)
+    if args.promote_current and not args.publish:
+        parser.error("--promote-current requires --publish")
+    files, release = release_files(args.directory, args.version, args.commit, args.channel)
     if args.publish:
-        publish(files, release, R2())
+        publish(files, release, R2(), promote_current=args.promote_current)
     print(json.dumps({"published": args.publish, **release}, indent=2))
 
 

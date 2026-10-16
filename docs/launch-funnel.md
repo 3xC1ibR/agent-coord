@@ -140,10 +140,12 @@ idempotent retries, persisted event fields, and website CORS. Test events were
 removed. Signed/notarized 0.1.1 builds and publication evidence are recorded under
 `build/macos/launch-funnel-0.1.1/`. Old app builds cannot emit these milestones.
 
-1. Publish signed/notarized, release-tested DMGs for both architectures.
-2. In the website repo, set Terraform `launch_downloads` and `dist/config.js`
-   `downloads` to the **same** two versioned URLs. Keep `funnelDownloads: false`
-   until the download endpoint has been deployed and smoke-tested.
+1. Publish both architectures with the protected Release macOS CI workflow.
+   CI advances `https://downloads.ribbonfield.com/releases/current.json` only
+   after verifying both public installers.
+2. The website and attribution redirect use that manifest through `/v1/release`.
+   No version or installer URLs are maintained in website or Terraform config.
+   Redirects pin the version displayed when the page loaded.
 3. Run the website/API tests, `scripts/build-api`, then review/apply the API
    Terraform plan using `scripts/terraform-api`. This provisions the event table,
    IAM policy, routes and Lambda environment/code. Billing remains independently
