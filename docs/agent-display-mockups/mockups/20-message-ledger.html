@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 20 · Message ledger</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* A process monitor for orchestration: one row per agent in its team tree, with the
+       message obligations (owes, awaiting) and the last exchange as columns. */
+    .ledger-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+    .ledger-head h2 { font-size: 15px; font-weight: 550; letter-spacing: -.02em; }
+    .ledger-head p { font-size: 11.5px; color: var(--muted); }
+    .ledger-tools { position: sticky; top: 0; z-index: 6; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; height: 46px; padding: 0 2px; background: var(--paper); }
+    .ledger-tools input[type="search"] { flex: 0 1 240px; min-width: 140px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .ledger-tools .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+    .ledger-tools .toggle b { font: 10px var(--mono); color: var(--muted); font-weight: 400; margin-left: 5px; }
+    .ledger-tools .toggle[aria-pressed="true"] b { color: var(--ink); }
+    .ledger-tools .toggle.needs[aria-pressed="true"] { border-color: var(--warm); background: var(--warm-tint); color: var(--warm); }
+    .ledger-tools .spacer { flex: 1; }
+    .ledger-tools .seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .ledger-tools .seg button { all: unset; cursor: pointer; padding: 3px 9px; border-radius: 5px; font-size: 11px; color: var(--muted); }
+    .ledger-tools .seg button[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .ledger-tools .seg button:focus-visible { outline: 2px solid var(--accent); }
+    .ledger-tools .shown { font: 10px var(--mono); color: var(--muted); white-space: nowrap; }
+
+    table.ledger { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+    .ledger th { position: sticky; top: 46px; z-index: 5; background: var(--paper); text-align: left; font: 600 9.5px var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--muted); padding: 7px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; user-select: none; }
+    .ledger th button { all: unset; cursor: pointer; display: inline-flex; gap: 5px; align-items: center; }
+    .ledger th button:hover, .ledger th[aria-sort] button { color: var(--ink); }
+    .ledger th button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .ledger th .arrow { font-size: 9px; color: var(--accent); }
+    .ledger td { padding: 5px 10px; height: 46px; border-bottom: 1px solid var(--line); background: var(--surface); vertical-align: middle; overflow: hidden; }
+    .ledger tr.row { cursor: pointer; }
+    .ledger tr.row.team td { border-top: 1px solid var(--line-strong); }
+    .ledger tr.row:first-child td { border-top: 0; }
+    .ledger tr.row:hover td { background: var(--hover-bg); }
+    .ledger tr.row.selected td { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
+    .ledger tr.row.linked td { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+    .ledger tr.row.linked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+    .ledger tr.row:focus-visible { outline: none; }
+    .ledger tr.row:focus-visible td { box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
+    .ledger tr.row.needs td:first-child { box-shadow: inset 3px 0 0 var(--warm); }
+    .ledger tr.row.context td > * { opacity: .55; }
+    .ledger tr.row.done td { background: color-mix(in srgb, var(--surface) 55%, var(--paper)); }
+    .ledger tr.row.answered td { animation: answered 1.6s ease-out; }
+    @keyframes answered { from { background: var(--ok-tint); } }
+
+    /* Every cell is two lines: the fact, then its context. */
+    .two { display: grid; gap: 2px; min-width: 0; }
+    .two > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .l2 { font-size: 10.5px; color: var(--muted); }
+    .none { color: var(--line-strong); }
+
+    /* Agent cell: indent with elbow, disclosure, identity. */
+    .who { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .who .indent { flex: none; position: relative; align-self: stretch; }
+    .who .indent::after { content: ""; position: absolute; right: 2px; top: -6px; width: 7px; height: calc(50% + 6px); border-left: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); border-bottom-left-radius: 3px; }
+    .who .indent.root::after { display: none; }
+    .who .disc { all: unset; flex: none; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 3px; color: var(--muted); font-size: 9px; cursor: pointer; transition: transform .12s; }
+    .who .disc:hover { background: var(--tint); color: var(--ink); }
+    .who .disc:focus-visible { outline: 2px solid var(--accent); }
+    .who .disc.open { transform: rotate(90deg); }
+    .who .disc.leaf { visibility: hidden; }
+    .who .provider-logo { width: 13px; height: 13px; }
+    .who .two { flex: 1; }
+    .who .id { font-weight: 600; color: var(--ink); }
+    .who .id.provisional { font-weight: 450; }
+    .who .id .k { font: 9px var(--mono); color: var(--muted); border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 4px; margin-left: 6px; vertical-align: 1px; font-weight: 400; }
+
+    .on .surf { color: var(--ink); }
+    .on .tag { display: inline-block; font: 9px var(--mono); letter-spacing: .03em; color: var(--muted); border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 4px; margin-right: 6px; vertical-align: 1px; }
+    .on .l2 { font-family: var(--mono); font-size: 10px; }
+    .on .clash { color: var(--warm); }
+
+    .state .st { display: flex; align-items: center; gap: 6px; }
+    .state .st .lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .state .health { flex: none; font: 9px var(--mono); padding: 0 4px; border-radius: 3px; border: 1px solid currentColor; }
+    .state .health.stuck { color: var(--danger); }
+    .state .slip { flex: none; color: var(--warm); font-size: 11px; line-height: 1; }
+    .state .ph { display: flex; align-items: center; gap: 6px; }
+    .state .phase-steps i { width: 6px; height: 3px; }
+
+    /* Obligation cells. A request owed is the loud case; an open assignment result is quiet. */
+    .ob .who-ref { color: var(--ink); font-weight: 550; }
+    .ob .age { font: 10.5px var(--mono); color: var(--muted); margin-left: 6px; }
+    .ob .age.late { color: var(--warm); font-weight: 600; }
+    .ob .result { color: var(--muted); }
+    .ob .l1, .last .l1 { display: flex; align-items: baseline; min-width: 0; }
+    .ob .l1 > *, .last .l1 > * { flex: none; white-space: nowrap; }
+    .ob .l1 .who-ref, .last .l1 .who-ref { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .last .l1 .intent { flex: 0 4 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .ob .result .who-ref { color: var(--muted); font-weight: 450; }
+    .ref { cursor: pointer; border-radius: 3px; }
+    .ref:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+    .last { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .last .two { flex: 1; }
+    .last .dir { font: 11px var(--mono); color: var(--muted); margin-right: 4px; }
+    .last .dir.out { color: var(--accent); }
+    .last .intent { color: var(--muted); margin-left: 6px; }
+    .last .xteam { font: 9px var(--mono); color: var(--muted); border: 1px dashed var(--line-strong); border-radius: 3px; padding: 0 4px; margin-left: 6px; }
+    .last .msgs { all: unset; flex: none; cursor: pointer; font: 10px var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+    .last .msgs:hover { color: var(--ink); border-color: var(--hover-line); }
+    .last .msgs[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+    .last .msgs:focus-visible { outline: 2px solid var(--accent); }
+    td.fresh .last { animation: arrive 1.4s ease-out; border-radius: 4px; }
+    @keyframes arrive { from { background: color-mix(in srgb, var(--accent) 22%, transparent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); } }
+
+    .needs-cell .q { color: var(--ink); }
+    .needs-cell .askchip { font: 9px var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--warm); margin-right: 6px; }
+    .needs-cell .askchip.failure { color: var(--danger); }
+    .needs-cell .acts { display: flex; align-items: center; gap: 6px; overflow: hidden; }
+    .needs-cell .acts .btn { flex: none; padding: 2px 8px; font-size: 10.5px; }
+    .needs-cell .path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--muted); }
+    .needs-cell .path b { color: var(--warm); font-weight: 600; }
+    .needs-cell .below { all: unset; cursor: pointer; color: var(--warm); font-size: 11px; }
+    .needs-cell .below:hover { text-decoration: underline; }
+
+    /* Inline expansions: the full ask, and the agent's message exchanges. */
+    .ledger tr.inline td { height: auto; padding: 8px 10px 14px; background: color-mix(in srgb, var(--ink) 2.5%, var(--surface)); cursor: default; }
+    .ledger tr.inline.ask-row td { background: color-mix(in srgb, var(--warm-tint) 30%, var(--surface)); }
+    .ledger tr.inline .ask { max-width: 760px; }
+    .today-reply { max-width: 760px; display: grid; gap: 6px; font-size: 12px; }
+    .today-reply .ask-answer { margin: 0; }
+
+    .xlist { display: grid; gap: 10px; max-width: 1060px; }
+    .xlist .xhead { display: flex; align-items: baseline; gap: 8px; font-size: 11px; color: var(--muted); }
+    .xlist .xhead .ttl { color: var(--ink); font-weight: 550; }
+    .xlist .xhead .st { font: 10px var(--mono); }
+    .xlist .xhead .st.open { color: var(--warm); }
+    .xlist .xhead .st.closed { color: var(--ok); }
+    .xlist .xhead .st.fyi { color: var(--muted); }
+    .xlist ol { list-style: none; margin: 4px 0 0; padding: 0 0 0 10px; border-left: 2px solid var(--line); display: grid; gap: 3px; }
+    .xlist .x.open ol { border-left-color: color-mix(in srgb, var(--warm) 55%, var(--line)); }
+    .xlist li { display: grid; grid-template-columns: 52px 210px 1fr; gap: 10px; align-items: baseline; font-size: 11.5px; line-height: 1.45; }
+    .xlist li.reply { padding-left: 14px; grid-template-columns: 38px 210px 1fr; }
+    .xlist li time { font: 10px var(--mono); color: var(--muted); }
+    .xlist li .hdr { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+    .xlist li .hdr b { color: var(--ink); font-weight: 550; }
+    .xlist li .hdr .itag { font: 9px var(--mono); border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 4px; margin-left: 4px; }
+    .xlist li .body { color: var(--ink); }
+    .xlist li .flags { font: 9.5px var(--mono); color: var(--muted); margin-left: 8px; }
+    .xlist li .flags.owed { color: var(--warm); }
+    .xlist li.fresh { animation: arrive 1.4s ease-out; border-radius: 4px; }
+    .xlist .more { justify-self: start; }
+    .xlist .compose { display: flex; gap: 6px; max-width: 620px; margin-top: 2px; }
+    .xlist .compose input { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .xlist .empty { color: var(--muted); font-size: 11.5px; }
+
+    .ledger td.empty { text-align: center; color: var(--muted); height: 80px; }
+    .legend { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 10.5px; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend b { font: 600 10.5px var(--mono); color: var(--ink); }
+    .legend .w { color: var(--warm); }
+
+    table.ledger.dense td { height: 40px; padding-top: 3px; padding-bottom: 3px; }
+    @media (max-width: 1250px) { .ledger .c-on { display: none; } }
+    @media (prefers-reduced-motion: reduce) { td.fresh .last, .xlist li.fresh, .ledger tr.row.answered td { animation: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60_000;
+  const LATE = 10 * MIN; // an owed request older than this is flagged
+  const RECENT = 15 * MIN;
+  const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Releaser", delegate: "Delegate", subagent: "Subagent"};
+  const STATUS_ORDER = {waiting: 0, failed: 1, blocked: 2, working: 3, idle: 4, done: 5};
+  const COLUMNS = [
+    {key: "agent", label: "Agent", width: "226px", title: "Sort by identity"},
+    {key: "on", label: "On", width: "172px", title: "Sort by what the agent works on"},
+    {key: "state", label: "State", width: "170px", title: "Sort by status (needs you, failed, waiting, working, idle, done)"},
+    {key: "owes", label: "Owes", width: "146px", title: "Replies this agent owes; oldest first"},
+    {key: "awaiting", label: "Awaiting", width: "146px", title: "Replies this agent is waiting for; oldest first"},
+    {key: "last", label: "Last message", width: null, title: "Most recent message first"},
+    {key: "needs", label: "Needs you", width: "286px", title: "Needs you first, then the oldest owed reply (default)"},
+  ];
+  const FILTERS = [
+    ["needs", "Needs you", (a, f, ix) => f.needsUser(a) || ix.userOwed.has(a.id)],
+    ["owes", "Owes a reply", (a, f, ix) => ix.get(a.id).owesReq.length > 0],
+    ["awaiting", "Awaiting a reply", (a, f, ix) => ix.get(a.id).awaitReq.length > 0],
+    ["talking", "Talked in 15m", (a, f, ix) => { const m = ix.get(a.id).last; return !!m && f.now - m.at <= RECENT; }],
+  ];
+
+  // View state survives every re-render (Play, Step, answers).
+  const view = {sort: {key: "needs", dir: 1}, query: "", filters: new Set(), collapsed: new Map(), msgsOpen: new Set(), asksOpen: new Set(),
+    allExchanges: new Set(), drafts: new Map(), today: false, seenMax: null, prevAsks: new Set(), hoverLink: null};
+  let head, tools, host, legend, search, shownLabel; const toggles = new Map(); let segBtns = [];
+  let lastField = null, lastApi = null;
+  const draw = () => lastApi?.rerender();
+
+  /* ---------- helpers ---------- */
+  const shortPath = p => { if (!p) return ""; if (p.length <= 34) return p; const parts = p.split("/"); let out = parts.pop(); while (parts.length && out.length + parts[parts.length - 1].length < 28) out = parts.pop() + "/" + out; return "…/" + out; };
+  const scopeDir = p => { const parts = p.replace(/\*\*$/, "").split("/").filter(Boolean); if (parts.length <= 1) return p; const last = parts.at(-1); return (last.includes(".") ? parts.slice(0, -1) : parts).slice(-2).join("/") + "/"; };
+  const age = (field, t) => { const d = Math.max(0, field.now - t); return d < MIN ? "now" : d < 60 * MIN ? Math.round(d / MIN) + "m" : d < 24 * 60 * MIN ? Math.round(d / (60 * MIN)) + "h" : Math.round(d / (24 * 60 * MIN)) + "d"; };
+  const clock = t => new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  const snippet = (t, n = 140) => !t ? "" : t.length > n ? t.slice(0, n - 1) + "…" : t;
+
+  // Identity. Position: the title is the assignment and gets rewritten; the row is keyed by a stable name.
+  // Without a name (today), the title stands in, set in regular weight so it reads as provisional.
+  function ident(a) { return !view.today && a.name ? {label: a.name, stable: true} : {label: a.title, stable: false}; }
+  const nameOf = (field, id) => { if (id === "user") return "You"; const a = field.byId(id); return a ? ident(a).label : id; };
+  const verb = (field, m) => view.today ? field.KIND_LABELS[m.kind] : (field.INTENT_LABELS[m.intent] || field.KIND_LABELS[m.kind]);
+  const isResult = m => m.kind === "creation"; // the reply an assignment owes back: a contract, not a pending question
+
+  /* One pass over the message log per render: per-agent messages, obligations, and last message. */
+  function buildIndex(field) {
+    const per = new Map();
+    const blank = () => ({msgs: [], owesReq: [], owesRes: [], awaitReq: [], awaitRes: [], last: null});
+    for (const a of field.agents) per.set(a.id, blank());
+    for (const m of field.messages) {
+      for (const id of new Set([m.from, m.to])) { const e = per.get(id); if (!e) continue; e.msgs.push(m); if (!e.last || m.at >= e.last.at) e.last = m; }
+    }
+    const userOwed = new Map();
+    for (const m of field.openRequests()) {
+      const to = per.get(m.to), from = per.get(m.from);
+      if (to) (isResult(m) ? to.owesRes : to.owesReq).push(m);
+      if (from) (isResult(m) ? from.awaitRes : from.awaitReq).push(m);
+      if (m.to === "user" && m.from !== "user") { if (!userOwed.has(m.from)) userOwed.set(m.from, []); userOwed.get(m.from).push(m); }
+    }
+    for (const e of per.values()) for (const list of [e.owesReq, e.owesRes, e.awaitReq, e.awaitRes]) list.sort((x, y) => x.at - y.at);
+    const root = new Map(); for (const a of field.agents) root.set(a.id, (field.ancestors(a.id).at(-1) || a).id);
+    const conflicts = new Map();
+    for (const c of field.conflicts()) for (const [x, y] of [[c.a, c.b], [c.b, c.a]]) { if (!conflicts.has(x.id)) conflicts.set(x.id, []); conflicts.get(x.id).push({other: y, path: c.path, negotiating: c.negotiating}); }
+    return {get: id => per.get(id) || blank(), userOwed, root, conflicts};
+  }
+
+  // Post-order roll-ups: needs below, oldest owed request in the subtree, latest message in the subtree.
+  function subtreeStats(field, ix) {
+    const stats = new Map();
+    const visit = a => {
+      const e = ix.get(a.id);
+      const s = {total: 0, needs: 0, anyNeeds: field.needsUser(a) || ix.userOwed.has(a.id), oldestOwed: e.owesReq[0]?.at ?? Infinity, latest: e.last?.at ?? 0,
+        owes: e.owesReq.length, awaiting: e.awaitReq.length, belowOwes: 0, belowAwait: 0, working: a.status === "working"};
+      for (const k of field.children(a.id)) {
+        const ks = visit(k);
+        s.total += 1 + ks.total; s.needs += ks.needs + (field.needsUser(k) ? 1 : 0);
+        s.anyNeeds ||= ks.anyNeeds; s.working ||= ks.working;
+        s.oldestOwed = Math.min(s.oldestOwed, ks.oldestOwed); s.latest = Math.max(s.latest, ks.latest);
+        s.belowOwes += ks.owes + ks.belowOwes; s.belowAwait += ks.awaiting + ks.belowAwait;
+      }
+      stats.set(a.id, s); return s;
+    };
+    for (const r of field.roots()) visit(r);
+    return stats;
+  }
+
+  function comparator(field, ix, stats) {
+    const needRank = a => { const s = stats.get(a.id); return field.needsUser(a) ? (a.ask?.blocking ? 0 : 1) : s.anyNeeds ? 2 : 3; };
+    const askAge = a => a.ask?.askedAt ?? (field.needsUser(a) ? a.updatedAt : Infinity);
+    const attention = (x, y) => needRank(x) - needRank(y) || askAge(x) - askAge(y) || stats.get(x.id).oldestOwed - stats.get(y.id).oldestOwed;
+    const recency = (x, y) => stats.get(y.id).latest - stats.get(x.id).latest;
+    const primary = {
+      needs: attention,
+      agent: (x, y) => ident(x).label.localeCompare(ident(y).label),
+      on: (x, y) => onLabel(x).localeCompare(onLabel(y)),
+      state: (x, y) => (field.needsUser(y) - field.needsUser(x)) || STATUS_ORDER[x.status] - STATUS_ORDER[y.status],
+      owes: (x, y) => (ix.get(x.id).owesReq[0]?.at ?? Infinity) - (ix.get(y.id).owesReq[0]?.at ?? Infinity) || ix.get(y.id).owesRes.length - ix.get(x.id).owesRes.length,
+      awaiting: (x, y) => (ix.get(x.id).awaitReq[0]?.at ?? Infinity) - (ix.get(y.id).awaitReq[0]?.at ?? Infinity) || ix.get(y.id).awaitRes.length - ix.get(x.id).awaitRes.length,
+      last: recency,
+    }[view.sort.key];
+    return (x, y) => view.sort.dir * primary(x, y) || attention(x, y) || recency(x, y);
+  }
+
+  function matches(a, field, ix) {
+    if (view.filters.size && ![...view.filters].every(k => FILTERS.find(f => f[0] === k)[2](a, field, ix))) return false;
+    const q = view.query.trim().toLowerCase(); if (!q) return true;
+    const e = ix.get(a.id);
+    return [a.title, a.name, ROLE_SHORT[a.role], a.surface?.label, a.surface?.kind, a.ask?.question, e.last?.body, ...a.scope].some(s => s && s.toLowerCase().includes(q));
+  }
+  const filtering = () => !!view.query.trim() || view.filters.size > 0;
+
+  function isCollapsed(a, field, stats) {
+    if (!field.children(a.id).length) return false;
+    // Default: at large, teams start folded unless something inside needs you.
+    if (!view.collapsed.has(a.id)) view.collapsed.set(a.id, field.scale === "large" && !stats.get(a.id).anyNeeds);
+    return view.collapsed.get(a.id);
+  }
+
+  function rows(field, ix, stats) {
+    const cmp = comparator(field, ix, stats);
+    const active = filtering(), keep = new Set(), hits = new Set();
+    if (active) for (const a of field.agents) if (matches(a, field, ix)) { hits.add(a.id); keep.add(a.id); for (const p of field.ancestors(a.id)) keep.add(p.id); }
+    const out = [];
+    const walk = (a, depth) => {
+      if (active && !keep.has(a.id)) return;
+      out.push({agent: a, depth, context: active && !hits.has(a.id)});
+      if (isCollapsed(a, field, stats) && !(active && field.children(a.id).some(k => keep.has(k.id)))) return;
+      for (const c of [...field.children(a.id)].sort(cmp)) walk(c, depth + 1);
+    };
+    for (const r of [...field.roots()].sort(cmp)) walk(r, 0);
+    return {list: out, hits: active ? hits.size : field.agents.length};
+  }
+
+  /* ---------- toolbar ---------- */
+  function buildChrome() {
+    head = $("div", "ledger-head");
+    head.append($("h2", null, "Message ledger"), $("p", null, "Who owes whom a reply, who is waiting, and the last word in every exchange. Expand ≡ to read an agent’s exchanges."));
+    tools = $("div", "ledger-tools");
+    search = $("input"); search.type = "search"; search.placeholder = "Filter by name, title, surface, scope, message…"; search.setAttribute("aria-label", "Filter agents");
+    search.oninput = () => { view.query = search.value; draw(); };
+    search.onkeydown = e => { if (e.key === "Escape" && search.value) { e.stopPropagation(); search.value = ""; search.oninput(); } };
+    tools.append(search, $("span", "sep"));
+    for (const [key, label] of FILTERS) {
+      const b = $("button", "btn small toggle" + (key === "needs" ? " needs" : "")); b.type = "button"; b.setAttribute("aria-pressed", "false");
+      b.append(label, $("b")); b.title = "Show only agents that match (toggles combine)";
+      b.onclick = () => { view.filters.has(key) ? view.filters.delete(key) : view.filters.add(key); b.setAttribute("aria-pressed", String(view.filters.has(key))); draw(); };
+      toggles.set(key, b); tools.append(b);
+    }
+    tools.append($("span", "sep"));
+    for (const [label, value] of [["Expand all", false], ["Collapse all", true]]) {
+      const b = $("button", "btn small quiet", label); b.type = "button";
+      b.onclick = () => { for (const a of lastField.agents) if (lastField.children(a.id).length) view.collapsed.set(a.id, value); draw(); };
+      tools.append(b);
+    }
+    tools.append($("span", "spacer"));
+    shownLabel = $("span", "shown"); tools.append(shownLabel);
+    const seg = $("span", "seg"); seg.setAttribute("role", "group"); seg.setAttribute("aria-label", "Signals");
+    segBtns = [["With proposed signals", false, "Names, surfaces, message intent, structured asks with relay paths, health"], ["Today only", true, "Only what agent-coord records now: titles, scopes, message classification, next actor"]].map(([label, today, t]) => {
+      const b = $("button", null, label); b.type = "button"; b.title = t; b.onclick = () => { view.today = today; draw(); }; seg.append(b); return [b, today];
+    });
+    tools.append(seg);
+    host = $("div");
+    legend = $("div", "legend");
+    for (const [sym, text, cls] of [["→", "sent by this agent", ""], ["←", "received", ""], ["Owes", "a reply it was asked for (bold) or the result of its assignment (grey)", ""], ["10m+", "owed request is late", "w"], ["↗ team", "talks outside its own team", ""], ["A → B → you", "ask relayed up the chain", "w"]]) {
+      const s = $("span"); const b = $("b", cls, sym); s.append(b, text); legend.append(s);
+    }
+  }
+
+  /* ---------- cells ---------- */
+  function linkTo(field, api, id, cls = "who-ref") {
+    const s = $("span", cls + (id !== "user" ? " ref" : ""), nameOf(field, id));
+    if (id !== "user") {
+      const a = field.byId(id); if (a) s.title = (a.name ? a.name + " · " : "") + a.title + " · " + field.statusLabel(a);
+      s.onclick = e => { e.stopPropagation(); api.select(id); };
+      s.onmouseenter = () => { view.hoverLink = id; host.querySelector(`tr.row[data-id="${id}"]`)?.classList.add("linked"); };
+      s.onmouseleave = () => { view.hoverLink = null; host.querySelectorAll("tr.row.linked").forEach(r => r.classList.remove("linked")); };
+    }
+    return s;
+  }
+
+  function agentCell(a, depth, field, stats) {
+    const td = $("td"); const w = $("div", "who");
+    const ind = $("span", "indent" + (depth ? "" : " root")); ind.style.width = (depth * 16) + "px"; w.append(ind);
+    const kids = field.children(a.id).length; const collapsed = isCollapsed(a, field, stats);
+    const disc = $("button", "disc" + (kids ? (collapsed ? "" : " open") : " leaf"), "▶"); disc.type = "button";
+    if (kids) {
+      disc.setAttribute("aria-expanded", String(!collapsed)); disc.setAttribute("aria-label", (collapsed ? "Expand " : "Collapse ") + ident(a).label);
+      disc.title = collapsed ? "Show " + stats.get(a.id).total + " agents below" : "Fold the team below";
+      disc.onclick = e => { e.stopPropagation(); view.collapsed.set(a.id, !collapsed); draw(); };
+    } else disc.tabIndex = -1;
+    w.append(disc, AgentField.statusDot(a), AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    const id = ident(a); const two = $("div", "two");
+    const l1 = $("span", "id" + (id.stable ? "" : " provisional"), id.label);
+    if (a.kind !== "app" && !view.today) l1.append($("span", "k", a.kind));
+    const parent = field.parent(a.id);
+    const l2bits = view.today
+      ? [AgentField.PROVIDER_NAMES[a.client], parent ? "from " + nameOf(field, parent.id) : "started by you"]
+      : [ROLE_SHORT[a.role], id.stable && a.title !== a.name ? a.title : id.stable ? AgentField.PROVIDER_NAMES[a.client] : (parent ? "from " + nameOf(field, parent.id) : AgentField.PROVIDER_NAMES[a.client])];
+    if (collapsed) l2bits.push(stats.get(a.id).total + " below");
+    two.append(l1, $("span", "l2", l2bits.join(" · ")));
+    w.append(two);
+    td.title = (a.name ? a.name + "\n" : "") + "Title (the assignment): " + a.title + "\n" + ROLE_SHORT[a.role] + " · " + AgentField.PROVIDER_NAMES[a.client] + " · " + a.kind + (parent ? "\nCreated by " + nameOf(field, parent.id) : "");
+    td.append(w); return td;
+  }
+
+  function onLabel(a) { return view.today ? (a.scope[0] ? scopeDir(a.scope[0]) : "") : (a.surface?.label || ""); }
+  function onCell(a, ix) {
+    const td = $("td", "c-on on"); const two = $("div", "two");
+    // Siblings overlapping inside one team are their orchestrator's business; only cross-team overlaps surface here.
+    const clash = (ix.conflicts.get(a.id) || []).filter(c => ix.root.get(c.other.id) !== ix.root.get(a.id));
+    if (view.today) {
+      if (a.scope.length) { two.append($("span", "surf", scopeDir(a.scope[0])), $("span", "l2", shortPath(a.scope[0]) + (a.scope.length > 1 ? " +" + (a.scope.length - 1) : ""))); }
+      else two.append($("span", "none", "no write scope"), $("span", "l2", "read-only so far"));
+    } else {
+      const s = $("span", "surf"); s.append($("span", "tag", a.surface.kind), a.surface.label); two.append(s);
+      two.append($("span", "l2", a.scope.length ? shortPath(a.scope[0]) + (a.scope.length > 1 ? " +" + (a.scope.length - 1) : "") : "no write scope"));
+    }
+    if (clash.length) {
+      // A quiet mark, not a line: overlapping scopes are common; the tooltip says with whom and whether they are talking.
+      const w = $("span", "clash", " ⚠" + (clash.length > 1 ? clash.length : "")); two.firstChild.append(w);
+    }
+    td.title = (a.surface && !view.today ? a.surface.kind + ": " + a.surface.label + "\n" : "") + (a.scope.length ? "Write scope:\n" + a.scope.join("\n") : "No write scope declared")
+      + (clash.length ? "\n\nOverlaps:\n" + clash.map(c => "• " + c.path + " with " + ident(c.other).label + (c.negotiating ? " (negotiating)" : " (no messages yet)")).join("\n") : "");
+    td.append(two); return td;
+  }
+
+  function stateCell(a, field) {
+    const td = $("td", "state"); const two = $("div", "two");
+    const st = $("span", "st"); st.append(AgentField.statusDot(a), $("span", "lbl", field.needsUser(a) && a.status !== "waiting" && a.status !== "failed" ? "Needs you" : field.statusLabel(a)));
+    if (!view.today && a.health === "stuck") st.append($("span", "health stuck", "stuck"));
+    else if (!view.today && a.health === "slipping") { const h = $("span", "slip", "◔"); h.title = "Slipping: no activity for a while or past its due time"; st.append(h); }
+    const ph = $("span", "ph l2"); ph.append(AgentField.phaseSteps(a), $("span", null, AgentField.PHASE_LABELS[a.phase]));
+    two.append(st, ph); td.append(two);
+    td.title = field.statusLabel(a) + " · " + AgentField.PHASE_LABELS[a.phase] + (a.status === "working" ? "\nNow: " + (field.toolLabel(a) || a.activity || "working") : "") + "\n\n" + a.summary;
+    return td;
+  }
+
+  function obligationCell(field, api, a, reqs, results, mode, stats, collapsed) {
+    const td = $("td", "ob"); const two = $("div", "two");
+    const other = m => mode === "owes" ? m.from : m.to;
+    if (reqs.length) {
+      const m = reqs[0]; const l1 = $("span", "l1");
+      l1.append(linkTo(field, api, other(m)));
+      const late = field.now - m.at > LATE; l1.append($("span", "age" + (late ? " late" : ""), age(field, m.at)));
+      const rest = reqs.length - 1 + results.length;
+      two.append(l1, $("span", "l2", (mode === "owes" ? "re: " : "") + verb(field, m).toLowerCase() + (rest ? " · +" + rest + " more" : "")));
+      td.title = (mode === "owes" ? "Owes replies to:\n" : "Waiting for replies from:\n") + [...reqs, ...results].map(x => "• " + nameOf(field, other(x)) + " · " + verb(field, x) + " · " + age(field, x.at) + "\n  " + snippet(x.body, 90)).join("\n");
+    } else if (results.length) {
+      const m = results[0]; const l1 = $("span", "result l1");
+      if (mode === "owes") l1.append("result → ", linkTo(field, api, m.from));
+      else l1.append(results.length === 1 ? linkTo(field, api, m.to) : results.length + " agents", results.length === 1 ? "’s result" : " to report");
+      two.append(l1, $("span", "l2", "assigned " + age(field, m.at) + " ago"));
+      td.title = (mode === "owes" ? "Its assignment expects a result back:\n" : "Assignments that will report back:\n") + results.map(x => "• " + nameOf(field, other(x)) + " · assigned " + age(field, x.at) + " ago").join("\n");
+    } else two.append($("span", "none", "—"));
+    if (collapsed) { const below = mode === "owes" ? stats.belowOwes : stats.belowAwait; if (below) { const l2 = two.children[1]; const t = "+" + below + " below"; if (l2) l2.textContent = (l2.textContent ? l2.textContent + " · " : "") + t; else two.append($("span", "l2", t)); } }
+    td.append(two); return td;
+  }
+
+  function lastCell(field, api, a, ix, fresh) {
+    const td = $("td", fresh ? "fresh" : null); const wrap = $("div", "last"); const e = ix.get(a.id); const m = e.last;
+    const two = $("div", "two");
+    if (m) {
+      const out = m.from === a.id; const other = out ? m.to : m.from;
+      const l1 = $("span", "l1"); l1.append($("span", "dir" + (out ? " out" : ""), out ? "→" : "←"), linkTo(field, api, other), $("span", "intent", verb(field, m).toLowerCase() + " · " + age(field, m.at)));
+      if (other !== "user" && ix.root.get(other) !== ix.root.get(a.id)) { const x = $("span", "xteam", "↗ team"); x.title = "Outside its team: " + nameOf(field, ix.root.get(other)) + "’s team"; l1.append(x); }
+      two.append(l1, $("span", "l2", m.body));
+      td.title = (out ? "To " : "From ") + nameOf(field, other) + " · " + verb(field, m) + " · " + field.relativeTime(m.at) + "\n\n" + m.body;
+    } else two.append($("span", "none", "no messages"));
+    wrap.append(two);
+    if (e.msgs.length) {
+      const open = view.msgsOpen.has(a.id);
+      const b = $("button", "msgs", "≡ " + e.msgs.length); b.type = "button"; b.setAttribute("aria-expanded", String(open));
+      b.title = (open ? "Hide" : "Show") + " " + e.msgs.length + " messages in " + new Set(e.msgs.map(x => x.exchange)).size + " exchanges";
+      b.onclick = ev => { ev.stopPropagation(); open ? view.msgsOpen.delete(a.id) : view.msgsOpen.add(a.id); draw(); };
+      wrap.append(b);
+    }
+    td.append(wrap); return td;
+  }
+
+  function relayPath(field, a) {
+    const via = (a.ask?.via || []).map(id => field.byId(id)).filter(Boolean);
+    if (!via.length) return null;
+    const short = x => { const id = ident(x); return id.stable || id.label.length <= 18 ? id.label : id.label.slice(0, 16).trimEnd() + "…"; };
+    return [a, ...via].map(short).join(" → ") + " → ";
+  }
+
+  function needsCell(field, api, a, ix, stats, collapsed) {
+    const td = $("td", "needs-cell"); const two = $("div", "two");
+    const userOwed = ix.userOwed.get(a.id) || [];
+    const structured = a.ask && (!view.today || a.ask.kind === "approval"); // a pending approval exists today; other structured asks are proposed
+    if (a.ask) {
+      const l1 = $("span"); l1.append($("span", "askchip" + (a.ask.kind === "failure" ? " failure" : ""), view.today ? (a.ask.kind === "approval" ? "approval" : "your step") : a.ask.kind + (a.ask.blocking ? " · blocking" : "")), $("span", "q", a.ask.question));
+      const acts = $("div", "acts l2");
+      const open = view.asksOpen.has(a.id);
+      if (structured && a.ask.options.length) {
+        const o = a.ask.options[0]; const b = $("button", "btn small primary", o.label); b.type = "button"; b.title = "Answer: " + o.label;
+        b.onclick = e => { e.stopPropagation(); field.answer(a.id, o.id); }; acts.append(b);
+      }
+      const more = $("button", "btn small quiet", (open ? "▴ " : "▾ ") + (structured && a.ask.options.length > 1 ? "+" + (a.ask.options.length - 1) : structured && a.ask.options.length ? "details" : "Reply"));
+      more.type = "button"; more.setAttribute("aria-expanded", String(open)); more.title = open ? "Hide the answer box" : "Answer here";
+      more.onclick = e => { e.stopPropagation(); open ? view.asksOpen.delete(a.id) : view.asksOpen.add(a.id); draw(); }; acts.append(more);
+      const path = relayPath(field, a); const impact = field.impact(a.id);
+      const p = $("span", "path");
+      if (path && !view.today) { p.append(path); p.append($("b", null, "you")); }
+      if (impact.length) p.append((p.textContent ? " · " : "") + "blocks " + impact.length);
+      if (!p.textContent) p.append("asked " + age(field, a.ask.askedAt) + " ago");
+      acts.append(p);
+      two.append(l1, acts);
+      td.title = a.ask.question + (path && !view.today ? "\n\nRelayed: " + path + "you" : "") + (impact.length ? "\nBlocks: " + impact.map(id => nameOf(field, id)).join(", ") : "") + "\nAsked " + field.relativeTime(a.ask.askedAt);
+    } else if (field.needsUser(a)) {
+      const l1 = $("span"); l1.append($("span", "askchip", "your step"), $("span", "q", a.next.action)); two.append(l1, $("span", "l2", "from the checkpoint’s next action"));
+      td.title = a.next.action;
+    } else if (userOwed.length) {
+      const m = userOwed[0]; const l1 = $("span"); l1.append($("span", "askchip", "message"), $("span", "q", m.body)); two.append(l1, $("span", "l2", "sent to you " + age(field, m.at) + " ago"));
+    } else if (collapsed && stats.needs) {
+      const b = $("button", "below", "↳ " + stats.needs + " below need" + (stats.needs === 1 ? "s" : "") + " you"); b.type = "button";
+      b.onclick = e => { e.stopPropagation(); for (const d of [a, ...field.descendants(a.id)]) if (field.descendantsNeedingUser(d.id).length) view.collapsed.set(d.id, false); draw(); };
+      two.append(b);
+    } else if (field.descendantsNeedingUser(a.id).length && !collapsed) {
+      two.append($("span", "l2", "↳ " + field.descendantsNeedingUser(a.id).length + " below need you"));
+    }
+    if (a.ask?.kind === "failure") two.querySelector(".askchip")?.classList.add("failure");
+    td.append(two); return td;
+  }
+
+  /* ---------- inline expansions ---------- */
+  function askRow(field, api, a, depth) {
+    const tr = $("tr", "inline ask-row"); const td = $("td"); td.colSpan = COLUMNS.length; td.style.paddingLeft = (44 + depth * 16) + "px";
+    if (!view.today || a.ask.kind === "approval") td.append(Mockup.askBox(a, field, api.select));
+    else {
+      // Today, a question is only the checkpoint's next action text; the user answers by message.
+      const box = $("div", "today-reply ask"); box.append($("span", "ask-kind", "next actor: you"), $("div", "ask-question", a.ask.question));
+      const row = $("div", "ask-answer"); const input = $("input"); input.placeholder = "Reply to " + ident(a).label + "…"; input.dataset.draft = "ask:" + a.id; input.value = view.drafts.get("ask:" + a.id) || "";
+      input.oninput = () => view.drafts.set("ask:" + a.id, input.value); input.onclick = e => e.stopPropagation();
+      const send = $("button", "btn small primary", "Send"); send.type = "button";
+      send.onclick = e => { e.stopPropagation(); const t = input.value.trim(); if (!t) return; view.drafts.delete("ask:" + a.id); field.answer(a.id, t); };
+      input.onkeydown = e => { if (e.key === "Enter") send.click(); };
+      row.append(input, send); box.append(row); td.append(box);
+    }
+    tr.append(td); return tr;
+  }
+
+  function messagesRow(field, api, a, depth, ix, freshIds) {
+    const tr = $("tr", "inline"); const td = $("td"); td.colSpan = COLUMNS.length; td.style.paddingLeft = (44 + depth * 16) + "px";
+    const list = $("div", "xlist");
+    const groups = new Map();
+    for (const m of ix.get(a.id).msgs) { if (!groups.has(m.exchange)) groups.set(m.exchange, []); groups.get(m.exchange).push(m); }
+    const exchanges = [...groups.values()].sort((x, y) => {
+      const ox = x.some(m => m.replyRequired && !m.repliedBy), oy = y.some(m => m.replyRequired && !m.repliedBy);
+      return Number(oy) - Number(ox) || y.at(-1).at - x.at(-1).at;
+    });
+    const limit = view.allExchanges.has(a.id) ? Infinity : 5;
+    for (const msgs of exchanges.slice(0, limit)) {
+      const first = msgs[0]; const open = msgs.filter(m => m.replyRequired && !m.repliedBy && !(m.to !== "user" && field.byId(m.to)?.status === "done"));
+      const parties = [...new Set(msgs.flatMap(m => [m.from, m.to]))].filter(id => id !== a.id);
+      const x = $("div", "x" + (open.length ? " open" : ""));
+      const h = $("div", "xhead");
+      const ttl = $("span", "ttl"); ttl.append("with "); parties.forEach((p, i) => { if (i) ttl.append(", "); ttl.append(linkTo(field, api, p)); });
+      h.append(ttl, $("span", null, verb(field, first).toLowerCase() + " · " + field.relativeTime(first.at)));
+      if (open.length) { const o = open[0]; h.append($("span", "st open", (o.to === a.id ? "owes " : "awaiting ") + (o.to === a.id ? nameOf(field, o.from) : nameOf(field, o.to)) + " a reply · " + age(field, o.at))); }
+      else if (msgs.some(m => m.repliedBy)) { const q = msgs.find(m => m.repliedBy), r = msgs.find(m => m.id === q.repliedBy); h.append($("span", "st closed", "✓ answered" + (r ? " in " + field.duration(r.at - q.at) : ""))); }
+      else h.append($("span", "st fyi", "no reply needed"));
+      x.append(h);
+      const ol = $("ol");
+      for (const m of msgs) {
+        const li = $("li", (m.inReplyTo ? "reply" : "") + (freshIds.has(m.id) ? " fresh" : ""));
+        const hdr = $("span", "hdr"); hdr.append($("b", null, nameOf(field, m.from)), " → ", $("b", null, nameOf(field, m.to)), $("span", "itag", verb(field, m).toLowerCase()));
+        const body = $("span", "body", m.body);
+        const flags = [];
+        if (m.replyRequired && !m.repliedBy && open.includes(m)) flags.push(["reply owed", "owed"]);
+        if (m.wokeTurn) flags.push(["woke a turn", ""]);
+        if (m.ackedAt && !m.repliedBy) flags.push(["acked", ""]);
+        for (const [t, c] of flags) body.append($("span", "flags " + c, t));
+        li.append($("time", null, clock(m.at)), hdr, body); li.title = new Date(m.at).toLocaleString() + " · " + field.KIND_LABELS[m.kind] + (view.today ? "" : " · intent: " + m.intent);
+        ol.append(li);
+      }
+      x.append(ol); list.append(x);
+    }
+    if (!exchanges.length) list.append($("p", "empty", "No messages yet."));
+    if (exchanges.length > limit) { const b = $("button", "btn small quiet more", "Show all " + exchanges.length + " exchanges"); b.type = "button"; b.onclick = e => { e.stopPropagation(); view.allExchanges.add(a.id); draw(); }; list.append(b); }
+    if (a.status !== "done") {
+      const c = $("div", "compose"); const input = $("input"); const key = "msg:" + a.id;
+      input.placeholder = "Message " + ident(a).label + " (agent-coord send)…"; input.dataset.draft = key; input.value = view.drafts.get(key) || "";
+      input.oninput = () => view.drafts.set(key, input.value); input.onclick = e => e.stopPropagation();
+      const send = $("button", "btn small", "Send"); send.type = "button";
+      send.onclick = e => { e.stopPropagation(); const t = input.value.trim(); if (!t) return; view.drafts.delete(key); field.message(a.id, t); };
+      input.onkeydown = e => { if (e.key === "Enter") send.click(); };
+      c.append(input, send); list.append(c);
+    }
+    td.append(list); tr.append(td); return tr;
+  }
+
+  /* ---------- table ---------- */
+  function table(field, api, ix, stats, freshIds, answered) {
+    const {list, hits} = rows(field, ix, stats);
+    shownLabel.textContent = filtering() ? hits + " of " + field.agents.length + " match" : list.length + " of " + field.agents.length + " rows";
+    const t = $("table", "ledger" + (list.length > 40 ? " dense" : ""));
+    const cg = $("colgroup"); for (const c of COLUMNS) { const col = $("col", "c-" + c.key); if (c.width) col.style.width = c.width; cg.append(col); } t.append(cg);
+    const thead = $("thead"); const hr = $("tr");
+    for (const c of COLUMNS) {
+      const th = $("th", "c-" + c.key); const b = $("button", null, c.label); b.type = "button"; b.title = c.title;
+      const on = view.sort.key === c.key;
+      if (on) { th.setAttribute("aria-sort", view.sort.dir === 1 ? "ascending" : "descending"); b.append($("span", "arrow", view.sort.dir === 1 ? "▼" : "▲")); }
+      b.onclick = () => { view.sort = on ? {key: c.key, dir: -view.sort.dir} : {key: c.key, dir: 1}; draw(); };
+      th.append(b); hr.append(th);
+    }
+    thead.append(hr); t.append(thead);
+    const tb = $("tbody");
+    if (!list.length) { const tr = $("tr"); const td = $("td", "empty", "No agents match. Clear the filter or toggles."); td.colSpan = COLUMNS.length; tr.append(td); tb.append(tr); }
+    for (const {agent: a, depth, context} of list) {
+      const collapsed = isCollapsed(a, field, stats); const e = ix.get(a.id); const s = stats.get(a.id);
+      const fresh = !!e.last && freshIds.has(e.last.id);
+      const tr = $("tr", "row " + a.status + (depth === 0 ? " team" : "") + (field.needsUser(a) || ix.userOwed.has(a.id) ? " needs" : "") + (context ? " context" : "")
+        + (api.selected === a.id ? " selected" : "") + (answered.has(a.id) ? " answered" : "") + (view.hoverLink === a.id ? " linked" : ""));
+      tr.dataset.id = a.id; tr.tabIndex = 0;
+      tr.onclick = () => { api.select(a.id); tb.querySelectorAll("tr.selected").forEach(r => r.classList.remove("selected")); tr.classList.add("selected"); };
+      tr.onkeydown = ev => {
+        if (ev.target !== tr) return;
+        if (ev.key === "Enter") tr.onclick();
+        else if (ev.key === " ") { ev.preventDefault(); view.msgsOpen.has(a.id) ? view.msgsOpen.delete(a.id) : view.msgsOpen.add(a.id); draw(); }
+        else if ((ev.key === "ArrowLeft" || ev.key === "ArrowRight") && field.children(a.id).length) { ev.preventDefault(); view.collapsed.set(a.id, ev.key === "ArrowLeft"); draw(); }
+        else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); const rs = [...tb.querySelectorAll("tr.row")]; rs[rs.indexOf(tr) + (ev.key === "ArrowDown" ? 1 : -1)]?.focus(); }
+      };
+      tr.append(agentCell(a, depth, field, stats), onCell(a, ix), stateCell(a, field),
+        obligationCell(field, api, a, e.owesReq, e.owesRes, "owes", s, collapsed), obligationCell(field, api, a, e.awaitReq, e.awaitRes, "awaiting", s, collapsed),
+        lastCell(field, api, a, ix, fresh), needsCell(field, api, a, ix, s, collapsed));
+      tb.append(tr);
+      if (a.ask && view.asksOpen.has(a.id)) tb.append(askRow(field, api, a, depth));
+      if (view.msgsOpen.has(a.id)) tb.append(messagesRow(field, api, a, depth, ix, freshIds));
+    }
+    t.append(tb); return t;
+  }
+
+  Mockup.mount({
+    number: 20, title: "Message ledger", spectrum: "conservative",
+    summary: "A process monitor for orchestration: each team as a tree table with what every agent owes, what it awaits, its last message, and what needs you, answerable in the row.",
+    signals: {current: ["title", "phase", "summary", "status", "next_actor", "next_action", "created_by", "client", "write_scope", "updated_at", "tool_activity", "pending_approval", "agent_messages", "creation", "conflicts"],
+      proposed: ["name", "role", "kind", "surface", "intent", "ask", "escalation", "blocks", "health"]},
+    notes: "Identity: the title is the assignment and gets rewritten, so the row is keyed by a stable name; without one (today) the title stands in, set in regular weight, with \"from <creator>\" to disambiguate. On what: surface first, write scope underneath; phase is demoted to a small stepper under status because \"Implementing\" says nothing about which page or service. Owes/Awaiting come entirely from today's reply_required, in_reply_to and exchange fields, and split real requests from the result an assignment owes back. Use \"Today only\" to see the view without proposed signals; the additions cost the model one intent word per send and a surface noun plus name in its first checkpoint.",
+    render(field, stage, api) {
+      lastField = field; lastApi = api;
+      if (!head) buildChrome();
+      if (field.tickCount === 0 && view.seenMax != null && field.messages.length && field.messages.at(-1).id < view.seenMax) view.seenMax = null; // Reset
+      const y = window.scrollY;
+      const focused = document.activeElement;
+      const focusedRow = focused?.closest?.("tr.row")?.dataset.id;
+      const focusedDraft = focused?.dataset?.draft; const caret = focusedDraft ? focused.selectionStart : null;
+      for (const id of view.asksOpen) if (!field.byId(id)?.ask) view.asksOpen.delete(id);
+      for (const [b, today] of segBtns) b.setAttribute("aria-pressed", String(view.today === today));
+
+      const ix = buildIndex(field), stats = subtreeStats(field, ix);
+      for (const [key, , fn] of FILTERS) toggles.get(key).querySelector("b").textContent = String(field.agents.filter(a => fn(a, field, ix)).length);
+      // Messages that arrived since the last render pulse once; asks that disappeared flash as answered.
+      const maxId = field.messages.reduce((m, x) => Math.max(m, x.id), 0);
+      const freshIds = new Set(view.seenMax == null ? [] : field.messages.filter(m => m.id > view.seenMax).map(m => m.id));
+      view.seenMax = maxId;
+      const asksNow = new Set(field.agents.filter(a => a.ask).map(a => a.id));
+      const answered = new Set([...view.prevAsks].filter(id => !asksNow.has(id) && field.byId(id)));
+      view.prevAsks = asksNow;
+
+      host.replaceChildren(table(field, api, ix, stats, freshIds, answered));
+      if (stage.firstChild !== head) stage.replaceChildren(head, tools, host, legend);
+      if (focusedDraft) { const el = host.querySelector(`input[data-draft="${focusedDraft}"]`); if (el) { el.focus({preventScroll: true}); if (caret != null) el.setSelectionRange(caret, caret); } }
+      else if (focusedRow) host.querySelector(`tr.row[data-id="${focusedRow}"]`)?.focus({preventScroll: true});
+      if (window.scrollY !== y) window.scrollTo(0, y);
+    },
+  });
+})();
+</script>
+</body>
+</html>

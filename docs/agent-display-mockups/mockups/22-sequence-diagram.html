@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 22 · Sequence diagram</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* One team at a time as a UML sequence diagram: lifelines across, time down, You on the left
+       where asks land. The page fills the window; the diagram scrolls inside its own frame. */
+    body { height: 100dvh; }
+    #stage { display: grid; grid-template-columns: 248px minmax(0, 1fr); gap: 18px; padding: 16px 20px 16px; overflow: hidden; }
+    :root {
+      --ph-discussion: color-mix(in srgb, var(--ink) 12%, var(--surface));
+      --ph-investigation: color-mix(in srgb, var(--ink) 20%, var(--surface));
+      --ph-planning: color-mix(in srgb, var(--ink) 28%, var(--surface));
+      --ph-orchestrating: color-mix(in srgb, var(--ink) 36%, var(--surface));
+      --ph-implementation: color-mix(in srgb, var(--ink) 46%, var(--surface));
+      --ph-validation: color-mix(in srgb, var(--ink) 56%, var(--surface));
+      --ph-deployment: color-mix(in srgb, var(--ink) 66%, var(--surface));
+      --ph-finished: color-mix(in srgb, var(--ok) 70%, var(--surface));
+    }
+
+    /* Team rail */
+    .rail { display: flex; flex-direction: column; min-height: 0; gap: 8px; }
+    .rail h2 { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .rail input { width: 100%; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .team-list { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; padding-right: 2px; }
+    .team-list h3 { font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 10px 0 3px 8px; }
+    .team-list h3:first-child { margin-top: 0; }
+    .team { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 2px 8px; width: 100%; padding: 7px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+    .team:hover { background: var(--hover-bg); }
+    .team[aria-current="true"] { background: var(--surface); border-color: var(--line-strong); box-shadow: 0 1px 4px var(--shadow); }
+    .team .t-name { font-size: 12.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .team .t-name.untitled { font-weight: 450; }
+    .team .t-sub { grid-column: 2 / 4; font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .team .t-dots { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+    .team .t-dots .dot { width: 5px; height: 5px; box-shadow: none; animation: none; }
+    .needs-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--warm); color: var(--surface); font: 600 10px/1.7 var(--mono); }
+
+    /* Diagram frame */
+    .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 10px; }
+    .bar-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+    .bar-top .team-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1 1 320px; }
+    .bar-top .team-title b { font-size: 16px; font-weight: 600; letter-spacing: -.015em; white-space: nowrap; }
+    .bar-top .team-title span { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .seg { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .seg > span { font: 600 9px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 0 6px 0 5px; }
+    .seg button { border: 0; background: transparent; color: var(--muted); font-size: 11px; padding: 4px 8px; border-radius: 5px; cursor: pointer; }
+    .seg button[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .seg button:hover { color: var(--ink); }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 10.5px; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend svg { width: 26px; height: 8px; overflow: visible; }
+    .legend i.bar-swatch { display: inline-block; width: 6px; height: 12px; border-radius: 2px; background: var(--ph-implementation); }
+
+    .frame { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+    .canvas { position: relative; min-width: 100%; }
+
+    /* Header: brackets for sub-agents, then lifeline heads. Sticky so identity stays visible. */
+    .head { position: sticky; top: 0; z-index: 6; background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+    .bracket { position: absolute; height: 14px; border: 1px solid var(--line-strong); border-bottom: 0; border-radius: 5px 5px 0 0; }
+    .bracket button { position: absolute; top: -8px; left: 8px; padding: 0 5px; border: 0; background: var(--surface); color: var(--muted); font-size: 10px; line-height: 14px; cursor: pointer; white-space: nowrap; max-width: calc(100% - 16px); overflow: hidden; text-overflow: ellipsis; }
+    .bracket button:hover { color: var(--ink); }
+    .lhead { position: absolute; bottom: 8px; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); cursor: pointer; text-align: left; color: inherit; font: inherit; min-width: 0; }
+    .lhead:hover, .lhead.hl { border-color: var(--hover-line); box-shadow: 0 3px 10px var(--shadow); }
+    .lhead .l1 { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 12px; font-weight: 600; }
+    .lhead .l1 .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .lhead .l1 .nm.handle { font: 500 11px var(--mono); color: var(--muted); }
+    .lhead .l1 .nm.title { font-weight: 500; }
+    .lhead .l2 { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lhead .l2 b { font-weight: 550; color: var(--ink); }
+    .lhead .provider-logo { width: 12px; height: 12px; }
+    .lhead .more { margin-left: auto; flex: none; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 8px; font: 600 9px/1.6 var(--mono); color: var(--muted); background: var(--tint); }
+    .lhead .more.warm { color: var(--warm); border-color: color-mix(in srgb, var(--warm) 50%, transparent); background: var(--warm-tint); }
+    .lhead.you { border-color: color-mix(in srgb, var(--warm) 55%, var(--line)); background: color-mix(in srgb, var(--warm-tint) 50%, var(--surface)); cursor: default; }
+    .lhead.guest { border-style: dashed; background: transparent; }
+    .lhead.depth-1 { border-top-width: 1px; }
+
+    /* Rows */
+    .row { position: relative; min-height: 56px; }
+    .row.gap { min-height: 24px; }
+    .row.earlier { min-height: 34px; }
+    .gutter { position: absolute; left: 0; top: 0; width: 44px; padding: 32px 6px 0 0; text-align: right; font: 10px var(--mono); color: var(--muted); }
+    .row.gap .gutter { padding-top: 6px; }
+    .gap-label { position: absolute; top: 5px; font: 10px var(--mono); color: var(--muted); padding: 0 6px; background: var(--surface); }
+    .lifeline { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--line-strong); }
+    .lifeline.after { border-left-color: var(--line); }
+    .row.gap .lifeline { border-left-style: dotted; }
+    .act { position: absolute; top: 0; bottom: 0; width: 7px; margin-left: -3.5px; background: var(--ph-implementation); }
+    .act.first { top: 30px; border-radius: 3px 3px 0 0; }
+    .act.last { border-radius: 0 0 3px 3px; }
+    .row.gap .act { opacity: .55; }
+    .act.waiting { background: color-mix(in srgb, var(--warm) 22%, var(--surface)); box-shadow: inset 0 0 0 1.5px var(--warm); }
+    .act.blocked { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .act.failed { background: color-mix(in srgb, var(--danger) 22%, var(--surface)); box-shadow: inset 0 0 0 1.5px var(--danger); }
+    .act.live { background: var(--accent); }
+    .phase-tag { position: absolute; top: 43px; margin-left: 6px; font: 9px var(--mono); letter-spacing: .03em; color: var(--muted); white-space: nowrap; background: var(--surface); padding: 0 3px; border-radius: 3px; }
+    .end-cap { position: absolute; margin-left: -6px; width: 12px; text-align: center; font-size: 10px; color: var(--ok); line-height: 1; }
+
+    /* Messages */
+    .msg { position: absolute; top: 4px; height: 44px; cursor: pointer; }
+    .msg .lbl { position: absolute; left: 8px; right: 8px; top: 2px; font-size: 11px; line-height: 1.3; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .msg.to-left .lbl { text-align: right; }
+    .msg .lbl b { font-weight: 600; margin-right: 4px; }
+    .msg .lbl .txt { background: color-mix(in srgb, var(--surface) 86%, transparent); -webkit-box-decoration-break: clone; box-decoration-break: clone; padding: 0 3px; border-radius: 3px; }
+    .msg .lbl .via { color: var(--muted); }
+    .msg svg { position: absolute; left: 0; top: 30px; width: 100%; height: 12px; overflow: visible; color: var(--muted); }
+    .msg svg.ah { width: 10px; }
+    .msg svg line, .msg svg path { stroke: currentColor; stroke-width: 1.3; fill: none; }
+    .msg svg path.solid-head { fill: currentColor; }
+    .msg.request svg, .msg.creation svg { color: var(--ink); }
+    .msg.reply svg { color: var(--muted); }
+    .msg.reply svg line { stroke-dasharray: 5 4; }
+    .msg.info svg line { stroke-dasharray: 1.5 3; }
+    .msg.failure svg { color: var(--danger); }
+    .msg.failure .lbl b { color: var(--danger); }
+    .msg.to-you svg { color: var(--warm); }
+    .msg.to-you svg line { stroke-width: 1.8; }
+    .msg.to-you .lbl b { color: var(--warm); }
+    .msg.from-user svg { color: var(--accent); }
+    .msg.from-user .lbl b { color: var(--accent); }
+    .msg.creation .lbl b::before { content: "«create» "; font-weight: 450; color: var(--muted); font-family: var(--mono); font-size: 9.5px; }
+    .msg.self svg { top: 22px; height: 20px; }
+    .msg:hover .lbl, .msg.hl .lbl { color: var(--ink); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 2px; }
+    .msg:hover svg, .msg.hl svg { filter: drop-shadow(0 0 2px color-mix(in srgb, var(--accent) 40%, transparent)); }
+    .canvas.dim .msg:not(.hl), .canvas.dim .owe:not(.hl) { opacity: .2; }
+    .canvas.dim .msg.hl svg { color: var(--accent); }
+    .owe { position: absolute; top: 42px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; border: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--line)); border-radius: 8px; background: var(--surface); font: 9.5px/14px var(--mono); color: var(--accent); white-space: nowrap; z-index: 2; pointer-events: none; }
+    .owe i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: owe 1.6s ease-in-out infinite; }
+    .owe.contract { color: var(--muted); border-color: var(--line-strong); }
+    .owe.contract i { background: var(--muted); animation: none; }
+    @keyframes owe { 50% { opacity: .2; transform: scale(.6); } }
+    .msg.fresh svg { animation: draw-r .7s ease-out both; }
+    .msg.fresh.to-left svg { animation-name: draw-l; }
+    .msg.fresh .lbl { animation: fade .5s .25s ease-out both; }
+    .row.fresh { animation: row-in .45s ease-out both; }
+    @keyframes draw-r { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+    @keyframes draw-l { from { clip-path: inset(0 0 0 100%); } to { clip-path: inset(0 0 0 0); } }
+    @keyframes fade { from { opacity: 0; } }
+    @keyframes row-in { from { background: color-mix(in srgb, var(--accent) 8%, transparent); } }
+
+    /* Asks land on the You lifeline and are answered there. */
+    .ask-slot { position: relative; z-index: 3; margin: 50px 0 14px; }
+    .ask-slot .path { font-size: 10.5px; color: var(--muted); margin-bottom: 4px; }
+    .ask-slot .path b { color: var(--warm); font-weight: 600; }
+    .ask-slot .ask { box-shadow: 0 6px 18px var(--shadow); }
+    .ask-slot .ask .btn.quiet { padding-left: 0; }
+    .row.ask-row { background: linear-gradient(90deg, color-mix(in srgb, var(--warm-tint) 60%, transparent), transparent 70%); }
+    .next-slot { position: relative; z-index: 3; margin: 50px 0 14px; padding: 8px 10px; border: 1px dashed color-mix(in srgb, var(--warm) 50%, var(--line)); border-radius: 6px; font-size: 11.5px; line-height: 1.45; background: var(--surface); }
+    .next-slot small { display: block; font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+
+    /* Now: what every lifeline is doing at this moment. Sticky at the bottom. */
+    .row.now { position: sticky; bottom: 0; z-index: 5; min-height: 52px; background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(6px); border-top: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); }
+    .row.now .gutter { padding-top: 8px; color: var(--accent); font-weight: 600; }
+    .now-cell { position: absolute; top: 7px; display: flex; gap: 5px; align-items: flex-start; font-size: 10.5px; line-height: 1.35; color: var(--muted); cursor: pointer; }
+    .now-cell .dot { margin-top: 4px; }
+    .now-cell span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .now-cell.working span { color: var(--accent); font-family: var(--mono); font-size: 10px; }
+    .now-cell.waiting span, .now-cell.failed span { color: var(--warm); font-weight: 550; }
+    .now-cell.failed span { color: var(--danger); }
+
+    .tip { position: fixed; z-index: 200; max-width: 380px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 12px 30px var(--shadow); font-size: 12px; line-height: 1.5; pointer-events: none; }
+    .tip .t-head { font-weight: 600; margin-bottom: 4px; }
+    .tip .t-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+    .tip .t-chips .chip.proposed { color: var(--warm); border-style: dashed; }
+    .tip .t-meta { margin-top: 6px; font: 10px var(--mono); color: var(--muted); }
+    .empty { padding: 60px 20px; text-align: center; color: var(--muted); }
+
+    @media (prefers-reduced-motion: reduce) {
+      .msg.fresh svg, .msg.fresh .lbl, .row.fresh, .owe i { animation: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <script src="../shared/fixture.js"></script>
+  <script src="../shared/orchestration.js"></script>
+  <script src="../shared/mockup.js"></script>
+  <script>
+  "use strict";
+  const $ = AgentField.el;
+  const MIN = 60_000, HOUR = 3_600_000;
+  const GUTTER = 48, GAP_MS = 15 * MIN, MAX_GUESTS = 3;
+  const WINDOWS = [["30m", 30 * MIN], ["2h", 2 * HOUR], ["6h", 6 * HOUR], ["All", Infinity]];
+
+  /* View state lives across re-renders. */
+  const view = {team: null, window: null, label: "name", on: "surface", collapsed: new Set(), autoCollapsed: new Set(), filter: "",
+    scroll: new Map(), seen: null, fieldRef: null, exchange: null};
+  let apiRef = null;
+  function Mockup_api() { return apiRef; }
+  const tip = $("div", "tip"); tip.hidden = true; document.body.append(tip);
+
+  /* Identity: a stable name when the agent has one; otherwise a runtime handle (provider + short
+     thread hash), which costs the model nothing. The title is the assignment and changes. */
+  function hash3(id) { let h = 2166136261; for (const ch of id) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36).slice(-3); }
+  function handle(a) { return ({codex: "codex", claude: "claude", antigravity: "agy", kimi: "kimi"}[a.client] || "agent") + "·" + hash3(a.id); }
+  function ident(a) {
+    if (view.label === "title") return {text: a.title, cls: "title"};
+    return a.name ? {text: a.name, cls: ""} : {text: handle(a), cls: "handle"};
+  }
+  function shortName(field, id) {
+    if (id === "user") return "You";
+    const a = field.byId(id); if (!a) return id;
+    return a.name || (view.label === "title" ? a.title : handle(a));
+  }
+  function onWhat(a) {
+    if (view.on === "scope") { const s = a.scope?.[0]; if (!s) return {kind: "scope", label: "no scope declared"}; const parts = s.split("/").filter(Boolean); return {kind: "scope", label: parts.slice(-2).join("/")}; }
+    return a.surface ? {kind: a.surface.kind, label: a.surface.label} : {kind: "", label: a.target || ""};
+  }
+
+  /* Phase at a moment, from checkpoint history (today) plus the current phase. */
+  function phaseAt(a, t) {
+    let phase = a.history[0]?.phase || a.phase;
+    for (const h of a.history) if (h.at <= t) phase = h.phase;
+    const lastAt = a.history.length ? a.history.at(-1).at : a.createdAt;
+    if (t >= Math.max(lastAt, a.checkpointAt || lastAt)) phase = a.phase;
+    return phase;
+  }
+  function stateSince(a) {
+    if (a.status === "waiting") return a.ask?.askedAt ?? a.updatedAt;
+    if (a.status === "blocked" || a.status === "failed") return a.updatedAt;
+    return Infinity;
+  }
+  const endAt = a => a.status === "done" ? a.updatedAt : Infinity;
+
+  function teamOf(field, id) { const chain = field.chain(id); return chain[0]?.id; }
+  function teamRank(field, t) {
+    const msgs = field.messages.filter(m => t.ids.has(m.from) || t.ids.has(m.to));
+    t.lastAt = msgs.length ? msgs.at(-1).at : t.root.updatedAt; t.msgCount = msgs.length; t.lastMsg = msgs.at(-1) || null;
+    t.active = t.members.some(m => ["working", "waiting", "blocked", "failed"].includes(m.status));
+  }
+
+  /* Columns: You, then the team in tree order (collapsed parents hide their subtree), then guests. */
+  function layoutColumns(field, team, messages, width, openAsks) {
+    const rows = field.treeRows([team.root.id]);
+    const visible = [], mapTo = new Map();
+    for (const {agent, depth} of rows) {
+      const hiddenBy = field.ancestors(agent.id).find(x => team.ids.has(x.id) && view.collapsed.has(x.id) && x.id !== agent.id);
+      if (hiddenBy) { let top = hiddenBy; for (const x of field.ancestors(agent.id)) if (team.ids.has(x.id) && view.collapsed.has(x.id)) top = x; mapTo.set(agent.id, top.id); continue; }
+      visible.push({id: agent.id, agent, depth}); mapTo.set(agent.id, agent.id);
+    }
+    const outside = new Map();
+    for (const m of messages) for (const id of [m.from, m.to]) if (id !== "user" && !team.ids.has(id)) outside.set(id, (outside.get(id) || 0) + 1);
+    const guestIds = [...outside.entries()].sort((x, y) => y[1] - x[1]).map(([id]) => id);
+    const guests = guestIds.slice(0, MAX_GUESTS).map(id => ({id, agent: field.byId(id), guest: true}));
+    if (guestIds.length > MAX_GUESTS) guests.push({id: "others", agent: null, guest: true, count: guestIds.length - MAX_GUESTS});
+    for (const id of guestIds) mapTo.set(id, guests.some(g => g.id === id) ? id : "others");
+    mapTo.set("user", "user");
+    const youW = openAsks ? 284 : 128;
+    const n = visible.length + guests.length;
+    const avail = width - GUTTER - youW - (guests.length ? 20 : 0) - 12;
+    const colW = Math.max(124, Math.min(218, Math.floor(avail / (Math.max(1, n) + 0.5))));
+    const cols = new Map();
+    cols.set("user", {id: "user", x: GUTTER + youW - 26, w: youW, you: true});
+    let x = GUTTER + youW + colW / 2 - 8;
+    for (const c of visible) { cols.set(c.id, {...c, x, w: colW}); x += colW; }
+    if (guests.length) x += 20;
+    for (const g of guests) { cols.set(g.id, {...g, x, w: colW}); x += colW; }
+    return {cols, mapTo, visible, guests, colW, width: Math.max(width - 2, x + 4), youW};
+  }
+
+  /* First look at a team: collapse the deepest subtrees until the lifelines fit. */
+  function autoCollapse(field, team, width) {
+    if (view.autoCollapsed.has(team.root.id)) return;
+    view.autoCollapsed.add(team.root.id);
+    const fit = Math.max(4, Math.floor((width - GUTTER - 284) / 124) - 1); // leave room for one guest lifeline
+    const parents = team.members.filter(m => m.id !== team.root.id && field.children(m.id).length).sort((x, y) => field.depth(y.id) - field.depth(x.id) || field.descendants(y.id).length - field.descendants(x.id).length);
+    let count = team.members.length;
+    for (const p of parents) { if (count <= fit) break; if ([...view.collapsed].some(c => field.ancestors(p.id).some(a => a.id === c))) continue; view.collapsed.add(p.id); count -= field.descendants(p.id).length; }
+  }
+
+  function arrowSvg(dir, style) {
+    const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("preserveAspectRatio", "none");
+    const line = document.createElementNS(ns, "line"), head = document.createElementNS(ns, "path");
+    svg.setAttribute("viewBox", "0 0 100 12");
+    // Lines are drawn in percent so the SVG stretches; the head is a separate fixed-size SVG.
+    line.setAttribute("x1", "0"); line.setAttribute("x2", "100"); line.setAttribute("y1", "6"); line.setAttribute("y2", "6"); line.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(line);
+    const hs = document.createElementNS(ns, "svg"); hs.setAttribute("viewBox", "0 0 10 12"); hs.setAttribute("width", "10"); hs.setAttribute("height", "12");
+    hs.setAttribute("class", "ah"); hs.style.left = dir > 0 ? "calc(100% - 9px)" : "-1px";
+    head.setAttribute("d", dir > 0 ? (style === "open" ? "M2 1 L9 6 L2 11" : "M1 1.5 L10 6 L1 10.5 Z") : (style === "open" ? "M8 1 L1 6 L8 11" : "M9 1.5 L0 6 L9 10.5 Z"));
+    if (style !== "open") head.setAttribute("class", "solid-head");
+    hs.append(head);
+    return [svg, hs];
+  }
+  function selfSvg() {
+    const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 30 20"); svg.style.width = "30px";
+    const p = document.createElementNS(ns, "path"); p.setAttribute("d", "M0 2 H24 V16 H4"); const h = document.createElementNS(ns, "path"); h.setAttribute("d", "M9 12 L3 16 L9 20"); svg.append(p, h); return svg;
+  }
+
+  function msgClass(m) {
+    if (m.from === "user") return "from-user";
+    return {creation: "creation", action_required: "request", info: "info", reply: "reply", closure: "reply", failure: "failure"}[m.kind] || "request";
+  }
+  function truncate(s, n) { return s && s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+  function showTip(field, m, e) {
+    tip.replaceChildren();
+    tip.append($("div", "t-head", field.nameOf(m.from) + " → " + field.nameOf(m.to)));
+    const chips = $("div", "t-chips");
+    const kind = $("span", "chip mono", "kind · " + (field.KIND_LABELS[m.kind] || m.kind)); kind.title = "Today: agent-coord classification";
+    const intent = $("span", "chip mono proposed", "intent · " + (field.INTENT_LABELS[m.intent] || m.intent)); intent.title = "Proposed: why it was sent";
+    chips.append(kind, intent); tip.append(chips, $("div", null, m.body));
+    const meta = [field.relativeTime(m.at)];
+    if (m.replyRequired) { if (m.repliedBy) { const r = field.messages.find(x => x.id === m.repliedBy); meta.push("replied" + (r ? " after " + field.duration(r.at - m.at) : "")); } else meta.push("awaiting reply · " + field.duration(field.now - m.at)); }
+    if (m.inReplyTo) meta.push("in reply to #" + m.inReplyTo);
+    if (m.wokeTurn) meta.push("woke a turn");
+    meta.push(m.ackedAt ? "acked" : "delivered");
+    tip.append($("div", "t-meta", meta.join(" · ")));
+    tip.hidden = false; moveTip(e);
+  }
+  function showAskTip(field, a, e) {
+    tip.replaceChildren(); tip.append($("div", "t-head", shortName(field, a.id) + " → You"));
+    const chips = $("div", "t-chips"); const c1 = $("span", "chip mono", a.ask ? "pending approval / next_actor=user" : "next_actor=user"); c1.title = "Today";
+    chips.append(c1); if (a.ask) { const c2 = $("span", "chip mono proposed", "ask · " + a.ask.kind); chips.append(c2); }
+    tip.append(chips, $("div", null, a.ask?.question || a.next.action)); tip.hidden = false; moveTip(e);
+  }
+  function moveTip(e) { const w = tip.offsetWidth, h = tip.offsetHeight; let x = e.clientX + 14, y = e.clientY + 16; if (x + w > innerWidth - 8) x = e.clientX - w - 14; if (y + h > innerHeight - 8) y = e.clientY - h - 12; tip.style.left = x + "px"; tip.style.top = y + "px"; }
+  function hideTip() { tip.hidden = true; }
+
+  function nowText(field, a) {
+    if (a.status === "working") return field.toolLabel(a) || "Working";
+    if (a.status === "waiting") return "Needs you · " + (a.ask?.kind || "input");
+    if (a.status === "failed") return "Failed · needs you";
+    if (a.status === "blocked") { const aw = field.awaiting(a.id).filter(m => m.kind !== "creation"); return aw.length ? "Awaiting " + shortName(field, aw[0].to) + "’s reply" : field.statusLabel(a); }
+    if (a.status === "done") return "✓ Handed off " + field.relativeTime(a.updatedAt);
+    return "Idle · " + field.relativeTime(field.lastActivity(a));
+  }
+
+  Mockup.mount({
+    number: 22, title: "Sequence diagram", spectrum: "moderate",
+    summary: "Each team as a UML sequence diagram: lifelines across, time down, asks landing on your lifeline where you answer them.",
+    signals: {
+      current: ["agent_messages", "creation", "created_by", "title", "phase", "checkpoint_history", "status", "pending_approval", "next_actor", "next_action", "tool_activity", "client", "write_scope", "updated_at"],
+      proposed: ["name", "role", "intent", "surface", "ask", "escalation", "waiting_on"],
+    },
+    notes: "Identity: the title is the wrong lifeline label, because it is the assignment and it changes; lifelines read name : role, and when no name is reported the runtime shows a handle (provider + thread hash) that costs the model nothing (toggle Label → Title to compare). On what: the surface goes on the lifeline head because it is stable for the agent’s life, while phase is the activation bar because it changes over time, which is what the vertical axis is for; scope is today’s fallback (toggle On → Scope). Everything drawn here except intent labels, surface, ask options and relay paths exists today in agent-coord messages, creation records and checkpoint history; the model would add one intent word per send and one surface noun per checkpoint.",
+    render(field, stage, api) {
+      // Remember scroll and the messages already seen (so only new arrows animate).
+      const oldFrame = stage.querySelector(".frame");
+      if (oldFrame && view.team) view.scroll.set(view.team, {top: oldFrame.scrollTop, left: oldFrame.scrollLeft, atBottom: oldFrame.scrollTop + oldFrame.clientHeight >= oldFrame.scrollHeight - 30});
+      const firstRender = view.fieldRef !== field;
+      if (firstRender) { view.fieldRef = field; view.seen = new Set(field.messages.map(m => m.id)); view.exchange = null; }
+      const fresh = new Set(field.messages.filter(m => !view.seen.has(m.id)).map(m => m.id));
+      for (const id of fresh) view.seen.add(id);
+      if (view.window == null) view.window = field.scale === "large" ? "2h" : "6h";
+      hideTip();
+
+      const teams = field.teams().map(t => ({...t, ids: new Set(t.members.map(m => m.id))}));
+      for (const t of teams) teamRank(field, t);
+      const order = (x, y) => y.needs.length - x.needs.length || Number(y.active) - Number(x.active) || y.lastAt - x.lastAt;
+      teams.sort(order);
+      if (!view.team || !teams.some(t => t.root.id === view.team)) view.team = (teams.find(t => t.needs.length && t.members.length > 1) || teams[0])?.root.id;
+      const team = teams.find(t => t.root.id === view.team);
+
+      stage.replaceChildren(renderRail(field, teams), renderMain(field, team, api, fresh, firstRender));
+      view.pendingScroll?.(); view.pendingScroll = null;
+    },
+  });
+
+  function renderRail(field, teams) {
+    const rail = $("aside", "rail");
+    rail.append($("h2", null, "Teams"));
+    if (teams.length > 10) {
+      const input = $("input"); input.placeholder = "Filter teams or agents…"; input.value = view.filter; input.type = "search";
+      input.oninput = () => { view.filter = input.value; const pos = input.selectionStart; Mockup_api().rerender(); const again = document.querySelector(".rail input"); if (again) { again.focus(); again.setSelectionRange(pos, pos); } };
+      rail.append(input);
+    }
+    const list = $("div", "team-list");
+    const q = view.filter.trim().toLowerCase();
+    const shown = teams.filter(t => !q || t.members.some(m => (m.name || "").toLowerCase().includes(q) || m.title.toLowerCase().includes(q)));
+    const groups = [["Needs you", shown.filter(t => t.needs.length)], ["Active", shown.filter(t => !t.needs.length && t.active)], ["Quiet", shown.filter(t => !t.needs.length && !t.active)]];
+    for (const [label, items] of groups) {
+      if (!items.length) continue;
+      list.append($("h3", null, label));
+      for (const t of items) {
+        const b = $("button", "team"); b.type = "button"; b.setAttribute("aria-current", String(t.root.id === view.team));
+        b.append(AgentField.statusDot(t.root));
+        const nm = $("span", "t-name" + (t.root.name ? "" : " untitled"), t.root.name || t.root.title); nm.title = t.root.title; b.append(nm);
+        b.append(t.needs.length ? $("span", "needs-badge", String(t.needs.length)) : $("span"));
+        const sub = t.lastMsg ? shortName(field, t.lastMsg.from) + " → " + shortName(field, t.lastMsg.to) + " · " + (field.INTENT_LABELS[t.lastMsg.intent] || "") + " · " + field.relativeTime(t.lastMsg.at).replace(" ago", "")
+          : (t.root.name ? t.root.title : AgentField.ROLE_LABELS[t.root.role]);
+        b.append($("span", "t-sub", sub));
+        if (t.members.length > 1) { const dots = $("span", "t-dots"); for (const m of t.members.slice(0, 18)) { const d = AgentField.statusDot(m); d.title = (m.name || m.title) + " · " + field.statusLabel(m); dots.append(d); } if (t.members.length > 18) dots.append($("small", "muted", "+" + (t.members.length - 18))); b.append(dots); }
+        b.onclick = () => { if (view.team === t.root.id) return; view.team = t.root.id; view.exchange = null; Mockup_api().rerender(); };
+        list.append(b);
+      }
+    }
+    if (!shown.length) list.append($("p", "muted", "No team matches."));
+    rail.append(list);
+    return rail;
+  }
+
+
+  function renderMain(field, team, api, fresh, firstRender) {
+    apiRef = api;
+    const main = $("section", "main");
+    if (!team) { main.append($("p", "empty", "No agents.")); return main; }
+    const root = team.root;
+
+    // Toolbar: team identity and the assignment, window, label and "on" toggles.
+    const top = $("div", "bar-top");
+    const tt = $("div", "team-title"); const rid = ident(root);
+    tt.append($("b", null, root.name || root.title), $("span", null, (root.name ? root.title + " · " : view.label === "title" ? "" : rid.text + " · ") + AgentField.ROLE_LABELS[root.role].toLowerCase() + " · " + team.members.length + (team.members.length === 1 ? " agent" : " agents")));
+    top.append(tt);
+    const seg = (label, options, value, set) => { const s = $("div", "seg"); s.append($("span", null, label)); for (const [v, l, t] of options) { const b = $("button", null, l); b.type = "button"; b.setAttribute("aria-pressed", String(value === v)); if (t) b.title = t; b.onclick = () => { set(v); api.rerender(); }; s.append(b); } return s; };
+    top.append(seg("Window", WINDOWS.map(([k]) => [k, k]), view.window, v => { view.window = v; }));
+    top.append(seg("Label", [["name", "Name", "Name when reported, otherwise a runtime handle"], ["title", "Title", "The checkpoint title (today)"]], view.label, v => { view.label = v; }));
+    top.append(seg("On", [["surface", "Surface", "Proposed: what it works on, as a product noun"], ["scope", "Scope", "Today: first begin-work scope path"]], view.on, v => { view.on = v; }));
+    main.append(top);
+
+    const frame = $("div", "frame");
+    main.append(frame);
+    const legend = $("div", "legend");
+    const legendItem = (dash, color, text, open) => { const s = $("span"); s.innerHTML = `<svg viewBox="0 0 26 8"><line x1="0" y1="4" x2="21" y2="4" stroke="${color}" stroke-width="1.3" ${dash ? `stroke-dasharray="${dash}"` : ""}/><path d="${open ? "M19 0.5 L25 4 L19 7.5" : "M19 0.5 L26 4 L19 7.5 Z"}" fill="${open ? "none" : color}" stroke="${color}" stroke-width="1.2"/></svg>`; s.append(text); return s; };
+    legend.append(legendItem("", "var(--ink)", "request / create"), legendItem("5 4", "var(--muted)", "reply", true), legendItem("1.5 3", "var(--muted)", "FYI", true), legendItem("", "var(--warm)", "to you"), legendItem("", "var(--accent)", "from you"));
+    const lb = $("span"); lb.append($("i", "bar-swatch"), "activation bar = phase (labeled at changes)"); legend.append(lb);
+    const ow = $("span"); const pill = $("span", "owe"); pill.style.position = "static"; pill.append($("i"), "awaiting reply"); ow.append(pill); legend.append(ow);
+    main.append(legend);
+
+    const width = (frame.isConnected ? frame.clientWidth : 0) || Math.max(700, (document.getElementById("stage")?.clientWidth || 1200) - 306);
+    autoCollapse(field, team, width);
+
+    const win = WINDOWS.find(([k]) => k === view.window)[1];
+    const since = win === Infinity ? -Infinity : field.now - win;
+    const teamMsgsAll = field.messages.filter(m => team.ids.has(m.from) || team.ids.has(m.to));
+    const teamMsgs = teamMsgsAll.filter(m => m.at >= since);
+    const earlier = teamMsgsAll.length - teamMsgs.length;
+    const askers = team.members.filter(field.needsUser);
+    const L = layoutColumns(field, team, teamMsgs, width, askers.length > 0);
+    const col = id => L.cols.get(L.mapTo.get(id) || id);
+
+    const canvas = $("div", "canvas"); canvas.style.width = L.width + "px";
+    frame.append(canvas);
+
+    // Header with sub-agent brackets.
+    const head = $("div", "head");
+    const parentsVisible = L.visible.filter(c => field.children(c.id).length && !view.collapsed.has(c.id));
+    const levels = parentsVisible.length ? Math.max(...parentsVisible.map(c => c.depth)) + 1 : 0;
+    const headH = 62 + levels * 16;
+    head.style.height = headH + "px";
+    for (const p of parentsVisible) {
+      const desc = new Set(field.descendants(p.id).map(d => d.id));
+      const kids = L.visible.filter(c => desc.has(c.id));
+      if (!kids.length) continue;
+      const x1 = L.cols.get(kids[0].id).x - L.colW / 2 + 6, x2 = L.cols.get(kids.at(-1).id).x + L.colW / 2 - 6;
+      const br = $("div", "bracket"); br.style.left = x1 + "px"; br.style.width = (x2 - x1) + "px"; br.style.top = (10 + p.depth * 16) + "px"; br.style.bottom = "0";
+      br.style.height = "auto"; br.style.bottom = (62) + "px"; br.style.borderBottom = "0";
+      const btn = $("button", null, "▾ " + shortName(field, p.id) + "’s agents · " + desc.size); btn.type = "button"; btn.title = "Collapse " + p.agent.title;
+      btn.onclick = () => { view.collapsed.add(p.id); api.rerender(); };
+      br.append(btn); head.append(br);
+    }
+    // Lifeline heads.
+    const you = L.cols.get("user");
+    const yh = $("div", "lhead you"); yh.style.left = (GUTTER + 6) + "px"; yh.style.width = (you.w - 14) + "px";
+    const y1 = $("div", "l1"); y1.append($("span", "nm", "You")); if (askers.length) y1.append($("span", "more warm", askers.length + " waiting")); yh.append(y1, $("div", "l2", "asks land here; answer in place"));
+    head.append(yh);
+    const heads = new Map();
+    for (const c of [...L.visible, ...L.guests].map(x => L.cols.get(x.id))) {
+      const w = L.colW - 14;
+      const h = $("button", "lhead" + (c.guest ? " guest" : "")); h.type = "button"; h.style.left = (c.x - w / 2) + "px"; h.style.width = w + "px";
+      const l1 = $("div", "l1"), l2 = $("div", "l2");
+      if (c.id === "others") { l1.append($("span", "nm", c.count + " others")); l2.append("other teams"); h.title = "Agents in other teams"; h.onclick = null; h.style.cursor = "default"; }
+      else {
+        const a = c.agent, id = ident(a);
+        l1.append(AgentField.statusDot(a), AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]) || "");
+        const nm = $("span", "nm " + id.cls, id.text); l1.append(nm);
+        const hidden = L.mapTo && [...L.mapTo.entries()].filter(([k, v]) => v === a.id && k !== a.id).map(([k]) => k);
+        if (!c.guest && hidden.length) {
+          const needs = hidden.filter(k => field.needsUser(field.byId(k))).length;
+          const more = $("span", "more" + (needs ? " warm" : ""), "+" + hidden.length + (needs ? " · " + needs + "!" : "") + " ▸"); more.title = "Expand " + hidden.length + " sub-agents" + (needs ? " (" + needs + " need you)" : "");
+          more.onclick = e => { e.stopPropagation(); view.collapsed.delete(a.id); for (const k of hidden) view.collapsed.delete(k); api.rerender(); };
+          l1.append(more);
+        }
+        const ow = onWhat(a);
+        if (c.guest) { const tr = field.byId(teamOf(field, a.id)); l2.append("↗ " + (tr ? (tr.name || tr.title) + "’s team" : "another team")); }
+        else { l2.append($("b", null, a.kind === "app" ? AgentField.ROLE_LABELS[a.role].toLowerCase() : a.kind === "subagent" ? "subagent" : "delegate"), " · " + (ow.kind ? ow.kind + " " : "") + ow.label); }
+        h.title = (a.name ? a.name + " · " : "") + a.title + "\n" + AgentField.ROLE_LABELS[a.role] + " · " + field.statusLabel(a) + (a.surface ? "\nOn: " + a.surface.kind + " · " + a.surface.label : "") + (a.scope[0] ? "\nScope: " + a.scope[0] : "");
+        h.onclick = () => c.guest ? (view.team = teamOf(field, a.id), view.exchange = null, api.rerender()) : api.select(a.id);
+        h.onmouseenter = () => highlight(canvas, a.id); h.onmouseleave = () => highlight(canvas, null);
+      }
+      h.append(l1, l2); head.append(h); heads.set(c.id, h);
+    }
+    canvas.append(head);
+
+    // Rows: messages and asks in time order, gaps compressed, a now row at the bottom.
+    const items = teamMsgs.map(m => ({t: m.at, m}));
+    for (const a of askers) items.push({t: Math.max(a.ask?.askedAt ?? a.updatedAt, since === -Infinity ? 0 : since), ask: a});
+    items.sort((x, y) => x.t - y.t || (x.m?.id ?? 1e9) - (y.m?.id ?? 1e9));
+
+    const lifeCols = [...L.visible, ...L.guests].map(x => L.cols.get(x.id));
+    const agentOfCol = c => c.agent && !c.guest ? c.agent : null;
+    const prevPhase = new Map();
+    const started = new Set();
+    function drawLifelines(row, t, kind) {
+      const ul = $("div", "lifeline"); ul.style.left = you.x + "px"; row.append(ul);
+      for (const c of lifeCols) {
+        const a = agentOfCol(c);
+        if (c.guest) { const l = $("div", "lifeline after"); l.style.left = c.x + "px"; row.append(l); continue; }
+        if (t < a.createdAt && kind !== "now") continue;
+        const ended = t > endAt(a);
+        const l = $("div", "lifeline" + (ended ? " after" : "")); l.style.left = c.x + "px"; row.append(l);
+        if (ended) {
+          if (!started.has(a.id + ":end")) { started.add(a.id + ":end"); const cap = $("span", "end-cap", "✓"); cap.style.left = c.x + "px"; cap.style.top = "0"; cap.title = "Finished " + field.relativeTime(a.updatedAt); row.append(cap); }
+          continue;
+        }
+        const act = $("div", "act");
+        const ph = phaseAt(a, t);
+        act.style.background = `var(--ph-${ph})`;
+        if (t >= stateSince(a)) act.classList.add(a.status), act.style.background = "";
+        if (kind === "now" && a.status === "working") { act.classList.add("live"); act.style.background = ""; }
+        if (!started.has(a.id)) { started.add(a.id); if (kind === "create") act.classList.add("first"); }
+        act.style.left = c.x + "px"; row.append(act);
+        if (kind !== "gap" && kind !== "now" && prevPhase.get(a.id) !== ph) {
+          const tag = $("span", "phase-tag", AgentField.PHASE_LABELS[ph]); tag.style.left = (c.x + 2) + "px"; tag.title = "Checkpoint phase from " + field.relativeTime(t); row.append(tag);
+        }
+        prevPhase.set(a.id, ph);
+      }
+    }
+
+    // One message per row, so a label may run wider than its arrow; keep it inside the canvas.
+    function placeLabel(lbl, x1, x2, minLeft = GUTTER + 4) {
+      const span = x2 - x1, w = Math.max(span - 16, Math.min(300, L.width - minLeft - 12));
+      let left = x1 + span / 2 - w / 2; left = Math.max(minLeft, Math.min(left, L.width - w - 8));
+      lbl.style.left = (left - x1) + "px"; lbl.style.right = "auto"; lbl.style.width = w + "px"; lbl.style.textAlign = "center";
+    }
+    function messageEl(m, isFresh) {
+      const a = col(m.from), b = col(m.to);
+      if (!a || !b) return null;
+      const cls = msgClass(m);
+      const intent = field.INTENT_LABELS[m.intent] || field.KIND_LABELS[m.kind];
+      const lbl = $("div", "lbl"), txt = $("span", "txt"); lbl.append(txt); txt.append($("b", null, intent));
+      const collapsedFrom = L.mapTo.get(m.from) !== m.from && m.from !== "user", collapsedTo = L.mapTo.get(m.to) !== m.to && m.to !== "user";
+      if (collapsedFrom || collapsedTo || a === b) txt.append($("span", "via", shortName(field, m.from) + " → " + shortName(field, m.to) + ": "));
+      txt.append(truncate(m.body, 140));
+      const el = $("div", "msg " + cls + (isFresh ? " fresh" : ""));
+      el.dataset.from = L.mapTo.get(m.from) || m.from; el.dataset.to = L.mapTo.get(m.to) || m.to; el.dataset.exchange = m.exchange;
+      if (a === b) {
+        el.classList.add("self"); el.style.left = (a.x + 4) + "px"; el.style.width = Math.min(L.colW - 10, 200) + "px";
+        el.append(lbl, selfSvg());
+        const w = Math.max(120, Math.min(280, L.width - a.x - 48)); lbl.style.left = "34px"; lbl.style.right = "auto"; lbl.style.width = w + "px"; lbl.style.top = "6px"; lbl.style.textAlign = "left";
+      } else {
+        const dir = b.x > a.x ? 1 : -1, x1 = Math.min(a.x, b.x) + 5, x2 = Math.max(a.x, b.x) - 5;
+        el.style.left = x1 + "px"; el.style.width = (x2 - x1) + "px"; if (dir < 0) el.classList.add("to-left");
+        placeLabel(lbl, x1, x2);
+        const [line, headSvg] = arrowSvg(dir, cls === "reply" || cls === "info" ? "open" : "solid");
+        el.append(lbl, line, headSvg);
+      }
+      el.onmouseenter = e => { showTip(field, m, e); highlightExchange(canvas, m.exchange); };
+      el.onmousemove = moveTip;
+      el.onmouseleave = () => { hideTip(); highlightExchange(canvas, view.exchange); };
+      el.onclick = () => { view.exchange = view.exchange === m.exchange ? null : m.exchange; highlightExchange(canvas, view.exchange); };
+      return el;
+    }
+
+    let lastT = null, rowsAdded = 0;
+    if (earlier > 0) {
+      const r = $("div", "row earlier"); drawLifelines(r, since, "gap");
+      const b = $("button", "btn quiet small", "↑ " + earlier + " earlier " + (earlier === 1 ? "message" : "messages") + " · show all"); b.type = "button";
+      b.style.cssText = `position:absolute;top:5px;left:${GUTTER + 4}px;background:var(--surface)`;
+      b.onclick = () => { view.window = "All"; api.rerender(); }; r.append(b); canvas.append(r);
+    }
+    for (const it of items) {
+      if (lastT != null && it.t - lastT > GAP_MS) {
+        const g = $("div", "row gap"); drawLifelines(g, (lastT + it.t) / 2, "gap");
+        const gl = $("span", "gap-label", "⋯ " + field.duration(it.t - lastT) + " later"); gl.style.left = (GUTTER + 4) + "px"; g.append(gl); canvas.append(g);
+      }
+      lastT = it.t;
+      const row = $("div", "row");
+      const gut = $("div", "gutter", it.t >= field.now - 30000 ? "now" : field.relativeTime(it.t).replace(" ago", "").replace("just now", "now"));
+      gut.title = new Date(it.t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+      row.append(gut);
+      if (it.m) {
+        const m = it.m, isFresh = fresh.has(m.id);
+        drawLifelines(row, it.t, m.kind === "creation" ? "create" : "msg");
+        const el = messageEl(m, isFresh); if (el) row.append(el);
+        if (isFresh) row.classList.add("fresh");
+        if (m.replyRequired && !m.repliedBy && m.to !== "user" && field.byId(m.to)?.status !== "done") {
+          const target = col(m.to), from = col(m.from);
+          if (target && from && target !== from) {
+            const contract = m.kind === "creation";
+            const o = $("span", "owe" + (contract ? " contract" : "")); o.append($("i"), (contract ? "result owed · " : "awaiting reply · ") + (field.now - m.at < MIN ? "<1m" : field.duration(field.now - m.at)));
+            o.dataset.exchange = m.exchange;
+            o.title = contract ? "Reply contract from the creation request (today)" : "reply_required, not yet replied (today)";
+            const right = target.x > from.x;
+            o.style.left = (right ? target.x - 8 : target.x + 8) + "px"; if (right) o.style.transform = "translateX(-100%)";
+            row.append(o);
+          }
+        }
+      } else {
+        const a = it.ask; row.classList.add("ask-row");
+        drawLifelines(row, it.t, "ask");
+        const via = (a.ask?.via || []).filter(v => col(v) && col(v) !== col(a.id));
+        const hops = [a.id, ...via, "user"];
+        for (let i = 0; i < hops.length - 1; i++) {
+          const from = col(hops[i]), to = col(hops[i + 1]); if (!from || !to || from === to) continue;
+          const x1 = Math.min(from.x, to.x) + 5, x2 = Math.max(from.x, to.x) - 5, dir = to.x > from.x ? 1 : -1;
+          const el = $("div", "msg to-you" + (dir < 0 ? " to-left" : "")); el.style.left = x1 + "px"; el.style.width = (x2 - x1) + "px";
+          el.dataset.from = L.mapTo.get(hops[i]); el.dataset.to = hops[i + 1] === "user" ? "user" : L.mapTo.get(hops[i + 1]);
+          // A relayed ask gets one label over the whole route; each hop is just an arrow.
+          const [line, hs] = arrowSvg(dir, "solid"); el.append(line, hs);
+          if (i === 0) {
+            const lbl = $("div", "lbl"), txt = $("span", "txt"); lbl.append(txt);
+            txt.append($("b", null, (hops.length > 2 ? "Escalates via " + via.map(v => shortName(field, v)).join(", ") : "Asks you") + (a.ask ? " · " + a.ask.kind : "")), truncate(a.ask?.question || a.next.action, 110));
+            const all = hops.map(col).filter(Boolean).map(c => c.x), lo = Math.min(...all) + 5, hi = Math.max(...all) - 5;
+            el.append(lbl); placeLabel(lbl, lo, hi, you.x + 8); lbl.style.left = (parseFloat(lbl.style.left) + lo - x1) + "px";
+          }
+          el.onmouseenter = e => showAskTip(field, a, e); el.onmousemove = moveTip; el.onmouseleave = hideTip;
+          el.onclick = () => api.select(a.id);
+          row.append(el);
+        }
+        const slot = $("div", a.ask ? "ask-slot" : "next-slot");
+        slot.style.marginLeft = (GUTTER + 6) + "px"; slot.style.width = (you.w - 44) + "px";
+        if (a.ask) {
+          const path = $("div", "path");
+          const names = [a, ...(a.ask.via || []).map(field.byId).filter(Boolean)].map(x => shortName(field, x.id));
+          path.append($("b", null, names.join(" → ") + " → you"), " · " + truncate(a.title, 48));
+          slot.append(path, Mockup.askBox(a, field, api.select));
+        } else {
+          slot.append($("small", null, "Your next step · " + shortName(field, a.id)), a.next.action);
+          const ob = $("button", "btn quiet small", "Open thread"); ob.type = "button"; ob.style.paddingLeft = "0"; ob.onclick = () => api.select(a.id); slot.append(ob);
+        }
+        row.append(slot);
+      }
+      canvas.append(row); rowsAdded++;
+    }
+    if (!rowsAdded) { const r = $("div", "row"); drawLifelines(r, field.now, "msg"); const p = $("span", "gap-label", "No messages in this window."); p.style.left = (GUTTER + you.w + 8) + "px"; p.style.top = "20px"; r.append(p); canvas.append(r); }
+
+    // Now row: what each lifeline is doing right now.
+    const now = $("div", "row now"); drawLifelines(now, field.now, "now");
+    now.append($("div", "gutter", "now"));
+    const yc = $("div", "now-cell"); yc.style.left = (GUTTER + 8) + "px"; yc.style.width = (you.w - 44) + "px";
+    yc.append($("span", null, askers.length ? askers.length + (askers.length === 1 ? " agent waits" : " agents wait") + " on you" : "Nothing waits on you"));
+    if (askers.length) yc.firstChild.style.color = "var(--warm)";
+    now.append(yc);
+    for (const c of lifeCols) {
+      if (c.id === "others") continue;
+      const a = c.agent, w = L.colW - 18;
+      const cell = $("div", "now-cell " + a.status); cell.style.left = (c.x - 3) + "px"; cell.style.width = w + "px";
+      cell.append(AgentField.statusDot(a), $("span", null, nowText(field, a)));
+      cell.title = (a.name || a.title) + " · " + nowText(field, a); cell.onclick = () => api.select(a.id);
+      now.append(cell);
+    }
+    canvas.append(now);
+
+    // Scroll: first look at a team shows the latest traffic (the bottom); later renders keep the user's place.
+    const saved = view.scroll.get(team.root.id);
+    view.pendingScroll = () => {
+      if (!saved || saved.atBottom || firstRender) frame.scrollTop = frame.scrollHeight; else frame.scrollTop = saved.top;
+      if (saved) frame.scrollLeft = saved.left;
+    };
+    if (view.exchange) highlightExchange(canvas, view.exchange);
+    return main;
+  }
+
+  function highlight(canvas, id) {
+    canvas.classList.toggle("dim", !!id);
+    for (const el of canvas.querySelectorAll(".msg, .owe")) el.classList.toggle("hl", !!id && (el.dataset.from === id || el.dataset.to === id));
+    if (!id && view.exchange) highlightExchange(canvas, view.exchange);
+  }
+  function highlightExchange(canvas, exchange) {
+    canvas.classList.toggle("dim", !!exchange);
+    for (const el of canvas.querySelectorAll(".msg, .owe")) el.classList.toggle("hl", !!exchange && el.dataset.exchange === exchange);
+  }
+  </script>
+</body>
+</html>

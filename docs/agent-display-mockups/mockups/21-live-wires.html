@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 21 · Live wires</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* The delegation tree as an org chart with messages as live wires. Lineage is a faint
+       wire; a message is a dot travelling along it; an open request is a dashed wire with its
+       wait age; asks climb their relay path to the You band at the top. */
+    .lw-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 14px; }
+    .lw-toolbar .btn { padding: 5px 10px; font-size: 11px; }
+    .lw-toolbar .btn.needs[aria-pressed="true"] { border-color: var(--warm); color: var(--warm); background: var(--warm-tint); }
+    .lw-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-left: auto; font-size: 10.5px; color: var(--muted); }
+    .lw-legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .lw-legend svg { overflow: visible; }
+
+    .lw-scroll { overflow-x: auto; overflow-y: visible; padding-bottom: 8px; }
+    .lw-canvas { position: relative; }
+    .lw-canvas > svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+
+    /* Team frames: a quiet ground behind each orchestration group. */
+    .team-frame { fill: color-mix(in srgb, var(--ink) 2.6%, transparent); stroke: color-mix(in srgb, var(--ink) 5%, transparent); }
+
+    /* Wires */
+    .wire { fill: none; stroke-linecap: round; transition: opacity .15s, stroke .15s; }
+    .wire.tree { stroke: var(--line-strong); stroke-width: 1.2; }
+    .wire.tree.sub { stroke-dasharray: 1 3; }
+    .wire.traffic { stroke: var(--accent); opacity: var(--o, .5); }
+    .wire.replaced { display: none; }
+    .wire.open { stroke: color-mix(in srgb, var(--ink) 55%, var(--line-strong)); stroke-width: 1.4; stroke-dasharray: 5 4; }
+    .wire.conflict { stroke: var(--danger); stroke-width: 1.2; stroke-dasharray: 2 3; opacity: .7; }
+    .wire.relay { stroke: var(--warm); stroke-width: 1.6; opacity: .55; }
+    .wire.hover-arc { stroke: var(--accent); stroke-width: 1.6; opacity: .85; }
+    .lw-canvas.focusing .wire { opacity: .12; }
+    .lw-canvas.focusing .wire.hot { opacity: 1; }
+    .lw-canvas.focusing .wire.tree.hot { stroke: color-mix(in srgb, var(--ink) 60%, var(--line-strong)); stroke-width: 1.6; }
+    .lw-canvas.focusing .wire.relay.hot { stroke-width: 2.2; }
+
+    .wire-label { position: absolute; z-index: 3; transform: translate(-50%, -50%); padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font: 9.5px/16px var(--mono); color: var(--ink); white-space: nowrap; pointer-events: auto; cursor: default; transition: opacity .15s; }
+    .wire-label.conflict { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+    .wire-label.count { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+    .lw-canvas.focusing .wire-label { opacity: .15; }
+    .lw-canvas.focusing .wire-label.hot { opacity: 1; }
+
+    /* Agent nodes */
+    .node { position: absolute; z-index: 2; display: flex; flex-direction: column; gap: 4px; padding: 8px 10px 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; cursor: pointer; font-size: 11px; line-height: 1.35; transition: opacity .15s, box-shadow .15s, border-color .15s; }
+    .node:hover, .node:focus-visible { border-color: var(--hover-line); box-shadow: 0 4px 14px var(--shadow); outline: none; }
+    .node.working { border-color: color-mix(in srgb, var(--accent) 32%, var(--line)); }
+    .node.needs { border-top: 2px solid var(--warm); }
+    .node.failed { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+    .node.done, .node.idle { background: color-mix(in srgb, var(--surface) 55%, var(--paper)); }
+    .node.done .ident, .node.done .on { color: var(--muted); }
+    .node.relay { box-shadow: 0 0 0 2px color-mix(in srgb, var(--warm) 38%, transparent); }
+    .lw-canvas.focusing .node { opacity: .32; }
+    .lw-canvas.focusing .node.hot { opacity: 1; }
+    .lw-canvas.focusing .node.focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent), 0 6px 18px var(--shadow); }
+    .id-line { display: flex; align-items: center; gap: 5px; min-width: 0; }
+    .id-line .provider-logo { width: 12px; height: 12px; }
+    .ident { flex: 0 1 auto; min-width: 0; font-size: 12px; font-weight: 600; letter-spacing: -.01em; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ident.untitled { font-weight: 500; }
+    .role { flex: none; font: 9px var(--mono); letter-spacing: .02em; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; line-height: 14px; }
+    .bubble { flex: none; margin-left: auto; min-width: 16px; padding: 0 5px; border-radius: 8px; background: var(--warm); color: var(--surface); font: 600 9.5px/16px var(--mono); text-align: center; }
+    :root[data-theme="dark"] .bubble { color: var(--paper); }
+    .on { display: flex; align-items: baseline; gap: 5px; min-width: 0; color: var(--ink); }
+    .on .kind { flex: none; font: 9px var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .on .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .state { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
+    .state span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node.working .state { color: var(--accent); }
+    .node.blocked .state { color: var(--ink); }
+    .node.failed .state { color: var(--danger); }
+    .ask-strip { display: block; width: 100%; margin-top: 2px; padding: 4px 7px; border: 0; border-left: 2px solid var(--warm); border-radius: 0 4px 4px 0; background: color-mix(in srgb, var(--warm-tint) 70%, var(--surface)); color: var(--ink); text-align: left; font-size: 10.5px; line-height: 1.35; cursor: pointer; }
+    .ask-strip b { display: block; font: 600 8.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+    .ask-strip span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ask-strip:hover { background: var(--warm-tint); }
+
+    /* Disclosure pill under a parent: collapsed shows the folded subtree. */
+    .disc { position: absolute; z-index: 3; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 5px; height: 18px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface); color: var(--muted); font: 9.5px var(--mono); white-space: nowrap; cursor: pointer; }
+    .disc:hover { color: var(--ink); border-color: var(--hover-line); }
+    .disc.open { width: 18px; padding: 0; justify-content: center; }
+    .disc .dots { display: inline-flex; gap: 3px; }
+    .disc .dot { width: 5px; height: 5px; box-shadow: none; animation: none; }
+    .disc .warm { color: var(--warm); }
+    .disc .traffic { color: var(--accent); }
+
+    /* The You band: every ask is a tile; relay wires end at its bottom edge. */
+    .you-band { position: absolute; z-index: 2; left: 0; right: 0; top: 0; display: flex; align-items: flex-start; gap: 12px; }
+    .you { flex: none; width: 64px; height: 64px; margin-top: 18px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: var(--paper); font-weight: 650; font-size: 13px; letter-spacing: -.01em; }
+    .you.asked { box-shadow: 0 0 0 3px var(--paper), 0 0 0 5px var(--warm); }
+    .you.ping, .node.ping { animation: ping .75s ease-out; }
+    @keyframes ping { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
+    .tiles { display: flex; flex-wrap: wrap; gap: 10px 12px; flex: 1; min-width: 0; }
+    .tile { position: relative; width: 252px; height: 122px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; background: var(--surface); border: 1px solid color-mix(in srgb, var(--warm) 40%, var(--line)); border-top: 2px solid var(--warm); border-radius: 7px; font-size: 11px; line-height: 1.4; transition: opacity .15s; }
+    .tile .k { display: flex; gap: 6px; font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+    .tile .k span:last-child { margin-left: auto; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--muted); }
+    .tile .who { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 10.5px; color: var(--muted); }
+    .tile .who button { flex: 0 1 auto; min-width: 0; max-width: 60%; padding: 0; border: 0; background: none; color: var(--ink); font-size: 11px; font-weight: 600; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+    .tile .who button:hover { text-decoration: underline; }
+    .tile .path { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tile .path b { color: var(--warm); font-weight: 600; }
+    .tile .q { color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .tile .acts { display: flex; gap: 5px; margin-top: auto; }
+    .tile .acts .btn { flex: 0 1 auto; min-width: 0; padding: 3px 8px; font-size: 10.5px; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tile.more { border: 1px dashed var(--line-strong); background: transparent; width: 120px; align-items: center; justify-content: center; color: var(--muted); cursor: pointer; }
+    .tile.more:hover { color: var(--ink); border-color: var(--hover-line); }
+    .lw-canvas.focusing .tile { opacity: .4; }
+    .lw-canvas.focusing .tile.hot { opacity: 1; }
+    .calm { margin-top: 36px; font-size: 12px; color: var(--muted); }
+
+    /* Hover mini log and the in-place ask popover. */
+    .minilog { position: absolute; z-index: 6; width: 300px; padding: 9px 11px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 12px 32px var(--shadow); font-size: 11px; line-height: 1.4; pointer-events: none; display: grid; gap: 5px; }
+    .minilog h4 { font-size: 11.5px; font-weight: 600; letter-spacing: -.01em; }
+    .minilog .sub { font-size: 10px; color: var(--muted); }
+    .minilog .row { display: grid; grid-template-columns: 12px 1fr auto; gap: 6px; align-items: baseline; }
+    .minilog .row .arrow { color: var(--muted); font-family: var(--mono); }
+    .minilog .row .what { min-width: 0; }
+    .minilog .row .what b { font-weight: 600; }
+    .minilog .row .what i { font-style: normal; font: 9px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--accent); margin-left: 4px; }
+    .minilog .row .what i.blocker { color: var(--warm); } .minilog .row .what i.handoff { color: var(--ok); }
+    .minilog .row .body { display: block; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .minilog .row .age { font: 9.5px var(--mono); color: var(--muted); }
+    .minilog .owe { font-size: 10.5px; color: var(--ink); border-top: 1px solid var(--line); padding-top: 5px; }
+    .minilog .owe b { color: var(--warm); font-weight: 600; }
+    .ask-pop { position: absolute; z-index: 7; width: 300px; box-shadow: 0 14px 36px var(--shadow); border-radius: 7px; background: var(--surface); }
+    .ask-pop .ask { margin: 0; }
+    .ask-pop .via { padding: 7px 12px 0; font-size: 10.5px; color: var(--muted); }
+    .ask-pop .via b { color: var(--warm); font-weight: 600; }
+    .ask-pop .x { position: absolute; top: 4px; right: 4px; padding: 0 6px; z-index: 1; }
+
+    /* Messages in flight */
+    .dots-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+    .msg-dot { position: absolute; left: 0; top: 0; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); offset-rotate: 0deg; offset-anchor: center; opacity: 0; }
+    .msg-dot.blocker, .msg-dot.user { background: var(--warm); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warm) 22%, transparent); }
+    .msg-dot.handoff { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+    @media (prefers-reduced-motion: reduce) { .you.ping, .node.ping { animation: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const MIN = 60_000;
+  const W = 190, SLOT = 206, GAP_Y = 52, TEAM_GAP = 30, SHELF_GAP = 46, NODE_H = 76, NODE_H_ASK = 112;
+  const TILE_W = 252, TILE_H = 122, BAND_TOP = 0, BAND_TO_TREE = 70;
+  const RECENT = 15 * MIN;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* View state that survives re-renders. */
+  const ui = {mode: "auto", collapsed: new Map(), onlyNeeds: false, hover: null, hoverTile: null, openAsk: null, showAllAsks: false,
+    lastMsgId: null, fieldRef: null, scrollLeft: 0};
+  let ctx = null; // the most recent layout: canvas, geometry, edges, field, api
+
+  const svg = (tag, attrs = {}) => { const n = document.createElementNS(SVGNS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+  const ident = a => a.name || a.title;
+  const ago = (field, ms) => field.now - ms < MIN ? "<1m" : field.duration(field.now - ms);
+  const needs = (field, a) => field.needsUser(a);
+
+  function isCollapsed(field, a) {
+    if (!field.children(a.id).length) return false;
+    if (ui.collapsed.has(a.id)) return ui.collapsed.get(a.id);
+    if (ui.mode === "expanded") return false;
+    if (ui.mode === "teams") return true;
+    if (field.scale === "large") return true;
+    if (field.scale === "medium") return field.depth(a.id) >= 1 && !field.descendantsNeedingUser(a.id).length;
+    return false;
+  }
+
+  function stateOf(field, a) {
+    if (a.ask) return a.status === "failed" ? "Failed · " + (a.failure || "needs a decision") : "Paused until you answer";
+    if (a.status === "working") return field.toolLabel(a) || a.activity || "Working";
+    if (a.status === "blocked") return field.statusLabel(a) + (field.now - a.updatedAt >= MIN ? " · " + ago(field, a.updatedAt) : "");
+    if (a.status === "done") return "Handed off " + (a.deliverable?.label || a.deliverable?.kind || "result") + " · " + field.relativeTime(a.updatedAt);
+    if (a.status === "failed") return "Failed · " + (a.failure || "see thread");
+    if (a.next?.actor === "user" && a.next.action) return "Your move";
+    return "Idle · " + field.relativeTime(field.lastActivity(a));
+  }
+
+  /* Layout: each team is a tidy tree; teams are shelf-packed, the ones that need you first. */
+  function layout(field, avail, tilesH) {
+    const teams = field.roots().map(root => ({root, members: [root, ...field.descendants(root.id)]}))
+      .map(t => ({...t, needs: t.members.filter(a => needs(field, a)).length, working: t.members.some(a => a.status === "working"),
+        last: Math.max(...t.members.map(field.lastActivity))}))
+      .filter(t => !ui.onlyNeeds || t.needs)
+      .sort((x, y) => y.needs - x.needs || Number(y.working) - Number(x.working) || y.last - x.last);
+    const geo = new Map(), frames = [], visible = new Set();
+    // Lay out each team locally, then pack first-fit into shelves so small teams fill gaps near the top.
+    const laid = teams.map(t => {
+      const nodes = []; let leaf = 0;
+      const walk = (a, d) => {
+        visible.add(a.id);
+        const kids = isCollapsed(field, a) ? [] : field.children(a.id);
+        const n = {a, d, h: needs(field, a) ? NODE_H_ASK : NODE_H}; nodes.push(n);
+        if (!kids.length) n.x = leaf++ * SLOT;
+        else { const ks = kids.map(k => walk(k, d + 1)); n.x = (ks[0].x + ks.at(-1).x) / 2; }
+        return n;
+      };
+      walk(t.root, 0);
+      const levels = []; for (const n of nodes) levels[n.d] = Math.max(levels[n.d] || 0, n.h);
+      const tops = []; let acc = 0; levels.forEach((h, d) => { tops[d] = acc; acc += h + GAP_Y; });
+      return {t, nodes, tops, w: leaf * SLOT - (SLOT - W), h: acc - GAP_Y + (field.children(t.root.id).length ? 22 : 0)};
+    });
+    const shelves = [];
+    for (const l of laid) {
+      const shelf = shelves.find(sh => sh.w + TEAM_GAP + l.w <= avail) || (shelves.push({w: -TEAM_GAP, items: []}), shelves.at(-1));
+      shelf.items.push(l); shelf.w += TEAM_GAP + l.w;
+    }
+    let y = tilesH + BAND_TO_TREE, shelfH = 0;
+    shelves.forEach((sh, i) => {
+      if (i) y += shelfH + SHELF_GAP;
+      shelfH = Math.max(...sh.items.map(l => l.h)); let x = 0;
+      for (const l of sh.items) {
+        for (const n of l.nodes) geo.set(n.a.id, {x: x + n.x, y: y + l.tops[n.d], w: W, h: n.h, d: n.d});
+        frames.push({x: x - 8, y: y - 8, w: l.w + 16, h: l.h + 16, size: l.nodes.length});
+        x += l.w + TEAM_GAP;
+      }
+    });
+    const width = Math.max(avail, ...[...geo.values()].map(g => g.x + g.w));
+    return {geo, frames, visible, width, height: y + shelfH + 20};
+  }
+
+  /* Geometry helpers: anchors on node edges and curve builders. */
+  const top = g => ({x: g.x + g.w / 2, y: g.y});
+  const bottom = g => ({x: g.x + g.w / 2, y: g.y + g.h});
+  const fmt = n => Math.round(n * 10) / 10;
+  function vCurve(p, q) { const my = (p.y + q.y) / 2; return `M${fmt(p.x)},${fmt(p.y)} C${fmt(p.x)},${fmt(my)} ${fmt(q.x)},${fmt(my)} ${fmt(q.x)},${fmt(q.y)}`; }
+  function arc(p, q) { const lift = Math.min(110, 26 + Math.abs(q.x - p.x) * 0.16), cy = Math.min(p.y, q.y) - lift; return `M${fmt(p.x)},${fmt(p.y)} C${fmt(p.x)},${fmt(cy)} ${fmt(q.x)},${fmt(cy)} ${fmt(q.x)},${fmt(q.y)}`; }
+  // Siblings on one level talk under their row, so the wire never crosses their parent.
+  function sag(p, q) { const drop = Math.min(36, 16 + Math.abs(q.x - p.x) * 0.05), cy = Math.max(p.y, q.y) + drop; return `M${fmt(p.x)},${fmt(p.y)} C${fmt(p.x)},${fmt(cy)} ${fmt(q.x)},${fmt(cy)} ${fmt(q.x)},${fmt(q.y)}`; }
+  function midOf(d) { // midpoint of a cubic "M x,y C x1,y1 x2,y2 x,y"
+    const n = d.match(/-?[\d.]+/g).map(Number); const [x0, y0, x1, y1, x2, y2, x3, y3] = n;
+    return {x: (x0 + 3 * x1 + 3 * x2 + x3) / 8, y: (y0 + 3 * y1 + 3 * y2 + y3) / 8};
+  }
+
+  function render(field, stage, api) {
+    if (ui.fieldRef !== field) { ui.fieldRef = field; ui.lastMsgId = field.messages.reduce((m, x) => Math.max(m, x.id), 0); ui.hover = null; ui.hoverTile = null; ui.openAsk = null; }
+    const keepY = scrollY;
+    stage.replaceChildren();
+
+    /* Toolbar: view controls and a legend for the wire grammar. No counts. */
+    const bar = $("div", "lw-toolbar");
+    const mk = (label, on, cls = "") => { const b = $("button", "btn " + cls, label); b.type = "button"; b.onclick = on; return b; };
+    bar.append(mk("Collapse to teams", () => { ui.mode = "teams"; ui.collapsed.clear(); api.rerender(); }),
+      mk("Expand all", () => { ui.mode = "expanded"; ui.collapsed.clear(); api.rerender(); }));
+    const only = mk("Only teams that need me", () => { ui.onlyNeeds = !ui.onlyNeeds; api.rerender(); }, "needs"); only.setAttribute("aria-pressed", String(ui.onlyNeeds)); bar.append(only);
+    const legend = $("div", "lw-legend");
+    const sample = (cls, extra = "") => { const s = svg("svg", {width: 26, height: 8}); s.append(svg("path", {d: "M1,4 L25,4", class: "wire " + cls, style: extra})); return s; };
+    const lg = (node, text) => { const s = $("span"); s.append(node, text); legend.append(s); };
+    lg(sample("tree"), "created"); lg(sample("traffic", "stroke-width:2;opacity:.6"), "talked < 15m");
+    lg(sample("open"), "awaiting reply"); lg(sample("relay"), "relayed to you");
+    const dot = $("i", "msg-dot"); dot.style.cssText = "position:static;display:inline-block;margin:0;opacity:1;width:7px;height:7px"; lg(dot, "message in flight");
+    bar.append(legend); stage.append(bar);
+
+    /* Asks become tiles in the You band. */
+    const avail = Math.max(760, stage.clientWidth - 56);
+    const asks = field.asks();
+    const perRow = Math.max(1, Math.floor((avail - 76 - 132) / (TILE_W + 12)));
+    let shown = ui.showAllAsks ? asks : asks.slice(0, perRow);
+    const tileRows = Math.max(1, Math.ceil(shown.length / perRow)); // the "more" tile fits in the space reserved on the last row
+    const bandH = asks.length ? tileRows * (TILE_H + 10) - 10 : 90;
+    const L = layout(field, avail, BAND_TOP + bandH);
+    const rep = id => { let a = field.byId(id); while (a && !L.visible.has(a.id)) a = field.byId(a.parentId); return a ? a.id : null; };
+    // Order tiles by where each relay wire lands, so wires fan down instead of crossing.
+    const landing = a => { const r = rep([a.id, ...(a.ask?.via || [])].at(-1)) || rep(a.id); const g = r && L.geo.get(r); return g ? g.x + g.w / 2 : Infinity; };
+    if (!ui.showAllAsks) shown = [...shown].sort((x, y) => landing(x) - landing(y));
+
+    const scroller = $("div", "lw-scroll");
+    const canvas = $("div", "lw-canvas"); canvas.style.width = L.width + "px"; canvas.style.height = L.height + "px";
+    scroller.append(canvas); stage.append(scroller);
+    scroller.onscroll = () => { ui.scrollLeft = scroller.scrollLeft; };
+
+    const s = svg("svg", {width: L.width, height: L.height});
+    const gFrames = svg("g"), gTree = svg("g"), gTraffic = svg("g"), gRelay = svg("g"), gHover = svg("g");
+    s.append(gFrames, gTree, gTraffic, gRelay, gHover); canvas.append(s);
+    for (const f of L.frames) if (f.size > 1) gFrames.append(svg("rect", {x: f.x, y: f.y, width: f.w, height: f.h, rx: 12, class: "team-frame"}));
+
+    /* You band */
+    const band = $("div", "you-band"); band.style.top = BAND_TOP + "px";
+    const you = $("div", "you" + (asks.length ? " asked" : ""), "You"); you.title = "You · every ask ends here";
+    band.append(you);
+    const tiles = $("div", "tiles"); band.append(tiles);
+    const tileGeo = new Map();
+    shown.forEach((a, i) => {
+      const col = i % perRow, row = Math.floor(i / perRow);
+      tileGeo.set(a.id, {x: 76 + col * (TILE_W + 12), y: BAND_TOP + row * (TILE_H + 10), w: TILE_W, h: TILE_H});
+      tiles.append(tile(field, api, a));
+    });
+    if (asks.length > shown.length || (ui.showAllAsks && asks.length > perRow)) {
+      const more = $("div", "tile more", ui.showAllAsks ? "Show fewer" : "+" + (asks.length - shown.length) + " more asks");
+      more.onclick = () => { ui.showAllAsks = !ui.showAllAsks; api.rerender(); }; tiles.append(more);
+    }
+    if (!asks.length) band.append($("p", "calm", "Nothing needs you. Wires below show who is talking to whom."));
+    canvas.append(band);
+    const youGeo = {x: 0, y: BAND_TOP + 18, w: 64, h: 64};
+
+    /* Edges. Every drawn wire carries the ids it touches so hover can light it. */
+    const edges = [];
+    const addWire = (g, d, cls, a, b, extra = {}) => { const p = svg("path", {d, class: "wire " + cls}); p.dataset.a = a; p.dataset.b = b; for (const [k, v] of Object.entries(extra)) p.setAttribute(k, v); g.append(p); edges.push(p); return p; };
+    const labels = [];
+    const addLabel = (pt, text, cls, a, b, title) => { const l = $("div", "wire-label " + cls, text); l.style.left = pt.x + "px"; l.style.top = pt.y + "px"; l.dataset.a = a; l.dataset.b = b; if (title) l.title = title; canvas.append(l); labels.push(l); };
+    const isTree = (x, y) => field.byId(y)?.parentId === x || field.byId(x)?.parentId === y;
+    const between = (from, to) => { // oriented path between two visible agents
+      const gf = L.geo.get(from), gt = L.geo.get(to);
+      if (field.byId(to)?.parentId === from) return vCurve(bottom(gf), top(gt));
+      if (field.byId(from)?.parentId === to) return vCurve(top(gf), bottom(gt));
+      if (Math.abs(gf.y - gt.y) < 4 && gf.d === gt.d && gf.d > 0) return sag(bottom(gf), bottom(gt));
+      if (gf.y + gf.h < gt.y) return vCurve(bottom(gf), top(gt)); // across rows: drop from the upper agent
+      if (gt.y + gt.h < gf.y) return vCurve(top(gf), bottom(gt));
+      return arc(top(gf), top(gt));
+    };
+    const toYou = (agentRep, askerId) => { const tg = tileGeo.get(askerId); const g = L.geo.get(agentRep); const end = tg ? bottom(tg) : {x: youGeo.x + youGeo.w / 2, y: youGeo.y + youGeo.h}; const p = top(g); return `M${fmt(p.x)},${fmt(p.y)} C${fmt(p.x)},${fmt(p.y - 70)} ${fmt(end.x)},${fmt(end.y + 70)} ${fmt(end.x)},${fmt(end.y)}`; };
+
+    // Tree wires (always, faint).
+    const treeWire = new Map();
+    for (const [id, g] of L.geo) { const a = field.byId(id); if (!a.parentId || !L.geo.has(a.parentId)) continue;
+      treeWire.set(id, addWire(gTree, vCurve(bottom(L.geo.get(a.parentId)), top(g)), "tree" + (a.kind === "app" ? "" : " sub"), a.parentId, id)); }
+
+    // Recent traffic and open requests, folded onto visible representatives.
+    const pairs = new Map();
+    const pairOf = (x, y) => { const k = [x, y].sort().join("|"); if (!pairs.has(k)) pairs.set(k, {a: x, b: y, count: 0, last: 0, open: null}); return pairs.get(k); };
+    for (const m of field.messages) {
+      if (m.at < field.now - RECENT || m.from === "user" || m.to === "user") continue;
+      const ra = rep(m.from), rb = rep(m.to); if (!ra || !rb || ra === rb) continue;
+      const p = pairOf(ra, rb); p.count++; p.last = Math.max(p.last, m.at);
+    }
+    for (const m of field.openRequests()) {
+      if (m.kind === "creation" || m.from === "user" || m.to === "user") continue;
+      const ra = rep(m.from), rb = rep(m.to); if (!ra || !rb || ra === rb) continue;
+      const p = pairOf(ra, rb); if (!p.open || m.at < p.open.at) p.open = m;
+    }
+    let peerArcs = [...pairs.values()].filter(p => !isTree(p.a, p.b));
+    const arcCap = field.scale === "large" ? 14 : 30;
+    peerArcs = [...peerArcs.filter(p => p.open), ...peerArcs.filter(p => !p.open).sort((x, y) => y.count - x.count || y.last - x.last)].slice(0, Math.max(arcCap, peerArcs.filter(p => p.open).length));
+    const drawn = new Set();
+    for (const p of pairs.values()) {
+      const tree = isTree(p.a, p.b); if (!tree && !peerArcs.includes(p)) continue;
+      const parent = tree ? (field.byId(p.b).parentId === p.a ? p.a : p.b) : null, child = tree ? (parent === p.a ? p.b : p.a) : null;
+      const d = tree ? vCurve(bottom(L.geo.get(parent)), top(L.geo.get(child))) : between(p.a, p.b);
+      drawn.add([p.a, p.b].sort().join("|"));
+      if (p.count) { const fresh = 1 - Math.min(1, (field.now - p.last) / RECENT); addWire(gTraffic, d, "traffic", p.a, p.b, {style: `--o:${(0.18 + 0.5 * fresh).toFixed(2)};stroke-width:${Math.min(4, 1 + Math.log2(p.count + 1) * 0.8).toFixed(1)}`}); }
+      if (p.open) {
+        addWire(gTraffic, d, "open", p.a, p.b);
+        if (tree) treeWire.get(child)?.classList.add("replaced");
+        const m = p.open, waiter = field.nameOf(m.from), owner = field.nameOf(m.to);
+        addLabel(midOf(d), "waiting " + ago(field, m.at), "", p.a, p.b, waiter + " → " + owner + " · " + (field.INTENT_LABELS[m.intent] || field.KIND_LABELS[m.kind]) + ", no reply for " + ago(field, m.at) + "\n“" + m.body + "”");
+      } else if (!tree && p.count > 1) addLabel(midOf(d), "⇄ " + p.count, "count", p.a, p.b, field.nameOf(p.a) + " ⇄ " + field.nameOf(p.b) + " · " + p.count + " messages in the last 15 min");
+    }
+    // Write-scope conflicts under negotiation (today's signal), sparse: only between visible agents.
+    for (const c of field.conflicts().filter(c => c.negotiating).slice(0, 6)) {
+      const ra = rep(c.a.id), rb = rep(c.b.id); if (!ra || !rb || ra === rb || isTree(ra, rb)) continue;
+      const d = between(ra, rb);
+      addWire(gTraffic, d, "conflict", ra, rb);
+      if (!drawn.has([ra, rb].sort().join("|"))) addLabel(midOf(d), "shared scope", "conflict", ra, rb, "Both declared " + c.path + (c.negotiating ? " · negotiating" : ""));
+    }
+
+    // Relay paths: asker → each agent it passed through → its tile in the You band.
+    const relayNodes = new Set();
+    for (const a of shown) {
+      const chain = [a.id, ...(a.ask?.via || [])].map(rep).filter(Boolean).filter((x, i, l) => x !== l[i - 1]);
+      if (!chain.length) continue;
+      for (let i = 0; i < chain.length - 1; i++) addWire(gRelay, between(chain[i], chain[i + 1]), "relay", chain[i], chain[i + 1], {"data-ask": a.id});
+      addWire(gRelay, toYou(chain.at(-1), a.id), "relay", chain.at(-1), "user", {"data-ask": a.id});
+      for (const id of chain.slice(1)) relayNodes.add(id);
+    }
+
+    /* Nodes */
+    for (const [id, g] of L.geo) canvas.append(node(field, api, field.byId(id), g, relayNodes.has(id)));
+    for (const [id, g] of L.geo) {
+      const a = field.byId(id), kids = field.children(id); if (!kids.length) continue;
+      canvas.append(disclosure(field, api, a, g, isCollapsed(field, a)));
+    }
+
+    /* Dots layer persists across renders so a message in flight is not cut off by the next tick. */
+    ctx = {field, api, canvas, L, rep, tileGeo, youGeo, between, toYou, edges, labels, gHover};
+    canvas.append(dotsLayer);
+    if (ui.openAsk) askPopover();
+    applyHover();
+    animate(field, rep);
+    scroller.scrollLeft = ui.scrollLeft;
+    if (Math.abs(scrollY - keepY) > 1) scrollTo(scrollX, keepY);
+
+    canvas.onmouseover = e => {
+      const n = e.target.closest?.(".node"), t = e.target.closest?.(".tile:not(.more)");
+      const id = n?.dataset.id || null, tid = t?.dataset.id || null;
+      if (id !== ui.hover || tid !== ui.hoverTile) { ui.hover = id; ui.hoverTile = tid; applyHover(); }
+    };
+    canvas.onmouseleave = () => { if (ui.hover || ui.hoverTile) { ui.hover = null; ui.hoverTile = null; applyHover(); } };
+    canvas.onfocusin = e => { const n = e.target.closest?.(".node"); if (n) { ui.hover = n.dataset.id; ui.hoverTile = null; applyHover(); } };
+    canvas.onfocusout = e => { if (!canvas.contains(e.relatedTarget)) { ui.hover = null; applyHover(); } };
+  }
+
+  /* A node: identity first (name, else title), then the surface it works on, then its live state. */
+  function node(field, api, a, g, relay) {
+    const n = $("div", "node " + a.status + (needs(field, a) ? " needs" : "") + (relay ? " relay" : ""));
+    n.dataset.id = a.id; n.tabIndex = 0; n.setAttribute("role", "button");
+    Object.assign(n.style, {left: g.x + "px", top: g.y + "px", width: g.w + "px", height: g.h + "px"});
+    const role = AgentField.ROLE_LABELS[a.role] || a.role;
+    n.title = (a.name ? a.name + " · " : "") + a.title + "\n" + role + (a.kind !== "app" ? " (" + a.kind + ")" : "") + " · on " + a.surface.label + " (" + a.surface.kind + ")" +
+      (a.scope.length ? "\nScope: " + a.scope.join(", ") : "") + "\n" + AgentField.PHASE_LABELS[a.phase] + " · " + field.statusLabel(a);
+    const idl = $("div", "id-line");
+    idl.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("span", "ident" + (a.name ? "" : " untitled"), ident(a)));
+    // Identity is the name plus its role; without a name the title stands alone and the role moves to the hover.
+    if (a.name) idl.append($("span", "role", a.kind === "app" ? shortRole(a.role) : a.kind));
+    else if (a.kind !== "app") idl.append($("span", "role", a.kind));
+    const below = field.descendantsNeedingUser(a.id);
+    if (below.length) { const b = $("span", "bubble", String(below.length)); b.title = below.length + " below need you: " + below.map(ident).join(", "); idl.append(b); }
+    n.append(idl);
+    const on = $("div", "on"); on.append($("span", "kind", a.surface.kind), $("span", "label", a.surface.label)); n.append(on);
+    const st = $("div", "state"); st.append(AgentField.statusDot(a), $("span", null, stateOf(field, a))); n.append(st);
+    if (needs(field, a)) {
+      const strip = $("button", "ask-strip"); strip.type = "button";
+      strip.append($("b", null, (a.ask ? a.ask.kind : "next step") + " · for you"), $("span", null, a.ask?.question || a.next.action));
+      strip.onclick = e => { e.stopPropagation(); ui.openAsk = {id: a.id, anchor: "node"}; askPopover(); };
+      n.append(strip);
+    }
+    n.onclick = () => api.select(a.id);
+    n.onkeydown = e => { if (e.key === "Enter" && e.target === n) api.select(a.id); };
+    return n;
+  }
+  const shortRole = r => ({orchestrator: "orchestr.", implementer: "impl", reviewer: "review", researcher: "research", releaser: "release", dispatcher: "dispatch", subagent: "sub", delegate: "delegate"}[r] || r);
+
+  function disclosure(field, api, a, g, collapsed) {
+    const kids = field.descendants(a.id);
+    const d = $("button", "disc" + (collapsed ? "" : " open")); d.type = "button";
+    d.style.left = (g.x + g.w / 2) + "px"; d.style.top = (g.y + g.h + 5) + "px";
+    if (collapsed) {
+      d.append("▸ " + kids.length);
+      const dots = $("span", "dots"); for (const k of kids.slice(0, 8)) dots.append(AgentField.statusDot(k)); d.append(dots);
+      const ids = new Set(kids.map(k => k.id).concat(a.id));
+      const traffic = field.messages.filter(m => m.at >= field.now - 60 * MIN && ids.has(m.from) && ids.has(m.to)).length;
+      if (traffic) d.append($("span", "traffic", "⇄ " + traffic));
+      const nu = kids.filter(k => field.needsUser(k)).length; if (nu) d.append($("span", "warm", "· " + nu + " for you"));
+      d.title = "Expand " + kids.length + " sub-agents · " + traffic + " messages inside this team in the last hour";
+    } else { d.append("▾"); d.title = "Collapse sub-agents"; }
+    d.onclick = e => { e.stopPropagation(); ui.collapsed.set(a.id, !collapsed); api.rerender(); };
+    return d;
+  }
+
+  /* An ask tile in the You band: who asks, the path it travelled, the question, a primary answer. */
+  function tile(field, api, a) {
+    const t = $("div", "tile"); t.dataset.id = a.id;
+    const path = field.askPath(a.id);
+    const k = $("div", "k"); k.append($("span", null, a.ask ? (a.status === "failed" ? "failed · " : "") + a.ask.kind + (a.ask.blocking ? " · blocking" : "") : "your next step"));
+    k.append($("span", null, a.ask ? ago(field, a.ask.askedAt) : ""));
+    t.append(k);
+    const who = $("div", "who");
+    const btn = $("button", null, ident(a)); btn.type = "button"; btn.title = a.title; btn.onclick = () => api.select(a.id);
+    who.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), btn);
+    const via = path?.via || [];
+    const p = $("span", "path");
+    if (via.length) { p.append(" → "); via.forEach(v => { p.append($("b", null, ident(v)), " → "); }); p.append("you"); p.title = "Relayed: " + [a, ...via].map(ident).join(" → ") + " → you"; }
+    else { const parent = field.parent(a.id); p.append(parent ? " · under " + ident(parent) : " · " + a.surface.label); }
+    who.append(p); t.append(who);
+    t.append($("div", "q", a.ask?.question || a.next.action));
+    const acts = $("div", "acts");
+    if (a.ask?.options.length) {
+      const o = a.ask.options[0]; const b = $("button", "btn primary", o.label); b.type = "button"; b.title = "Answer: " + o.label;
+      b.onclick = e => { e.stopPropagation(); field.answer(a.id, o.id); }; acts.append(b);
+    }
+    const more = $("button", "btn", a.ask?.options.length > 1 ? "Other answers…" : a.ask ? "Answer…" : "Open"); more.type = "button";
+    more.onclick = e => { e.stopPropagation(); if (!a.ask) { api.select(a.id); return; } ui.openAsk = {id: a.id, anchor: "tile"}; askPopover(); };
+    acts.append(more);
+    const blocks = path?.blocks?.length || 0;
+    if (blocks) { const bl = $("span", "muted", "holds " + blocks); bl.style.cssText = "margin-left:auto;font-size:10px;align-self:center;white-space:nowrap"; bl.title = "Blocks " + path.blocks.map(ident).join(", "); acts.append(bl); }
+    t.append(acts);
+    t.onclick = e => { if (e.target === t || e.target.classList.contains("q")) { ui.openAsk = {id: a.id, anchor: "tile"}; askPopover(); } };
+    return t;
+  }
+
+  /* The shared ask box, floating under the tile or node it was opened from. */
+  function askPopover() {
+    if (!ctx) return;
+    ctx.canvas.querySelector(".ask-pop")?.remove();
+    const {field, api, canvas, L, tileGeo} = ctx;
+    const a = ui.openAsk && field.byId(ui.openAsk.id);
+    if (!a || !a.ask) { ui.openAsk = null; return; }
+    const g = (ui.openAsk.anchor === "tile" && tileGeo.get(a.id)) || L.geo.get(a.id) || tileGeo.get(a.id); if (!g) return;
+    const pop = $("div", "ask-pop");
+    const via = a.ask.via?.length ? a.ask.via.map(field.byId).filter(Boolean) : [];
+    if (via.length) { const v = $("div", "via"); v.append("Relayed: " + ident(a) + " → "); via.forEach(x => v.append($("b", null, ident(x)), " → ")); v.append("you"); pop.append(v); }
+    pop.append(Mockup.askBox(a, field, api.select));
+    const x = $("button", "btn quiet small x", "×"); x.type = "button"; x.setAttribute("aria-label", "Close"); x.onclick = () => { ui.openAsk = null; pop.remove(); }; pop.append(x);
+    const left = Math.min(Math.max(0, g.x), parseFloat(canvas.style.width) - 304);
+    pop.style.left = left + "px"; pop.style.top = (g.y + g.h + 6) + "px";
+    canvas.append(pop);
+  }
+  document.addEventListener("pointerdown", e => {
+    if (!ui.openAsk || !ctx) return;
+    if (e.target.closest?.(".ask-pop, .ask-strip, .tile .acts, .tile")) return;
+    ui.openAsk = null; ctx.canvas.querySelector(".ask-pop")?.remove();
+  }, true);
+
+  /* Hover or focus: the agent's wires brighten, everything else fades, and its last messages appear. */
+  function applyHover() {
+    if (!ctx) return;
+    const {field, canvas, L, rep, edges, labels, gHover, tileGeo} = ctx;
+    gHover.replaceChildren(); canvas.querySelector(".minilog")?.remove();
+    for (const el of canvas.querySelectorAll(".hot, .focus")) el.classList.remove("hot", "focus");
+    const id = ui.hover && L.geo.has(ui.hover) ? ui.hover : null, tid = ui.hoverTile;
+    canvas.classList.toggle("focusing", !!(id || tid));
+    if (tid) {
+      const a = field.byId(tid); if (!a) return;
+      const chain = new Set([a.id, ...(a.ask?.via || [])].map(rep).filter(Boolean));
+      for (const e of edges) if (e.dataset.ask === tid) e.classList.add("hot");
+      for (const n of canvas.querySelectorAll(".node")) if (chain.has(n.dataset.id)) n.classList.add("hot");
+      canvas.querySelector(`.tile[data-id="${tid}"]`)?.classList.add("hot");
+      return;
+    }
+    if (!id) return;
+    const a = field.byId(id);
+    const self = new Set([id]); for (const d of field.descendants(id)) if (rep(d.id) === id) self.add(d.id);
+    const since = field.now - 120 * MIN;
+    const mine = field.messages.filter(m => (self.has(m.from) || self.has(m.to)) && !(self.has(m.from) && self.has(m.to)));
+    const related = new Set([id]); if (a.parentId && L.geo.has(a.parentId)) related.add(a.parentId);
+    for (const k of field.children(id)) if (L.geo.has(k.id)) related.add(k.id);
+    let touchesYou = false;
+    for (const m of mine.filter(m => m.at >= since)) {
+      const other = self.has(m.from) ? m.to : m.from;
+      if (other === "user") { touchesYou = true; continue; }
+      const r = rep(other); if (!r || r === id) continue;
+      if (!related.has(r)) {
+        related.add(r);
+        if (!isDrawn(edges, id, r)) { const p = svg("path", {d: ctx.between(id, r), class: "wire hover-arc hot"}); gHover.append(p); }
+      }
+    }
+    for (const e of edges) if (e.dataset.a === id || e.dataset.b === id) e.classList.add("hot");
+    for (const l of labels) if (l.dataset.a === id || l.dataset.b === id) l.classList.add("hot");
+    for (const n of canvas.querySelectorAll(".node")) if (related.has(n.dataset.id)) n.classList.add("hot");
+    canvas.querySelector(`.node[data-id="${id}"]`)?.classList.add("focus");
+    for (const [tidx] of tileGeo) if (tidx === id || (touchesYou && self.has(tidx))) canvas.querySelector(`.tile[data-id="${tidx}"]`)?.classList.add("hot");
+    canvas.append(minilog(field, a, self, mine, L.geo.get(id), parseFloat(canvas.style.width)));
+  }
+  const isDrawn = (edges, x, y) => edges.some(e => (e.dataset.a === x && e.dataset.b === y) || (e.dataset.a === y && e.dataset.b === x));
+
+  function minilog(field, a, self, mine, g, width) {
+    const box = $("div", "minilog");
+    const head = $("h4", null, ident(a)); box.append(head);
+    box.append($("div", "sub", (a.name ? a.title + " · " : "") + (AgentField.ROLE_LABELS[a.role] || a.role) + " · on " + a.surface.label + (self.size > 1 ? " · with " + (self.size - 1) + " folded sub-agents" : "")));
+    const last = mine.slice(-5).reverse();
+    if (!last.length) box.append($("div", "sub", "No messages yet."));
+    for (const m of last) {
+      const out = self.has(m.from), other = out ? m.to : m.from;
+      const row = $("div", "row");
+      row.append($("span", "arrow", out ? "→" : "←"));
+      const what = $("span", "what"); const who = $("b", null, field.nameOf(other)); what.append(who);
+      what.append($("i", m.intent, field.INTENT_LABELS[m.intent] || field.KIND_LABELS[m.kind]));
+      what.append($("span", "body", m.body)); row.append(what, $("span", "age", ago(field, m.at)));
+      box.append(row);
+    }
+    const owes = field.openRequests().filter(m => self.has(m.to) && m.kind !== "creation" && m.from !== "user");
+    const awaits = field.openRequests().filter(m => self.has(m.from) && m.kind !== "creation" && m.to !== "user");
+    for (const m of owes.slice(0, 2)) { const o = $("div", "owe"); o.append($("b", null, "Owes "), field.nameOf(m.from) + " a reply · " + ago(field, m.at)); box.append(o); }
+    for (const m of awaits.slice(0, 2)) { const o = $("div", "owe"); o.append("Waiting on " + field.nameOf(m.to) + "’s reply · " + ago(field, m.at)); box.append(o); }
+    const right = g.x + g.w + 10 + 300 <= width;
+    box.style.left = (right ? g.x + g.w + 10 : Math.max(0, g.x - 310)) + "px"; box.style.top = Math.max(0, g.y - 4) + "px";
+    return box;
+  }
+
+  /* Messages in flight: each new message becomes a dot travelling sender → recipient along its wire. */
+  const dotsLayer = $("div", "dots-layer");
+  function animate(field, rep) {
+    const fresh = field.messages.filter(m => m.id > ui.lastMsgId);
+    if (!fresh.length) return;
+    ui.lastMsgId = Math.max(ui.lastMsgId, ...fresh.map(m => m.id));
+    const cap = field.scale === "large" ? 14 : 10;
+    fresh.slice(-cap).forEach((m, i) => {
+      const from = m.from === "user" ? "user" : rep(m.from), to = m.to === "user" ? "user" : rep(m.to);
+      if (!from || !to || from === to) return;
+      let d;
+      if (from === "user" || to === "user") {
+        const agent = from === "user" ? to : from, asker = from === "user" ? m.to : m.from;
+        d = ctx.toYou(agent, asker);
+        if (from === "user") d = reversePath(d);
+      } else d = ctx.between(from, to);
+      const delay = i * 140, dur = 950;
+      const target = to === "user" ? null : to;
+      if (!reduced) {
+        const dot = $("i", "msg-dot " + (m.to === "user" || m.from === "user" ? "user" : m.intent));
+        dot.style.offsetPath = `path("${d}")`;
+        dotsLayer.append(dot);
+        const anim = dot.animate([{offsetDistance: "0%", opacity: 0}, {opacity: 1, offset: 0.12}, {opacity: 1, offset: 0.88}, {offsetDistance: "100%", opacity: 0}], {duration: dur, delay, easing: "ease-in-out", fill: "both"});
+        anim.onfinish = () => dot.remove();
+      }
+      setTimeout(() => {
+        const el = target ? ctx.canvas.querySelector(`.node[data-id="${target}"]`) : ctx.canvas.querySelector(".you");
+        if (!el) return; el.classList.remove("ping"); void el.offsetWidth; el.classList.add("ping");
+        setTimeout(() => el.classList.remove("ping"), 800);
+      }, reduced ? 0 : delay + dur);
+    });
+  }
+  function reversePath(d) { const n = d.match(/-?[\d.]+/g); return `M${n[6]},${n[7]} C${n[4]},${n[5]} ${n[2]},${n[3]} ${n[0]},${n[1]}`; }
+
+  Mockup.mount({
+    number: 21, title: "Live wires", spectrum: "moderate",
+    summary: "The delegation tree as an org chart whose edges carry messages: dots travel on every send, dashed wires wait for replies, and asks climb their relay path to You at the top.",
+    signals: {
+      current: ["created_by", "creation", "agent_messages", "conflicts", "status", "title", "client", "write_scope", "tool_activity", "pending_approval", "age", "updated_at", "next_actor", "next_action", "phase"],
+      proposed: ["name", "role", "kind", "surface", "intent", "escalation", "ask", "blocks", "deliverable"],
+    },
+    notes: "Identity: the title is the assignment and drifts, so a node leads with a stable name the creator picks in the create call (free per turn) and falls back to the title only when there is none; role and title stay in the hover. On what: the second line is the surface (one proposed checkpoint field), with the write scope on hover; phase stays in the drawer because it says how far, not on what. Wires cost nothing new: lineage is created_by, dots and dashes are today's agent_messages (dashed = an unanswered action request; a creation's reply contract is not drawn as a wait), red dotted arcs are today's scope conflicts under negotiation. Only intent (one enum on send), ask.via (the relay chain, derivable from blocker messages), and surface/name are new.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

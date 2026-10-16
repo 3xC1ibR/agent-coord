@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 24 · Surface map</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* "On what", answered with product nouns. Surfaces are tiles grouped by kind; agents are
+       marks on the surface they work on; messages are arcs between surfaces. A side panel holds
+       what needs you, or the selected surface's agents, asks, overlaps and traffic. */
+    html, body { height: 100%; } body { height: 100dvh; overflow: hidden; }
+    #stage { display: grid; grid-template-columns: minmax(0, 1fr) 360px; grid-template-rows: minmax(0, 1fr); gap: 0; padding: 0; overflow: hidden; }
+    .sm-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .sm-toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 12px 22px 10px; border-bottom: 1px solid var(--line); }
+    .seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .seg button { border: 0; background: transparent; color: var(--muted); font-size: 11.5px; padding: 4px 10px; border-radius: 5px; cursor: pointer; }
+    .seg button:hover { color: var(--ink); }
+    .seg button[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .seg button small { font: 9px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-left: 4px; }
+    .tb-label { font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-right: -8px; }
+    .legend { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 10.5px; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend svg { width: 22px; height: 8px; }
+    .lg-arc { stroke: var(--accent); stroke-width: 2; stroke-opacity: .6; }
+    .lg-open { stroke: var(--accent); stroke-width: 1.6; stroke-dasharray: 3 2.5; stroke-opacity: .8; }
+    .lg-overlap { width: 14px; height: 8px; border-radius: 2px; background: repeating-linear-gradient(135deg, var(--warm) 0 2px, transparent 2px 4px); opacity: .8; }
+    .scope-note { flex: none; padding: 7px 22px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--tint) 60%, transparent); }
+    .scope-note b { color: var(--ink); font-weight: 550; }
+
+    .sm-map { flex: 1; min-height: 0; overflow: auto; position: relative; }
+    .sm-canvas { position: relative; padding: 16px 22px 40px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; }
+    .region { flex: 1 1 var(--w, 380px); min-width: 0; max-width: var(--maxw, none); border: 1px dashed var(--line-strong); border-radius: 10px; padding: 8px 10px 10px; background: color-mix(in srgb, var(--surface) 35%, transparent); }
+    .region > h3 { position: relative; z-index: 1; width: fit-content; max-width: 100%; padding: 0 4px; border-radius: 3px; background: color-mix(in srgb, var(--surface) 35%, var(--paper)); display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font: 600 9.5px var(--mono); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); margin: 0 2px 8px; }
+    .region > h3 .glyph { font: 12px -apple-system, sans-serif; letter-spacing: 0; color: var(--muted); }
+    .region > h3 .needs { color: var(--warm); letter-spacing: .04em; }
+    .tiles { display: flex; flex-wrap: wrap; gap: 8px; }
+    .tile { position: relative; flex: 1 1 var(--tw, 190px); min-width: 150px; max-width: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px 7px; cursor: pointer; display: flex; flex-direction: column; gap: 5px; transition: border-color .15s, box-shadow .2s, opacity .2s; }
+    .tile:hover { border-color: var(--hover-line); }
+    .tile.needs { border-top: 2px solid var(--warm); padding-top: 6px; }
+        /* Fade a tile's content, not the tile, so arcs behind it stay hidden. */
+    .tile > * { transition: opacity .2s; }
+    .tile.quiet > * { opacity: .6; }
+    .tile.quiet:hover > *, .tile.selected > *, .tile.linked > * { opacity: 1; }
+    .tile.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .tile.linked { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+    .tile.overlap { box-shadow: 0 0 0 1px color-mix(in srgb, var(--warm) 55%, transparent), 0 0 16px color-mix(in srgb, var(--warm) 32%, transparent); }
+    .tile.overlap.selected { box-shadow: 0 0 0 1px var(--accent), 0 0 16px color-mix(in srgb, var(--warm) 32%, transparent); }
+    .map-focus .tile:not(.selected):not(.linked):not(.hovered) > * { opacity: .4; }
+    .map-team .tile:not(.team) > * { opacity: .35; }
+    .map-team .mark:not(.team) { opacity: .35; }
+    .tile.ping { animation: ping 1.1s ease-out; }
+    @keyframes ping { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+    .t-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .t-label { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 550; letter-spacing: -.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .t-label.path { font: 500 11px var(--mono); letter-spacing: 0; }
+    .t-badge { flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; border-radius: 9px; background: var(--warm); color: var(--surface); font: 600 9.5px var(--mono); line-height: 1.7; }
+    :root[data-theme="dark"] .t-badge { color: var(--paper); }
+    .t-chat { flex: none; font: 9.5px var(--mono); color: var(--muted); }
+    .t-rows { display: grid; gap: 1px; }
+    .mark { border: 0; background: transparent; color: inherit; font: inherit; padding: 0; cursor: pointer; text-align: left; }
+    .m-row { display: grid; grid-template-columns: 10px minmax(0, auto) minmax(0, 1fr); align-items: center; column-gap: 6px; padding: 2px 4px; margin: 0 -4px; border-radius: 4px; font-size: 11px; line-height: 1.35; min-width: 0; }
+    .m-row:hover { background: var(--hover-bg); }
+    .m-row.sub { padding-left: 14px; grid-template-columns: 8px minmax(0, auto) minmax(0, 1fr); }
+    .m-row.sub .dot { width: 5px; height: 5px; }
+    .m-row .who { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+    .m-row .who.titled { font-weight: 450; }
+    .m-row .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; }
+    .m-row.working .what { color: var(--accent); }
+    .m-row.waiting .what, .m-row.failed .what { color: var(--warm); }
+    .m-row.failed .what { color: var(--danger); }
+    .m-dots { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+    .m-dot { width: 12px; height: 12px; display: inline-grid; place-items: center; border-radius: 50%; }
+    .m-dot:hover { background: var(--hover-bg); }
+    .m-dot .dot { width: 7px; height: 7px; }
+    .m-dot.sub .dot { width: 4.5px; height: 4.5px; }
+    .m-dot.waiting .dot, .m-dot.failed .dot { width: 8px; height: 8px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--warm) 28%, transparent); }
+    .more { font: 9.5px var(--mono); color: var(--muted); padding: 0 2px; }
+    .t-foot { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--warm); line-height: 1.35; min-width: 0; }
+    .t-foot .stripe { flex: none; width: 12px; height: 8px; border-radius: 2px; background: repeating-linear-gradient(135deg, var(--warm) 0 2px, transparent 2px 4px); }
+    .t-foot span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .t-up { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Arcs */
+    svg.arcs { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; z-index: 2; }
+    svg.arcs.under { z-index: 0; }
+    .tile { z-index: 1; }
+    .arc.ghost { stroke-opacity: 0; }
+    .arc { fill: none; stroke: var(--accent); stroke-linecap: round; transition: stroke-opacity .15s; }
+    .arc.open { stroke-dasharray: 5 4; }
+    .arc.scope { stroke: var(--warm); stroke-dasharray: 2 4; stroke-opacity: 0; }
+    .arc-end { fill: var(--accent); }
+    .arc-count { pointer-events: auto; cursor: pointer; }
+    .arc-count circle { fill: var(--surface); stroke: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+    .arc-count text { font: 600 9px var(--mono); fill: var(--accent); text-anchor: middle; dominant-baseline: central; }
+    .arc-label { opacity: 0; transition: opacity .15s; }
+    .arc-label rect { fill: var(--surface); stroke: var(--line-strong); }
+    .arc-label text { font: 10px -apple-system, sans-serif; fill: var(--ink); }
+    .arc-label text tspan.m { fill: var(--muted); }
+    svg.focusing .arc:not(.hot) { stroke-opacity: .07 !important; }
+    svg.focusing .arc-end:not(.hot), svg.focusing .arc-count:not(.hot) { opacity: .12; }
+    svg.focusing .arc.hot { stroke-opacity: .85 !important; }
+    svg.focusing .arc.scope.hot { stroke-opacity: .9 !important; }
+    svg.focusing .arc-label.hot { opacity: 1; }
+    .flight { position: absolute; left: 0; top: 0; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); z-index: 3; pointer-events: none; offset-rotate: 0deg; animation: fly 1s ease-in-out forwards; }
+    .flight.rev { animation-name: fly-rev; }
+    .flight.warm { background: var(--warm); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warm) 25%, transparent); }
+    @keyframes fly { from { offset-distance: 0%; opacity: 1; } 90% { opacity: 1; } to { offset-distance: 100%; opacity: 0; } }
+    @keyframes fly-rev { from { offset-distance: 100%; opacity: 1; } 90% { opacity: 1; } to { offset-distance: 0%; opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .flight { display: none; } .tile.ping { animation: none; outline: 1px solid var(--accent); } }
+
+    /* Panel */
+    .sm-panel { min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--surface); padding: 14px 16px 30px; display: flex; flex-direction: column; gap: 12px; font-size: 12px; line-height: 1.5; }
+    .sm-panel h2 { font-size: 14px; font-weight: 600; letter-spacing: -.015em; display: flex; align-items: center; gap: 8px; }
+    .sm-panel h2 .n { font: 600 10px var(--mono); padding: 1px 7px; border-radius: 9px; background: var(--warm); color: var(--surface); }
+    :root[data-theme="dark"] .sm-panel h2 .n { color: var(--paper); }
+    .sm-panel h4 { font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
+    .p-sub { font-size: 11px; color: var(--muted); margin-top: -6px; }
+    .need { display: grid; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+    .need:last-child { border-bottom: 0; }
+    .need-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
+    .need-head .who { color: var(--ink); font-weight: 600; }
+    .surf-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 10px; font-size: 10.5px; color: var(--ink); background: transparent; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .surf-chip:hover { border-color: var(--accent); color: var(--accent); }
+    .surf-chip .k { font: 9px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+    .relay { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; font-size: 10.5px; color: var(--muted); }
+    .relay b { color: var(--ink); font-weight: 550; }
+    .relay .you { color: var(--warm); font-weight: 600; }
+    .relay .arrow { color: var(--muted); }
+    .need .ask { padding: 8px 10px; }
+    .need-next { border-left: 2px solid var(--warm); padding-left: 8px; color: var(--ink); }
+    .p-head { display: flex; align-items: flex-start; gap: 8px; }
+    .p-head h2 { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .p-head h2.path { font: 600 12px var(--mono); }
+    .p-agent { display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 2px 7px; padding: 6px 8px; margin: 0 -8px; border-radius: 6px; cursor: pointer; align-items: baseline; }
+    .p-agent:hover { background: var(--hover-bg); }
+    .p-agent .dot { align-self: center; }
+    .p-agent .id { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; min-width: 0; }
+    .p-agent .id b { font-weight: 600; }
+    .p-agent .id .role { font-size: 10.5px; color: var(--muted); }
+    .p-agent .line { grid-column: 2; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .p-agent .line.now { color: var(--ink); }
+    .p-agent.working .line.now { color: var(--accent); }
+    .p-agent .line .phase-steps { margin-right: 6px; }
+    .p-agent .line .phase-steps i { width: 6px; height: 3px; }
+    .p-agent .chain { grid-column: 2; font-size: 10.5px; color: var(--muted); }
+    .health { font: 9px var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--warm); }
+    .overlap-item { border-left: 3px solid var(--warm); padding: 4px 0 4px 9px; font-size: 11px; display: grid; gap: 2px; }
+    .overlap-item code { font: 10px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+    .overlap-item .state { font: 600 9px var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--warm); }
+    .overlap-item .state.ok { color: var(--ok); }
+    .msg { display: grid; gap: 1px; padding: 5px 0 5px 9px; border-left: 2px solid var(--line); }
+    .msg.open { border-left-color: var(--accent); }
+    .msg small { font-size: 10px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 6px; align-items: baseline; }
+    .msg small b { color: var(--ink); font-weight: 550; }
+    .msg small .intent { color: var(--accent); }
+    .msg small .owed { color: var(--accent); font-weight: 600; }
+    .msg span.body { font-size: 11.5px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .link-row { display: grid; gap: 2px; padding: 6px 8px; margin: 0 -8px; border-radius: 6px; cursor: pointer; }
+    .link-row:hover { background: var(--hover-bg); }
+    .link-row .pair { display: flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 550; min-width: 0; }
+    .link-row .pair span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .link-row .pair .x { flex: none; color: var(--muted); font-weight: 400; }
+    .link-row .pair .c { flex: none; margin-left: auto; font: 10px var(--mono); color: var(--accent); }
+    .link-row .last { font-size: 10.5px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .calm { color: var(--muted); font-size: 12px; padding: 10px 0; }
+    .p-more { font-size: 11px; }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el, MIN = 60_000;
+  const SVG = "http://www.w3.org/2000/svg";
+  const svgEl = (tag, attrs = {}) => { const e = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; };
+  const KIND_ORDER = ["page", "screen", "service", "module", "pipeline", "build", "doc", "question"];
+  const KIND_LABELS = {page: "Pages", screen: "Screens", service: "Services", module: "Modules", pipeline: "Pipelines", build: "Builds", doc: "Docs", question: "Questions"};
+  const KIND_ONE = {page: "page", screen: "screen", service: "service", module: "module", pipeline: "pipeline", build: "build", doc: "doc", question: "question"};
+  const KIND_GLYPH = {page: "▭", screen: "▯", service: "◇", module: "◫", pipeline: "⇢", build: "⬡", doc: "¶", question: "?"};
+  const WINDOWS = [[15, "15m"], [60, "1h"], [360, "6h"]];
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // View state that survives re-renders (Play, Step, answers).
+  const view = {mode: "surface", windowMin: 60, selected: null, mapScroll: 0, panelScroll: 0, lastField: null, lastMsgId: 0, showAllLinks: false};
+
+  /* Identity: the stable name when the agent has one; otherwise the title, which is really the assignment. */
+  const ident = a => a.name || a.title;
+  const rootOf = (field, a) => field.chain(a.id)[0] || a;
+  const isSub = a => a.kind !== "app";
+
+  /* Node keys: a product surface (proposed signal) or a write-scope directory (today). */
+  function scopeDir(path) {
+    const parts = path.replace(/\*\*.*$/, "").split("/").filter(Boolean);
+    if (parts.length && /\.[a-z0-9]+$/i.test(parts.at(-1))) parts.pop();
+    return parts.join("/") || "(repository root)";
+  }
+  function scopeRegion(dir) { const p = dir.split("/"); return p[0] === "plugins" && p.length > 1 ? p.slice(0, 2).join("/") : p[0]; }
+  function nodeOf(a) {
+    if (view.mode === "surface") {
+      const kind = a.surface?.kind || "module", label = a.surface?.label || a.title;
+      return {key: "s:" + kind + "|" + label, region: kind, label, kind, path: /[/.]/.test(label) && !/\s/.test(label)};
+    }
+    if (!a.scope?.length) return {key: "d:none", region: "No declared scope", label: "No begin-work scope", kind: null, path: false, none: true};
+    const dir = scopeDir(a.scope[0]), region = scopeRegion(dir);
+    const label = dir.startsWith("(") ? dir : dir === region ? dir + "/" : dir.slice(region.length + 1) + "/";
+    return {key: "d:" + dir, region, label, kind: null, path: true, dir};
+  }
+
+  function build(field) {
+    const nodes = new Map(), keyOf = new Map();
+    for (const a of field.agents) {
+      const n = nodeOf(a);
+      if (!nodes.has(n.key)) nodes.set(n.key, {...n, agents: [], needs: [], working: 0, last: 0, internal: 0, overlaps: [], allOverlaps: []});
+      const t = nodes.get(n.key); t.agents.push(a); keyOf.set(a.id, n.key);
+      if (field.needsUser(a)) t.needs.push(a);
+      if (a.status === "working") t.working++;
+      t.last = Math.max(t.last, field.lastActivity(a));
+    }
+    // Message traffic between surfaces in the window, aggregated per pair.
+    const since = field.now - view.windowMin * MIN, links = new Map(), fresh = [];
+    for (const m of field.messages) {
+      if (m.from === "user" || m.to === "user") continue;
+      const ka = keyOf.get(m.from), kb = keyOf.get(m.to); if (!ka || !kb) continue;
+      if (m.id > view.lastMsgId) fresh.push({m, ka, kb});
+      if (m.at < since) continue;
+      if (ka === kb) { nodes.get(ka).internal++; continue; }
+      const [a, b] = [ka, kb].sort(), key = a + "⇄" + b;
+      if (!links.has(key)) links.set(key, {key, a, b, count: 0, ab: 0, ba: 0, open: 0, last: null, msgs: []});
+      const l = links.get(key); l.count++; if (ka === a) l.ab++; else l.ba++; l.last = m; l.msgs.push(m);
+      if (m.replyRequired && !m.repliedBy && m.kind !== "closure") l.open++;
+    }
+    // Write-scope overlaps between different teams. Only live ones glow, on the surface where the
+    // two teams meet (or on both ends while they negotiate); the rest are listed in the panel.
+    const overlaps = [], active = a => ["working", "blocked", "waiting"].includes(a.status);
+    for (const c of field.conflicts()) {
+      if (rootOf(field, c.a).id === rootOf(field, c.b).id) continue;
+      const ka = keyOf.get(c.a.id), kb = keyOf.get(c.b.id);
+      const at = view.mode === "scope" ? ("d:" + scopeDir(c.path)) : null;
+      const where = at && nodes.has(at) ? [at] : ka === kb ? [ka] : [ka, kb];
+      const live = c.negotiating || (active(c.a) && active(c.b) && (c.a.status === "working" || c.b.status === "working"));
+      const o = {...c, ka, kb, where, glow: live && (where.length === 1 || c.negotiating)};
+      if (o.glow) overlaps.push(o);
+      for (const k of new Set([...where, ka, kb])) { const n = nodes.get(k); if (!n) continue; n.allOverlaps.push(o); if (o.glow && where.includes(k)) n.overlaps.push(o); }
+    }
+    // Regions, in a fixed order so the map keeps its shape (spatial memory).
+    const regions = new Map();
+    for (const n of nodes.values()) { if (!regions.has(n.region)) regions.set(n.region, []); regions.get(n.region).push(n); }
+    const order = [...regions.keys()].sort((x, y) => view.mode === "surface" ? KIND_ORDER.indexOf(x) - KIND_ORDER.indexOf(y)
+      : (x === "No declared scope" ? 1 : 0) - (y === "No declared scope" ? 1 : 0) || regions.get(y).length - regions.get(x).length || x.localeCompare(y));
+    for (const list of regions.values()) list.sort((x, y) => y.needs.length - x.needs.length || y.working - x.working || y.last - x.last || x.label.localeCompare(y.label));
+    return {nodes, keyOf, links: [...links.values()], overlaps, regions: order.map(r => ({id: r, nodes: regions.get(r)})), fresh};
+  }
+
+  function nowText(field, a) {
+    if (a.ask) return a.ask.kind + " · needs you";
+    if (field.needsUser(a)) return "needs you";
+    if (a.status === "working") return a.activity || field.toolLabel(a) || "Working";
+    if (a.status === "blocked") return field.statusLabel(a);
+    if (a.status === "done") return "done " + field.relativeTime(a.updatedAt);
+    if (a.status === "failed") return "failed";
+    return "idle · " + field.relativeTime(field.lastActivity(a));
+  }
+
+  /* Surface tile. Few agents: one row per agent (identity + now). Many: status marks with a count. */
+  function tile(field, n, M, api, compact) {
+    const t = $("div", "tile"); t.dataset.key = n.key; t.tabIndex = 0; t.setAttribute("role", "button");
+    t.style.setProperty("--tw", (compact ? 120 + Math.min(10, n.agents.length) * 14 : 180 + Math.min(4, n.agents.length) * 14) + "px");
+    const quiet = !n.needs.length && !n.working && n.agents.every(a => ["done", "idle"].includes(a.status)) && field.now - n.last > 45 * MIN;
+    if (n.needs.length) t.classList.add("needs"); if (quiet) t.classList.add("quiet");
+    if (n.overlaps.length) t.classList.add("overlap");
+    if (view.selected === n.key) t.classList.add("selected");
+    const teams = new Set(n.agents.map(a => rootOf(field, a).id)); t.dataset.teams = [...teams].join(" ");
+    const head = $("div", "t-head");
+    const label = $("span", "t-label" + (n.path ? " path" : ""), n.label); head.append(label);
+    t.title = (n.kind ? KIND_ONE[n.kind] + " · " : "") + (n.dir || n.label);
+    if (n.internal) { const c = $("span", "t-chat", "↺" + n.internal); c.title = n.internal + " messages between agents on this " + (n.kind ? KIND_ONE[n.kind] : "directory") + " in the window"; head.append(c); }
+    if (n.needs.length) { const b = $("span", "t-badge", n.needs.length + " you"); b.title = n.needs.length + " need you: " + n.needs.map(ident).join(", "); head.append(b); }
+    t.append(head);
+    // Order agents as a tree within the tile: parents before their sub-agents.
+    const here = new Set(n.agents.map(a => a.id));
+    const ordered = []; const walk = a => { ordered.push(a); for (const k of field.children(a.id)) if (here.has(k.id)) walk(k); };
+    const tops = n.agents.filter(a => !a.parentId || !here.has(a.parentId)).sort((x, y) => Number(field.needsUser(y)) - Number(field.needsUser(x)) || (x.status === "done") - (y.status === "done") || field.lastActivity(y) - field.lastActivity(x));
+    for (const a of tops) walk(a);
+    const markTitle = a => ident(a) + " · " + AgentField.ROLE_LABELS[a.role] + (a.kind !== "app" ? " (" + a.kind + ")" : "") + " · " + (a.surface?.label || "") + "\n" + (a.name ? a.title + "\n" : "") + nowText(field, a) + (a.parentId && field.byId(a.parentId) ? "\nCreated by " + ident(field.byId(a.parentId)) : "");
+    const mark = (a, cls) => { const b = $("button", "mark " + cls + " " + a.status); b.type = "button"; b.dataset.team = rootOf(field, a).id; b.title = markTitle(a); b.onclick = e => { e.stopPropagation(); api.select(a.id); }; if (isSub(a)) b.classList.add("sub"); return b; };
+    if (!compact) {
+      const rows = $("div", "t-rows"), cap = 4;
+      for (const a of ordered.slice(0, cap)) {
+        const r = mark(a, "m-row" + (field.needsUser(a) && a.status !== "failed" ? " waiting" : ""));
+        if (a.parentId && here.has(a.parentId)) r.classList.add("sub");
+        const who = $("span", "who" + (a.name ? "" : " titled"), ident(a));
+        r.append(AgentField.statusDot(a), who, $("span", "what", nowText(field, a)));
+        rows.append(r);
+      }
+      t.append(rows);
+      if (ordered.length > cap) { const d = $("div", "m-dots"); for (const a of ordered.slice(cap, cap + 14)) { const m = mark(a, "m-dot"); m.append(AgentField.statusDot(a)); d.append(m); } if (ordered.length > cap + 14) d.append($("span", "more", "+" + (ordered.length - cap - 14))); t.append(d); }
+      // Delegation across surfaces: who sent this surface's top agents here.
+      const ups = [...new Set(tops.map(a => a.parentId).filter(id => id && field.byId(id)))].map(field.byId);
+      if (ups.length) t.append($("div", "t-up", "↑ from " + ups.map(p => ident(p) + " · " + (M.nodes.get(M.keyOf.get(p.id))?.label || "")).join(", ")));
+    } else {
+      const d = $("div", "m-dots"), cap = 22;
+      for (const a of ordered.slice(0, cap)) { const m = mark(a, "m-dot" + (field.needsUser(a) ? " waiting" : "")); m.append(AgentField.statusDot(a)); d.append(m); }
+      if (ordered.length > cap) d.append($("span", "more", "+" + (ordered.length - cap)));
+      t.append(d);
+    }
+    if (n.overlaps.length) {
+      const o = n.overlaps[0], other = (o.ka === n.key ? o.b : o.kb === n.key ? o.a : o.b);
+      const foot = $("div", "t-foot"); foot.append($("span", "stripe"));
+      const otherTeam = rootOf(field, other);
+      foot.append($("span", null, (n.overlaps.length > 1 ? n.overlaps.length + " scope overlaps · " : "Overlaps " + ident(otherTeam) + "’s team · ") + (n.overlaps.some(x => !x.negotiating) ? "unresolved" : "negotiating")));
+      foot.title = n.overlaps.map(x => ident(x.a) + " ⇄ " + ident(x.b) + " on " + x.path + (x.negotiating ? " (negotiating)" : " (no coordination yet)")).join("\n");
+      t.append(foot);
+    }
+    t.onclick = () => { view.selected = view.selected === n.key ? null : n.key; view.panelScroll = 0; api.rerender(); };
+    t.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); t.click(); } };
+    return t;
+  }
+
+  /* Arcs between surfaces, drawn over the laid-out tiles. */
+  function drawArcs(field, M, canvas, [under, svg], api) {
+    const base = canvas.getBoundingClientRect();
+    const rects = new Map();
+    for (const el of canvas.querySelectorAll(".tile")) { const r = el.getBoundingClientRect(); rects.set(el.dataset.key, {x: r.left - base.left, y: r.top - base.top, w: r.width, h: r.height}); }
+    for (const v of [under, svg]) { v.setAttribute("width", canvas.scrollWidth); v.setAttribute("height", canvas.scrollHeight); }
+    const center = r => ({x: r.x + r.w / 2, y: r.y + r.h / 2});
+    const edgePoint = (r, toward) => { // where the line from the centre toward another point leaves the rect
+      const c = center(r), dx = toward.x - c.x, dy = toward.y - c.y; if (!dx && !dy) return c;
+      const s = Math.min(Math.abs((r.w / 2 + 2) / (dx || 1e-9)), Math.abs((r.h / 2 + 2) / (dy || 1e-9)));
+      return {x: c.x + dx * s, y: c.y + dy * s};
+    };
+    const geometry = (ka, kb) => {
+      const ra = rects.get(ka), rb = rects.get(kb); if (!ra || !rb) return null;
+      const ca = center(ra), cb = center(rb), p = edgePoint(ra, cb), q = edgePoint(rb, ca);
+      const mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2, dx = q.x - p.x, dy = q.y - p.y, len = Math.hypot(dx, dy) || 1;
+      const bend = Math.min(80, len * .18), cx = mx - dy / len * bend, cy = my + dx / len * bend;
+      return {d: `M${p.x.toFixed(1)},${p.y.toFixed(1)} Q${cx.toFixed(1)},${cy.toFixed(1)} ${q.x.toFixed(1)},${q.y.toFixed(1)}`, p, q, mid: {x: (p.x + 2 * cx + q.x) / 4, y: (p.y + 2 * cy + q.y) / 4}};
+    };
+    const focus = view.selected;
+    // Sparse by default: the strongest recent links; every link of the focused surface.
+    const score = l => l.count * (1 - Math.min(.9, (field.now - l.last.at) / (view.windowMin * MIN)));
+    const ranked = [...M.links].sort((x, y) => score(y) - score(x));
+    const cap = view.showAllLinks ? Infinity : field.agents.length > 60 ? 16 : 30;
+    const shown = ranked.filter((l, i) => i < cap || (focus && (l.a === focus || l.b === focus)));
+    M.hiddenLinks = M.links.length - shown.length;
+    const back = svgEl("g"), layer = svgEl("g"), labels = svgEl("g");
+    for (const l of shown) {
+      const g = geometry(l.a, l.b); if (!g) continue; l.d = g.d;
+      const age = (field.now - l.last.at) / (view.windowMin * MIN);
+      const op = (.22 + .58 * (1 - Math.min(1, age))).toFixed(2), w = Math.min(4.5, 1.1 + Math.log2(l.count) * 1).toFixed(2);
+      const path = svgEl("path", {d: g.d, class: "arc" + (l.open ? " open" : ""), "stroke-width": w, "stroke-opacity": op, "data-a": l.a, "data-b": l.b});
+      back.append(path);
+      // A copy above the tiles, shown only while this link is focused.
+      layer.append(svgEl("path", {d: g.d, class: "arc ghost" + (l.open ? " open" : ""), "stroke-width": w, "data-a": l.a, "data-b": l.b}));
+      for (const pt of [g.p, g.q]) layer.append(svgEl("circle", {cx: pt.x, cy: pt.y, r: 2.4, class: "arc-end", "data-a": l.a, "data-b": l.b, "fill-opacity": op}));
+      const onTile = [...rects.values()].some(r => g.mid.x > r.x - 6 && g.mid.x < r.x + r.w + 6 && g.mid.y > r.y - 6 && g.mid.y < r.y + r.h + 6);
+      if (l.count > 1 && !onTile) {
+        const c = svgEl("g", {class: "arc-count", "data-a": l.a, "data-b": l.b, transform: `translate(${g.mid.x.toFixed(1)},${g.mid.y.toFixed(1)})`});
+        c.append(svgEl("circle", {r: 8}), Object.assign(svgEl("text"), {textContent: String(l.count)}));
+        const tt = svgEl("title"); tt.textContent = linkText(field, M, l); c.append(tt);
+        c.addEventListener("click", () => { view.selected = l.a === view.selected ? l.b : l.a; api.rerender(); });
+        layer.append(c);
+      }
+      // Hover/focus label: who talks to whom and the latest reason.
+      const lab = svgEl("g", {class: "arc-label", "data-a": l.a, "data-b": l.b});
+      const txt = svgEl("text", {x: g.mid.x + 12, y: g.mid.y + 3.5});
+      const last = l.last, intent = field.INTENT_LABELS[last.intent] || field.KIND_LABELS[last.kind];
+      const t1 = svgEl("tspan"); t1.textContent = field.nameOf(last.from) + " " + intent.toLowerCase() + " → " + field.nameOf(last.to);
+      const t2 = svgEl("tspan", {class: "m"}); t2.textContent = "  · " + field.relativeTime(last.at).replace(" ago", "") + (l.open ? " · " + l.open + " awaiting reply" : "");
+      txt.append(t1, t2); lab.append(svgEl("rect", {rx: 4}), txt); labels.append(lab);
+    }
+    // Scope overlaps between different surfaces: a faint warm tie, visible when either end is focused.
+    for (const o of M.overlaps) {
+      if (o.where.length < 2) continue; const g = geometry(o.where[0], o.where[1]); if (!g) continue;
+      layer.append(svgEl("path", {d: g.d, class: "arc scope", "stroke-width": 1.6, "data-a": o.where[0], "data-b": o.where[1]}));
+    }
+    under.replaceChildren(back); svg.replaceChildren(layer, labels);
+    // Size label backgrounds now that text can be measured.
+    for (const lab of labels.children) { const txt = lab.querySelector("text"), bb = txt.getBBox(); const r = lab.querySelector("rect"); r.setAttribute("x", bb.x - 6); r.setAttribute("y", bb.y - 3); r.setAttribute("width", bb.width + 12); r.setAttribute("height", bb.height + 6); }
+    const applyFocus = (key, cls) => {
+      for (const v of [under, svg]) v.classList.toggle("focusing", !!key);
+      for (const e of canvas.querySelectorAll("svg [data-a]")) e.classList.toggle("hot", !!key && (e.dataset.a === key || e.dataset.b === key));
+      const linked = new Set(); if (key) for (const l of M.links) { if (l.a === key) linked.add(l.b); if (l.b === key) linked.add(l.a); }
+      if (key) for (const o of M.overlaps) if (o.where.includes(key)) o.where.forEach(k => linked.add(k));
+      for (const el of canvas.querySelectorAll(".tile")) { el.classList.toggle("linked", linked.has(el.dataset.key) && el.dataset.key !== key); el.classList.toggle(cls, el.dataset.key === key); }
+      canvas.classList.toggle("map-focus", !!key);
+    };
+    applyFocus(focus, "selected");
+    for (const el of canvas.querySelectorAll(".tile")) {
+      el.addEventListener("mouseenter", () => { if (!view.selected) applyFocus(el.dataset.key, "hovered"); });
+      el.addEventListener("mouseleave", () => { if (!view.selected) { applyFocus(null, "hovered"); el.classList.remove("hovered"); } });
+    }
+    // Team highlight: hovering a mark shows every surface its team works on.
+    for (const m of canvas.querySelectorAll(".mark")) {
+      m.addEventListener("mouseenter", () => { const team = m.dataset.team; canvas.classList.add("map-team");
+        for (const t of canvas.querySelectorAll(".tile")) t.classList.toggle("team", t.dataset.teams.split(" ").includes(team));
+        for (const x of canvas.querySelectorAll(".mark")) x.classList.toggle("team", x.dataset.team === team); });
+      m.addEventListener("mouseleave", () => canvas.classList.remove("map-team"));
+    }
+    // Messages in flight: a dot travels the arc; the receiving surface pings.
+    if (view.lastField === field) {
+      for (const {m, ka, kb} of M.fresh.slice(-12)) {
+        const dest = canvas.querySelector(`.tile[data-key="${CSS.escape(kb)}"]`);
+        if (dest) { dest.classList.remove("ping"); void dest.offsetWidth; dest.classList.add("ping"); }
+        if (ka === kb || reduced) continue;
+        const g = geometry(...[ka, kb].sort()); if (!g) continue;
+        const dot = $("div", "flight" + ([ka, kb].sort()[0] !== ka ? " rev" : "") + (m.intent === "blocker" ? " warm" : ""));
+        dot.style.offsetPath = `path("${g.d}")`; canvas.append(dot); setTimeout(() => dot.remove(), 1100);
+      }
+    }
+  }
+
+  function linkText(field, M, l) {
+    const A = M.nodes.get(l.a), B = M.nodes.get(l.b);
+    return A.label + " ⇄ " + B.label + "\n" + l.count + " messages in " + WINDOWS.find(w => w[0] === view.windowMin)[1] + (l.open ? " · " + l.open + " awaiting reply" : "") +
+      "\nLatest: " + field.nameOf(l.last.from) + " → " + field.nameOf(l.last.to) + " · " + (field.INTENT_LABELS[l.last.intent] || "") + ": " + l.last.body;
+  }
+
+  /* Relay path for an ask: the agent, each agent it passed through, then you. */
+  function relay(field, a) {
+    const p = $("div", "relay"), path = field.askPath(a.id), via = path?.via || [];
+    if (via.length) { p.append($("span", null, "Relayed"), $("b", null, ident(a))); for (const v of via) p.append($("span", "arrow", "→"), $("b", null, ident(v))); p.append($("span", "arrow", "→"), $("span", "you", "you")); }
+    if (path?.blocks?.length) p.append($("span", null, (via.length ? " · holds up " : "Holds up ") + path.blocks.slice(0, 3).map(ident).join(", ") + (path.blocks.length > 3 ? " +" + (path.blocks.length - 3) : "")));
+    return p;
+  }
+  function surfChip(M, key, onClick) {
+    const n = M.nodes.get(key); if (!n) return $("span");
+    const b = $("button", "surf-chip"); b.type = "button"; b.title = "Show on map";
+    if (n.kind) b.append($("span", "k", KIND_ONE[n.kind])); b.append(n.label);
+    b.onclick = e => { e.stopPropagation(); onClick(key); }; return b;
+  }
+  function needItem(field, M, a, api, focusSurface, showSurface = true) {
+    const it = $("div", "need");
+    const head = $("div", "need-head");
+    head.append(AgentField.statusDot(a), $("span", "who", ident(a)), $("span", null, AgentField.ROLE_LABELS[a.role].toLowerCase()));
+    if (showSurface) head.append($("span", null, "on"), surfChip(M, M.keyOf.get(a.id), focusSurface));
+    it.append(head);
+    const rel = relay(field, a); if (rel.childNodes.length) it.append(rel);
+    if (a.ask) it.append(Mockup.askBox(a, field, api.select));
+    else { const nx = $("div", "need-next", a.next.action); it.append(nx); const o = $("button", "btn quiet small", "Open thread"); o.type = "button"; o.onclick = () => api.select(a.id); it.append(o); }
+    return it;
+  }
+
+  function panelDefault(field, M, api, panel, focusSurface) {
+    const asks = field.asks();
+    const h = $("h2", null, "Needs you"); if (asks.length) h.append($("span", "n", String(asks.length))); panel.append(h);
+    if (!asks.length) panel.append($("p", "calm", "Nothing needs you. Agents are working on the surfaces to the left."));
+    const capped = field.agents.length > 60 && !view.showAllAsks ? asks.slice(0, 8) : asks;
+    for (const a of capped) panel.append(needItem(field, M, a, api, focusSurface));
+    if (capped.length < asks.length) { const b = $("button", "btn quiet small p-more", "Show " + (asks.length - capped.length) + " more"); b.type = "button"; b.onclick = () => { view.showAllAsks = true; api.rerender(); }; panel.append(b); }
+    // Busiest links: who talks to whom, and why, in words.
+    const links = [...M.links].sort((x, y) => y.count - x.count || y.last.at - x.last.at).slice(0, 6);
+    panel.append($("h4", null, "Busiest links · last " + WINDOWS.find(w => w[0] === view.windowMin)[1]));
+    if (!links.length) panel.append($("p", "calm", "No agent-to-agent messages between surfaces in this window."));
+    for (const l of links) {
+      const r = $("div", "link-row"); r.title = linkText(field, M, l);
+      const pair = $("div", "pair"); pair.append($("span", null, M.nodes.get(l.a).label), $("span", "x", "⇄"), $("span", null, M.nodes.get(l.b).label), $("span", "c", l.count + (l.open ? " · " + l.open + " open" : "")));
+      r.append(pair, $("div", "last", field.nameOf(l.last.from) + " → " + field.nameOf(l.last.to) + ": " + l.last.body));
+      r.onclick = () => focusSurface(l.a); panel.append(r);
+    }
+  }
+
+  function panelSurface(field, M, n, api, panel, focusSurface) {
+    const head = $("div", "p-head");
+    const h = $("h2", n.path ? "path" : null, n.dir && !n.dir.startsWith("(") ? n.dir + "/" : n.label); head.append(h);
+    const x = $("button", "btn quiet small", "×"); x.type = "button"; x.title = "Back to what needs you"; x.onclick = () => { view.selected = null; api.rerender(); }; head.append(x);
+    panel.append(head);
+    panel.append($("p", "p-sub", (n.kind ? KIND_ONE[n.kind].charAt(0).toUpperCase() + KIND_ONE[n.kind].slice(1) : n.none ? "Agents with no declared write scope" : "Write-scope directory") + " · " + n.agents.length + (n.agents.length === 1 ? " agent" : " agents")));
+    // Asks first.
+    if (n.needs.length) { panel.append($("h4", null, "Needs you here")); for (const a of n.needs) panel.append(needItem(field, M, a, api, focusSurface, false)); }
+    // Agents, in tree order, with the chain that led here and delegation to other surfaces.
+    panel.append($("h4", null, "Agents on this " + (n.kind ? KIND_ONE[n.kind] : "directory")));
+    const here = new Set(n.agents.map(a => a.id));
+    const ordered = []; const walk = a => { ordered.push(a); for (const k of field.children(a.id)) if (here.has(k.id)) walk(k); };
+    for (const a of n.agents.filter(a => !a.parentId || !here.has(a.parentId))) walk(a);
+    for (const a of ordered.slice(0, 40)) {
+      const r = $("div", "p-agent " + a.status); r.title = a.title; r.onclick = () => api.select(a.id);
+      const id = $("div", "id"); id.append($("b", null, ident(a)), $("span", "role", AgentField.ROLE_LABELS[a.role] + (a.kind !== "app" ? " · " + a.kind : "")));
+      if (a.health && a.health !== "on-track" && a.status !== "done") id.append($("span", "health", a.health));
+      r.append(AgentField.statusDot(a), id);
+      if (a.name) r.append($("div", "line", a.title));
+      const now = $("div", "line now"); now.append(AgentField.phaseSteps(a), nowText(field, a)); r.append(now);
+      const chain = field.chain(a.id).slice(0, -1);
+      if (chain.length) r.append($("div", "chain", "in " + chain.map(ident).join(" › ")));
+      const away = field.children(a.id).filter(k => !here.has(k.id));
+      if (away.length) r.append($("div", "chain", "→ " + away.length + (away.length === 1 ? " sub-agent" : " sub-agents") + " on " + [...new Set(away.map(k => M.nodes.get(M.keyOf.get(k.id))?.label))].join(", ")));
+      panel.append(r);
+    }
+    if (ordered.length > 40) panel.append($("p", "muted", "+" + (ordered.length - 40) + " more"));
+    // Overlaps with other teams.
+    if (n.allOverlaps.length) {
+      const list = [...n.allOverlaps].sort((x, y) => y.glow - x.glow);
+      panel.append($("h4", null, "Scope overlaps with other teams"));
+      for (const o of list.slice(0, 8)) {
+        const it = $("div", "overlap-item");
+        it.append($("span", "state" + (o.negotiating ? " ok" : ""), o.negotiating ? "negotiating" : o.glow ? "both writing · no coordination yet" : "overlapping declaration · one side quiet"));
+        it.append($("span", null, ident(o.a) + " (" + ident(rootOf(field, o.a)) + "’s team) ⇄ " + ident(o.b) + " (" + ident(rootOf(field, o.b)) + "’s team)"));
+        it.append($("code", null, o.path));
+        const talk = field.between(o.a.id, o.b.id).filter(m => m.intent === "coordinate").at(-1);
+        if (talk) it.append($("span", "muted", "“" + talk.body + "” · " + field.relativeTime(talk.at)));
+        panel.append(it);
+      }
+    }
+    // Traffic touching this surface.
+    const since = field.now - view.windowMin * MIN;
+    const all = field.messages.filter(m => here.has(m.from) || here.has(m.to)).filter(m => m.from !== "user" || here.has(m.to));
+    let msgs = all.filter(m => m.at >= since), older = false;
+    if (!msgs.length) { msgs = all.slice(-6); older = true; }
+    panel.append($("h4", null, "Traffic · " + (older ? "latest" : "last " + WINDOWS.find(w => w[0] === view.windowMin)[1])));
+    if (!msgs.length) panel.append($("p", "calm", "No messages yet."));
+    for (const m of msgs.slice(-12).reverse()) {
+      const open = m.replyRequired && !m.repliedBy && m.kind !== "closure";
+      const it = $("div", "msg" + (open ? " open" : ""));
+      const meta = $("small"); meta.append($("b", null, field.nameOf(m.from)), "→", $("b", null, field.nameOf(m.to)), $("span", "intent", field.INTENT_LABELS[m.intent] || field.KIND_LABELS[m.kind]));
+      const otherId = here.has(m.from) ? m.to : m.from, ok = M.keyOf.get(otherId);
+      if (ok && ok !== n.key) meta.append(surfChip(M, ok, focusSurface));
+      if (open) meta.append($("span", "owed", "awaiting reply"));
+      meta.append($("span", null, field.relativeTime(m.at)));
+      it.append(meta, $("span", "body", m.body)); panel.append(it);
+    }
+  }
+
+  Mockup.mount({
+    number: 24, title: "Surface map", spectrum: "moderate",
+    summary: "On what, with product nouns: surfaces grouped by kind, agents attached as marks, messages as arcs between surfaces, scope overlaps glowing where teams meet.",
+    signals: {
+      current: ["status", "created_by", "creation", "agent_messages", "conflicts", "write_scope", "title", "phase", "client", "tool_activity", "updated_at", "age"],
+      proposed: ["surface", "name", "intent", "escalation", "ask", "role", "kind", "activity", "health"],
+    },
+    notes: "Position on identity: the label is the stable name when there is one, and the title only as a fallback, because the title is the assignment and changes while the agent does not; on this map the surface already says what it is on, so “Gravity on Upload API” beats a 5-word title. Position on “on what”: the surface (a product noun) is the primary layout, and phase is demoted to a tiny stepper in the detail panel. Cost to the model: one surface {kind, label} per checkpoint plus an intent on send; messages, creation, conflicts and status exist today. The Scope toggle shows the free version (begin-work directories), where sub-agents without a declared scope fall into one bucket.",
+    render(field, stage, api) {
+      const oldMap = stage.querySelector(".sm-map"), oldPanel = stage.querySelector(".sm-panel");
+      if (oldMap) view.mapScroll = oldMap.scrollTop; if (oldPanel) view.panelScroll = oldPanel.scrollTop;
+      if (view.lastField !== field) { view.lastMsgId = Math.max(0, ...field.messages.map(m => m.id)); view.selected = null; view.showAllAsks = false; }
+      const M = build(field);
+      if (view.selected && !M.nodes.has(view.selected)) view.selected = null;
+      const compact = field.agents.length > 80;
+      stage.replaceChildren();
+
+      const main = $("section", "sm-main");
+      const bar = $("div", "sm-toolbar");
+      const seg = (items, current, onPick) => { const s = $("div", "seg"); for (const [v, label, tag] of items) { const b = $("button", null, label); b.type = "button"; if (tag) b.append($("small", null, tag)); b.setAttribute("aria-pressed", String(v === current)); b.onclick = () => onPick(v); s.append(b); } return s; };
+      bar.append($("span", "tb-label", "Lay out by"), seg([["surface", "Product surface", "proposed"], ["scope", "Scope directory", "today"]], view.mode, v => { if (view.mode !== v) { view.mode = v; view.selected = null; view.mapScroll = 0; api.rerender(); } }));
+      bar.append($("span", "tb-label", "Traffic"), seg(WINDOWS.map(([m, l]) => [m, l]), view.windowMin, v => { view.windowMin = v; api.rerender(); }));
+      const legend = $("div", "legend");
+      const dotL = (status, text) => { const s = $("span"); const d = $("i", "dot " + status); s.append(d, text); return s; };
+      const arcL = (cls, text) => { const s = $("span"); const v = svgEl("svg", {viewBox: "0 0 22 8"}); v.append(svgEl("path", {d: "M1,6 Q11,0 21,6", fill: "none", class: cls})); s.append(v, text); return s; };
+      const ov = $("span"); ov.append($("i", "lg-overlap"), "scope overlap");
+      legend.append(dotL("working", "working"), dotL("waiting", "needs you"), dotL("blocked", "waiting on another"), dotL("done", "done"), arcL("lg-arc", "messages"), arcL("lg-open", "reply owed"), ov);
+      bar.append(legend); main.append(bar);
+      if (view.mode === "scope") {
+        const none = M.nodes.get("d:none")?.agents.length || 0;
+        const nt = $("p", "scope-note"); nt.append($("b", null, "Today’s signal. "), "Tiles are begin-work write-scope directories, so “on what” reads as file paths. " + (none ? none + " of " + field.agents.length + " agents (mostly sub-agents and researchers) declare no scope and share one bucket." : ""));
+        main.append(nt);
+      }
+      const map = $("div", "sm-map"), canvas = $("div", "sm-canvas");
+      const under = svgEl("svg", {class: "arcs under", "aria-hidden": "true"}), svg = svgEl("svg", {class: "arcs over", "aria-hidden": "true"});
+      for (const r of M.regions) {
+        const sec = $("section", "region"); sec.dataset.region = r.id;
+        const w = Math.min(4, r.nodes.length) * (compact ? 150 : 200) + 24;
+        sec.style.setProperty("--w", w + "px");
+        if (r.nodes.length === 1) { sec.style.setProperty("--w", (compact ? 220 : 260) + "px"); sec.style.setProperty("--maxw", (compact ? 300 : 360) + "px"); }
+        const h = $("h3"); if (view.mode === "surface") h.append($("span", "glyph", KIND_GLYPH[r.id] || "·"));
+        h.append(view.mode === "surface" ? (KIND_LABELS[r.id] || r.id) : r.id);
+        const needs = r.nodes.reduce((s, n) => s + n.needs.length, 0); if (needs) h.append($("span", "needs", "· " + needs + " need you"));
+        sec.append(h);
+        const tiles = $("div", "tiles"); for (const n of r.nodes) tiles.append(tile(field, n, M, api, compact)); sec.append(tiles);
+        canvas.append(sec);
+      }
+      canvas.prepend(under); canvas.append(svg); map.append(canvas); main.append(map);
+
+      const panel = $("aside", "sm-panel"); panel.setAttribute("aria-label", "Surface detail");
+      const focusSurface = key => {
+        view.selected = key; view.panelScroll = 0; api.rerender();
+        const t = stage.querySelector(`.tile[data-key="${CSS.escape(key)}"]`); t?.scrollIntoView({block: "nearest", behavior: reduced ? "auto" : "smooth"});
+      };
+      if (view.selected) panelSurface(field, M, M.nodes.get(view.selected), api, panel, focusSurface);
+      else panelDefault(field, M, api, panel, focusSurface);
+      stage.append(main, panel);
+      map.scrollTop = view.mapScroll; panel.scrollTop = view.panelScroll;
+
+      drawArcs(field, M, canvas, [under, svg], api);
+      if (M.hiddenLinks > 0) {
+        const more = $("button", "btn quiet small", (view.showAllLinks ? "Show fewer links" : "+" + M.hiddenLinks + " quieter links"));
+        more.type = "button"; more.onclick = () => { view.showAllLinks = !view.showAllLinks; api.rerender(); }; legend.append(more);
+      } else if (view.showAllLinks) {
+        const fewer = $("button", "btn quiet small", "Show fewer links"); fewer.type = "button"; fewer.onclick = () => { view.showAllLinks = false; api.rerender(); }; legend.append(fewer);
+      }
+      view.lastField = field;
+      view.lastMsgId = Math.max(view.lastMsgId, ...field.messages.map(m => m.id));
+    },
+  });
+})();
+</script>
+</body>
+</html>

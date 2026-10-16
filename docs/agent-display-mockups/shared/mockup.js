@@ -22,6 +22,16 @@ const Mockup = (() => {
     ["16-radar.html", "Radar", "round two"],
     ["17-breathing-grid.html", "Breathing grid", "round two"],
     ["18-atlas.html", "Atlas", "synthesis"],
+    ["19-conversation-cards.html", "Conversation cards", "conservative"],
+    ["20-message-ledger.html", "Message ledger", "conservative"],
+    ["21-live-wires.html", "Live wires", "moderate"],
+    ["22-sequence-diagram.html", "Sequence diagram", "moderate"],
+    ["23-team-channels.html", "Team channels", "moderate"],
+    ["24-surface-map.html", "Surface map", "moderate"],
+    ["25-contracts.html", "Contracts", "radical"],
+    ["26-comms-matrix.html", "Comms matrix", "radical"],
+    ["27-critical-path.html", "Critical path", "radical"],
+    ["28-office-floor.html", "Office floor", "radical"],
   ];
   const CURRENT_SIGNALS = {
     title: "checkpoint title (3–6 words, auto/agent/user source)", phase: "checkpoint phase (8 values)", summary: "checkpoint summary (1–2 sentences)",
@@ -33,6 +43,9 @@ const Mockup = (() => {
     tool_activity: "latest tool calls in the turn (read, edit, run, search) from the provider stream; costs the model nothing", pending_approval: "a pending permission request from the provider, answerable with approve/deny",
     age: "time since the last tool call or update (runtime)", scope_cluster: "cluster key derived from the write scope when no domain is reported",
     messages: "conversation turns, and how many came from the user (runtime)",
+    agent_messages: "agent-coord messages: sender, recipient, body, classification, reply_required, in_reply_to, exchange, delivered/acked, woke a turn",
+    creation: "thread create requests: creator, creation mode (orchestration or dispatch), initial request, reply contract",
+    conflicts: "overlapping begin-work write scopes between active agents",
   };
   const PROPOSED_SIGNALS = {
     name: "stable agent identity name, separate from the thread title", role: "role (orchestrator, implementer, reviewer, researcher, releaser, dispatcher)",
@@ -41,6 +54,12 @@ const Mockup = (() => {
     target: "target page / service / module", plan: "plan steps with states (done, active, todo, blocked, delegated)", activity: "live one-line activity (what the agent is doing right now)",
     waiting_on: "dependency edges: other agents or an external thing", cost: "cost so far (tokens, dollars, minutes)", confidence: "self-reported confidence", eta: "expected remaining time",
     events: "event log (phase changes, asks, spawns, finishes) for timelines and digests",
+    intent: "why a message was sent: assign, question, answer, handoff, finding, review, blocker, coordinate, status",
+    surface: "what the agent works on as a product noun: page, service, screen, doc, pipeline, build, question",
+    contract: "what the creator expects back: deliverable, acceptance checks, due time",
+    deliverable: "what the agent will hand over and how ready it is (none, draft, ready, delivered)",
+    escalation: "a child's ask relayed up the chain (ask.via): who it passed through before reaching you",
+    health: "on-track, slipping, or stuck (self-reported or derived from age, waits, and due time)",
   };
   const $ = (tag, cls, text) => AgentField.el(tag, cls, text);
   function params() { return new URLSearchParams(location.search); }
@@ -253,6 +272,16 @@ const Mockup = (() => {
       if (kids.length) { drawer.append($("h3", null, "Agents · " + kids.length)); const ul = $("div", "kids"); for (const k of kids) { const b = $("button", "btn quiet small"); b.type = "button"; b.append(AgentField.statusDot(k), " ", k.title, " · ", field.statusLabel(k)); b.onclick = () => select(k.id); ul.append(b); } drawer.append(ul); }
       if (a.scope.length) { drawer.append($("h3", null, "Scope")); const sc = $("div", "scope"); for (const s of a.scope) sc.append($("code", null, s)); drawer.append(sc); }
       if (a.links.length) { drawer.append($("h3", null, "Links")); const ul = $("div", "kids"); for (const l of a.links) ul.append($("span", null, l.kind.replaceAll("_", " ") + " · " + l.label + " · " + l.target)); drawer.append(ul); }
+      if (field.messagesOf) {
+        const msgs = field.messagesOf(a.id).slice(-8).reverse();
+        if (msgs.length) {
+          drawer.append($("h3", null, "Messages · " + field.messagesOf(a.id).length)); const ml = $("div", "history");
+          for (const m of msgs) { const art = $("article"); const out = m.from === a.id; const other = out ? m.to : m.from;
+            art.append($("small", null, (out ? "→ " : "← ") + field.nameOf(other) + " · " + (field.INTENT_LABELS[m.intent] || field.KIND_LABELS[m.kind]) + (m.replyRequired && !m.repliedBy ? " · awaiting reply" : "") + " · " + field.relativeTime(m.at)), $("span", null, m.body)); ml.append(art); }
+          drawer.append(ml);
+        }
+        if (a.contract) { drawer.append($("h3", null, "Contract from " + field.nameOf(a.contract.from))); const ul = $("ul", "plan"); for (const c of a.contract.acceptance) ul.append($("li", c.met ? "done" : "todo", c.label)); drawer.append(ul); }
+      }
       drawer.append($("h3", null, a.cost.tokens ? "Cost" : "Run"), $("p", "muted", a.cost.tokens ? field.duration(a.cost.minutes * 60000) + " · " + Math.round(a.cost.tokens / 1000) + "k tokens · $" + a.cost.usd.toFixed(2) + " · confidence " + Math.round(a.confidence * 100) + "%" : field.duration(a.cost.minutes * 60000) + " since created · " + (a.turns || 0) + " turns" + (a.workspace ? " · " + a.workspace : "")));
       drawer.append($("h3", null, "Checkpoint history · " + a.history.length)); const h = $("div", "history");
       for (const e of [...a.history].reverse()) { const art = $("article"); art.append($("small", null, (e.actor === "user" ? "You · " : "") + AgentField.PHASE_LABELS[e.phase] + " · " + field.relativeTime(e.at)), $("span", null, e.summary)); h.append(art); }

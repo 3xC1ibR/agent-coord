@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 23 · Team channels</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Orchestration as group chat: a rail of team channels, the channel feed with pinned asks, and the team's members. */
+    .tc { position: absolute; inset: 0; display: grid; grid-template-columns: 252px minmax(0, 1fr) 286px; background: var(--paper); }
+    .tc > section { min-height: 0; display: flex; flex-direction: column; }
+
+    /* Rail */
+    .rail { border-right: 1px solid var(--line); background: var(--panel); }
+    .rail-search { padding: 12px 12px 8px; }
+    .rail-search input { width: 100%; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .rail-list { flex: 1; overflow: auto; padding: 0 8px 16px; }
+    .rail h4 { display: flex; align-items: center; gap: 6px; margin: 12px 6px 4px; font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .rail h4 button { all: unset; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+    .rail h4 button:focus-visible { outline: 2px solid var(--accent); }
+    .chan { all: unset; box-sizing: border-box; cursor: pointer; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; gap: 2px 7px; width: 100%; padding: 5px 7px; border-radius: 6px; color: var(--muted); font-size: 12.5px; }
+    .chan:hover { background: var(--hover-bg); color: var(--ink); }
+    .chan:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .chan[aria-current="true"] { background: var(--surface); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+    .chan.unread { color: var(--ink); font-weight: 600; }
+    .chan .glyph { font: 12px var(--mono); color: var(--muted); text-align: center; }
+    .chan .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chan .badges { display: inline-flex; gap: 4px; align-items: center; }
+    .chan .dots { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-height: 6px; }
+    .chan .dots .dot { width: 5px; height: 5px; box-shadow: none; animation: none; }
+    .chan .dots small { font: 9px var(--mono); color: var(--muted); margin-left: 2px; }
+    .pill { font: 600 9.5px var(--mono); padding: 1px 6px; border-radius: 8px; background: var(--tint); color: var(--ink); border: 1px solid var(--line-strong); }
+    .pill.warm { background: var(--warm); border-color: var(--warm); color: var(--surface); }
+    .pill.bump { animation: bump .6s ease-out; }
+    @keyframes bump { 30% { transform: scale(1.25); } }
+    .chan.needs-all { color: var(--ink); font-weight: 600; margin-top: 4px; }
+    .chan.needs-all .glyph { color: var(--warm); }
+    .chan.direct .label small { color: var(--muted); font-weight: 400; }
+    .chan .overlap { font: 9px var(--mono); color: var(--warm); }
+    .rail-more { all: unset; cursor: pointer; display: block; padding: 4px 7px 4px 28px; font-size: 11px; color: var(--muted); }
+    .rail-more:hover { color: var(--ink); }
+
+    /* Channel */
+    .channel { background: var(--surface); }
+    .ch-head { flex: none; display: flex; align-items: baseline; gap: 10px; padding: 12px 20px 10px; border-bottom: 1px solid var(--line); min-width: 0; }
+    .ch-head h2 { font-size: 15px; font-weight: 600; letter-spacing: -.015em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ch-head h2 .hash { color: var(--muted); font-weight: 400; margin-right: 3px; }
+    .ch-head .topic { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+    .ch-head .btn { flex: none; }
+    .pins { flex: none; max-height: 40%; overflow: auto; padding: 10px 20px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--warm-tint) 35%, var(--surface)); display: grid; gap: 8px; }
+    .pins:empty { display: none; }
+    .pin-head { display: flex; align-items: center; gap: 8px; font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+    .pin-head .btn, .members-head .btn { margin-left: auto; text-transform: none; letter-spacing: 0; font: 11px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .pin { display: grid; gap: 4px; }
+    .pin .path { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+    .pin .path button { all: unset; cursor: pointer; color: var(--ink); font-weight: 550; }
+    .pin .path button:hover { text-decoration: underline; }
+    .pin .path .you { color: var(--warm); font-weight: 600; }
+    .pin .path .chan-link { margin-left: auto; color: var(--muted); font-weight: 400; }
+    .pin .ask { padding: 7px 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; }
+    .pin .ask > .ask-kind, .pin .ask > .ask-question, .pin .ask > .ask-impact { flex-basis: 100%; }
+    .pin .ask > .ask-kind { margin-bottom: 0; }
+    .pin .ask > .ask-options, .pin .ask > .ask-answer { margin-top: 6px; }
+    .pin .ask > .ask-answer { flex: 1 1 260px; }
+    .pin .ask > .btn.quiet { margin-top: 6px; margin-left: auto; }
+    .pin.next { font-size: 12px; padding: 7px 10px; border: 1px dashed color-mix(in srgb, var(--warm) 45%, var(--line)); border-radius: 6px; background: var(--surface); }
+    .pins.collapsed .pin { display: none; }
+    .channel.needs-view .pins { flex: 1; max-height: none; align-content: start; }
+    .channel.needs-view .pins:empty + .feed { display: block; }
+    .channel.needs-view .feed { display: none; }
+    .conflict-banner { flex: none; padding: 8px 20px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: baseline; }
+    .conflict-banner b { color: var(--warm); font: 600 9.5px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .conflict-banner code { font: 11px var(--mono); color: var(--ink); }
+
+    .feed { flex: 1; min-height: 0; overflow: auto; padding: 10px 0 16px; }
+    .feed-empty { padding: 40px 20px; color: var(--muted); font-size: 13px; text-align: center; }
+    .earlier { display: block; margin: 4px auto 10px; }
+    .divider { display: flex; align-items: center; gap: 10px; margin: 8px 20px; font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+    .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+    .divider::before { flex: 0 0 12px; }
+    .thread { padding: 2px 0; }
+    .msg { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 0 10px; padding: 6px 20px; position: relative; }
+    .msg:hover { background: color-mix(in srgb, var(--tint) 60%, transparent); }
+    .msg.dim { opacity: .35; }
+    .msg.arrive { animation: arrive 2.2s ease-out; }
+    @keyframes arrive { 0% { background: color-mix(in srgb, var(--accent) 16%, transparent); } 100% { background: transparent; } }
+    @media (prefers-reduced-motion: reduce) { .msg.arrive, .pill.bump { animation: none; } }
+    .msg-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 7px; font-size: 12px; min-width: 0; }
+    .who { all: unset; cursor: pointer; font-weight: 600; color: var(--ink); }
+    .who:hover { text-decoration: underline; }
+    .who:focus-visible { outline: 2px solid var(--accent); }
+    .who.you { color: var(--ink); }
+    .on { color: var(--muted); font-size: 11px; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .to { color: var(--muted); font-size: 11px; }
+    .to .who { font-weight: 500; color: var(--muted); }
+    .to .who.you { color: var(--warm); font-weight: 600; }
+    .intent { font: 600 9px var(--mono); letter-spacing: .05em; text-transform: uppercase; padding: 1px 5px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--muted); }
+    .intent.handoff { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+    .intent.blocker { color: var(--warm); border-color: color-mix(in srgb, var(--warm) 50%, transparent); }
+    .intent.assign { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+    .time { font: 10px var(--mono); color: var(--muted); margin-left: auto; }
+    .body { font-size: 13px; line-height: 1.5; color: var(--ink); margin-top: 1px; overflow-wrap: anywhere; }
+    .body .mention { color: var(--accent); font-weight: 550; }
+    .owed { display: inline-flex; gap: 5px; align-items: center; margin-top: 4px; font: 10px var(--mono); color: var(--muted); border: 1px dashed var(--line-strong); border-radius: 4px; padding: 1px 6px; }
+    .owed.you { color: var(--warm); border-color: color-mix(in srgb, var(--warm) 50%, transparent); }
+    .pinned-ref { margin-left: 6px; font-size: 11px; color: var(--warm); }
+    .msg-actions { position: absolute; top: 4px; right: 16px; display: none; gap: 4px; }
+    .msg:hover .msg-actions, .msg:focus-within .msg-actions { display: flex; }
+    .msg-actions .btn { padding: 2px 7px; font-size: 10.5px; }
+    .replies-toggle { all: unset; cursor: pointer; display: flex; align-items: center; gap: 7px; margin: 0 20px 2px 64px; padding: 2px 6px; border-radius: 5px; font-size: 11px; color: var(--accent); max-width: calc(100% - 90px); }
+    .replies-toggle:hover { background: var(--hover-bg); }
+    .replies-toggle:focus-visible { outline: 2px solid var(--accent); }
+    .replies-toggle .count { flex: none; white-space: nowrap; }
+    .replies-toggle .time { flex: none; margin-left: 0; }
+    .replies-toggle .preview { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .replies { margin-left: 52px; border-left: 2px solid var(--line); }
+    .replies .msg { padding-left: 14px; }
+
+    /* Avatars: a stable identity mark. Round for app agents, square for subagents and delegates. */
+    .av { position: relative; width: 30px; height: 30px; flex: none; border-radius: 50%; background: var(--tint); border: 1px solid var(--line-strong); display: grid; place-items: center; font: 600 11px var(--mono); color: var(--ink); cursor: pointer; }
+    .av.sub { border-radius: 7px; width: 26px; height: 26px; margin: 2px; font-size: 10px; }
+    .av.working { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+    .av.needs { border-color: var(--warm); box-shadow: 0 0 0 2px color-mix(in srgb, var(--warm) 22%, transparent); }
+    .av.done { color: var(--muted); }
+    .av.you { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+    .av .provider-logo { position: absolute; right: -4px; bottom: -4px; width: 12px; height: 12px; padding: 1px; background: var(--surface); border-radius: 50%; box-sizing: content-box; }
+    .av.sm { width: 20px; height: 20px; font-size: 8.5px; }
+    .av.sm.sub { width: 18px; height: 18px; margin: 1px; border-radius: 5px; }
+    .av.sm .provider-logo { display: none; }
+
+    /* Composer */
+    .composer { flex: none; position: relative; padding: 10px 20px 14px; border-top: 1px solid var(--line); }
+    .composer-box { display: flex; gap: 8px; align-items: flex-end; border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 6px 6px 10px; background: var(--surface); }
+    .composer-box:focus-within { border-color: var(--accent); }
+    .composer textarea { flex: 1; resize: none; border: 0; outline: none; background: transparent; color: var(--ink); font-size: 13px; line-height: 1.45; min-height: 20px; max-height: 120px; padding: 3px 0; }
+    .composer .hint { margin-top: 5px; font-size: 10.5px; color: var(--muted); }
+    .composer .hint b { color: var(--ink); font-weight: 550; }
+    .mentions { position: absolute; left: 20px; bottom: calc(100% - 4px); width: min(360px, calc(100% - 40px)); max-height: 260px; overflow: auto; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 10px 30px var(--shadow); padding: 4px; z-index: 20; }
+    .mentions button { all: unset; box-sizing: border-box; cursor: pointer; display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border-radius: 5px; font-size: 12px; }
+    .mentions button[aria-selected="true"], .mentions button:hover { background: var(--hover-bg); }
+    .mentions small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Members */
+    .members { border-left: 1px solid var(--line); background: var(--panel); }
+    .members-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 14px 8px; font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+        .members-list { flex: 1; overflow: auto; padding: 0 8px 16px; }
+    .mem { display: grid; grid-template-columns: auto 22px minmax(0, 1fr) auto; align-items: start; gap: 0 7px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
+    .mem:hover { background: var(--hover-bg); }
+    .mem:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .mem.focused { background: var(--surface); box-shadow: inset 0 0 0 1px var(--accent); }
+    .mem .indent { display: flex; align-self: stretch; }
+    .mem .indent i { width: 12px; border-left: 1px solid var(--line-strong); margin-left: 5px; }
+    .mem .tw { all: unset; cursor: pointer; width: 12px; font-size: 10px; color: var(--muted); text-align: center; line-height: 22px; }
+    .mem .tw.leaf { cursor: default; }
+    .mem .txt { min-width: 0; display: grid; gap: 1px; }
+    .mem .nm { font-size: 12px; font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 5px; min-width: 0; }
+    .mem .nm span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mem .nm .chip { font-size: 8.5px; padding: 0 4px; font-weight: 400; }
+    .mem .surf { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mem .st { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; gap: 5px; align-items: center; }
+    .mem .st.needs { color: var(--warm); font-weight: 550; }
+    .mem .st .phase-steps i { width: 5px; height: 3px; }
+    .mem .only { opacity: 0; padding: 1px 5px; font-size: 10px; }
+    .mem:hover .only, .mem .only[aria-pressed="true"], .mem:focus-within .only { opacity: 1; }
+    .mem .collapsed-count { font: 9.5px var(--mono); color: var(--muted); }
+    .members-foot { flex: none; max-height: 32%; overflow: auto; padding: 10px 14px 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); display: grid; gap: 4px; }
+    .members-foot h5 { margin: 0; font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .members-foot button { all: unset; cursor: pointer; color: var(--ink); }
+    .members-foot button:hover { text-decoration: underline; }
+
+    @media (max-width: 1100px) { .tc { grid-template-columns: 220px minmax(0, 1fr); } .members { display: none; } }
+  </style>
+</head>
+<body>
+  <main id="stage"></main>
+  <script src="../shared/fixture.js"></script>
+  <script src="../shared/orchestration.js"></script>
+  <script src="../shared/mockup.js"></script>
+  <script>
+  "use strict";
+  const $ = AgentField.el, MIN = 60_000, HOUR = 3_600_000;
+  const NEEDS = "needs", lowerFirst = t => t ? t.charAt(0).toLowerCase() + t.slice(1) : t;
+
+  /* View state kept across re-renders. */
+  const view = {
+    field: null, channel: null, lastSeen: new Map(), dividerAt: null, window: 40, expanded: new Set(), collapsedMembers: new Set(),
+    only: null, query: "", draft: "", mentionTo: null, quietOpen: false, overlapOpen: false, pinsCollapsed: false,
+    seenIds: new Set(), maxId: 0, prevUnread: new Map(), dom: null, stickBottom: true,
+  };
+
+  /* Identity: a stable handle (name) when present; otherwise the title, which is the assignment. */
+  const ident = a => a ? (a.name || a.title) : "You";
+  const initials = a => { if (!a) return "You"; const src = a.name || a.title; const w = src.replace(/[^\p{L}\p{N} ]/gu, "").split(/\s+/).filter(Boolean); return (a.name ? src.slice(0, 2) : (w[0]?.[0] || "?") + (w[1]?.[0] || "")).toUpperCase(); };
+  const handle = a => (a.name || a.title).toLowerCase().replace(/[^a-z0-9]+/g, "-").split("-").filter(Boolean).slice(0, a.name ? 1 : 3).join("-");
+  /* On what: the surface (proposed) or, today, the first write-scope path. Never the phase. */
+  const onWhat = a => a.surface?.label ? a.surface.label + (a.surface.kind ? " · " + a.surface.kind : "") : a.scope[0] ? a.scope[0].replace(/^plugins\/agent-coord\/scripts\/agent_coord\//, "…/") : null;
+  const roleLabel = a => AgentField.ROLE_LABELS[a.role]?.toLowerCase() || a.role;
+
+  function avatar(a, field, api, small = false) {
+    const d = $("span", "av" + (small ? " sm" : "")); d.setAttribute("aria-hidden", "true");
+    if (!a) { d.classList.add("you"); d.textContent = small ? "Y" : "You"; d.style.fontSize = small ? "" : "9px"; return d; }
+    if (a.kind !== "app") d.classList.add("sub");
+    if (field.needsUser(a)) d.classList.add("needs"); else if (a.status === "working") d.classList.add("working"); else if (a.status === "done") d.classList.add("done");
+    d.textContent = initials(a); d.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    d.title = ident(a) + " · " + roleLabel(a) + " · " + field.statusLabel(a);
+    d.onclick = e => { e.stopPropagation(); api.select(a.id); };
+    return d;
+  }
+  function whoBtn(id, field, api, cls = "who") {
+    if (id === "user") { const s = $("span", cls + " you", "you"); return s; }
+    const a = field.byId(id); const b = $("button", cls, ident(a)); b.type = "button"; b.title = a.title + " · open thread"; b.onclick = e => { e.stopPropagation(); api.select(id); }; return b;
+  }
+
+  /* Channels: a team is a root and everyone below it, plus roots it routed (a creation message from a dispatcher). */
+  function model(field) {
+    const routedBy = new Map();
+    for (const m of field.messages) if (m.kind === "creation" && m.from !== "user" && m.to !== "user") { const t = field.byId(m.to); if (t && !t.parentId && field.byId(m.from) && !field.byId(m.from).parentId && m.from !== m.to) routedBy.set(m.to, m.from); }
+    const teamCache = new Map();
+    const teamOf = id => {
+      if (id === "user") return null;
+      if (teamCache.has(id)) return teamCache.get(id);
+      const a = field.byId(id); if (!a) return null;
+      let root = field.ancestors(id).at(-1) || a; const seen = new Set();
+      while (routedBy.has(root.id) && !seen.has(root.id)) { seen.add(root.id); root = field.byId(routedBy.get(root.id)); }
+      teamCache.set(id, root.id); return root.id;
+    };
+    const chanOf = m => {
+      const ta = teamOf(m.from), tb = teamOf(m.to);
+      if (!ta || !tb) return "t:" + (ta || tb);
+      if (ta === tb) return "t:" + ta;
+      return "d:" + [m.from, m.to].sort().join("|");
+    };
+    const byChan = new Map();
+    for (const m of field.messages) { const c = chanOf(m); if (!byChan.has(c)) byChan.set(c, []); byChan.get(c).push(m); }
+    const teams = new Map();
+    for (const a of field.agents) { const t = teamOf(a.id); if (!teams.has(t)) teams.set(t, []); teams.get(t).push(a); }
+    return {routedBy, teamOf, chanOf, byChan, teams};
+  }
+
+  function memberRows(field, M, rootId) {
+    const rows = [];
+    const walk = (a, depth, routed) => {
+      rows.push({a, depth, routed, kids: field.children(a.id).length + [...M.routedBy].filter(([, by]) => by === a.id).length});
+      if (view.collapsedMembers.has(a.id)) return;
+      for (const k of field.children(a.id)) walk(k, depth + 1, false);
+      for (const [rid, by] of M.routedBy) if (by === a.id && field.byId(rid)) walk(field.byId(rid), depth + 1, true);
+    };
+    walk(field.byId(rootId), 0, false);
+    return rows;
+  }
+
+  function channelInfo(field, M, key) {
+    if (key === NEEDS) return {key, kind: "needs", label: "Needs you"};
+    if (key.startsWith("t:")) { const root = field.byId(key.slice(2)); if (!root) return null; return {key, kind: "team", root, label: root.title, members: M.teams.get(root.id) || [root], messages: M.byChan.get(key) || []}; }
+    const [x, y] = key.slice(2).split("|"); const a = field.byId(x), b = field.byId(y); if (!a || !b) return null;
+    return {key, kind: "direct", pair: [a, b], label: ident(a) + " ↔ " + ident(b), members: [a, b], messages: M.byChan.get(key) || []};
+  }
+
+  function unreadOf(info) { const since = view.lastSeen.get(info.key) ?? (view.field.now - 20 * MIN); return info.messages.filter(m => m.at > since && m.from !== "user").length; }
+  const lastAt = info => info.messages.at(-1)?.at || 0;
+
+  function defaultChannel(field, M) {
+    const ranked = [...M.teams.keys()].map(id => channelInfo(field, M, "t:" + id)).filter(Boolean)
+      .sort((x, y) => y.members.filter(field.needsUser).length - x.members.filter(field.needsUser).length || y.members.length - x.members.length || lastAt(y) - lastAt(x));
+    return ranked[0]?.key || NEEDS;
+  }
+
+  /* ---------- Skeleton (built once so the composer keeps focus and text through Play) ---------- */
+  function skeleton(stage, api) {
+    if (view.dom && view.dom.root.isConnected && view.dom.root.parentNode === stage) return view.dom;
+    stage.replaceChildren();
+    const root = $("div", "tc");
+    const rail = $("section", "rail"); rail.setAttribute("aria-label", "Channels");
+    const search = $("div", "rail-search"); const q = $("input"); q.type = "search"; q.placeholder = "Find a team or agent"; q.setAttribute("aria-label", "Find a team or agent"); q.value = view.query;
+    q.oninput = () => { view.query = q.value.trim().toLowerCase(); api.rerender(); }; search.append(q);
+    const railList = $("div", "rail-list"); rail.append(search, railList);
+    const channel = $("section", "channel"); channel.setAttribute("aria-label", "Channel");
+    const head = $("div", "ch-head"), banner = $("div", "conflict-banner"), pins = $("div", "pins"), feed = $("div", "feed");
+    pins.setAttribute("aria-label", "Asks for you"); feed.setAttribute("aria-live", "polite"); banner.hidden = true;
+    feed.addEventListener("scroll", () => { view.stickBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40; });
+    const composer = $("div", "composer"), box = $("div", "composer-box"), ta = $("textarea"), send = $("button", "btn primary small", "Send"), hint = $("div", "hint"), menu = $("div", "mentions");
+    ta.rows = 1; ta.setAttribute("aria-label", "Message"); send.type = "button"; menu.hidden = true; menu.setAttribute("role", "listbox");
+    box.append(ta, send); composer.append(menu, box, hint);
+    channel.append(head, banner, pins, feed, composer);
+    const members = $("section", "members"); members.setAttribute("aria-label", "Members");
+    const memHead = $("div", "members-head"), memList = $("div", "members-list"), memFoot = $("div", "members-foot");
+    members.append(memHead, memList, memFoot);
+    root.append(rail, channel, members); stage.append(root);
+    view.dom = {root, channel, railList, search: q, head, banner, pins, feed, composer, ta, send, hint, menu, memHead, memList, memFoot};
+    wireComposer(api);
+    return view.dom;
+  }
+
+  /* ---------- Composer: post to the channel lead, or @mention one agent ---------- */
+  let mentionSel = 0, mentionList = [];
+  function composerTargets(field) {
+    const info = view.info; if (!info || info.kind === "needs") return [];
+    return (info.kind === "team" ? memberRows(field, view.M, info.root.id).map(r => r.a) : info.members).filter(a => a.status !== "done" || a.kind === "app");
+  }
+  function resolveMention(field, text) {
+    const m = text.match(/@([a-z0-9-]+)/i); if (!m) return null;
+    return composerTargets(field).find(a => handle(a) === m[1].toLowerCase()) || null;
+  }
+  function defaultTarget() { const info = view.info; if (!info) return null; if (info.kind === "team") return info.root; if (info.kind === "direct") return null; return null; }
+  function updateHint(field) {
+    const {hint, ta, send} = view.dom; const info = view.info; hint.replaceChildren();
+    if (!info || info.kind === "needs") { view.dom.composer.hidden = true; return; }
+    view.dom.composer.hidden = false;
+    const target = resolveMention(field, ta.value) || defaultTarget();
+    ta.placeholder = info.kind === "team" ? "Message #" + info.label + "  ·  @ to address one agent" : "Message " + ident(info.pair[0]) + " or " + ident(info.pair[1]) + " with @";
+    if (target) hint.append("Goes to ", $("b", null, ident(target)), target === defaultTarget() && !resolveMention(field, ta.value) ? " (leads this channel) as an agent-coord message. @mention to address someone else." : " as an agent-coord message; it wakes them if idle.");
+    else hint.append("Direct messages are between two agents. @mention one of them to step in.");
+    send.disabled = !ta.value.trim() || !target;
+  }
+  function wireComposer(api) {
+    const {ta, send, menu} = view.dom;
+    const field = () => api.field;
+    const showMenu = () => {
+      const caret = ta.selectionStart, before = ta.value.slice(0, caret), m = before.match(/@([a-z0-9-]*)$/i);
+      if (!m) { menu.hidden = true; return; }
+      const q = m[1].toLowerCase();
+      mentionList = composerTargets(field()).filter(a => handle(a).includes(q) || (a.title + " " + (a.name || "")).toLowerCase().includes(q)).slice(0, 8);
+      if (!mentionList.length) { menu.hidden = true; return; }
+      mentionSel = Math.min(mentionSel, mentionList.length - 1);
+      menu.replaceChildren(...mentionList.map((a, i) => {
+        const b = $("button"); b.type = "button"; b.setAttribute("role", "option"); b.setAttribute("aria-selected", String(i === mentionSel));
+        b.append(AgentField.statusDot(a), $("b", null, "@" + handle(a)), $("small", null, (a.name ? a.title + " · " : "") + roleLabel(a) + (onWhat(a) ? " · " + onWhat(a) : "")));
+        b.onmousedown = e => { e.preventDefault(); pickMention(i); }; return b;
+      }));
+      menu.hidden = false;
+    };
+    const pickMention = i => {
+      const a = mentionList[i]; if (!a) return;
+      const caret = ta.selectionStart, before = ta.value.slice(0, caret).replace(/@([a-z0-9-]*)$/i, "@" + handle(a) + " ");
+      ta.value = before + ta.value.slice(caret); ta.selectionStart = ta.selectionEnd = before.length; view.draft = ta.value; menu.hidden = true; updateHint(field()); ta.focus();
+    };
+    const grow = () => { ta.style.height = "auto"; ta.style.height = Math.min(120, ta.scrollHeight) + "px"; };
+    ta.addEventListener("input", () => { view.draft = ta.value; mentionSel = 0; showMenu(); updateHint(field()); grow(); });
+    ta.addEventListener("keydown", e => {
+      if (!menu.hidden && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
+        e.preventDefault();
+        if (e.key === "ArrowDown") mentionSel = (mentionSel + 1) % mentionList.length; else if (e.key === "ArrowUp") mentionSel = (mentionSel + mentionList.length - 1) % mentionList.length;
+        else if (e.key === "Escape") { menu.hidden = true; return; } else { pickMention(mentionSel); return; }
+        showMenu(); return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send.click(); }
+    });
+    ta.addEventListener("blur", () => setTimeout(() => { menu.hidden = true; }, 120));
+    send.onclick = () => {
+      const f = field(), text = ta.value.trim(); if (!text) return;
+      const target = resolveMention(f, text) || defaultTarget(); if (!target) return;
+      ta.value = ""; view.draft = ""; grow(); view.stickBottom = true;
+      f.message(target.id, text.replace(/@[a-z0-9-]+\s*/i, m => resolveMention(f, m) === target ? "" : m) || text);
+      ta.focus();
+    };
+  }
+
+  /* ---------- Rail ---------- */
+  function renderRail(field, M, api) {
+    const {railList} = view.dom; const keep = railList.scrollTop; railList.replaceChildren();
+    const q = view.query;
+    const match = info => !q || info.label.toLowerCase().includes(q) || (info.members || []).some(a => (a.title + " " + (a.name || "") + " " + (onWhat(a) || "")).toLowerCase().includes(q));
+    const asks = field.asks();
+    const needsBtn = chanButton({key: NEEDS, kind: "needs", label: "Needs you"}, api, {glyph: "!", needs: asks.length});
+    needsBtn.classList.add("needs-all"); railList.append(needsBtn);
+
+    const teams = [...M.teams.keys()].map(id => channelInfo(field, M, "t:" + id)).filter(Boolean).filter(match);
+    const recent = field.now - 30 * MIN;
+    const multi = teams.filter(t => t.members.length > 1), solo = teams.filter(t => t.members.length === 1);
+    const order = (x, y) => y.members.filter(field.needsUser).length - x.members.filter(field.needsUser).length || lastAt(y) - lastAt(x);
+    const quiet = t => !t.members.some(field.needsUser) && lastAt(t) < recent && !t.members.some(a => a.status === "working") && t.key !== view.channel;
+    const section = (title, list, opts = {}) => {
+      if (!list.length) return;
+      const h = $("h4"); h.append(title); railList.append(h);
+      for (const t of list) railList.append(chanButton(t, api, opts));
+    };
+    const big = field.agents.length > 60;
+    const teamsActive = multi.filter(t => !(big && quiet(t))).sort(order), teamsQuiet = multi.filter(t => big && quiet(t)).sort(order);
+    section("Teams", teamsActive, {dots: true});
+    if (teamsQuiet.length) {
+      const b = $("button", "rail-more", (view.quietOpen || q ? "▾ " : "▸ ") + teamsQuiet.length + " quiet teams"); b.type = "button";
+      b.onclick = () => { view.quietOpen = !view.quietOpen; api.rerender(); }; railList.append(b);
+      if (view.quietOpen || q) for (const t of teamsQuiet) railList.append(chanButton(t, api, {dots: true}));
+    }
+    const soloActive = solo.filter(t => !(big && quiet(t))).sort(order), soloQuiet = solo.filter(t => big && quiet(t));
+    section("Solo agents", soloActive, {});
+    if (soloQuiet.length) { const b = $("button", "rail-more", (view.quietOpen || q ? "▾ " : "▸ ") + soloQuiet.length + " quiet agents"); b.type = "button"; b.onclick = () => { view.quietOpen = !view.quietOpen; api.rerender(); }; railList.append(b); if (view.quietOpen || q) for (const t of soloQuiet) railList.append(chanButton(t, api, {})); }
+
+    // Direct: cross-team pairs that messaged, then overlapping scopes between teams that are not talking yet.
+    const conflicts = field.conflicts();
+    const conflictKey = c => "d:" + [c.a.id, c.b.id].sort().join("|");
+    const conflictMap = new Map(conflicts.map(c => [conflictKey(c), c]));
+    const directs = [...M.byChan.keys()].filter(k => k.startsWith("d:")).map(k => channelInfo(field, M, k)).filter(Boolean).filter(match).sort((x, y) => lastAt(y) - lastAt(x));
+    const directLimit = big && !q ? 8 : 99;
+    if (directs.length) {
+      const h = $("h4", null, "Direct"); railList.append(h);
+      for (const d of directs.slice(0, directLimit)) railList.append(chanButton(d, api, {overlap: conflictMap.get(d.key)}));
+      if (directs.length > directLimit) railList.append($("span", "rail-more", "+" + (directs.length - directLimit) + " older · search to find"));
+    }
+    const silent = conflicts.filter(c => !M.byChan.has(conflictKey(c)) && M.teamOf(c.a.id) !== M.teamOf(c.b.id)).map(c => ({...channelInfo(field, M, conflictKey(c)), conflict: c})).filter(i => i.pair && match(i));
+    if (silent.length) {
+      const b = $("button", "rail-more", (view.overlapOpen ? "▾ " : "▸ ") + silent.length + " overlapping scopes, not talking"); b.type = "button"; b.title = "Agents in different teams whose begin-work scopes overlap but who have not messaged each other";
+      b.onclick = () => { view.overlapOpen = !view.overlapOpen; api.rerender(); }; railList.append(b);
+      if (view.overlapOpen) for (const d of silent.slice(0, 30)) railList.append(chanButton(d, api, {overlap: d.conflict}));
+    }
+    railList.scrollTop = keep;
+  }
+  function chanButton(info, api, {glyph, needs, dots, overlap} = {}) {
+    const field = api.field;
+    const b = $("button", "chan" + (info.kind === "direct" ? " direct" : "")); b.type = "button";
+    if (info.key === view.channel) b.setAttribute("aria-current", "true");
+    const unread = info.kind === "needs" || info.key === view.channel ? 0 : unreadOf(info);
+    if (unread) b.classList.add("unread");
+    const n = needs ?? (info.members ? info.members.filter(field.needsUser).length : 0);
+    b.append($("span", "glyph", glyph || (info.kind === "direct" ? "↔" : info.members.length > 1 ? "#" : "·")));
+    const label = $("span", "label");
+    if (info.kind === "direct") { label.append(ident(info.pair[0]), " ↔ ", ident(info.pair[1])); }
+    else label.append(info.label);
+    b.append(label);
+    const badges = $("span", "badges");
+    if (overlap) { const o = $("span", "overlap", "overlap"); o.title = "Both declare " + overlap.path + (overlap.negotiating ? " · negotiating" : ""); badges.append(o); }
+    if (unread) { const p = $("span", "pill", String(unread)); if (unread > (view.prevUnread.get(info.key) || 0)) p.classList.add("bump"); badges.append(p); }
+    view.prevUnread.set(info.key, unread);
+    if (n) { const w = $("span", "pill warm", String(n)); w.title = n + (n === 1 ? " ask needs you" : " asks need you"); badges.append(w); }
+    b.append(badges);
+    if (dots && info.members.length > 1) {
+      const d = $("span", "dots"); const show = info.members.slice(0, 14);
+      for (const a of show) { const s = AgentField.statusDot(a); if (field.needsUser(a)) s.className = "dot waiting"; d.append(s); }
+      if (info.members.length > show.length) d.append($("small", null, "+" + (info.members.length - show.length)));
+      b.append(d);
+    }
+    b.title = info.kind === "team" ? info.label + (info.root.name ? " · led by " + info.root.name : "") : info.kind === "direct" ? info.pair.map(a => ident(a) + " (" + field.byId(view.M.teamOf(a.id)).title + ")").join(" ↔ ") : "Every ask waiting on you, across channels";
+    b.onclick = () => openChannel(info.key, api);
+    return b;
+  }
+  function openChannel(key, api) {
+    if (view.channel && view.channel !== key) view.lastSeen.set(view.channel, api.field.now);
+    view.dividerAt = view.lastSeen.get(key) ?? (api.field.now - 20 * MIN);
+    view.channel = key; view.window = 40; view.only = null; view.stickBottom = true; view.pinsCollapsed = false;
+    api.rerender();
+  }
+
+  /* ---------- Pinned asks ---------- */
+  function askPathEl(a, field, api, showChannel) {
+    const p = $("div", "path"), via = (a.ask?.via || []).map(field.byId).filter(Boolean);
+    p.append(whoBtn(a.id, field, api)); p.title = via.length ? "Relayed: the ask passed through " + via.map(ident).join(", ") + " before reaching you" : "Asked you directly";
+    for (const v of via) { p.append("→"); p.append(whoBtn(v.id, field, api)); }
+    p.append("→", $("span", "you", "you"));
+    if (a.parentId && !via.length && field.byId(a.parentId)) p.append($("span", null, " · created by " + ident(field.byId(a.parentId))));
+    if (showChannel) { const c = $("button", "chan-link", "in #" + field.byId(view.M.teamOf(a.id)).title); c.type = "button"; c.onclick = () => openChannel("t:" + view.M.teamOf(a.id), api); p.append(c); }
+    return p;
+  }
+  function renderPins(field, api, list, showChannel) {
+    const {pins} = view.dom;
+    const sig = list.map(a => a.id + ":" + (a.ask?.askedAt || "") + ":" + (a.ask?.via || []).join(",") + ":" + (a.next?.action || "")).join("|") + (showChannel ? "*" : "") + view.pinsCollapsed;
+    if (pins.dataset.sig === sig && pins.contains(document.activeElement) && document.activeElement !== document.body) return;
+    pins.dataset.sig = sig; pins.replaceChildren(); pins.classList.toggle("collapsed", view.pinsCollapsed);
+    if (!list.length) return;
+    const h = $("div", "pin-head"); h.append("📌 " + list.length + (list.length === 1 ? " ask for you" : " asks for you"));
+    if (!showChannel) { const t = $("button", "btn quiet small", view.pinsCollapsed ? "Show" : "Hide"); t.type = "button"; t.onclick = () => { view.pinsCollapsed = !view.pinsCollapsed; api.rerender(); }; h.append(t); }
+    pins.append(h);
+    for (const a of list) {
+      const pin = $("div", "pin" + (a.ask ? "" : " next"));
+      pin.append(askPathEl(a, field, api, showChannel));
+      if (a.ask) pin.append(Mockup.askBox(a, field, api.select)); else pin.append($("span", null, a.next.action));
+      pins.append(pin);
+    }
+  }
+
+  /* ---------- Feed ---------- */
+  function threadsOf(messages) {
+    const map = new Map();
+    for (const m of messages) { if (!map.has(m.exchange)) map.set(m.exchange, []); map.get(m.exchange).push(m); }
+    return [...map.values()].map(list => ({root: list[0], replies: list.slice(1), last: list.at(-1)})).sort((x, y) => x.last.at - y.last.at || x.last.id - y.last.id);
+  }
+  function msgEl(m, field, api, open, fresh) {
+    const row = $("div", "msg"); row.dataset.id = m.id;
+    if (fresh) row.classList.add("arrive");
+    if (view.only && m.from !== view.only && m.to !== view.only) row.classList.add("dim");
+    const sender = m.from === "user" ? null : field.byId(m.from);
+    row.append(avatar(sender, field, api));
+    const main = $("div"); const head = $("div", "msg-head");
+    head.append(whoBtn(m.from, field, api));
+    if (sender) { const w = onWhat(sender); const on = $("span", "on", roleLabel(sender) + (w ? " · " + w : "")); on.title = sender.title + (w ? " · on " + w : ""); head.append(on); }
+    const to = $("span", "to"); to.append("→ ", whoBtn(m.to, field, api)); head.append(to);
+    const intent = $("span", "intent " + m.intent, field.INTENT_LABELS[m.intent] || field.KIND_LABELS[m.kind]);
+    intent.title = "Intent (proposed): " + (field.INTENT_LABELS[m.intent] || "—") + " · classification today: " + field.KIND_LABELS[m.kind] + (m.wokeTurn ? " · woke the recipient" : "");
+    head.append(intent);
+    const t = $("span", "time", field.relativeTime(m.at)); t.title = new Date(m.at).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) + (m.ackedAt ? " · acknowledged" : m.deliveredAt <= field.now ? " · delivered" : ""); head.append(t);
+    main.append(head);
+    const body = $("div", "body");
+    for (const part of m.body.split(/(@[a-z0-9-]+)/i)) body.append(part.startsWith("@") ? $("span", "mention", part) : part);
+    main.append(body);
+    if (open.has(m.id)) {
+      const owed = $("span", "owed" + (m.to === "user" ? " you" : ""));
+      owed.append(m.kind === "creation" ? "Reply due when " + ident(field.byId(m.to)) + " finishes" : (m.to === "user" ? "Your reply" : "Awaiting " + ident(field.byId(m.to)) + "’s reply") + " · " + field.duration(field.now - m.at));
+      main.append(owed);
+    }
+    if (m.intent === "blocker" && m.from !== "user" && sender?.ask) { const r = $("span", "pinned-ref", "↑ pinned above"); main.append(r); }
+    row.append(main);
+    // Hover actions: answer a request addressed to you, or step into the conversation by mentioning the sender.
+    const acts = $("div", "msg-actions");
+    if (m.to === "user" && sender) { const b = $("button", "btn small", "Reply"); b.type = "button"; b.onclick = () => prefill(sender); acts.append(b); }
+    else if (sender && view.info?.kind !== "needs") { const b = $("button", "btn small", "@" + handle(sender)); b.type = "button"; b.title = "Message " + ident(sender) + " in this channel"; b.onclick = () => prefill(sender); acts.append(b); }
+    if (acts.childNodes.length) row.append(acts);
+    return row;
+  }
+  function prefill(a) {
+    const {ta} = view.dom; const tag = "@" + handle(a) + " ";
+    if (!ta.value.startsWith(tag)) ta.value = tag + ta.value.replace(/^@[a-z0-9-]+\s*/i, "");
+    view.draft = ta.value; ta.focus(); ta.selectionStart = ta.selectionEnd = ta.value.length; ta.dispatchEvent(new Event("input"));
+  }
+  function renderFeed(field, api, info) {
+    const {feed} = view.dom;
+    const prevTop = feed.scrollTop, prevHeight = feed.scrollHeight, stick = view.stickBottom;
+    feed.replaceChildren();
+    const msgs = info.messages;
+    if (!msgs.length) { feed.append($("div", "feed-empty", info.kind === "direct" ? "These two agents have not messaged each other. Their write scopes overlap; one message usually settles who owns what." : "No agent messages in this channel yet.")); return; }
+    const open = new Set(field.openRequests().map(m => m.id));
+    const threads = threadsOf(msgs), shown = threads.slice(-view.window);
+    if (threads.length > shown.length) { const b = $("button", "btn quiet small earlier", "Show " + Math.min(40, threads.length - shown.length) + " earlier conversations"); b.type = "button"; b.onclick = () => { view.window += 40; view.stickBottom = false; api.rerender(); }; feed.append(b); }
+    let dividerPlaced = false;
+    for (const th of shown) {
+      if (!dividerPlaced && view.dividerAt != null && th.last.at > view.dividerAt && th.last.from !== "user") { feed.append($("div", "divider", "New")); dividerPlaced = true; }
+      const wrap = $("div", "thread");
+      const fresh = id => !view.seenIds.has(id) && view.seenIds.size > 0;
+      wrap.append(msgEl(th.root, field, api, open, fresh(th.root.id)));
+      if (th.replies.length) {
+        const isOpen = view.expanded.has(th.root.exchange);
+        const tg = $("button", "replies-toggle"); tg.type = "button"; tg.setAttribute("aria-expanded", String(isOpen));
+        const last = th.replies.at(-1);
+        tg.append($("span", "count", (isOpen ? "▾ " : "▸ ") + th.replies.length + (th.replies.length === 1 ? " reply" : " replies")));
+        if (!isOpen) tg.append($("span", "preview", ident(last.from === "user" ? null : field.byId(last.from)) + ": " + last.body), $("span", "time", field.relativeTime(last.at)));
+        tg.onclick = () => { isOpen ? view.expanded.delete(th.root.exchange) : view.expanded.add(th.root.exchange); api.rerender(); };
+        wrap.append(tg);
+        if (isOpen) { const r = $("div", "replies"); for (const m of th.replies) r.append(msgEl(m, field, api, open, fresh(m.id))); wrap.append(r); }
+        else if (th.replies.some(m => fresh(m.id))) tg.classList.add("arrive");
+      }
+      feed.append(wrap);
+    }
+    if (stick) feed.scrollTop = feed.scrollHeight; else feed.scrollTop = prevTop + (view.window > 40 && prevHeight ? 0 : 0);
+  }
+
+  function renderNeeds(field, api) {
+    const {head, feed, banner} = view.dom;
+    head.replaceChildren($("h2", null, "Needs you"), $("span", "topic", "Every ask across channels, with the path it took to reach you and what it holds up."));
+    banner.hidden = true;
+    const list = field.asks();
+    view.dom.channel.classList.add("needs-view");
+    renderPins(field, api, list, true);
+    feed.replaceChildren();
+    if (!list.length) feed.append($("div", "feed-empty", "Nothing needs you. Agents are working or waiting on each other."));
+    else feed.append($("div", "feed-empty", "Answer above, or open a channel to see the conversation that led to an ask."));
+  }
+
+  /* ---------- Members ---------- */
+  function memberEl(r, field, api) {
+    const a = r.a, row = $("div", "mem"); row.tabIndex = 0;
+    if (view.only === a.id) row.classList.add("focused");
+    const ind = $("span", "indent"); for (let i = 0; i < r.depth; i++) ind.append($("i"));
+    const tw = $("button", "tw" + (r.kids ? "" : " leaf"), r.kids ? (view.collapsedMembers.has(a.id) ? "▸" : "▾") : ""); tw.type = "button";
+    if (r.kids) { tw.setAttribute("aria-label", (view.collapsedMembers.has(a.id) ? "Expand " : "Collapse ") + ident(a)); tw.onclick = e => { e.stopPropagation(); view.collapsedMembers.has(a.id) ? view.collapsedMembers.delete(a.id) : view.collapsedMembers.add(a.id); api.rerender(); }; }
+    else tw.tabIndex = -1;
+    ind.append(tw);
+    row.append(ind, avatar(a, field, api, true));
+    const txt = $("div", "txt"); const nm = $("div", "nm"); nm.append($("span", null, ident(a)));
+    if (a.kind !== "app") nm.append($("span", "chip mono", a.kind));
+    if (r.routed) { const c = $("span", "chip mono", "routed"); c.title = "Created by the dispatcher (creation mode: dispatch)"; nm.append(c); }
+    if (r.kids && view.collapsedMembers.has(a.id)) { const n = field.descendants(a.id).length; const need = field.descendantsNeedingUser(a.id).length; nm.append($("span", "collapsed-count", "+" + n + (need ? " · " + need + "!" : ""))); }
+    txt.append(nm);
+    const surf = $("div", "surf", (a.name ? a.title + " · " : "") + (onWhat(a) ? "on " + onWhat(a) : roleLabel(a))); surf.title = a.title + " · " + roleLabel(a) + (a.scope.length ? "\nScope: " + a.scope.join(", ") : ""); txt.append(surf);
+    const st = $("div", "st" + (field.needsUser(a) ? " needs" : ""));
+    st.append(AgentField.statusDot(a));
+    st.append(field.needsUser(a) ? (a.ask ? "Needs you · " + a.ask.kind : "Your move") : a.status === "working" ? (a.activity || field.toolLabel(a) || "Working") : a.status === "done" ? "Done · handed off " + field.relativeTime(a.updatedAt) : field.statusLabel(a));
+    if (a.status !== "done") st.append(AgentField.phaseSteps(a));
+    txt.append(st);
+    row.append(txt);
+    const only = $("button", "btn quiet small only", "only"); only.type = "button"; only.setAttribute("aria-pressed", String(view.only === a.id)); only.title = "Highlight only " + ident(a) + "’s messages";
+    only.onclick = e => { e.stopPropagation(); view.only = view.only === a.id ? null : a.id; view.stickBottom = false; api.rerender(); };
+    row.append(only);
+    row.onclick = () => api.select(a.id);
+    row.onkeydown = e => { if (e.key === "Enter" && e.target === row) api.select(a.id); };
+    return row;
+  }
+  function renderMembers(field, M, api, info) {
+    const {memHead, memList, memFoot} = view.dom; const keep = memList.scrollTop;
+    memHead.replaceChildren(); memList.replaceChildren(); memFoot.replaceChildren(); memFoot.hidden = true;
+    if (info.kind === "needs") {
+      memHead.append("Waiting on you");
+      for (const a of field.asks()) memList.append(memberEl({a, depth: 0, kids: 0}, field, api));
+      return;
+    }
+    if (info.kind === "team") {
+      const rows = memberRows(field, M, info.root.id);
+      memHead.append("Members · tree");
+      if (rows.some(r => r.kids)) {
+        const allCollapsed = rows.filter(r => r.kids).every(r => view.collapsedMembers.has(r.a.id));
+        const b = $("button", "btn quiet small", allCollapsed ? "Expand" : "Collapse"); b.type = "button";
+        b.onclick = () => { const withKids = [info.root, ...field.descendants(info.root.id), ...[...M.routedBy.keys()].map(field.byId)].filter(a => a && (field.children(a.id).length)); if (allCollapsed) withKids.forEach(a => view.collapsedMembers.delete(a.id)); else withKids.filter(a => a.id !== info.root.id).forEach(a => view.collapsedMembers.add(a.id)); api.rerender(); };
+        memHead.append(b);
+      }
+      for (const r of rows) memList.append(memberEl(r, field, api));
+      // Outside the team: collaborators in other channels, and overlapping scopes.
+      const ids = new Set(info.members.map(a => a.id)), outside = new Map();
+      for (const a of info.members) for (const c of field.collaborators(a.id)) if (!ids.has(c.agent.id)) outside.set(c.agent.id, {agent: c.agent, via: a});
+      const overlaps = field.conflicts().filter(c => ids.has(c.a.id) !== ids.has(c.b.id));
+      if (outside.size || overlaps.length) {
+        memFoot.hidden = false;
+        if (outside.size) { memFoot.append($("h5", null, "Talking outside the team")); for (const {agent, via} of [...outside.values()].slice(0, 4)) { const row = $("div"); const b = $("button", null, ident(via) + " ↔ " + ident(agent)); b.type = "button"; b.onclick = () => openChannel("d:" + [via.id, agent.id].sort().join("|"), api); row.append(b, " · #" + field.byId(M.teamOf(agent.id)).title); memFoot.append(row); } }
+        if (overlaps.length) { const h = $("h5", null, "Scope overlaps"); h.style.color = "var(--warm)"; memFoot.append(h); for (const c of overlaps.slice(0, 3)) { const [mine, other] = ids.has(c.a.id) ? [c.a, c.b] : [c.b, c.a]; const row = $("div"); const b = $("button", null, ident(mine) + " ↔ " + ident(other)); b.type = "button"; b.title = c.path; b.onclick = () => openChannel("d:" + [mine.id, other.id].sort().join("|"), api); row.append(b, c.negotiating ? " · negotiating" : " · not talking"); memFoot.append(row); } if (overlaps.length > 3) memFoot.append($("div", null, "+" + (overlaps.length - 3) + " more")); }
+      }
+    } else {
+      memHead.append("In this conversation");
+      for (const a of info.pair) {
+        const chain = field.chain(a.id); const teamRoot = field.byId(M.teamOf(a.id));
+        memList.append(memberEl({a, depth: 0, kids: 0}, field, api));
+        const c = $("div", "surf"); c.style.padding = "0 8px 8px 36px"; const b = $("button", "btn quiet small", "#" + teamRoot.title); b.type = "button"; b.onclick = () => openChannel("t:" + teamRoot.id, api);
+        c.append(chain.length > 1 ? chain.slice(0, -1).map(ident).join(" → ") + " → " + ident(a) + " · " : "", b); memList.append(c);
+      }
+    }
+    memList.scrollTop = keep;
+  }
+
+  /* ---------- Render ---------- */
+  function render(field, stage, api) {
+    if (view.field !== field) { // first load or Reset
+      view.field = field; view.lastSeen.clear(); view.seenIds.clear(); view.expanded.clear(); view.collapsedMembers.clear(); view.prevUnread.clear(); view.channel = null; view.only = null;
+      if (view.dom) { view.dom.ta.value = ""; view.draft = ""; }
+      if (field.agents.length > 60) for (const a of field.agents) if (field.depth(a.id) >= 1 && field.children(a.id).length) view.collapsedMembers.add(a.id);
+    }
+    const dom = skeleton(stage, api);
+    const M = view.M = model(field);
+    if (!view.channel || (view.channel !== NEEDS && !channelInfo(field, M, view.channel))) { view.channel = defaultChannel(field, M); view.dividerAt = field.now - 20 * MIN; }
+    const info = view.info = channelInfo(field, M, view.channel);
+    if (info.kind !== "needs") view.lastSeen.set(info.key, field.now);
+
+    renderRail(field, M, api);
+    if (info.kind === "needs") { renderNeeds(field, api); }
+    else {
+      dom.channel.classList.remove("needs-view");
+      dom.head.replaceChildren();
+      const h = $("h2"); h.append($("span", "hash", info.kind === "team" ? (info.members.length > 1 ? "#" : "·") : "↔"), info.kind === "team" ? info.label : ident(info.pair[0]) + " ↔ " + ident(info.pair[1])); dom.head.append(h);
+      const topic = $("span", "topic");
+      if (info.kind === "team") { const r = info.root; topic.textContent = (r.name ? "led by " + r.name + " · " : "") + roleLabel(r) + (onWhat(r) ? " · on " + onWhat(r) : "") + " · " + field.statusLabel(r); }
+      else topic.textContent = info.pair.map(a => ident(a) + " in #" + field.byId(M.teamOf(a.id)).title).join(" · ");
+      dom.head.append(topic);
+      const lead = info.kind === "team" ? info.root : null;
+      if (lead) { const b = $("button", "btn quiet small", lead.name ? "Open " + lead.name : "Open lead"); b.title = "Open " + lead.title; b.type = "button"; b.onclick = () => api.select(lead.id); dom.head.append(b); }
+      const conflict = info.kind === "direct" && field.conflicts().find(c => [c.a.id, c.b.id].sort().join("|") === info.key.slice(2));
+      dom.banner.hidden = !conflict; dom.banner.replaceChildren();
+      if (conflict) dom.banner.append($("b", null, "Scope overlap"), "Both declared ", $("code", null, conflict.path), conflict.negotiating ? " · they are negotiating it below." : " · no coordination message yet.");
+      const askers = info.members.filter(field.needsUser).sort((x, y) => Number(!!y.ask?.blocking) - Number(!!x.ask?.blocking) || (x.ask?.askedAt ?? x.updatedAt) - (y.ask?.askedAt ?? y.updatedAt));
+      renderPins(field, api, askers, false);
+      renderFeed(field, api, info);
+    }
+    renderMembers(field, M, api, info);
+    if (document.activeElement !== dom.ta && dom.ta.value !== view.draft) dom.ta.value = view.draft;
+    updateHint(field);
+    for (const m of field.messages) view.seenIds.add(m.id);
+  }
+
+  Mockup.mount({
+    number: 23, title: "Team channels", spectrum: "moderate",
+    summary: "Orchestration as group chat: one channel per team, cross-team direct pairs, asks pinned and answerable, a composer that messages the lead or an @mentioned agent.",
+    signals: {
+      current: ["agent_messages", "creation", "conflicts", "created_by", "title", "status", "client", "write_scope", "updated_at", "next_actor", "next_action", "phase", "pending_approval", "tool_activity"],
+      proposed: ["name", "intent", "surface", "escalation", "ask", "blocks", "role", "kind", "activity"],
+    },
+    notes: "Identity: the title is the assignment, so here it names the channel (a topic) and the member's subtitle, never the speaker; speakers are a short stable name you can @mention (proposed name), falling back to the title, which reads like a ticket in chat. On what: every line and member shows its surface (proposed) or first write-scope path (today) instead of phase; phase is only a tiny stepper in the members panel. Channels, threads, unread counts, open replies, dispatch routing and scope overlaps come from today's agent-coord messages, creation records and begin-work; intent tags, surfaces and relay paths (\"Rook → Procurement → you\") each cost one extra field on send or checkpoint.",
+    render,
+  });
+  </script>
+</body>
+</html>

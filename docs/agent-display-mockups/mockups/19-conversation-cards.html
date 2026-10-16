@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 19 · Conversation cards</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Today's home page cards, grouped by team, with two added lines per card:
+       who it is talking with (and why), and what it owes or awaits. */
+    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 18px; font-size: 11px; color: var(--muted); }
+    .bar .seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .bar .seg button { border: 0; background: transparent; color: var(--muted); font-size: 11px; padding: 4px 9px; border-radius: 5px; cursor: pointer; }
+    .bar .seg button[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .bar .spacer { flex: 1; }
+    .bar .legend { display: inline-flex; align-items: center; gap: 12px; }
+    .bar .legend span { display: inline-flex; align-items: center; gap: 5px; }
+
+    h2.section { display: flex; align-items: baseline; gap: 10px; font-size: 15px; font-weight: 550; letter-spacing: -.02em; margin: 0 0 10px; }
+    h2.section small { font-size: 11px; font-weight: 400; color: var(--muted); letter-spacing: 0; }
+
+    /* Needs you: the top of the page, answerable in place. */
+    .needs-sec { margin-bottom: 30px; }
+    .needs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-items: start; }
+    .ask-card { display: grid; gap: 8px; padding: 12px 14px; border-top: 2px solid var(--warm); }
+    .ask-card .who { display: flex; align-items: flex-start; gap: 7px; min-width: 0; font-size: 12px; }
+    .ask-card .who b { font-weight: 600; min-width: 0; line-height: 1.35; }
+    .ask-card .who .provider-logo { margin-top: 2px; }
+    .ask-card .who .muted { font-size: 11px; white-space: nowrap; }
+    .ask-card .ask { padding: 8px 10px; }
+    .path { font-size: 11px; line-height: 1.5; color: var(--muted); }
+    .path .hop { border: 0; background: none; padding: 0; color: var(--ink); font: inherit; cursor: pointer; }
+    .path .hop:hover { text-decoration: underline; }
+    .path .you { color: var(--warm); font-weight: 600; }
+    .path .arrow { color: var(--muted); margin: 0 4px; }
+    .ask-card .locate { margin-left: auto; flex: none; padding: 1px 7px; }
+    .more { margin-top: 10px; }
+
+    /* Teams: one block per root, flowing like the home page columns. */
+    .teams { display: flex; gap: 14px; align-items: flex-start; }
+    .teams > .col { flex: 1; min-width: 0; display: grid; gap: 14px; }
+    .members > *, .team, .branch { min-width: 0; }
+    .members { display: grid; gap: 8px; margin: 8px 0 0 14px; padding-left: 12px; border-left: 1px solid var(--line-strong); }
+
+    .conv { position: relative; display: flex; flex-direction: column; gap: 7px; padding: 13px 15px 11px; cursor: pointer; }
+    .conv:hover { border-color: var(--hover-line); }
+    .conv.member { padding: 10px 12px 9px; gap: 6px; }
+    .conv.flash { animation: flash 1.4s ease-out; }
+    @keyframes flash { 0%, 30% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warm) 45%, transparent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+    .ident { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10.5px; color: var(--muted); }
+    .ident .provider-logo { width: 13px; height: 13px; }
+    .ident .name { color: var(--ink); font-weight: 600; font-size: 11px; }
+    .ident .when { margin-left: auto; font-family: var(--mono); white-space: nowrap; }
+    .conv h3 { font-size: 15px; font-weight: 550; letter-spacing: -.02em; line-height: 1.35; }
+    .conv.member h3 { font-size: 13px; }
+    .state { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
+    .state .label { color: var(--ink); }
+    .state.working .label { color: var(--accent); }
+    .state.waiting .label { color: var(--warm); }
+    .state.failed .label { color: var(--danger); }
+    .on { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 11px; color: var(--muted); }
+    .on b, .line b.k { flex: none; font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); width: 34px; }
+    .on .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+    .on .what.mono { font-size: 10.5px; color: var(--muted); }
+    .on .extra { flex: none; font: 10px var(--mono); }
+    .overlap { font-size: 10.5px; color: var(--muted); padding-left: 40px; }
+    .overlap b { font-weight: 550; color: var(--ink); }
+    .activity { font-size: 11.5px; color: var(--accent); line-height: 1.45; }
+    .activity::before { content: "▸ "; }
+    .summary { font-size: 11.5px; line-height: 1.6; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .conv.member .summary { -webkit-line-clamp: 1; }
+
+    /* The two new lines. */
+    .line { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; line-height: 1.45; }
+    .talk { border-top: 1px solid var(--line); padding-top: 7px; }
+    .talk .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+    .talk .text q { color: var(--muted); quotes: "“" "”"; }
+    .talk .age, .owe .age { flex: none; margin-left: auto; font: 10px var(--mono); color: var(--muted); padding-left: 6px; }
+    .talk.quiet .text { color: var(--muted); }
+    .talk.fresh { animation: fresh 1.6s ease-out; border-radius: 4px; }
+    @keyframes fresh { 0% { background: color-mix(in srgb, var(--accent) 16%, transparent); } 100% { background: transparent; } }
+    .owe .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .owe .more-owed { flex: none; font-size: 10px; color: var(--muted); }
+    .who-btn { border: 0; background: none; padding: 0; font: inherit; color: var(--ink); font-weight: 550; cursor: pointer; }
+    .who-btn:hover { text-decoration: underline; }
+    .owe.owes .k { color: var(--ink); }
+    .owe.you .who-btn, .owe.you .k { color: var(--warm); }
+
+    .avatars { display: inline-flex; flex: none; }
+    .av { position: relative; display: inline-grid; place-items: center; width: 20px; height: 20px; margin-left: -5px; border-radius: 50%; border: 1.5px solid var(--surface); background: var(--tint); color: var(--ink); font: 600 8.5px -apple-system, sans-serif; letter-spacing: .02em; cursor: pointer; padding: 0; box-shadow: inset 0 0 0 1px var(--line-strong); }
+    .av:first-child { margin-left: 0; }
+    .av:hover { z-index: 2; box-shadow: inset 0 0 0 1.5px var(--accent); }
+    .av.you { font-size: 7px; background: var(--warm-tint); color: var(--warm); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warm) 50%, transparent); cursor: default; }
+    .av .dot { position: absolute; right: -2px; bottom: -2px; width: 7px; height: 7px; border: 1.5px solid var(--surface); box-sizing: content-box; }
+    .av .dot.working { box-shadow: none; animation: none; }
+    .av.more { cursor: default; font-size: 8px; color: var(--muted); }
+
+    /* Needs-you reference inside a card; answers in place when opened. */
+    .needs-ref { display: flex; align-items: baseline; gap: 6px; font-size: 11px; line-height: 1.45; color: var(--ink); padding: 6px 8px; border-left: 2px solid var(--warm); background: color-mix(in srgb, var(--warm-tint) 60%, transparent); border-radius: 0 4px 4px 0; }
+    .needs-ref b { flex: none; color: var(--warm); font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .needs-ref span { min-width: 0; flex: 1; }
+    .needs-ref .btn { flex: none; padding: 2px 7px; font-size: 10.5px; }
+    .conv .ask { padding: 8px 10px; }
+
+    /* Sub-agents as chips; app members collapse into chips too. */
+    .chips { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+    .kid { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 8px 2px 6px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper); font-size: 10.5px; color: var(--ink); cursor: pointer; }
+    .kid:hover { border-color: var(--hover-line); }
+    .kid.needs { border-color: var(--warm); background: var(--warm-tint); }
+    .kid.fresh { animation: fresh 1.6s ease-out; }
+    .kid .t { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .kid small { color: var(--muted); font-size: 10px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .kid .kind { font: 9px var(--mono); color: var(--muted); }
+    .disclose { align-self: flex-start; border: 0; background: none; padding: 0; color: var(--muted); font-size: 10.5px; cursor: pointer; }
+    .disclose:hover { color: var(--ink); }
+    .disclose .warm { color: var(--warm); }
+    @media (prefers-reduced-motion: reduce) { .talk.fresh, .kid.fresh, .conv.flash { animation: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60_000, HOUR = 3_600_000;
+  const ROLE = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
+  // How a message reads from the sender's card and from the recipient's card.
+  const OUT = {assign: "Assigned", question: "Asked", answer: "Answered", handoff: "Handed off to", finding: "Sent a finding to", review: "Sent a verdict to",
+    blocker: "Escalated to", coordinate: "Coordinated scope with", status: "Updated"};
+  const IN = {assign: "assigned this", question: "asked", answer: "answered", handoff: "handed off", finding: "reported a finding", review: "sent a verdict",
+    blocker: "escalated", coordinate: "asked to coordinate scope", status: "reported status"};
+  const OWED = {question: "an answer", review: "a review", coordinate: "a scope answer", blocker: "a decision"};
+
+  // View state survives re-renders.
+  const view = {labels: "today", open: new Map(), openAsks: new Set(), showAllAsks: false, lastMsgId: null, conflicts: [], prevAsks: new Map(), lastEvents: 0, flash: null};
+
+  /* Identity. The title is the assignment and changes; in a "talking with" line it is too long to read.
+     Today the title is all we have; with the proposed name the agent keeps one short, stable handle. */
+  const proposed = () => view.labels === "proposed";
+  const handle = a => !a ? "You" : proposed() && a.name ? a.name : a.title;
+  const short = (t, n = 30) => t.length > n ? t.slice(0, n - 1).trimEnd() + "…" : t;
+  const initials = a => { if (!a) return "You"; const w = handle(a).replace(/[^\p{L}\p{N} ]/gu, "").split(/\s+/).filter(Boolean); return (w.length > 1 && !(proposed() && a.name) ? w[0][0] + w[1][0] : w[0]?.slice(0, 2) || "?").toUpperCase(); };
+  const snippet = body => { const s = body.split(/(?<=[.?!])\s/)[0]; return short(s, 70); };
+  const ago = (field, at) => field.duration(field.now - at);
+
+  /* On what. Today: the write scope. Proposed: the surface, a product noun. Phase is a stepper; it says how far, not on what. */
+  function onWhat(a) {
+    if (proposed() && a.surface) return {text: a.surface.label, kind: a.surface.kind, mono: false, title: a.surface.kind + " · " + (a.scope.join(", ") || "no write scope")};
+    if (a.scope.length) return {text: a.scope[0], kind: a.scope.length > 1 ? "+" + (a.scope.length - 1) : null, mono: true, title: a.scope.join("\n")};
+    return null;
+  }
+
+  function avatar(field, api, id) {
+    const a = id === "user" ? null : field.byId(id);
+    const b = $("button", "av" + (a ? "" : " you"), initials(a)); b.type = "button";
+    if (a) { b.append(AgentField.statusDot(a)); b.title = handle(a) + " · " + ROLE[a.role] + " · " + field.statusLabel(a); b.onclick = e => { e.stopPropagation(); api.select(a.id); }; }
+    else { b.title = "You"; b.onclick = e => e.stopPropagation(); }
+    return b;
+  }
+  function who(field, api, id, text) {
+    if (id === "user") return $("span", "you", text || "you");
+    const a = field.byId(id); const b = $("button", "who-btn", text || short(handle(a), 28)); b.type = "button"; b.title = a.title;
+    b.onclick = e => { e.stopPropagation(); api.select(id); }; return b;
+  }
+
+  /* "Talking with": counterparts in the last hour (most recent first), and the latest exchange in words. */
+  function talkLine(a, field, api, fresh) {
+    const recent = field.messagesOf(a.id, {since: field.now - HOUR});
+    const all = recent.length ? recent : field.messagesOf(a.id);
+    if (!all.length) return null;
+    const last = all.at(-1); const out = last.from === a.id; const other = out ? last.to : last.from;
+    const row = $("div", "line talk" + (recent.length ? "" : " quiet") + (fresh.has(a.id) ? " fresh" : ""));
+    row.title = (out ? "→ " : "← ") + field.nameOf(other) + " · " + field.INTENT_LABELS[last.intent] + " (" + field.KIND_LABELS[last.kind] + ")\n" + last.body + (last.wokeTurn ? "\nWoke the recipient's turn." : "");
+    if (recent.length) {
+      const people = []; for (const m of [...recent].reverse()) { const o = m.from === a.id ? m.to : m.from; if (!people.includes(o)) people.push(o); }
+      const av = $("span", "avatars"); for (const id of people.slice(0, 4)) av.append(avatar(field, api, id));
+      if (people.length > 4) { const more = $("span", "av more", "+" + (people.length - 4)); more.title = people.slice(4).map(field.nameOf).join(", "); av.append(more); }
+      row.append(av);
+    }
+    const text = $("span", "text");
+    if (!recent.length) text.append("Quiet · last ");
+    if (out) text.append((recent.length ? OUT[last.intent] : OUT[last.intent].toLowerCase()) + " ", who(field, api, other), " ");
+    else text.append(who(field, api, other), " " + IN[last.intent] + " ");
+    text.append($("q", null, snippet(last.body)));
+    row.append(text, $("span", "age", ago(field, last.at)));
+    return row;
+  }
+
+  /* Obligation: a reply this agent owes (oldest first), else a reply it is waiting for. Creations are the delegation itself, not an obligation. */
+  function oweLine(a, field, api) {
+    const owes = field.owes(a.id).filter(m => m.kind !== "creation").sort((x, y) => x.at - y.at);
+    const awaits = field.awaiting(a.id).filter(m => m.kind !== "creation").sort((x, y) => x.at - y.at);
+    if (!owes.length && !awaits.length) return null;
+    const m = owes[0] || awaits[0], isOwe = !!owes.length, other = isOwe ? m.from : m.to;
+    const row = $("div", "line owe " + (isOwe ? "owes" : "awaits") + (other === "user" ? " you" : ""));
+    row.title = (isOwe ? field.nameOf(m.from) + " asked: " : "Asked " + field.nameOf(m.to) + ": ") + m.body;
+    row.append($("b", "k", isOwe ? "Owes" : "Waits"));
+    const text = $("span", "text");
+    if (isOwe) text.append(who(field, api, other, other === "user" ? "you" : null), " " + (OWED[m.intent] || "a reply"));
+    else if (other === "user") text.append("on ", who(field, api, "user", "your reply"));
+    else text.append("on ", who(field, api, other), "’s reply");
+    text.append($("span", "muted", " · " + m.intent));
+    row.append(text);
+    const rest = owes.length + awaits.length - 1; if (rest > 0) { const r = $("span", "more-owed", "+" + rest); r.title = [...owes.map(x => "Owes " + field.nameOf(x.from)), ...awaits.map(x => "Waits on " + field.nameOf(x.to))].join("\n"); row.append(r); }
+    row.append($("span", "age", ago(field, m.at)));
+    return row;
+  }
+
+  function relayPath(a, field, api) {
+    const path = $("div", "path");
+    const via = proposed() ? (a.ask?.via || []).map(field.byId).filter(Boolean) : [];
+    if (via.length) {
+      path.append("Relayed ");
+      for (const hop of [a, ...via]) { const b = $("button", "hop", short(handle(hop), 22)); b.type = "button"; b.title = hop.title; b.onclick = e => { e.stopPropagation(); api.select(hop.id); }; path.append(b, $("span", "arrow", "→")); }
+      path.append($("span", "you", "You"));
+    }
+    const root = field.ancestors(a.id).at(-1);
+    if (!via.length && !root && !proposed()) return null;
+    if (!via.length) path.append(proposed() ? "Asks you directly" : "From");
+    if (root && !via.includes(root)) { path.append(via.length || proposed() ? " · in " : " "); const b = $("button", "hop", short(handle(root), 30)); b.type = "button"; b.title = root.title; b.onclick = e => { e.stopPropagation(); api.select(root.id); }; path.append(b, "’s team"); }
+    if (!proposed() && a.ask?.via?.length) path.title = "Today the ask reaches you from the child directly; the relay path (" + a.ask.via.map(field.nameOf).join(" → ") + ") is a proposed signal.";
+    return path;
+  }
+
+  const defaultOpen = (a, field) => field.scale === "small" || (field.scale === "medium" && !a.parentId);
+  const isOpen = (a, field) => view.open.has(a.id) ? view.open.get(a.id) : defaultOpen(a, field);
+  const isChipKind = k => k.kind !== "app";
+
+  function card(a, field, api, fresh, member) {
+    const el = $("article", "card conv " + a.status + (member ? " member" : "") + (field.needsUser(a) ? " needs-you" : "") + (a.status === "working" ? " working" : ""));
+    el.dataset.id = a.id; el.tabIndex = 0;
+    el.onclick = () => api.select(a.id); el.onkeydown = e => { if (e.key === "Enter" && e.target === el) api.select(a.id); };
+    if (view.flash === a.id) el.classList.add("flash");
+    const id = $("div", "ident");
+    id.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    if (proposed() && a.name) id.append($("span", "name", a.name));
+    id.append($("span", null, ROLE[a.role] + (a.kind !== "app" ? " · " + a.kind : "")));
+    const when = $("span", "when", field.relativeTime(field.lastActivity(a))); when.title = "Last activity"; id.append(when);
+    el.append(id, $("h3", null, a.title));
+    const st = $("div", "state " + a.status);
+    st.append(AgentField.statusDot(a), $("span", "label", field.statusLabel(a)), AgentField.phaseSteps(a), $("span", null, AgentField.PHASE_LABELS[a.phase]));
+    el.append(st);
+    const on = onWhat(a);
+    if (on) { const r = $("div", "on"); r.title = on.title; r.append($("b", null, "On"), $("span", "what" + (on.mono ? " mono" : ""), on.text)); if (on.kind) r.append($("span", "extra muted", on.kind)); el.append(r); }
+    // Overlapping write scopes (today's begin-work conflicts), one line however many.
+    const overlaps = view.conflicts.filter(c => c.a === a || c.b === a);
+    if (overlaps.length) {
+      const o = $("div", "overlap"), c0 = overlaps[0], others = overlaps.map(c => c.a === a ? c.b : c.a), talking = overlaps.filter(c => c.negotiating).length;
+      o.append("Shares ", $("span", "mono", short(c0.path.replace(/\/$/, "") + "/", 30)), " with ", who(field, api, others[0].id));
+      if (others.length > 1) o.append(" +" + (others.length - 1));
+      o.append(talking ? " · " + (overlaps.length > 1 ? talking + " " : "") + "negotiating" : " · not discussed");
+      o.title = overlaps.map(c => (c.a === a ? c.b : c.a).title + " · " + c.path + (c.negotiating ? " · negotiating" : "")).join("\n"); el.append(o);
+    }
+    if (a.status === "working" && (a.activity || field.toolLabel(a))) el.append($("div", "activity", a.activity || field.toolLabel(a)));
+    else if (!field.needsUser(a)) { const s = $("p", "summary", a.summary); s.title = a.summary; el.append(s); }
+    if (field.needsUser(a)) {
+      if (a.ask && view.openAsks.has(a.id)) el.append(Mockup.askBox(a, field, null));
+      else {
+        const n = $("div", "needs-ref"); n.append($("b", null, a.ask ? a.ask.kind : "you"), $("span", null, a.ask?.question || a.next.action));
+        if (a.ask) { const b = $("button", "btn small warm", "Answer"); b.type = "button"; b.onclick = e => { e.stopPropagation(); view.openAsks.add(a.id); api.rerender(); }; n.append(b); }
+        el.append(n);
+      }
+    }
+    const talk = talkLine(a, field, api, fresh); if (talk) el.append(talk);
+    const owe = oweLine(a, field, api); if (owe) el.append(owe);
+    // Sub-agents and delegates are chips; app members are chips only while collapsed.
+    const kids = field.children(a.id), apps = kids.filter(k => !isChipKind(k)), open = isOpen(a, field);
+    const chipKids = open ? kids.filter(isChipKind) : kids;
+    if (chipKids.length) {
+      const row = $("div", "chips");
+      for (const k of chipKids) {
+        const c = $("button", "kid" + (field.needsUser(k) || field.descendantsNeedingUser(k.id).length ? " needs" : "") + (fresh.has(k.id) ? " fresh" : "")); c.type = "button";
+        c.title = k.title + " · " + field.statusLabel(k) + (field.children(k.id).length ? " · " + field.descendants(k.id).length + " below" : "");
+        c.append(AgentField.statusDot(k), $("span", "t", short(handle(k), 34)));
+        if (k.kind !== "app") c.append($("span", "kind", k.kind));
+        c.append($("small", null, k.status === "working" ? (k.activity || field.toolLabel(k) || "Working") : field.statusLabel(k)));
+        c.onclick = e => { e.stopPropagation(); api.select(k.id); };
+        row.append(c);
+      }
+      el.append(row);
+    }
+    if (apps.length) {
+      const below = field.descendants(a.id).length, needs = field.descendantsNeedingUser(a.id).length;
+      const d = $("button", "disclose"); d.type = "button"; d.setAttribute("aria-expanded", String(open));
+      d.append((open ? "▾ Hide " : "▸ Show ") + apps.length + (apps.length === 1 ? " member" : " members") + (below > apps.length ? " (" + below + " agents below)" : ""));
+      if (needs && !open) d.append(" · ", $("span", "warm", needs + " need you"));
+      d.onclick = e => { e.stopPropagation(); view.open.set(a.id, !open); api.rerender(); };
+      el.append(d);
+    }
+    return el;
+  }
+
+  function team(a, field, api, fresh, member) {
+    const box = $("div", member ? "branch" : "team");
+    box.append(card(a, field, api, fresh, member));
+    const apps = field.children(a.id).filter(k => !isChipKind(k));
+    if (apps.length && isOpen(a, field)) {
+      const list = $("div", "members");
+      for (const k of apps) list.append(team(k, field, api, fresh, true));
+      box.append(list);
+    }
+    return box;
+  }
+
+  function askCard(a, field, api) {
+    const c = $("article", "card ask-card");
+    const w = $("div", "who"); w.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("b", null, handle(a)), $("span", "muted", ROLE[a.role] + " · " + field.relativeTime(a.ask?.askedAt ?? a.updatedAt)));
+    w.title = a.title; c.append(w); const rp = relayPath(a, field, api); if (rp) c.append(rp);
+    if (a.ask) c.append(Mockup.askBox(a, field, api.select));
+    else { const n = $("div", "needs-ref"); n.append($("b", null, "next"), $("span", null, a.next.action)); c.append(n); }
+    const loc = $("button", "btn quiet small locate", "↓"); loc.type = "button"; loc.title = "Show in its team"; loc.setAttribute("aria-label", "Show in its team");
+    loc.onclick = () => locate(a, field, api); w.append(loc);
+    return c;
+  }
+
+  function locate(a, field, api) {
+    for (const anc of field.ancestors(a.id)) view.open.set(anc.id, true);
+    view.flash = a.id; api.rerender();
+    const target = document.querySelector('.conv[data-id="' + a.id + '"]') || document.querySelector('.kid');
+    target?.scrollIntoView({block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"});
+    setTimeout(() => { view.flash = null; }, 1500);
+  }
+
+  function seg(options, value, onPick) {
+    const s = $("span", "seg");
+    for (const [v, label, title] of options) { const b = $("button", null, label); b.type = "button"; b.title = title; b.setAttribute("aria-pressed", String(v === value)); b.onclick = () => onPick(v); s.append(b); }
+    return s;
+  }
+
+  let resizeTimer = null;
+  const ui = Mockup.mount({
+    number: 19, title: "Conversation cards", spectrum: "conservative",
+    summary: "Today's cards grouped by team; each card adds who it is talking with and why, and the reply it owes or awaits.",
+    signals: {
+      current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "updated_at", "write_scope", "tool_activity", "pending_approval", "agent_messages", "creation", "conflicts"],
+      proposed: ["intent", "ask", "name", "surface", "escalation"],
+    },
+    notes: "Default labels use today's signals plus message intent: the talking-with line, obligations, and overlaps come from agent-coord messages, creation, and begin-work. Identity: the title is the right headline (it is the assignment) but the wrong handle; it changes and is too long in 'asked X about…', so the proposed stable name becomes the handle. On what: scope today, surface (one proposed checkpoint field) with proposed labels; phase stays a small stepper because it says how far, not on what. Cost to the model: one intent word per send; name and surface once per thread; ask.via is relayed by the parent.",
+    render(field, stage, api) {
+      // Messages new since the last render pulse once on both cards.
+      const fresh = new Set();
+      if (view.lastMsgId != null) for (const m of field.messages) if (m.id > view.lastMsgId) { fresh.add(m.from); fresh.add(m.to); }
+      view.lastMsgId = field.messages.reduce((n, m) => Math.max(n, m.id), 0);
+      // Say what happened to an answered ask, including who it was relayed back through.
+      for (const [id, via] of view.prevAsks) {
+        const a = field.byId(id); if (!a || a.ask) continue;
+        const h = a.history.at(-1); if (h?.actor === "user") api.note(handle(a) + " · " + h.summary.replace(/^You answered: /, "you answered “").replace(/\.$/, "”") + (via.length ? " · relayed back through " + via.map(field.nameOf).join(" → ") : "") + " · " + field.statusLabel(a) + ".");
+        view.openAsks.delete(id);
+      }
+      view.prevAsks = new Map(field.agents.filter(a => a.ask).map(a => [a.id, a.ask.via || []]));
+      view.conflicts = field.conflicts();
+      const scrollY = window.scrollY;
+      stage.replaceChildren();
+
+      const bar = $("div", "bar");
+      bar.append($("span", null, "Labels"), seg([["today", "Today + intent", "Title as identity, write scope as 'on what'"], ["proposed", "With proposed", "Stable name as identity, surface as 'on what', relayed ask paths"]], view.labels, v => { view.labels = v; api.rerender(); }));
+      const expand = $("button", "btn small", "Expand all"); expand.type = "button"; expand.onclick = () => { for (const a of field.agents) if (field.children(a.id).some(k => !isChipKind(k))) view.open.set(a.id, true); api.rerender(); };
+      const collapse = $("button", "btn small", "Collapse all"); collapse.type = "button"; collapse.onclick = () => { for (const a of field.agents) view.open.set(a.id, false); api.rerender(); };
+      const legend = $("span", "legend");
+      for (const [cls, label] of [["working", "Working"], ["blocked", "Waiting on agent / external"], ["waiting", "Needs you"], ["done", "Done"]]) { const s = $("span"); s.append($("span", "dot " + cls), label); legend.append(s); }
+      bar.append(expand, collapse, $("span", "spacer"), legend);
+      stage.append(bar);
+
+      const asks = field.asks();
+      if (asks.length) {
+        const sec = $("section", "needs-sec");
+        const h = $("h2", "section", "Needs you"); h.append($("small", null, "Answer here; the path shows who passed the ask to you and whose team it is in.")); sec.append(h);
+        const grid = $("div", "needs-grid"); const first = field.scale === "small" ? 8 : 4, limit = view.showAllAsks ? asks.length : first;
+        for (const a of asks.slice(0, limit)) grid.append(askCard(a, field, api));
+        sec.append(grid);
+        if (asks.length > first) { const m = $("button", "btn small more", view.showAllAsks ? "Show fewer" : "Show " + (asks.length - first) + " more asks"); m.type = "button"; m.onclick = () => { view.showAllAsks = !view.showAllAsks; api.rerender(); }; sec.append(m); }
+        stage.append(sec);
+      }
+
+      // Teams: a root with its members. Order: teams that need you, then the most recent conversation.
+      const lastTalk = r => Math.max(field.lastActivity(r), ...[r, ...field.descendants(r.id)].map(x => field.messagesOf(x.id).at(-1)?.at || 0));
+      const roots = field.roots().map(r => ({r, needs: [r, ...field.descendants(r.id)].filter(field.needsUser).length, done: r.status === "done", t: lastTalk(r)}))
+        .sort((x, y) => Number(x.done) - Number(y.done) || y.needs - x.needs || y.t - x.t);
+      const h = $("h2", "section", "Teams"); h.append($("small", null, "Members nest under their creator; avatars are who each agent messaged in the last hour.")); stage.append(h);
+      // Masonry by hand: each team goes to the shortest column, so reading order stays roughly by priority.
+      const teams = $("div", "teams"); stage.append(teams);
+      const n = Math.max(1, Math.floor((teams.clientWidth + 14) / (380 + 14)));
+      const cols = Array.from({length: n}, () => { const c = $("div", "col"); teams.append(c); return c; });
+      for (const {r} of roots) { const col = cols.reduce((x, y) => y.offsetHeight < x.offsetHeight ? y : x); col.append(team(r, field, api, fresh, false)); }
+      window.scrollTo(0, scrollY);
+    },
+  });
+  addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => ui.rerender(), 150); });
+})();
+</script>
+</body>
+</html>

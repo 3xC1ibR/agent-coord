@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 26 · Comms matrix</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Who talks to whom as an adjacency matrix: rows send, columns receive, teams sit as blocks on the diagonal, You first. */
+    #stage { padding: 14px 20px 16px; }
+    .cm { display: grid; grid-template-columns: minmax(0, 1fr) 360px; grid-template-rows: auto minmax(0, 1fr) 116px; gap: 10px 16px; min-height: 560px; }
+    .cm-bar { grid-column: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 11px; color: var(--muted); }
+    .seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .seg .btn { border: 0; padding: 4px 9px; background: transparent; }
+    .seg .btn[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .cm-bar .lbl { font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .cm-bar .grow { flex: 1; }
+    .cm-bar .btn.small[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: transparent; }
+    .cm-main { grid-column: 1; position: relative; min-height: 0; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+    .cm-main svg { display: block; position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; }
+    .cm-strip { grid-column: 1; display: flex; align-items: center; gap: 10px; min-width: 0; overflow-x: auto; }
+    .cm-strip .head { flex: none; width: 92px; font-size: 10.5px; line-height: 1.45; color: var(--muted); align-self: center; }
+    .cm-strip .head b { display: block; font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+    .mini { flex: none; display: grid; gap: 3px; justify-items: center; padding: 4px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font: 10px var(--mono); cursor: pointer; }
+    .mini:hover { border-color: var(--line-strong); }
+    .mini[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+    .mini canvas { display: block; border-radius: 3px; }
+
+    /* Side panel: needs-you first, then the inspector or the live feed. */
+    .cm-side { grid-column: 2; grid-row: 1 / span 3; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; padding-right: 2px; }
+    .side-h { display: flex; align-items: baseline; gap: 8px; font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+    .side-h .warm { color: var(--warm); }
+    .side-h .btn { margin-left: auto; text-transform: none; letter-spacing: 0; font-family: inherit; }
+    .needs { display: grid; gap: 6px; }
+    .need { border: 1px solid color-mix(in srgb, var(--warm) 35%, var(--line)); border-left: 3px solid var(--warm); border-radius: 6px; background: var(--surface); }
+    .need > button.need-sum { all: unset; box-sizing: border-box; width: 100%; display: grid; gap: 2px; padding: 7px 10px; cursor: pointer; font-size: 11.5px; line-height: 1.45; }
+    .need > button.need-sum:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .need .path { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; font-size: 10.5px; color: var(--muted); }
+    .need .path b { color: var(--ink); font-weight: 600; }
+    .need .path .you { color: var(--warm); font-weight: 600; }
+    .need .q { color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .need .k { font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--warm); }
+    .need.open > button.need-sum { padding-bottom: 2px; }
+    .need .ask { border: 0; border-radius: 0 0 6px 0; background: transparent; padding: 2px 10px 9px; }
+    .need .ask .ask-kind, .need .ask .ask-question { display: none; }
+    .need:hover, .need.lit { border-color: var(--warm); }
+    .need.lit { box-shadow: 0 0 0 2px color-mix(in srgb, var(--warm) 25%, transparent); }
+    .need-more { justify-self: start; }
+    .calm { font-size: 11.5px; color: var(--muted); padding: 8px 10px; border: 1px dashed var(--line-strong); border-radius: 6px; }
+
+    .insp { display: grid; gap: 8px; font-size: 11.5px; line-height: 1.5; }
+    .insp-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; font-weight: 550; letter-spacing: -.01em; }
+    .insp-head .arrow { color: var(--muted); font-weight: 400; }
+    .insp-head .btn { margin-left: auto; }
+    .who { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; border-radius: 4px; }
+    .who:hover { color: var(--accent); }
+    .who:focus-visible { outline: 2px solid var(--accent); }
+    .who.assigned { font-style: italic; }
+    .sub { color: var(--muted); font-size: 11px; }
+    .sub b { color: var(--ink); font-weight: 550; }
+    .crumbs { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; font-size: 10.5px; color: var(--muted); }
+    .xchg { border-left: 2px solid var(--line); padding-left: 9px; display: grid; gap: 5px; }
+    .xchg.open { border-left-color: var(--line-strong); }
+    .msg { display: grid; gap: 1px; }
+    .msg small { font: 10px var(--mono); color: var(--muted); display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+    .msg small .intent { color: var(--ink); }
+    .msg small .owed { color: var(--ink); border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 4px; }
+    .msg small .owed.you { color: var(--warm); border-color: var(--warm); }
+    .msg span { color: var(--ink); }
+    .msg .reply-row { display: flex; gap: 5px; margin-top: 3px; }
+    .msg .reply-row input { flex: 1; min-width: 0; padding: 4px 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--ink); font-size: 11px; }
+    .partners { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+    .partners li > button { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 3px 5px; border-radius: 4px; }
+    .partners li > button:hover { background: var(--hover-bg); }
+    .partners .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .partners .nm i { color: var(--muted); font-style: normal; font-size: 10.5px; }
+    .partners .ct { font: 10px var(--mono); color: var(--muted); }
+    .partners .ct .ow { color: var(--ink); }
+    .bar-mini { display: inline-block; height: 6px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 55%, var(--surface)); vertical-align: middle; margin-left: 4px; }
+    .feed { display: grid; gap: 1px; }
+    .feed button { all: unset; box-sizing: border-box; cursor: pointer; display: grid; gap: 1px; padding: 5px 7px; border-radius: 5px; font-size: 11px; line-height: 1.4; }
+    .feed button:hover { background: var(--hover-bg); }
+    .feed .fh { display: flex; gap: 5px; align-items: center; font-size: 10.5px; color: var(--muted); min-width: 0; }
+    .feed .fh b { color: var(--ink); font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+    .feed .fh .age { margin-left: auto; font: 10px var(--mono); flex: none; }
+    .feed .fb { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .feed .fresh { animation: arrive 1.6s ease-out; }
+    @keyframes arrive { from { background: color-mix(in srgb, var(--accent) 18%, transparent); } }
+    .legend { display: grid; gap: 5px; font-size: 10.5px; color: var(--muted); line-height: 1.4; }
+    .legend .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; border: 1px solid var(--line); }
+    .tag { display: inline-block; font: 600 8.5px var(--mono); letter-spacing: .06em; text-transform: uppercase; padding: 0 4px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--muted); }
+    .tag.proposed { border-style: dashed; }
+
+    /* SVG marks */
+    .lab { font-size: 11px; fill: var(--ink); cursor: pointer; }
+    .lab.assigned { font-style: italic; }
+    .lab.team { font-weight: 600; }
+    .lab.dim { opacity: .3; }
+    .lab.hot { fill: var(--accent); font-weight: 600; }
+    .lab.you { fill: var(--warm); font-weight: 650; }
+    .lab-surface { font-size: 10px; fill: var(--muted); pointer-events: none; }
+    .cell { shape-rendering: crispEdges; }
+    .cell.fresh { animation: cell-arrive 1.8s ease-out; }
+    @keyframes cell-arrive { 0% { stroke: var(--accent); stroke-width: 3px; } 100% { stroke-width: 0; } }
+    .grid-line { stroke: var(--line); stroke-width: 1; shape-rendering: crispEdges; }
+    .block { fill: color-mix(in srgb, var(--ink) 4.5%, var(--surface)); stroke: var(--line-strong); stroke-width: 1; shape-rendering: crispEdges; }
+    .block.solo { fill: color-mix(in srgb, var(--ink) 2%, var(--surface)); stroke-dasharray: 3 3; }
+    .you-band { fill: color-mix(in srgb, var(--warm) 6%, var(--surface)); }
+    .cross { fill: none; stroke: var(--accent); stroke-width: 1; opacity: .5; pointer-events: none; }
+    .hl { fill: color-mix(in srgb, var(--accent) 9%, transparent); pointer-events: none; }
+    .relay { fill: none; stroke: var(--warm); stroke-width: 2; pointer-events: none; }
+    .relay-line { fill: none; stroke: var(--warm); stroke-width: 1.4; stroke-dasharray: 3 3; pointer-events: none; opacity: .8; }
+    .owed { fill: var(--ink); pointer-events: none; }
+    .owed.you { fill: var(--warm); }
+    .conflict { fill: none; stroke: var(--ink); stroke-width: 1; stroke-dasharray: 2 2; pointer-events: none; opacity: .7; }
+    .focus-ring { fill: none; stroke: var(--ink); stroke-width: 2; pointer-events: none; }
+    .needs-dot { fill: var(--warm); }
+    .needs-dot.pulse { animation: blink 1.6s ease-in-out infinite; }
+    @keyframes blink { 50% { opacity: .35; } }
+    .twisty { font-size: 9px; fill: var(--muted); cursor: pointer; }
+    .axis-note { font: 9px var(--mono); fill: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+    .status { stroke: none; }
+    /* Chord view */
+    .arc { cursor: pointer; }
+    .arc-out { fill: color-mix(in srgb, var(--ink) 22%, var(--surface)); }
+    .arc-self { fill: color-mix(in srgb, var(--accent) 75%, var(--surface)); }
+    .arc-label .nd { fill: var(--warm); }
+    .arc.you .arc-out { fill: var(--warm); }
+    .ribbon { fill: color-mix(in srgb, var(--accent) 30%, transparent); stroke: color-mix(in srgb, var(--accent) 50%, transparent); stroke-width: .6; cursor: pointer; transition: opacity .15s; }
+    .ribbon.you { fill: color-mix(in srgb, var(--warm) 35%, transparent); stroke: color-mix(in srgb, var(--warm) 60%, transparent); }
+    .ribbon.open { stroke: var(--ink); stroke-dasharray: 3 2; stroke-width: .8; }
+    .ribbon.fresh { animation: rib-arrive 1.8s ease-out; }
+    @keyframes rib-arrive { 0% { fill: color-mix(in srgb, var(--accent) 75%, transparent); } }
+    svg.focusing .ribbon:not(.on) { opacity: .12; }
+    svg.focusing .arc:not(.on) { opacity: .45; }
+    .arc-label { font-size: 10.5px; fill: var(--ink); pointer-events: none; }
+    .arc-label.you { fill: var(--warm); font-weight: 650; }
+    .arc-label.dim { fill: var(--muted); }
+
+    .tip { position: fixed; z-index: 130; pointer-events: none; max-width: 300px; padding: 7px 9px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: 0 8px 24px var(--shadow); font-size: 11px; line-height: 1.45; color: var(--ink); }
+    .tip b { font-weight: 600; }
+    .tip .m { color: var(--muted); }
+    .tip .q { display: block; margin-top: 3px; color: var(--ink); font-style: italic; }
+    @media (prefers-reduced-motion: reduce) { .cell.fresh, .ribbon.fresh, .feed .fresh, .needs-dot.pulse { animation: none; } .ribbon { transition: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+(() => {
+  const $ = (tag, cls, text) => AgentField.el(tag, cls, text);
+  const NS = "http://www.w3.org/2000/svg";
+  const S = (tag, attrs = {}, cls) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); if (cls) n.setAttribute("class", cls); return n; };
+  const MIN = 60_000, HOUR = 3_600_000;
+  const WINDOWS = [["15m", 15 * MIN], ["1h", HOUR], ["6h", 6 * HOUR], ["All", Infinity]];
+  const RAMP = [[1, 30], [2, 44], [4, 60], [8, 76], [Infinity, 94]];
+  const rampPct = n => n <= 0 ? 0 : RAMP.find(([max]) => n <= max)[1];
+  const maxId = field => field.messages.reduce((m, x) => Math.max(m, x.id), 0);
+  const trunc = (t, n) => !t ? "" : t.length > n ? t.slice(0, n - 1) + "…" : t;
+
+  /* Identity: the title is the assignment and changes; the axis needs a short, stable handle.
+   * Use the reported name; otherwise the app assigns a callsign once, at creation, at no cost to the model. */
+  const CALLSIGNS = [
+    "Anvil", "Aster", "Birch", "Bluff", "Briar", "Canyon", "Cinder", "Clover", "Copper", "Crane", "Delta", "Dove", "Elm", "Falcon", "Fern", "Flint", "Gale", "Glade",
+    "Granite", "Grove", "Hazel", "Hawk", "Iris", "Ivy", "Juno", "Kite", "Lark", "Laurel", "Maple", "Mesa", "Mink", "Nova", "Oak", "Onyx", "Opal", "Otter", "Owl", "Pine",
+    "Plover", "Quartz", "Raven", "Reed", "Ridge", "Robin", "Rowan", "Sage", "Shale", "Slate", "Sparrow", "Spruce", "Swift", "Teal", "Thistle", "Thorn", "Tide", "Topaz",
+    "Vale", "Willow", "Yew", "Zinnia", "Acorn", "Agate", "Amber", "Arbor", "Ash", "Aspen", "Badger", "Beacon", "Beryl", "Bison", "Bracken", "Brook", "Calder", "Camber",
+    "Cassia", "Cedarwood", "Chalk", "Cirrus", "Coral", "Cove", "Cypress", "Dahlia", "Drift", "Dunlin", "Egret", "Eider", "Fable", "Finch", "Fjord", "Flax", "Gannet",
+    "Garland", "Geode", "Ginger", "Gorse", "Harrier", "Heath", "Hemlock", "Holly", "Hyacinth", "Ibis", "Jade", "Jay", "Juniperus", "Kelp", "Knoll", "Lagoon", "Larch",
+    "Lichen", "Lupine", "Lynx", "Magpie", "Mallow", "Marsh", "Merlin", "Mistral", "Myrtle", "Nimbus", "Oriole", "Osprey", "Pampas", "Petrel", "Pinion", "Poppy",
+    "Prairie", "Quail", "Quill", "Rain", "Rill", "Saffron", "Sandpiper", "Sequoia", "Shoal", "Sierra", "Skylark", "Sorrel", "Starling", "Stratus", "Summit", "Sycamore",
+    "Tamarack", "Tansy", "Tern", "Thrush", "Timber", "Tundra", "Umber", "Verbena", "Vireo", "Walnut", "Warbler", "Wisteria", "Woodcock", "Yucca", "Zircon", "Aurora",
+    "Basalt", "Bluebell", "Caraway", "Comfrey", "Corvid", "Crocus", "Ember", "Fescue", "Foxglove", "Galena", "Heather", "Indigo", "Kingfisher", "Lantana", "Loam",
+    "Meadow", "Mosswort", "Nightjar", "Obsidian", "Pewter", "Pumice", "Redwood", "Rosemary", "Russet", "Shingle", "Silt", "Spindle", "Talon", "Thyme", "Upland", "Vetch",
+    "Wren"];
+
+  const view = {mode: "matrix", win: null, slice: null, labels: "identity", crossOnly: false, expanded: null, focus: null, needOpen: new Set(), needAll: false, hoverAsk: null};
+  let lastField = null, seenMsg = 0, callsigns = new Map(), apiRef = null, tip = null, sizeKey = "";
+
+  function resetFor(field) {
+    lastField = field; seenMsg = maxId(field); callsigns = new Map(); view.focus = null; view.needOpen = new Set(); view.needInit = false;
+    view.win ??= field.scale === "small" ? 6 * HOUR : HOUR;
+    view.expanded = new Set(field.scale === "large" ? [] : field.roots().map(r => r.id).concat("solo"));
+  }
+  function callsign(field, a) {
+    if (!callsigns.size || !callsigns.has(a.id)) {
+      const taken = new Set(field.agents.map(x => x.name).filter(Boolean));
+      for (const v of callsigns.values()) taken.add(v);
+      for (const x of [...field.agents].sort((p, q) => p.createdAt - q.createdAt || (p.id < q.id ? -1 : 1))) {
+        if (x.name || callsigns.has(x.id)) continue;
+        let h = 0; for (const ch of x.id + x.title) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+        let name = null;
+        for (let k = 0; k < CALLSIGNS.length && !name; k++) { const w = CALLSIGNS[(h + k) % CALLSIGNS.length]; if (!taken.has(w)) name = w; }
+        for (let k = 2; !name; k++) { const w = CALLSIGNS[h % CALLSIGNS.length] + " " + k; if (!taken.has(w)) name = w; }
+        taken.add(name); callsigns.set(x.id, name);
+      }
+    }
+    return callsigns.get(a.id);
+  }
+  const identity = (field, a) => !a ? "You" : view.labels === "title" ? a.title : (a.name || callsign(field, a));
+  const assigned = a => a && view.labels !== "title" && !a.name;
+  const surfaceOf = a => a.surface ? a.surface.kind + " · " + a.surface.label : (a.scope[0] || "");
+
+  /* Axis units: You, then each team (root + tree), solo agents grouped in one block. A collapsed team is one unit. */
+  function buildAxis(field) {
+    const roots = field.roots();
+    const teams = [], solos = [];
+    for (const r of roots) { const members = [r, ...field.descendants(r.id)]; if (members.length > 1) teams.push({key: r.id, root: r, members}); else solos.push(r); }
+    if (solos.length) teams.push({key: "solo", root: null, members: solos, solo: true});
+    const units = [{type: "you", key: "user", ids: ["user"], team: null}];
+    const teamOf = new Map([["user", null]]);
+    for (const t of teams) {
+      t.start = units.length;
+      for (const m of t.members) teamOf.set(m.id, t);
+      if (view.expanded.has(t.key)) {
+        const rows = t.solo ? solos.map(a => ({agent: a, depth: 0})) : field.treeRows([t.root.id]);
+        for (const {agent, depth} of rows) units.push({type: "agent", key: agent.id, ids: [agent.id], agent, depth, team: t});
+      } else units.push({type: "team", key: "team:" + t.key, ids: t.members.map(m => m.id), team: t});
+      t.end = units.length;
+    }
+    const unitOf = new Map(); units.forEach((u, i) => { for (const id of u.ids) unitOf.set(id, i); });
+    return {units, teams, unitOf, teamOf};
+  }
+  function windowRange(field) {
+    if (view.slice != null) return {from: field.now - (view.slice + 1) * 10 * MIN, to: field.now - view.slice * 10 * MIN, label: view.slice ? (view.slice + 1) * 10 + "–" + view.slice * 10 + " min ago" : "the last 10 min"};
+    const w = WINDOWS.find(x => x[1] === view.win);
+    return {from: view.win === Infinity ? -Infinity : field.now - view.win, to: Infinity, label: view.win === Infinity ? "all time" : "the last " + w[0]};
+  }
+  /* Directed counts per unit pair. Pending asks count as an open message to You (agent-coord has no ask-to-user message today). */
+  function aggregate(field, axis, range) {
+    const cells = new Map(), key = (i, j) => i * 4096 + j;
+    const get = (i, j) => { const k = key(i, j); let c = cells.get(k); if (!c) cells.set(k, c = {i, j, count: 0, msgs: [], open: 0, youOpen: 0, asks: [], fresh: false, last: null}); return c; };
+    for (const m of field.messages) {
+      if (m.at < range.from || m.at > range.to) continue;
+      const i = axis.unitOf.get(m.from), j = axis.unitOf.get(m.to); if (i == null || j == null) continue;
+      const c = get(i, j); c.count++; c.msgs.push(m); c.last = m; if (m.id > seenMsg) c.fresh = true;
+    }
+    for (const m of field.openRequests()) {
+      const i = axis.unitOf.get(m.from), j = axis.unitOf.get(m.to); if (i == null || j == null) continue;
+      const c = get(i, j); if (m.to === "user") c.youOpen++; else c.open++;
+    }
+    for (const a of field.asks()) { const i = axis.unitOf.get(a.id); if (i == null) continue; const c = get(i, 0); c.asks.push(a); c.youOpen++; }
+    return cells;
+  }
+  const intentsOf = msgs => { const t = {}; for (const m of msgs) t[m.intent] = (t[m.intent] || 0) + 1; return Object.entries(t).sort((a, b) => b[1] - a[1]); };
+  const intentText = (field, msgs) => intentsOf(msgs).map(([k, n]) => n + " " + (field.INTENT_LABELS[k] || k).toLowerCase()).join(", ");
+
+  function hexToRgb(h) { h = h.trim(); if (h.length === 4) h = "#" + [...h.slice(1)].map(c => c + c).join(""); const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+  const mix = (a, b, p) => "rgb(" + a.map((v, k) => Math.round(v * p / 100 + b[k] * (1 - p / 100))).join(",") + ")";
+
+  Mockup.mount({
+    number: 26, title: "Comms matrix", spectrum: "radical",
+    summary: "Who talks to whom at any scale: an adjacency matrix with teams as diagonal blocks and You as the first row and column, a chord view by team, and small multiples of the last hour.",
+    signals: {
+      current: ["agent_messages", "creation", "created_by", "conflicts", "status", "title", "phase", "write_scope", "pending_approval", "next_actor", "updated_at"],
+      proposed: ["name", "intent", "surface", "escalation", "ask", "role", "blocks"],
+    },
+    notes: "Identity: the title is the assignment and changes, and it is too long for an axis, so rows use the reported name and otherwise an app-assigned callsign (italic) given once at creation; the title stays in the hover and inspector. On what: the surface (page, service, doc…) is shown under each identity and phase is left to the drawer, because phase says how far, not on what; without the proposed surface the label falls back to the first write-scope path. Cost to the model: nothing for the matrix itself (agent-coord messages, created_by, and conflicts exist today); intent on send, a surface noun on the checkpoint, and ask.via on escalation are one field each. Pending asks are shown as open messages to You because today an ask is not an agent-coord message.",
+    render(field, stage, api) {
+      apiRef = api;
+      if (field !== lastField) resetFor(field);
+      const prevSide = stage.querySelector(".cm-side")?.scrollTop || 0;
+      stage.replaceChildren();
+      tip ??= (() => { const t = $("div", "tip"); t.hidden = true; document.body.append(t); return t; })();
+      tip.hidden = true;
+      if (view.focus?.agent && !field.byId(view.focus.agent)) view.focus = null;
+
+      const root = $("div", "cm"); stage.append(root);
+      const top = stage.getBoundingClientRect().top + 14;
+      root.style.height = Math.max(560, innerHeight - top - 16) + "px";
+
+      const axis = buildAxis(field), range = windowRange(field), cells = aggregate(field, axis, range);
+      root.append(toolbar(field, axis), mainArea(field, axis, range, cells), strip(field), side(field, axis, range, cells));
+      root.querySelector(".cm-side").scrollTop = prevSide;
+      drawMain(field, axis, range, cells, root.querySelector(".cm-main"));
+      drawMinis(field, root.querySelector(".cm-strip"));
+      seenMsg = maxId(field);
+      const key = innerWidth + "x" + innerHeight; if (!sizeKey) addEventListener("resize", () => { if (innerWidth + "x" + innerHeight !== sizeKey) { sizeKey = innerWidth + "x" + innerHeight; apiRef?.rerender(); } }); sizeKey = key;
+    },
+  });
+
+  /* ---------- toolbar ---------- */
+  function seg(options, current, onPick, title) {
+    const s = $("span", "seg"); if (title) s.title = title;
+    for (const [label, value] of options) { const b = $("button", "btn small", label); b.type = "button"; b.setAttribute("aria-pressed", String(value === current)); b.onclick = () => onPick(value); s.append(b); }
+    return s;
+  }
+  function toolbar(field, axis) {
+    const bar = $("div", "cm-bar");
+    bar.append(seg([["Matrix", "matrix"], ["Chord by team", "chord"]], view.mode, v => { view.mode = v; apiRef.rerender(); }, "View"));
+    bar.append($("span", "lbl", "Window"), seg(WINDOWS.map(([l, v]) => [l, v]), view.slice == null ? view.win : null, v => { view.win = v; view.slice = null; apiRef.rerender(); }, "Messages counted"));
+    bar.append($("span", "lbl", "Label"), seg([["Identity", "identity"], ["Title", "title"]], view.labels, v => { view.labels = v; apiRef.rerender(); }, "Axis label: stable identity or the current assignment title"));
+    const cross = $("button", "btn small", "Cross-team only"); cross.type = "button"; cross.setAttribute("aria-pressed", String(view.crossOnly)); cross.title = "Fade traffic inside a team so collaboration between teams stands out";
+    cross.onclick = () => { view.crossOnly = !view.crossOnly; apiRef.rerender(); }; bar.append(cross);
+    bar.append($("span", "grow"));
+    if (view.mode === "matrix") {
+      const total = field.agents.length;
+      const allOpen = axis.teams.every(t => view.expanded.has(t.key));
+      const t = $("button", "btn small", allOpen ? "Collapse teams" : "Expand all · " + total + " agents"); t.type = "button";
+      t.onclick = () => { if (allOpen) view.expanded.clear(); else for (const tm of axis.teams) view.expanded.add(tm.key); apiRef.rerender(); };
+      bar.append(t);
+    }
+    return bar;
+  }
+
+  /* ---------- main area ---------- */
+  function mainArea() { const m = $("div", "cm-main"); return m; }
+  function drawMain(field, axis, range, cells, host) {
+    const W = host.clientWidth, H = host.clientHeight;
+    const svg = S("svg", {viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": view.mode === "matrix" ? "Message matrix: rows send, columns receive" : "Messages between teams"});
+    host.append(svg);
+    if (view.mode === "chord") return drawChord(field, range, svg, W, H);
+    const n = axis.units.length;
+    const fit = (lw, hh) => Math.floor(Math.min((W - lw - 18) / n, (H - hh - 14) / n) * 2) / 2;
+    let cell = fit(200, 96); const labeled = cell >= 11;
+    if (!labeled) cell = fit(150, 26);
+    cell = Math.max(2, Math.min(28, cell));
+    const lw = labeled ? 200 : 150, hh = labeled ? 96 : 26, size = n * cell;
+    const ox = Math.max(lw + 8, Math.floor((W - size - lw) / 2) + lw), oy = hh + 6;
+    const gBack = S("g"), gCells = S("g"), gMarks = S("g"), gOver = S("g"), gLab = S("g");
+    svg.append(gBack, gCells, gMarks, gOver, gLab);
+
+    // You band, team blocks along the diagonal, faint grid when cells are large enough.
+    gBack.append(S("rect", {x: ox, y: oy, width: size, height: cell}, "you-band"), S("rect", {x: ox, y: oy, width: cell, height: size}, "you-band"));
+    for (const t of axis.teams) gBack.append(S("rect", {x: ox + t.start * cell, y: oy + t.start * cell, width: (t.end - t.start) * cell, height: (t.end - t.start) * cell}, "block" + (t.solo ? " solo" : "")));
+    if (cell >= 7) for (let k = 0; k <= n; k++) { gBack.append(S("line", {x1: ox, x2: ox + size, y1: oy + k * cell, y2: oy + k * cell}, "grid-line"), S("line", {y1: oy, y2: oy + size, x1: ox + k * cell, x2: ox + k * cell}, "grid-line")); }
+    gBack.querySelectorAll(".grid-line").forEach(l => l.setAttribute("opacity", ".55"));
+    gBack.append(S("rect", {x: ox, y: oy, width: size, height: size, fill: "none", stroke: "var(--line-strong)"}));
+
+    const sameTeam = (i, j) => i > 0 && j > 0 && axis.units[i].team === axis.units[j].team;
+    const pad = cell >= 6 ? 1 : 0;
+    for (const c of cells.values()) {
+      const toYou = c.j === 0 && c.youOpen;
+      if (!c.count && !toYou) continue;
+      const x = ox + c.j * cell + pad, y = oy + c.i * cell + pad, w = cell - 2 * pad;
+      const pct = Math.max(rampPct(c.count + (toYou ? c.asks.length : 0)), toYou ? 50 : 0, cell < 6 ? 60 : 0);
+      const color = c.j === 0 && c.youOpen ? "var(--warm)" : c.i === 0 || c.j === 0 ? "var(--warm)" : "var(--accent)";
+      const r = S("rect", {x, y, width: w, height: w, rx: cell >= 10 ? 2 : 0}, "cell" + (c.fresh ? " fresh" : ""));
+      r.style.fill = `color-mix(in srgb, ${color} ${pct}%, var(--surface))`;
+      if (view.crossOnly && sameTeam(c.i, c.j)) r.setAttribute("opacity", ".18");
+      gCells.append(r);
+      if (cell >= 18 && c.count + c.asks.length > 1) { const t = S("text", {x: x + w / 2, y: y + w / 2 + 3.5, "text-anchor": "middle", "font-size": 9.5, "font-family": "var(--mono)", "pointer-events": "none"}); t.style.fill = pct > 55 ? "var(--surface)" : "var(--ink)"; t.textContent = c.count + c.asks.length; gCells.append(t); }
+      // Reply owed: a corner notch (ink between agents, warm when it is owed by You).
+      const owed = c.open + c.youOpen;
+      if (owed) {
+        const s = Math.max(2.5, Math.min(7, cell * .32));
+        gMarks.append(cell >= 6 ? S("path", {d: `M${x + w - s} ${y} L${x + w} ${y} L${x + w} ${y + s} Z`}, "owed" + (c.j === 0 ? " you" : "")) : S("circle", {cx: x + w / 2, cy: y + w / 2, r: .9}, "owed" + (c.j === 0 ? " you" : "")));
+      }
+    }
+    // Overlapping write scopes: a dashed outline on both cells of the pair.
+    // Sparse: all of them only when there are few; otherwise only the focused agent's.
+    const conflictCells = field.conflicts().map(cf => ({cf, i: axis.unitOf.get(cf.a.id), j: axis.unitOf.get(cf.b.id)})).filter(x => x.i != null && x.j != null && x.i !== x.j);
+    const pinnedId = view.focus?.agent;
+    for (const {cf, i, j} of conflictCells) {
+      if (conflictCells.length > 8 && cf.a.id !== pinnedId && cf.b.id !== pinnedId) continue;
+      for (const [p, q] of [[i, j], [j, i]]) gMarks.append(S("rect", {x: ox + q * cell + .5, y: oy + p * cell + .5, width: cell - 1, height: cell - 1}, "conflict"));
+    }
+
+    // Labels: rows on the left, columns rotated above. Dots carry status; a warm dot means needs you somewhere in the unit.
+    const labelEls = [], colEls = [];
+    axis.units.forEach((u, i) => {
+      const y = oy + i * cell + cell / 2;
+      const a = u.agent;
+      const needs = u.type === "agent" ? field.needsUser(a) : u.type === "team" ? u.team.members.some(field.needsUser) : !!field.asks().length;
+      const g = S("g"); g.dataset.i = i; gLab.append(g); labelEls[i] = g;
+      if (labeled) {
+        const indent = u.type === "agent" ? u.depth * 9 : 0;
+        let x = ox - lw + 4 + indent;
+        if ((u.type === "agent" && !u.team.solo && u.depth === 0) || u.type === "team") {
+          const tw = S("text", {x: x, y: y + 3}, "twisty"); tw.textContent = u.type === "team" ? "▸" : "▾"; g.append(tw);
+          tw.onclick = e => { e.stopPropagation(); toggleTeam(u.team.key); };
+        }
+        x += 10;
+        if (u.type !== "you") { const st = statusFill(u.type === "agent" ? a : u.team.root || u.team.members[0], u); g.append(S("circle", {cx: x + 3, cy: y, r: 3.2, fill: st.fill, stroke: st.stroke || "none", "stroke-width": 1.2}, "status")); x += 10; }
+        const txt = S("text", {x, y: y + 3.8}, "lab" + (u.type === "you" ? " you" : "") + (u.type === "team" ? " team" : "") + (assigned(a) ? " assigned" : ""));
+        const maxChars = Math.floor((ox - 14 - x - (needs ? 10 : 0)) / 6.3);
+        let main = u.type === "you" ? "You" : u.type === "team" ? (u.team.solo ? "Solo agents" : identity(field, u.team.root)) : identity(field, a);
+        let extra = u.type === "team" ? " · " + u.team.members.length : "";
+        txt.textContent = trunc(main, Math.max(6, maxChars - extra.length)) + extra;
+        if (u.type === "agent" && cell >= 20 && view.labels !== "title") {
+          const used = Math.min(main.length, maxChars) * 6.4 + 6;
+          const rest = Math.floor((ox - 14 - x - used - (needs ? 10 : 0)) / 5.6);
+          if (rest > 6) { const sf = S("tspan", {dx: 6}, "lab-surface"); sf.textContent = trunc(a.surface?.label || a.scope[0] || "", rest); txt.append(sf); }
+        }
+        g.append(txt);
+        if (needs) g.append(S("circle", {cx: ox - 9, cy: y, r: 3.4}, "needs-dot" + (u.type !== "you" ? " pulse" : "")));
+        if (i > 0) {
+          const ct = S("text", {transform: `translate(${ox + i * cell + cell / 2 + 3.5},${oy - 6}) rotate(-90)`}, "lab" + (u.type === "team" ? " team" : "") + (assigned(a) ? " assigned" : ""));
+          ct.style.fontSize = Math.min(11, cell - 1) + "px";
+          ct.textContent = trunc(u.type === "team" ? (u.team.solo ? "Solo agents" : identity(field, u.team.root)) : identity(field, a), 15);
+          gLab.append(ct); colEls[i] = ct;
+        } else { const ct = S("text", {transform: `translate(${ox + cell / 2 + 3.5},${oy - 6}) rotate(-90)`}, "lab you"); ct.style.fontSize = Math.min(11, cell - 1) + "px"; ct.textContent = "You"; gLab.append(ct); colEls[0] = ct; }
+      }
+      // Hit area for the whole label row.
+      const hit = S("rect", {x: ox - lw, y: oy + i * cell, width: lw - 2, height: cell, fill: "transparent"}); hit.style.cursor = "pointer"; g.prepend(hit);
+      g.addEventListener("pointerenter", e => { brush(i); showTip(e, labelTip(field, u)); });
+      g.addEventListener("pointermove", e => moveTip(e));
+      g.addEventListener("pointerleave", () => { brush(null); hideTip(); });
+      g.addEventListener("click", () => {
+        if (u.type === "team") { toggleTeam(u.team.key); return; }
+        if (u.type === "you") { view.focus = {agent: "user"}; apiRef.rerender(); return; }
+        view.focus = {agent: a.id}; api().select(a.id); apiRef.rerender();
+      });
+    });
+    if (!labeled) {
+      // Tiny cells: label team bands instead of rows.
+      const youT = S("text", {x: ox - 8, y: oy + cell / 2 + 3.5, "text-anchor": "end"}, "lab you"); youT.textContent = "You"; gLab.append(youT);
+      for (const t of axis.teams) {
+        const y0 = oy + t.start * cell, y1 = oy + t.end * cell;
+        gLab.append(S("line", {x1: ox - 4, x2: ox - 4, y1: y0 + 1, y2: y1 - 1, stroke: "var(--line-strong)", "stroke-width": 2}));
+        if (y1 - y0 >= 10) { const tt = S("text", {x: ox - 10, y: (y0 + y1) / 2 + 3.5, "text-anchor": "end"}, "lab team"); tt.style.fontSize = "10px"; tt.textContent = trunc(t.solo ? "Solo agents" : identity(field, t.root), 20) + " · " + t.members.length; tt.onclick = () => toggleTeam(t.key); gLab.append(tt);
+          if (t.members.some(field.needsUser)) gLab.append(S("circle", {cx: ox - lw + 6, cy: (y0 + y1) / 2, r: 3}, "needs-dot pulse")); }
+        gLab.append(S("line", {y1: oy - 4, y2: oy - 4, x1: ox + t.start * cell + 1, x2: ox + t.end * cell - 1, stroke: "var(--line-strong)", "stroke-width": 2}));
+      }
+      const note = S("text", {x: ox, y: 12}, "axis-note"); note.textContent = "Sender ↓ · recipient → · click a team to fold"; svg.append(note);
+    } else { const note = S("text", {x: 12, y: 16}, "axis-note"); note.textContent = "Rows send → columns receive"; svg.append(note); }
+
+    // Relayed ask path, when hovering an ask: asker → via… → You, drawn through the matrix cells.
+    const askId = view.hoverAsk || (view.focus?.agent && field.byId(view.focus.agent)?.ask ? view.focus.agent : null);
+    if (askId && field.askPath(askId)) {
+      const chain = [askId, ...(field.byId(askId).ask.via || []), "user"].map(id => axis.unitOf.get(id)).filter(x => x != null);
+      let pts = [];
+      for (let k = 0; k < chain.length - 1; k++) { const i = chain[k], j = chain[k + 1]; if (i === j) continue; gOver.append(S("rect", {x: ox + j * cell, y: oy + i * cell, width: cell, height: cell}, "relay")); pts.push([ox + j * cell + cell / 2, oy + i * cell + cell / 2]); }
+      if (pts.length > 1) gOver.append(S("polyline", {points: pts.map(p => p.join(",")).join(" ")}, "relay-line"));
+    }
+    // Focused cell ring.
+    if (view.focus?.cell) { const [ki, kj] = view.focus.cell; const i = axis.units.findIndex(u => u.key === ki), j = axis.units.findIndex(u => u.key === kj); if (i >= 0 && j >= 0) gOver.append(S("rect", {x: ox + j * cell - .5, y: oy + i * cell - .5, width: cell + 1, height: cell + 1}, "focus-ring")); }
+
+    // Crosshair brushing: the row and column of a unit, and its partners' labels.
+    const hlRow = S("rect", {x: ox, width: size, height: cell}, "hl"), hlCol = S("rect", {y: oy, width: cell, height: size}, "hl");
+    hlRow.style.display = hlCol.style.display = "none"; gOver.append(hlRow, hlCol);
+    const partnersOf = i => { const s = new Set([i]); for (const c of cells.values()) { if (!c.count && !c.asks.length) continue; if (c.i === i) s.add(c.j); if (c.j === i) s.add(c.i); } return s; };
+    const pinned = view.focus?.agent ? axis.unitOf.get(view.focus.agent) : null;
+    function brush(i, j = i) {
+      const at = i ?? pinned;
+      hlRow.style.display = hlCol.style.display = at == null ? "none" : "";
+      if (at != null) { hlRow.setAttribute("y", oy + (i ?? at) * cell); hlCol.setAttribute("x", ox + (i == null ? at : j) * cell); }
+      const ps = at == null ? null : partnersOf(at);
+      labelEls.forEach((g, k) => { const t = g.querySelector(".lab"); if (!t) return; t.classList.toggle("dim", !!ps && !ps.has(k)); t.classList.toggle("hot", !!ps && ps.has(k) && k !== at && k !== 0); });
+      colEls.forEach((t, k) => { if (!t) return; t.classList.toggle("dim", !!ps && !ps.has(k)); t.classList.toggle("hot", !!ps && ps.has(k) && k !== at && k !== 0); });
+    }
+    brush(null);
+
+    // Cell hover and click by pointer position, so empty cells answer too.
+    const hit = S("rect", {x: ox, y: oy, width: size, height: size, fill: "transparent"}); hit.style.cursor = "pointer"; gOver.prepend(hit);
+    const locate = e => { const r = svg.getBoundingClientRect(); const x = (e.clientX - r.left) * W / r.width, y = (e.clientY - r.top) * H / r.height; const i = Math.floor((y - oy) / cell), j = Math.floor((x - ox) / cell); return i >= 0 && j >= 0 && i < n && j < n ? [i, j] : null; };
+    let lastHover = "";
+    hit.addEventListener("pointermove", e => { const p = locate(e); if (!p) return; const k = p.join(","); if (k !== lastHover) { lastHover = k; brushCell(p); showTip(e, cellTip(field, axis, cells, p[0], p[1])); } else moveTip(e); });
+    hit.addEventListener("pointerleave", () => { lastHover = ""; brush(null); hideTip(); });
+    hit.addEventListener("click", e => { const p = locate(e); if (!p) return; view.focus = {cell: [axis.units[p[0]].key, axis.units[p[1]].key]}; apiRef.rerender(); });
+    function brushCell([i, j]) { brush(i, j); const ps = partnersOf(i); labelEls.forEach((g, k) => { const t = g.querySelector(".lab"); if (t) t.classList.toggle("hot", k === j || (ps.has(k) && k !== i && k !== 0)); }); }
+  }
+  function statusFill(a, u) {
+    if (u?.type === "team") { const ms = u.team.members; if (ms.some(x => x.status === "working")) return {fill: "var(--accent)"}; if (ms.some(x => x.status === "waiting")) return {fill: "var(--warm)"}; if (ms.every(x => x.status === "done")) return {fill: "var(--ok)"}; return {fill: "var(--dot-idle)"}; }
+    return {working: {fill: "var(--accent)"}, waiting: {fill: "var(--warm)"}, blocked: {fill: "transparent", stroke: "var(--muted)"}, failed: {fill: "var(--danger)"}, done: {fill: "var(--ok)"}, idle: {fill: "var(--dot-idle)"}}[a.status] || {fill: "var(--dot-idle)"};
+  }
+  function toggleTeam(key) { view.expanded.has(key) ? view.expanded.delete(key) : view.expanded.add(key); apiRef.rerender(); }
+  const api = () => apiRef;
+
+  /* ---------- chord view by team ---------- */
+  function drawChord(field, range, svg, W, H) {
+    const savedExpanded = view.expanded; view.expanded = new Set();
+    const axis = buildAxis(field); view.expanded = savedExpanded;
+    const cells = aggregate(field, axis, range);
+    const n = axis.units.length, pair = new Map(), self = new Array(n).fill(0), open = new Map(), fresh = new Map(), asks = new Array(n).fill(0);
+    for (const c of cells.values()) {
+      const cnt = c.count + c.asks.length; if (!cnt && !c.open && !c.youOpen) continue;
+      if (c.i === c.j) { self[c.i] += c.count; continue; }
+      const k = Math.min(c.i, c.j) + "|" + Math.max(c.i, c.j);
+      pair.set(k, (pair.get(k) || 0) + cnt); open.set(k, (open.get(k) || 0) + c.open + c.youOpen); if (c.fresh) fresh.set(k, true);
+      if (c.j === 0) asks[c.i] += c.asks.length;
+    }
+    const vol = new Array(n).fill(0); for (const [k, v] of pair) { const [i, j] = k.split("|").map(Number); vol[i] += v; vol[j] += v; } for (let i = 0; i < n; i++) vol[i] += self[i];
+    const shown = axis.units.map((u, i) => i).filter(i => vol[i] > 0 || i === 0);
+    const quiet = n - shown.length;
+    const cx = W / 2, cy = H / 2 + 4, R = Math.max(110, Math.min(W, H) / 2 - 118), band = 12;
+    const total = shown.reduce((s, i) => s + Math.max(vol[i], 0.5), 0) || 1;
+    const gap = Math.min(0.06, 1.2 / shown.length), span = Math.PI * 2 - gap * shown.length;
+    const P = (r, t) => [cx + r * Math.cos(t - Math.PI / 2), cy + r * Math.sin(t - Math.PI / 2)];
+    const arcPath = (r0, r1, a0, a1) => { const large = a1 - a0 > Math.PI ? 1 : 0; const [x0, y0] = P(r1, a0), [x1, y1] = P(r1, a1), [x2, y2] = P(r0, a1), [x3, y3] = P(r0, a0); return `M${x0} ${y0}A${r1} ${r1} 0 ${large} 1 ${x1} ${y1}L${x2} ${y2}A${r0} ${r0} 0 ${large} 0 ${x3} ${y3}Z`; };
+    let t = 0; const seg = new Map(), cursor = new Map();
+    for (const i of shown) { const len = span * Math.max(vol[i], 0.5) / total; seg.set(i, [t, t + len]); cursor.set(i, t + span * self[i] / total); t += len + gap; }
+    const focusTeam = view.focus?.team != null ? axis.units.findIndex(u => u.key === "team:" + view.focus.team || (view.focus.team === "user" && u.type === "you")) : -1;
+    const gRib = S("g"), gArc = S("g"), gLab = S("g"); svg.append(gRib, gArc, gLab);
+    if (focusTeam >= 0) svg.classList.add("focusing");
+    // Ribbons, ordered so each arc's sub-segments run around in partner order.
+    const pairs = [...pair.entries()].map(([k, v]) => { const [i, j] = k.split("|").map(Number); return {i, j, v, k}; }).sort((x, y) => x.i - y.i || x.j - y.j);
+    const ribs = [];
+    for (const p of pairs) {
+      const ai = cursor.get(p.i), aj = cursor.get(p.j); const di = span * p.v / total;
+      cursor.set(p.i, ai + di); cursor.set(p.j, aj + di);
+      const r = R - 1, [s0x, s0y] = P(r, ai), [s1x, s1y] = P(r, ai + di), [t0x, t0y] = P(r, aj), [t1x, t1y] = P(r, aj + di);
+      const d = `M${s0x} ${s0y}A${r} ${r} 0 0 1 ${s1x} ${s1y}Q${cx} ${cy} ${t0x} ${t0y}A${r} ${r} 0 0 1 ${t1x} ${t1y}Q${cx} ${cy} ${s0x} ${s0y}Z`;
+      const path = S("path", {d}, "ribbon" + (p.i === 0 ? " you" : "") + (open.get(p.k) && p.i !== 0 ? " open" : "") + (fresh.get(p.k) ? " fresh" : "") + (focusTeam >= 0 && (p.i === focusTeam || p.j === focusTeam) ? " on" : ""));
+      path.addEventListener("pointerenter", e => { path.style.opacity = 1; showTip(e, teamPairTip(field, axis, cells, p.i, p.j)); });
+      path.addEventListener("pointermove", moveTip); path.addEventListener("pointerleave", () => { path.style.opacity = ""; hideTip(); });
+      path.onclick = () => { view.focus = {teamPair: [axis.units[p.i].key, axis.units[p.j].key]}; apiRef.rerender(); };
+      gRib.append(path); ribs.push(path);
+    }
+    for (const i of shown) {
+      const [a0, a1] = seg.get(i), u = axis.units[i];
+      const needs = u.type === "you" ? field.asks().length > 0 : u.team.members.some(field.needsUser);
+      const g = S("g", {}, "arc" + (u.type === "you" ? " you" : "") + (needs && u.type !== "you" ? " needs" : "") + (i === focusTeam ? " on" : ""));
+      g.append(S("path", {d: arcPath(R + 2, R + 2 + band, a0, a1)}, "arc-out"));
+      if (self[i]) g.append(S("path", {d: arcPath(R - 3, R + 2, a0, a0 + span * self[i] / total)}, "arc-self"));
+      g.addEventListener("pointerenter", e => showTip(e, arcTip(field, u, self[i], vol[i], asks[i])));
+      g.addEventListener("pointermove", moveTip); g.addEventListener("pointerleave", hideTip);
+      g.onclick = () => { view.focus = {team: u.type === "you" ? "user" : u.team.key}; apiRef.rerender(); };
+      gArc.append(g);
+      const mid = (a0 + a1) / 2, [lx, ly] = P(R + band + 10, mid), deg = mid * 180 / Math.PI - 90, flip = mid > Math.PI;
+      const label = S("text", {transform: `translate(${lx},${ly}) rotate(${flip ? deg + 180 : deg})`, "text-anchor": flip ? "end" : "start", "dominant-baseline": "middle"}, "arc-label" + (u.type === "you" ? " you" : vol[i] < 2 ? " dim" : ""));
+      const name = u.type === "you" ? "You" : u.team.solo ? "Solo agents" : identity(field, u.team.root);
+      label.textContent = trunc(name, 15) + (u.type === "team" ? " · " + u.team.members.length : "");
+      if (needs && u.type !== "you") { const nd = S("tspan", {}, "nd"); nd.textContent = " ●"; flip ? label.prepend(nd) : label.append(nd); if (flip) nd.textContent = "● "; }
+      gLab.append(label);
+    }
+    const note = S("text", {x: 12, y: H - 26}, "axis-note"); note.textContent = "Teams around the ring · ribbons are messages between teams in " + range.label + " · inner band is traffic within the team"; svg.append(note);
+    if (quiet) { const q = S("text", {x: 12, y: H - 10}, "axis-note"); q.textContent = quiet + (quiet === 1 ? " team was" : " teams were") + " quiet in this window"; svg.append(q); }
+  }
+
+  /* ---------- small multiples ---------- */
+  function strip() {
+    const s = $("div", "cm-strip");
+    const head = $("div", "head"); head.append($("b", null, "Last hour"), "Each frame is ten minutes, by team. Click to inspect it.");
+    s.append(head);
+    for (let k = 5; k >= 0; k--) {
+      const b = $("button", "mini"); b.type = "button"; b.dataset.slice = k; b.setAttribute("aria-pressed", String(view.slice === k));
+      b.title = k ? (k + 1) * 10 + "–" + k * 10 + " minutes ago" : "The last ten minutes";
+      b.append($("canvas"), $("span", null, k ? "−" + (k + 1) * 10 + "m" : "now"));
+      b.onclick = () => { view.slice = view.slice === k ? null : k; apiRef.rerender(); };
+      s.append(b);
+    }
+    return s;
+  }
+  function drawMinis(field, host) {
+    const saved = view.expanded; view.expanded = new Set(); const axis = buildAxis(field); view.expanded = saved;
+    const cs = getComputedStyle(document.documentElement);
+    const col = v => hexToRgb(cs.getPropertyValue(v) || "#888");
+    const surface = col("--surface"), accent = col("--accent"), warm = col("--warm"), line = col("--line-strong"), block = col("--ink");
+    const n = axis.units.length, px = Math.max(1.5, Math.min(14, 88 / n)), size = Math.ceil(n * px), dpr = devicePixelRatio || 1;
+    for (const b of host.querySelectorAll(".mini")) {
+      const k = Number(b.dataset.slice), cv = b.querySelector("canvas");
+      cv.width = size * dpr; cv.height = size * dpr; cv.style.width = cv.style.height = size + "px";
+      const g = cv.getContext("2d"); g.scale(dpr, dpr);
+      g.fillStyle = mix(surface, surface, 100); g.fillRect(0, 0, size, size);
+      g.fillStyle = mix(block, surface, 6); for (const t of axis.teams) g.fillRect(t.start * px, t.start * px, (t.end - t.start) * px, (t.end - t.start) * px);
+      const counts = new Map(); const from = field.now - (k + 1) * 10 * MIN, to = field.now - k * 10 * MIN;
+      for (const m of field.messages) { if (m.at < from || m.at > to) continue; const i = axis.unitOf.get(m.from), j = axis.unitOf.get(m.to); if (i == null || j == null) continue; const key = i * 4096 + j; counts.set(key, (counts.get(key) || 0) + 1); }
+      for (const [key, c] of counts) { const i = Math.floor(key / 4096), j = key % 4096; g.fillStyle = mix(i === 0 || j === 0 ? warm : accent, surface, Math.max(35, rampPct(c))); g.fillRect(j * px, i * px, Math.max(1, px - (px > 3 ? .5 : 0)), Math.max(1, px - (px > 3 ? .5 : 0))); }
+      g.strokeStyle = mix(line, surface, 100); g.lineWidth = 1; g.strokeRect(.5, .5, size - 1, size - 1);
+      b.lastChild.textContent = (k ? "−" + (k + 1) * 10 + "m" : "now") + " · " + [...counts.values()].reduce((s, v) => s + v, 0);
+    }
+  }
+
+  /* ---------- side panel ---------- */
+  function side(field, axis, range, cells) {
+    const s = $("aside", "cm-side");
+    s.append(needsSection(field));
+    const insp = $("section", "insp");
+    if (view.focus?.cell) cellInspector(field, axis, range, insp);
+    else if (view.focus?.teamPair) teamPairInspector(field, range, insp);
+    else if (view.focus?.team) teamInspector(field, range, insp);
+    else if (view.focus?.agent) agentInspector(field, range, insp);
+    else feedSection(field, range, insp);
+    s.append(insp);
+    return s;
+  }
+  function relayPath(field, a) {
+    const p = $("span", "path");
+    const chain = [a, ...(a.ask?.via || []).map(field.byId).filter(Boolean)];
+    chain.forEach((x, k) => { const w = whoBtn(field, x, "b"); p.append(w, " → "); void k; });
+    p.append($("span", "you", "You"));
+    if (a.parentId && !(a.ask?.via || []).length) { const par = field.byId(a.parentId); if (par) p.append($("span", null, " · for " + identity(field, par))); }
+    return p;
+  }
+  function whoBtn(field, a, tag) {
+    const b = $("button", "who" + (assigned(a) ? " assigned" : "")); b.type = "button";
+    const inner = tag ? $(tag, null, identity(field, a)) : document.createTextNode(identity(field, a)); b.append(inner);
+    b.title = a.title + " · " + (a.surface ? a.surface.kind + ": " + a.surface.label : a.scope[0] || "") + " · " + field.statusLabel(a);
+    b.onclick = e => { e.stopPropagation(); view.focus = {agent: a.id}; apiRef.select(a.id); apiRef.rerender(); };
+    return b;
+  }
+  function needsSection(field) {
+    const sec = $("section");
+    const asks = field.asks();
+    const h = $("div", "side-h"); h.append($("span", asks.length ? "warm" : null, "Needs you" + (asks.length ? " · " + asks.length : "")));
+    sec.append(h);
+    if (!asks.length) { sec.append($("div", "calm", "Nothing needs you. Agents are talking among themselves.")); return sec; }
+    if (!view.needInit && asks[0]) { view.needInit = true; view.needOpen.add(asks[0].id); }
+    const list = $("div", "needs"), limit = view.needAll ? asks.length : Math.min(asks.length, field.scale === "large" ? 4 : 5);
+    for (const a of asks.slice(0, limit)) {
+      const box = $("div", "need" + (view.needOpen.has(a.id) ? " open" : "") + (view.hoverAsk === a.id ? " lit" : ""));
+      const sum = $("button", "need-sum"); sum.type = "button";
+      const k = $("span", "k", a.ask ? (a.ask.kind === "failure" ? "failed · " : "") + a.ask.kind + (a.ask.blocking ? " · blocking" : "") : "next step is yours");
+      const impact = field.impact(a.id).length; if (impact) k.append($("span", "muted", " · holds up " + impact));
+      sum.append(k, relayPath(field, a), $("span", "q", a.ask ? a.ask.question : a.next.action));
+      sum.onclick = () => { view.needOpen.has(a.id) ? view.needOpen.delete(a.id) : view.needOpen.add(a.id); apiRef.rerender(); };
+      box.append(sum);
+      box.addEventListener("pointerenter", () => { if (view.hoverAsk !== a.id) { view.hoverAsk = a.id; lightRelay(); } });
+      box.addEventListener("pointerleave", () => { if (view.hoverAsk === a.id) { view.hoverAsk = null; lightRelay(); } });
+      if (view.needOpen.has(a.id)) {
+        if (a.ask) box.append(Mockup.askBox(a, field, id => { view.focus = {agent: id}; apiRef.select(id); }));
+        else { const row = $("div", "ask"); const b = $("button", "btn quiet small", "Open thread"); b.type = "button"; b.onclick = () => apiRef.select(a.id); row.append(b); box.append(row); }
+      }
+      list.append(box);
+    }
+    if (asks.length > limit || view.needAll) { const more = $("button", "btn quiet small need-more", view.needAll ? "Show fewer" : asks.length - limit + " more"); more.type = "button"; more.onclick = () => { view.needAll = !view.needAll; apiRef.rerender(); }; list.append(more); }
+    sec.append(list);
+    return sec;
+  }
+  let relayTimer = null;
+  function lightRelay() { clearTimeout(relayTimer); relayTimer = setTimeout(() => apiRef.rerender(), 60); }
+
+  function msgRow(field, m, viewer) {
+    const r = $("div", "msg");
+    const meta = $("small");
+    const out = viewer ? m.from === viewer : null;
+    meta.append($("span", null, (out == null ? field.nameOf(m.from) === "You" ? "You" : identity(field, field.byId(m.from)) : out ? "→" : "←") + (out == null ? " → " + (m.to === "user" ? "You" : identity(field, field.byId(m.to))) : "")));
+    const intent = $("span", "intent", field.INTENT_LABELS[m.intent] || m.intent); intent.title = "Proposed intent; today's classification is " + (field.KIND_LABELS[m.kind] || m.kind); meta.append(intent);
+    meta.append($("span", null, field.KIND_LABELS[m.kind]));
+    if (m.replyRequired && !m.repliedBy && m.kind !== "closure") meta.append($("span", "owed" + (m.to === "user" ? " you" : ""), (m.to === "user" ? "You owe" : identity(field, field.byId(m.to)) + " owes") + " a reply · " + field.duration(field.now - m.at)));
+    else if (m.repliedBy) meta.append($("span", null, "answered"));
+    meta.append($("span", null, field.relativeTime(m.at)));
+    r.append(meta, $("span", null, m.body));
+    if (m.to === "user" && m.replyRequired && !m.repliedBy) {
+      const row = $("div", "reply-row"); const inp = $("input"); inp.placeholder = "Reply to " + identity(field, field.byId(m.from)) + "…";
+      const send = $("button", "btn small primary", "Reply"); send.type = "button"; send.onclick = () => { if (inp.value.trim()) field.reply(m.id, inp.value.trim(), "user"); };
+      inp.onkeydown = e => { if (e.key === "Enter") send.click(); }; row.append(inp, send); r.append(row);
+    }
+    return r;
+  }
+  function exchangesList(field, msgs, viewer, host, limit = 6) {
+    const groups = new Map(); for (const m of msgs) { if (!groups.has(m.exchange)) groups.set(m.exchange, []); groups.get(m.exchange).push(m); }
+    const sorted = [...groups.values()].sort((a, b) => b.at(-1).at - a.at(-1).at);
+    for (const g of sorted.slice(0, limit)) { const x = $("div", "xchg" + (g.some(m => m.replyRequired && !m.repliedBy) ? " open" : "")); for (const m of g) x.append(msgRow(field, m, viewer)); host.append(x); }
+    if (sorted.length > limit) host.append($("span", "sub", sorted.length - limit + " older exchanges"));
+  }
+  function closeBtn() { const b = $("button", "btn quiet small", "×"); b.type = "button"; b.title = "Back to the live feed"; b.onclick = () => { view.focus = null; apiRef.rerender(); }; return b; }
+
+  function cellInspector(field, axis, range, host) {
+    const [ki, kj] = view.focus.cell; const i = axis.units.findIndex(u => u.key === ki), j = axis.units.findIndex(u => u.key === kj);
+    if (i < 0 || j < 0) { view.focus = null; return feedSection(field, range, host); }
+    const ui = axis.units[i], uj = axis.units[j];
+    const head = $("div", "insp-head"); head.append(unitName(field, ui), $("span", "arrow", i === j ? "within" : "⇄"), i === j ? "" : unitName(field, uj), closeBtn()); host.append(head);
+    const si = new Set(ui.ids), sj = new Set(uj.ids);
+    const msgs = field.messages.filter(m => m.at >= range.from && m.at <= range.to && ((si.has(m.from) && sj.has(m.to)) || (sj.has(m.from) && si.has(m.to))));
+    const ab = msgs.filter(m => si.has(m.from) && sj.has(m.to)).length, ba = msgs.length - ab;
+    const sub = $("div", "sub"); sub.append(i === j ? $("b", null, msgs.length + " messages") : $("span", null, ""), i === j ? " inside " + unitLabel(field, ui) + " in " + range.label : "");
+    if (i !== j) { sub.append($("b", null, String(ab)), " sent → · ", $("b", null, String(ba)), " ← back in " + range.label); }
+    if (msgs.length) sub.append(" · " + intentText(field, msgs));
+    host.append(sub);
+    // Pending asks in the You column, answerable here.
+    const askers = (j === 0 ? ui.ids : i === 0 ? uj.ids : []).map(field.byId).filter(a => a?.ask);
+    for (const a of askers.slice(0, 3)) { const p = $("div", "crumbs"); p.append(relayPath(field, a)); host.append(p, Mockup.askBox(a, field, id => apiRef.select(id))); }
+    const cf = field.conflicts().filter(c => (si.has(c.a.id) && sj.has(c.b.id)) || (sj.has(c.a.id) && si.has(c.b.id)));
+    for (const c of cf) host.append($("div", "sub", "Write scopes overlap on " + c.path + (c.negotiating ? " · they are negotiating it" : " · no coordination message yet")));
+    if (!msgs.length && !askers.length && !cf.length) host.append($("div", "calm", "No messages between these two in " + range.label + "." + (range.to === Infinity && view.win !== Infinity ? " Try a wider window." : "")));
+    if (ui.type === "team" || uj.type === "team") {
+      // Collapsed teams: break the traffic down by member pair.
+      const pairs = new Map(); for (const m of msgs) { const k = m.from + ">" + m.to; pairs.set(k, (pairs.get(k) || 0) + 1); }
+      if (pairs.size) {
+        host.append($("div", "side-h", "Member pairs"));
+        const ul = $("ul", "partners");
+        for (const [k, c] of [...pairs].sort((a, b) => b[1] - a[1]).slice(0, 8)) {
+          const [f, t] = k.split(">"); const li = $("li"); const b = $("button"); b.type = "button";
+          const fa = field.byId(f), ta = field.byId(t);
+          b.append(AgentField.statusDot(fa || ta), $("span", "nm", (fa ? identity(field, fa) : "You") + " → " + (ta ? identity(field, ta) : "You")), $("span", "ct", c + " msg"));
+          b.onclick = () => { for (const id of [f, t]) { const tm = axis.teamOf.get(id); if (tm) view.expanded.add(tm.key); } view.focus = {cell: [f === "user" ? "user" : f, t === "user" ? "user" : t]}; apiRef.rerender(); };
+          li.append(b); ul.append(li);
+        }
+        host.append(ul);
+      }
+      host.append($("div", "side-h", "Exchanges"));
+    }
+    exchangesList(field, msgs, null, host);
+  }
+  function unitLabel(field, u) { return u.type === "you" ? "You" : u.type === "team" ? (u.team.solo ? "Solo agents" : identity(field, u.team.root) + "’s team") : identity(field, u.agent); }
+  function unitName(field, u) {
+    if (u.type === "agent") return whoBtn(field, u.agent);
+    const s = $("span", u.type === "you" ? "you" : null, unitLabel(field, u)); if (u.type === "you") s.style.color = "var(--warm)"; return s;
+  }
+
+  function agentInspector(field, range, host) {
+    if (view.focus.agent === "user") return youInspector(field, range, host);
+    const a = field.byId(view.focus.agent);
+    const head = $("div", "insp-head"); head.append(AgentField.statusDot(a), AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), whoBtn(field, a), closeBtn()); host.append(head);
+    const on = $("div", "sub"); on.append($("span", "tag proposed", a.surface?.kind || "scope"), " ", $("b", null, a.surface?.label || a.scope[0] || "—"), " · ", AgentField.ROLE_LABELS[a.role] || a.role, " · ", field.statusLabel(a)); host.append(on);
+    host.append($("div", "sub", "Assignment: " + a.title + (a.name ? "" : view.labels === "title" ? "" : " · callsign " + callsign(field, a) + " assigned by the app")));
+    const chain = field.chain(a.id); if (chain.length > 1) { const cr = $("div", "crumbs"); chain.forEach((x, k) => { if (k) cr.append(" › "); cr.append(x.id === a.id ? $("b", null, identity(field, x)) : whoBtn(field, x)); }); host.append(cr); }
+    if (a.ask) { host.append($("div", "crumbs")); host.lastChild.append(relayPath(field, a)); host.append(Mockup.askBox(a, field, id => apiRef.select(id))); }
+    const owes = field.owes(a.id), awaiting = field.awaiting(a.id);
+    if (owes.length || awaiting.length) {
+      const ob = $("div", "sub");
+      if (owes.length) ob.append("Owes ", $("b", null, owes.map(m => field.nameOf(m.from) === "You" ? "You" : identity(field, field.byId(m.from))).filter((v, k, s) => s.indexOf(v) === k).join(", ")), " a reply · oldest " + field.duration(field.now - owes[0].at));
+      if (owes.length && awaiting.length) ob.append(" · ");
+      if (awaiting.length) ob.append("Waiting on ", $("b", null, awaiting.map(m => m.to === "user" ? "You" : identity(field, field.byId(m.to))).filter((v, k, s) => s.indexOf(v) === k).join(", ")));
+      host.append(ob);
+    }
+    // Partners: everyone this agent exchanged messages with in the window, family and peers.
+    const msgs = field.messagesOf(a.id).filter(m => m.at >= range.from && m.at <= range.to);
+    const by = new Map(); for (const m of msgs) { const o = m.from === a.id ? m.to : m.from; const e = by.get(o) || {out: 0, in: 0, msgs: []}; m.from === a.id ? e.out++ : e.in++; e.msgs.push(m); by.set(o, e); }
+    const h = $("div", "side-h"); h.append("Partners in " + range.label); host.append(h);
+    if (!by.size) host.append($("div", "calm", "No messages in " + range.label + "."));
+    const max = Math.max(1, ...[...by.values()].map(e => e.out + e.in));
+    const ul = $("ul", "partners");
+    for (const [o, e] of [...by].sort((x, y) => (y[1].out + y[1].in) - (x[1].out + x[1].in))) {
+      const oa = o === "user" ? null : field.byId(o); const li = $("li"); const b = $("button"); b.type = "button";
+      const rel = !oa ? "you" : oa.id === a.parentId ? "creator" : oa.parentId === a.id ? "sub-agent" : field.chain(oa.id)[0]?.id === field.chain(a.id)[0]?.id ? "team" : "other team";
+      const dot = oa ? AgentField.statusDot(oa) : $("span", "dot waiting");
+      const nm = $("span", "nm" + (assigned(oa) ? " assigned" : "")); nm.append(identity(field, oa) + " ", $("i", null, rel + " · " + (field.INTENT_LABELS[intentsOf(e.msgs)[0][0]] || "").toLowerCase()));
+      const ct = $("span", "ct"); ct.append(e.out + "→ " + e.in + "←"); const bar = $("span", "bar-mini"); bar.style.width = Math.round(28 * (e.out + e.in) / max) + "px"; ct.append(bar);
+      b.append(dot, nm, ct); b.title = "Open the exchange with " + identity(field, oa);
+      b.onclick = () => { view.focus = {cell: [a.id, o]}; apiRef.rerender(); };
+      li.append(b); ul.append(li);
+    }
+    host.append(ul);
+    host.append($("div", "side-h", "Recent"));
+    exchangesList(field, msgs, a.id, host, 4);
+  }
+  function youInspector(field, range, host) {
+    const head = $("div", "insp-head"); const y = $("span", null, "You"); y.style.color = "var(--warm)"; head.append(y, closeBtn()); host.append(head);
+    const msgs = field.messages.filter(m => (m.from === "user" || m.to === "user") && m.at >= range.from && m.at <= range.to);
+    host.append($("div", "sub", "Your row is what you sent agents (answers, messages); your column is what reached you. Pending asks sit in your column as open requests until you answer."));
+    if (!msgs.length) host.append($("div", "calm", "No messages to or from you in " + range.label + "."));
+    exchangesList(field, msgs, "user", host);
+  }
+  function teamInspector(field, range, host) {
+    const key = view.focus.team;
+    if (key === "user") { view.focus = {agent: "user"}; return youInspector(field, range, host); }
+    const r = key === "solo" ? null : field.byId(key);
+    const members = r ? [r, ...field.descendants(r.id)] : field.roots().filter(x => !field.children(x.id).length);
+    const head = $("div", "insp-head"); head.append(r ? whoBtn(field, r) : "Solo agents", $("span", "arrow", "team · " + members.length), closeBtn()); host.append(head);
+    const show = $("button", "btn small", "Show in matrix"); show.type = "button"; show.onclick = () => { view.mode = "matrix"; view.expanded.add(key); apiRef.rerender(); }; host.append(show);
+    const ids = new Set(members.map(m => m.id));
+    const ul = $("ul", "partners");
+    for (const {agent: m, depth} of r ? field.treeRows([r.id]) : members.map(agent => ({agent, depth: 0}))) {
+      const li = $("li"); const b = $("button"); b.type = "button"; b.style.paddingLeft = 5 + depth * 10 + "px";
+      const out = field.messagesOf(m.id).filter(x => x.at >= range.from && x.at <= range.to);
+      const ext = out.filter(x => !ids.has(x.from === m.id ? x.to : x.from)).length;
+      const nm = $("span", "nm" + (assigned(m) ? " assigned" : "")); nm.append(identity(field, m) + " ", $("i", null, m.surface?.label || m.scope[0] || ""));
+      b.append(AgentField.statusDot(m), nm, $("span", "ct", out.length + (ext ? " · " + ext + " out" : "") + (field.needsUser(m) ? " · needs you" : "")));
+      b.onclick = () => { view.focus = {agent: m.id}; apiRef.select(m.id); apiRef.rerender(); };
+      li.append(b); ul.append(li);
+    }
+    host.append(ul);
+  }
+  function teamPairInspector(field, range, host) {
+    const [a, b] = view.focus.teamPair;
+    view.focus = {cell: [a, b]};
+    const saved = view.expanded; view.expanded = new Set(); const axis = buildAxis(field); view.expanded = saved;
+    cellInspector(field, axis, range, host);
+    view.focus = {teamPair: [a, b]};
+  }
+  function feedSection(field, range, host) {
+    const h = $("div", "side-h"); h.append("Latest messages"); host.append(h);
+    const msgs = field.messages.filter(m => m.at >= range.from && m.at <= range.to).slice(-9).reverse();
+    if (!msgs.length) host.append($("div", "calm", "No messages in " + range.label + ". Press Play to let agents talk."));
+    const feed = $("div", "feed");
+    for (const m of msgs) {
+      const b = $("button", m.id > seenMsg ? "fresh" : ""); b.type = "button";
+      const fa = m.from === "user" ? null : field.byId(m.from), ta = m.to === "user" ? null : field.byId(m.to);
+      const fh = $("span", "fh"); fh.append($("b", null, identity(field, fa)), "→", $("b", null, identity(field, ta)), $("span", null, (field.INTENT_LABELS[m.intent] || "").toLowerCase()));
+      if (m.replyRequired && !m.repliedBy) fh.append($("span", "tag", "reply owed"));
+      fh.append($("span", "age", field.relativeTime(m.at).replace(" ago", "")));
+      b.append(fh, $("span", "fb", m.body)); b.title = m.body;
+      b.onclick = () => { for (const id of [m.from, m.to]) { const r = id !== "user" && field.chain(id)[0]; if (r) view.expanded.add(field.children(r.id).length ? r.id : "solo"); } view.focus = {cell: [m.from, m.to]}; apiRef.rerender(); };
+      feed.append(b);
+    }
+    host.append(feed);
+    const lg = $("div", "legend"); host.append($("div", "side-h", "Reading the matrix"), lg);
+    const sw = p => { const s = $("span", "sw"); s.style.background = `color-mix(in srgb, var(--accent) ${p}%, var(--surface))`; return s; };
+    const r1 = $("div", "row"); r1.append(...RAMP.map(([, p]) => sw(p)), "1 → 9+ messages, row sends to column"); lg.append(r1);
+    const r2 = $("div", "row"); const w = $("span", "sw"); w.style.background = "color-mix(in srgb, var(--warm) 60%, var(--surface))"; r2.append(w, "to or from You · a pending ask is an open request in your column"); lg.append(r2);
+    const r3 = $("div", "row"); r3.append($("span", "tag", "◥"), "reply owed (warm when you owe it)", $("span", "tag", "┄"), "write scopes overlap"); lg.append(r3);
+    const r4 = $("div", "row"); r4.append("Grey squares on the diagonal are teams; anything outside them is cross-team. ", $("i", null, "Italic"), " names are app-assigned callsigns."); lg.append(r4);
+  }
+
+  /* ---------- tooltips ---------- */
+  function showTip(e, content) { if (!content) return hideTip(); tip.replaceChildren(...content); tip.hidden = false; moveTip(e); }
+  function moveTip(e) { if (tip.hidden) return; const w = tip.offsetWidth, h = tip.offsetHeight; let x = e.clientX + 14, y = e.clientY + 14; if (x + w > innerWidth - 8) x = e.clientX - w - 14; if (y + h > innerHeight - 8) y = e.clientY - h - 14; tip.style.left = x + "px"; tip.style.top = y + "px"; }
+  function hideTip() { if (tip) tip.hidden = true; }
+  function labelTip(field, u) {
+    if (u.type === "you") return [$("b", null, "You"), $("span", "m", " · row: what you sent · column: what reached you")];
+    if (u.type === "team") { const nd = u.team.members.filter(field.needsUser).length; return [$("b", null, u.team.solo ? "Solo agents" : identity(field, u.team.root) + "’s team"), $("span", "m", " · " + u.team.members.length + " agents" + (nd ? " · " + nd + " need you" : "") + " · click to unfold")]; }
+    const a = u.agent;
+    return [$("b", null, identity(field, a)), $("span", "m", " · " + (AgentField.ROLE_LABELS[a.role] || a.role) + " · " + field.statusLabel(a)), $("span", "q", a.title), $("span", "m", (a.surface ? a.surface.kind + ": " + a.surface.label : a.scope[0] || "") + (a.activity && a.status === "working" ? " · " + a.activity : ""))];
+  }
+  function cellTip(field, axis, cells, i, j) {
+    const c = cells.get(i * 4096 + j), back = cells.get(j * 4096 + i);
+    const ui = axis.units[i], uj = axis.units[j];
+    const out = [$("b", null, unitLabel(field, ui)), $("span", "m", i === j ? " · within" : " → "), i === j ? "" : $("b", null, unitLabel(field, uj))];
+    if (!c?.count && !c?.asks.length) out.push($("span", "q", "No messages this way" + (back?.count ? "; " + back.count + " came back the other way." : ".")));
+    else {
+      if (c.count) out.push($("span", "m", " · " + c.count + " msg: " + intentText(field, c.msgs)));
+      if (c.last) out.push($("span", "q", "“" + trunc(c.last.body, 110) + "” · " + field.relativeTime(c.last.at)));
+      for (const a of c.asks.slice(0, 2)) out.push($("span", "q", "Asks you: " + trunc(a.ask.question, 90)));
+      if (c.open) out.push($("span", "m", (c.open === 1 ? "1 reply owed" : c.open + " replies owed") + " by " + unitLabel(field, uj)));
+      if (back?.count && i !== j) out.push($("span", "m", " · " + back.count + " back"));
+    }
+    return out;
+  }
+  function teamPairTip(field, axis, cells, i, j) {
+    const a = cells.get(i * 4096 + j), b = cells.get(j * 4096 + i), msgs = [...(a?.msgs || []), ...(b?.msgs || [])];
+    return [$("b", null, unitLabel(field, axis.units[i])), $("span", "m", " ⇄ "), $("b", null, unitLabel(field, axis.units[j])),
+      $("span", "m", " · " + msgs.length + " msg" + ((a?.asks.length || b?.asks.length) ? " + " + ((a?.asks.length || 0) + (b?.asks.length || 0)) + " asks" : "")), msgs.length ? $("span", "q", intentText(field, msgs)) : ""];
+  }
+  function arcTip(field, u, self, vol, asks) {
+    if (u.type === "you") return [$("b", null, "You"), $("span", "m", " · " + field.asks().length + " asks waiting")];
+    return [$("b", null, u.team.solo ? "Solo agents" : identity(field, u.team.root) + "’s team"), $("span", "m", " · " + u.team.members.length + " agents · " + self + " msgs inside · " + (vol - self) + " with other teams" + (asks ? " · " + asks + " asks to you" : ""))];
+  }
+})();
+</script>
+</body>
+</html>

@@ -236,6 +236,66 @@ control's quiet needs-you panel.
   labels form "No domain reported", and with no signal the clusters come from
   write scopes, which cost the model nothing.
 
+## Round three: orchestration (mockups 19–28)
+
+Rounds one and two asked what agents exist and what they are doing. Round three
+asks how they work together when anyone can spin up agents that spin up agents:
+who messages whom and why, how they delegate, hand off, negotiate scope and
+review, what each one is (identity beyond the title), what it works on (a
+surface, not only a phase), and what needs you, including asks that climbed a
+chain of agents before reaching you.
+
+`shared/orchestration.js` wraps `AgentField.create` and adds the agent-coord
+message log to every field: sender, recipient, classification (creation,
+request, FYI, reply, closure, failure report), reply obligation, `in_reply_to`,
+exchange thread, delivery and acknowledgement, and whether the message woke a
+turn. Everything there is recorded today. On top, it models a few proposed
+fields, each one short enough for the agent to report in the same `send` or
+`checkpoint` call:
+
+| Proposed field | Where it is reported | What it unlocks |
+| --- | --- | --- |
+| `intent` | on `send` (assign, question, answer, handoff, finding, review, blocker, coordinate, status) | edge labels, filtering chatter from blockers, "why are they talking" |
+| `surface` | on `checkpoint` (page, service, screen, doc, pipeline, build, question + label) | "on what" in product nouns; the surface map |
+| `contract` | on `thread create` (deliverable, acceptance checks, due) | contracts board, overdue work, accept / send back |
+| `deliverable` | on `checkpoint` (kind, label, none/draft/ready/delivered) | handoff readiness without reading the thread |
+| `escalation` | `ask.via`, appended as an ask is relayed | "Rook → Procurement → you" and who answers it |
+| `health` | derived from age, waits and due time; optionally self-reported | slipping or stuck without a stat line |
+
+Trees go three or four levels deep at `medium` and `large`. Play and Step
+generate creations, handoffs on finish, blockers escalated to the parent,
+status and findings, peer coordination, and replies. The thread drawer now
+lists an agent's messages and its contract.
+
+| # | Mockup | Spectrum | Idea |
+| --- | --- | --- | --- |
+| 19 | Conversation cards | conservative | Today's cards grouped by team, plus a "talking with" line and an owes/awaits line. A toggle shows the view with today's signals only or with the proposed ones. |
+| 20 | Message ledger | conservative | A tree table with Owes, Awaiting and Last-message columns; expand a row for its threaded exchanges and a composer. Includes a "Today only" switch. |
+| 21 | Live wires | moderate | Org chart under a "You" band of asks. Dots travel edges as messages are sent, open requests are dashed with their wait, and relay paths climb to your tile. |
+| 22 | Sequence diagram | moderate | A UML sequence diagram per team: lifelines, intent-labeled arrows, pulsing open requests, phase activation bars, and asks answered on your lifeline. |
+| 23 | Team channels | moderate | Group chat with one channel per team and cross-team directs. Asks are pinned, replies threaded, and you can post or @mention an agent. |
+| 24 | Surface map | moderate | Surfaces (pages, services, screens, docs, builds) with agents attached. Traffic arcs connect surfaces and overlaps glow; a toggle switches to today's scope directories. |
+| 25 | Contracts | radical | Each delegation is a contract moving from Assigned to In progress, Handed off, and Accepted. Acceptance checks tick, and handoffs get Accept / Send back. |
+| 26 | Comms matrix | radical | Who talks to whom at 180 agents: a matrix ordered by team with You first, a chord view by team, and small multiples of the last hour. |
+| 27 | Critical path | radical | You as a node in the dependency graph. It shows each outcome's longest chain, which answer unblocks the most work, and reflows as you answer. |
+| 28 | Office floor | radical | Teams are rooms with agents at desks. Notes fly between desks, and agents that need you queue at your desk; zoom into a room for its log. |
+
+Positions the builders converged on independently:
+
+- **The title is the assignment, not the identity.** It is long and it changes
+  with every task. Every mockup leads with a stable `name` and falls back to
+  role and surface, a runtime handle, or the title in a placeholder style.
+  The cheapest real fix is to have the app assign a short name at creation;
+  no model cooperation needed.
+- **"On what" is the surface; phase drops to a stepper or the drawer.** Write
+  scope is a usable fallback today, but read-only agents (researchers,
+  reviewers, subagents) declare none, and file paths do not say which page or
+  service is affected.
+- **Most of orchestration is drawable today.** Creations, reply obligations,
+  `in_reply_to` and `next_actor=user` already give the graph, open requests,
+  and who waits on whom. `intent` and `escalation` are the two proposed fields
+  that most change what the views can say.
+
 ## Who built what
 
 Mockups 01, 11, and 18, the shared fixture, shell, tokens, lens, probe, index,
@@ -247,6 +307,10 @@ built 15, 10 built 16, and 02 built 17. Those conversations keep their context:
 to iterate on one mockup, message its agent directly. `BRIEF.md` is the
 contract they followed, including the per-mockup specification.
 
+Round three (19–28) was built the same way by ten new app agents named
+"Mockup NN <title>" (for example "Mockup 25 Contracts"), working from the
+"Round three" section of `BRIEF.md` and `shared/orchestration.js`.
+
 ## Files
 
 - `shared/tokens.css`: design tokens mirroring the shipped `styles.css` and
@@ -255,6 +319,9 @@ contract they followed, including the per-mockup specification.
 - `shared/fixture.js`: `AgentField.create({scale})` builds the field; `tick()`,
   `answer()`, `spawn()`, and `subscribe()` drive it. Includes the provider logo
   marks already used by the model picker.
+- `shared/orchestration.js`: the agent-to-agent message log and the proposed
+  orchestration signals for round three; load it between `fixture.js` and
+  `mockup.js`.
 - `shared/mockup.js`: `Mockup.mount({...render})` builds the top strip, faux app
   chrome, transport, signals popover, and thread drawer; `Mockup.askBox()`
   renders an answerable ask.

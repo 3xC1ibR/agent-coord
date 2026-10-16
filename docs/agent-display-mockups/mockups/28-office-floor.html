@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 28 · Office floor</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* A floor plan: teams are rooms, agents sit at desks, notes fly between desks,
+       and whoever needs the user walks to the user's desk in the corner. */
+    html, body { height: 100%; } body { height: 100dvh; overflow: hidden; }
+    #stage { display: grid; grid-template-columns: minmax(0, 1fr) 360px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+
+    /* Floor */
+    .floor-wrap { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .floor-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 9px 18px; border-bottom: 1px solid var(--line); background: var(--paper); font-size: 12px; }
+    .crumbs { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .crumbs .sep { color: var(--muted); }
+    .crumbs .here { font-weight: 600; max-width: 42ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; }
+    .seg .btn { border: 0; padding: 4px 9px; background: transparent; color: var(--muted); }
+    .seg .btn[aria-pressed="true"] { background: var(--tint); color: var(--ink); }
+    .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-left: auto; font-size: 10.5px; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .lg-line { display: inline-block; width: 18px; border-top: 1.5px dashed var(--muted); }
+    .lg-trail { display: inline-block; width: 18px; border-top: 2.5px dotted var(--warm); }
+    .lg-note { display: inline-block; width: 9px; height: 11px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 1px; box-shadow: 2px -2px 0 -1px var(--surface), 2px -2px 0 0 var(--line-strong); }
+    .floor { flex: 1; min-height: 0; overflow: auto; padding: 26px 24px 48px; --tile: color-mix(in srgb, var(--ink) 4.5%, transparent);
+      background-color: var(--paper); background-image: linear-gradient(var(--tile) 1px, transparent 1px), linear-gradient(90deg, var(--tile) 1px, transparent 1px);
+      background-size: 28px 28px; background-attachment: local; }
+    .plan { display: flex; flex-wrap: wrap; gap: 34px 26px; align-items: flex-start; }
+    .plan.entering { animation: enter .28s ease-out; transform-origin: 30% 0; }
+    @keyframes enter { from { opacity: 0; transform: scale(.97); } }
+
+    /* Rooms: walls, a door sign on the top wall, nested rooms for sub-teams. */
+    .room { --wall: color-mix(in srgb, var(--ink) 34%, var(--paper)); --room-bg: var(--surface);
+      position: relative; width: max-content; max-width: 100%; background: var(--room-bg); border: 2px solid var(--wall); border-radius: 3px; padding: 28px 14px 14px; }
+    .room.sub { --wall: color-mix(in srgb, var(--ink) 18%, var(--surface)); --room-bg: color-mix(in srgb, var(--paper) 60%, var(--surface)); border-width: 1.5px; padding: 24px 11px 11px; }
+    .room.sub .room.sub { --room-bg: var(--surface); }
+    .room.quiet { --wall: color-mix(in srgb, var(--ink) 15%, var(--paper)); }
+    .room.quiet > .door { color: var(--muted); font-weight: 550; }
+    .room.hovered { border-color: color-mix(in srgb, var(--accent) 55%, var(--wall)); }
+    .door { position: absolute; top: -11px; left: 12px; max-width: calc(100% - 24px); display: inline-flex; align-items: baseline; gap: 8px; padding: 2px 9px;
+      background: var(--room-bg); border: 0; border-radius: 3px; color: var(--ink); font: 600 11.5px/1.4 inherit; letter-spacing: -.01em; white-space: nowrap; text-align: left; }
+    .room.sub > .door { top: -9px; font-size: 10.5px; font-weight: 550; }
+    button.door { cursor: pointer; } button.door:hover .door-name { text-decoration: underline; text-underline-offset: 2px; }
+    .door-name { overflow: hidden; text-overflow: ellipsis; max-width: 30ch; }
+    .door-lead { font-weight: 400; font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+    .door-needs { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--warm); }
+    .door-needs::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--warm); animation: beacon 1.8s ease-in-out infinite; }
+    @keyframes beacon { 50% { opacity: .35; } }
+    .room-body { display: flex; flex-direction: column; gap: 16px; }
+    .desks { display: flex; flex-wrap: wrap; gap: 14px 12px; align-items: flex-end; max-width: calc(var(--cols) * (var(--desk-w) + 12px)); }
+    .subrooms { display: flex; flex-wrap: wrap; gap: 26px 16px; align-items: flex-start; padding-top: 8px; }
+    .room-empty { font-size: 11px; color: var(--muted); padding: 4px 2px; }
+
+    /* Desks */
+    .desk { position: relative; width: var(--desk-w); display: flex; flex-direction: column; gap: 5px; cursor: pointer; border-radius: 6px; outline: none; }
+    .desk.new { animation: hire .6s ease-out; }
+    @keyframes hire { from { opacity: 0; transform: translateY(8px); } }
+    .bubble-slot { min-height: 34px; display: flex; align-items: flex-end; padding-left: 6px; }
+    .bubble { position: relative; max-width: 100%; padding: 4px 8px; border-radius: 9px; background: var(--surface); border: 1px solid var(--line-strong); font-size: 10.5px; line-height: 1.35; color: var(--ink); }
+    .bubble span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .bubble::after { content: ""; position: absolute; left: 12px; bottom: -5px; width: 8px; height: 8px; background: inherit; border: inherit; border-top: 0; border-left: 0; transform: rotate(45deg); }
+    .bubble.accent { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+    .bubble.warm { border-color: color-mix(in srgb, var(--warm) 60%, var(--line)); background: var(--warm-tint); color: var(--warm); font-weight: 550; }
+    .bubble.thought { border-style: dashed; color: var(--muted); }
+    .bubble.thought::after { border-style: dashed; }
+    .bubble.danger { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); background: var(--danger-tint); color: var(--danger); }
+    .bubble.quiet { color: var(--muted); }
+    .desk-top { position: relative; display: grid; gap: 6px; padding: 8px 9px 7px; border: 1px solid var(--line-strong); border-radius: 6px;
+      background: color-mix(in srgb, var(--paper) 45%, var(--surface)); box-shadow: 0 2px 0 color-mix(in srgb, var(--ink) 9%, transparent); transition: border-color .15s; }
+    .desk.lead .desk-top { border-color: color-mix(in srgb, var(--ink) 38%, var(--line)); }
+    .desk:hover .desk-top, .desk:focus-visible .desk-top { border-color: var(--hover-line); }
+    .desk.focused .desk-top { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
+    .desk.lit .desk-top { border-color: var(--warm); }
+    .desk.st-idle, .desk.st-done { opacity: .62; } .desk.st-idle:hover, .desk.st-done:hover { opacity: 1; }
+    .desk.away .desk-top { border-style: dashed; border-color: color-mix(in srgb, var(--warm) 55%, var(--line)); background: transparent; box-shadow: none; }
+    .screen { position: absolute; top: 8px; right: 8px; width: 13px; height: 9px; border-radius: 2px; background: var(--line-strong); }
+    .desk.st-working .screen { background: var(--accent); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 55%, transparent); animation: glow 2.4s ease-in-out infinite; }
+    .desk.st-failed .screen { background: var(--danger); }
+    @keyframes glow { 50% { opacity: .55; } }
+    .who { display: flex; align-items: center; gap: 9px; min-width: 0; padding-right: 16px; }
+    .plate { min-width: 0; display: grid; line-height: 1.3; }
+    .plate b { font-size: 12px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .plate b.unnamed { font-style: italic; font-weight: 500; color: color-mix(in srgb, var(--ink) 72%, var(--muted)); }
+    .desk.away .plate b { color: var(--warm); }
+    .plate .on { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .plate .on i { font: 8.5px var(--mono); font-style: normal; text-transform: uppercase; letter-spacing: .06em; margin-right: 4px; color: color-mix(in srgb, var(--muted) 80%, transparent); }
+    .sheet { font-size: 10.5px; color: color-mix(in srgb, var(--ink) 70%, var(--muted)); background: var(--surface); border: 1px solid var(--line); border-radius: 2px; padding: 3px 6px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transform: rotate(-.7deg); box-shadow: 1px 1px 0 var(--line); }
+    .desk-foot { display: flex; align-items: center; gap: 6px; min-height: 16px; font-size: 10px; color: var(--muted); }
+    .desk-foot .phase-steps i { width: 6px; height: 3px; }
+    .desk-foot .flag { font: 9px var(--mono); letter-spacing: .03em; padding: 0 4px; border-radius: 3px; border: 1px solid var(--line-strong); white-space: nowrap; }
+    .desk-foot .flag.slipping { color: var(--muted); border-style: dashed; }
+    .desk-foot .flag.stuck { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
+    .desk-foot .flag.ready { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+    .helpers { display: inline-flex; gap: 3px; margin-left: auto; }
+    .helper { width: 17px; height: 17px; border-radius: 50%; border: 0; padding: 0; display: grid; place-items: center; cursor: pointer; background: var(--tint); color: var(--muted);
+      font: 600 8px var(--mono); box-shadow: inset 0 0 0 1.5px var(--dot-idle); }
+    .helper .provider-logo { width: 9px; height: 9px; }
+    .helper.st-working { box-shadow: inset 0 0 0 1.5px var(--accent); }
+    .helper.st-waiting, .helper.needs { box-shadow: inset 0 0 0 1.5px var(--warm); background: var(--warm-tint); }
+    .helper.st-blocked { box-shadow: none; outline: 1.2px dashed var(--muted); outline-offset: -1px; }
+    .helper.st-done { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--ok) 70%, transparent); opacity: .6; }
+    .helper.st-failed { box-shadow: inset 0 0 0 1.5px var(--danger); }
+    .helper:hover { outline: 2px solid var(--hover-line); outline-offset: 1px; }
+    .desk.compact .desk-top { padding: 7px 8px; gap: 4px; }
+    .desk.compact .who { gap: 7px; padding-right: 12px; }
+    .desk.compact .plate b { font-size: 11px; }
+    .desk.compact .plate .on { font-size: 10px; }
+    .desk.compact .plate .on i { display: none; }
+    .desk.compact .screen { width: 9px; height: 6px; top: 7px; right: 7px; }
+    .desk.compact .desk-foot { min-height: 0; }
+    .desk.compact .desk-foot:empty { display: none; }
+
+    /* Notes waiting on a desk: open requests this agent owes a reply to. */
+    .notes { position: absolute; z-index: 1; top: -10px; right: -8px; min-width: 18px; height: 16px; padding: 0 4px; display: grid; place-items: center;
+      background: var(--surface); border: 1px solid var(--line-strong); border-radius: 1px; font: 600 9px var(--mono); color: var(--ink); transform: rotate(4deg);
+      box-shadow: 1px 1px 0 var(--line-strong); }
+    .notes.many::before { content: ""; position: absolute; inset: -1px; z-index: -1; background: var(--surface); border: 1px solid var(--line-strong); transform: translate(3px, -3px) rotate(-7deg); }
+    .notes.old { border-color: color-mix(in srgb, var(--ink) 45%, var(--line)); }
+
+    /* Avatars */
+    .avatar { position: relative; flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--tint); color: var(--ink);
+      font: 650 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: -.02em; box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--dot-idle); }
+    .avatar > .provider-logo { width: 14px; height: 14px; }
+    .avatar .badge { position: absolute; right: -5px; bottom: -4px; width: 13px; height: 13px; padding: 1.5px; border-radius: 50%; background: var(--surface); }
+    .avatar.st-working { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--accent); }
+    .avatar.st-waiting { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--warm); }
+    .avatar.st-blocked { box-shadow: none; outline: 1.5px dashed var(--muted); outline-offset: 2px; }
+    .avatar.st-failed { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--danger); }
+    .avatar.st-done { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px color-mix(in srgb, var(--ok) 70%, transparent); }
+    .avatar.ghost { background: transparent; box-shadow: none; outline: 1.5px dashed var(--warm); outline-offset: -1px; color: var(--warm); font-size: 13px; }
+    .avatar.sm { width: 24px; height: 24px; font-size: 10px; }
+    .avatar.sm > .provider-logo { width: 12px; height: 12px; }
+    .desk.compact .avatar { width: 22px; height: 22px; font-size: 9.5px; }
+    .desk.compact .avatar > .provider-logo { width: 11px; height: 11px; }
+    .desk.compact .avatar .badge { width: 11px; height: 11px; }
+    .avatar.you { width: 34px; height: 34px; background: var(--ink); color: var(--paper); font-size: 11px; box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--warm); }
+
+    /* Occupancy heatmap rooms (large floor). */
+    .room.heat { width: 212px; padding: 22px 12px 10px; cursor: pointer; background: color-mix(in srgb, var(--accent) calc(var(--heat, 0) * 16%), var(--surface)); }
+    .cells { display: grid; grid-template-columns: repeat(var(--cols), 11px); gap: 3px; }
+    .cell { width: 11px; height: 11px; padding: 0; border: 0; border-radius: 2px; cursor: pointer; background: color-mix(in srgb, var(--dot-idle) 50%, transparent); }
+    .cell.st-working { background: var(--accent); }
+    .cell.st-blocked { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .cell.st-done { background: color-mix(in srgb, var(--ok) 40%, transparent); }
+    .cell.st-failed { background: var(--danger); }
+    .cell.needs { background: var(--warm); animation: beacon 1.8s ease-in-out infinite; }
+    .cell.gap { visibility: hidden; }
+    .cell:hover { outline: 2px solid var(--ink); outline-offset: 1px; }
+    .heat-meta { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; margin-bottom: 8px; font-size: 10.5px; color: var(--muted); min-height: 15px; }
+    .heat-meta .door-lead { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+    .room.heat > .door .door-name { max-width: 170px; }
+    .heat-foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 10.5px; color: var(--muted); }
+    .heat-foot .lg-note { transform: rotate(4deg); }
+
+    /* The room log (room zoom only). */
+    .room-log { margin-top: 26px; max-width: 820px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 11.5px; }
+    .room-log h3 { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+    .log-line { display: grid; grid-template-columns: 54px minmax(0, 230px) 92px minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 4px 0; border-top: 1px solid var(--line); cursor: pointer; }
+    .log-line:first-of-type { border-top: 0; }
+    .log-line:hover { background: var(--hover-bg); }
+    .log-line .t { font: 10px var(--mono); color: var(--muted); }
+    .log-line .ft { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .log-line .i { font: 9px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+    .log-line .b { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .log-line.open .i { color: var(--ink); }
+
+    /* Your desk: the corner office. */
+    .office { position: relative; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 0 16px 28px; background: var(--surface);
+      border-left: 2px solid color-mix(in srgb, var(--ink) 34%, var(--paper)); }
+    .office-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; padding: 16px 0 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+    .my-desk { display: grid; place-items: center; width: 54px; height: 44px; border: 1px solid var(--line-strong); border-radius: 6px; background: color-mix(in srgb, var(--paper) 45%, var(--surface)); box-shadow: 0 2px 0 color-mix(in srgb, var(--ink) 9%, transparent); }
+    .office-head h2 { font-size: 15px; font-weight: 600; letter-spacing: -.02em; }
+    .office-head p { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .office h3 { font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .queue { display: grid; gap: 10px; padding-left: 12px; border-left: 2px dotted color-mix(in srgb, var(--warm) 45%, var(--line)); }
+    .queue-item { position: relative; display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); transition: border-color .15s, box-shadow .15s; }
+    .queue-item::before { content: ""; position: absolute; left: -18px; top: 18px; width: 10px; height: 10px; border-radius: 50%; background: var(--surface); border: 2px solid var(--warm); }
+    .queue-item:hover, .queue-item.lit { border-color: color-mix(in srgb, var(--warm) 55%, var(--line)); box-shadow: 0 4px 16px var(--shadow); }
+    .queue-item.arrived { animation: arrive .5s ease-out; }
+    @keyframes arrive { from { opacity: 0; transform: translateX(-16px); } }
+    .qi-head { display: flex; align-items: flex-start; gap: 9px; }
+    .qi-head .avatar { cursor: pointer; margin-top: 2px; }
+    .qi-who { flex: 1; min-width: 0; font-size: 12px; line-height: 1.35; }
+    .qi-who b { font-weight: 600; }
+    .qi-who .role { color: var(--muted); font-size: 11px; }
+    .qi-age { font: 10px var(--mono); color: var(--muted); white-space: nowrap; }
+    .trail { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 4px; font-size: 10.5px; color: var(--muted); }
+    .trail .stop { padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 9px; color: var(--ink); background: var(--surface); cursor: pointer; line-height: 1.5; }
+    .trail .stop:hover { border-color: var(--hover-line); }
+    .trail .stop.you { border-color: color-mix(in srgb, var(--warm) 60%, var(--line)); color: var(--warm); cursor: default; }
+    .trail .steps { width: 16px; height: 3px; background-image: radial-gradient(circle, var(--warm) 1.1px, transparent 1.5px); background-size: 5px 3px; }
+    .trail .room-of { flex-basis: 100%; }
+    .queue-item .ask { padding: 8px 10px; }
+    .queue-more { justify-self: start; display: inline-flex; align-items: center; gap: 6px; }
+    .queue-more .avatar { width: 18px; height: 18px; font-size: 8px; box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 2.5px var(--warm); margin-right: -4px; }
+    .queue-more .avatar > .provider-logo { width: 9px; height: 9px; }
+    .queue-more .avatar .badge { display: none; }
+    .calm { padding: 18px 12px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.6; border: 1px dashed var(--line-strong); border-radius: 8px; }
+    .tray { display: grid; gap: 6px; }
+    .slip { display: grid; gap: 2px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 2px; background: color-mix(in srgb, var(--paper) 35%, var(--surface)); font-size: 11px; line-height: 1.4; cursor: pointer; box-shadow: 1px 1px 0 var(--line); }
+    .slip:nth-child(odd) { transform: rotate(-.4deg); } .slip:nth-child(even) { transform: rotate(.35deg); }
+    .slip small { font: 10px var(--mono); color: var(--muted); }
+    .slip span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .slip:hover { border-color: var(--hover-line); }
+    .compose { display: grid; gap: 6px; }
+    .compose-row { display: flex; gap: 6px; }
+    .compose input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--ink); font-size: 12px; }
+    .compose input:disabled { opacity: .55; }
+    .compose p { font-size: 10.5px; color: var(--muted); }
+
+    /* Overlay: wires, trails and flying notes, drawn in viewport space above the floor. */
+    .fx { position: fixed; z-index: 30; pointer-events: none; overflow: hidden; }
+    .fx svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .fx .recent { fill: none; stroke: var(--ink); stroke-width: 1; }
+    .fx .wire { fill: none; stroke: var(--accent); stroke-width: 1.4; }
+    .fx .wire.open { stroke-dasharray: 5 3; }
+    .fx .tip { fill: var(--accent); }
+    .fx .tip.recent-tip { fill: var(--ink); }
+    .fx .overlap { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 4 3; }
+    .fx .trail-line { fill: none; stroke: var(--warm); stroke-width: 2.6; stroke-dasharray: .1 6; stroke-linecap: round; }
+    .fx .room-arc { fill: none; stroke: var(--accent); stroke-opacity: .55; }
+    .fx .pill rect { fill: var(--surface); stroke: var(--line-strong); }
+    .fx .pill text { font: 9.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: var(--ink); dominant-baseline: central; text-anchor: middle; }
+    .fx .pill.warm rect { stroke: var(--warm); } .fx .pill.warm text { fill: var(--warm); }
+    .fx .pill.muted text { fill: var(--muted); }
+    .flying { position: absolute; left: 0; top: 0; padding: 2px 6px 2px 5px; font: 600 8.5px var(--mono); text-transform: uppercase; letter-spacing: .05em; white-space: nowrap;
+      background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 1px; box-shadow: 0 4px 12px var(--shadow); }
+    .flying.to-user { border-color: var(--warm); color: var(--warm); }
+    .flying.from-user { border-color: var(--accent); color: var(--accent); }
+    .fx .avatar { position: absolute; left: 0; top: 0; }
+    .ping .desk-top, .my-desk.ping, .cell.ping, .helper.ping { animation: ping .9s ease-out; }
+    @keyframes ping { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } to { box-shadow: 0 0 0 12px transparent; } }
+    @media (prefers-reduced-motion: reduce) {
+      .desk.new, .plan.entering, .queue-item.arrived, .ping .desk-top, .my-desk.ping, .cell.ping { animation: none; }
+      .desk.st-working .screen, .door-needs::before, .cell.needs { animation: none; }
+    }
+    @media (max-width: 980px) { #stage { grid-template-columns: minmax(0, 1fr) 300px; } .legend { display: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = (tag, cls, text) => AgentField.el(tag, cls, text);
+  const NS = "http://www.w3.org/2000/svg";
+  const svgEl = (tag, attrs = {}) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+  const MIN = 60_000;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const NOTE_LABEL = {assign: "Assignment", question: "Question", answer: "Answer", handoff: "Handoff", finding: "Finding", review: "Review", blocker: "Blocker", coordinate: "Scope", status: "Status"};
+  const RANK = {waiting: 0, failed: 0, working: 1, blocked: 2, idle: 3, done: 4};
+
+  /* View state that survives re-renders. */
+  const view = {zoom: null, mode: null, hover: null, trail: null, hoverRoom: null, focus: null, queueOpen: false, scroll: {}, officeScroll: 0,
+    drafts: {}, lastField: null, lastMsgId: 0, seen: new Set(), queueRects: new Map(), queueIds: new Set(), lastZoomKey: null};
+  let F = null, API = null, stageEl = null, groupOf = new Map(), density = "full";
+
+  /* Identity: the stable name when reported; otherwise the role, in italics, never the title. */
+  const ident = a => a ? (a.name || AgentField.ROLE_LABELS[a.role] || "Agent") : "You";
+  const nameFor = id => id === "user" ? "You" : ident(F.byId(id));
+  const surfaceOf = a => a.surface?.label ? {kind: a.surface.kind, label: a.surface.label} : {kind: "scope", label: (a.scope[0] || "no scope declared").replace(/\/\*\*$/, "/")};
+  const hasAppKids = a => F.children(a.id).some(k => k.kind === "app");
+  const rank = a => F.needsUser(a) ? 0 : RANK[a.status] ?? 3;
+  const byRank = (x, y) => rank(x) - rank(y) || F.lastActivity(y) - F.lastActivity(x);
+
+  function avatar(a, size = "") {
+    const needs = F.needsUser(a);
+    const v = $("span", "avatar " + size + " st-" + (needs ? "waiting" : a.status));
+    if (a.name) {
+      v.append(a.name.slice(0, 2));
+      const logo = AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]); logo.classList.add("badge"); v.append(logo);
+    } else v.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    return v;
+  }
+
+  /* What the speech bubble says: the live line, or where the agent is instead. */
+  function say(a) {
+    if (a.ask) return {text: "At your desk · " + (a.ask.kind === "failure" ? "failed, needs a call" : a.ask.kind), tone: "warm"};
+    if (F.needsUser(a)) return {text: "At your desk · " + a.next.action, tone: "warm"};
+    if (a.status === "working") return {text: a.activity || F.toolLabel(a) || "Working", tone: "accent"};
+    if (a.status === "blocked") return {text: F.statusLabel(a) + "…", tone: "thought"};
+    if (a.status === "failed") return {text: "Failed: " + (a.failure || "see thread"), tone: "danger"};
+    if (a.status === "done") return {text: "Handed off " + (a.deliverable?.kind || "result") + (a.deliverable?.label ? " " + a.deliverable.label : "") + " · " + F.relativeTime(a.updatedAt), tone: "quiet"};
+    return {text: "", tone: "quiet"};
+  }
+
+  /* Rooms: dispatcher reception, one room per team that has app members, and the open floor for solo agents. */
+  function groups() {
+    const roots = F.roots();
+    const dispatchers = roots.filter(r => r.role === "dispatcher");
+    const routed = new Map();
+    for (const m of F.messages) if (m.kind === "creation" && dispatchers.some(d => d.id === m.from)) { const t = F.byId(m.to); if (t && !t.parentId) routed.set(t.id, m.from); }
+    const out = [], solo = [];
+    for (const d of dispatchers) out.push({id: "rx:" + d.id, kind: "reception", lead: d, units: [...roots.filter(r => routed.get(r.id) === d.id), ...F.children(d.id)], door: "Reception", sub: "routed by " + ident(d)});
+    for (const r of roots) { if (r.role === "dispatcher" || routed.has(r.id)) continue; if (hasAppKids(r)) out.push({id: r.id, kind: "team", lead: r, door: r.title, sub: "led by " + ident(r)}); else solo.push(r); }
+    if (solo.length) out.push({id: "open", kind: "open", lead: null, units: solo, door: "Open floor", sub: "solo agents"});
+    for (const g of out) {
+      const seen = new Set(), list = [];
+      const add = a => { if (!seen.has(a.id)) { seen.add(a.id); list.push(a); for (const k of F.children(a.id)) add(k); } };
+      if (g.lead) add(g.lead); for (const u of g.units || []) add(u);
+      g.members = list; g.needs = list.filter(F.needsUser); g.working = list.filter(a => a.status === "working").length;
+      g.quiet = list.every(a => a.status === "done" || a.status === "idle"); g.last = Math.max(...list.map(F.lastActivity));
+    }
+    return out.sort((x, y) => Number(x.quiet) - Number(y.quiet) || y.needs.length - x.needs.length || y.last - x.last);
+  }
+
+  function cols(n, dens) {
+    if (dens === "compact") return Math.max(2, Math.min(8, Math.ceil(Math.sqrt(n * 1.6))));
+    if (view.zoom) return Math.max(1, Math.min(5, n <= 3 ? n : Math.ceil(Math.sqrt(n * 1.5))));
+    return n <= 2 ? Math.max(1, n) : n <= 4 ? 2 : n <= 9 ? 3 : 4;
+  }
+
+  function doorEl(text, sub, needs, onClick, title) {
+    const d = $(onClick ? "button" : "div", "door");
+    if (onClick) { d.type = "button"; d.onclick = e => { e.stopPropagation(); onClick(); }; d.title = title || "Enter the room"; }
+    d.append($("span", "door-name", text)); if (sub) d.append($("span", "door-lead", sub));
+    if (needs) d.append($("span", "door-needs", needs + " at your desk"));
+    return d;
+  }
+
+  /* A room for a lead and its team; members with their own app team become nested rooms. */
+  function roomEl(lead, depth, opt = {}) {
+    const room = $("section", "room" + (depth ? " sub" : ""));
+    const members = opt.members || [lead, ...F.descendants(lead.id)];
+    if (depth === 0) room.dataset.room = opt.gid; else room.dataset.subroom = lead.id;
+    if (members.every(a => a.status === "done" || a.status === "idle")) room.classList.add("quiet");
+    const needs = members.filter(F.needsUser).length;
+    const zoomable = depth === 0 && !view.zoom;
+    room.append(doorEl(depth ? ident(lead) + "’s team" : opt.door, depth ? lead.title : opt.sub, needs, zoomable ? () => zoomTo(opt.gid) : null));
+    const body = $("div", "room-body"), desks = $("div", "desks"), subs = $("div", "subrooms");
+    if (lead) desks.append(deskEl(lead, {lead: true}));
+    const units = (opt.units || F.children(lead.id).filter(k => k.kind === "app" || hasAppKids(k))).slice().sort(byRank);
+    for (const u of units) (hasAppKids(u) && !(opt.units && u.id === lead?.id) ? subs.append(roomEl(u, depth + 1)) : desks.append(deskEl(u)));
+    const n = desks.childElementCount;
+    desks.style.setProperty("--cols", cols(n, density)); desks.style.setProperty("--desk-w", (density === "compact" ? 162 : 190) + "px");
+    if (n) body.append(desks); if (subs.childElementCount) body.append(subs);
+    if (!n && !subs.childElementCount) body.append($("div", "room-empty", "Nobody at a desk."));
+    room.append(body);
+    if (depth === 0) roomHover(room, opt.gid);
+    return room;
+  }
+
+  function roomHover(room, gid) {
+    room.addEventListener("mouseenter", () => { if (view.zoom) return; view.hoverRoom = gid; room.classList.add("hovered"); drawOverlay(); });
+    room.addEventListener("mouseleave", () => { if (view.hoverRoom === gid) { view.hoverRoom = null; room.classList.remove("hovered"); drawOverlay(); } });
+  }
+
+  function deskEl(a, {lead = false} = {}) {
+    const needs = F.needsUser(a), full = density === "full";
+    const d = $("div", "desk " + density + " st-" + a.status + (needs ? " away" : "") + (lead ? " lead" : "") + (view.focus === a.id ? " focused" : ""));
+    d.dataset.agent = a.id; d.tabIndex = 0; d.setAttribute("role", "button");
+    if (!view.seen.has(a.id)) { d.classList.add("new"); view.seen.add(a.id); }
+    const s = say(a), on = surfaceOf(a);
+    d.setAttribute("aria-label", ident(a) + ", " + a.title + ". " + (s.text || F.statusLabel(a)));
+    if (!full) d.title = ident(a) + " — " + a.title + (s.text ? "\n" + s.text : "") + "\nOn " + on.kind + ": " + on.label + (a.scope.length ? "\nScope: " + a.scope.join(", ") : "");
+    if (full) { const slot = $("div", "bubble-slot"); if (s.text) { const b = $("div", "bubble " + s.tone); b.append($("span", null, s.text)); slot.append(b); } d.append(slot); }
+    const top = $("div", "desk-top"); top.append($("span", "screen"));
+    const who = $("div", "who");
+    const face = needs ? $("span", "avatar ghost", "↗") : avatar(a); if (needs) face.title = "Walked to your desk";
+    const plate = $("div", "plate");
+    const nm = $("b", a.name ? null : "unnamed", ident(a)); nm.title = a.name ? "Name (stable identity)" : "No name reported; showing the role";
+    const onLine = $("span", "on"); onLine.append($("i", null, on.kind), on.label); onLine.title = "On " + on.kind + ": " + on.label + (a.scope.length ? "\nScope today: " + a.scope.join(", ") : "\nNo write scope declared");
+    plate.append(nm, onLine); who.append(face, plate); top.append(who);
+    if (full) {
+      const sheet = $("div", "sheet", a.title);
+      const c = a.contract; sheet.title = "Assignment (thread title): " + a.title + (c ? "\nOwes " + nameFor(c.from) + " a " + c.deliverable + (a.status === "done" ? " · delivered" : " · due " + (c.due > F.now ? "in " + F.duration(c.due - F.now) : F.duration(F.now - c.due) + " ago")) : "");
+      top.append(sheet);
+    }
+    const foot = $("div", "desk-foot");
+    if (full && a.status !== "done") { const ps = AgentField.phaseSteps(a); ps.title = "Phase: " + AgentField.PHASE_LABELS[a.phase]; foot.append(ps); }
+    if (full && a.status !== "done" && a.health && a.health !== "on-track") { const f = $("span", "flag " + a.health, a.health); f.title = a.health === "stuck" ? "Stuck: no progress and still blocked" : "Slipping: quiet for a while or past its due time"; foot.append(f); }
+    if (full && a.status !== "done" && a.deliverable?.state === "ready") { const f = $("span", "flag ready", a.deliverable.kind + " ready"); foot.append(f); }
+    const helpers = F.children(a.id).filter(k => k.kind !== "app" && !hasAppKids(k)).sort(byRank);
+    if (helpers.length) {
+      const hs = $("span", "helpers");
+      for (const h of helpers.slice(0, full ? 5 : 4)) {
+        const b = $("button", "helper st-" + h.status + (F.needsUser(h) ? " needs" : "")); b.type = "button"; b.dataset.agent = h.id;
+        b.append(AgentField.providerLogo(h.client, AgentField.PROVIDER_NAMES[h.client]));
+        const sub = F.descendants(h.id).length;
+        b.title = AgentField.ROLE_LABELS[h.role] + " · " + h.title + " · " + F.statusLabel(h) + (h.activity && h.status === "working" ? "\n" + h.activity : "") + (sub ? "\n+" + sub + " below" : "");
+        b.onclick = e => { e.stopPropagation(); focusAgent(h.id); };
+        b.onmouseenter = () => { view.hover = h.id; drawOverlay(); }; b.onmouseleave = () => { if (view.hover === h.id) { view.hover = null; drawOverlay(); } };
+        hs.append(b);
+      }
+      if (helpers.length > (full ? 5 : 4)) hs.append($("span", null, "+" + (helpers.length - (full ? 5 : 4))));
+      foot.append(hs);
+    }
+    if (foot.childElementCount) top.append(foot);
+    const owed = F.owes(a.id).filter(m => m.kind !== "creation");
+    if (owed.length) {
+      const n = $("span", "notes" + (owed.length > 1 ? " many" : "") + (owed.some(m => F.now - m.at > 15 * MIN) ? " old" : ""), String(owed.length));
+      n.title = "Reply owed:\n" + owed.slice(-4).map(m => "From " + nameFor(m.from) + " · " + (NOTE_LABEL[m.intent] || m.kind) + " · " + F.relativeTime(m.at) + "\n  " + m.body).join("\n");
+      top.append(n);
+    }
+    d.append(top);
+    d.onclick = () => focusAgent(a.id);
+    d.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); focusAgent(a.id); } };
+    d.onmouseenter = () => { view.hover = a.id; drawOverlay(); };
+    d.onmouseleave = () => { if (view.hover === a.id) { view.hover = null; drawOverlay(); } };
+    return d;
+  }
+
+  function heatRoom(g) {
+    const room = $("section", "room heat" + (g.quiet ? " quiet" : "")); room.dataset.room = g.id;
+    room.style.setProperty("--heat", (g.working / Math.max(1, g.members.length)).toFixed(2));
+    const door = doorEl(g.door, null, 0, () => zoomTo(g.id)); door.title = g.door + " · " + g.sub; room.append(door);
+    const meta = $("div", "heat-meta"); if (g.needs.length) meta.append($("span", "door-needs", g.needs.length + " at your desk")); meta.append($("span", "door-lead", g.sub)); room.append(meta);
+    room.onclick = () => zoomTo(g.id); room.title = "Enter " + g.door;
+    const cells = $("div", "cells"); cells.style.setProperty("--cols", Math.max(4, Math.min(16, Math.ceil(Math.sqrt(g.members.length * 2.2)))));
+    for (const a of g.members) {
+      const c = $("button", "cell st-" + a.status + (F.needsUser(a) ? " needs" : "")); c.type = "button"; c.dataset.agent = a.id;
+      c.title = ident(a) + " · " + a.title + "\n" + (say(a).text || F.statusLabel(a)) + "\nOn " + surfaceOf(a).label;
+      c.onclick = e => { e.stopPropagation(); focusAgent(a.id); };
+      cells.append(c);
+    }
+    room.append(cells);
+    const owed = g.members.reduce((s, a) => s + F.owes(a.id).filter(m => m.kind !== "creation").length, 0);
+    const foot = $("div", "heat-foot");
+    if (owed) { const n = $("span"); n.append($("i", "lg-note"), " " + owed + " notes waiting"); foot.append(n); }
+    const deep = Math.max(...g.members.map(a => F.depth(a.id))) + 1; if (deep > 1) foot.append($("span", null, deep + " levels"));
+    if (foot.childElementCount) room.append(foot);
+    roomHover(room, g.id);
+    return room;
+  }
+
+  function roomFor(g) {
+    if (g.kind === "team") return roomEl(g.lead, 0, {gid: g.id, door: g.door, sub: g.sub, members: g.members});
+    return roomEl(g.lead, 0, {gid: g.id, door: g.door, sub: g.sub, members: g.members, units: g.units});
+  }
+
+  function roomLog(g) {
+    const ids = new Set(g.members.map(a => a.id));
+    const msgs = F.messages.filter(m => ids.has(m.from) || ids.has(m.to)).slice(-10).reverse();
+    const box = $("section", "room-log"); box.append($("h3", null, "Notes passed in this room"));
+    if (!msgs.length) box.append($("p", "muted", "No notes yet."));
+    for (const m of msgs) {
+      const open = m.replyRequired && !m.repliedBy;
+      const line = $("div", "log-line" + (open ? " open" : ""));
+      line.append($("span", "t", F.relativeTime(m.at)), $("span", "ft", nameFor(m.from) + " → " + nameFor(m.to)), $("span", "i", (NOTE_LABEL[m.intent] || F.KIND_LABELS[m.kind]) + (open ? " · open" : "")), $("span", "b", m.body));
+      line.title = m.body; line.onclick = () => { const id = m.from === "user" ? m.to : m.from; focusAgent(id); };
+      line.onmouseenter = () => { view.hover = m.from === "user" ? m.to : m.from; drawOverlay(); }; line.onmouseleave = () => { view.hover = null; drawOverlay(); };
+      box.append(line);
+    }
+    return box;
+  }
+
+  /* Your desk: the queue of agents waiting on you, notes left for you, and a note you can leave. */
+  function office() {
+    const asks = F.asks();
+    const o = $("aside", "office");
+    const head = $("div", "office-head");
+    const desk = $("div", "my-desk"); desk.dataset.user = "1"; desk.append($("span", "avatar you", "You"));
+    const t = $("div"); t.append($("h2", null, "Your desk"), $("p", null, asks.length ? (asks.length === 1 ? "One agent is waiting in line" : asks.length + " agents are waiting in line") : "Nobody is waiting on you"));
+    head.append(desk, t); o.append(head);
+    if (!asks.length) o.append($("div", "calm", "Everyone is at their desk. Agents walk over here when they need a decision, an approval, or access."));
+    else {
+      const q = $("div", "queue");
+      const shown = view.queueOpen ? asks : asks.slice(0, 5);
+      for (const a of shown) q.append(queueItem(a));
+      if (asks.length > shown.length || view.queueOpen && asks.length > 5) {
+        const more = $("button", "btn small queue-more"); more.type = "button";
+        if (view.queueOpen) more.append("Show the first five");
+        else { const faces = $("span"); for (const a of asks.slice(5, 11)) faces.append(avatar(a)); more.append(faces, " " + (asks.length - 5) + " more in line"); }
+        more.onclick = () => { view.queueOpen = !view.queueOpen; draw(); };
+        q.append(more);
+      }
+      o.append(q);
+    }
+    const notes = F.messages.filter(m => m.to === "user" && F.now - m.at < 3 * 60 * MIN && !(F.byId(m.from)?.ask && m.intent === "blocker")).slice(-3).reverse();
+    if (notes.length) {
+      const tray = $("div", "tray"); tray.append($("h3", null, "Left on your desk"));
+      for (const m of notes) {
+        const s = $("div", "slip"); s.append($("small", null, nameFor(m.from) + " · " + (m.kind === "failure" ? "failure report" : NOTE_LABEL[m.intent] || F.KIND_LABELS[m.kind]) + " · " + F.relativeTime(m.at)), $("span", null, m.body));
+        s.onclick = () => focusAgent(m.from); s.onmouseenter = () => { view.hover = m.from; drawOverlay(); }; s.onmouseleave = () => { view.hover = null; drawOverlay(); };
+        tray.append(s);
+      }
+      o.append(tray);
+    }
+    o.append(composer());
+    return o;
+  }
+
+  function queueItem(a) {
+    const it = $("article", "queue-item" + (view.trail === a.id ? " lit" : "") + (view.queueIds.size && !view.queueIds.has(a.id) ? " arrived" : ""));
+    it.dataset.ask = a.id; it.dataset.key = "ask:" + a.id;
+    const head = $("div", "qi-head"); const av = avatar(a, "sm"); av.title = "Open " + ident(a); av.onclick = () => focusAgent(a.id);
+    const who = $("div", "qi-who"); who.append($("b", null, ident(a)), " ", $("span", "role", (a.name ? AgentField.ROLE_LABELS[a.role] + " · " : "") + surfaceOf(a).label));
+    const trail = $("div", "trail");
+    const path = [a, ...(a.ask?.via || []).map(F.byId).filter(Boolean)];
+    for (const p of path) { const stop = $("span", "stop", ident(p)); stop.title = p.title; stop.onclick = e => { e.stopPropagation(); focusAgent(p.id); }; trail.append(stop, $("i", "steps")); }
+    trail.append($("span", "stop you", "You"));
+    if (path.length > 1) trail.title = "Relayed: " + path.map(ident).join(" → ") + " → you";
+    const g = groupOf.get(a.id); const room = g && view.groups?.find(x => x.id === g);
+    const helperOf = a.kind !== "app" && F.parent(a.id) ? "helper at " + ident(F.parent(a.id)) + "’s desk · " : "";
+    if (room) trail.append($("span", "room-of", helperOf + "from " + (room.kind === "team" ? room.door : room.door.toLowerCase()) + (path.length > 1 ? " · relayed by " + path.slice(1).map(ident).join(", ") : "")));
+    who.append(trail);
+    head.append(av, who, $("span", "qi-age", F.relativeTime(a.ask?.askedAt ?? a.updatedAt)));
+    it.append(head);
+    if (a.ask) {
+      const box = Mockup.askBox(a, F, id => focusAgent(id)); it.append(box);
+      const input = box.querySelector("input"); if (input) { input.value = view.drafts["ask:" + a.id] || ""; input.addEventListener("input", () => { view.drafts["ask:" + a.id] = input.value; }); }
+    } else {
+      const box = $("div", "ask"); box.append($("span", "ask-kind", "your next step"), $("div", "ask-question", a.next.action));
+      const open = $("button", "btn quiet small", "Open thread"); open.type = "button"; open.onclick = () => focusAgent(a.id); box.append(open); it.append(box);
+    }
+    it.onmouseenter = () => { view.trail = a.id; it.classList.add("lit"); drawOverlay(); };
+    it.onmouseleave = () => { if (view.trail === a.id) { view.trail = null; it.classList.remove("lit"); drawOverlay(); } };
+    return it;
+  }
+
+  function composer() {
+    const c = $("div", "compose"); c.dataset.key = "compose";
+    const target = view.focus && F.byId(view.focus);
+    c.append($("h3", null, target ? "Leave a note for " + ident(target) : "Leave a note"));
+    const row = $("div", "compose-row"); const input = $("input"); input.placeholder = target ? "Ask " + ident(target) + " something…" : "Click a desk first";
+    input.disabled = !target; input.value = view.drafts.compose || "";
+    input.addEventListener("input", () => { view.drafts.compose = input.value; });
+    const send = $("button", "btn small primary", "Send"); send.type = "button"; send.disabled = !target;
+    send.onclick = () => { const text = input.value.trim(); if (!text || !target) return; view.drafts.compose = ""; F.message(target.id, text); };
+    input.onkeydown = e => { if (e.key === "Enter") send.click(); };
+    row.append(input, send); c.append(row);
+    if (target) c.append($("p", null, "It lands on " + ident(target) + "’s desk as an open request; the reply comes back here."));
+    return c;
+  }
+
+  function focusAgent(id) { view.focus = id; API.select(id); draw(); }
+  function zoomTo(gid) { view.zoom = gid; view.hoverRoom = null; draw(); }
+  function draw() { API.rerender(); }
+
+  /* ---------- Overlay ---------- */
+  const fx = (() => { const root = $("div", "fx"); root.setAttribute("aria-hidden", "true"); const svg = svgEl("svg"); root.append(svg); document.body.append(root); return {root, svg}; })();
+  let origin = {left: 0, top: 0};
+
+  function anchorEl(id) {
+    if (id === "user") return document.querySelector(".my-desk");
+    let a = F.byId(id);
+    while (a) { const e = stageEl.querySelector(`[data-agent="${a.id}"]`); if (e) return e; a = F.parent(a.id); }
+    const gid = groupOf.get(id); return gid ? stageEl.querySelector(`[data-room="${CSS.escape(gid)}"] > .door`) : null;
+  }
+  function pt(id) {
+    const e = anchorEl(id); if (!e) return null;
+    const target = e.querySelector?.(".avatar") || e; const r = target.getBoundingClientRect(); if (!r.width) return null;
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    const box = e.closest(".floor, .office")?.getBoundingClientRect();
+    if (box && (x < box.left - 2 || x > box.right + 2 || y < box.top - 2 || y > box.bottom + 2)) return null;
+    return {x: x - origin.left, y: y - origin.top};
+  }
+  const ctrl = (a, b, bend = .2) => { const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1, off = Math.min(90, len * bend); return {x: mx - dy / len * off, y: my + dx / len * off}; };
+  const curve = (a, b, bend) => { const c = ctrl(a, b, bend); return `M${a.x.toFixed(1)},${a.y.toFixed(1)} Q${c.x.toFixed(1)},${c.y.toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)}`; };
+  const onCurve = (a, b, t, bend) => { const c = ctrl(a, b, bend); return {x: (1 - t) ** 2 * a.x + 2 * (1 - t) * t * c.x + t * t * b.x, y: (1 - t) ** 2 * a.y + 2 * (1 - t) * t * c.y + t * t * b.y}; };
+  function pill(x, y, text, cls = "") {
+    const g = svgEl("g", {class: "pill " + cls}); const w = text.length * 5.3 + 12;
+    g.append(svgEl("rect", {x: x - w / 2, y: y - 8, width: w, height: 16, rx: 8}));
+    const t = svgEl("text", {x, y}); t.textContent = text; g.append(t); return g;
+  }
+
+  function drawOverlay() {
+    if (!F || !stageEl?.isConnected) return;
+    const st = stageEl.getBoundingClientRect(); origin = {left: st.left, top: st.top};
+    Object.assign(fx.root.style, {left: st.left + "px", top: st.top + "px", width: st.width + "px", height: st.height + "px"});
+    const svg = fx.svg; svg.replaceChildren(); svg.setAttribute("viewBox", `0 0 ${st.width} ${st.height}`);
+    const back = svgEl("g"), mid = svgEl("g"), front = svgEl("g"); svg.append(back, mid, front);
+    const focusId = view.hover || null;
+    const desks = density !== "heat" || view.zoom;
+
+    if (desks && !view.trail && density === "full") {
+      // Scope overlaps between active agents: few and always worth seeing.
+      for (const c of F.conflicts().slice(0, 8)) {
+        const a = pt(c.a.id), b = pt(c.b.id); if (!a || !b) continue;
+        back.append(svgEl("path", {class: "overlap", d: curve(a, b, .12)}));
+        const m = onCurve(a, b, .5, .12); back.append(pill(m.x, m.y, (c.negotiating ? "negotiating · " : "overlap · ") + c.path.replace(/\*\*$/, "").split("/").filter(Boolean).slice(-2).join("/") + "/", "muted"));
+      }
+      // Recent traffic: notes passed in the last 15 simulated minutes, fading with age.
+      if (!focusId) {
+        const recent = F.messages.filter(m => F.now - m.at <= 15 * MIN).slice(-10);
+        for (const m of recent) {
+          const a = pt(m.from), b = pt(m.to); if (!a || !b || (Math.abs(a.x - b.x) < 2 && Math.abs(a.y - b.y) < 2)) continue;
+          const op = (0.55 - 0.4 * (F.now - m.at) / (15 * MIN)).toFixed(2);
+          back.append(svgEl("path", {class: "recent", d: curve(a, b), "stroke-opacity": op}));
+          const tip = onCurve(a, b, .93); back.append(svgEl("circle", {class: "tip recent-tip", cx: tip.x, cy: tip.y, r: 2.2, "fill-opacity": op}));
+        }
+      }
+    }
+
+    // Hovered agent: its correspondents in the last hour, one wire each, labeled with why.
+    if (focusId && !view.trail) {
+      const latest = new Map();
+      for (const m of F.messagesOf(focusId, {since: F.now - 60 * MIN})) { const other = m.from === focusId ? m.to : m.from; latest.set(other, m); }
+      const a = pt(focusId);
+      if (a) for (const [other, m] of [...latest.entries()].slice(-8)) {
+        const b = pt(other); if (!b || (Math.abs(a.x - b.x) < 2 && Math.abs(a.y - b.y) < 2)) continue;
+        const out = m.from === focusId, open = m.replyRequired && !m.repliedBy;
+        const [p, q] = out ? [a, b] : [b, a];
+        mid.append(svgEl("path", {class: "wire" + (open ? " open" : ""), d: curve(p, q)}));
+        const tip = onCurve(p, q, .94); mid.append(svgEl("circle", {class: "tip", cx: tip.x, cy: tip.y, r: 2.6}));
+        const lab = onCurve(p, q, .5); front.append(pill(lab.x, lab.y, (NOTE_LABEL[m.intent] || F.KIND_LABELS[m.kind]) + (open ? " · awaiting reply" : "") + " · " + F.relativeTime(m.at).replace(" ago", "")));
+      }
+    }
+
+    // Relay trail: from the asking agent's empty desk, through each agent it passed, to your desk.
+    const trailId = view.trail || (focusId && F.byId(focusId) && F.needsUser(F.byId(focusId)) ? focusId : null);
+    if (trailId) {
+      const a = F.byId(trailId);
+      const stops = [a.id, ...(a.ask?.via || [])].map(pt).filter(Boolean);
+      const item = stageEl.querySelector(`.queue-item[data-ask="${trailId}"] .avatar`);
+      let end = null; if (item) { const r = item.getBoundingClientRect(); const box = item.closest(".office").getBoundingClientRect(); if (r.top >= box.top && r.bottom <= box.bottom) end = {x: r.left + r.width / 2 - origin.left, y: r.top + r.height / 2 - origin.top}; }
+      end ||= pt("user");
+      if (end) stops.push(end);
+      for (let i = 0; i + 1 < stops.length; i++) mid.append(svgEl("path", {class: "trail-line", d: curve(stops[i], stops[i + 1], .14)}));
+      for (const id of [a.id, ...(a.ask?.via || [])]) anchorEl(id)?.classList.add("lit");
+    }
+    stageEl.querySelectorAll(".desk.lit").forEach(d => { if (!trailId || ![trailId, ...(F.byId(trailId)?.ask?.via || [])].includes(d.dataset.agent)) d.classList.remove("lit"); });
+
+    // Hovered room: which other rooms it exchanged notes with in the last hour.
+    if (view.hoverRoom && !view.zoom) {
+      const counts = new Map();
+      for (const m of F.messages) {
+        if (F.now - m.at > 60 * MIN) continue;
+        const ga = m.from === "user" ? "user" : groupOf.get(m.from), gb = m.to === "user" ? "user" : groupOf.get(m.to);
+        if (ga === gb || (ga !== view.hoverRoom && gb !== view.hoverRoom)) continue;
+        const other = ga === view.hoverRoom ? gb : ga; if (other) counts.set(other, (counts.get(other) || 0) + 1);
+      }
+      const roomPt = gid => { if (gid === "user") return pt("user"); const e = stageEl.querySelector(`[data-room="${CSS.escape(gid)}"] > .door`); if (!e) return null; const r = e.getBoundingClientRect(); return {x: r.left + 24 - origin.left, y: r.top + r.height / 2 - origin.top}; };
+      const a = roomPt(view.hoverRoom);
+      if (a) for (const [gid, n] of counts) {
+        const b = roomPt(gid); if (!b) continue;
+        mid.append(svgEl("path", {class: "room-arc", d: curve(a, b, .25), "stroke-width": (1 + Math.log2(n + 1)).toFixed(1)}));
+        const lab = onCurve(a, b, .5, .25); front.append(pill(lab.x, lab.y, n + (n === 1 ? " note" : " notes") + " · 1h", gid === "user" ? "warm" : ""));
+      }
+    }
+  }
+
+  function ping(id) { const e = anchorEl(id); if (!e) return; e.classList.remove("ping"); void e.offsetWidth; e.classList.add("ping"); setTimeout(() => e.classList.remove("ping"), 950); }
+
+  /* A note in flight: a paper slip arcs from the sender's desk to the recipient's. */
+  function fly(m, delay) {
+    const a = pt(m.from), b = pt(m.to);
+    if (!a || !b || reduced) { setTimeout(() => ping(m.to), delay); return; }
+    const n = $("div", "flying" + (m.to === "user" ? " to-user" : m.from === "user" ? " from-user" : ""), NOTE_LABEL[m.intent] || F.KIND_LABELS[m.kind]);
+    fx.root.append(n);
+    const frames = [];
+    for (let i = 0; i <= 18; i++) { const t = i / 18, p = onCurve(a, b, t, .28); frames.push({transform: `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(-50%, -50%) rotate(${(-10 + 14 * t).toFixed(1)}deg) scale(${(0.8 + 0.35 * Math.sin(Math.PI * t)).toFixed(2)})`, opacity: t === 0 ? 0 : t > .94 ? .3 : 1}); }
+    const anim = n.animate(frames, {duration: 1050, delay, easing: "cubic-bezier(.4,.1,.3,1)", fill: "both"});
+    anim.onfinish = () => { n.remove(); ping(m.to); };
+  }
+
+  /* An answered agent walks back from your desk to its own. */
+  function walkBack(id, from) {
+    const a = F.byId(id), b = pt(id); if (!a || !b || reduced) { ping(id); return; }
+    const s = {x: from.left + from.width / 2 - origin.left, y: from.top + from.height / 2 - origin.top};
+    const av = avatar(a, "sm"); fx.root.append(av);
+    const frames = []; for (let i = 0; i <= 14; i++) { const t = i / 14, p = onCurve(s, b, t, .1); frames.push({transform: `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(-50%, -50%) translateY(${(-Math.abs(Math.sin(t * Math.PI * 5)) * 3).toFixed(1)}px)`}); }
+    const anim = av.animate(frames, {duration: 1200, easing: "ease-in-out", fill: "both"});
+    anim.onfinish = () => { av.remove(); ping(id); };
+  }
+
+  /* ---------- Render ---------- */
+  function render(field, stage, api) {
+    F = field; API = api; stageEl = stage;
+    const freshField = view.lastField !== field;
+    if (freshField) {
+      view.lastField = field; view.lastMsgId = field.messages.reduce((m, x) => Math.max(m, x.id), 0);
+      view.seen = new Set(field.agents.map(a => a.id)); view.queueRects = new Map(); view.queueIds = new Set(); view.hover = view.trail = view.hoverRoom = null;
+      if (view.focus && !field.byId(view.focus)) view.focus = null;
+    }
+    view.mode ??= field.agents.length > 120 ? "heat" : "desks";
+
+    // Keep typing and scroll across rebuilds.
+    const act = document.activeElement; let keep = null;
+    if (act && stage.contains(act) && act.tagName === "INPUT") { const host = act.closest("[data-key]"); if (host) keep = {key: host.dataset.key, s: act.selectionStart}; }
+    const oldOffice = stage.querySelector(".office"); if (oldOffice) view.officeScroll = oldOffice.scrollTop;
+
+    const gs = groups(); view.groups = gs;
+    groupOf = new Map(); for (const g of gs) for (const m of g.members) groupOf.set(m.id, g.id);
+    const zoomG = view.zoom && gs.find(g => g.id === view.zoom); if (!zoomG) view.zoom = null;
+    density = view.zoom ? "full" : view.mode === "heat" ? "heat" : field.agents.length <= 24 ? "full" : "compact";
+
+    stage.replaceChildren();
+    const wrap = $("div", "floor-wrap");
+    const bar = $("div", "floor-bar"), crumbs = $("div", "crumbs");
+    const floorBtn = $("button", "btn small", view.zoom ? "← Floor" : "Floor"); floorBtn.type = "button"; floorBtn.setAttribute("aria-pressed", String(!view.zoom));
+    floorBtn.onclick = () => { if (view.zoom) { view.zoom = null; draw(); } };
+    crumbs.append(floorBtn);
+    if (zoomG) { crumbs.append($("span", "sep", "›"), $("span", "here", zoomG.door)); crumbs.lastChild.title = zoomG.door + " · " + zoomG.sub; }
+    bar.append(crumbs);
+    if (!view.zoom) {
+      const seg = $("div", "seg"); seg.setAttribute("role", "group"); seg.setAttribute("aria-label", "Floor detail");
+      for (const [m, label, tip] of [["desks", "Desks", "Every agent at a desk"], ["heat", "Occupancy", "Rooms as occupancy heatmaps; zoom into a room for desks"]]) {
+        const b = $("button", "btn small", label); b.type = "button"; b.title = tip; b.setAttribute("aria-pressed", String(view.mode === m)); b.onclick = () => { view.mode = m; draw(); }; seg.append(b);
+      }
+      bar.append(seg);
+    }
+    const legend = $("div", "legend");
+    const lg = (node, text) => { const s = $("span"); s.append(node, text); legend.append(s); };
+    lg($("span", "dot working"), "working"); lg($("span", "dot waiting"), "at your desk"); lg($("span", "dot blocked"), "waiting on another"); lg($("i", "lg-note"), "reply owed");
+    if (density === "full") { lg($("i", "lg-line"), "shared scope"); lg($("i", "lg-trail"), "relay trail"); }
+    bar.append(legend);
+    const floor = $("div", "floor"); const key = view.zoom || "floor:" + density; floor.dataset.key = key;
+    const plan = $("div", "plan" + (view.lastZoomKey !== null && view.lastZoomKey !== key && !reduced ? " entering" : ""));
+    view.lastZoomKey = key;
+    if (zoomG) { plan.append(roomFor(zoomG)); }
+    else for (const g of gs) plan.append(density === "heat" ? heatRoom(g) : roomFor(g));
+    floor.append(plan);
+    if (zoomG) floor.append(roomLog(zoomG));
+    floor.addEventListener("scroll", () => { view.scroll[key] = {top: floor.scrollTop, left: floor.scrollLeft}; drawOverlay(); }, {passive: true});
+    wrap.append(bar, floor);
+    const off = office(); off.addEventListener("scroll", () => { view.officeScroll = off.scrollTop; drawOverlay(); }, {passive: true});
+    stage.append(wrap, off);
+    const sc = view.scroll[key]; if (sc) { floor.scrollTop = sc.top; floor.scrollLeft = sc.left; }
+    off.scrollTop = view.officeScroll;
+    if (keep) { const input = stage.querySelector(`[data-key="${CSS.escape(keep.key)}"] input`); if (input && !input.disabled) { input.focus(); try { input.setSelectionRange(keep.s, keep.s); } catch { /* not a text input */ } } }
+
+    drawOverlay();
+
+    // Motion: new notes fly, answered agents walk home.
+    if (!freshField) {
+      const fresh = field.messages.filter(m => m.id > view.lastMsgId);
+      fresh.slice(-10).forEach((m, i) => fly(m, i * 110));
+      const askIds = new Set(field.asks().map(a => a.id));
+      for (const [id, rect] of view.queueRects) if (!askIds.has(id) && field.byId(id)) walkBack(id, rect);
+    }
+    view.lastMsgId = field.messages.reduce((m, x) => Math.max(m, x.id), view.lastMsgId);
+    view.queueRects = new Map([...stage.querySelectorAll(".queue-item")].map(it => [it.dataset.ask, it.querySelector(".avatar").getBoundingClientRect()]));
+    view.queueIds = new Set(field.asks().map(a => a.id));
+  }
+
+  addEventListener("resize", () => drawOverlay());
+  addEventListener("keydown", e => {
+    if (e.key !== "Escape" || !view.zoom || e.target?.matches?.("input, textarea, select")) return;
+    if (document.querySelector(".drawer, .lens")) return;
+    view.zoom = null; draw();
+  }, true);
+
+  Mockup.mount({
+    number: 28, title: "Office floor", spectrum: "radical", fullBleed: true,
+    summary: "Teams are rooms, agents sit at desks, notes fly between desks, and whoever needs you walks to your desk in the corner.",
+    signals: {
+      current: ["title", "status", "phase", "next_action", "next_actor", "created_by", "creation", "client", "write_scope", "conflicts", "agent_messages", "tool_activity", "pending_approval", "updated_at", "age"],
+      proposed: ["name", "role", "kind", "surface", "activity", "ask", "escalation", "blocks", "intent", "contract", "deliverable", "health"],
+    },
+    notes: "Identity: the nameplate is the stable name (proposed); when none is reported it shows the role in italics, never the title, because the title is the assignment and changes, so it sits on the desk as a sheet of paper, and only rooms are labeled by a title (the lead's mission). On what: every plate's second line is the surface (proposed: page, service, screen…), falling back to today's write scope; phase is demoted to a thin stepper on the desk edge because it says how far along, not on what. Today's signals already draw the floor (created_by rooms, dispatch reception, tool-stream bubbles, message notes, owed replies, scope overlaps, pending approvals); the cost to the model is one name, one surface noun, and an intent per message, with relay paths, deliverables and health as optional extras.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

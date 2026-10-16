@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 25 · Contracts</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Orchestration as contracts. Every delegation is a card: creator → assignee, deliverable,
+       acceptance checks, due. Transitions (needs you, assigned, handed off, accepted) pull up from
+       any depth; steady work (in progress) nests its sub-contracts inside the card. */
+    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 12px; }
+    .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 13px; }
+    .crumbs button { border: 0; background: transparent; color: var(--muted); font: inherit; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+    .crumbs button:hover { color: var(--ink); background: var(--hover-bg); }
+    .crumbs button[aria-current="true"] { color: var(--ink); font-weight: 600; cursor: default; background: transparent; }
+    .crumbs .sep { color: var(--line-strong); }
+    .board-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; color: var(--muted); margin: -4px 0 12px; }
+    .board-head b { color: var(--ink); font-weight: 550; }
+
+    /* The wire: the last few messages on this board, newest first. */
+    .wire { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; overflow: hidden; -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); mask-image: linear-gradient(90deg, #000 85%, transparent); }
+    .wire-label { flex: none; font: 600 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .wire button.ping { animation: rowping 1.4s ease-out; }
+    .wire button { flex: none; display: inline-flex; align-items: center; gap: 5px; max-width: 290px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .wire button:hover { border-color: var(--hover-line); color: var(--ink); }
+    .wire button b { color: var(--ink); font-weight: 550; }
+    .wire button .i { color: var(--accent); }
+    .wire button.open .i { color: var(--warm); }
+    .wire button:nth-child(n+5) { opacity: .7; } .wire button:nth-child(n+6) { opacity: .45; }
+
+    .board { display: grid; grid-template-columns: minmax(300px, 1.2fr) repeat(4, minmax(232px, 1fr)); gap: 12px; align-items: start; overflow-x: auto; padding-bottom: 8px; }
+    .col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .col-head { position: sticky; top: 0; z-index: 2; display: flex; flex-direction: column; gap: 2px; padding: 8px 2px 8px; background: var(--paper); border-bottom: 2px solid var(--line-strong); }
+    .col-head h2 { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; letter-spacing: -.01em; }
+    .col-head h2 small { font: 10px var(--mono); color: var(--muted); border: 1px solid var(--line-strong); border-radius: 9px; padding: 0 6px; font-weight: 400; }
+    .col-head p { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
+    .col[data-state="needs"] .col-head { border-color: var(--warm); } .col[data-state="needs"] .col-head h2 { color: var(--warm); }
+    .col[data-state="progress"] .col-head { border-color: var(--accent); }
+    .col[data-state="handed"] .col-head { border-bottom-style: dashed; border-color: var(--ok); }
+    .col[data-state="accepted"] .col-head { border-color: var(--ok); }
+    .empty { font-size: 11px; color: var(--muted); line-height: 1.5; padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: 7px; }
+    .more { align-self: flex-start; }
+
+    /* Contract card */
+    .k { position: relative; display: flex; flex-direction: column; gap: 7px; padding: 10px 12px 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; cursor: pointer; font-size: 11px; line-height: 1.45; min-width: 0; }
+    .k::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 0 2px 2px 0; background: var(--line-strong); }
+    .k:hover { border-color: var(--hover-line); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 5%, transparent); }
+    .k[data-state="progress"]::before { background: var(--accent); }
+    .k[data-state="handed"]::before { background: repeating-linear-gradient(var(--ok) 0 4px, transparent 4px 7px); }
+    .k[data-state="accepted"]::before { background: var(--ok); }
+    .k[data-state="needs"]::before { background: var(--warm); }
+    .k[data-state="needs"] { border-color: color-mix(in srgb, var(--warm) 35%, var(--line)); }
+    .k[data-state="accepted"] { background: color-mix(in srgb, var(--surface) 55%, var(--paper)); gap: 4px; padding-top: 8px; padding-bottom: 8px; }
+    .k.ping { animation: ping 1.4s ease-out; }
+    @keyframes ping { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } 100% { box-shadow: 0 0 0 10px transparent; } }
+    @media (prefers-reduced-motion: reduce) { .k.ping, .row.ping, .wire button.ping { animation: none; } }
+
+    .parties { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; min-width: 0; font-size: 11px; color: var(--muted); }
+    .party { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; padding: 1px 4px; margin: -1px -4px; border: 0; background: transparent; border-radius: 4px; font: inherit; color: var(--ink); font-weight: 550; cursor: pointer; }
+    .party:hover { background: var(--hover-bg); }
+    .party span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .party.you { color: var(--muted); font-weight: 500; }
+    .party.unnamed span { font-weight: 450; color: var(--muted); font-style: italic; }
+    .party .provider-logo { width: 12px; height: 12px; }
+    .arrow { color: var(--line-strong); flex: none; margin: 0 2px; }
+    .parties .to { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+    .parties .right { margin-left: auto; display: inline-flex; gap: 4px; flex: none; }
+    .kind { font: 9px var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+    .team { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: -3px; }
+    .k h3 { font-size: 13px; font-weight: 550; letter-spacing: -.015em; line-height: 1.35; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .k[data-state="accepted"] h3 { font-size: 12px; font-weight: 500; color: var(--muted); -webkit-line-clamp: 1; }
+
+    .terms { display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; align-items: baseline; }
+    .terms dt { font: 600 9px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .terms dd { margin: 0; min-width: 0; color: var(--ink); display: flex; align-items: center; gap: 6px; overflow: hidden; }
+    .terms dd .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .terms dd code { font: 10px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .meter { display: inline-flex; gap: 2px; flex: none; } .meter i { width: 8px; height: 4px; border-radius: 1px; background: var(--line-strong); }
+    .meter i.on { background: var(--accent); } .meter.delivered i { background: var(--ok); }
+    .dstate { font: 9.5px var(--mono); color: var(--muted); flex: none; }
+    .due.late { color: var(--warm); }
+    .health { font: 600 9px var(--mono); letter-spacing: .04em; text-transform: uppercase; padding: 0 5px; border-radius: 3px; line-height: 1.6; }
+    .health.slipping { color: var(--warm); background: var(--warm-tint); }
+    .health.stuck { color: var(--danger); background: var(--danger-tint); }
+
+    .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+    .checks li { display: flex; gap: 6px; align-items: baseline; color: var(--muted); }
+    .checks li::before { content: "○"; flex: none; width: 10px; color: var(--line-strong); }
+    .checks li.met { color: var(--ink); } .checks li.met::before { content: "✓"; color: var(--ok); font-weight: 700; }
+    .checks.short { display: flex; gap: 8px; }
+
+    .msg { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; background: var(--tint); border-radius: 5px; min-width: 0; }
+    .msg .h { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); white-space: nowrap; min-width: 0; }
+    .msg .h b { color: var(--ink); font-weight: 550; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .msg .h .intent, .msg .h .ago { flex: none; }
+    .msg .h .intent { color: var(--accent); font-weight: 550; }
+    .msg .h .ago { margin-left: auto; font-family: var(--mono); }
+    .msg .body { color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .owe { font-size: 10.5px; color: var(--muted); display: flex; gap: 6px; flex-wrap: wrap; }
+    .owe b { font-weight: 550; color: var(--ink); }
+    .owe .warm { color: var(--warm); }
+    .live { font-size: 11px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .live::before { content: "▸ "; }
+    .live.wait { color: var(--muted); } .live.wait::before { content: "◌ "; }
+    .live.fail { color: var(--danger); } .live.fail::before { content: "✕ "; }
+
+    .acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .acts .for { font-size: 10px; color: var(--muted); margin-left: auto; }
+
+    /* Sub-contracts: a count with a mini state bar, expanding to an indented tree of rows. */
+    .subs { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--line); padding-top: 7px; }
+    .subs-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .subs-head .toggle { white-space: nowrap; flex: none; min-width: 0; text-align: left; border: 0; background: transparent; padding: 0; color: var(--ink); font-size: 11px; font-weight: 550; font-family: inherit; cursor: pointer; display: inline-flex; gap: 5px; align-items: center; }
+    .subs-head .toggle .warm { color: var(--warm); }
+    .subs-head .drill { margin-left: auto; flex: none; white-space: nowrap; padding: 2px 6px; }
+    .sbar { display: flex; height: 4px; flex: 1 1 0; min-width: 0; max-width: 120px; border-radius: 2px; overflow: hidden; background: var(--line); gap: 1px; }
+    .sbar i { display: block; height: 100%; }
+    .sbar i.needs { background: var(--warm); } .sbar i.assigned { background: var(--muted); } .sbar i.progress { background: var(--accent); }
+    .sbar i.handed { background: color-mix(in srgb, var(--ok) 50%, transparent); } .sbar i.accepted { background: var(--ok); }
+    .rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+    .row { display: grid; grid-template-columns: 12px minmax(0, max-content) minmax(0, 1fr) auto; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 4px; cursor: pointer; min-width: 0; }
+    .row:hover { background: var(--hover-bg); }
+    .row.ping { animation: rowping 1.4s ease-out; }
+    @keyframes rowping { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); } 100% { background: transparent; } }
+    .row .tw { border: 0; background: transparent; padding: 0; color: var(--muted); font-size: 9px; cursor: pointer; width: 12px; }
+    .row .who { display: block; font-weight: 550; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+    .row .who .dot { margin-right: 4px; }
+    .row .who.unnamed { font-weight: 450; font-style: italic; color: var(--muted); }
+    .row .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); min-width: 0; }
+    .pill { font: 600 8.5px var(--mono); letter-spacing: .05em; text-transform: uppercase; padding: 1px 5px; border-radius: 3px; white-space: nowrap; color: var(--muted); border: 1px solid var(--line); }
+    .pill.needs { color: var(--warm); border-color: color-mix(in srgb, var(--warm) 50%, transparent); background: var(--warm-tint); }
+    .pill.progress { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+    .pill.handed { color: var(--ok); border-style: dashed; border-color: var(--ok); }
+    .pill.accepted { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: var(--ok-tint); }
+
+    /* Needs-you items */
+    .path { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 3px; font-size: 11px; }
+    .path .hop { color: var(--muted); }
+    .path .you { color: var(--warm); font-weight: 600; }
+    .path .via { font: 9px var(--mono); color: var(--muted); letter-spacing: .04em; margin-left: 4px; }
+    .ctx { font-size: 10.5px; color: var(--muted); }
+    .ctx b { color: var(--ink); font-weight: 550; }
+    .accept-box { border: 1px solid color-mix(in srgb, var(--warm) 45%, var(--line)); border-left: 3px solid var(--warm); border-radius: 6px; padding: 8px 10px; background: color-mix(in srgb, var(--warm-tint) 55%, var(--surface)); display: flex; flex-direction: column; gap: 6px; }
+    .accept-box .ask-kind { margin: 0; }
+    .k .ask { padding: 8px 10px; font-size: 11.5px; }
+    .k .ask-options .btn { font-size: 11px; }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el, MIN = 60_000;
+  const STATES = ["needs", "assigned", "progress", "handed", "accepted"];
+  const STATE_LABELS = {needs: "Needs you", assigned: "Assigned", progress: "In progress", handed: "Handed off", accepted: "Accepted"};
+  const STATE_HINTS = {
+    needs: "Asks and handoffs waiting on you, from any depth, with the path they came up.",
+    assigned: "Contracts sent in the last few minutes the assignee has not started. From any depth.",
+    progress: "This board's own contracts. Sub-contracts nest inside; open one as its own board.",
+    handed: "Delivered, waiting on the creator to accept or send back. From any depth.",
+    accepted: "Closed by the creator. Oldest sink.",
+  };
+  // Root contracts come from you, so the fixture gives them no contract; mirror its acceptance checks here.
+  const ROOT_ACCEPT = {implementer: ["Focused tests pass", "Scope stays inside the declaration", "Checkpoint links the PR"],
+    reviewer: ["Every finding reproduced", "No blocking defects", "Verdict sent to you"], researcher: ["Sources cited", "Answer in two sentences", "Open questions listed"],
+    releaser: ["Install smoke test passes", "Conversations preserved", "Rollback ready"], orchestrator: ["Every contribution integrated", "End-to-end validation passes"],
+    dispatcher: ["Each request routed to one owner", "Nothing left unrouted"]};
+
+  const view = {focus: null, open: new Set(), openInit: false, accepted: new Map(), sentBack: new Set(), lastMsg: null, field: null, more: new Set()};
+  let F = null, S = new Map(), pings = new Set();
+
+  /* Identity: a stable name, else role on its surface (the provider shows as the logo). Never the title: the
+     title is the assignment, it heads the card and changes with the work. */
+  const ident = a => a.name || (AgentField.ROLE_LABELS[a.role] + " · " + short(a.surface?.label || a.target || a.client, 22));
+  const who = id => id === "user" || !id ? "You" : (F.byId(id) ? ident(F.byId(id)) : "?");
+  const creatorOf = a => a.parentId && F.byId(a.parentId) ? a.parentId : "user";
+  const routedBy = a => { if (a.parentId) return null; const m = F.messages.find(x => x.to === a.id && x.kind === "creation" && x.from !== "user"); return m ? F.byId(m.from) : null; };
+  const short = (t, n = 90) => !t ? "" : t.length > n ? t.slice(0, n - 1).trimEnd() + "…" : t;
+  const ago = ms => F.relativeTime(ms).replace(" ago", "");
+  const isFinished = a => a.status === "done" || (a.status === "idle" && a.role !== "dispatcher" && a.plan.length > 0 && F.progress(a).done >= a.plan.length);
+  const handoffMsg = a => { const c = creatorOf(a); for (let i = F.messages.length - 1; i >= 0; i--) { const m = F.messages[i]; if (m.from === a.id && m.to === c && m.intent === "handoff") return m; } return null; };
+
+  function contractOf(a) {
+    if (a.contract) return a.contract;
+    return {from: "user", deliverable: a.deliverable?.kind || "result", acceptance: (ROOT_ACCEPT[a.role] || ROOT_ACCEPT.implementer).map(label => ({label, met: false})), due: null, synthetic: true};
+  }
+  // Checks are agent-reported in the proposal; here they tick with plan progress so Play shows them filling.
+  function checks(a) {
+    const c = contractOf(a), n = c.acceptance.length, p = F.progress(a);
+    const done = view.accepted.has(a.id) || (isFinished(a) && !view.sentBack.has(a.id));
+    const met = done ? n : p.total ? Math.floor((p.done / p.total) * n + 1e-9) : 0;
+    return c.acceptance.map((x, i) => ({label: x.label, met: done || (x.met && !view.sentBack.has(a.id)) || i < met}));
+  }
+  function stateOf(a) {
+    if (view.accepted.has(a.id)) return "accepted";
+    if (F.needsUser(a)) return "needs";
+    if (a.role === "dispatcher") return "progress"; // a standing contract: it routes, it never hands off
+    if (isFinished(a)) {
+      if (creatorOf(a) === "user") return "needs"; // your acceptance
+      const parent = F.byId(a.parentId);
+      if (parent?.status === "done" || view.accepted.has(parent?.id)) return "accepted"; // the creator closed its own contract
+      return "handed";
+    }
+    if (F.now - a.createdAt < 5 * MIN && F.progress(a).done === 0 && !(a.history || []).some(h => h.at > a.createdAt + 30_000)) return "assigned";
+    return "progress";
+  }
+
+  /* Actions on a handoff: accept closes it, send back reopens it with one check unmet. */
+  function accept(a) {
+    const c = creatorOf(a); view.accepted.set(a.id, {by: c, at: F.now}); view.sentBack.delete(a.id);
+    a.unread = false; if (a.contract) for (const x of a.contract.acceptance) x.met = true; if (a.deliverable) a.deliverable.state = "delivered";
+    F.send(c, a.id, {kind: "closure", intent: "review", replyRequired: false, body: "Accepted: " + (a.deliverable?.label ? a.deliverable.kind + " " + a.deliverable.label : a.deliverable?.kind || "the result") + ". Closing the contract."});
+    F.emit();
+  }
+  function sendBack(a) {
+    const c = creatorOf(a); view.accepted.delete(a.id); view.sentBack.add(a.id);
+    const unmet = checks(a).at(-1)?.label || "an acceptance check";
+    if (a.contract) for (const x of a.contract.acceptance) x.met = false;
+    a.status = "working"; a.phase = a.role === "researcher" ? "investigation" : a.role === "reviewer" ? "validation" : "implementation"; a.unread = false;
+    a.plan.push({label: "Address send-back: " + unmet.toLowerCase(), state: "active"}); a.activity = "Addressing the send-back"; a.next = {actor: "agent", action: "Address the send-back and hand off again."};
+    if (a.deliverable) a.deliverable.state = "draft"; a.updatedAt = a.checkpointAt = F.now;
+    a.history.push({at: F.now, phase: a.phase, summary: "Sent back by " + who(c) + ": " + unmet + " not met.", actor: c === "user" ? "user" : "agent"});
+    const parent = F.byId(a.parentId); if (parent && a.kind === "app" && !parent.waitingOn.includes(a.id)) parent.waitingOn.push(a.id);
+    F.send(c, a.id, {kind: "action_required", intent: "review", body: "Sending this back: “" + unmet + "” is not met yet. Fix it and hand off again."});
+    F.emit();
+  }
+
+  /* Small builders */
+  const btn = (label, cls, onclick, title) => { const b = $("button", "btn small " + (cls || ""), label); b.type = "button"; if (title) b.title = title; b.onclick = e => { e.stopPropagation(); onclick(e); }; return b; };
+  function party(id, api) {
+    const a = id === "user" ? null : F.byId(id);
+    const b = $("button", "party" + (a ? (a.name ? "" : " unnamed") : " you")); b.type = "button";
+    if (a) { b.append(AgentField.statusDot(a)); const logo = AgentField.providerLogo(a.client); if (logo) b.append(logo); }
+    b.append($("span", null, who(id)));
+    if (a) { b.title = ident(a) + " · " + AgentField.ROLE_LABELS[a.role] + " · " + (a.surface?.label || a.target || "") + "\nAssignment: " + a.title + "\n" + F.statusLabel(a) + " · " + AgentField.PHASE_LABELS[a.phase]; b.onclick = e => { e.stopPropagation(); api.select(id); }; }
+    else { b.title = "You created this contract"; b.onclick = e => e.stopPropagation(); }
+    return b;
+  }
+  function parties(a, api, extra) {
+    const row = $("div", "parties"); const c = creatorOf(a);
+    row.append(party(c, api));
+    const via = routedBy(a); if (via) { const v = $("span", "kind", "via " + ident(via)); v.title = "Routed by " + ident(via) + " (dispatch)"; row.append(v); }
+    const to = $("span", "to"); to.append($("span", "arrow", "→"), party(a.id, api)); row.append(to);
+    const right = $("span", "right");
+    if (a.kind !== "app") right.append($("span", "kind", a.kind));
+    if (a.health && a.health !== "on-track" && !["accepted", "handed"].includes(S.get(a.id))) { const h = $("span", "health " + a.health, a.health); h.title = "Health (proposed): derived from age, waits and due time"; right.append(h); }
+    if (extra) right.append(extra);
+    row.append(right); return row;
+  }
+  function teamLine(a) {
+    const anc = F.ancestors(a.id).reverse(); if (anc.length < 2 && !(anc.length === 1 && view.focus !== anc[0].id)) return null;
+    const visible = anc.filter(x => x.id !== view.focus && !F.ancestors(view.focus || "").some(y => y.id === x.id));
+    const chain = visible.slice(0, -1); if (!chain.length) return null;
+    const t = $("div", "team", "in " + chain.map(ident).join(" › ")); t.title = "Contract chain: You › " + anc.map(ident).join(" › ") + " › " + ident(a); return t;
+  }
+  function deliverableRow(a, dl) {
+    const d = a.deliverable || {kind: "result", state: "none"};
+    const dt = $("dt", null, "Delivers"); const dd = $("dd");
+    dd.append($("span", "t", d.kind + (d.label ? " · " + d.label : "")));
+    const m = $("span", "meter" + (d.state === "delivered" ? " delivered" : "")); const lvl = {none: 0, draft: 1, ready: 2, delivered: 3}[d.state] ?? 0;
+    for (let i = 0; i < 3; i++) m.append($("i", i < lvl ? "on" : null)); m.title = "Deliverable (proposed): " + d.state; dd.append(m, $("span", "dstate", d.state));
+    dl.append(dt, dd);
+  }
+  function onRow(a, dl, withScope = true) {
+    const dt = $("dt", null, "On"); const dd = $("dd");
+    if (a.surface) { const s = $("span", "t", a.surface.kind + " · " + a.surface.label); s.title = "Surface (proposed)"; dd.append(s); }
+    if (withScope && a.scope?.[0]) { const c = $("code", null, a.scope[0].replace(/^plugins\/agent-coord\/scripts\/agent_coord\//, "…/")); c.title = "Write scope (today): " + a.scope.join(", "); dd.append(c); }
+    dl.append(dt, dd);
+  }
+  function dueRow(a, dl) {
+    const c = contractOf(a); if (!c.due) return;
+    const left = c.due - F.now, done = ["handed", "accepted"].includes(S.get(a.id));
+    const dd = $("dd"); const s = $("span", "t due" + (left < 0 && !done ? " late" : ""), done ? "was due " + new Date(c.due).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : left >= 0 ? "in " + F.duration(left) : F.duration(-left) + " overdue");
+    dd.append(s); if (c.replyRequired) dd.append($("span", "dstate", "reply required"));
+    dl.append($("dt", null, "Due"), dd);
+  }
+  function checksList(a, compact) {
+    const list = checks(a);
+    if (compact) { const met = list.filter(x => x.met).length; const ul = $("ul", "checks short"); const li = $("li", met === list.length ? "met" : null, met + " of " + list.length + " checks"); li.title = list.map(x => (x.met ? "✓ " : "○ ") + x.label).join("\n"); ul.append(li); return ul; }
+    const ul = $("ul", "checks"); for (const x of list) ul.append($("li", x.met ? "met" : null, x.label)); return ul;
+  }
+  // The contract's own conversation: the latest message between creator and assignee, with its intent.
+  function lastMsg(a, filter) {
+    const c = creatorOf(a); const list = F.between(c, a.id).filter(filter || (() => true)); return list.at(-1) || null;
+  }
+  function msgBox(m) {
+    if (!m) return null;
+    const box = $("div", "msg"); const h = $("div", "h");
+    h.append($("b", null, who(m.from)), "→", $("b", null, who(m.to)), $("span", "intent", (F.INTENT_LABELS[m.intent] || F.KIND_LABELS[m.kind]).toLowerCase()), $("span", "ago", ago(m.at)));
+    box.title = "Intent (proposed): " + m.intent + " · classification (today): " + m.kind + (m.replyRequired ? " · reply required" + (m.repliedBy ? " · replied" : " · open") : "");
+    box.append(h, $("div", "body", m.body)); return box;
+  }
+  function obligations(a) {
+    const owes = F.owes(a.id).filter(m => m.kind !== "creation"), waits = F.awaiting(a.id).filter(m => m.kind !== "creation");
+    const peers = F.collaborators(a.id).slice(0, 2);
+    if (!owes.length && !waits.length && !peers.length) return null;
+    const line = $("div", "owe");
+    if (owes.length) { const s = $("span", "warm"); s.append("Owes ", $("b", null, who(owes[0].from)), " a reply · " + ago(owes[0].at)); line.append(s); }
+    if (waits.length) { const s = $("span"); s.append("Awaiting ", $("b", null, who(waits[0].to)), " · " + ago(waits[0].at)); line.append(s); }
+    if (peers.length) { const s = $("span"); s.append("Also talking with ", ...peers.flatMap((p, i) => [i ? ", " : "", $("b", null, ident(p.agent))])); line.append(s); }
+    return line;
+  }
+  function liveLine(a) {
+    if (a.status === "working") return $("div", "live", a.activity || F.toolLabel(a) || "Working");
+    if (a.status === "blocked") return $("div", "live wait", F.statusLabel(a));
+    if (a.status === "failed") return $("div", "live fail", a.failure || "Failed");
+    if (a.status === "idle" && a.role === "dispatcher") return $("div", "live wait", "Standing contract · idle, nothing queued");
+    return null;
+  }
+
+  /* Sub-contracts: count + mini state bar, expanding to an indented tree of rows. */
+  function subsBlock(a, api) {
+    const desc = F.descendants(a.id); if (!desc.length) return null;
+    const wrap = $("div", "subs"); const head = $("div", "subs-head");
+    const open = view.open.has(a.id);
+    const t = $("button", "toggle"); t.type = "button";
+    const kids = F.children(a.id).length, needs = desc.filter(d => S.get(d.id) === "needs").length;
+    t.append((open ? "▾ " : "▸ ") + desc.length + (desc.length === 1 ? " sub-contract" : " sub-contracts")); t.title = kids + " direct, " + desc.length + " at any depth";
+    if (needs) t.append($("span", "warm", " · " + needs + " need you"));
+    t.onclick = e => { e.stopPropagation(); open ? view.open.delete(a.id) : view.open.add(a.id); api.rerender(); };
+    const bar = $("span", "sbar"); const cnt = {}; for (const d of desc) cnt[S.get(d.id)] = (cnt[S.get(d.id)] || 0) + 1;
+    for (const s of STATES) if (cnt[s]) { const i = $("i", s); i.style.flex = cnt[s]; i.title = cnt[s] + " " + STATE_LABELS[s].toLowerCase(); bar.append(i); }
+    head.append(t, bar, btn("⤢", "quiet drill", () => { view.focus = a.id; api.rerender(); }, "Show " + ident(a) + "'s contracts as their own board"));
+    wrap.append(head);
+    if (open) { const ul = $("ul", "rows"); addRows(ul, a.id, 0, api); wrap.append(ul); }
+    return wrap;
+  }
+  function addRows(ul, pid, depth, api) {
+    for (const k of F.children(pid)) {
+      const st = S.get(k.id), li = $("li", "row" + (pings.has(k.id) ? " ping" : "")); li.style.paddingLeft = (4 + depth * 14) + "px";
+      const has = F.children(k.id).length, open = view.open.has(k.id);
+      const tw = $("button", "tw", has ? (open ? "▾" : "▸") : ""); tw.type = "button"; if (has) { tw.title = open ? "Collapse" : "Expand " + has + " sub-contracts"; tw.onclick = e => { e.stopPropagation(); open ? view.open.delete(k.id) : view.open.add(k.id); api.rerender(); }; } else tw.disabled = true;
+      const w = $("span", "who" + (k.name ? "" : " unnamed")); w.append(AgentField.statusDot(k), ident(k));
+      const what = $("span", "what", k.title + (k.deliverable ? " · " + k.deliverable.kind + " " + k.deliverable.state : ""));
+      li.append(tw, w, what, $("span", "pill " + st, STATE_LABELS[st]));
+      li.title = ident(k) + " · " + k.title + "\n" + F.statusLabel(k) + " · on " + (k.surface?.label || "—") + (k.ask ? "\nAsks: " + k.ask.question : "");
+      li.onclick = () => api.select(k.id); ul.append(li);
+      if (has && open) addRows(ul, k.id, depth + 1, api);
+    }
+  }
+
+  /* Cards per column */
+  function shell(a, api, state) {
+    const k = $("article", "k" + (pings.has(a.id) || (state === "progress" && F.descendants(a.id).some(d => pings.has(d.id) && !view.open.has(a.id))) ? " ping" : ""));
+    k.dataset.state = state; k.dataset.id = a.id; k.tabIndex = 0; k.setAttribute("role", "button");
+    k.setAttribute("aria-label", STATE_LABELS[state] + ": " + who(creatorOf(a)) + " to " + ident(a) + ", " + a.title);
+    k.onclick = () => api.select(a.id); k.onkeydown = e => { if (e.key === "Enter" && e.target === k) api.select(a.id); };
+    return k;
+  }
+  function progressCard(a, api, compact) {
+    const k = shell(a, api, "progress");
+    const tl = teamLine(a); if (tl) k.append(tl);
+    k.append(parties(a, api), $("h3", null, a.title));
+    const dl = $("dl", "terms"); deliverableRow(a, dl); onRow(a, dl, !compact); dueRow(a, dl); k.append(dl);
+    k.append(checksList(a, compact));
+    const live = liveLine(a); if (live) k.append(live);
+    if (!compact) { const m = lastMsg(a, m => m.kind !== "creation") || lastMsg(a); const box = msgBox(m); if (box) k.append(box); }
+    const ob = obligations(a); if (ob) k.append(ob);
+    const subs = subsBlock(a, api); if (subs) k.append(subs);
+    return k;
+  }
+  function assignedCard(a, api) {
+    const k = shell(a, api, "assigned");
+    const tl = teamLine(a); if (tl) k.append(tl);
+    k.append(parties(a, api), $("h3", null, a.title));
+    const dl = $("dl", "terms"); deliverableRow(a, dl); dueRow(a, dl); k.append(dl);
+    const m = F.messages.find(x => x.to === a.id && x.kind === "creation"); const box = msgBox(m); if (box) { box.querySelector(".intent").textContent = "contract terms"; k.append(box); }
+    k.append($("div", "live wait", "Assigned " + F.relativeTime(a.createdAt) + (a.status === "working" ? " · reading the request" : " · not started")));
+    return k;
+  }
+  function handedCard(a, api, compact) {
+    const k = shell(a, api, "handed");
+    const tl = teamLine(a); if (tl) k.append(tl);
+    k.append(parties(a, api), $("h3", null, a.title));
+    const dl = $("dl", "terms"); deliverableRow(a, dl); if (!compact) onRow(a, dl, false); k.append(dl);
+    k.append(checksList(a, compact));
+    const h = handoffMsg(a); if (!compact) { const box = msgBox(h); if (box) k.append(box); }
+    const c = creatorOf(a), acts = $("div", "acts");
+    acts.append(btn("Accept", "primary", () => accept(a), "Close the contract for " + who(c)), btn("Send back", "", () => sendBack(a), "Reopen with an unmet check"));
+    const f = $("span", "for", who(c) + "’s call · " + ago(h?.at || a.updatedAt)); f.title = "Today a handoff has no acceptance step; you can act for " + who(c); acts.append(f);
+    k.append(acts); return k;
+  }
+  function acceptedCard(a, api) {
+    const k = shell(a, api, "accepted"); const rec = view.accepted.get(a.id);
+    const by = rec ? who(rec.by) : who(a.parentId ? F.byId(a.parentId)?.parentId || "user" : "user");
+    k.append(parties(a, api), $("h3", null, a.title));
+    const line = $("div", "owe");
+    line.append($("span", null, (a.deliverable?.kind || "result") + (a.deliverable?.label ? " " + a.deliverable.label : "")), $("span", null, rec ? "accepted by " + by + " · " + ago(rec.at) : "closed with " + who(a.parentId) + "’s own contract"));
+    k.append(line); return k;
+  }
+  function needsCard(a, api) {
+    const k = shell(a, api, "needs");
+    // The path the ask took to reach you: asker → relays → You.
+    const path = $("div", "path"); const hops = [a, ...(a.ask?.via || []).map(F.byId).filter(Boolean)];
+    hops.forEach((h, i) => { path.append(party(h.id, api)); path.append($("span", "arrow", "→")); void i; });
+    path.append($("span", "you", "You"));
+    if (a.ask?.via?.length) { const v = $("span", "via", "relayed ×" + a.ask.via.length); v.title = "Escalation (proposed): the ask passed through " + a.ask.via.map(who).join(", "); path.append(v); }
+    else if (a.ask && a.parentId) path.append($("span", "via", "direct"));
+    k.append(path);
+    const ctx = $("div", "ctx"); const c = creatorOf(a);
+    ctx.append(c === "user" ? "Your contract" : "Contract from ", ...(c === "user" ? [] : [$("b", null, who(c))]), " · ", $("b", null, a.title), " · delivers " + (a.deliverable?.kind || "result"));
+    if (a.surface) ctx.append(" on " + a.surface.label);
+    k.append(ctx);
+    if (a.ask) { const box = Mockup.askBox(a, F, api.select); k.append(box); }
+    else if (isFinished(a)) {
+      const box = $("div", "accept-box"); box.append($("span", "ask-kind", "handoff · your acceptance"));
+      const h = handoffMsg(a); box.append($("div", "ask-question", h?.body || a.summary));
+      box.append(checksList(a, false));
+      const acts = $("div", "acts"); acts.append(btn("Accept", "primary", () => accept(a)), btn("Send back", "", () => sendBack(a)), btn("Open thread", "quiet", () => api.select(a.id)));
+      acts.append($("span", "for", "finished " + ago(F.lastActivity(a))));
+      box.append(acts); k.append(box);
+    } else if (a.next?.action) { const box = $("div", "accept-box"); box.append($("span", "ask-kind", "your next step"), $("div", "ask-question", a.next.action)); k.append(box); }
+    const desc = F.descendants(a.id);
+    if (desc.length) { const s = $("div", "acts"); s.append($("span", "ctx", desc.length + (desc.length === 1 ? " sub-contract" : " sub-contracts") + " under it"), btn("Open board ⤢", "quiet", () => { view.focus = a.id; api.rerender(); })); k.append(s); }
+    return k;
+  }
+
+  function render(field, stage, api) {
+    F = field;
+    if (view.field !== field) { view.field = field; view.accepted.clear(); view.sentBack.clear(); view.lastMsg = null; view.focus = null; view.openInit = false; view.open.clear(); }
+    if (view.focus && !F.byId(view.focus)) view.focus = null;
+    // Pings: agents touched by messages since the last render.
+    const maxId = F.messages.reduce((m, x) => Math.max(m, x.id), 0);
+    pings = new Set(); if (view.lastMsg != null) for (const m of F.messages) if (m.id > view.lastMsg) { pings.add(m.from); pings.add(m.to); }
+    view.lastMsg = maxId;
+
+    S = new Map(F.agents.map(a => [a.id, stateOf(a)]));
+    const large = F.agents.length > 80, compact = F.agents.length > 30;
+    if (!view.openInit) { view.openInit = true; if (!compact) for (const r of F.roots()) if (F.descendants(r.id).length && F.descendants(r.id).length <= 6) view.open.add(r.id); }
+
+    const scroller = document.scrollingElement, keep = scroller.scrollTop;
+    stage.replaceChildren();
+    const inScope = view.focus ? new Set(F.descendants(view.focus).map(d => d.id)) : null;
+    const pool = F.agents.filter(a => !inScope || inScope.has(a.id));
+    const direct = view.focus ? F.children(view.focus) : F.roots();
+
+    /* Breadcrumb + the wire */
+    const bar = $("div", "bar"); const crumbs = $("nav", "crumbs"); crumbs.setAttribute("aria-label", "Contract boards");
+    const trail = view.focus ? F.chain(view.focus) : [];
+    const crumb = (label, id) => { const b = $("button", null, label); b.type = "button"; if ((id || null) === view.focus) b.setAttribute("aria-current", "true"); b.onclick = () => { view.focus = id; api.rerender(); }; return b; };
+    crumbs.append(crumb("Your contracts", null)); for (const a of trail) crumbs.append($("span", "sep", "›"), crumb(ident(a) + "’s contracts", a.id));
+    bar.append(crumbs);
+    const wire = $("div", "wire"); wire.append($("span", "wire-label", "On the wire"));
+    const recent = F.messages.filter(m => !inScope || inScope.has(m.from) || inScope.has(m.to) || m.from === view.focus || m.to === view.focus).slice(-6).reverse();
+    for (const m of recent) {
+      const b = $("button", (m.replyRequired && !m.repliedBy ? "open" : "") + (m.id > (view.prevMax ?? maxId) ? " ping" : "")); b.type = "button";
+      b.append($("b", null, who(m.from)), " → ", $("b", null, who(m.to)), " ", $("span", "i", (F.INTENT_LABELS[m.intent] || "").toLowerCase()), " · " + ago(m.at));
+      b.title = m.body + (m.replyRequired && !m.repliedBy ? "\n(reply owed)" : ""); b.onclick = () => api.select(m.from === "user" ? m.to : m.from); wire.append(b);
+    }
+    view.prevMax = maxId;
+    bar.append(wire); stage.append(bar);
+
+    if (view.focus) {
+      const f = F.byId(view.focus), head = $("div", "board-head");
+      head.append(party(creatorOf(f), api), $("span", "arrow", "→"), party(f.id, api), $("b", null, f.title), $("span", "pill " + S.get(f.id), STATE_LABELS[S.get(f.id)]),
+        $("span", null, "delivers " + (f.deliverable?.kind || "result") + " on " + (f.surface?.label || "—") + " · " + checks(f).filter(x => x.met).length + " of " + checks(f).length + " checks"));
+      head.append(btn("↑ Up a level", "quiet", () => { view.focus = f.parentId || null; api.rerender(); }));
+      stage.append(head);
+    }
+
+    /* Columns: transitions pull up from any depth; steady work nests. */
+    const recency = (x, y) => F.lastActivity(y) - F.lastActivity(x);
+    const cols = {
+      needs: (() => { const order = new Map(F.asks().map((a, i) => [a.id, i])); return pool.filter(a => S.get(a.id) === "needs").sort((x, y) => (order.get(x.id) ?? 1e3) - (order.get(y.id) ?? 1e3) || recency(x, y)); })(),
+      assigned: pool.filter(a => S.get(a.id) === "assigned").sort((x, y) => y.createdAt - x.createdAt),
+      progress: direct.filter(a => S.get(a.id) === "progress").sort((x, y) => (F.descendants(y.id).some(d => S.get(d.id) === "needs") - F.descendants(x.id).some(d => S.get(d.id) === "needs")) || recency(x, y)),
+      handed: pool.filter(a => S.get(a.id) === "handed").sort((x, y) => (handoffMsg(x)?.at || x.updatedAt) - (handoffMsg(y)?.at || y.updatedAt)),
+      accepted: pool.filter(a => S.get(a.id) === "accepted").sort((x, y) => (view.accepted.get(y.id)?.at ?? y.updatedAt) - (view.accepted.get(x.id)?.at ?? x.updatedAt)),
+    };
+    const limits = {needs: large ? 6 : 12, assigned: large ? 6 : 10, progress: large ? 14 : 40, handed: large ? 6 : 10, accepted: large ? 6 : 12};
+    const EMPTY = {needs: "Nothing waits on you here.", assigned: "No new contracts. A contract sits here until its assignee starts (today: the creation message, before its first checkpoint).",
+      progress: "No contracts in progress on this board.", handed: "No handoffs waiting. A handoff lands here when an assignee replies with intent: handoff.",
+      accepted: "Nothing accepted yet. Today a handoff has no acceptance step; the creator just reads it. Accept records it as a closing review."};
+    const board = $("div", "board");
+    for (const s of STATES) {
+      const col = $("section", "col"); col.dataset.state = s;
+      const h = $("div", "col-head"); const h2 = $("h2", null, STATE_LABELS[s]); if (cols[s].length) h2.append($("small", null, String(cols[s].length))); h.append(h2, $("p", null, STATE_HINTS[s])); col.append(h);
+      const list = cols[s], showAll = view.more.has(s), shown = showAll ? list : list.slice(0, limits[s]);
+      if (!list.length) col.append($("div", "empty", EMPTY[s]));
+      for (const a of shown) col.append(s === "needs" ? needsCard(a, api) : s === "assigned" ? assignedCard(a, api) : s === "progress" ? progressCard(a, api, compact) : s === "handed" ? handedCard(a, api, compact) : acceptedCard(a, api));
+      if (list.length > limits[s]) col.append(btn(showAll ? "Show fewer" : "Show " + (list.length - limits[s]) + " more", "quiet more", () => { showAll ? view.more.delete(s) : view.more.add(s); api.rerender(); }));
+      board.append(col);
+    }
+    stage.append(board);
+    scroller.scrollTop = keep;
+  }
+
+  Mockup.mount({
+    number: 25, title: "Contracts", spectrum: "radical",
+    summary: "Every delegation is a contract card: creator → assignee, deliverable, acceptance checks, due, moving Assigned → In progress → Handed off → Accepted, with what waits on you pulled up front.",
+    signals: {current: ["title", "status", "phase", "summary", "next_actor", "created_by", "creation", "agent_messages", "client", "write_scope", "links", "unread", "pending_approval", "updated_at", "tool_activity"],
+      proposed: ["contract", "deliverable", "intent", "surface", "escalation", "health", "name", "role", "kind", "ask", "plan", "blocks", "activity"]},
+    notes: "Identity: the title is the assignment, so it heads the contract card and changes with the work; the agent is named by its stable name, else provider + role (“Codex implementer”), never by the title. " +
+      "On what: the deliverable and the surface it lands on (“pull request on Upload API”) replace phase; the contract state column is the progress signal, phase survives only in hovers, and write scope is today’s fallback for the surface. " +
+      "Today the board can be built from creation messages (creator, initial request, reply contract) and final replies; it would cost the model one contract on create (deliverable, 2–3 checks, due), a deliverable state on checkpoint, and intent: handoff on its final reply. " +
+      "Check ticks are derived from plan progress here; Accept/Send back are new user actions recorded as a closing or reopening review message.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

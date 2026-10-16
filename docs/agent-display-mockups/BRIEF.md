@@ -401,3 +401,207 @@ Real data: `export-threads.py` snapshots the live threads (now carrying
 `AgentField.create({scale: "real", workspace})` maps them into the same agent
 shape, and the shell offers the snapshot and a workspace selector when the
 script is loaded. The count line above cluster titles was removed on request.
+
+---
+
+# Round three: orchestration (mockups 19–28)
+
+Rounds one and two asked "what agents exist and what are they doing". Round
+three asks how they **work together**: when the user can spin up any number of
+agents and each can spin up its own, show
+
+1. which agents are messaging each other, and why;
+2. how they collaborate (delegation, handoffs, peer coordination, scope
+   negotiation, review);
+3. what agents are there (is the title the right identity? see below);
+4. what each is doing and **on what** (phase is not enough: add the surface it
+   works on: a page, service, screen, doc, pipeline, build, or question);
+5. what sub-agents each has, at any depth;
+6. whether each is working, waiting on another agent, or waiting on you;
+7. what needs the user and **exactly what**, including asks that were relayed
+   up a chain of agents before reaching you.
+
+## Data: `shared/orchestration.js`
+
+Load it **after** `fixture.js` and **before** `mockup.js`:
+
+```html
+<script src="../shared/fixture.js"></script>
+<script src="../shared/orchestration.js"></script>
+<script src="../shared/mockup.js"></script>
+```
+
+It wraps `AgentField.create`, so the `field` passed to `render` also has:
+
+- `field.messages`: `{id, from, to, at, kind, intent, body, replyRequired,
+  inReplyTo, exchange, about, deliveredAt, ackedAt, repliedBy, wokeTurn}`.
+  `from`/`to` are agent ids or `"user"`. `kind` is today's classification
+  (`creation`, `action_required`, `info`, `reply`, `closure`, `failure`);
+  `intent` is proposed (`assign`, `question`, `answer`, `handoff`, `finding`,
+  `review`, `blocker`, `coordinate`, `status`). Labels: `field.KIND_LABELS`,
+  `field.INTENT_LABELS`.
+- Queries: `field.messagesOf(id, {since})`, `field.between(a, b)`,
+  `field.openRequests()` (reply owed), `field.owes(id)`, `field.awaiting(id)`,
+  `field.edges({since, includeUser})` (one per pair: `a, b, count, ab, ba, last,
+  open, intents, kinds`), `field.exchanges()`, `field.collaborators(id)` (peers
+  outside the parent/child line), `field.conflicts()` (overlapping write scopes:
+  `a, b, path, negotiating`), `field.teams()` (root + members + counts + needs +
+  depth), `field.chain(id)` (root → agent), `field.askPath(id)` (`via` agents
+  the ask passed through, `blocks` agents it holds up), `field.nameOf(id)`.
+- Actions: `field.message(agentId, text)` (user → agent), `field.reply(messageId,
+  text)`, plus the existing `field.answer`, `field.spawn`, `field.tick`. Play and
+  Step generate messages: creations on spawn, handoffs on finish, blockers
+  escalated to the parent when an ask appears, status/finding notes, peer
+  coordination, and replies to open requests.
+- Proposed per-agent signals: `a.surface {kind, label}`, `a.contract {from,
+  deliverable, acceptance [{label, met}], replyRequired, due}` (children only),
+  `a.deliverable {kind, label, state}` (`none|draft|ready|delivered`),
+  `a.health` (`on-track|slipping|stuck`), `a.ask.via` (relay chain ids).
+- Trees are up to four levels deep at `medium`/`large`. `small` has the
+  hand-written Rig upload team (Procurement s01 → Harbor s02 → Gravity s03 →
+  test subagent; UI s04; reviewer Rook s05), the dispatcher s00 routing three
+  researchers who also talk to each other, the mobile push team (Pager s09 with a
+  subagent, a test writer, and a CI-watch delegate), and a scope negotiation
+  between s15 and s09.
+
+The drawer (`api.select`) now shows the agent's recent messages and its
+contract. New signal keys for `signals`: current `agent_messages`, `creation`,
+`conflicts`; proposed `intent`, `surface`, `contract`, `deliverable`,
+`escalation`, `health` (plus every earlier key).
+
+## Principles carried from round two
+
+The user kept: visible delegation, answering from the home page, plan steps as
+"now and next", collapsible sub-agents, scopes as "where". The user rejected:
+stat lines, walls of text, overwhelming plan/territory views, and **dense
+edges**. So:
+
+- **Edges are sparse by default.** Show message lines for the focused or hovered
+  agent/team, recent traffic (last ~15 simulated minutes) fading with age, or
+  aggregated per team. Never draw all 600 messages at once.
+- **Needs-you is the most prominent thing** and answerable in place
+  (`Mockup.askBox`). When an ask was relayed (`ask.via`), show the path
+  ("Rook → Procurement → you") and what it blocks.
+- **Identity**: show `name` when present, otherwise the title, then role and
+  surface ("Gravity · implementer · Upload API"). The title is the assignment,
+  which changes; the identity should not. Each mockup takes a position on this.
+- **On what**: use `surface` (proposed) and scope (today) rather than phase alone.
+- Works at 185 agents (`large`): group by team, aggregate edges, collapse.
+- Meaningful motion only: a message in flight, a pulse on arrival.
+- Clearly separate "today" from "proposed" via the Signals popover; each page's
+  `notes` should say what the view would cost the model to report.
+
+## Page contract
+
+Same as round one (one file `mockups/NN-<slug>.html`, vanilla, no network,
+idempotent `render`, `api.select`, both themes, three scales, do not edit shared
+files or other mockups; report shared bugs in your reply). Use the spectrum
+label given below. Verify with `./render.sh` (small and `SCALE=large`) and look
+at the PNGs; use `probe.js` to exercise an interaction (answer an ask, click a
+node) headlessly.
+
+## 19 · Conversation cards (conservative)
+
+Today's home page cards, grouped by team (root card with its members nested
+and collapsible). Each card adds one **"talking with"** line: tiny avatars of
+the counterparts it messaged in the last hour with the latest intent ("asked
+Gravity about the session key · 3m"), and one **obligation** line when present:
+"Owes Harbor a reply · 12m" or "Waiting on Gravity's reply · 6m". Relayed asks
+show the path. Sub-agent chips show status dots. Only today's signals plus
+`intent`; say so. Clicking a counterpart avatar opens that agent.
+
+## 20 · Message ledger (conservative)
+
+A process monitor for orchestration: a tree table (team → members, any depth)
+with columns Agent (identity), On (surface + scope), State (phase + status),
+**Owes** (replies it owes, oldest age), **Awaiting** (replies it is waiting
+for), **Last message** (direction arrow, counterpart, intent, age), Needs you.
+Expanding a row reveals its message exchanges inline as a compact threaded list
+(grouped by `exchange`). Sortable; default sort puts needs-you, then oldest
+owed reply, first. Sticky header; works at large.
+
+## 21 · Live wires (moderate)
+
+The delegation tree drawn as an org chart, with **messages as live wires**:
+parent/child edges are always shown faintly; when a message is sent (Play), a
+dot travels along the edge (peer messages arc between siblings or across
+teams). Edges with an open request are dashed and labeled with the wait age.
+Hover or focus an agent: its edges brighten, others fade, and a mini log of its
+last messages appears. Needs-you badges bubble up to every ancestor; relayed
+asks light the relay path toward a "You" node at the top. Collapse/expand
+subtrees; at large start collapsed to teams with aggregated traffic counts.
+
+## 22 · Sequence diagram (moderate)
+
+A UML-style sequence diagram per team: lifelines across the top (You first,
+then the root, then members in tree order, sub-agents nested under a bracket),
+time flowing down. Messages are arrows labeled with intent and a short body;
+replies are dashed returning arrows; open requests are arrows ending in a
+pulsing "awaiting reply" stub. Phase is a colored activation bar on each
+lifeline. Asks to the user arrive on the You lifeline and can be answered there,
+creating the reply arrow. A team picker (or stacked teams), time-window control,
+and hover for the full body. At large, pick one team at a time with a team list.
+
+## 23 · Team channels (moderate)
+
+Orchestration as group chat. Left rail: one channel per team (unread counts,
+needs-you badge), plus a "Direct" section for cross-team pairs. The channel shows
+agent-to-agent messages as chat lines with avatar, identity, intent tag, and
+body; threaded replies collapse under the message they answer. Asks to the user
+are pinned at the top of the channel with inline answers. A composer lets the
+user post to the channel or @mention one agent (`field.message`). A members
+panel on the right shows the team tree with status and surface. Play makes new
+messages stream in.
+
+## 24 · Surface map (moderate)
+
+Answer "on what" with the product, not files: nodes are **surfaces** (pages,
+services, screens, docs, pipelines, builds, questions) grouped by kind, laid out
+as a map. Agents attach to the surface they work on as small marks with status.
+Messages between agents become arcs between surfaces ("the Upload page team is
+talking to the Upload API team"), weighted by recent count. Write-scope
+conflicts glow on the surface where two teams overlap, with the negotiation
+state. Click a surface: its agents, their asks, and its message traffic. Toggle
+to lay out by scope directory instead of surface (what we have today).
+
+## 25 · Contracts (radical)
+
+Orchestration as **contracts between agents**. Every delegation is a card:
+creator → assignee, deliverable, acceptance checks (ticking as met), due, and
+state columns **Assigned → In progress → Handed off → Accepted** (plus
+**Needs you** where the contract's acceptance or an ask waits on the user).
+Sub-contracts nest inside their parent's card as a count you expand. A handoff
+shows the deliverable (PR, findings, build) and an Accept / Send back action for
+the creator (or for the user when they are the creator). Shows what the
+checkpoint would need: `contract`, `deliverable`, `intent: handoff`.
+
+## 26 · Comms matrix (radical)
+
+Who talks to whom at 185 agents: an adjacency matrix with agents on both axes,
+ordered by team and tree (team blocks along the diagonal, You as the first
+row/column). Cells are colored by recent message count and marked when a reply
+is owed; off-diagonal blocks reveal cross-team collaboration. Hover a cell for
+the exchange; click to see it. Brushing a row highlights the agent's partners.
+A toggle switches to a **chord/arc view** of the same data aggregated by team.
+Small multiples of the last hour show how the pattern changed.
+
+## 27 · Critical path (radical)
+
+The user as a node in the dependency graph. Build a DAG from `waitingOn`,
+open requests, and asks: agents wait on agents, on external things, and on
+**You**. Lay it out left (blocked) to right (unblocking), and compute each root
+outcome's **critical path**: the chain that finishes last. You see "You are
+blocking 7 agents across 3 teams; answering Harbor's release ask unblocks the
+longest chain." Answering an ask in place reflows the graph. Each node shows
+identity, surface, health. Non-critical work fades.
+
+## 28 · Office floor (radical)
+
+A transformative, spatial metaphor: a floor plan. Each team is a room (nested
+rooms for sub-teams); agents are people at desks (avatar, identity, a speech
+bubble with the current activity). Messages are paper notes that fly between
+desks; an open request leaves a note waiting on the recipient's desk. Agents
+that need you walk to **your desk** in the corner and queue with their ask
+(answerable there; the relayed path is a trail). Idle agents dim, done agents'
+desks show their deliverable. Zoom from floor to room. At large, rooms shrink to
+occupancy heatmaps until you zoom in.
