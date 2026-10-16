@@ -36,7 +36,7 @@
             </section>
             <section class="story-copy" data-chapter="2" aria-hidden="true" inert>
               <h2>Different models. <br><em>Shared direction.</em></h2>
-              <p>Claude brings in Codex for the interface and Gemini for the export. Each agent has a clear piece of the work.</p>
+              <p>Your lead brings in specialists for the web app, mobile app, and API. Different providers, working toward one release.</p>
             </section>
             <section class="story-copy" data-chapter="3" aria-hidden="true" inert>
               <h2>They talk. <br><em>Work moves.</em></h2>
@@ -44,7 +44,7 @@
             </section>
             <section class="story-copy" data-chapter="4" aria-hidden="true" inert>
               <h2>Another agent. <br><em>A second look.</em></h2>
-              <p>The export agent brings in a verifier. It checks the actual result, then sends its findings back to the team.</p>
+              <p>The mobile agent brings in a verifier to check the full flow across devices. Its findings go back to the team.</p>
             </section>
             <section class="story-copy" data-chapter="5" aria-hidden="true" inert>
               <h2>A team at work. <br><em>One moment <br>for you.</em></h2>
@@ -60,20 +60,22 @@
                   <linearGradient id="ribbon-ink" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#9cbaa0"/><stop offset="1" stop-color="#41664d"/></linearGradient>
                 </defs>
                 <path class="route" id="request-route" d="M310 258 C310 300 310 335 310 370"/>
-                <path class="route" id="interface-route" d="M310 245 C310 285 150 270 150 304"/>
-                <path class="route" id="export-route" d="M310 245 C310 285 470 270 470 304"/>
-                <path class="route message-route" id="message-route" d="M245 353 C300 353 320 353 375 353"/>
-                <path class="route" id="verifier-route" d="M470 405 C470 442 470 454 470 489"/>
-                <path class="route return-route" id="return-route" d="M570 540 C620 540 610 185 430 195"/>
+                <path class="route" id="web-route" d="M310 245 C310 285 100 270 100 304"/>
+                <path class="route" id="api-route" d="M310 245 L310 304"/>
+                <path class="route" id="mobile-route" d="M310 245 C310 285 520 270 520 304"/>
+                <path class="route message-route" id="message-route" d="M520 397 C520 446 310 446 310 397"/>
+                <path class="route" id="verifier-route" d="M520 400 C520 447 490 452 490 489"/>
+                <path class="route return-route" id="return-route" d="M582 540 C620 540 617 185 430 195"/>
                 <circle class="traveler" id="task-pulse" r="5"/>
+                <circle class="traveler" id="api-pulse" r="5"/>
                 <circle class="traveler" id="reply-pulse" r="5"/>
               </svg>
 
               <div class="request-card">
                 <div class="request-author"><span class="user-avatar">Y</span><span>You</span><span class="request-arrow" aria-hidden="true">↗</span></div>
-                <p>Add CSV export for filtered orders.</p>
-                <div class="request-detail">Have it verified.<br>Show me before deploying.</div>
-                <div class="request-bottom"><span>Orders dashboard</span><span class="enter-icon" aria-hidden="true">↵</span></div>
+                <p>Ship shared collections across our web and mobile apps.</p>
+                <div class="request-detail">Keep older mobile versions working.<br>Verify the full flow before release.</div>
+                <div class="request-bottom"><span>Web app · Mobile app · API</span><span class="enter-icon" aria-hidden="true">↵</span></div>
               </div>
 
               <article class="agent-node lead-node" data-node="lead">
@@ -81,38 +83,46 @@
                 <div class="node-status"><span class="status-dot"></span><span id="lead-status">Planning the work</span></div>
                 <div class="node-assignment">Own the result. Bring in help.</div>
               </article>
-              <article class="agent-node interface-node" data-node="interface">
-                <div class="node-main"><span class="provider-icon codex" aria-hidden="true">⌘</span><div><h3>Interface</h3><span class="provider-name">Codex</span></div></div>
-                <div class="node-status"><span class="status-dot"></span><span id="interface-status">Building the button</span></div>
+              <article class="agent-node specialist-node web-node" data-node="web">
+                <div class="node-main"><span class="provider-icon codex" aria-hidden="true">⌘</span><div><h3>Web</h3><span class="provider-name">Codex</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="web-status">Building collections</span></div>
               </article>
-              <article class="agent-node export-node" data-node="export">
-                <div class="node-main"><span class="provider-icon gemini" aria-hidden="true">✦</span><div><h3>Export</h3><span class="provider-name">Gemini</span></div></div>
-                <div class="node-status"><span class="status-dot"></span><span id="export-status">Preparing the CSV</span></div>
+              <article class="agent-node specialist-node api-node" data-node="api">
+                <div class="node-main"><span class="provider-icon claude" aria-hidden="true">✳</span><div><h3>API</h3><span class="provider-name">Claude</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="api-status">Adding shared access</span></div>
+              </article>
+              <article class="agent-node specialist-node mobile-node" data-node="mobile">
+                <div class="node-main"><span class="provider-icon gemini" aria-hidden="true">✦</span><div><h3>Mobile</h3><span class="provider-name">Gemini</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="mobile-status">Connecting the app</span></div>
               </article>
               <article class="agent-node verifier-node" data-node="verifier">
-                <div class="node-main"><span class="provider-icon claude" aria-hidden="true">✳</span><div><h3>Verifier</h3><span class="provider-name">Claude</span></div></div>
-                <div class="node-status"><span class="status-dot"></span><span id="verifier-status">Checking the result</span></div>
+                <div class="node-main"><span class="provider-icon codex" aria-hidden="true">⌘</span><div><h3>Verifier</h3><span class="provider-name">Codex</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="verifier-status">Checking both apps</span></div>
               </article>
 
-              <div class="lead-note"><span class="mini-spark" aria-hidden="true">✳</span> “I’ll bring in two specialists.”</div>
+              <div class="lead-note"><span class="mini-spark" aria-hidden="true">✳</span> “Three parts. One coordinated release.”</div>
               <div class="agent-exchange">
-                <div class="exchange-message"><span class="message-direction">Interface <span aria-hidden="true">→</span> Export</span><p>Does the export use the same filters as the table?</p></div>
-                <div class="exchange-message reply"><span class="message-direction">Export <span aria-hidden="true">→</span> Interface</span><p>Yes. The filtered export is ready to connect.</p></div>
+                <div class="exchange-message"><span class="message-direction">Mobile <span aria-hidden="true">→</span> API</span><p>Mobile ships later. Will older app versions still work?</p></div>
+                <div class="exchange-message reply"><span class="message-direction">API <span aria-hidden="true">→</span> Mobile</span><p>Yes. The existing contract stays compatible.</p></div>
               </div>
-              <div class="verification-note"><span aria-hidden="true">✓</span><div><strong>12 orders. 12 exported rows.</strong><span>Filters and comma handling checked.</span></div></div>
+              <div class="verification-note"><span aria-hidden="true">✓</span><div><strong>Shared on web. Opened on mobile.</strong><span>Permissions and older app versions checked.</span></div></div>
 
               <div class="decision-card">
                 <div class="decision-heading"><span class="attention-icon" aria-hidden="true">↗</span><span>Ready for your review</span></div>
-                <h3>Your export is ready.</h3>
-                <p>The interface is connected. An independent agent checked the exported data.</p>
-                <div class="result-preview">
-                  <div class="preview-toolbar"><strong>Orders</strong><span>Paid <span aria-hidden="true">⌄</span></span><span class="csv-button">↓ Export CSV</span></div>
-                  <div class="preview-row"><span>Order</span><span>Status</span><span>Total</span></div>
-                  <div class="preview-row"><span>#1042</span><span class="paid">Paid</span><span>$48.00</span></div>
-                  <div class="preview-row"><span>#1043</span><span class="paid">Paid</span><span>$72.00</span></div>
+                <h3>One feature. Both apps.</h3>
+                <p>Shared collections work across web and mobile. Older app versions still work, too.</p>
+                <div class="result-preview" role="img" aria-label="A laptop and phone show the same shared collection, Launch ideas, with three members.">
+                  <div class="preview-laptop" aria-hidden="true">
+                    <div class="laptop-screen">
+                      <div class="window-chrome"><i></i><i></i><i></i><span>Collections</span></div>
+                      <div class="collection-content"><div class="collection-title"><strong>Launch ideas</strong><span>Share ↗</span></div><div class="collection-members"><span class="member-avatar">J</span><span class="member-avatar">M</span><span class="member-avatar">A</span><span>3 members</span></div><div class="collection-items"><span><i></i> Product inspiration</span><span><i></i> A little inspiration</span><span><i></i> The next big thing</span></div></div>
+                    </div>
+                    <div class="laptop-base"></div>
+                  </div>
+                  <div class="preview-phone" aria-hidden="true"><div class="phone-speaker"></div><span class="phone-back">‹ Collections</span><strong>Launch ideas</strong><div class="collection-members"><span class="member-avatar">J</span><span class="member-avatar">M</span><span class="member-avatar">A</span></div><div class="collection-items"><span><i></i> Product inspiration</span><span><i></i> A little inspiration</span><span><i></i> The next big thing</span></div><div class="phone-home"></div></div>
                 </div>
-                <div class="decision-check"><span aria-hidden="true">✓</span> Verification passed <span>·</span> 3 agents contributed</div>
-                <div class="decision-question">Would you like to deploy this version?</div>
+                <div class="decision-check"><span aria-hidden="true">✓</span> Verification passed <span>·</span> 5 agents, one release</div>
+                <div class="decision-question">Ready to review the rollout?</div>
                 <button class="review-button" type="button">Review the result <span aria-hidden="true">↗</span></button>
                 <p class="review-feedback screen-reader" role="status" hidden>Example reviewed. In Ribbon Field, this opens the lead’s conversation and result.</p>
               </div>
@@ -133,7 +143,7 @@
       <a class="closing-cta" href="https://ribbonfield.com/#pilot">Request macOS early access <span aria-hidden="true">↗</span></a>
       <a class="replay-link" href="#story">Back to the beginning ↑</a>
     </section>
-    <noscript><section class="no-script"><h2>One request becomes a team at work.</h2><p>A lead agent delegates interface and export work to specialists. They exchange context, bring in another agent to verify the result, and return with a clear request for your review. Enable JavaScript to explore the scroll animation.</p></section></noscript>
+    <noscript><section class="no-script"><h2>One request becomes a team at work.</h2><p>A lead agent delegates shared collections to web, mobile, and API specialists. They coordinate compatibility with older app versions, bring in another agent to verify the flow across devices, and return with a release ready for your review. Enable JavaScript to explore the scroll animation.</p></section></noscript>
   </main>
   <footer><a class="footer-wordmark" href="#story">Ribbon Field.</a><span>Landing-page concept · Example data</span></footer>
 </body>

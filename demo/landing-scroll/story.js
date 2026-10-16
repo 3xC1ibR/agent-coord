@@ -7,6 +7,7 @@
   const nodes = Object.fromEntries([...document.querySelectorAll('[data-node]')].map(el => [el.dataset.node, el]));
   const paths = Object.fromEntries([...document.querySelectorAll('.route')].map(el => [el.id, { el, length: el.getTotalLength() }]));
   const pulse = document.querySelector('#task-pulse');
+  const apiPulse = document.querySelector('#api-pulse');
   const reply = document.querySelector('#reply-pulse');
   const leadNote = document.querySelector('.lead-note');
   const exchange = document.querySelector('.agent-exchange');
@@ -17,7 +18,7 @@
   const announcement = document.querySelector('#story-announcement');
   const scrollLabel = document.querySelector('#scroll-label');
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-  const statuses = Object.fromEntries(['lead', 'interface', 'export', 'verifier'].map(name => [name, document.querySelector(`#${name}-status`)]));
+  const statuses = Object.fromEntries(Object.keys(nodes).map(name => [name, document.querySelector(`#${name}-status`)]));
   let frame = 0;
   let activeChapter = -1;
   const clamp = value => Math.max(0, Math.min(1, value));
@@ -76,16 +77,19 @@
     request.style.top = `${40 + 18 * arrival}%`;
     request.style.transform = `translate(-50%,-50%) rotate(${-5 * (1 - arrival)}deg) scale(${1 - .58 * arrival})`;
     opacity(request, 1 - smooth(.85, 1.15, t));
-    nodes.lead.style.top = `${58 - 27.4 * smooth(1.1, 1.8, t)}%`;
+    const leadTop = innerWidth <= 760 && innerHeight <= 700 ? 26.3 : 30.6;
+    nodes.lead.style.top = `${58 - (58 - leadTop) * smooth(1.1, 1.8, t)}%`;
     reveal(nodes.lead, smooth(.8, 1.2, t), done);
-    reveal(nodes.interface, smooth(1.65, 2.2, t), done);
-    reveal(nodes.export, smooth(1.8, 2.35, t), done);
+    reveal(nodes.web, smooth(1.65, 2.15, t), done);
+    reveal(nodes.api, smooth(1.75, 2.25, t), done);
+    reveal(nodes.mobile, smooth(1.85, 2.35, t), done);
     reveal(nodes.verifier, smooth(3.75, 4.22, t), done);
     nodes.verifier.classList.toggle('passed', t >= 4.45);
 
     drawPath('request-route', smooth(.4, .95, t), between(t, .4, .6, 1.05, 1.3) * .65);
-    drawPath('interface-route', smooth(1.4, 2.05, t), sceneFade * .85);
-    drawPath('export-route', smooth(1.55, 2.25, t), sceneFade * .85);
+    drawPath('web-route', smooth(1.4, 2.05, t), sceneFade * .85);
+    drawPath('api-route', smooth(1.5, 2.15, t), sceneFade * .85);
+    drawPath('mobile-route', smooth(1.6, 2.25, t), sceneFade * .85);
     drawPath('message-route', smooth(2.7, 3.0, t), between(t, 2.6, 2.85, 3.6, 3.85));
     drawPath('verifier-route', smooth(3.6, 4.1, t), sceneFade * .85);
     drawPath('return-route', smooth(4.45, 5.02, t), sceneFade * .5);
@@ -98,10 +102,12 @@
     opacity(verification, between(t, 4.45, 4.65, 4.9, 5.3));
 
     opacity(pulse, 0);
+    opacity(apiPulse, 0);
     opacity(reply, 0);
     if (!reducedMotion.matches) {
-      if (t > 1.4 && t < 2.05) movePulse(pulse, 'interface-route', (t - 1.4) / .65, 1);
-      if (t > 1.55 && t < 2.25) movePulse(reply, 'export-route', (t - 1.55) / .7, 1);
+      if (t > 1.4 && t < 2.05) movePulse(pulse, 'web-route', (t - 1.4) / .65, 1);
+      if (t > 1.5 && t < 2.15) movePulse(apiPulse, 'api-route', (t - 1.5) / .65, 1);
+      if (t > 1.6 && t < 2.25) movePulse(reply, 'mobile-route', (t - 1.6) / .65, 1);
       if (t > 2.75 && t < 3.03) movePulse(pulse, 'message-route', (t - 2.75) / .28, 1);
       if (t > 3.08 && t < 3.38) movePulse(reply, 'message-route', 1 - (t - 3.08) / .3, 1);
       if (t > 3.6 && t < 4.1) movePulse(pulse, 'verifier-route', (t - 3.6) / .5, 1);
@@ -109,9 +115,10 @@
     }
 
     statuses.lead.textContent = t < 1.6 ? 'Planning the work' : t < 4.4 ? 'Coordinating the team' : 'Gathering the result';
-    statuses.interface.textContent = t < 3.3 ? 'Building the button' : 'Interface ready';
-    statuses.export.textContent = t < 3.25 ? 'Preparing the CSV' : t < 4.45 ? 'Ready for verification' : 'Export verified';
-    statuses.verifier.textContent = t < 4.45 ? 'Checking the result' : 'Checks passed';
+    statuses.web.textContent = t < 3.3 ? 'Building collections' : 'Web ready';
+    statuses.api.textContent = t < 3.25 ? 'Adding shared access' : 'Older apps supported';
+    statuses.mobile.textContent = t < 3.6 ? 'Connecting the app' : t < 4.45 ? 'Requesting a check' : 'Mobile verified';
+    statuses.verifier.textContent = t < 4.45 ? 'Checking both apps' : 'Checks passed';
 
     const ready = smooth(4.95, 5.4, t);
     opacity(decision, ready);

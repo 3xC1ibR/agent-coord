@@ -1,8 +1,12 @@
 # Ribbon Field scroll concept
 
 A standalone, buildless landing-page prototype. Native scrolling carries one
-illustrative request through a lead agent, two providers, a direct message
-exchange, nested verification, and a final human review. It does not start
+illustrative request through a lead agent, three specialists across Claude,
+Codex, and Gemini, a direct message exchange, nested verification, and a final
+human review. The example ships shared collections across a web app, mobile
+app, and API. The mobile and API agents coordinate support for older app
+versions; the mobile agent then recruits a verifier to check the flow across
+devices. The final result pairs laptop and phone previews. It does not start
 agents, submit forms, or deploy code. The early-access links open the existing
 public site.
 
