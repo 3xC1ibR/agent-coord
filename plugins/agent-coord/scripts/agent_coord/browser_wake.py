@@ -9,6 +9,7 @@ import logging
 import threading
 
 from .workspaces import matches_workspace
+from .app_agent_failures import notify_agent_failure
 from .zellij_wake import WAKE_PROMPT
 
 
@@ -134,6 +135,7 @@ class BrowserInboxWake:
                     return
             except Exception as exc:
                 self.pause(thread_id, str(exc))
+                self._report_failure(thread_id, str(exc))
                 return
             ids = self._claim(thread_id)
             if not ids:
@@ -154,11 +156,22 @@ class BrowserInboxWake:
             except Exception as exc:
                 self.store.complete_wake_attempts(thread_id, ids, outcome="failed", detail=str(exc))
                 self.pause(thread_id, "Inbox wake may have started; send a message to continue. " + str(exc))
+                self._report_failure(thread_id, str(exc))
             else:
                 self.store.complete_wake_attempts(thread_id, ids, outcome="sent", detail=WAKE_PROMPT)
             finally:
                 with self.store._connection() as db:
                     db.execute("UPDATE browser_inbox_wake SET dispatching = 0 WHERE thread_id = ?", (thread_id,))
+
+    def _report_failure(self, thread_id, error):
+        self.sessions.persistence.submit(lambda: self._persist_failure(thread_id, error))
+
+    def _persist_failure(self, thread_id, error):
+        with self.store._connection() as db:
+            ids = [row[0] for row in db.execute("""SELECT id FROM messages
+                WHERE recipient_session_id = ? AND delivered_at IS NULL
+                AND classification = 'action_required' ORDER BY id""", (thread_id,))]
+        notify_agent_failure(self.store, thread_id, event_key=["wake", ids], stage="wake", error=error)
 
     def start(self):
         if self.worker is None:
