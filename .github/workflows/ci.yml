@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Exercise the CLI's minimum Python and the desktop runtime's minor version.
+          - os: ubuntu-24.04
+            python: '3.10'
+          - os: macos-15
+            python: '3.12'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Validate plugin packaging
+        run: python3 scripts/plugin_tools.py validate
+      - name: Compile Python sources
+        run: python3 -m compileall -q plugins/agent-coord/scripts scripts tests desktop/macos
+      - name: Run JavaScript tests
+        run: node --test tests/*.js
+      - name: Run Python tests
+        run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
+
+  macos-build:
+    name: macOS standalone build (arm64)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.13.1'
+          enable-cache: false
+      # Ad hoc signing exercises packaging without release credentials or notarization.
+      - name: Build standalone test disk image
+        run: |
+          python3 desktop/macos/build.py --standalone --arch arm64 \
+            --output 'build/ci/Ribbon Field.app' \
+            --dmg build/ci/Ribbon-Field-arm64-test.dmg
+      # The headless check relocates the app and runs its bundled runtime/backend/CLI.
+      # Foreground native UI smoke tests remain a release check on an unlocked Mac.
+      - name: Verify disk image and relocated app
+        run: |
+          python3 desktop/macos/verify_distribution.py \
+            --dmg build/ci/Ribbon-Field-arm64-test.dmg \
+            --report build/ci/distribution-validation.json

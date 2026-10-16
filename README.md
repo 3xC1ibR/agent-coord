@@ -1516,8 +1516,24 @@ write tools; it is not a security boundary for arbitrary shell commands.
 
 The runtime supports Python 3.10 or later and has no third-party dependencies.
 
+[GitHub Actions CI](.github/workflows/ci.yml) runs on pull requests, pushes to
+`main`, and manual **Run workflow** requests in GitHub's Actions tab. It validates
+plugin packaging, compiles Python sources, and runs the Python and JavaScript
+suites on Ubuntu with Python 3.10 and macOS with Python 3.12 (both with Node 22).
+The dependency-free test jobs skip the optional Web Push encryption test when
+its third-party packages are absent.
+
+A separate macOS job builds an Apple Silicon standalone test DMG and verifies
+the mounted image and relocated app with a fresh home directory, including its
+bundled Python, cryptography, backend, and CLI. This uses ad hoc signing and
+needs no Apple or provider credentials. It does not publish a release or run
+foreground UI smoke tests. Intel packaging, supported macOS versions, native UI,
+and signed/notarized downloads still need the
+[release checks](desktop/macos/README.md#build-a-standalone-disk-image).
+
 ```bash
 python3 -W error::ResourceWarning -m unittest discover -s tests -v
+node --test tests/*.js
 python3 -m compileall -q plugins/agent-coord/scripts scripts tests
 
 python3 scripts/plugin_tools.py validate
