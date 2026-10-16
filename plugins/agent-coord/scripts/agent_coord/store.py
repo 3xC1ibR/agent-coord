@@ -913,6 +913,8 @@ class CoordinationStore:
                 (session_id, client, repository, name, now, now),
             )
         self.threads.ensure(session_id, project_cwd=project_cwd)
+        from .launch_metrics import registered
+        registered(self)
         return self.get_session(session_id)
 
     def get_session(self, session_id: str) -> dict[str, Any]:
@@ -1261,6 +1263,9 @@ class CoordinationStore:
                 ),
             )
             self.threads.record_scope(connection, session_id, normalized, session["cwd"])
+        if lease_mode == "write":
+            from .launch_metrics import record_action
+            record_action(self, "write_scope")
         return self.get_session(session_id)
 
     def check_conflicts(self, session_id: str) -> list[dict[str, Any]]:

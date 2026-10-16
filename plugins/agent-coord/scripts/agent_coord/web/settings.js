@@ -29,6 +29,20 @@
       return data;
     }
     const api = (path, body) => request("/api/browser/", path, body);
+    if (!config.remote) {
+      const metrics = await api("launch-metrics");
+      if (metrics.available) {
+        $("launch-metrics-settings").hidden = false;
+        const toggle = $("launch-metrics-enabled");
+        toggle.checked = metrics.enabled;
+        toggle.onchange = async () => {
+          toggle.disabled = true;
+          try { toggle.checked = (await api("launch-metrics", {enabled: toggle.checked})).enabled; }
+          catch (error) { toggle.checked = !toggle.checked; report(error); }
+          finally { toggle.disabled = false; }
+        };
+      }
+    }
     // The iPhone wrapper already owns APNs permission and device registration.
     const nativePhone = config.remote && window.parent.document.querySelector("#native-notification-style");
     if (nativePhone) {
