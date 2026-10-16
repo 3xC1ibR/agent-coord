@@ -36,7 +36,7 @@ class MacOSReleaseTests(unittest.TestCase):
                 "architecture": arch, "disk_image": "/build/" + name,
                 "relocated": True, "backend": True, "cli": True,
             })
-            self.write(name + ".provenance.json", {"version": "1.2.3", "source_commit": COMMIT})
+            self.write(name + ".provenance.json", {"version": "1.2.3", "source_commit": COMMIT, "build_number": "1", "run_url": "https://github.com/3xC1ibR/agent-coord/actions/runs/123"})
 
     def write(self, name, value):
         (self.directory / name).write_text(json.dumps(value))
@@ -51,6 +51,49 @@ class MacOSReleaseTests(unittest.TestCase):
         self.assertEqual(manifest["source_commit"], COMMIT)
         self.assertEqual(manifest["downloads"]["arm64"]["url"],
                          "https://downloads.ribbonfield.com/releases/1.2.3/Ribbon-Field-1.2.3-arm64.dmg")
+
+    def test_promotion_occurs_only_after_all_public_bytes_verify(self):
+        files, manifest = self.files()
+        r2, events = mock.Mock(), []
+        r2.exists_identical.return_value = False
+        r2.promote.side_effect = lambda path: events.append("promote")
+        with mock.patch.object(release, "verify_download", side_effect=lambda key, path: events.append(key)):
+            release.publish(files, manifest, r2, promote_current=True)
+        self.assertEqual(events[-3:], ["releases/1.2.3/release.json", "promote", release.CURRENT_KEY])
+        r2.reset_mock()
+        with mock.patch.object(release, "verify_download", side_effect=ValueError("bad download")):
+            with self.assertRaises(ValueError):
+                release.publish(files, manifest, r2, promote_current=True)
+        r2.promote.assert_not_called()
+
+    def test_promotion_uses_compare_and_swap_and_rejects_downgrade(self):
+        _, manifest = self.files()
+        path = self.directory / "candidate.json"
+        path.write_text(json.dumps(manifest))
+        r2 = release.R2()
+        for previous_version in ("1.2.2", "1.2.4"):
+            def run(*args):
+                if args[0] == "get-object":
+                    Path(args[-1]).write_text(json.dumps({**manifest, "version": previous_version}))
+                return subprocess.CompletedProcess([], 0, '{"ETag": "previous-etag"}', "")
+            with mock.patch.object(r2, "run", side_effect=run) as call:
+                if previous_version == "1.2.4":
+                    with self.assertRaisesRegex(ValueError, "downgrade"):
+                        r2.promote(path)
+                    self.assertEqual(call.call_count, 1)
+                else:
+                    r2.promote(path)
+                    args = call.call_args.args
+                    self.assertEqual(args[args.index("--if-match") + 1], "previous-etag")
+                    self.assertIn("no-store", args)
+
+    def test_architectures_from_different_ci_runs_are_rejected(self):
+        path = self.directory / "Ribbon-Field-1.2.3-x86_64.dmg.provenance.json"
+        data = json.loads(path.read_text())
+        data["build_number"] = "2"
+        path.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "different CI runs"):
+            self.files()
 
     def test_corrupt_image_is_rejected(self):
         (self.directory / "Ribbon-Field-1.2.3-arm64.dmg").write_bytes(b"corrupt")

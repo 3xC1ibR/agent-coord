@@ -11,6 +11,8 @@ body.settings-page { display: block; height: auto; min-height: 100dvh; backgroun
 .settings-section label { display: grid; gap: 7px; margin: 14px 0; font-size: 13px; }
 .settings-section input, .settings-section select { box-sizing: border-box; width: 100%; min-height: 40px; padding: 9px 11px; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; }
 .settings-section input:disabled, .settings-section select:disabled { opacity: .65; }
+#launch-metrics-settings label { display: flex; flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
+#launch-metrics-enabled { flex: 0 0 auto; width: 18px; height: 18px; min-height: 0; padding: 0; margin: 0; }
 .settings-actions, .settings-section footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .settings-actions small { flex-basis: 100%; color: var(--muted); line-height: 1.6; }
 .settings-section button { min-height: 38px; padding: 8px 12px; font-size: 12px; }

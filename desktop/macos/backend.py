@@ -22,14 +22,19 @@ if push_libraries.is_dir():
 
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import make_ui_server
+from agent_coord import launch_metrics
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db")
+    parser.add_argument("--no-launch-metrics", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    server = make_ui_server(CoordinationStore(args.db), host="127.0.0.1", port=0)
+    store = CoordinationStore(args.db)
+    server = make_ui_server(store, host="127.0.0.1", port=0)
     stopping = threading.Event()
+    if not args.no_launch_metrics:
+        launch_metrics.start(store, stopping, Path(__file__).parent)
 
     def parent_closed() -> None:
         try:

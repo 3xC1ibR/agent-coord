@@ -13,6 +13,11 @@ on:
         description: 'Publish to downloads.ribbonfield.com after release approval'
         default: false
         type: boolean
+      channel:
+        description: 'Release channel shown on the website'
+        default: alpha
+        type: choice
+        options: [alpha, beta, stable]
 
 permissions:
   contents: read
@@ -134,7 +139,7 @@ jobs:
       - name: Verify the packaged distribution
         run: |
           dmg="build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.dmg"
-          xcrun stapler validate "$dmg"
+          python3 desktop/macos/distribution.py validate "$dmg"
           spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
           python3 desktop/macos/verify_distribution.py --dmg "$dmg" --report "$dmg.validation.json"
           python3 - <<'PY'
@@ -190,12 +195,14 @@ jobs:
           AWS_EC2_METADATA_DISABLED: 'true'
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          RELEASE_CHANNEL: ${{ inputs.channel || 'alpha' }}
         run: |
           set -euo pipefail
           test -n "$AWS_ACCESS_KEY_ID" && test -n "$AWS_SECRET_ACCESS_KEY"
           aws --version
           python3 scripts/publish_macos_release.py --directory build/release \
-            --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --publish | tee release-result.json
+            --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --channel "$RELEASE_CHANNEL" \
+            --publish --promote-current | tee release-result.json
           {
             echo '### Published macOS downloads'
             echo

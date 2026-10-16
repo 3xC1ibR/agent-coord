@@ -34,6 +34,7 @@ from .organization import repository_root
 from .workspace_files import workspace_files
 from .skill_catalog import skill_catalog
 from .speech import Speech, spoken_text
+from . import launch_metrics
 
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 8765
@@ -488,6 +489,11 @@ def _handler(
                 self._json(HTTPStatus.OK, store.threads.project_scratchpad(directory))
             elif route == "speech/settings":
                 self._json(HTTPStatus.OK, speech.settings())
+            elif route == "launch-metrics":
+                if not self._local_request():
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "Use Settings on your Mac."})
+                else:
+                    self._json(HTTPStatus.OK, launch_metrics.settings(store))
             elif route == "speech/voices":
                 self._json(HTTPStatus.OK, {"voices": speech.voices()})
             elif route == "schedules":
@@ -637,6 +643,19 @@ def _handler(
                 body = json.loads(raw_body)
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
+                if route in (["api", "browser", "launch-metrics"], ["api", "browser", "launch-metrics", "attribution"]):
+                    if not self._local_request():
+                        self._json(HTTPStatus.FORBIDDEN, {"error": "Use Settings on your Mac."})
+                    elif route[-1] == "attribution":
+                        if set(body) != {"download_token"}:
+                            raise ValueError("Expected a download token.")
+                        launch_metrics.attribute(store, body["download_token"])
+                        self._json(HTTPStatus.OK, {"status": "ok"})
+                    else:
+                        if set(body) != {"enabled"} or not isinstance(body["enabled"], bool):
+                            raise ValueError("Expected an enabled boolean.")
+                        self._json(HTTPStatus.OK, launch_metrics.configure(store, body["enabled"]))
+                    return
                 if route == ["api", "browser", "speech", "settings"]:
                     if not self._local_request():
                         self._json(HTTPStatus.FORBIDDEN, {"error": "Configure Kokoro in Speech settings on your Mac."})

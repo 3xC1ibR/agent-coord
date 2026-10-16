@@ -98,6 +98,20 @@ class DistributionTests(unittest.TestCase):
                     distribution.notarize(artifact, "profile")
             self.assertEqual(json.loads(artifact.with_suffix(".zip.notary.json").read_text())["status"], "Invalid")
 
+    def test_stapler_retries_only_transient_connection_loss(self):
+        transient = subprocess.CompletedProcess([], 68, "NSURLErrorDomain Code=-1005", "")
+        success = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(distribution.subprocess, "run", side_effect=[transient, success]) as run, mock.patch.object(distribution.time, "sleep") as sleep:
+            distribution.run_stapler("validate", Path("test.dmg"))
+            self.assertEqual(run.call_count, 2)
+            sleep.assert_called_once_with(10)
+        for result, attempts in [(transient, 5), (subprocess.CompletedProcess([], 65, "invalid ticket", ""), 1)]:
+            with mock.patch.object(distribution.subprocess, "run", return_value=result) as run, mock.patch.object(distribution.time, "sleep") as sleep:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    distribution.run_stapler("validate", Path("test.dmg"))
+                self.assertEqual(run.call_count, attempts)
+                self.assertEqual(sleep.call_count, attempts - 1)
+
 
 if __name__ == "__main__":
     unittest.main()

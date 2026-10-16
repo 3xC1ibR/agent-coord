@@ -23,6 +23,7 @@ from .context import client_environment
 from .store import CoordinationError, CoordinationStore
 from .browser_queue import BrowserMessageQueue
 from .browser_persistence import BrowserPersistence
+from .app_agent_failures import notify_agent_failure
 from .browser_wake import BrowserInboxWake
 from .message_timeline import message_timeline
 from .timeline_clock import preserve_timing, restore_timing, set_time
@@ -309,6 +310,7 @@ class BrowserSessions:
                 self.active.pop(thread_id, None)
                 self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") != thread_id}
             disconnected = set()
+            disconnected_turns = {}
             if method == "thread/closed" and thread_id:
                 self._save_history(thread_id)
                 disconnected.add(thread_id)
@@ -317,6 +319,8 @@ class BrowserSessions:
                 for loaded_id in disconnected:
                     self._save_history(loaded_id)
             if disconnected:
+                if not self.closed:
+                    disconnected_turns = {t: self.active[t] for t in disconnected if self.active.get(t)}
                 # This must not depend on a database write succeeding. Otherwise
                 # a disconnected turn stays running and blocks idle/deploy gates.
                 self.loaded.difference_update(disconnected)
@@ -327,9 +331,9 @@ class BrowserSessions:
             self._publish(method, params)
             if method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected"}:
                 saved_params = copy.deepcopy(params)
-                self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected))
+                self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected, disconnected_turns))
 
-    def _persist_event(self, method, params, disconnected):
+    def _persist_event(self, method, params, disconnected, disconnected_turns=None):
         """Idempotent bookkeeping only: never replay a streamed event or prompt."""
         thread_id = params.get("threadId")
         if hasattr(self, "schedules"):
@@ -342,6 +346,9 @@ class BrowserSessions:
         if method == "turn/completed" and thread_id:
             turn = params.get("turn", {})
             self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=turn.get("status", "completed"))
+            if turn.get("status") == "failed":
+                notify_agent_failure(self.store, thread_id, event_key=["turn", turn.get("id")],
+                                     stage="turn", error=turn.get("error"), turn_id=turn.get("id"))
             session = self.store.get_session(thread_id)
             unfinished = session["write_scope"] or session["scope_required"] or session["activity"] in {"implementing", "validating", "planning", "waiting"}
             self.store.touch(thread_id, "waiting" if unfinished else "idle", turn_active=False)
@@ -355,6 +362,12 @@ class BrowserSessions:
             reason = ("Codex disconnected. Review queued messages before resuming."
                       if method == "bridge/disconnected" else "The thread closed. Reopen it to resume queued messages.")
             self.queue.pause(identity, reason)
+            if identity in (disconnected_turns or {}):
+                turn_id = disconnected_turns[identity]
+                self.store.threads.finish_turn(identity, turn_id=turn_id, status="failed")
+                self.inbox_wake.pause(identity, reason)
+                notify_agent_failure(self.store, identity, event_key=["turn", turn_id],
+                                     stage="disconnect", error=reason, turn_id=turn_id)
             self.store.end_session(identity)
 
     def _history(self, thread_id: str) -> dict:

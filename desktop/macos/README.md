@@ -161,7 +161,7 @@ are not included in release artifacts. Ordinary PR CI has no release secrets.
 
 1. Merge the release source into `main`. In **Actions → Release macOS → Run
    workflow**, select `main`, enter a new numeric `X.Y.Z` version, and select
-   **Publish** to request a release. Leave Publish unchecked for a build-only
+   **Publish** to request a release. Select the channel (`alpha` by default). Leave Publish unchecked for a build-only
    rehearsal. Pushing a `vX.Y.Z` tag on a commit in `main` also requests a release.
 2. Both architecture jobs retain `macos-release-arm64` and
    `macos-release-x86_64` artifacts for 30 days. Download and extract them while
@@ -173,9 +173,10 @@ are not included in release artifacts. Ordinary PR CI has no release secrets.
    checks their recorded source commit, and uploads versioned files. It then
    downloads them through the public HTTPS host and verifies every checksum.
    Only after all checks pass does it upload `releases/X.Y.Z/release.json`.
-4. Use the links in the workflow summary for the website or invitations, for
-   example `https://downloads.ribbonfield.com/releases/0.1.1/Ribbon-Field-0.1.1-arm64.dmg`.
-   These examples are naming conventions, not a claim that version is published.
+4. CI atomically advances `https://downloads.ribbonfield.com/releases/current.json`.
+   The website reads its version, channel and both installer URLs through
+   `https://api.ribbonfield.com/v1/release`; no website release edit is needed.
+   Both manifests include the source commit, CI build number and workflow run URL.
    The matching `.dmg.sha256`, `.dmg.json`, and `.dmg.provenance.json` are public.
 
 Release URLs are immutable. The upload uses R2's atomic `If-None-Match: *`
@@ -183,8 +184,10 @@ condition and refuses different bytes at an existing key. Identical files from
 a partial upload are reused. If upload fails, rerun **failed jobs only**, keeping
 the original build artifacts. Rebuilding after a partial publication changes
 signatures/timestamps; use a new version rather than overwriting old files.
-There is no mutable `latest` URL or automatic website update. Roll back by
-linking to a previous release; never replace an installer users already have.
+The current manifest is uncached and updated with an ETag precondition to prevent
+concurrent publication races. Promotion refuses version downgrades and different
+metadata for the same version. Publish a new version for a corrective release;
+never replace an installer users already have.
 Individual uploaded files may be visible before completion; `release.json` is
 the marker that the whole release passed public-download verification.
 
