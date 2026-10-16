@@ -41,6 +41,16 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+      - name: Install ripgrep on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Install ripgrep on macOS
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew install ripgrep
       - name: Validate plugin packaging
         run: python3 scripts/plugin_tools.py validate
       - name: Compile Python sources

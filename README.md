@@ -1520,8 +1520,8 @@ The runtime supports Python 3.10 or later and has no third-party dependencies.
 `main`, and manual **Run workflow** requests in GitHub's Actions tab. It validates
 plugin packaging, compiles Python sources, and runs the Python and JavaScript
 suites on Ubuntu with Python 3.10 and macOS with Python 3.12 (both with Node 22).
-The dependency-free test jobs skip the optional Web Push encryption test when
-its third-party packages are absent.
+The full suite needs Node.js and ripgrep; CI installs both. Test jobs skip the
+optional Web Push encryption test when its third-party packages are absent.
 
 A separate macOS job builds an Apple Silicon standalone test DMG and verifies
 the mounted image and relocated app with a fresh home directory, including its

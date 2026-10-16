@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import selectors
+import shlex
 import signal
 import subprocess
 import sys
@@ -160,7 +161,8 @@ class DesktopPackagingTests(unittest.TestCase):
                 self.assertIn("../skills/agent-coordination/SKILL.md", snapshot)
                 env = {key: value for key, value in os.environ.items()
                        if not key.startswith(("AGENT_COORD_", "CODEX_", "CLAUDE"))}
-                env.update(PYTHONPATH=str(resources / "backend"),
+                # A recipient need not have agent-coord installed on PATH.
+                env.update(PATH=os.defpath, PYTHONPATH=str(resources / "backend"),
                            AGENT_COORD_DB=str(root / "state.sqlite3"),
                            AGENT_COORD_CLIENT="kimi", AGENT_COORD_SESSION_ID="packaged-kimi",
                            KIMI_CODE_HOME=str(root / "kimi home"))
@@ -174,7 +176,10 @@ class DesktopPackagingTests(unittest.TestCase):
                     input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "native-kimi",
                                       "cwd": str(root), "prompt": "Hello"}), check=True)
                 self.assertEqual(result.stderr, "")
-                self.assertIn("agent-coord checkpoint", json.loads(result.stdout)["message"])
+                packaged_cli = shlex.quote(str((resources / "backend/agent-coord").resolve()))
+                payload = json.loads(result.stdout)
+                self.assertIn("message", payload)
+                self.assertIn(packaged_cli + " checkpoint --json", payload["message"])
                 for name in ("agent-coordination", "dispatch", "orchestrate", "manage-threads"):
                     self.assertTrue((resources / "skills" / name / "SKILL.md").is_file())
 
