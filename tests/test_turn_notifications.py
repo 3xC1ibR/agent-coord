@@ -53,8 +53,8 @@ class TurnNotificationTests(unittest.TestCase):
         self.approval(method="item/tool/requestUserInput", request_id=4)
         self.approval(method="mcpServer/elicitation/request", request_id=5)
         events = self.sessions.approval_notifications()
-        self.assertEqual(len(events), 3)
-        self.assertEqual({event["status"] for event in events}, {"approval"})
+        self.assertEqual(len(events), 5)
+        self.assertEqual({event["status"] for event in events}, {"approval", "question"})
         self.assertTrue(all(event["title"] == "Approval test" for event in events))
         self.assertEqual(self.store.threads.completion_cursor(), 0)
 
@@ -96,7 +96,7 @@ class TurnNotificationTests(unittest.TestCase):
         with self.assertRaises(CoordinationError):
             self.sessions.claim_approval_notification(outside_key)
         _, question = self.approval(method="item/tool/requestUserInput")
-        self.assertFalse(self.sessions.claim_approval_notification(question))
+        self.assertTrue(self.sessions.claim_approval_notification(question))
         for invalid in (None, 42, ""):
             with self.assertRaises(CoordinationError):
                 self.sessions.claim_approval_notification(invalid)

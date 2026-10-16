@@ -422,7 +422,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     const designation = node("span", "Dispatcher", "dispatcher-designation");
     (compact ? title : button.querySelector(".card-meta")).append(designation);
   }
-  button.onclick = () => action(() => select(thread.thread_id));
+  button.onclick = () => action(() => select(thread.attention_target_thread_id || thread.thread_id));
   if (!compact && thread.attention !== "archived") {
     button.draggable = true; button.dataset.dragThread = thread.thread_id;
     const card = node("div", null, "thread-card" + (inAttention ? " attention-card" : ""));
@@ -767,15 +767,27 @@ function agentThreadTree(threads) {
     ["blocked", "review"].includes(thread.attention_reason) ||
     (!thread.checkpoint_stale && thread.checkpoint?.next_actor === "user" && thread.checkpoint.next_action));
   return {children, requiresInput,
-    roots: threads.filter(thread => !parents.has(thread.thread_id) || requiresInput(thread))};
+    roots: threads.filter(thread => !visible.has(thread.attention_grouped_under) &&
+      (!parents.has(thread.thread_id) || requiresInput(thread)))};
 }
 function agentThreadCard(thread, tree, compact = false, inAttention = false) {
   const card = threadCard(thread, compact, inAttention);
   const children = tree.children.get(thread.thread_id) || [];
   const forks = compact && (thread.forked_from || thread.forked_sessions?.length);
-  if (!children.length && !thread.created_by_thread_id && !forks) return card;
+  const needs = thread.attention_items || [];
+  if (!children.length && !thread.created_by_thread_id && !forks && !needs.length) return card;
   const group = node("div", null, "agent-thread-group" + (compact ? " compact-agent-group" : ""));
   group.append(card);
+  if (needs.length) {
+    const list = node("ul", null, "agent-rows");
+    for (const need of needs) {
+      const item = node("li"), link = node("button", need.title + " · " + need.action, "agent-row needs-attention");
+      link.type = "button"; link.dataset.thread = need.thread_id;
+      link.onclick = () => action(() => select(need.thread_id));
+      item.append(link); list.append(item);
+    }
+    group.append(list);
+  }
   if (forks) group.append(forkLinks(thread));
   if (thread.created_by_thread_id) {
     const creator = thread.created_by;

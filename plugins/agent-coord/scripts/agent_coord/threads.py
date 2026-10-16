@@ -12,6 +12,7 @@ from .context import caller_session, command_prefix
 from .store import CoordinationError, derive_scope_cluster
 from .organization import OrganizationStore, UNSET
 from .attention import AttentionStore
+from . import notification_policy
 
 PHASES = {"discussion", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"}
 ATTENTION_STATES = {"now", "later", "archived"}
@@ -114,6 +115,7 @@ class ThreadStore:
                     UNIQUE(thread_id, snoozed_until)
                 );
             """)
+            notification_policy.initialize(db)
             # Serialize upgrades across independently running terminal hooks.
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(work_threads)")}
@@ -229,6 +231,13 @@ class ThreadStore:
 
     def _read(self, db, row, *, history=False, inventory=None):
         result = dict(row)
+        context = (inventory.notification_contexts.get(row["thread_id"]) if inventory is not None else
+                   db.execute("SELECT * FROM turn_notification_context WHERE thread_id = ? AND turn_key = ?",
+                              (row["thread_id"], row["turn_key"])).fetchone())
+        result["notification_context"] = dict(context) if context else None
+        result["automatic_turn"] = (row["thread_id"] in inventory.automatic_turns if inventory is not None else
+            db.execute("SELECT 1 FROM messages WHERE recipient_session_id = ? AND wake_turn_id = ? LIMIT 1",
+                       (row["thread_id"], row["turn_id"])).fetchone() is not None)
         result["project_cwd"] = result["project_cwd"] or result["cwd"]
         deadline = row["snoozed_until"]
         result["snoozed"] = bool(deadline is not None and row["attention"] == "later" and deadline > self.store.clock())
@@ -479,12 +488,23 @@ class ThreadStore:
                           WHERE thread_id = ? AND (attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL))""",
                        (self.store.clock(), session_id))
 
-    def start_turn(self, session_id: str, *, prompt=None, turn_id=None) -> None:
+    def user_turn_context(self, session_id: str, turn_id: str) -> None:
+        """An accepted direct follow-up takes precedence over automatic origin."""
+        self.remember_notification_context(session_id, turn_id, {"origin": "user", "owner_thread_id": session_id})
+
+    def remember_notification_context(self, session_id: str, turn_id: str, context: dict) -> None:
+        with self.store._connection() as db:
+            notification_policy.record_context(db, session_id, turn_id, context)
+            notification_policy.snapshot_checkpoint(db, session_id, turn_id)
+
+    def start_turn(self, session_id: str, *, prompt=None, turn_id=None, notification_context=None) -> None:
         from .thread_control import cancel_pending
         self.ensure(session_id)
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
+            if notification_context and turn_id:
+                notification_policy.record_context(db, session_id, turn_id, notification_context)
             # App-server notifications and lifecycle hooks may describe the same turn.
             if turn_id and row["turn_id"] == turn_id:
                 return
@@ -520,6 +540,9 @@ class ThreadStore:
             inserted = db.execute("INSERT OR IGNORE INTO turn_completions (thread_id, turn_key, status, completed_at) VALUES (?, ?, ?, ?)",
                                   (session_id, turn["turn_key"], status, now)).rowcount
             if inserted:
+                db.execute("""UPDATE turn_notification_context SET checkpoint_id = (
+                    SELECT id FROM thread_checkpoints WHERE thread_id = ? AND turn_id IS ? ORDER BY id DESC LIMIT 1)
+                    WHERE thread_id = ? AND turn_key = ?""", (session_id, turn["turn_id"], session_id, turn["turn_key"]))
                 db.execute("UPDATE work_threads SET updated_at = ? WHERE thread_id = ?", (now, session_id))
 
     def completion_cursor(self) -> int:

@@ -44,6 +44,23 @@ function harness(threads) {
   return c;
 }
 
+test("an orchestration escalation has one card with a link to the child and survives filtering", () => {
+  const parent = thread("parent", null, {needs_attention: true, attention_reason: "blocked",
+    attention_items: [{thread_id: "child", title: "child", action: "Approve the command"}],
+    attention_target_thread_id: "child"});
+  const child = thread("child", "parent", {needs_attention: true, response_state: "input",
+    attention_reason: "blocked", attention_grouped_under: "parent"});
+  const c = harness([parent, child]);
+  assert.deepEqual(c.cards(), ["parent"]);
+  const link = c.rows().find(row => row.textContent === "child · Approve the command");
+  assert.ok(link);
+  link.onclick();
+  assert.deepEqual(c.selected, ["child"]);
+  c.$("search").value = "child";
+  c.renderList();
+  assert.deepEqual(c.cards(), ["child"]);
+});
+
 test("only explicit orchestration creations nest across phases without changing counts or records", () => {
   const records = [thread("parent", null, {work_phase: "orchestrating"}), thread("dispatch", "parent", {creation_mode: null}),
     thread("orchestrated", "parent", {work_phase: "deployment", status: "running"}), thread("user")];

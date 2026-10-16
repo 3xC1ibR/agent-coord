@@ -149,6 +149,19 @@ class WebPushTests(unittest.TestCase):
         self.push.tick()
         self.assertEqual(len(self.transport.sent), 1)
 
+    def test_live_question_pushes_once_with_its_actual_thread(self):
+        self.push.subscribe(self.device, subscription())
+        thread = self.sessions.create({"name": "Specialist"})["session"]["thread_id"]
+        self.sessions._event({"id": 57, "method": "item/tool/requestUserInput", "params": {"threadId": thread}})
+        key = next(reversed(self.sessions.requests))
+        self.assertTrue(self.sessions.claim_approval_notification(key))
+        self.push.tick()
+        self.push.tick()
+        self.assertEqual(len(self.transport.sent), 1)
+        payload = self.transport.sent[0]["payload"]
+        self.assertIn("Answer needed", payload["title"])
+        self.assertEqual(payload["url"], "/#" + thread)
+
     def test_approval_ttl_does_not_create_repeated_notifications(self):
         self.push.subscribe(self.device, subscription())
         self.approval()

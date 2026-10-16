@@ -1248,10 +1248,23 @@ permission only when you enable them. Keep a UI tab open; it can be in the
 background. Click an alert to open its thread. Turn failures also produce an
 alert; manually interrupted turns do not.
 
+Orchestration results are quiet: internal agent turns, successful child results,
+and an orchestrator waiting for its agents do not produce alerts or routine
+Attention entries. The orchestrator's delivered result, dispatched conversations,
+and direct user follow-ups retain normal visibility. A concrete user need still
+surfaces, including an approval, question, or fresh checkpoint naming the user as
+the next actor. Child needs share an Attention card under their available
+orchestrator, with links to each actual request. Filtering out the parent keeps
+the child's request accessible. Recoverable child failures go to the orchestrator;
+failures surface when that owner cannot continue. Message delivery, completion
+subscriptions, history, and saved thread placement are independent of this policy.
+
 Codex command, file-change, and permission approval requests also produce a
 **Codex is requesting approval** alert for browser sessions. Pending approvals
 are checked on connection and reconnection; answered requests stay quiet, and
 each request alerts once across tabs without changing its approval decision.
+Live user-input questions also produce an **Answer needed** alert. Desktop and
+phone delivery use the same policy, including cancellation of resolved requests.
 
 When a snooze expires, the thread returns to **Now** and produces a **Snooze
 ended** alert through the same desktop/browser notifications and enabled phone

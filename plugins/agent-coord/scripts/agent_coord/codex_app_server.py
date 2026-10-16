@@ -37,6 +37,7 @@ from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
 from .organization import app_agent_creators
+from . import notification_policy
 from .session_close import is_external_codex_session, stop_terminal_session
 from .workspaces import matches_workspace, workspace_choices
 
@@ -198,6 +199,7 @@ class BrowserSessions:
         self.loaded: set[str] = set()
         self.loaded_clients: dict[str, str] = {}
         self.thread_locks: dict[str, threading.RLock] = {}
+        self.starting_notification_context: dict[str, dict] = {}
         self.histories: dict[str, dict] = {}
         self.dirty_histories: set[str] = set()
         self.history_revisions: dict[str, int] = {}
@@ -297,6 +299,11 @@ class BrowserSessions:
                     self.turn_revisions[loaded_id] = self.turn_revisions.get(loaded_id, 0) + 1
             if thread_id in self.loaded:
                 self._capture_history(method, params)
+            if (method == "item/completed" and params.get("item", {}).get("type") == "userMessage"
+                    and self.starting_notification_context.get(thread_id, {}).get("origin") == "user"
+                    and params.get("turnId")):
+                accepted_turn = params["turnId"]
+                self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, accepted_turn))
             if "id" in message:
                 key = str(uuid.uuid4())
                 self.requests[key] = {**message, "key": key, "received_at": self.store.clock()}
@@ -331,6 +338,8 @@ class BrowserSessions:
             self._publish(method, params)
             if method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected"}:
                 saved_params = copy.deepcopy(params)
+                if method == "turn/started":
+                    saved_params["notification_context"] = self.starting_notification_context.get(thread_id)
                 self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected, disconnected_turns))
 
     def _persist_event(self, method, params, disconnected, disconnected_turns=None):
@@ -342,7 +351,8 @@ class BrowserSessions:
             self.store.touch(thread_id, turn_active=True)
             prompt = next(("\n".join(c.get("text", "") for c in item.get("content", []))
                            for item in params["turn"].get("items", []) if item.get("type") == "userMessage"), None)
-            self.store.threads.start_turn(thread_id, prompt=prompt, turn_id=params["turn"]["id"])
+            self.store.threads.start_turn(thread_id, prompt=prompt, turn_id=params["turn"]["id"],
+                                         notification_context=params.get("notification_context"))
         if method == "turn/completed" and thread_id:
             turn = params.get("turn", {})
             self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=turn.get("status", "completed"))
@@ -573,18 +583,45 @@ class BrowserSessions:
         batch = self.store.threads.completions_after(sequence)
         batch["events"] = [event for event in batch["events"]
                            if event["attention"] != "archived" and matches_workspace(event["cwd"], self.cwd)
-                           and not (event["snoozed_until"] and event["snoozed_until"] > self.store.clock())]
+                           and not (event["snoozed_until"] and event["snoozed_until"] > self.store.clock())
+                           and self.completion_notification_allowed(event["id"])]
         return batch
 
     def completion_notification_allowed(self, completion_id: int) -> bool:
         if type(completion_id) is not int or completion_id <= 0:
             raise CoordinationError("Choose a valid turn completion.")
         with self.store._connection() as db:
-            row = db.execute("SELECT thread_id FROM turn_completions WHERE id = ?", (completion_id,)).fetchone()
+            row = db.execute("SELECT * FROM turn_completions WHERE id = ?", (completion_id,)).fetchone()
+            context = db.execute("SELECT * FROM turn_notification_context WHERE thread_id = ? AND turn_key = ?",
+                                 (row["thread_id"], row["turn_key"])).fetchone() if row else None
+            checkpoint = db.execute("SELECT * FROM thread_checkpoints WHERE id = ?", (context["checkpoint_id"],)).fetchone() if context else None
+            owners = notification_policy.available_owners(db, self.store)
+            automatic = bool(row and db.execute("SELECT 1 FROM messages WHERE recipient_session_id = ? AND wake_turn_id = ? LIMIT 1",
+                                                (row["thread_id"], row["turn_key"])).fetchone())
         if row is None:
             raise CoordinationError("Turn completion not found.")
         thread = self.work_thread(row["thread_id"], history=False)
-        return thread["attention"] != "archived" and not thread["snoozed"]
+        if (context and context["origin"] == "coordination" and checkpoint and checkpoint["next_actor"] == "user"
+                and (thread["turn_key"] != row["turn_key"] or
+                     row["id"] <= thread["handled_completion_id"] and checkpoint["id"] <= thread["handled_checkpoint_id"])):
+            return False  # The user already answered or handled this escalation.
+        # Evaluate the completed turn, not a newer user follow-up or checkpoint.
+        if context:
+            thread.update(notification_context=dict(context), checkpoint=dict(checkpoint) if checkpoint else None,
+                          checkpoint_stale=False)
+        elif thread["turn_key"] != row["turn_key"]:
+            thread.update(notification_context=None, checkpoint=None, checkpoint_stale=True)
+        thread["turn_completion"] = dict(row)
+        thread["automatic_turn"] = automatic
+        policy = notification_policy.decide(thread, owners=owners)
+        if (context and context["origin"] == "coordination" and context["owner_thread_id"] == row["thread_id"]
+                and policy["needs_user"]):
+            # An automatic parent summary of live child needs shares their
+            # existing alerts. Distinct provider requests still have their own keys.
+            grouped = next((t for t in self.list_work_threads() if t["thread_id"] == row["thread_id"]), {})
+            if any(item["thread_id"] != row["thread_id"] for item in grouped.get("attention_items", [])):
+                return False
+        return thread["attention"] != "archived" and not thread["snoozed"] and policy["notify"]
 
     def claim_notification(self, completion_id: int) -> bool:
         return self.completion_notification_allowed(completion_id) and self.store.threads.claim_notification(completion_id)
@@ -606,12 +643,18 @@ class BrowserSessions:
             "item/permissions/requestApproval",
         }
 
+    @classmethod
+    def _input_request(cls, request: dict) -> bool:
+        return cls._approval_request(request) or request["method"] in {
+            "item/tool/requestUserInput", "mcpServer/elicitation/request",
+        }
+
     def approval_notifications(self, *, include_claimed: bool = False) -> list[dict]:
         """Include still-pending approvals on fresh streams and reconnects."""
         with self.lock:
             notifications = []
             for key, request in self.requests.items():
-                if not self._approval_request(request) or (request.get("notification_claimed") and not include_claimed):
+                if not self._input_request(request) or (request.get("notification_claimed") and not include_claimed):
                     continue
                 try:
                     thread_id = request["params"].get("threadId")
@@ -620,7 +663,8 @@ class BrowserSessions:
                 except CoordinationError:
                     continue
                 if thread["attention"] != "archived" and not thread["snoozed"]:
-                    notifications.append({"request_key": key, "thread_id": thread_id, "status": "approval",
+                    notifications.append({"request_key": key, "thread_id": thread_id,
+                                          "status": "approval" if self._approval_request(request) else "question",
                                           "client": self._record(thread_id)["client"],
                                           "title": thread["title"], "project_name": thread["project_name"],
                                           "repository_name": thread["repository_name"]})
@@ -632,7 +676,7 @@ class BrowserSessions:
             raise CoordinationError("Choose a valid approval request key.")
         with self.lock:
             request = self.requests.get(key)
-            if not request or not self._approval_request(request) or request.get("notification_claimed"):
+            if not request or not self._input_request(request) or request.get("notification_claimed"):
                 return False
             thread_id = request["params"].get("threadId")
             self._record(thread_id)
@@ -728,9 +772,11 @@ class BrowserSessions:
         if _inventory is None:
             with self.store._connection() as db:
                 thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
+                owners = notification_policy.available_owners(db, self.store)
             thread["dispatcher"] = self.dispatch.settings(thread_id)["enabled"] if hasattr(self, "dispatch") else False
             session = self.store.get_session(thread_id)
         else:
+            owners = _inventory.notification_owners
             thread["browser_session"] = thread_id in _inventory.browser
             thread["dispatcher"] = thread_id in _inventory.dispatchers
             session = _inventory.sessions[thread_id]
@@ -808,6 +854,14 @@ class BrowserSessions:
         thread["can_handle_response"] = (thread["attention"] != "archived" and pending_response
                                          and thread["status"] not in {"running", "needs input"}
                                          and thread["response_state"] in {"input", "action", "reply", "failed", "update"})
+        policy = notification_policy.decide(thread, waiting=bool(waiting), owners=owners)
+        thread["attention_owner_thread_id"] = policy["owner_thread_id"]
+        thread["attention_action"] = ("Approval or answer needed" if waiting else
+                                      checkpoint["next_action"] if checkpoint_input else
+                                      "Review the failed agent" if thread["response_state"] == "failed" else "")
+        if policy["quiet"] and not thread["snooze_due"]:
+            thread.update(needs_attention=False, attention_reason=None, attention_key=None, attention_since=None,
+                          can_handle_response=False)
         thread["can_resume"] = bool(not thread["browser_session"] and thread["client"] == "codex" and session["presence"] == "offline")
         fork_supported = thread["client"] == "codex" or (thread["client"] == "claude" and thread["browser_session"])
         thread["can_fork"] = bool(fork_supported and thread["attention"] != "archived"
@@ -840,8 +894,9 @@ class BrowserSessions:
             inventory.creators = self._app_agent_creators(db=db)
             inventory.projected = {row["thread_id"]: inventory.read(db, row) for row in inventory.rows
                                    if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)}
-        return [self.work_thread(thread_id, history=False, _creators=inventory.creators, _inventory=inventory)
-                for thread_id in inventory.projected]
+        return notification_policy.group_attention([
+            self.work_thread(thread_id, history=False, _creators=inventory.creators, _inventory=inventory)
+            for thread_id in inventory.projected])
 
     def update_work_thread(self, thread_id: str, body: dict) -> dict:
         with self._thread_lock(thread_id):
@@ -1356,8 +1411,15 @@ class BrowserSessions:
             params = {"threadId": thread_id, "input": inputs}
             if turn_id:
                 # The server checks this too, covering completion during the RPC.
-                with self.navigation.sending(thread_id, source_window):
-                    result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                with self.lock:
+                    self.starting_notification_context[thread_id] = {"origin": "user", "owner_thread_id": thread_id}
+                try:
+                    with self.navigation.sending(thread_id, source_window):
+                        result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                finally:
+                    with self.lock:
+                        self.starting_notification_context.pop(thread_id, None)
+                self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, turn_id))
                 self.dispatch.confirm_context(thread_id, dispatch_context)
                 self.store.threads.user_message(thread_id)
                 self.inbox_wake.resume(thread_id)
@@ -1378,12 +1440,23 @@ class BrowserSessions:
                     "type": "workspaceWrite", "writableRoots": roots, "networkAccess": False,
                 })
             try:
+                context = (notification_policy.automatic_context(self.store, thread_id) if automatic else
+                           {"origin": "user", "owner_thread_id": thread_id})
+                with self.lock:
+                    self.starting_notification_context[thread_id] = context
                 with self.navigation.sending(thread_id, source_window):
                     result = self._rpc(thread_id).request("turn/start", params)
+                # Some providers reply before emitting turn/started. Save by
+                # the accepted ID too; the callback path covers fast completion.
+                self.persistence.submit(lambda: self.store.threads.remember_notification_context(
+                    thread_id, result["turn"]["id"], context))
             except Exception:
                 with self.lock:
                     self.active.pop(thread_id, None)
                 raise
+            finally:
+                with self.lock:
+                    self.starting_notification_context.pop(thread_id, None)
             if result.get("model"):
                 self._capture_settings(thread_id, result)
             self.dispatch.confirm_context(thread_id, dispatch_context)

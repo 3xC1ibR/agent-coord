@@ -211,7 +211,7 @@ class WebPush:
         return {"queued": True}
 
     def _enqueue(self, db, device, event, kind, thread, expires, context=None):
-        label = {"completed": "Turn finished", "failed": "Turn failed", "approval": "Approval needed",
+        label = {"completed": "Turn finished", "failed": "Turn failed", "approval": "Approval needed", "question": "Answer needed",
                  "snooze": "Reminder",
                  "test": "Phone notifications are working"}[kind]
         context = context or {}
@@ -258,7 +258,7 @@ class WebPush:
             db.execute("UPDATE settings SET value=? WHERE name='cursor'", (str(batch["seq"]),))
             for event in approvals:
                 for sub in subscribers:
-                    self._enqueue(db, sub["device"], "approval:" + event["request_key"], "approval",
+                    self._enqueue(db, sub["device"], "approval:" + event["request_key"], event["status"],
                                   event["thread_id"], now + 900, event)
             for event in snoozes:
                 key = "snooze:" + str(event["id"])

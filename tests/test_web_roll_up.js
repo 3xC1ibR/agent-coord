@@ -15,6 +15,19 @@ function setup(threads) {
   return {roll, data, opened, selected: id => { selected = id; }};
 }
 
+test("a grouped escalation opens its child and advances using the parent receipt", async () => {
+  const {roll, data, opened} = setup([thread("parent", 1, {attention_target_thread_id: "child"}), thread("other", 2)]);
+  await roll.start();
+  assert.deepEqual(opened, ["child"]);
+  const ticket = roll.ticket();
+  assert.equal(ticket.id, "child");
+  data.threads[0] = thread("parent", 1, {attention_target_thread_id: "second-child", attention_key: "parent:2"});
+  await roll.responded(ticket);
+  assert.deepEqual(opened, ["child", "other"]);
+  await roll.responded(roll.ticket());
+  assert.deepEqual(opened, ["child", "other", "second-child"]);
+});
+
 test("oldest waiting request wins across projects, excluding quiet, Later and Closed", async () => {
   const {roll, opened} = setup([thread("new", 20, {created_at: 1}), thread("old", 10, {project_id: "elsewhere", created_at: 99}),
     thread("later", 1, {attention: "later"}), thread("closed", 1, {attention: "archived"}),

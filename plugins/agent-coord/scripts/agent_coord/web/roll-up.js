@@ -13,6 +13,8 @@
       this.current = null; this.done = false;
     }
     sync(threads) {
+      const visible = new Set(threads.filter(eligible).map(thread => thread.thread_id));
+      threads = threads.filter(thread => !visible.has(thread.attention_grouped_under));
       if (!this.active) return;
       const candidates = new Map(threads.filter(thread => eligible(thread) && !this.skipped.has(thread.thread_id) &&
         this.answered.get(thread.thread_id) !== token(thread)).map(thread => [thread.thread_id, thread]));
@@ -29,7 +31,7 @@
       this.changed();
     }
     ticket(id = this.selected()) {
-      return this.active && this.current?.thread_id === id ? {id, token: token(this.current), epoch: this.epoch} : null;
+      return this.active && (this.current?.attention_target_thread_id || this.current?.thread_id) === id ? {id, token: token(this.current), epoch: this.epoch} : null;
     }
     stop(done = false) {
       if (!this.active && !this.busy && !this.done && !done) return;
@@ -53,7 +55,7 @@
         const next = this.queue[0];
         if (!next) { this.stop(true); return; }
         this.current = next;
-        await this.open(next.thread_id);
+        await this.open(next.attention_target_thread_id || next.thread_id);
       } finally {
         if (epoch === this.epoch) { this.busy = false; this.changed(); }
       }
@@ -65,10 +67,10 @@
     }
     async responded(ticket, {pending = false} = {}) {
       if (!ticket || !this.active || this.busy || ticket.epoch !== this.epoch ||
-          ticket.id !== this.selected() || ticket.id !== this.current?.thread_id || pending) return;
-      this.answered.set(ticket.id, ticket.token);
+          ticket.id !== this.selected() || ticket.id !== (this.current?.attention_target_thread_id || this.current?.thread_id) || pending) return;
+      this.answered.set(this.current.thread_id, ticket.token);
       // A fast new response belongs at the end, behind the rest of this pass.
-      this.queue = this.queue.filter(thread => thread.thread_id !== ticket.id);
+      this.queue = this.queue.filter(thread => thread.thread_id !== this.current.thread_id);
       await this.advance();
     }
   }

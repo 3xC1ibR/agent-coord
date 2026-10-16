@@ -5,6 +5,13 @@ const {awaitsUser, groupThreads, status, phase, reason, cardAge} = require("../p
 const thread = (id, work_phase = "investigation", extra = {}) => ({thread_id: id, attention: "now", status: "idle",
   work_phase, created_at: 1, response_state: "available", ...extra});
 const ids = items => items.map(t => t.thread_id);
+
+test("grouped child needs fold only when their parent is visible", () => {
+  const parent = thread("parent", "orchestrating", {needs_attention: true});
+  const child = thread("child", "implementation", {needs_attention: true, attention_grouped_under: "parent"});
+  assert.deepEqual(ids(groupThreads([parent, child]).priority), ["parent"]);
+  assert.deepEqual(ids(groupThreads([child]).priority), ["child"]);
+});
 const lane = (groups, key) => groups.phases.find(g => g.key === key);
 
 test("all eight lifecycle columns have a fixed order, including empty stages", () => {

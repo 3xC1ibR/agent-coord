@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from .attention import AttentionStore, MODEL, POLICY_VERSION
 from .organization import OrganizationStore
+from .notification_policy import available_owners
 
 
 class ThreadInventory:
@@ -37,6 +38,13 @@ class ThreadInventory:
             SELECT c.* FROM thread_checkpoints c WHERE c.id IN (
                 SELECT MAX(id) FROM thread_checkpoints WHERE thread_id IN (
         """ + self.selected + ") GROUP BY thread_id)", self.params)}
+        self.notification_contexts = {row["thread_id"]: dict(row) for row in db.execute("""
+            SELECT n.* FROM turn_notification_context n JOIN work_threads t
+            ON t.thread_id = n.thread_id AND t.turn_key = n.turn_key
+            WHERE (t.attention = 'archived') = ?""", self.params)}
+        self.automatic_turns = {row[0] for row in db.execute("""SELECT DISTINCT t.thread_id
+            FROM work_threads t JOIN messages m ON m.recipient_session_id = t.thread_id AND m.wake_turn_id = t.turn_id
+            WHERE (t.attention = 'archived') = ?""", self.params)}
         self.prior = {row["thread_id"]: row["phase"] for row in db.execute("""
             SELECT c.thread_id, c.phase FROM thread_checkpoints c WHERE c.id IN (
                 SELECT MAX(id) FROM thread_checkpoints WHERE phase != 'finished' AND thread_id IN (
@@ -93,6 +101,7 @@ class ThreadInventory:
 
     def load_runtime(self, db):
         """Load the app-only fields without starting or resuming providers."""
+        self.notification_owners = available_owners(db, self.threads.store)
         self.sessions = {row["session_id"]: self.threads.store._row_to_session(row) for row in db.execute(
             "SELECT * FROM sessions WHERE session_id IN (" + self.selected + ")", self.params)}
         self.browser = {row[0] for row in db.execute(

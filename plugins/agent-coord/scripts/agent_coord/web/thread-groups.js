@@ -54,6 +54,8 @@ const threadGrouping = (() => {
     return hours >= 24 ? "old" : hours >= 6 ? "settled" : "fresh";
   }
   function groupThreads(threads) {
+    const visible = new Set(threads.map(thread => thread.thread_id));
+    threads = threads.filter(thread => !visible.has(thread.attention_grouped_under));
     const now = threads.filter(thread => thread.attention === "now");
     const priority = threads.filter(awaitsUser).sort(attentionOrder);
     return {

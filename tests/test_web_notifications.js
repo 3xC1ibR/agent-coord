@@ -39,6 +39,18 @@ const completion = (id = 1, values = {}) => ({id, thread_id: "thread-one", title
 const approval = (key = "request-one", values = {}) => ({request_key: key, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "approval", ...values});
 const snooze = (id = 1, values = {}) => ({id, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "snooze", ...values});
 
+test("a live question alerts once and opens the child with the actual question", async () => {
+  const f = fixture();
+  await f.button.onclick();
+  const question = approval("question-one", {status: "question", thread_id: "child"});
+  await f.client.receive([question, question]);
+  assert.equal(f.shared.shown.length, 1);
+  assert.equal(f.shared.shown[0].title, "agent-coord · Answer needed");
+  await f.shared.shown[0].onclick();
+  assert.deepEqual(f.opened, ["child"]);
+  f.client.destroy();
+});
+
 test("notification delivery works without a sidebar button and honors the Settings preference", async () => {
   const shared = {}, settings = fixture(shared), workspace = fixture(shared, false);
   await settings.button.onclick();
