@@ -77,7 +77,7 @@ async function loadThreadList(view, request) {
   if (request !== listRequest || view !== $("view").value) return;
   state.sessions = (closed || open).data.map(overlayPendingAttention);
   state.viewThreads = open.data.map(overlayPendingAttention);
-  state.threadTabs?.update([...state.viewThreads, ...(closed?.data || [])]);
+  state.threadTabs?.update([...(state.conversationWindow ? state.sessions : state.viewThreads), ...(closed?.data || [])]);
   state.dispatchWorkspace?.update(state.viewThreads, state.detail);
   state.rollUp?.sync(state.viewThreads);
   state.organization = organization;
@@ -881,7 +881,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.mobileChat?.close();
   if (id === "new-session") return newSession();
-  if (!state.paneMode) {
+  if (!state.paneMode && !state.conversationWindow) {
     const known = state.sessions?.find(thread => thread.thread_id === id) || state.conversations?.get(id)?.detail?.work_thread;
     if (stayInProject && (known?.project_cwd || known?.cwd) && (known.project_cwd || known.cwd) !== state.projectCwd) return;
     const cwd = known?.project_cwd || known?.cwd;
@@ -959,7 +959,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   if (fresh === false) return;
   if (state.paneMode) return;
   const displayed = state.detail.work_thread;
-  if (displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
+  if (!state.conversationWindow && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
     if (stayInProject) { goHome({restoreDispatcher: false}); return; }
     await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp});
     return select(id, {rollUp});
@@ -2554,16 +2554,21 @@ async function forkThread(onSuccess = () => {}, source = state.selected) {
 function setupConversationTransfer({state, document, select, goHome, renderStatus}) {
   const $ = id => document.getElementById(id);
   const panes = () => window.agentCoordPanes;
+  const staged = new Map();
   const field = id => panes()?.active && panes().records.get(id)?.api
     ? panes().records.get(id).frame.contentDocument.getElementById("message")
     : state.selected === id ? $("message") : null;
   return {
-    capture(id) {
+    empty: () => state.threadTabs.items.length === 0,
+    capture(id, {validate = true} = {}) {
       const shell = panes(), record = shell?.records.get(id);
-      const thread = state.threadTabs.items.find(item => item.thread_id === id) || record?.thread
-        || [...state.threadTabs.projects.values()].flat().find(item => item.thread_id === id);
-      if (!thread || id === "new-session" || record?.api?.canTransfer?.() === false || state.busy || state.sending?.size || state.attachments.pending(id) ||
-          document.querySelector("dialog[open]") || record?.frame?.contentDocument?.querySelector("dialog[open]")) return null;
+      const tab = state.threadTabs.items.find(item => item.thread_id === id) || record?.thread
+        || [...state.threadTabs.projects.values()].flat().find(item => item.thread_id === id)
+        || (state.drafts.has(id) || state.attachments.drafts.has(id) || state.mentions?.drafts.has(id) ? {thread_id: id} : null);
+      if (!tab || id === "new-session") return null;
+      if (validate && (state.transferLocks?.has(id) || record?.api?.canTransfer?.() === false || state.busy || state.sending?.size || state.attachments.pending(id) ||
+          document.querySelector("dialog[open]") || record?.frame?.contentDocument?.querySelector("dialog[open]"))) return null;
+      const thread = {...tab, ...state.conversations?.get(id)?.detail?.work_thread, ...record?.thread};
       const input = field(id), position = state.conversationPositions?.get(id) || state.conversations?.get(id);
       const draft = shell?.active && record ? record.api?.exportDraft() || record.initialDraft || shell.getDraft(id) : {
         text: input?.value ?? state.drafts.get(id) ?? "",
@@ -2576,7 +2581,7 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       try { disclosures = JSON.parse(sessionStorage.getItem("timeline-disclosures:" + id) || "[]"); }
       catch { /* Optional expansion state. */ }
       return {thread: {thread_id: id, title: thread.title}, cwd: thread.project_cwd || thread.cwd || state.projectCwd,
-        sourceCwd: state.projectCwd,
+        sourceCwd: state.threadTabs.cwd, tabCount: state.threadTabs.items.length,
         draft: {...draft, following: draft.following ?? !Number.isFinite(draft.scroll), disclosures,
           selectionStart: input?.selectionStart, selectionEnd: input?.selectionEnd}};
     },
@@ -2586,10 +2591,51 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       panes()?.records.get(id)?.api?.setTransferLock?.(locked);
       renderStatus();
     },
-    async restore(payload) {
+    async stage(payload, transferId) {
+      if (state.busy || state.sending?.size || document.querySelector("dialog[open]") ||
+          panes()?.focusedRecord?.api?.canTransfer?.() === false)
+        throw new Error("Finish the current action in the destination window before moving a tab there.");
+      const id = payload.thread.thread_id;
+      staged.set(transferId, {id, before: this.capture(id, {validate: false}), selected: state.selected,
+        wasOpen: [...state.threadTabs.projects.values()].some(items => items.some(item => item.thread_id === id)),
+        paneView: panes()?.active ? panes().viewId : null});
+      this.lock(id, true);
+      try {
+        await this.restore(payload);
+        return true;
+      } catch (error) {
+        await this.finish(transferId, false);
+        throw error;
+      }
+    },
+    async finish(transferId, committed) {
+      const snapshot = staged.get(transferId);
+      if (!snapshot) return !committed;
+      staged.delete(transferId);
+      const {id, before, wasOpen, selected, paneView} = snapshot;
+      this.lock(id, false);
+      if (!committed) {
+        if (before) {
+          await this.restore(before, {rollback: true});
+          if (!wasOpen) await this.release(id, state.threadTabs.cwd, undefined, {retainDraft: true});
+        }
+        else await this.release(id);
+        if (selected && selected !== id) await select(selected, {focus: false});
+        else if (!selected) goHome({restoreDispatcher: false});
+        if (paneView != null) panes()?.restoreView?.();
+      }
+      return true;
+    },
+    async restore(payload, {rollback = false} = {}) {
       const id = payload?.thread?.thread_id, draft = payload?.draft;
       if (typeof id !== "string" || !id || id === "new-session" || !draft || typeof draft.text !== "string")
         throw new Error("The detached conversation state is invalid.");
+      const existing = this.capture(id, {validate: false});
+      if (!rollback && existing && (existing.draft.text || existing.draft.images?.length) &&
+          JSON.stringify([existing.draft.text, existing.draft.images, existing.draft.mentions]) !==
+          JSON.stringify([draft.text, draft.images, draft.mentions]))
+        throw new Error("This window already has a different draft for this conversation.");
+      if (panes()?.active || state.dispatchDock?.active) goHome({restoreDispatcher: false});
       state.drafts.set(id, draft.text);
       state.attachments.drafts.set(id, draft.images || []);
       state.mentions?.restore(id, draft.text, draft.mentions || []);
@@ -2598,10 +2644,12 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       catch { /* Optional expansion state. */ }
       if (state.conversations?.has(id)) state.conversations.get(id).disclosures = new Set(disclosures);
       (state.conversationPositions ||= new Map()).set(id, {scroll: draft.scroll || 0, following: draft.following === true});
-      await select(id, {focus: false});
+      if (state.selected !== id) await select(id, {focus: false});
       if (state.selected !== id || state.detail?.work_thread?.thread_id !== id)
         throw new Error("The conversation could not be opened. Its original tab is still available.");
       $("message").value = draft.text;
+      state.drafts.set(id, draft.text);
+      state.threadTabs.open({...payload.thread, project_cwd: payload.cwd});
       if (Number.isFinite(draft.selectionStart)) $("message").setSelectionRange(draft.selectionStart, draft.selectionEnd);
       renderStatus(); state.resizeComposer?.();
       // Wait for the composer and transcript to receive their final geometry.
@@ -2614,12 +2662,24 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       $("message").focus({preventScroll: true});
       return true;
     },
-    async release(id, cwd = state.projectCwd, expected) {
+    discard(id) {
+      state.drafts.delete(id); state.attachments.drafts.delete(id); state.mentions?.drafts.delete(id);
+    },
+    async release(id, cwd = state.projectCwd, expected, {retainDraft = false} = {}) {
       if (expected) {
-        const current = this.capture(id);
+        // Unrelated sends/dialogs may start in another tab while the target
+        // loads. Only an actual draft change can invalidate this commit.
+        const current = this.capture(id, {validate: false});
         const content = draft => JSON.stringify([draft?.text, draft?.images || [], draft?.mentions || []]);
         if (!current || content(current.draft) !== content(expected.draft))
           throw new Error("Your draft changed while the window was opening. The original tab has been kept.");
+      }
+      if (retainDraft) {
+        const draft = this.capture(id, {validate: false})?.draft;
+        if (draft) {
+          state.drafts.set(id, draft.text); state.attachments.drafts.set(id, draft.images || []);
+          state.mentions?.restore(id, draft.text, draft.mentions || []);
+        }
       }
       // Closing a tab is navigation only; it never closes/stops its conversation.
       if (cwd === state.threadTabs.cwd) await state.threadTabs.close(id, {force: true});
@@ -2647,7 +2707,7 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       const record = shell?.records.get(id);
       record?.frame?.remove(); shell?.records.delete(id);
       // Prevent navigation history from restoring the moved draft in this window.
-      state.drafts.delete(id); state.attachments.drafts.delete(id); state.mentions?.drafts.delete(id);
+      if (!retainDraft) this.discard(id);
     },
   };
 }
@@ -2779,11 +2839,12 @@ async function boot() {
   let windowStorage, preferences;
   try { windowStorage = sessionStorage; preferences = localStorage; } catch { /* Views work without browser storage. */ }
   const desktop = window.agentCoordDesktop;
+  state.conversationWindow = desktop?.conversationWindow === true;
   const publishDesktopProjects = snapshot => api("desktop-projects", {
     windowId: state.sourceWindowId, projects: snapshot.projects, active: snapshot.active,
   });
-  state.folders = new WorkingFolders({storage: desktop ? preferences : windowStorage, preferences,
-    key: desktop?.folderSlot || "browser", scope: state.config.workspaceRoot || "", api,
+  state.folders = new WorkingFolders({storage: desktop && !state.conversationWindow ? preferences : windowStorage, preferences,
+    key: (state.conversationWindow ? desktop.windowId : desktop?.folderSlot) || "browser", scope: state.config.workspaceRoot || "", api,
     onChange: desktop ? snapshot => publishDesktopProjects(snapshot).catch(showError) : null});
   const projectQuery = new URLSearchParams(location.search);
   // Browsers copy sessionStorage into a new window. Explicitly opening a
@@ -2824,8 +2885,8 @@ async function boot() {
     },
     notify: (...args) => state.threadActions.notify(...args), onError: showError});
   state.threadTabs = new ThreadTabs({document, container: $("conversation-tabs"),
-    storage: desktop ? preferences : windowStorage, fallbackStorage: desktop ? windowStorage : null,
-    scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
+    storage: desktop && !state.conversationWindow ? preferences : windowStorage, fallbackStorage: desktop && !state.conversationWindow ? windowStorage : null,
+    scope: (state.config.workspaceRoot || "") + ":" + ((state.conversationWindow ? desktop.windowId : desktop?.folderSlot) || "browser"),
     onError: showError, onScratchpad: openProjectScratchpad,
     onSelect: async id => {
       if (await globalThis.agentCoordPanes?.selectTab(id)) return;
@@ -2835,14 +2896,24 @@ async function boot() {
       else goHome({restoreDispatcher: false});
     }});
   state.threadTabs.setProject(state.projectCwd);
-  if (projectQuery.get("detached") === "1") {
-    state.threadTabs.items.splice(0);
-    state.threadTabs.scratchpads.set(state.projectCwd, false);
-    state.threadTabs.overview();
-  }
   setupPaneShell({state, document, api, select, goHome, refreshList, showError, notifications: () => notifications,
     getView: () => state.projectCwd + ":" + savedViews.activeId,
     getThreads: () => threadsInProject(state.sessions).filter(thread => threadViews.matches(thread, savedViews.read().filters))});
+  if (state.conversationWindow) {
+    const closePane = state.threadTabs.onClose;
+    state.threadTabs.onClose = async id => {
+      const handled = await closePane?.(id);
+      if (!state.threadTabs.items.length) {
+        // Let tab/draft cleanup finish before the native view is released.
+        setTimeout(() => {
+          if (!state.threadTabs.items.length) desktop.closeConversationWindow().catch(showError);
+        }, 0);
+        return true;
+      }
+      return handled;
+    };
+    $("conversation-add-tab").onclick = () => newSession().catch(showError);
+  }
   state.dispatchWorkspace = new DispatcherWorkspace.Workspace({document, view: window, storage: preferences,
     panes: window.agentCoordPanes, fetchThread: id => api(threadPath(id)), onError: showError,
     dismissThread: async thread => {
@@ -2920,7 +2991,7 @@ async function boot() {
   if (initialDispatcher) await select(initialDispatcher, {dock: true, focus: false});
   if (initialThread && initialThread !== initialDispatcher) await select(initialThread);
   if (!initialThread && !initialDispatcher && projectQuery.get("scratchpad") === "1") openProjectScratchpad();
-  if (!initialNavigation && !initialThread && !initialDispatcher && projectQuery.get("scratchpad") !== "1" && projectQuery.get("detached") !== "1") {
+  if (!initialNavigation && !initialThread && !initialDispatcher && projectQuery.get("scratchpad") !== "1") {
     await restoreProjectTab().catch(showError);
   }
   if (initialThread && /^\d+$/.test(initialMessage || "")) focusAgentMessage(initialMessage);

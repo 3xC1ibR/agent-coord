@@ -77,7 +77,7 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
   }
   Object.assign(env, {
     Event, EventTarget, Storage, crypto: {randomUUID}, localStorage: new Storage(),
-    document, DataTransfer, DragEvent, queueMicrotask,
+    document, DataTransfer, DragEvent, queueMicrotask, URLSearchParams,
     MutationObserver: class { observe() {} disconnect() {} },
     DesktopCommandPalette: class {
       constructor(options) {
@@ -102,7 +102,8 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
   });
   env.window = env;
   env.top = subframe ? {} : env;
-  vm.runInContext(source.replace("__AGENT_COORD_PREFERENCES__", JSON.stringify(preferences)), vm.createContext(env));
+  vm.runInContext(source.replace("__AGENT_COORD_PREFERENCES__", JSON.stringify(preferences))
+    .replace("__AGENT_COORD_CONVERSATION_WINDOW__", "false"), vm.createContext(env));
   return {env, messages, preferences, nodes, replies, palettes};
 }
 
@@ -614,6 +615,7 @@ function tabDragFixture(pane = false) {
   f.env.document.elementFromPoint = () => null;
   f.env.agentCoordConversationTransfer = {capture: id => ({thread: {thread_id: id}, cwd: '/work', draft: {text: 'Draft'}}),
     lock() {},
+    restore: async () => {},
     release: id => released.push(id)};
   const pointer = (type, x = -200) => {
     const event = new Event(type, {cancelable: true});
@@ -661,4 +663,16 @@ test('an accepted reorder or split uses the existing drop handlers and never ope
   f.env.document.elementFromPoint = () => target;
   f.pointer('pointerdown', 50); f.pointer('pointermove', 200); f.pointer('pointerup', 200); await settle();
   assert.equal(drops.length, 1); assert.equal(f.messages.some(body => body.action === 'detachConversation'), false);
+});
+
+test('a failed native commit restores the source draft and requests destination rollback', async () => {
+  const f = tabDragFixture(), recovered = [], discarded = [];
+  f.replies.detachConversation = {transferId: 'move'};
+  f.replies.completeConversationTransfer = Promise.reject(new Error('Destination closed'));
+  f.env.agentCoordConversationTransfer.restore = async payload => recovered.push(payload.thread.thread_id);
+  f.env.agentCoordConversationTransfer.discard = id => discarded.push(id);
+  f.pointer('pointerdown', 50); f.pointer('pointermove'); f.pointer('pointerup');
+  await settle();
+  assert.deepEqual(recovered, ['thread-one']); assert.deepEqual(discarded, []);
+  assert.deepEqual(f.messages.filter(body => body.action === 'completeConversationTransfer').map(body => body.committed), [true, false]);
 });

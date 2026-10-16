@@ -4,6 +4,8 @@
   const native = window.webkit?.messageHandlers?.desktop;
   if (!native || window.top !== window) return;
   const send = body => native.postMessage(body);
+  const conversationWindow = __AGENT_COORD_CONVERSATION_WINDOW__;
+  if (conversationWindow) document.documentElement?.classList.add("conversation-window");
   const preferences = __AGENT_COORD_PREFERENCES__;
   const savedKey = key => key.startsWith("agent-coord.") || key === "agent-coord-group-by";
   // The backend uses a fresh private port on every launch. Preserve UI choices
@@ -75,6 +77,8 @@
     const panes = window.agentCoordPanes;
     // Include stacked tabs in their displayed pane order, not just the active tabs.
     if (panes?.active) return panes.layout?.groups.flat() || [];
+    if (conversationWindow) return Array.from(byID("conversation-tabs")?.querySelectorAll("[data-thread-tab]") || [])
+      .map(button => button.dataset.threadTab).filter(id => id && id !== "project-scratchpad");
     return [...new Set(Array.from(byID("sessions")?.querySelectorAll("button.session[data-thread]") || [])
       .map(button => button.dataset.thread))];
   }
@@ -82,7 +86,8 @@
     const ids = sessionOrder();
     if (!ids.length) return false;
     const panes = window.agentCoordPanes;
-    const selected = panes?.active ? panes.selected :
+    const selected = panes?.active ? panes.selected : conversationWindow ?
+      byID("conversation-tabs")?.querySelector('[aria-selected="true"]')?.dataset.threadTab :
       byID("sessions")?.querySelector('button.session[aria-current="true"]')?.dataset.thread;
     const index = ids.indexOf(selected);
     const id = ids[index < 0 ? (direction > 0 ? 0 : ids.length - 1) : (index + direction + ids.length) % ids.length];
@@ -102,8 +107,9 @@
         !byID("open-project-scratchpad").disabled && (!dialog || dialog === palette?.dialog)) result.push("openProjectScratchpad");
     if (destination()) result.push("insertFiles");
     if (dialog || !byID("back-home")) return result;
-    result.push("workspace", "findThread", "newSession", "toggleSidebar", "toggleFiles");
-    if (byID("open-folder")) result.push("openFolder");
+    result.push("newSession");
+    if (!conversationWindow) result.push("workspace", "findThread", "toggleSidebar", "toggleFiles");
+    if (!conversationWindow && byID("open-folder")) result.push("openFolder");
     if (sessionOrder().length) result.push("nextSession", "previousSession");
     if (byID("roll-up-start")) result.push("rollUp");
     if (byID("tile-threads") && window.agentCoordPanes) result.push("tileThreads");
@@ -164,10 +170,15 @@
     },
     windowId: "__AGENT_COORD_WINDOW_ID__",
     folderSlot: "native-__AGENT_COORD_FOLDER_SLOT__",
+    conversationWindow,
     chooseFolder: async () => (await send({action: "chooseFiles", workspace: true}))[0]?.path || null,
     newWindow: url => send({action: "newWindow", url}),
     openSettings: () => send({action: "openSettings"}),
     closeSettings: () => send({action: "closeSettings"}),
+    closeConversationWindow: () => {
+      if (transferring) { closeAfterTransfer = true; return Promise.resolve(true); }
+      return send({action: "closeConversationWindow"});
+    },
     fileEditor: operation => send({action: "fileEditor", operation}),
     navigationReady: () => send({action: "navigationReady"}).catch(reportError),
   });
@@ -175,7 +186,7 @@
   // WebKit's native HTML dragend reports the same result for Escape and an
   // unhandled external drop. Pointer capture gives us an unambiguous release
   // outside the window, and reuses the existing HTML reorder/split handlers.
-  let tabDrag = null, transferring = false, suppressTabClick = false;
+  let tabDrag = null, transferring = false, suppressTabClick = false, closeAfterTransfer = false;
   const dragEvent = (type, event, drag) => new DragEvent(type, {bubbles: true, cancelable: true,
     dataTransfer: drag.transfer, clientX: event.clientX, clientY: event.clientY});
   function finishTabDrag(event, cancel = false) {
@@ -205,8 +216,27 @@
     transferring = true;
     transfer.lock(drag.id, true);
     send({action: "detachConversation", payload, x: event.clientX, y: event.clientY})
-      .then(moved => moved ? transfer.release(drag.id, payload.sourceCwd ?? payload.cwd, payload) : null)
-      .catch(reportError).finally(() => { transfer.lock(drag.id, false); transferring = false; });
+      .then(async moved => {
+        if (!moved) return;
+        try {
+          await transfer.release(drag.id, payload.sourceCwd ?? payload.cwd, payload, {retainDraft: true});
+          if (moved.transferId) await send({action: "completeConversationTransfer", transferId: moved.transferId, committed: true});
+          transfer.discard?.(drag.id);
+        } catch (error) {
+          // Keep a recoverable source draft until native confirms the commit.
+          const recovery = transfer.capture(drag.id, {validate: false}) || payload;
+          await transfer.restore(recovery, {rollback: true});
+          if (moved.transferId) await send({action: "completeConversationTransfer", transferId: moved.transferId, committed: false}).catch(() => {});
+          throw error;
+        }
+      })
+      .catch(reportError).finally(() => {
+        transfer.lock(drag.id, false); transferring = false;
+        if (closeAfterTransfer) {
+          closeAfterTransfer = false;
+          if (transfer.empty()) send({action: "closeConversationWindow"}).catch(reportError);
+        }
+      });
   }
   document.addEventListener("pointerdown", event => {
     if (event.button !== 0 || event.isPrimary === false || tabDrag || transferring || openDialog()) return;

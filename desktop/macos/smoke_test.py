@@ -59,7 +59,9 @@ def main() -> int:
     if result.get("error"):
         raise RuntimeError(result["error"])
     required = ("detach_normal_tab_click", "detach_escape_cancelled", "detach_reorder_preserved", "detach_window_created", "detach_state_restored", "detach_history_and_reading", "detach_window_focused", "detach_remaining_tabs",
-                "detach_inside_window_ignored", "detach_last_tab_overview", "detach_shared_backend") if args.detach_only else (
+                "detach_inside_window_ignored", "detach_last_tab_overview", "detach_shared_backend", "detach_compact_host",
+                "detach_singleton_moves_window", "detach_drop_into_existing", "detach_repeat_moves_tab",
+                "detach_dock_back_closes_empty_host", "detach_host_survives_reload") if args.detach_only else (
                 "ui_loaded", "notification_bridge", "window_closed", "backend_survived_close",
                 "download_attribution_link",
                 "cold_start_link_queued", "app_link_project_filter", "app_link_source_window",

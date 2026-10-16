@@ -184,6 +184,7 @@ private final class DesktopWindow {
     let id = UUID().uuidString.lowercased()
     var folderSlot = 0
     var isSettings = false
+    var isConversationWindow = false
     let window: NSWindow
     let webView: WKWebView
     let status: NSStackView
@@ -197,6 +198,8 @@ private final class DesktopWindow {
     var pendingLinks: [URL] = []
     var incomingConversation: [String: Any]?
     var conversationReply: ((Any?, String?) -> Void)?
+    var conversationTransferId: String?
+    var closeAfterConversationTransfer = false
     let files = FileBrowserController()
     let split = NSSplitViewController()
     var filesItem: NSSplitViewItem?
@@ -212,6 +215,13 @@ private final class DesktopWindow {
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation,
     WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply, UNUserNotificationCenterDelegate {
     private var windows: [DesktopWindow] = []
+    private struct ConversationTransfer {
+        weak var source: DesktopWindow?
+        weak var target: DesktopWindow?
+        let created: Bool
+        var finishing = false
+    }
+    private var conversationTransfers: [String: ConversationTransfer] = [:]
     // Share local storage (including notification focus) while each web view
     // retains its own session storage, selected thread, and message drafts.
     private let websiteDataStore = WKWebsiteDataStore.nonPersistent()
@@ -399,6 +409,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     @discardableResult private func makeWindow(url: URL? = nil) -> DesktopWindow {
         let settings = url?.path == "/settings"
+        let conversation = URLComponents(url: url ?? serverURL ?? URL(fileURLWithPath: "/"), resolvingAgainstBaseURL: false)?
+            .queryItems?.contains { $0.name == "detached" && $0.value == "1" } == true
         if settings, let existing = windows.first(where: { $0.isSettings }) {
             existing.window.deminiaturize(nil)
             existing.window.makeKeyAndOrderFront(nil)
@@ -406,17 +418,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return existing
         }
         let previous = current?.window
-        let window = SessionWindow(contentRect: NSRect(x: 0, y: 0, width: settings ? 720 : 1240, height: settings ? 760 : 820),
+        let window = SessionWindow(contentRect: NSRect(x: 0, y: 0, width: settings ? 720 : conversation ? 880 : 1240, height: settings || conversation ? 760 : 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = settings ? "Settings — Ribbon Field" : url?.path == "/monitor" ? "Coordination Monitor — Ribbon Field" : "Ribbon Field"
-        window.minSize = settings ? NSSize(width: 480, height: 420) : NSSize(width: 720, height: 520)
+        window.minSize = settings || conversation ? NSSize(width: 480, height: 420) : NSSize(width: 720, height: 520)
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.tabbingMode = .disallowed
         if smokeReport == nil && (settings || windows.isEmpty) { window.setFrameAutosaveName(settings ? "AgentCoordSettings" : "AgentCoordWorkspace") }
         if settings {
             if smokeReport != nil || !window.setFrameUsingName("AgentCoordSettings") { window.center() }
-        } else if let previous = previous {
+        } else if let previous = previous, !conversation {
             window.setFrame(previous.frame.offsetBy(dx: 24, dy: -24), display: false)
         } else if smokeReport != nil || !window.setFrameUsingName("AgentCoordWorkspace") { window.center() }
         let config = WKWebViewConfiguration()
@@ -448,6 +460,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let item = DesktopWindow(window: window, webView: webView, status: status, label: statusLabel,
                                  spinner: spinner, retry: retry)
         item.isSettings = settings
+        item.isConversationWindow = conversation
         item.files.preferences = preferences
         // Stable slots restore each window's folder without reusing its runtime identity.
         while windows.contains(where: { $0.folderSlot == item.folderSlot }) { item.folderSlot += 1 }
@@ -459,7 +472,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return true
         }
         // Settings shares the web preferences store without a conversation or Files pane.
-        if !settings {
+        if !settings && !conversation {
             // Keep the native file pane independent of the conversation renderer.
             let chat = NSViewController()
             let content = window.contentView!
@@ -493,10 +506,94 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func item(for view: WKWebView) -> DesktopWindow? { windows.first { $0.webView === view } }
 
+    private func positionConversationWindow(_ window: NSWindow, near drop: NSPoint) {
+        let screen = NSScreen.screens.first { $0.frame.contains(drop) } ?? window.screen ?? NSScreen.main
+        var frame = window.frame
+        frame.origin = NSPoint(x: drop.x - 100, y: drop.y - frame.height + 20)
+        if let visible = screen?.visibleFrame {
+            frame.origin.x = max(visible.minX, min(frame.minX, visible.maxX - frame.width))
+            frame.origin.y = max(visible.minY, min(frame.minY, visible.maxY - frame.height))
+        }
+        window.setFrame(frame, display: true)
+    }
+
+    private func receiveConversation(_ payload: [String: Any], in target: DesktopWindow, from source: DesktopWindow, created: Bool,
+                                     reply: @escaping (Any?, String?) -> Void) {
+        guard target.conversationTransferId == nil else { reply(nil, "This window is already receiving a tab."); return }
+        let transferId = UUID().uuidString.lowercased()
+        conversationTransfers[transferId] = ConversationTransfer(source: source, target: target, created: created)
+        target.conversationTransferId = transferId
+        target.incomingConversation = payload
+        target.conversationReply = reply
+        deliverConversation(to: target)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self, weak target] in
+            guard let self = self, let target = target, let transfer = self.conversationTransfers[transferId], !transfer.finishing else { return }
+            let reply = target.conversationReply
+            target.conversationReply = nil
+            target.incomingConversation = nil
+            self.finishConversationTransfer(transferId, committed: transfer.source == nil) { _, _ in }
+            reply?(nil, "Moving the conversation timed out. The original tab is still available.")
+        }
+    }
+
+    private func deliverConversation(to target: DesktopWindow) {
+        guard target.navigationReady, let payload = target.incomingConversation, let transferId = target.conversationTransferId,
+              target.conversationReply != nil else { return }
+        target.incomingConversation = nil
+        target.webView.callAsyncJavaScript("return await window.agentCoordConversationTransfer.stage(payload, transferId)",
+            arguments: ["payload": payload, "transferId": transferId], in: nil, in: .page) { [weak self, weak target] result in
+            guard let self = self, let target = target, let reply = target.conversationReply else { return }
+            target.conversationReply = nil
+            switch result {
+            case .success(let value) where value as? Bool == true:
+                target.window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                if self.conversationTransfers[transferId]?.source == nil {
+                    self.finishConversationTransfer(transferId, committed: true) { _, _ in }
+                }
+                reply(["transferId": transferId], nil)
+            default:
+                self.finishConversationTransfer(transferId, committed: false) { _, _ in
+                    reply(nil, "The conversation could not be moved. The original tab is still available.")
+                }
+            }
+        }
+    }
+
+    private func finishConversationTransfer(_ transferId: String, committed: Bool,
+                                            reply: @escaping (Any?, String?) -> Void) {
+        guard let transfer = conversationTransfers[transferId], let target = transfer.target,
+              windows.contains(where: { $0 === target }), !transfer.finishing else {
+            reply(nil, "The destination window is no longer available."); return
+        }
+        conversationTransfers[transferId]?.finishing = true
+        target.webView.callAsyncJavaScript("return await window.agentCoordConversationTransfer.finish(transferId, committed)",
+            arguments: ["transferId": transferId, "committed": committed], in: nil, in: .page) { [weak self] result in
+            self?.conversationTransfers.removeValue(forKey: transferId)
+            target.conversationTransferId = nil
+            guard case .success(let value) = result, value as? Bool == true else {
+                transfer.source?.closeAfterConversationTransfer = false
+                if transfer.created { target.window.close() }
+                reply(nil, "The destination could not confirm the move. The original tab is being restored.")
+                return
+            }
+            if !committed && transfer.created { target.window.close() }
+            if committed, let source = transfer.source, source.closeAfterConversationTransfer {
+                source.closeAfterConversationTransfer = false
+                source.window.performClose(nil)
+            } else { transfer.source?.closeAfterConversationTransfer = false }
+            reply(true, nil)
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow,
               let item = windows.first(where: { $0.window === closing }),
               item.isSettings || windows.filter({ !$0.isSettings }).count > 1 else { return }
+        for (transferId, transfer) in conversationTransfers where transfer.target === item {
+            transfer.source?.closeAfterConversationTransfer = false
+            conversationTransfers.removeValue(forKey: transferId)
+        }
         let reply = item.conversationReply
         item.conversationReply = nil
         reply?(nil, "The new window closed before the conversation was ready. The original tab is still available.")
@@ -547,8 +644,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         NSApp.activate(ignoringOtherApps: true)
     }
     @objc private func showWorkspace() {
-        if current?.isSettings == true {
-            let workspace = windows.last { !$0.isSettings } ?? makeWindow()
+        if current?.isSettings == true || current?.isConversationWindow == true {
+            let workspace = windows.last { !$0.isSettings && !$0.isConversationWindow } ?? makeWindow()
             workspace.window.makeKeyAndOrderFront(nil)
         }
         showWindow()
@@ -674,6 +771,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         controller.addUserScript(WKUserScript(source: palette, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         controller.addUserScript(WKUserScript(source: source.replacingOccurrences(of: "__AGENT_COORD_PREFERENCES__", with: json)
             .replacingOccurrences(of: "__AGENT_COORD_FOLDER_SLOT__", with: String(item(for: webView)?.folderSlot ?? 0))
+            .replacingOccurrences(of: "__AGENT_COORD_CONVERSATION_WINDOW__", with: item(for: webView)?.isConversationWindow == true ? "true" : "false")
             .replacingOccurrences(of: "__AGENT_COORD_WINDOW_ID__", with: item(for: webView)?.id ?? ""),
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
@@ -806,27 +904,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                     else { replyHandler(true, nil) }
                 }
             } catch { replyHandler(nil, error.localizedDescription) }
+        case "closeConversationWindow":
+            guard owner.isConversationWindow else { replyHandler(false, nil); return }
+            replyHandler(true, nil)
+            if conversationTransfers.values.contains(where: { $0.source === owner }) {
+                owner.closeAfterConversationTransfer = true
+                return
+            }
+            DispatchQueue.main.async { owner.window.performClose(nil) }
+        case "completeConversationTransfer":
+            guard let transferId = body["transferId"] as? String,
+                  conversationTransfers[transferId]?.source === owner,
+                  let committed = body["committed"] as? Bool else {
+                replyHandler(nil, "This conversation transfer is no longer available."); return
+            }
+            finishConversationTransfer(transferId, committed: committed, reply: replyHandler)
         case "navigationReady":
             owner.navigationReady = true
             deliverLinks(to: owner)
             replyHandler(true, nil)
-            if let payload = owner.incomingConversation {
-                owner.incomingConversation = nil
-                source.callAsyncJavaScript("return await window.agentCoordConversationTransfer.restore(payload)",
-                    arguments: ["payload": payload], in: nil, in: .page) { [weak owner] result in
-                    guard let owner = owner, let reply = owner.conversationReply else { return }
-                    owner.conversationReply = nil
-                    switch result {
-                    case .success(let value) where value as? Bool == true:
-                        owner.window.makeKeyAndOrderFront(nil)
-                        NSApp.activate(ignoringOtherApps: true)
-                        reply(true, nil)
-                    default:
-                        owner.window.close()
-                        reply(nil, "The conversation could not be restored in the new window. The original tab is still available.")
-                    }
-                }
-            }
+            deliverConversation(to: owner)
         case "windowState":
             if let title = body["title"] as? String {
                 owner.window.title = String(title.prefix(160)) + " — Ribbon Field"
@@ -871,27 +968,33 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 y: source.isFlipped ? y * source.pageZoom : source.bounds.height - y * source.pageZoom)
             let drop = owner.window.convertPoint(toScreen: source.convert(local, to: nil))
             guard !owner.window.frame.contains(drop) else { replyHandler(false, nil); return }
+            // A tab can move into any existing conversation window, including
+            // the original workspace. No second copy/window is needed.
+            let destinationWindow = NSApp.orderedWindows.first { window in
+                window !== owner.window && window.isVisible && !window.isMiniaturized && window.frame.contains(drop) &&
+                windows.contains { $0.window === window && !$0.isSettings && $0.webView.url?.path == "/" && $0.navigationReady }
+            }
+            if let destinationWindow = destinationWindow,
+               let target = windows.first(where: { $0.window === destinationWindow }) {
+                receiveConversation(payload, in: target, from: owner, created: false, reply: replyHandler)
+                return
+            }
+            // Dragging the sole tab out of an auxiliary window moves that
+            // window itself, preserving its document and live UI exactly.
+            if owner.isConversationWindow, payload["tabCount"] as? Int == 1 {
+                positionConversationWindow(owner.window, near: drop)
+                owner.window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                replyHandler(false, nil)
+                return
+            }
             var destination = URLComponents(url: base, resolvingAgainstBaseURL: false)!
             destination.path = "/"
             destination.queryItems = [URLQueryItem(name: "directory", value: cwd), URLQueryItem(name: "detached", value: "1")]
             destination.fragment = nil
             let target = makeWindow(url: destination.url!)
-            target.incomingConversation = payload
-            target.conversationReply = replyHandler
-            let screen = NSScreen.screens.first { $0.frame.contains(drop) } ?? owner.window.screen ?? NSScreen.main
-            var frame = target.window.frame
-            frame.origin = NSPoint(x: drop.x - 100, y: drop.y - frame.height + 20)
-            if let visible = screen?.visibleFrame {
-                frame.origin.x = max(visible.minX, min(frame.minX, visible.maxX - frame.width))
-                frame.origin.y = max(visible.minY, min(frame.minY, visible.maxY - frame.height))
-            }
-            target.window.setFrame(frame, display: true)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak target] in
-                guard let target = target, let reply = target.conversationReply else { return }
-                target.conversationReply = nil
-                target.window.close()
-                reply(nil, "Opening the detached conversation timed out. The original tab is still available.")
-            }
+            positionConversationWindow(target.window, near: drop)
+            receiveConversation(payload, in: target, from: owner, created: true, reply: replyHandler)
         case "dropFiles":
             guard let names = body["names"] as? [String], !names.isEmpty, names.count <= 32 else {
                 replyHandler(nil, "Drop up to 32 files or folders at a time."); return
@@ -1033,9 +1136,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             userInfo: [NSLocalizedDescriptionKey: "Native behavior check failed: " + key]) }
     }
 
-    @MainActor private func smokeJS(_ source: String, in view: WKWebView) async throws -> Any {
+    @MainActor private func smokeJS(_ source: String, in view: WKWebView, arguments: [String: Any] = [:]) async throws -> Any {
         try await withCheckedThrowingContinuation { continuation in
-            view.callAsyncJavaScript(source, arguments: [:], in: nil, in: .page) { result in
+            view.callAsyncJavaScript(source, arguments: arguments, in: nil, in: .page) { result in
                 continuation.resume(with: result)
             }
         }
@@ -2134,13 +2237,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return true;
             """, in: first.webView)
         try await smokeFocus(first)
-        func pointer(_ type: NSEvent.EventType, _ x: Double, _ y: Double) {
-            let view = first.webView
+        func pointer(_ type: NSEvent.EventType, _ x: Double, _ y: Double, in item: DesktopWindow? = nil) {
+            let item = item ?? first, view = item.webView
             let location = view.convert(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y), to: nil)
             if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: first.window.windowNumber,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: item.window.windowNumber,
                 context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) {
-                first.window.sendEvent(event)
+                item.window.sendEvent(event)
             }
         }
         var tab = try await smokeJS("const rect = document.querySelector('[data-thread-tab=\"detach-one\"]').getBoundingClientRect(); return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};", in: first.webView) as! [String: Double]
@@ -2186,7 +2289,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         pointer(.leftMouseDragged, -250, 80)
         pointer(.leftMouseUp, -250, 80)
         for _ in 0..<150 {
-            if windows.count == 2 && windows.last?.navigationReady == true,
+            if windows.count == 2 && windows.last?.navigationReady == true && conversationTransfers.isEmpty,
                (try await smokeJS("return !state.threadTabs.items.some(item => item.thread_id === 'detach-one');", in: first.webView)) as? Bool == true { break }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -2219,9 +2322,77 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
               payload: agentCoordConversationTransfer.capture('detach-one'), x: 100, y: 80}) === false;
             """, in: second.webView)
         try smokeCheck("detach_inside_window_ignored", inside as? Bool == true && windows.count == 2)
-        _ = try await smokeJS("await agentCoordConversationTransfer.release('detach-one'); return true;", in: second.webView)
-        let last = try await smokeJS("return state.selected === null && !state.threadTabs.items.length && !document.querySelector('#welcome').hidden;", in: second.webView)
-        try smokeCheck("detach_last_tab_overview", last as? Bool == true && second.window.isVisible)
+        let compact = try await smokeJS("""
+            return agentCoordDesktop.conversationWindow && document.documentElement.classList.contains('conversation-window') &&
+              getComputedStyle(document.querySelector('.sidebar')).display === 'none' &&
+              getComputedStyle(document.querySelector('.workspace-bar')).display === 'none' &&
+              getComputedStyle(document.querySelector('.projects-bar')).display === 'none' &&
+              getComputedStyle(document.querySelector('#conversation-add-tab')).display !== 'none' &&
+              document.querySelector('#conversation-tabs').getBoundingClientRect().top < 2;
+            """, in: second.webView)
+        try smokeCheck("detach_compact_host", compact as? Bool == true && second.filesItem == nil)
+        func localPoint(_ screen: NSPoint, in item: DesktopWindow) -> NSPoint {
+            let local = item.webView.convert(item.window.convertPoint(fromScreen: screen), from: nil)
+            return NSPoint(x: local.x, y: item.webView.isFlipped ? local.y : item.webView.bounds.height - local.y)
+        }
+        func drag(_ id: String, from item: DesktopWindow, to point: NSPoint) async throws {
+            try await smokeFocus(item)
+            let tab = try await smokeJS("const rect = document.querySelector('[data-thread-tab=\"' + thread + '\"]').getBoundingClientRect(); return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};", in: item.webView, arguments: ["thread": id]) as! [String: Double]
+            pointer(.leftMouseDown, tab["x"]!, tab["y"]!, in: item)
+            pointer(.leftMouseDragged, point.x, point.y, in: item)
+            pointer(.leftMouseUp, point.x, point.y, in: item)
+        }
+        let outside = NSPoint(x: (NSScreen.main?.frame.maxX ?? first.window.frame.maxX) + 400, y: first.window.frame.midY)
+        let oldOrigin = second.window.frame.origin
+        try await drag("detach-one", from: second, to: localPoint(outside, in: second))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let singleton = try await smokeJS("return state.selected === 'detach-one' && state.threadTabs.items.length === 1 && document.querySelector('#message').value === 'Keep detached draft';", in: second.webView)
+        try smokeCheck("detach_singleton_moves_window", singleton as? Bool == true && windows.count == 2 && second.window.frame.origin != oldOrigin)
+        // Keep a visible destination point outside the original source frame.
+        second.window.setFrameOrigin(NSPoint(x: first.window.frame.maxX + 40, y: first.window.frame.minY))
+        let targetPoint = NSPoint(x: second.window.frame.maxX - 10, y: second.window.frame.maxY - 80)
+        _ = try await smokeJS("document.querySelector('#message').value = 'Second tab draft'; return true;", in: first.webView)
+        try await drag("detach-two", from: first, to: localPoint(targetPoint, in: first))
+        for _ in 0..<100 {
+            if (try await smokeJS("return state.threadTabs.items.length === 2 && !state.transferLocks?.size;", in: second.webView)) as? Bool == true { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let added = try await smokeJS("return state.threadTabs.items.some(t => t.thread_id === 'detach-one') && state.threadTabs.items.some(t => t.thread_id === 'detach-two') && document.querySelector('#message').value === 'Second tab draft';", in: second.webView)
+        try smokeCheck("detach_drop_into_existing", added as? Bool == true && windows.count == 2)
+        let emptyMain = try await smokeJS("return state.selected === null && !state.threadTabs.items.length;", in: first.webView)
+        try smokeCheck("detach_last_tab_overview", emptyMain as? Bool == true && first.window.isVisible)
+        // An outward drag from a multi-tab host moves just that tab to a new host.
+        let multiOutside = NSPoint(x: (windows.map { $0.window.frame.maxX }.max() ?? outside.x) + 400, y: outside.y)
+        try await drag("detach-one", from: second, to: localPoint(multiOutside, in: second))
+        for _ in 0..<100 {
+            if windows.count == 3 && windows.last?.navigationReady == true && conversationTransfers.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard let third = windows.last, third !== second else { try smokeCheck("detach_repeat_moves_tab", false); return }
+        let repeatSource = try await smokeJS("return state.threadTabs.items.map(t => t.thread_id).join(',') === 'detach-two';", in: second.webView)
+        let repeatTarget = try await smokeJS("return state.threadTabs.items.map(t => t.thread_id).join(',') === 'detach-one' && document.querySelector('#message').value === 'Keep detached draft';", in: third.webView)
+        try smokeCheck("detach_repeat_moves_tab", repeatSource as? Bool == true && repeatTarget as? Bool == true && windows.count == 3)
+        // Dock the singleton back into the original window; its empty host closes.
+        first.window.setFrameOrigin(NSPoint(x: second.window.frame.minX - first.window.frame.width - 40, y: second.window.frame.minY))
+        let rootPoint = NSPoint(x: first.window.frame.minX + 100, y: first.window.frame.maxY - 80)
+        try await drag("detach-one", from: third, to: localPoint(rootPoint, in: third))
+        for _ in 0..<100 {
+            if windows.count == 2 && conversationTransfers.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let docked = try await smokeJS("return state.threadTabs.items.map(t => t.thread_id).join(',') === 'detach-one' && document.querySelector('#message').value === 'Keep detached draft';", in: first.webView)
+        try smokeCheck("detach_dock_back_closes_empty_host", docked as? Bool == true && windows.count == 2 && !windows.contains { $0 === third })
+        // Native identity, rather than the navigation URL, survives Reload.
+        second.loaded = false
+        second.navigationReady = false
+        second.webView.reload()
+        try await smokeReady(second)
+        for _ in 0..<100 {
+            if second.navigationReady { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let reloaded = try await smokeJS("return agentCoordDesktop.conversationWindow && state.threadTabs.items.map(t => t.thread_id).join(',') === 'detach-two' && getComputedStyle(document.querySelector('.sidebar')).display === 'none';", in: second.webView)
+        try smokeCheck("detach_host_survives_reload", reloaded as? Bool == true)
         try smokeCheck("detach_shared_backend", backend.process?.isRunning == true)
         second.window.close()
     }
