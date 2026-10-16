@@ -113,6 +113,92 @@ Download that hosted image on another Mac and verify installation and first
 launch with Gatekeeper enabled before announcing it. Hosting/upload is separate
 from building; this command does not publish anything.
 
+## Automated releases to Cloudflare R2
+
+[Release macOS](../../.github/workflows/release-macos.yml) builds Apple Silicon
+on `macos-15` and Intel on `macos-15-intel`, using the same builder above. It
+runs the Python/JavaScript suites and packaging checks before signing, then
+checks notarization tickets, Gatekeeper, and the mounted/relocated distribution.
+Release builds do not run foreground native UI smoke tests on hosted runners.
+
+The download host is `https://downloads.ribbonfield.com`, backed by the existing
+`ribbon-field-downloads` R2 bucket in account
+`af320d6747244dea99edc8895d3d00f4`. CI uses the S3 API and the AWS CLI included
+on GitHub's Ubuntu runner; it does not need Cloudflare account administration.
+
+### One-time GitHub setup
+
+Create these environments in the repository's **Settings → Environments**:
+
+| Environment | Configuration |
+| --- | --- |
+| `macos-signing` | Allow `main` and version tags (`v*`). Store the Apple signing settings below. |
+| `macos-release` | Allow `main` and version tags (`v*`). **Require a release reviewer** before any upload. Store only the two R2 secrets below. |
+
+In `macos-signing`, configure:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| Secret | `MACOS_CERTIFICATE_BASE64` | Base64 of an exported Developer ID Application `.p12`, including its private key. |
+| Secret | `MACOS_CERTIFICATE_PASSWORD` | Password protecting that `.p12`. |
+| Secret | `APPLE_ID` | Apple account used for notarization. |
+| Secret | `APPLE_APP_PASSWORD` | An Apple app-specific password for that account. |
+| Variable | `APPLE_TEAM_ID` | Developer team ID (currently `R6Z7YTP6YG`). |
+| Variable | `MACOS_SIGN_IDENTITY` | Full Developer ID identity (currently `Developer ID Application: Roni Quinonez (R6Z7YTP6YG)`). |
+
+In `macos-release`, set `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` from an
+[R2 API token](https://developers.cloudflare.com/r2/api/tokens/) with **Object
+Read & Write** permission limited to `ribbon-field-downloads`. These are S3
+credentials, not the Cloudflare OAuth connection or a general API bearer token.
+Use GitHub's secret UI or pipe local files into `gh secret set --env <name>`;
+do not put secrets in source, chat, workflow inputs, or shell history.
+
+The signing job imports the certificate into an ephemeral Keychain, creates a
+notarytool profile, and removes the Keychain on success or failure. Credentials
+are not included in release artifacts. Ordinary PR CI has no release secrets.
+
+### Build, review, and publish
+
+1. Merge the release source into `main`. In **Actions → Release macOS → Run
+   workflow**, select `main`, enter a new numeric `X.Y.Z` version, and select
+   **Publish** to request a release. Leave Publish unchecked for a build-only
+   rehearsal. Pushing a `vX.Y.Z` tag on a commit in `main` also requests a release.
+2. Both architecture jobs retain `macos-release-arm64` and
+   `macos-release-x86_64` artifacts for 30 days. Download and extract them while
+   the publish job waits for environment approval. Test drag-to-Applications,
+   Gatekeeper, first launch, and the native UI on another Mac. Test Intel on
+   Intel hardware when available; an Intel runner does not cover every
+   supported macOS version.
+3. Approve `macos-release`. The publisher validates both complete artifact sets,
+   checks their recorded source commit, and uploads versioned files. It then
+   downloads them through the public HTTPS host and verifies every checksum.
+   Only after all checks pass does it upload `releases/X.Y.Z/release.json`.
+4. Use the links in the workflow summary for the website or invitations, for
+   example `https://downloads.ribbonfield.com/releases/0.1.1/Ribbon-Field-0.1.1-arm64.dmg`.
+   These examples are naming conventions, not a claim that version is published.
+   The matching `.dmg.sha256`, `.dmg.json`, and `.dmg.provenance.json` are public.
+
+Release URLs are immutable. The upload uses R2's atomic `If-None-Match: *`
+condition and refuses different bytes at an existing key. Identical files from
+a partial upload are reused. If upload fails, rerun **failed jobs only**, keeping
+the original build artifacts. Rebuilding after a partial publication changes
+signatures/timestamps; use a new version rather than overwriting old files.
+There is no mutable `latest` URL or automatic website update. Roll back by
+linking to a previous release; never replace an installer users already have.
+Individual uploaded files may be visible before completion; `release.json` is
+the marker that the whole release passed public-download verification.
+
+The publisher can validate downloaded artifacts locally without credentials or
+network access:
+
+```bash
+python3 scripts/publish_macos_release.py --directory build/release \
+  --version 0.1.1 --commit <full-source-commit-sha>
+```
+
+Adding `--publish` performs the public upload using `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`. Use the protected workflow for normal releases.
+
 ## Build and install locally
 
 Requirements: macOS 12 or later, Xcode Command Line Tools (`xcode-select --install`),
