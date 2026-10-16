@@ -116,6 +116,42 @@ test("failed commands keep the draft and running sessions cannot change settings
   assert.equal(c.$("message").value, "/effort invalid");
 });
 
+test("permission and settings commands restore composer focus after refreshing", async () => {
+  for (const command of ["/permissions yolo", "/permissions default", "/model", "/effort high", "/cd", "/help"]) {
+    const c = setup(), input = c.$("message");
+    const doc = {body: {}, documentElement: {}, activeElement: input, hasFocus: () => true, querySelector: () => null};
+    input.ownerDocument = doc; input.value = command;
+    input.focus = options => { assert.equal(options.preventScroll, true); doc.activeElement = input; };
+    c.api = async () => ({command: {message: "Settings updated"}});
+    c.refreshDetail = async () => { doc.activeElement = doc.body; };
+    await c.sendMessage();
+    assert.equal(input.value, "");
+    assert.equal(doc.activeElement, input, command + " leaves the composer ready to type");
+  }
+});
+
+test("command completion respects deliberate focus changes and navigation", async () => {
+  for (const destination of ["other control", "other thread", "overview and back", "dialog", "other window", "hidden composer", "disabled input", "unfocused submission"]) {
+    const c = setup(), input = c.$("message");
+    const doc = {body: {}, documentElement: {}, activeElement: input, hasFocus: () => true, querySelector: () => null};
+    input.ownerDocument = doc; input.value = "/permissions yolo";
+    input.focus = () => assert.fail("Must preserve " + destination);
+    if (destination === "unfocused submission") doc.activeElement = {};
+    c.api = async () => ({command: {message: "Settings updated"}});
+    c.refreshDetail = async () => {
+      doc.activeElement = doc.body;
+      if (destination === "other control") doc.activeElement = {};
+      if (destination === "other thread") c.state.selected = "two";
+      if (destination === "overview and back") c.state.navigationRevision = 2;
+      if (destination === "dialog") doc.querySelector = () => ({});
+      if (destination === "other window") doc.hasFocus = () => false;
+      if (destination === "hidden composer") c.$("composer").hidden = true;
+      if (destination === "disabled input") input.disabled = true;
+    };
+    await c.sendMessage();
+  }
+});
+
 test("switching threads during a command preserves the new thread draft", async () => {
   const c = setup();
   c.$("message").value = "/model";

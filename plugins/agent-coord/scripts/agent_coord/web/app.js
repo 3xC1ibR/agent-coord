@@ -2255,6 +2255,9 @@ async function sendMessage(mode = "steer") {
   const detail = state.detail;
   const dispatcher = !!detail?.work_thread?.dispatcher;
   const id = state.selected, text = $("message").value;
+  const input = $("message"), doc = input.ownerDocument;
+  const hadComposerFocus = doc?.activeElement === input;
+  const navigationRevision = state.navigationRevision;
   const draft = isSessionDraft() ? state.newSessionDraft : null, sendKey = draft || id;
   const draftId = draft?.draftId || id;
   const ticket = state.rollUp?.ticket(id);
@@ -2269,6 +2272,7 @@ async function sendMessage(mode = "steer") {
   if (!dispatcher && detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
   (state.sending ||= new Set()).add(sendKey); renderStatus();
   let dispatchReceived = false;
+  let commandCompleted = false;
   try {
     const command = text.trim().split(/\s+/)[0].toLowerCase();
     if (command === "/fork" || command === "/close") {
@@ -2301,6 +2305,7 @@ async function sendMessage(mode = "steer") {
     }
     const result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
     dispatchReceived = !!result.dispatched;
+    commandCompleted = !!result.command;
     if (result.dispatched) {
       sessionStorage.removeItem("dispatch-request:" + id);
       if (body.askDispatcher && state.dispatchDock?.active === id) state.dispatchDock.expand(true);
@@ -2325,7 +2330,15 @@ async function sendMessage(mode = "steer") {
     }
     throw error;
   }
-  finally { state.sending.delete(sendKey); renderStatus(); if (state.paneMode) globalThis.agentCoordPane?.saveDraft(); }
+  finally {
+    state.sending.delete(sendKey); renderStatus();
+    // Local commands leave the composer ready for the next message. Restore
+    // focus only if refresh lost it, without overriding navigation or a click.
+    if (commandCompleted && hadComposerFocus && state.selected === id && state.navigationRevision === navigationRevision &&
+        !$("composer").hidden && !input.disabled && doc.hasFocus() && !doc.querySelector("dialog[open]") &&
+        [input, doc.body, doc.documentElement].includes(doc.activeElement)) input.focus({preventScroll: true});
+    if (state.paneMode) globalThis.agentCoordPane?.saveDraft();
+  }
 }
 $("composer").onsubmit = event => { event.preventDefault(); action(sendMessage); };
 async function toggleDispatcher(thread = state.detail?.work_thread) {
