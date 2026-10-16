@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
@@ -125,8 +126,22 @@ def notarize(artifact: Path, profile: str) -> None:
 
 
 def staple(artifact: Path) -> None:
-    subprocess.run(["xcrun", "stapler", "staple", str(artifact)], check=True)
-    subprocess.run(["xcrun", "stapler", "validate", str(artifact)], check=True)
+    run_stapler("staple", artifact)
+    run_stapler("validate", artifact)
+
+
+def run_stapler(action: str, artifact: Path) -> None:
+    for attempt in range(5):
+        result = subprocess.run(["xcrun", "stapler", action, str(artifact)], capture_output=True, text=True)
+        output = (result.stdout or "") + (result.stderr or "")
+        print(output, end="", flush=True)
+        if result.returncode == 0:
+            return
+        if result.returncode != 68 or "NSURLErrorDomain Code=-1005" not in output or attempt == 4:
+            result.check_returncode()
+        delay = 10 * 2 ** attempt
+        print(f"Apple ticket connection lost; retrying {action} in {delay}s", flush=True)
+        time.sleep(delay)
 
 
 def create_dmg(app: Path, output: Path, *, identity: str, profile: str | None,
@@ -167,3 +182,12 @@ def create_dmg(app: Path, output: Path, *, identity: str, profile: str | None,
         "sha256": digest, "signing_identity": identity, "notarized": bool(profile),
         "python": runtime_spec(architecture),
     }, indent=2) + "\n")
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Validate an Apple notarization ticket with bounded network retries")
+    parser.add_argument("action", choices=("validate",))
+    parser.add_argument("artifact", type=Path)
+    args = parser.parse_args()
+    run_stapler(args.action, args.artifact)
+
