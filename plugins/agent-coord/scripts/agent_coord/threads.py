@@ -613,6 +613,8 @@ class ThreadStore:
             if domain is not UNSET:
                 self._save_domain(db, session_id, domain, "user" if author == "user" else "agent")
             db.execute("UPDATE work_threads SET updated_at = ? WHERE thread_id = ?", (now, session_id))
+        from .launch_metrics import record_action
+        record_action(self.store, "checkpoint")
         return self.get(session_id, history=True)
 
     def _link(self, payload, thread):

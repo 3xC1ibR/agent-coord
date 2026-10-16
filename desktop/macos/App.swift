@@ -71,6 +71,7 @@ private final class Backend {
         child.executableURL = configuration.pythonURL(resources: resources)
         child.arguments = ["-u", resources.appendingPathComponent("backend.py").path,
                            "--db", database ?? configuration.databasePath]
+        if database != nil { child.arguments?.append("--no-launch-metrics") }
         var environment = ProcessInfo.processInfo.environment
         // Finder has a minimal PATH. Portable builds use this user's tool locations.
         // Avoid inheriting the session identity of a terminal that opens the app.
@@ -275,6 +276,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             backend.ready = { [weak self] url in
                 guard let self = self else { return }
                 self.serverURL = url
+                let links = self.pendingAppLinks
+                self.pendingAppLinks.removeAll()
+                for link in links { self.openAppLink(link) }
                 for item in self.windows {
                     if !item.isSettings { item.files.connect(BackendWorkspaceFiles(baseURL: url, local: true)) }
                     self.configureScripts(item.webView)
@@ -292,7 +296,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             pendingAppLinks.removeAll()
             for link in links { openAppLink(link) }
             if smokeReport != nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 35) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
                     guard let self = self, !self.quitting else { return }
                     self.finishSmoke(error: "Native smoke test timed out")
                 }
@@ -601,6 +605,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func openAppLink(_ url: URL, preferred: DesktopWindow? = nil) {
+        if url.scheme == "agentcoord", url.host == "attribution", url.user == nil,
+           url.password == nil, url.port == nil, url.path.isEmpty,
+           let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           parts.queryItems?.count == 1, let query = parts.queryItems?.first,
+           query.name == "download_token", let token = query.value,
+           let identifier = UUID(uuidString: token), identifier.uuidString.lowercased() == token {
+            // Explicit user-initiated attribution; never inspect the clipboard.
+            guard let base = serverURL else { pendingAppLinks.append(url); return }
+            Task {
+                do {
+                    let (data, _) = try await URLSession.shared.data(from: base.appendingPathComponent("api/browser/config"))
+                    guard let config = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let csrf = config["token"] as? String else { return }
+                    var request = URLRequest(url: base.appendingPathComponent("api/browser/launch-metrics/attribution"))
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue(csrf, forHTTPHeaderField: "X-Agent-Coord-Token")
+                    request.httpBody = try JSONSerialization.data(withJSONObject: ["download_token": token])
+                    _ = try await URLSession.shared.data(for: request)
+                } catch { /* Attribution cannot interrupt opening the app. */ }
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         guard url.scheme == "agentcoord", ["overview", "view", "thread"].contains(url.host ?? ""),
               url.user == nil, url.password == nil, url.port == nil,
               url.absoluteString.count <= 8192 else { return }
@@ -1017,6 +1045,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try await smokeReady(first)
         smokeResults["backend_pid"] = backend.process?.processIdentifier
         smokeResults["url"] = serverURL?.absoluteString
+        if CommandLine.arguments.contains("--smoke-attribution-only") {
+            try await smokeAttribution()
+            finishSmoke(error: nil)
+            return
+        }
         if CommandLine.arguments.contains("--smoke-sessions-only") {
             try await smokeFocus(first)
             try await smokeSessionCycling(first)
@@ -1740,6 +1773,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         return result
     }
 
+    @MainActor private func smokeAttribution() async throws {
+        let fixture = try smokePython("""
+            import json, sys, uuid
+            from agent_coord.store import CoordinationStore
+            from agent_coord import launch_metrics
+            launch_metrics.initialize(CoordinationStore(sys.argv[1]))
+            print(json.dumps({'download_token': str(uuid.uuid4())}))
+            """, arguments: [])
+        let token = fixture["download_token"] as! String
+        application(NSApp, open: [URL(string: "agentcoord://attribution?download_token=\(token)")!])
+        var attributed = false
+        for _ in 0..<20 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let receipt = try smokePython("""
+                import json, sqlite3, sys
+                with sqlite3.connect(sys.argv[1]) as db:
+                    token = db.execute('SELECT download_token FROM launch_install').fetchone()[0]
+                print(json.dumps({'received': token == sys.argv[2]}))
+                """, arguments: [token])
+            if receipt["received"] as? Bool == true { attributed = true; break }
+        }
+        try smokeCheck("download_attribution_link", attributed)
+    }
+
     @MainActor private func smokeNavigation(_ first: DesktopWindow, _ second: DesktopWindow) async throws {
         // The actual CLI runs outside the checkout against the isolated database.
         // Capture its launch URL instead of sending it to the user's installed app.
@@ -1751,19 +1808,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             from agent_coord.cli import main
             store = CoordinationStore(sys.argv[1])
             nav = NavigationStore(store)
-            billing = store.threads.organization.create_project('Billing')
-            other = store.threads.organization.create_project('Other')
+            directory = str(store.database_path.parent.resolve())
+            billing = store.threads.organization.create_project('Billing', cwd=directory)
+            other = store.threads.organization.create_project('Other', cwd=directory)
             for name, project in [('navigation-manager', None), ('navigation-billing', billing['id']), ('navigation-other', other['id'])]:
                 store.register(session_id=name, client='codex', cwd=str(store.database_path.parent))
                 store.threads.update(name, title=name, project_id=project)
-            view = nav.views.create({'name': 'Review', 'filters': {'project': other['id'], 'search': 'keep'}})
+            view = nav.views.create({'name': 'Review', 'cwd': directory, 'filters': {'project': other['id'], 'search': 'keep'}})
             nav.bind('navigation-manager', sys.argv[2])
             output = io.StringIO()
             with patch('agent_coord.navigation.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as opener, contextlib.redirect_stdout(output):
                 assert main(['--db', sys.argv[1], 'ui', 'open', '--project', 'Billing', '--from-session', 'navigation-manager', '--wait', '0']) == 0
             print(json.dumps({'url': opener.call_args.args[0][-1], 'result': json.loads(output.getvalue()),
-                              'billing': billing['id'], 'other': other['id'], 'view': view['id']}))
+                              'billing': billing['id'], 'other': other['id'], 'view': view['id'], 'directory': directory}))
             """, arguments: [first.id])
+        try await smokeAttribution()
         let data = try JSONSerialization.data(withJSONObject: fixture)
         let json = String(data: data, encoding: .utf8)!
         _ = try await smokeJS("""
@@ -1778,6 +1837,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         _ = smokeWebKey("\t", flags: [], code: 48)
         _ = try await smokeJS("""
             window.navigationFixture = \(json);
+            await openProjectDirectory(navigationFixture.directory);
             savedViews.sync((await api('views')).data);
             await savedViews.activate(window.navigationFixture.view);
             return true;
@@ -1855,7 +1915,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         application(NSApp, open: [URL(string: "agentcoord://overview?project=\(fixture["billing"] as! String)&window=\(UUID().uuidString)")!])
         let fallback = try await smokeJS("""
             for (let i = 0; i < 100; i++) {
-              if (savedViews.activeId === 'all' && document.querySelector('#project').value === navigationFixture.billing && !navigation.applying) return true;
+              if (['all', 'group-' + navigationFixture.billing].includes(savedViews.activeId) && document.querySelector('#project').value === navigationFixture.billing && !navigation.applying) return true;
               await new Promise(resolve => setTimeout(resolve, 25));
             }
             return false;

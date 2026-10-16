@@ -28,6 +28,7 @@ def main() -> int:
     parser.add_argument("--files-only", action="store_true", help="Run focused native file-browser checks.")
     parser.add_argument("--sessions-only", action="store_true", help="Run focused native session-switching checks.")
     parser.add_argument("--scratchpad-only", action="store_true", help="Run focused project scratchpad checks.")
+    parser.add_argument("--attribution-only", action="store_true", help="Verify the native download-token handoff without sending telemetry.")
     args = parser.parse_args()
     executable = args.app.expanduser().resolve() / "Contents/MacOS/Agent Coord"
     report = args.report.expanduser().resolve()
@@ -40,9 +41,11 @@ def main() -> int:
         command.append("--smoke-sessions-only")
     if args.scratchpad_only:
         command.append("--smoke-scratchpad-only")
+    if args.attribution_only:
+        command.append("--smoke-attribution-only")
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as app:
         try:
-            _, errors = app.communicate(timeout=50)
+            _, errors = app.communicate(timeout=110)
         except subprocess.TimeoutExpired:
             app.kill()
             _, errors = app.communicate(timeout=5)
@@ -53,6 +56,7 @@ def main() -> int:
     if result.get("error"):
         raise RuntimeError(result["error"])
     for key in ("ui_loaded", "notification_bridge", "window_closed", "backend_survived_close",
+                "download_attribution_link",
                 "cold_start_link_queued", "app_link_project_filter", "app_link_source_window",
                 "app_link_acknowledged", "app_link_back_preserves_draft", "app_link_saved_view_unchanged",
                 "app_link_closed_window_fallback",
@@ -81,6 +85,8 @@ def main() -> int:
                 "file_browser_shortcut", "file_browser_collapsed",
                 "external_window_rejected", "secondary_window_closed", "one_shared_backend"):
         if args.files_only and not (key.startswith(("file_browser_", "settings_")) or key == "ui_loaded"):
+            continue
+        if args.attribution_only and key not in {"ui_loaded", "download_attribution_link"}:
             continue
         if args.sessions_only and not (key.startswith(("next_session_", "previous_session_")) or key == "ui_loaded"):
             continue
