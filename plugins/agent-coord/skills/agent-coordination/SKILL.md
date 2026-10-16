@@ -487,6 +487,16 @@ follow-ups remain available, and later `send` requests choose their own reply
 obligation. Use new requests for questions or revisions after completion, and
 share material findings when useful without recurring check-ins.
 
+The app runtime automatically reports app-agent failures to the creating agent,
+regardless of creation mode or reply requirements. Failed turns (including usage
+and credit limits), unexpected provider disconnects during work, and creation or
+inbox-start failures produce durable actionable inbox messages with the agent
+identity and available error details. Each failure is reported once; a later
+failed turn produces a new report. These reports require no reply and wake an
+eligible idle creator through the normal inbox guards. Deliberate Stop is not a
+failure report. Failed work is not automatically retried. This behavior requires
+an updated running app backend, not just refreshed CLI plugins.
+
 Reuse the same `--request-id` and arguments when retrying a timed-out command;
 do not create another agent. Inspect or cancel a pending request with:
 

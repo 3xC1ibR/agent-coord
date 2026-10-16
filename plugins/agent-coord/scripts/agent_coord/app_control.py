@@ -9,6 +9,7 @@ import time
 import uuid
 
 from .navigation import NavigationStore
+from .app_agent_failures import notify_creation_failure
 from .store import CoordinationError
 from .workspaces import matches_workspace
 
@@ -113,13 +114,22 @@ class AppControl:
         return self.status(identifier)
 
     def _reconcile(self, db):
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
         cutoff = self.store.clock() - LEASE_SECONDS
         # Never replay provider creation or a possibly applied settings change.
+        stale = db.execute("""SELECT request_id FROM app_control_requests
+            WHERE status = 'running' AND updated_at < ? AND NOT EXISTS
+            (SELECT 1 FROM app_control_runtimes r WHERE r.id = app_control_requests.owner AND r.heartbeat >= ?)""",
+            (cutoff, cutoff)).fetchall()
         db.execute("""UPDATE app_control_requests SET status = 'uncertain',
             error = 'The app runtime stopped before confirming the result. Inspect the conversation before retrying.',
             updated_at = ? WHERE status = 'running' AND updated_at < ? AND NOT EXISTS
             (SELECT 1 FROM app_control_runtimes r WHERE r.id = app_control_requests.owner AND r.heartbeat >= ?)""",
             (self.store.clock(), cutoff, cutoff))
+        for row in stale:
+            notify_creation_failure(self.store, db, db.execute(
+                "SELECT * FROM app_control_requests WHERE request_id = ?", (row["request_id"],)).fetchone())
 
     def status(self, request_id, *, wait=0):
         if not isinstance(wait, (int, float)) or not 0 <= wait <= 30:
@@ -178,8 +188,12 @@ class AppControl:
     def complete(self, request_id, *, result=None, error=None, uncertain=False):
         status = "uncertain" if uncertain else "failed" if error is not None else "completed"
         with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             changed = db.execute("UPDATE app_control_requests SET status = ?, result_json = ?, error = ?, updated_at = ? WHERE request_id = ? AND status = 'running'",
                        (status, json.dumps(result) if result is not None else None, error, self.store.clock(), request_id))
+            if changed.rowcount and status in {"failed", "uncertain"}:
+                notify_creation_failure(self.store, db, db.execute(
+                    "SELECT * FROM app_control_requests WHERE request_id = ?", (request_id,)).fetchone())
             # The message can refresh the timeline before creation is confirmed.
             if changed.rowcount and status == "completed" and isinstance(result, dict) and type(result.get("message_id")) is int:
                 db.execute("""INSERT INTO message_changes(sender_session_id, recipient_session_id)
