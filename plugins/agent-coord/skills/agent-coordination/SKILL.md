@@ -213,6 +213,56 @@ Closing does not imply task completion. Terminal shutdown requires a verified
 Codex transcript owner and never targets a remembered Zellij pane or shared
 app-server. When that cannot be verified, exit the terminal session first.
 
+## Context lifecycle for orchestration agents
+
+Only app agents created with `thread create --mode orchestration` are required
+to report context lifecycle advice. User-created conversations, ordinary
+dispatch-created agents, and terminal delegates keep their existing behavior.
+Reusing a conversation does not change its creation mode. Independent peer
+coordination and direct user follow-ups remain available.
+
+When returning an assignment result, including blocked or failed work, add
+`context_lifecycle` to the normal checkpoint before returning control or sending
+any requested reply. Associate it with the delivered assignment message ID:
+
+```json
+{
+  "context_lifecycle": {
+    "assignment_message_id": 123,
+    "recommendation": "reuse",
+    "reason": "Retained debugging constraints help with related fixes.",
+    "reuse_for": ["Fixing this implementation"],
+    "fresh_for": ["Independent review"],
+    "handover": {
+      "confirmed_facts": ["The parser rejects empty input."],
+      "constraints": ["Keep the CLI dependency-free."],
+      "tried_and_failed": ["Trimming after parsing preserves invalid whitespace."],
+      "open_questions": []
+    }
+  }
+}
+```
+
+Use `reuse`, `fresh`, or `either`; explain the recommendation with observed
+conditions and identify the kinds of follow-up work each context would serve.
+Preserve concrete findings, constraints, and failed approaches needed by a
+replacement. Do not invent token counts or noise ratios. Use existing checkpoint
+links for artifacts. Each array accepts at most eight non-empty strings of
+400 characters; `reason` accepts 500 characters. The complete serialized report
+must fit within 6000 characters. Arrays may be empty when there is nothing to report.
+
+Omission preserves a saved report within the current turn; a new turn does not
+inherit it. `"context_lifecycle": null` clears it. Changes save checkpoint history
+even when the progress summary is unchanged. Automatic initial-assignment
+completion events and explicit result replies attach a snapshot matched to the
+assignment and exact turn, with its source `checkpoint_id`. Missing reports
+remain unknown and do not block ordinary result delivery. This requires an
+updated app runtime for automatic completion delivery as well as refreshed plugins.
+
+Do not send a separate lifecycle assessment message. Only send a conversational
+reply where one was requested. A recommendation for fresh context does not close,
+archive, or reset this conversation; the orchestrator chooses the next assignment.
+
 ## Before implementation
 
 1. Inspect other working sessions with `agent-coord list --relevant --cwd
@@ -474,8 +524,20 @@ request is saved as the original request, then sent as actionable work. By defau
 (or with `--no-reply-required`), the agent answers the user in its own chat with no
 reply obligation to the creator.
 
-Add `--reply-required` to `thread create` when the initial result must return to
-the creating agent. The recipient uses `agent-coord reply --message-id <id>` with
+Creation automatically subscribes the creator to completion of the created
+agent's initial assignment turn. The completion event carries the saved
+checkpoint and, for an eligible orchestration agent, its matching context
+lifecycle envelope. No result reply is needed solely to deliver that event.
+Review the reported outcome against the assignment; a completed turn does not
+by itself prove the task is complete. Completion events require no reply.
+Use `--no-subscribe` to opt out of the automatic subscription. A completed
+creation receipt confirms `result.subscribe` and `result.subscription_id`
+(`null` when opted out). This delivery requires the updated running app backend;
+plugin refresh alone does not replace a running backend.
+
+Add `--reply-required` to `thread create` when an explicit agent-authored reply
+to the initial request is needed in addition to its automatic completion event.
+The recipient uses `agent-coord reply --message-id <id>` with
 the delivered initial message ID; the reply reaches the creator's inbox and wakes
 an eligible idle app conversation. The completed creation receipt includes
 `result.reply_required`, which confirms the applied contract. This flag needs an

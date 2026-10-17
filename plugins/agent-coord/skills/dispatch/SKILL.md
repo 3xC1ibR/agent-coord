@@ -55,6 +55,13 @@ Use actionable messages for assignments. Default to
 `--no-reply-required` when the dispatcher does not need a response.
 This removes the reply obligation, not the request to do the work.
 
+Creation also subscribes you to the created agent's initial assignment turn
+completion without imposing a result-reply obligation. Handle completion events
+without conversational acknowledgements. Consume a matching context lifecycle
+envelope when one is available for an orchestration-created agent, but do not
+require ordinary dispatch agents or user-created conversations to produce one.
+Use `--no-subscribe` when the creation should not report its completion to you.
+
 Have the app agent answer the user directly in its own conversation
 and accept follow-ups there. Give the user a link to that conversation.
 Do not require routine answers to pass back through the dispatcher.

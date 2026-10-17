@@ -319,6 +319,22 @@ Workflow findings collection is off by default; enable it only with an explicit
 request for that dispatch or orchestration conversation.
 Normal task tracking, checkpoints, and result reporting remain in use.
 
+App agents created with `thread create --mode orchestration` also save a
+`context_lifecycle` envelope in their normal assignment-result checkpoint.
+It recommends `reuse`, `fresh`, or `either`, explains what follow-up work would
+benefit from retained context, and provides confirmed facts, constraints,
+tried-and-failed approaches, and open questions for a replacement. Creation's
+automatic completion event and explicit requested replies carry an immutable
+snapshot matched to that assignment and turn. User-created conversations and
+ordinary dispatch-created agents do not acquire this reporting requirement.
+The recommendation guides the orchestrator; it does not close or reset a
+conversation. See the [reporting contract](plugins/agent-coord/skills/agent-coordination/SKILL.md#context-lifecycle-for-orchestration-agents)
+and [reuse guidance](plugins/agent-coord/skills/orchestrate/SKILL.md).
+Automatic creation subscriptions can be disabled with `--no-subscribe`; the
+completed creation receipt reports `result.subscribe` and
+`result.subscription_id`. An updated app backend is required to deliver these
+events; refreshing plugins alone does not replace an already running backend.
+
 A registered dispatcher can ask the running app to create an agent:
 
 ```bash

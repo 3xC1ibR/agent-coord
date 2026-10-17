@@ -42,6 +42,28 @@ to record that it was created to contribute to this coordinated outcome.
 This is creation intent, independent of the request's reply requirement.
 Reuse existing conversations with `send`; reuse does not change their creation mode.
 
+Choose context for the next assignment by asking whether it depends on the
+worker's accumulated trajectory or only on its delivered artifacts. Use a
+matching `context_lifecycle` report from the worker's result when available:
+
+- Prefer reuse for the same implementation's write/test/fix loop, dialogue-based
+  refinements, and questions about earlier evidence, constraints, or failed approaches.
+- Prefer fresh context for synthesis from completed verified research and for
+  independent review when the handover and artifacts contain the needed state.
+- Use separate workers for independent items in a map/reduce workload when useful.
+- Treat a domain, toolset, or phase change as a reason to assess relevance, not
+  an automatic reset. Repeated failures can make retained negative memory valuable.
+
+Match `reuse_for`, `fresh_for`, and the recommendation's concrete reason to the
+actual next task; the report is advice, not a permanent worker classification.
+`reuse`, `fresh`, and `either` express the worker's recommendation. Missing,
+assignment-mismatched, or outdated advice means unknown. Do not wake a worker
+solely to ask whether to reuse it, or invent token/noise thresholds from its
+self-assessment. A fresh conversation receives the verified handover, relevant
+artifacts, constraints, failed approaches, and open questions. Copying the full
+conversation does not provide fresh context. Creating a replacement does not
+close the previous conversation or prevent useful peer coordination.
+
 Give each assignment its objective, necessary context, expected
 result, constraints, dependencies, and a clear reporting destination.
 
@@ -66,20 +88,32 @@ source assumptions before relying on retained context.
 
 ## Keep results and decisions flowing
 
-Use the coordination request/reply mechanism when you need an
-answer or result. Request a reply and have the recipient answer
-the original message using `agent-coord reply --message-id <id>`.
-Use `thread create --mode orchestration --reply-required` for a new agent
-and `send --reply-required` for an existing one.
+App-agent creation automatically subscribes you to completion of the created
+agent's initial assignment turn. Its completion event carries the saved
+checkpoint and a matching context lifecycle envelope when available. Use
+`thread create --mode orchestration` without adding a result-reply obligation
+solely to collect that outcome. A turn ending is evidence to review, not proof
+that the assignment or overall objective is complete.
+Use `--no-subscribe` only when that automatic completion delivery is unwanted;
+the creation receipt confirms `result.subscribe` and `result.subscription_id`.
+
+For later messages that need an answer, use `send --reply-required` and have
+the recipient answer the original message with
+`agent-coord reply --message-id <id>`. Explicit requested replies also carry a
+matching saved lifecycle snapshot. Completion events need no conversational
+reply; acknowledge handled events silently. Preserve any explicit reply
+contract already chosen for an assignment.
 
 Apply the chosen reporting contract to initial creation assignments
 as well as later messages. Follow-up communication can start a new
 request when needed; a previous completion does not end collaboration.
 
 Ask agents to return useful results, artifact references, relevant
-validation, and unresolved limitations. Intermediate findings are
-worth sharing when they change another agent's work. A final response
-in an agent's own conversation does not automatically deliver it to you.
+validation, and unresolved limitations. Orchestration-created agents also save
+the [context lifecycle report](../agent-coordination/SKILL.md#context-lifecycle-for-orchestration-agents)
+in their normal result checkpoint. Intermediate findings are worth sharing
+when they change another agent's work. For an explicit reply-required request,
+a final response in the agent's own conversation does not replace its requested reply.
 
 Specialists should raise blockers and questions with you. Resolve
 them within the user's instructions; bring genuine user decisions
