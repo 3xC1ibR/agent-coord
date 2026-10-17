@@ -179,3 +179,65 @@ class AppAgentFailureTests(unittest.TestCase):
         self.assertEqual(self.control.status(request["request_id"])["status"], "running")
         self.control.complete(request["request_id"], error="Provider failed")
         self.assertEqual(len(self.reports()), 1)
+
+    def test_failure_and_subscription_matching_emit_one_notice_in_either_order(self):
+        for failure_first in (True, False):
+            with self.subTest(failure_first=failure_first):
+                child = self.create(mode="orchestration")
+                self.sessions.inbox_wake._dispatch(child)
+                self.store.inbox(child)
+                turn = self.sessions.rpc.threads[child]["turns"][-1]["id"]
+                if failure_first:
+                    self.finish(child, error="No credits")
+                else:
+                    self.store.threads.finish_turn(child, turn_id=turn, status="failed")
+                self.sessions.event_subscriptions.process_once()
+                before = len(self.reports())
+                self.assertEqual(before, 1 if failure_first else 2)
+                notify_agent_failure(self.store, child, event_key=["turn", turn],
+                                     stage="turn", error="No credits", turn_id=turn)
+                self.sessions.event_subscriptions.process_once()
+                self.assertEqual(len(self.reports()), before)
+                body = json.loads(self.reports()[-1]["body"])
+                snapshot = body if failure_first else body["outcomes"][0]
+                self.assertIsNone(snapshot["context_lifecycle"])
+                subscription = next(sub for sub in self.sessions.event_subscriptions.list(self.parent)
+                                    if sub["items"][0]["session_id"] == child)
+                self.assertEqual(subscription["state"], "fired")
+                self.assertEqual(subscription["message_id"], self.reports()[-1]["id"])
+                if failure_first:
+                    self.assertEqual(body["error"], "No credits")
+                    # Cancelling a subscription must not suppress the independent failure report.
+                    self.sessions.event_subscriptions.cancel(self.parent, subscription["id"])
+                    self.assertEqual(len(self.reports()), before)
+
+    def test_opt_out_keeps_failure_notification(self):
+        child = self.create(subscribe=False)
+        self.sessions.inbox_wake._dispatch(child)
+        self.store.inbox(child)
+        self.finish(child, error="Usage limit")
+        self.sessions.event_subscriptions.process_once()
+        self.assertEqual(len(self.reports()), 1)
+        self.assertEqual(json.loads(self.reports()[0]["body"])["error"], "Usage limit")
+        self.assertEqual(self.sessions.event_subscriptions.list(self.parent), [])
+
+    def test_failure_snapshot_contains_only_this_turns_assignment_report(self):
+        child = self.create(mode="orchestration")
+        self.sessions.inbox_wake._dispatch(child)
+        message = self.store.inbox(child)[0]
+        self.store.threads.checkpoint(child, {
+            "phase": "implementation", "summary": "Provider failed during the requested work.",
+            "context_lifecycle": {
+                "assignment_message_id": message["id"], "recommendation": "fresh", "reason": "Useful facts are saved.",
+                "reuse_for": [], "fresh_for": ["Retry the task"], "handover": {
+                    "confirmed_facts": [], "constraints": [], "tried_and_failed": ["The provider has no credits."],
+                    "open_questions": []}}})
+        self.finish(child, error="No credits")
+        self.sessions.event_subscriptions.process_once()
+        body = json.loads(self.reports()[0]["body"])
+        self.assertEqual(body["context_lifecycle"]["recommendation"], "fresh")
+        self.assertEqual(body["assignment_message_id"], message["id"])
+        self.sessions.send(child, {"message": "Try again"})
+        self.finish(child, error="Still no credits")
+        later = json.loads(self.reports()[1]["body"])
+        self.assertIsNone(later["context_lifecycle"])

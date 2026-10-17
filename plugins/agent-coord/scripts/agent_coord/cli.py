@@ -193,7 +193,9 @@ def _parser() -> argparse.ArgumentParser:
     create_agent.add_argument("--effort")
     create_agent.add_argument("--yolo", action="store_true", help="Explicitly authorize full machine access without approval prompts.")
     create_agent.add_argument("--reply-required", action=argparse.BooleanOptionalAction, default=False,
-                              help="Request an initial result back to the creating agent (default: answer the user directly).")
+                              help="Require an explicit result reply in addition to any completion subscription (default: no explicit reply).")
+    create_agent.add_argument("--subscribe", action=argparse.BooleanOptionalAction, default=True,
+                              help="Resume the creator when the initial request's turn ends (default: enabled).")
     create_agent.add_argument("prompt", help="Exact initial user request; use - to read stdin.")
     settings = thread_commands.add_parser("settings", help="Inspect app settings or queue an idle settings change.")
     settings.add_argument("--session-id", required=True, help="Target app conversation.")
@@ -684,7 +686,7 @@ def run(arguments: argparse.Namespace) -> Any:
                 if operation == "create":
                     prompt = sys.stdin.read(100001) if arguments.prompt == "-" else arguments.prompt
                     payload.update(name=arguments.name, prompt=prompt, yolo=arguments.yolo,
-                                   reply_required=arguments.reply_required)
+                                   reply_required=arguments.reply_required, subscribe=arguments.subscribe)
                     payload.update({key: getattr(arguments, key) for key in ("model", "effort", "mode") if getattr(arguments, key) is not None})
             receipt = control.request(operation, arguments.from_session, payload,
                                       thread_id=getattr(arguments, "session_id", None), request_id=arguments.request_id)

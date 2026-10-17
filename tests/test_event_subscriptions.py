@@ -73,6 +73,30 @@ class EventSubscriptionsTests(unittest.TestCase):
         self.assertEqual(self.events.get("owner", old["id"])["state"], "fired")
         self.assertEqual(self.events.get("owner", current["id"])["state"], "pending")
 
+    def test_initial_message_waits_for_its_delivery_turn_and_ignores_unrelated_turns(self):
+        message = self.store.send_message(sender_session_id="owner", recipient_session_id="a",
+                                          body="Do the assignment", reply_required=False)
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM messages WHERE id = ?", (message["id"],)).fetchone()
+            subscription_id = self.events.create_for_message(db, row)
+        self.finish("a", "a1")
+        self.assertEqual(self.events.process_once(), [])
+        self.turn("a", "a2")
+        self.store.touch("a", turn_active=True)
+        self.store.inbox("a")
+        self.finish("a", "a2")
+        self.turn("a", "a3")
+        restarted = EventSubscriptions(self.store)
+        restarted.process_once()
+        result = restarted.get("owner", subscription_id)
+        self.assertEqual(result["items"][0]["turn_id"], "a2")
+        self.assertEqual(result["items"][0]["outcome"]["assignment_message_id"], message["id"])
+        self.assertIsNone(result["items"][0]["outcome"]["context_lifecycle"])
+        self.finish("a", "a3")
+        restarted.process_once()
+        self.assertEqual(len(self.messages()), 1)
+
     def test_all_counts_terminal_failure_and_interruption(self):
         subscription = self.events.create("owner", sessions=["a", "b"])
         self.finish("a", status="failed")

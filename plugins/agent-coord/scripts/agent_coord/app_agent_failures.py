@@ -5,26 +5,65 @@ import hashlib
 import json
 
 
+def _receipt_thread(request_id, event_key):
+    return "app-agent-failure:" + hashlib.sha256(json.dumps([request_id, event_key]).encode()).hexdigest()
+
+
+def turn_failure_message(db, creator, child, turn_id):
+    """Find the existing runtime report for a subscribed failed turn."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
+        return None
+    request = db.execute("""SELECT request_id FROM app_control_requests
+        WHERE operation = 'create' AND thread_id = ? AND sender_session_id = ?
+        ORDER BY created_at, request_id LIMIT 1""", (child, creator)).fetchone()
+    if request is None:
+        return None
+    row = db.execute("SELECT id FROM messages WHERE thread_id = ?",
+                     (_receipt_thread(request["request_id"], ["turn", turn_id]),)).fetchone()
+    return row["id"] if row else None
+
+
 def _notify(store, db, request, *, event_key, stage, error, turn_id=None):
     creator = request["sender_session_id"]
     child = request["thread_id"]
     if child == creator or not db.execute(
             "SELECT 1 FROM sessions WHERE session_id = ?", (creator,)).fetchone():
         return
-    key = hashlib.sha256(json.dumps([request["request_id"], event_key]).encode()).hexdigest()
-    message_thread = "app-agent-failure:" + key
+    message_thread = _receipt_thread(request["request_id"], event_key)
     # The message is the durable receipt. Keep the check and insert in the same
     # writer transaction, including across callback retries and backend restarts.
     if db.execute("SELECT 1 FROM messages WHERE thread_id = ?", (message_thread,)).fetchone():
         return
+    if turn_id and db.execute("SELECT 1 FROM sqlite_master WHERE name = 'event_subscription_items'").fetchone():
+        # The completion matcher may win the race with failure persistence.
+        # Both paths use a writer transaction, so only one wakes the creator.
+        existing = db.execute("""SELECT 1 FROM event_subscription_items i
+            JOIN event_subscriptions s ON s.id = i.subscription_id
+            JOIN messages m ON m.id = COALESCE(i.message_id, s.message_id)
+            WHERE i.kind = 'message' AND i.session_id = ? AND i.turn_id = ?
+            AND s.owner_session_id = ? AND m.suppressed_at IS NULL""",
+            (child, turn_id, creator)).fetchone()
+        if existing:
+            return
     child_row = db.execute("SELECT title FROM work_threads WHERE thread_id = ?", (child,)).fetchone()
     if isinstance(error, dict):
         error = error.get("message") or json.dumps(error, ensure_ascii=True)
+    result = {"checkpoint": None, "context_lifecycle": None}
+    if turn_id:
+        from .event_subscriptions import result_snapshot
+        assignment = db.execute("""SELECT id FROM messages WHERE sender_session_id = ?
+            AND recipient_session_id = ? AND classification = 'action_required'
+            AND COALESCE(recipient_turn_id, wake_turn_id) = ? ORDER BY id DESC LIMIT 1""",
+            (creator, child, turn_id)).fetchone()
+        if assignment:
+            result = {"assignment_message_id": assignment["id"],
+                      **result_snapshot(db, child, turn_id, assignment["id"])}
     body = json.dumps({
         "event": "app_agent_failed", "source": "runtime", "stage": stage,
         "request_id": request["request_id"], "session_id": child,
         "name": child_row["title"] if child_row else None, "turn_id": turn_id,
         "error": str(error or "The app agent failed without an error description.")[:8000],
+        **result,
         "guidance": "Review the failed agent and decide how to continue the original task. "
                     "This is an automatic failure report, not a result from the agent. "
                     "No reply is required. The failed work has not been retried.",

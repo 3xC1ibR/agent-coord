@@ -15,6 +15,7 @@ from unittest.mock import patch
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex, PLUGIN_SCRIPTS
 from test_browser_providers import claude_factory
 from agent_coord.app_control import AppControl, AppControlWorker
+from agent_coord.event_subscriptions import EventSubscriptions
 from agent_coord.hook import handle
 from agent_coord.message_timeline import message_timeline, message_cursor, message_changes
 from agent_coord.store import CoordinationError
@@ -282,6 +283,128 @@ class AppControlTests(unittest.TestCase):
         self.assertEqual(len(initial), 1)
         self.assertFalse(initial[0]["reply_required"])
         self.assertIn("Answer the user directly", initial[0]["body"])
+
+    def test_default_subscription_returns_result_without_worker_reply_for_both_providers(self):
+        for client in ("codex", "claude"):
+            with self.subTest(client=client):
+                creator = self.sessions.create(dict(client=client, name="Creator"))["session"]["thread_id"]
+                queued = self.cli("create", "--from-session", creator, "--client", client,
+                                  "--name", "Worker", "--mode", "orchestration", "--wait", "0", "Do the work.")
+                self.worker.process_once()
+                receipt = self.control.status(queued["request_id"])["result"]
+                child = receipt["session_id"]
+                self.assertTrue(receipt["subscribe"])
+                self.assertFalse(receipt["reply_required"])
+                self.assertTrue(receipt["subscription_id"])
+                self.sessions.inbox_wake._dispatch(child)
+                self.deliver(child)
+                checkpoint = self.store.threads.checkpoint(child, {
+                    "phase": "finished", "summary": "Implemented and checked.", "next_step": None,
+                    "context_lifecycle": {
+                        "assignment_message_id": receipt["message_id"], "recommendation": "reuse",
+                        "reason": "The debugging constraints remain useful.", "reuse_for": ["Fixes"],
+                        "fresh_for": ["Independent review"], "handover": {
+                            "confirmed_facts": ["Tests passed."], "constraints": [],
+                            "tried_and_failed": [], "open_questions": []}}})
+                self.finish(child)
+                # Late bookkeeping in the same turn must not replace the frozen report.
+                self.store.threads.checkpoint(child, {"summary": "Late bookkeeping.", "context_lifecycle": None})
+                # A later user turn must not replace the saved completion result.
+                self.sessions.send(child, {"message": "A separate follow-up."})
+                self.store.threads.checkpoint(child, {"phase": "discussion", "summary": "Another task."})
+                self.sessions.event_subscriptions.process_once()
+                messages = self.store.inbox(creator, mark_delivered=False)
+                self.assertEqual(len(messages), 1)
+                self.assertFalse(messages[0]["reply_required"])
+                outcome = json.loads(messages[0]["body"])["outcomes"][0]
+                self.assertEqual(outcome["assignment_message_id"], receipt["message_id"])
+                self.assertEqual(outcome["checkpoint"]["id"], checkpoint["checkpoint"]["id"])
+                self.assertEqual(outcome["context_lifecycle"]["recommendation"], "reuse")
+                self.assertEqual(outcome["checkpoint"]["summary"], "Implemented and checked.")
+                self.finish(child, "Follow-up done")
+                self.sessions.event_subscriptions.process_once()
+                self.assertEqual(len(self.store.inbox(creator, mark_delivered=False)), 1)
+                self.sessions.inbox_wake._dispatch(creator)
+                self.assertTrue(self.sessions.read(creator)["running"])
+                self.finish(creator)
+
+    def test_subscription_opt_out_preserves_result_and_does_not_wake_creator(self):
+        request = self.cli("create", "--name", "Independent", "--no-subscribe", "--wait", "0", "Do the work.")
+        self.worker.process_once()
+        receipt = self.control.status(request["request_id"])["result"]
+        self.assertFalse(receipt["subscribe"])
+        self.assertIsNone(receipt["subscription_id"])
+        child = receipt["session_id"]
+        self.sessions.inbox_wake._dispatch(child)
+        self.deliver(child)
+        self.store.threads.checkpoint(child, {"phase": "finished", "summary": "Saved result."})
+        self.finish(child)
+        self.sessions.event_subscriptions.process_once()
+        self.assertEqual(self.store.inbox("dispatcher", mark_delivered=False), [])
+        self.assertEqual(self.store.threads.get(child)["checkpoint"]["summary"], "Saved result.")
+        self.assertEqual(self.sessions.event_subscriptions.list("dispatcher"), [])
+
+    def test_subscription_choice_is_validated_and_stable_across_retries(self):
+        for value in (None, 0, 1, "false", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(CoordinationError, "subscribe must be a boolean"):
+                self.request(subscribe=value)
+        args = ("create", "--name", "Worker", "--request-id", "subscription-retry", "--wait", "0")
+        self.cli(*args, "Work")
+        self.cli(*args, "--subscribe", "Work")
+        self.cli(*args, "--no-subscribe", "Work", expected=2)
+        self.worker.process_once()
+        result = self.control.status("subscription-retry")["result"]
+        self.assertTrue(result["subscribe"])
+        self.cli(*args, "--subscribe", "Work")
+        self.assertEqual(len(self.sessions.event_subscriptions.list("dispatcher")), 1)
+
+    def test_initial_message_and_subscription_roll_back_together(self):
+        request = self.request()
+        register = self.worker.subscriptions.create_for_message
+        def fail_after_registration(db, message):
+            register(db, message)
+            raise RuntimeError("Subscription storage failed")
+        with patch.object(self.worker.subscriptions, "create_for_message", side_effect=fail_after_registration):
+            self.worker.process_once()
+        receipt = self.control.status(request["request_id"])
+        self.assertEqual(receipt["status"], "uncertain")
+        self.assertEqual(self.store.inbox(receipt["thread_id"], mark_delivered=False), [])
+        self.assertEqual(self.sessions.event_subscriptions.list("dispatcher"), [])
+        self.assertIn("Subscription storage failed", self.store.inbox("dispatcher", mark_delivered=False)[0]["body"])
+
+    def test_subscription_registered_before_a_fast_worker_can_finish(self):
+        request = self.request()
+        complete = self.control.complete
+        def finish_before_receipt(request_id, **kwargs):
+            child = kwargs["result"]["session_id"]
+            self.sessions.inbox_wake._dispatch(child)
+            self.deliver(child)
+            self.finish(child)
+            self.sessions.event_subscriptions.process_once()
+            complete(request_id, **kwargs)
+        with patch.object(self.control, "complete", side_effect=finish_before_receipt):
+            self.worker.process_once()
+        receipt = self.control.status(request["request_id"])
+        restarted = EventSubscriptions(CoordinationStore(self.store.database_path))
+        restarted.process_once()
+        result = restarted.get("dispatcher", receipt["result"]["subscription_id"])
+        self.assertEqual(result["state"], "fired")
+        self.assertEqual(len(self.store.inbox("dispatcher", mark_delivered=False)), 1)
+        outcome = result["items"][0]["outcome"]
+        self.assertIsNone(outcome["checkpoint"])
+        self.assertIsNone(outcome["context_lifecycle"])
+
+    def test_interrupted_initial_turn_notifies_once_and_later_turns_do_not(self):
+        child = self.create()
+        self.sessions.inbox_wake._dispatch(child)
+        # Wake evidence binds the turn even when prompt-hook delivery never ran.
+        turn = self.sessions.rpc.threads[child]["turns"][-1]
+        self.store.threads.finish_turn(child, turn_id=turn["id"], status="interrupted")
+        self.sessions.event_subscriptions.process_once()
+        self.sessions.event_subscriptions.process_once()
+        messages = self.store.inbox("dispatcher", mark_delivered=False)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(json.loads(messages[0]["body"])["outcomes"][0]["state"], "interrupted")
 
     def test_initial_reply_choice_is_validated_before_queueing(self):
         for value in (None, 0, 1, "false", "true", [], {}):

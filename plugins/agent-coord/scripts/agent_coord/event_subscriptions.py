@@ -17,6 +17,20 @@ from .workspaces import matches_workspace
 JOB_TERMINAL = {"completed", "failed", "cancelled", "timed_out", "unknown"}
 
 
+def result_snapshot(db, session_id, turn_id, assignment_message_id):
+    """Read the checkpoint frozen at completion and the matching lifecycle report."""
+    from .context_lifecycle import snapshot_for_assignment
+    row = db.execute("""SELECT c.* FROM turn_notification_context n
+        JOIN thread_checkpoints c ON c.id = n.checkpoint_id
+        WHERE n.thread_id = ? AND n.turn_key = ? AND c.thread_id = n.thread_id""",
+        (session_id, turn_id)).fetchone()
+    checkpoint = None if row is None else {key: row[key] for key in (
+        "id", "phase", "summary", "next_action", "next_actor", "turn_id", "created_at")}
+    lifecycle = snapshot_for_assignment(db, session_id, assignment_message_id, turn_id,
+                                       checkpoint_id=checkpoint["id"]) if checkpoint is not None else None
+    return {"checkpoint": checkpoint, "context_lifecycle": lifecycle}
+
+
 class EventSubscriptions:
     def __init__(self, store, cwd=None):
         self.store = store
@@ -40,6 +54,33 @@ class EventSubscriptions:
                 );
                 CREATE INDEX IF NOT EXISTS event_subscriptions_pending ON event_subscriptions(state);
             """)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(event_subscription_items)")}
+            if "assignment_message_id" not in columns:
+                db.execute("ALTER TABLE event_subscription_items ADD COLUMN assignment_message_id INTEGER REFERENCES messages(id)")
+
+    def create_for_message(self, db, message):
+        """Subscribe atomically with an app agent's initial inbox message.
+
+        The first provider turn does not exist yet. Delivery/wake evidence later
+        binds this item to that message's turn, never the session's latest turn.
+        The caller owns the transaction and has already initialized this schema.
+        """
+        owner = self._owner(db, message["sender_session_id"])
+        identifier = f"app-agent:{message['id']}"
+        now = self.store.clock()
+        db.execute("""INSERT INTO event_subscriptions
+            (id, owner_session_id, cwd, mode, continuation, state, request_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'all', ?, 'pending', ?, ?, ?)""",
+            (identifier, message["sender_session_id"], owner["cwd"],
+             "Read the app agent's result and checkpoint, evaluate any context_lifecycle advice, "
+             "and continue the original task. A turn ending does not establish assignment success. "
+             "Acknowledge this event after handling it; no reply is required.",
+             json.dumps({"assignment_message_id": message["id"]}), now, now))
+        db.execute("""INSERT INTO event_subscription_items
+            (subscription_id, id, kind, session_id, assignment_message_id)
+            VALUES (?, '1', 'message', ?, ?)""", (identifier, message["recipient_session_id"], message["id"]))
+        return identifier
 
     def _jobs(self):
         if self._managed_jobs is None:
@@ -178,20 +219,34 @@ class EventSubscriptions:
             record = self._describe(db, row)
             for message_id in record["message_ids"]:
                 db.execute("""UPDATE messages SET delivered_at = ?, suppressed_at = ?
-                              WHERE id = ? AND delivered_at IS NULL""", (now, now, message_id))
+                              WHERE id = ? AND delivered_at IS NULL AND thread_id LIKE 'event:%'""", (now, now, message_id))
             db.execute("UPDATE event_subscriptions SET state = 'cancelled', updated_at = ? WHERE id = ?", (now, row["id"]))
             db.execute("UPDATE event_subscription_items SET state = 'cancelled' WHERE subscription_id = ? AND message_id IS NULL", (row["id"],))
             return self._describe(db, self._get(db, session_id, subscription_id))
 
     def _outcome(self, db, owner, item, deadline):
-        if item["kind"] == "turn":
+        if item["kind"] in {"turn", "message"}:
+            turn_id = item["turn_id"]
+            if item["kind"] == "message" and not turn_id:
+                message = db.execute("""SELECT COALESCE(recipient_turn_id, wake_turn_id) AS turn_id
+                    FROM messages WHERE id = ? AND recipient_session_id = ?""",
+                    (item["assignment_message_id"], item["session_id"])).fetchone()
+                if not message or not message["turn_id"]:
+                    return None
+                turn_id = message["turn_id"]
+                db.execute("UPDATE event_subscription_items SET turn_id = ? WHERE subscription_id = ? AND id = ?",
+                           (turn_id, item["subscription_id"], item["id"]))
             row = db.execute("""SELECT id, status, completed_at FROM turn_completions
-                              WHERE thread_id = ? AND turn_key = ?""", (item["session_id"], item["turn_id"])).fetchone()
+                              WHERE thread_id = ? AND turn_key = ?""", (item["session_id"], turn_id)).fetchone()
             if row is None or (deadline is not None and row["completed_at"] > deadline):
                 return None
-            return {"kind": "turn", "session_id": item["session_id"], "turn_id": item["turn_id"],
+            result = {"kind": "turn", "session_id": item["session_id"], "turn_id": turn_id,
                     "state": row["status"], "completion_id": row["id"], "completed_at": row["completed_at"],
-                    "result_ref": {"session_id": item["session_id"], "turn_id": item["turn_id"]}}
+                    "result_ref": {"session_id": item["session_id"], "turn_id": turn_id}}
+            if item["kind"] == "message":
+                result["assignment_message_id"] = item["assignment_message_id"]
+                result.update(result_snapshot(db, item["session_id"], turn_id, item["assignment_message_id"]))
+            return result
         row = db.execute("SELECT * FROM jobs WHERE id = ? AND owner_session_id = ?", (item["job_id"], owner)).fetchone()
         if row is None or row["state"] not in JOB_TERMINAL:
             return None
@@ -208,6 +263,12 @@ class EventSubscriptions:
                 "result_ref": {"job_id": item["job_id"]}}
 
     def _deliver(self, db, subscription, target, outcomes, now, *, timeout=False):
+        if not timeout and len(outcomes) == 1 and outcomes[0].get("assignment_message_id") and outcomes[0]["state"] == "failed":
+            from .app_agent_failures import turn_failure_message
+            outcome = outcomes[0]
+            existing = turn_failure_message(db, subscription["owner_session_id"], outcome["session_id"], outcome["turn_id"])
+            if existing is not None:
+                return existing  # The automatic failure report already wakes the creator.
         body = json.dumps({"event": "subscription_timeout" if timeout else "subscription_matched",
                            "subscription_id": subscription["id"], "mode": subscription["mode"],
                            "target": target, "outcomes": outcomes, "continuation": subscription["continuation"],

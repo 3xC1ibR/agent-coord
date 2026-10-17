@@ -87,6 +87,11 @@ class AppControl:
             # Keep the legacy payload shape so opt-out and pre-upgrade retries match.
             if not payload.get("reply_required", False):
                 payload.pop("reply_required", None)
+            if not isinstance(payload.get("subscribe", True), bool):
+                raise CoordinationError("Initial request subscribe must be a boolean.")
+            # Omitted and explicitly enabled subscriptions share a retry key.
+            if payload.get("subscribe", True):
+                payload.pop("subscribe", None)
         identifier = request_id or str(uuid.uuid4())
         if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 160:
             raise CoordinationError("Request ID must contain 1–160 characters.")
@@ -98,6 +103,8 @@ class AppControl:
                 old_payload.pop("expected_settings", None)
                 if operation == "create" and old_payload.get("reply_required") is False:
                     old_payload.pop("reply_required")
+                if operation == "create" and old_payload.get("subscribe") is True:
+                    old_payload.pop("subscribe")
                 # thread_id on create is filled in as soon as the provider replies.
                 if (previous["operation"] != operation or previous["sender_session_id"] != sender_session_id
                         or old_payload != payload or (operation != "move" and previous["cwd"] != cwd)
@@ -208,6 +215,8 @@ class AppControlWorker:
     def __init__(self, sessions):
         self.sessions = sessions
         self.control = AppControl(sessions.store)
+        from .event_subscriptions import EventSubscriptions
+        self.subscriptions = EventSubscriptions(sessions.store)
         self.owner = str(uuid.uuid4())
         self.stopped = threading.Event()
         self.worker = None
@@ -270,6 +279,7 @@ class AppControlWorker:
                 result = self.control.settings(thread_id)
             else:
                 reply_required = payload.pop("reply_required", False)
+                subscribe = payload.pop("subscribe", True)
                 mode = payload.pop("mode", None)
                 # Fail invalid settings before entering the uncertain provider boundary.
                 self.sessions._creation_settings(payload)
@@ -285,17 +295,32 @@ class AppControlWorker:
                     "Answer the user directly in this conversation and accept their follow-ups here. "
                     "This initial request does not require a reply to its sender. "
                 )
-                message = self.control.store.send_message(
-                    sender_session_id=request["sender_session_id"], recipient_session_id=thread_id,
-                    classification="action_required", reply_required=reply_required,
-                    body=(reporting +
+                if subscribe:
+                    reporting += "The runtime will notify the creating agent when this request's turn ends. "
+                    if not reply_required:
+                        reporting += "No separate completion message is needed. "
+                if mode == "orchestration":
+                    from .context_lifecycle import REPORTING_INSTRUCTIONS
+                    reporting += REPORTING_INSTRUCTIONS + " "
+                body = (reporting +
                           "You are an independent app agent; specialist describes your role. "
                           "Follow repository work rules, release scopes after assignments, and keep this conversation "
                           "available for direct user follow-ups and later assignments. "
                           "Use Agent Coord messaging when coordination is needed.\n\n"
-                          "User request:\n" + payload["prompt"]))
+                          "User request:\n" + payload["prompt"])
+                # The message cannot wake a fast worker until its subscription
+                # is durable. Roll back both if registration fails.
+                with self.control.store._connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    message, _ = self.control.store._insert_message(
+                        db, sender_session_id=request["sender_session_id"], recipient_session_id=thread_id,
+                        classification="action_required", reply_required=reply_required,
+                        thread_id=f"app-agent-request:{request['request_id']}", body=body,
+                        now=self.control.store.clock())
+                    subscription_id = self.subscriptions.create_for_message(db, message) if subscribe else None
                 result = {**self.control.settings(thread_id), "message_id": message["id"],
-                          "reply_required": message["reply_required"], "mode": mode}
+                          "reply_required": bool(message["reply_required"]), "mode": mode,
+                          "subscribe": subscribe, "subscription_id": subscription_id}
             self.control.complete(request["request_id"], result=result)
         except Exception as exc:
             self.control.complete(request["request_id"], error=str(exc), uncertain=provider_started)
