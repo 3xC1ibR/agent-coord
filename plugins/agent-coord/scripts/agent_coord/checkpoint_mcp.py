@@ -8,6 +8,7 @@ import sys
 from .context import caller_session
 from .store import CoordinationError, CoordinationStore
 from .threads import LINK_KINDS, PHASES
+from .context_lifecycle import CHECKPOINT_SCHEMA
 
 
 TOOL = {
@@ -35,6 +36,7 @@ TOOL = {
             "title": {"type": "string", "minLength": 1, "maxLength": 160},
             "domain": {"type": "string", "minLength": 1, "maxLength": 64},
             "turn_id": {"type": "string", "description": "Optional current turn ID to reject an outdated update."},
+            "context_lifecycle": CHECKPOINT_SCHEMA,
             "links": {
                 "type": "array", "maxItems": 100, "description": "Add or update links; existing links persist.",
                 "items": {

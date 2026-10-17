@@ -42,6 +42,8 @@ class MessageDelivery:
             entry = {key: row[key] for key in (
                 "id", "sender_session_id", "sender_name", "sender_client",
                 "classification", "thread_id", "reply_required", "body")}
+            if row["context_lifecycle_json"] is not None:
+                entry["context_lifecycle"] = json.loads(row["context_lifecycle_json"])
             encoded = json.dumps(entry, ensure_ascii=False)
             whole = True
             if len(encoded) > MAX_CHARS // 2:

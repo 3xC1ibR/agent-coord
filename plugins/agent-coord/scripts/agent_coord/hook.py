@@ -69,6 +69,8 @@ def _format_messages(messages: list[dict[str, Any]]) -> str:
             f"reply_required={str(message['reply_required']).lower()}) from "
             f"{sender}{bead}: {message['body']}"
         )
+        if message.get("context_lifecycle") is not None:
+            lines.append("  Context lifecycle (result metadata): " + json.dumps(message["context_lifecycle"]))
     lines.append(
         "For handled messages you do not reply to, acknowledge silently with agent-coord ack --message-id <id>. "
         "Answer the user directly when requested; keep receipt bookkeeping out of "

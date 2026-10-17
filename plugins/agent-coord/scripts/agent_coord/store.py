@@ -440,7 +440,8 @@ class CoordinationStore:
                 """
             )
             for column, definition in (("sender_turn_id", "TEXT"), ("recipient_turn_id", "TEXT"),
-                                       ("wake_turn_id", "TEXT"), ("suppressed_at", "REAL")):
+                                       ("wake_turn_id", "TEXT"), ("suppressed_at", "REAL"),
+                                       ("context_lifecycle_json", "TEXT")):
                 if column not in message_columns:
                     connection.execute(f"ALTER TABLE messages ADD COLUMN {column} {definition}")
             connection.executescript("""
@@ -696,7 +697,7 @@ class CoordinationStore:
         self, row: sqlite3.Row, *, delivered_at: float | None = None
     ) -> dict[str, Any]:
         keys = set(row.keys())
-        return {
+        result = {
             "id": row["id"],
             "sender_session_id": row["sender_session_id"],
             "sender_name": row["sender_name"] if "sender_name" in keys else None,
@@ -717,6 +718,9 @@ class CoordinationStore:
             ),
             "acknowledged_at": _iso(row["acknowledged_at"]),
         }
+        if "context_lifecycle_json" in keys and row["context_lifecycle_json"] is not None:
+            result["context_lifecycle"] = json.loads(row["context_lifecycle_json"])
+        return result
 
     def _insert_message(
         self,
@@ -730,6 +734,7 @@ class CoordinationStore:
         reply_required: bool,
         now: float,
         in_reply_to: int | None = None,
+        context_lifecycle_json: str | None = None,
     ) -> tuple[sqlite3.Row, bool]:
         if classification not in MESSAGE_CLASSIFICATIONS:
             raise CoordinationError(
@@ -805,8 +810,8 @@ class CoordinationStore:
             """
             INSERT INTO messages (
                 sender_session_id, recipient_session_id, body, created_at,
-                delivered_at, classification, thread_id, reply_required, in_reply_to
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                delivered_at, classification, thread_id, reply_required, in_reply_to, context_lifecycle_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sender_session_id,
@@ -818,6 +823,7 @@ class CoordinationStore:
                 normalized_thread,
                 int(reply_required),
                 in_reply_to,
+                context_lifecycle_json,
             ),
         )
         if classification == "action_required" and connection.execute(
@@ -2616,6 +2622,7 @@ class CoordinationStore:
         self, *, sender_session_id: str, message_id: int, body: str
     ) -> dict[str, Any]:
         """Atomically answer and acknowledge one request without another reply obligation."""
+        from .context_lifecycle import reply_snapshot
         if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
             raise CoordinationError("Reply message ID must be a positive integer.")
         if not body.strip():
@@ -2647,6 +2654,7 @@ class CoordinationStore:
                 thread_id=original["thread_id"],
                 reply_required=False,
                 in_reply_to=message_id,
+                context_lifecycle_json=reply_snapshot(connection, sender_session_id, message_id),
                 now=now,
             )
             connection.execute(

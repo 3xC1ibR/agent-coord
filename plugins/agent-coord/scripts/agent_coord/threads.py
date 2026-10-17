@@ -12,6 +12,7 @@ from .context import caller_session, command_prefix
 from .store import CoordinationError, derive_scope_cluster
 from .organization import OrganizationStore, UNSET
 from .attention import AttentionStore
+from . import context_lifecycle
 from . import notification_policy
 
 PHASES = {"discussion", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"}
@@ -118,6 +119,10 @@ class ThreadStore:
             notification_policy.initialize(db)
             # Serialize upgrades across independently running terminal hooks.
             db.execute("BEGIN IMMEDIATE")
+            checkpoint_columns = {row["name"] for row in db.execute("PRAGMA table_info(thread_checkpoints)")}
+            for field in ("context_lifecycle_json", "context_lifecycle_turn_key"):
+                if field not in checkpoint_columns:
+                    db.execute(f"ALTER TABLE thread_checkpoints ADD COLUMN {field} TEXT")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(work_threads)")}
             for field in ("domain", "domain_source", "scope_cluster"):
                 if field not in columns:
@@ -245,7 +250,7 @@ class ThreadStore:
         result["pinned"] = bool(row["pinned"])
         latest = (inventory.latest.get(row["thread_id"]) if inventory is not None else
                   db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1", (row["thread_id"],)).fetchone())
-        result["checkpoint"] = dict(latest) if latest else None
+        result["checkpoint"] = context_lifecycle.checkpoint_record(latest) if latest else None
         result["checkpoint_stale"] = bool(latest and row["turn_started_at"] and latest["refreshed_at"] < row["turn_started_at"])
         completion = inventory.completion(row["thread_id"]) if inventory is not None else db.execute("""SELECT id, status, completed_at FROM turn_completions
                                    WHERE thread_id = ? AND turn_key = ?""",
@@ -285,7 +290,7 @@ class ThreadStore:
         result["links"] = [dict(link) for link in (inventory.links[row["thread_id"]] if inventory is not None else
                            db.execute("SELECT * FROM thread_links WHERE thread_id = ? ORDER BY id", (row["thread_id"],)))]
         if history:
-            result["checkpoints"] = [dict(cp) for cp in db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC", (row["thread_id"],))]
+            result["checkpoints"] = [context_lifecycle.checkpoint_record(cp) for cp in db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC", (row["thread_id"],))]
         if inventory is not None:
             return self.organization.describe(db, result, association=inventory.associations.get(row["thread_id"]))
         return self.organization.describe(db, result)
@@ -577,8 +582,9 @@ class ThreadStore:
                        (request, " ".join(request.split())[:100], session_id))
 
     def checkpoint(self, session_id: str, payload: dict, *, author="agent") -> dict:
-        if not isinstance(payload, dict) or set(payload) - {"phase", "summary", "next_step", "next_action", "next_actor", "links", "turn_id", "title", "domain"}:
-            raise CoordinationError("Checkpoint accepts phase, summary, next_step, links, turn_id, title, domain, and legacy next_action/next_actor.")
+        if not isinstance(payload, dict) or set(payload) - {"phase", "summary", "next_step", "next_action", "next_actor", "links", "turn_id", "title", "domain", "context_lifecycle"}:
+            raise CoordinationError("Checkpoint accepts phase, summary, next_step, links, turn_id, title, domain, context_lifecycle, and legacy next_action/next_actor.")
+        report = context_lifecycle.validate_report(payload["context_lifecycle"]) if "context_lifecycle" in payload else UNSET
         legacy_step = {"next_action", "next_actor"} & payload.keys()
         if "next_step" in payload and legacy_step:
             raise CoordinationError("Use next_step or legacy next_action/next_actor, not both.")
@@ -598,11 +604,18 @@ class ThreadStore:
         now = self.store.clock()
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            current = db.execute("SELECT turn_id, title_source FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
+            current = db.execute("SELECT turn_id, turn_key, title_source FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
             turn_id = payload.get("turn_id", current["turn_id"])
             if turn_id is not None and (not isinstance(turn_id, str) or turn_id != current["turn_id"]):
                 raise CoordinationError("Checkpoint belongs to an older or unknown turn.")
             latest = db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+            if report is not UNSET and report is not None:
+                context_lifecycle.validate_assignment(db, session_id, report)
+            lifecycle_json, lifecycle_turn = None, current["turn_key"]
+            if report is not UNSET:
+                lifecycle_json = context_lifecycle.encode(report)
+            elif latest and latest["context_lifecycle_turn_key"] == current["turn_key"]:
+                lifecycle_json, lifecycle_turn = latest["context_lifecycle_json"], latest["context_lifecycle_turn_key"]
             if latest is None and not {"phase", "summary"} <= payload.keys():
                 raise CoordinationError("The first checkpoint requires phase and summary.")
             phase = payload.get("phase", latest["phase"] if latest else None)
@@ -622,11 +635,11 @@ class ThreadStore:
             action = _text(action, "Next action", 1000, empty=True)
             if bool(action) != (actor != "nobody"):
                 raise CoordinationError("A next action needs an owner; use nobody with an empty next action.")
-            content = (phase, summary, action, actor)
-            if latest and tuple(latest[key] for key in ("phase", "summary", "next_action", "next_actor")) == content and latest["turn_id"] == turn_id and latest["author"] == author:
+            content = (phase, summary, action, actor, lifecycle_json, lifecycle_turn)
+            if latest and tuple(latest[key] for key in ("phase", "summary", "next_action", "next_actor", "context_lifecycle_json", "context_lifecycle_turn_key")) == content and latest["turn_id"] == turn_id and latest["author"] == author:
                 db.execute("UPDATE thread_checkpoints SET refreshed_at = ? WHERE id = ?", (now, latest["id"]))
             else:
-                db.execute("INSERT INTO thread_checkpoints (thread_id, phase, summary, next_action, next_actor, session_id, turn_id, author, created_at, refreshed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                db.execute("INSERT INTO thread_checkpoints (thread_id, phase, summary, next_action, next_actor, context_lifecycle_json, context_lifecycle_turn_key, session_id, turn_id, author, created_at, refreshed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            (session_id, *content, session_id, turn_id, author, now, now))
             for link in normalized:
                 self._save_link(db, session_id, link)
@@ -718,6 +731,9 @@ class ThreadStore:
         )
         if session_id:
             thread = self.ensure(session_id)
+            with self.store._connection() as db:
+                if context_lifecycle.is_orchestrated(db, session_id):
+                    text += "\n" + context_lifecycle.REPORTING_INSTRUCTIONS
             text += "\nWorkspace domains: " + json.dumps(self.known_domains(thread["cwd"]))
             text += "\nThread context (saved data): " + json.dumps({
                 "project": thread["project_cwd"], "group": thread["project_name"],
