@@ -1,8 +1,7 @@
 /* Editorial diagram, not app UI. Every frame is a pure function of time.
- * One OpenAI-powered dispatcher assembles a four-agent team across providers,
- * the agents coordinate with each other, one result is reported back, and two
- * follow-ups return to the same agents with their context intact.
- * Kimi is shown for illustration only; it is not a Ribbon Field provider. */
+ * One orchestrator assembles a four-agent team across OpenAI, Claude, Muse,
+ * and Gemini, the agents coordinate with each other, one result is reported
+ * back, and two follow-ups return to the same agents with context intact. */
 "use strict";
 (() => {
   const $ = id => document.getElementById(id);
@@ -14,17 +13,17 @@
   const show = (el, o) => { el.style.opacity = String(clamp(o)); el.style.visibility = o <= 0 ? "hidden" : "visible"; };
   const current = (list, t) => { let found = null; for (const item of list) if (t >= item.at) found = item; return found; };
 
-  const ids = ["ui", "api", "tests", "release"], names = ["Checkout UI", "Payments API", "Test suite", "Release"];
+  const ids = ["ui", "api", "tests", "release"];
   const xs = [150, 410, 670, 930], tones = ["#4f7a8a", "#9c7949", "#847099", "#3f7062"];
   const fan = ids.map((_, i) => 4.8 + .55 * i), arrival = fan.map(f => f + .95);
-  const OUTRO = 44.2, DURATION = 49;
+  const DURATION = 45;
 
   const headings = [
-    {at: 0, end: 4.4, html: "One request.<br><span>One dispatcher.</span>"},
+    {at: 0, end: 4.4, html: "One request.<br><span>One orchestrator.</span>"},
     {at: 4.5, end: 11.1, html: "One team.<br><span>Four different models.</span>"},
     {at: 11.2, end: 25.8, html: "Working in parallel.<br><span>Talking to each other.</span>"},
     {at: 25.9, end: 29.9, html: "One coherent result.<br><span>Reported back to you.</span>"},
-    {at: 30.0, end: OUTRO, html: "Follow-ups find<br><span>the agent that remembers.</span>"},
+    {at: 30.0, end: DURATION + 1, html: "Follow-ups find<br><span>the agent that remembers.</span>"},
   ];
   const requests = [
     {at: 1.3, send: 3.3, end: 7.2, to: -1, text: "Ship the new checkout flow by Friday."},
@@ -32,10 +31,10 @@
     {at: 38.6, send: 40.2, end: 44.0, to: 3, text: "Roll the next release out gradually."},
   ];
   const captions = [
-    {at: 7.5, end: 11.0, text: "One OpenAI model launches Gemini, Anthropic, Kimi, and another OpenAI model."},
+    {at: 7.5, end: 11.0, text: "The orchestrator launches OpenAI, Claude, Muse, and Gemini agents."},
     {at: 12.0, end: 16.6, text: "Two agents reach for the same file. They settle it between themselves."},
     {at: 16.9, end: 19.4, text: "Inside its own conversation, an agent can spin up short-lived subagents."},
-    {at: 19.5, end: 21.7, text: "Subagents finish and vanish. App agents stay."},
+    {at: 19.5, end: 21.7, text: "Subagents finish and vanish. Specialist agents stay."},
     {at: 21.9, end: 25.2, text: "Release waits for everyone, then ships."},
   ];
   const report = {at: 26.0, end: 29.6};
@@ -90,9 +89,7 @@
 
   function render(time) {
     const t = Math.max(0, Math.min(DURATION - .001, time));
-    const outro = progress(t, OUTRO, .7);
-    show($("brand"), 1 - outro); show($("story"), 1 - outro); show($("endcard"), outro);
-    $("endcard").style.transform = `translateY(${(1 - outro) * 18}px)`;
+    show($("story"), 1);
 
     const heading = headings.find(h => t >= h.at && t < h.end);
     $("headline").innerHTML = heading?.html || "";
@@ -121,7 +118,7 @@
     show($("input-packet"), Math.sin(inputFlight * Math.PI));
 
     const state = {time: t, headline: heading ? $("headline").textContent : "", request: request?.text || null, target: request && request.to >= 0 ? ids[request.to] : request ? "all" : null,
-      caption: caption?.text || null, report: reportIn > .5, agents: [], status: {}, assignment: {}, arrival: {}, pills: [], subagents: false, endcard: outro >= 1};
+      caption: caption?.text || null, report: reportIn > .5, agents: [], status: {}, assignment: {}, arrival: {}, pills: [], subagents: false, endcard: false};
 
     ids.forEach((id, i) => {
       const agent = $(id), intro = progress(t, arrival[i], .65);
@@ -190,7 +187,8 @@
 
     Object.values(arcs).forEach(arc => { show(arc.group, 0); show(arc.dot, 0); });
     pills.forEach((pill, k) => {
-      const key = `${Math.min(pill.from, pill.to)}-${Math.max(pill.from, pill.to)}`, arc = arcs[key];
+      const key = `${Math.min(pill.from, pFromTo(pill))}`;
+      const arc = arcs[`${Math.min(pill.from, pill.to)}-${Math.max(pill.from, pill.to)}`];
       const forward = pill.from < pill.to, p = (t - pill.at) / FLIGHT, tone = tones[pill.from];
       const on = fade(t, pill.at + PILL_IN, pill.at + PILL_OUT + .4, .3);
       show(pillEls[k], on);
@@ -205,10 +203,12 @@
       show(arc.active, p <= 1.4 ? 1 - progress(p, 1, .4) : 0);
       const pos = arc.track.getPointAtLength((forward ? flight : 1 - flight) * arc.length);
       arc.dot.setAttribute("cx", pos.x); arc.dot.setAttribute("cy", pos.y);
-      show(arc.dot, p <= 1 ? Math.sin(Math.PI * flight) : 0);
+      show(dotOrArc(arc), p <= 1 ? Math.sin(Math.PI * flight) : 0);
     });
     window.__sceneState = state;
   }
+  function pFromTo(pill) { return Math.max(pill.from, pill.to); }
+  function dotOrArc(arc) { return arc.dot; }
   window.__render = t => { render(t); return true; };
   window.__duration = () => DURATION;
   window.__cues = () => [];

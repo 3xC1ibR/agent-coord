@@ -10,10 +10,10 @@ const path = require("node:path");
 
 const HERE = __dirname, OUT = path.join(HERE, "out");
 const mode = process.argv[2] || "all";
-const KEY_TIMES = [0.6, 2.4, 3.5, 5.0, 6.2, 7.9, 9.5, 12.6, 13.6, 15.6, 17.8, 20.0, 20.8, 23.2, 25.3, 27.5, 32.0, 34.0, 36.0, 38.0, 41.5, 42.8, 45.5];
-const SELECTORS = ["#brand", "#headline", "#request-text", "#caption", "#report strong", "#report span", ".hub-label", "#hub .chip", ".agent h2", ".agent .chip",
-  ".agent .status", ".agent .initial", ".agent .revision", ".arrival", ".pill", "#film-note", ".end-promise", ".end-detail", "#endcard h2"];
-const WRAP_LIMIT = {"#headline": 2, "#request-text": 2, "#caption": 2, ".end-promise": 2, ".end-detail": 3};
+const KEY_TIMES = [0.6, 2.4, 3.5, 5.0, 6.2, 7.9, 9.5, 12.6, 13.6, 15.6, 17.8, 20.0, 20.8, 23.2, 25.3, 27.5, 32.0, 34.0, 36.0, 38.0, 41.5, 42.8, 44.5];
+const SELECTORS = ["#headline", "#request-text", "#caption", "#report strong", "#report span", ".hub-label", "#hub .chip", ".agent h2", ".agent .chip",
+  ".agent .status", ".agent .initial", ".agent .revision", ".arrival", ".pill"];
+const WRAP_LIMIT = {"#headline": 2, "#request-text": 2, "#caption": 2};
 
 async function compose() {
   const browser = await chromium.launch();
@@ -47,12 +47,11 @@ async function compose() {
     }
     checks.push({time: t, state: result.state, bounds: result.bounds});
   }
-  // Pills must never overlap the dispatcher label, and agent cards must stay clear of the footer.
+  // Pills must never overlap the orchestrator label.
   for (const c of checks) {
-    const hub = c.bounds.find(b => b.selector === ".hub-label"), footer = c.bounds.find(b => b.selector === "#film-note");
+    const hub = c.bounds.find(b => b.selector === ".hub-label");
     for (const b of c.bounds) {
-      if (b.selector === ".pill" && hub && b.x < hub.x + hub.w && b.x + b.w > hub.x && b.y < hub.y + hub.h && b.y + b.h > hub.y) errors.push(`t=${c.time} pill overlaps dispatcher label: ${b.text}`);
-      if (b.selector.startsWith(".agent") && footer && b.y + b.h > footer.y) errors.push(`t=${c.time} ${b.selector} collides with footer: ${b.text}`);
+      if (b.selector === ".pill" && hub && b.x < hub.x + hub.w && b.x + b.w > hub.x && b.y < hub.y + hub.h && b.y + b.h > hub.y) errors.push(`t=${c.time} pill overlaps orchestrator label: ${b.text}`);
     }
   }
   await page.evaluate(() => window.__render(10.0));
@@ -81,7 +80,7 @@ async function playback() {
     if (v.readyState >= 1) done(); else { v.addEventListener("loadedmetadata", done, {once: true}); v.addEventListener("error", () => reject(new Error("video error " + (v.error && v.error.code))), {once: true}); }
   }));
   const seeks = [];
-  for (const t of [0.6, 5.0, 9.5, 13.6, 20.8, 25.3, 27.5, 34.0, 38.0, 42.8, 46.5]) {
+  for (const t of [0.6, 5.0, 9.5, 13.6, 20.8, 25.3, 27.5, 34.0, 38.0, 42.8, 44.5]) {
     seeks.push(await page.evaluate(tt => new Promise(resolve => {
       const v = document.querySelector("video");
       v.addEventListener("seeked", () => resolve({time: tt, currentTime: v.currentTime, readyState: v.readyState, error: v.error ? v.error.code : null}), {once: true});
