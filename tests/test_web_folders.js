@@ -15,6 +15,33 @@ const api = async (route, body) => {
   return {cwd: body.path, repository: body.path.startsWith(rig.root) ? rig : null};
 };
 
+test("project dots identify the project needing action and update when only the blocker reason changes", async () => {
+  global.threadViews = require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews;
+  try {
+    const folders = new WorkingFolders({storage: storage(), api});
+    await folders.open("/a"); await folders.open("/b"); folders.activate("/a");
+    const element = () => ({children: [], dataset: {}, attributes: {}, hidden: false,
+      append(...items) { this.children.push(...items); }, replaceChildren() { this.children = []; },
+      setAttribute(key, value) { this.attributes[key] = value; }, contains: () => false});
+    const controls = Object.fromEntries(["view-tabs", "mobile-project", "mobile-project-attention", "mobile-project-activity"].map(id => [id, element()]));
+    const tabs = Object.assign(Object.create(ProjectTabs.prototype), {folders,
+      doc: {getElementById: id => controls[id], createElement: element}});
+    const running = {thread_id: "running", project_cwd: "/a", attention: "now", response_state: "working"};
+    const blocked = {thread_id: "blocked", project_cwd: "/b", attention: "now", response_state: "action", needs_attention: true, attention_reason: "blocked"};
+    const dot = index => controls["view-tabs"].children[index].children[0].children.find(child => /view-(action|active|completed)$/.test(child.className));
+    tabs.render([running, blocked]);
+    assert.equal(dot(0).className, "view-active"); assert.equal(dot(1).className, "view-action");
+    folders.activate("/b"); tabs.render();
+    assert.equal(controls["mobile-project-activity"].className, "view-action");
+    assert.equal(controls["mobile-project-activity"].hidden, false);
+    blocked.attention_reason = "reply"; tabs.render();
+    assert.equal(dot(1), undefined, "a reason change must invalidate the render cache");
+    blocked.attention_reason = "blocked"; tabs.render(); assert.equal(dot(1).className, "view-action");
+    blocked.needs_attention = false; tabs.render(); assert.equal(dot(1), undefined);
+    assert.equal(controls["mobile-project-activity"].hidden, true);
+  } finally { delete global.threadViews; }
+});
+
 test("views inherit the active project directory and optional group, ignoring repository filters", () => {
   const folder = {cwd: "/projects/stoic", repository: stoic};
   assert.deepEqual(newThreadContext(organization, {repository: "rig", project: "__none__"}, folder),

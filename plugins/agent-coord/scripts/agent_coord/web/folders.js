@@ -164,9 +164,9 @@ class ProjectTabs {
       attention.setAttribute("aria-label", (selectedCounts.attention || 0) + " need attention");
     }
     if (activity) {
-      activity.hidden = !selectedCounts.active && !selectedCounts.completed;
-      activity.className = selectedCounts.active ? "view-active" : "view-completed";
-      activity.setAttribute("aria-label", selectedCounts.active ? "Active work" : "New responses");
+      activity.hidden = !selectedCounts.action && !selectedCounts.active && !selectedCounts.completed;
+      activity.className = selectedCounts.action ? "view-action" : selectedCounts.active ? "view-active" : "view-completed";
+      activity.setAttribute("aria-label", selectedCounts.action ? "Action required" : selectedCounts.active ? "Active work" : "New responses");
     }
     const close = this.doc.getElementById("mobile-close-project");
     if (close) close.hidden = !this.folders.selected;
@@ -185,7 +185,7 @@ class ProjectTabs {
     this.threads = threads;
     const tabs = this.doc.getElementById("view-tabs");
     const signature = JSON.stringify([this.folders.projects, this.folders.selected?.cwd,
-      threads.map(t => [t.thread_id, t.project_cwd, t.attention, t.needs_attention, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
+      threads.map(t => [t.thread_id, t.project_cwd, t.attention, t.needs_attention, t.attention_reason, t.snoozed, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
     if (signature === this.signature) return;
     this.signature = signature;
     this.renderMobilePicker(threads);
@@ -208,9 +208,9 @@ class ProjectTabs {
       if (counts.attention) {
         const badge = this.doc.createElement("span"); badge.className = "view-attention"; badge.textContent = String(counts.attention); tab.append(badge);
       }
-      if (counts.active || counts.completed) {
-        const dot = this.doc.createElement("span"); dot.className = counts.active ? "view-active" : "view-completed";
-        dot.setAttribute("aria-label", counts.active ? "Active work" : "New responses"); tab.append(dot);
+      if (counts.action || counts.active || counts.completed) {
+        const dot = this.doc.createElement("span"); dot.className = counts.action ? "view-action" : counts.active ? "view-active" : "view-completed";
+        dot.setAttribute("aria-label", counts.action ? "Action required" : counts.active ? "Active work" : "New responses"); tab.append(dot);
       }
       tab.onclick = () => this.activate(project.cwd).catch(this.onError);
       const close = this.doc.createElement("button"); close.type = "button"; close.className = "project-tab-close"; close.textContent = "×";

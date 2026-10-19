@@ -1,5 +1,7 @@
 "use strict";
 
+const tabViews = typeof module !== "undefined" ? require("./views.js").threadViews : threadViews;
+
 // Tabs are a window's working set, independent of thread placement and filters.
 class ThreadTabs {
   constructor({document, container, storage, fallbackStorage, scope = "", onSelect, onScratchpad, onError, canNavigate = () => true}) {
@@ -136,7 +138,7 @@ class ThreadTabs {
     // Status updates must not replace the native drag source mid-gesture.
     if (!this.container || this.dragging) return;
     const signature = JSON.stringify([this.selected ?? null, this.selected === undefined, this.scratchpadOpen,
-      this.items.map(item => [item.thread_id, item.title, item.response_state, item.unread_result])]);
+      this.items.map(item => [item.thread_id, item.title, item.response_state, item.unread_result, tabViews.needsAction(item)])]);
     if (signature === this.signature) return;
     this.signature = signature;
     const focused = this.container.contains(this.document.activeElement) ? this.document.activeElement?.dataset.threadTab : undefined;
@@ -150,7 +152,10 @@ class ThreadTabs {
       tab.setAttribute("aria-selected", String(this.selected === id));
       tab.setAttribute("aria-controls", scratchpad ? "project-scratchpad-page" : id ? "conversation" : "welcome");
       tab.tabIndex = this.selected === id || this.selected === undefined && id === null ? 0 : -1;
-      tab.title = scratchpad ? "Project scratchpad · ⌘⇧S to toggle floating notes" : item.title + (item.unread_result ? " · New response" : "") + (id ? " · Alt+Shift+←/→ to reorder" : "");
+      const needsAction = tabViews.needsAction(item);
+      tab.title = scratchpad ? "Project scratchpad · ⌘⇧S to toggle floating notes" : item.title + (needsAction ? " · Action required" : item.unread_result ? " · New response" : "") + (id ? " · Alt+Shift+←/→ to reorder" : "");
+      tab.setAttribute("aria-label", item.title + (needsAction ? " · Action required" : ""));
+      tab.dataset.needsAction = String(needsAction);
       tab.dataset.status = item.response_state || "";
       tab.dataset.unread = item.unread_result ? "true" : "false";
       tab.onclick = () => this.activate(id); tab.onkeydown = event => this.keydown(event, id);

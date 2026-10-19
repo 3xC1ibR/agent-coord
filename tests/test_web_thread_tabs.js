@@ -167,6 +167,27 @@ test("status refreshes retain the dragged DOM tab until drop or cancellation", (
   assert.equal(prevented, true); assert.equal(tabs.dragging, null);
 });
 
+test("conversation tabs keep action dots through reading and refresh when blockers are handled", () => {
+  const element = () => ({children: [], dataset: {}, attributes: {}, scrollLeft: 0, classList: {add() {}},
+    append(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
+    setAttribute(key, value) { this.attributes[key] = value; }, contains: () => false, querySelectorAll: () => []});
+  const container = element(), tabs = new ThreadTabs({container, document: {createElement: element}});
+  tabs.setProject("/work");
+  const approval = {...thread("approval"), response_state: "input", needs_attention: true, unread_result: true};
+  tabs.open(approval);
+  const tab = () => container.children[1].children[0];
+  assert.equal(tab().dataset.needsAction, "true");
+  assert.match(tab().attributes["aria-label"], /Action required/);
+  tabs.update([{...approval, unread_result: false}]);
+  assert.equal(tab().dataset.needsAction, "true", "reading must not clear a pending approval");
+  tabs.update([{...approval, response_state: "working", needs_attention: false}]);
+  assert.equal(tab().dataset.needsAction, "false"); assert.equal(tab().dataset.status, "working");
+  const blocker = {...approval, response_state: "action", attention_reason: "blocked"};
+  tabs.update([blocker]); assert.equal(tab().dataset.needsAction, "true");
+  tabs.update([{...blocker, needs_attention: false}]); assert.equal(tab().dataset.needsAction, "false");
+  assert.doesNotMatch(tab().attributes["aria-label"], /Action required/);
+});
+
 test("restart preserves tab order and selection through the initial inventory refresh", async () => {
   const {tabs, storage} = setup();
   tabs.open(thread("a")); tabs.open(thread("b")); tabs.move("b", 0); tabs.open(thread("a"));

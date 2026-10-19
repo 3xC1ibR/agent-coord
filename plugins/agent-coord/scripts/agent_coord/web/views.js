@@ -25,9 +25,13 @@ const threadViews = (() => {
   function needsYou(thread) {
     return grouping.awaitsUser(thread);
   }
+  function needsAction(thread) {
+    return needsYou(thread) && ["blocked", "review"].includes(grouping.reason(thread).key);
+  }
   function badges(threads, values) {
     const visible = threads.filter(thread => matches(thread, values));
     return {attention: visible.filter(needsYou).length,
+      action: visible.some(needsAction),
       active: visible.some(t => t.attention !== "archived" && t.response_state === "working"),
       completed: visible.some(t => t.attention === "now" && t.unhandled_response && (t.unread_result || t.unread))};
   }
@@ -45,7 +49,7 @@ const threadViews = (() => {
     if (["ArrowLeft", "ArrowRight"].includes(event.key)) return (index + (event.key === "ArrowLeft" ? -1 : 1) + count) % count;
     return null;
   }
-  return {filters, matches, badges, same, shortcut};
+  return {filters, matches, badges, needsAction, same, shortcut};
 })();
 
 class SavedViews {
@@ -436,8 +440,8 @@ class SavedViews {
         const badge = this.doc.createElement("span"); badge.className = "view-attention";
         badge.textContent = String(counts.attention); badge.setAttribute("aria-hidden", "true"); tab.append(badge);
       }
-      if (counts.active || counts.completed) {
-        const dot = this.doc.createElement("span"); dot.className = counts.active ? "view-active" : "view-completed";
+      if (counts.action || counts.active || counts.completed) {
+        const dot = this.doc.createElement("span"); dot.className = counts.action ? "view-action" : counts.active ? "view-active" : "view-completed";
         dot.setAttribute("aria-hidden", "true"); tab.append(dot);
       }
       tab.onclick = () => this.activate(view.id).catch(this.onError);
@@ -455,9 +459,9 @@ class SavedViews {
     const attention = this.$("mobile-view-attention"), activity = this.$("mobile-view-activity");
     attention.textContent = String(counts.attention); attention.hidden = !counts.attention;
     attention.setAttribute("aria-label", counts.attention + " need attention");
-    activity.hidden = !counts.active && !counts.completed;
-    activity.className = counts.active ? "view-active" : "view-completed";
-    activity.setAttribute("aria-label", counts.active ? "Active work" : "New responses");
+    activity.hidden = !counts.action && !counts.active && !counts.completed;
+    activity.className = counts.action ? "view-action" : counts.active ? "view-active" : "view-completed";
+    activity.setAttribute("aria-label", counts.action ? "Action required" : counts.active ? "Active work" : "New responses");
     this.$("welcome").setAttribute("aria-labelledby", "overview-title");
     if (hadFocus) this.focusActive();
   }

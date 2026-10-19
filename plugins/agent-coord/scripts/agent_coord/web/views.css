@@ -14,10 +14,11 @@
 @media (pointer: fine) { #overview [data-drag-thread] { cursor: grab; } }
 .views-bar > .view-actions { margin-left: auto; padding-block: 6px; }
 .view-attention { display: inline-grid; place-items: center; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 10px; color: var(--warm); background: var(--warm-tint); font: 10px var(--mono); }
-.view-completed, .view-active { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--dot-idle); }
+.view-completed, .view-active, .view-action { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--dot-idle); }
 .view-active { background: var(--accent); animation: view-work-blink 1.4s ease-in-out infinite; }
+.view-action { background: var(--warm); animation: view-work-blink 1.4s ease-in-out infinite; }
 @keyframes view-work-blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
-@media (prefers-reduced-motion: reduce) { .view-active { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .view-active, .view-action { animation: none; } }
 .view-actions { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
 .filter-panel > label[for="saved-filter"] { display: grid; gap: 6px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 #saved-filter { width: 100%; min-height: 36px; color: var(--ink); }
@@ -54,6 +55,7 @@
   .mobile-project-picker select { width: auto; max-width: 100%; field-sizing: content; min-width: 0; min-height: 44px; border: 0; padding: 6px 16px 6px 2px; font-size: 16px; font-weight: 600; background-color: transparent; text-overflow: ellipsis; }
   .mobile-project-picker .view-attention { flex-shrink: 0; }
   #mobile-project-activity { display: none; }
+  #mobile-project-activity.view-action:not([hidden]) { display: block; }
   .filter-panel .mobile-view-picker { display: grid; gap: 6px; }
   .filter-panel .mobile-view-label { display: block; color: var(--muted); font-size: 12px; }
   .filter-panel .mobile-view-picker select { width: 100%; max-width: none; min-height: 44px; font-size: 16px; }

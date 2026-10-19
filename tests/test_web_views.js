@@ -32,13 +32,13 @@ test("tab badges share handled attention, include pins, and exclude Later", () =
   const input = [thread("reply", {response_state: "reply", pinned: true}), thread("approval", {response_state: "input"}),
     thread("failure", {response_state: "failed"}), thread("later", {response_state: "reply", attention: "later"}),
     thread("done", {response_state: "reply", unhandled_response: true, unread_result: true}), thread("closed", {response_state: "reply", attention: "archived"})];
-  assert.deepEqual(threadViews.badges(input, {}), {attention: 4, active: false, completed: true});
-  assert.deepEqual(threadViews.badges(input, {show: "completed"}), {attention: 0, active: false, completed: false});
-  assert.deepEqual(threadViews.badges(input, {show: "archived"}), {attention: 0, active: false, completed: false});
+  assert.deepEqual(threadViews.badges(input, {}), {attention: 4, action: true, active: false, completed: true});
+  assert.deepEqual(threadViews.badges(input, {show: "completed"}), {attention: 0, action: false, active: false, completed: false});
+  assert.deepEqual(threadViews.badges(input, {show: "archived"}), {attention: 0, action: false, active: false, completed: false});
   assert.deepEqual(input.filter(t => threadViews.matches(t, {show: "attention"})), input.filter(grouping.awaitsUser));
   input[4].unread_result = false;
   for (const filter of [{repository: "rig"}, {project: "migration"}]) {
-    assert.deepEqual(threadViews.badges(input, filter), {attention: 4, active: false, completed: false});
+    assert.deepEqual(threadViews.badges(input, filter), {attention: 4, action: true, active: false, completed: false});
   }
 });
 
@@ -50,6 +50,29 @@ test("active-work badges follow the view's filters and ignore waiting or closed 
     {show: "attention"}, {show: "completed"}, {show: "archived"}]) {
     assert.equal(threadViews.badges(input, filters).active, false);
   }
+});
+
+test("action dots follow approvals and blockers without blinking for ordinary responses or dismissed work", async () => {
+  const c = setup(); await c.views.start();
+  const approval = thread("approval", {response_state: "input", needs_attention: true});
+  const running = thread("running");
+  const activity = c.controls["mobile-view-activity"];
+  c.views.render([running, approval]);
+  assert.equal(activity.className, "view-action"); assert.equal(activity.hidden, false);
+  assert.equal(activity.attributes["aria-label"], "Action required");
+  assert.ok(c.controls["saved-view-tabs"].children[0].children.some(child => child.className === "view-action"));
+  for (const reason of ["blocked", "review"]) {
+    const blocked = thread("blocker", {response_state: "action", needs_attention: true, attention_reason: reason});
+    assert.equal(threadViews.badges([blocked], {}).action, true);
+    for (const patch of [{needs_attention: false}, {snoozed: true}, {attention: "archived"}]) {
+      assert.equal(threadViews.badges([{...blocked, ...patch}], {}).action, false);
+    }
+  }
+  approval.response_state = "available"; approval.needs_attention = false;
+  c.views.render([running, approval]); assert.equal(activity.className, "view-active");
+  c.views.render([thread("reply", {response_state: "reply", needs_attention: true, unhandled_response: true, unread_result: true})]);
+  assert.equal(activity.className, "view-completed");
+  assert.equal(threadViews.badges([thread("other", {response_state: "input", repository_id: "other"})], {repository: "rig"}).action, false);
 });
 
 test("keyboard shortcuts cycle views without intercepting ordinary Tab or browser shortcuts", () => {
