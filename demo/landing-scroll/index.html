@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f5f6ef">
   <meta name="description" content="One request becomes a team at work. A scroll-through concept for Ribbon Field.">
   <title>One request. A team at work. — Ribbon Field</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M8 30V10h12c14 0 14 20 0 20H8Zm0-10h24' fill='none' stroke='%233b5745' stroke-width='5'/%3E%3C/svg%3E">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
   <script src="story.js" defer></script>
 </head>
@@ -14,7 +14,7 @@
   <a class="skip-link" href="#after-story">Skip the animation</a>
   <header class="site-header">
     <a class="wordmark" href="#story" aria-label="Ribbon Field, back to the beginning">
-      <svg viewBox="0 0 36 36" aria-hidden="true"><path d="M6 27V9h12c13 0 13 18 0 18H6Zm0-9h25"/></svg>
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
       Ribbon Field<span class="wordmark-dot">.</span>
     </a>
     <a class="access-link" href="https://ribbonfield.com/#pilot">Request early access <span aria-hidden="true">↗</span></a>
@@ -28,7 +28,7 @@
             <section class="story-copy is-current" data-chapter="0">
               <h1>Give your agents <br>something <em>to <br>work on.</em></h1>
               <p>One request. A team that works together. <br>A clear moment for you to step in.</p>
-              <div class="intro-note">Your coding agents, in one workspace.</div>
+              <div class="intro-note">Muse · Gemini · OpenAI · Claude · Moonshot</div>
             </section>
             <section class="story-copy" data-chapter="1" aria-hidden="true" inert>
               <h2>Start with <br><em>one conversation.</em></h2>
@@ -36,17 +36,21 @@
             </section>
             <section class="story-copy" data-chapter="2" aria-hidden="true" inert>
               <h2>Different models. <br><em>Shared direction.</em></h2>
-              <p>Your lead brings in specialists for the web app, mobile app, and API. Different providers, working toward one release.</p>
+              <p>Claude brings in OpenAI, Gemini, and Moonshot agents for web, mobile, and the API.</p>
             </section>
             <section class="story-copy" data-chapter="3" aria-hidden="true" inert>
+              <h2>Your agents <br><em>have agents.</em></h2>
+              <p>Each specialist builds a team. Muse handles the interface; others take accessibility, data, permissions, and sync.</p>
+            </section>
+            <section class="story-copy" data-chapter="4" aria-hidden="true" inert>
               <h2>They talk. <br><em>Work moves.</em></h2>
               <p>A question goes straight to the agent that can answer it. Context moves with the work.</p>
             </section>
-            <section class="story-copy" data-chapter="4" aria-hidden="true" inert>
-              <h2>Another agent. <br><em>A second look.</em></h2>
-              <p>The mobile agent brings in a verifier to check the full flow across devices. Its findings go back to the team.</p>
-            </section>
             <section class="story-copy" data-chapter="5" aria-hidden="true" inert>
+              <h2>Another agent. <br><em>A second look.</em></h2>
+              <p>Mobile brings in a fresh verifier. It checks sharing, permissions, sync, and older app versions across both apps.</p>
+            </section>
+            <section class="story-copy" data-chapter="6" aria-hidden="true" inert>
               <h2>A team at work. <br><em>One moment <br>for you.</em></h2>
               <p>The work is ready. The checks are in. <br>Your lead brings back the result and the one decision that needs you.</p>
             </section>
@@ -60,11 +64,16 @@
                   <linearGradient id="ribbon-ink" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#9cbaa0"/><stop offset="1" stop-color="#41664d"/></linearGradient>
                 </defs>
                 <path class="route" id="request-route" d="M310 258 C310 300 310 335 310 370"/>
-                <path class="route" id="web-route" d="M310 245 C310 285 100 270 100 304"/>
-                <path class="route" id="api-route" d="M310 245 L310 304"/>
-                <path class="route" id="mobile-route" d="M310 245 C310 285 520 270 520 304"/>
+                <path class="route" id="web-route" data-from="lead" data-to="web" d="M310 245 C310 285 100 270 100 304"/>
+                <path class="route" id="api-route" data-from="lead" data-to="api" d="M310 245 L310 304"/>
+                <path class="route" id="mobile-route" data-from="lead" data-to="mobile" d="M310 245 C310 285 520 270 520 304"/>
+                <path class="route" id="ui-route" data-from="web" data-to="ui" data-nested="true" d="M100 310 L114 420"/>
+                <path class="route" id="a11y-route" data-from="web" data-to="a11y" data-nested="true" d="M100 310 L114 530"/>
+                <path class="route" id="data-route" data-from="api" data-to="data" data-nested="true" d="M310 310 L324 420"/>
+                <path class="route" id="access-route" data-from="api" data-to="access" data-nested="true" d="M310 310 L324 530"/>
+                <path class="route" id="sync-route" data-from="mobile" data-to="sync" data-nested="true" d="M520 310 L534 420"/>
                 <path class="route message-route" id="message-route" d="M520 397 C520 446 310 446 310 397"/>
-                <path class="route" id="verifier-route" d="M520 400 C520 447 490 452 490 489"/>
+                <path class="route" id="verifier-route" data-from="mobile" data-to="verifier" data-nested="true" d="M520 310 L534 530"/>
                 <path class="route return-route" id="return-route" d="M582 540 C620 540 617 185 430 195"/>
                 <circle class="traveler" id="task-pulse" r="5"/>
                 <circle class="traveler" id="api-pulse" r="5"/>
@@ -83,20 +92,40 @@
                 <div class="node-status"><span class="status-dot"></span><span id="lead-status">Planning the work</span></div>
                 <div class="node-assignment">Own the result. Bring in help.</div>
               </article>
-              <article class="agent-node specialist-node web-node" data-node="web">
-                <div class="node-main"><span class="provider-icon codex" aria-hidden="true">⌘</span><div><h3>Web</h3><span class="provider-name">Codex</span></div></div>
+              <article class="agent-node specialist-node web-node" data-node="web" data-parent="lead">
+                <div class="node-main"><span class="provider-icon openai" aria-hidden="true">⌘</span><div><h3>Web</h3><span class="provider-name" title="OpenAI · Codex">OpenAI</span></div></div>
                 <div class="node-status"><span class="status-dot"></span><span id="web-status">Building collections</span></div>
               </article>
-              <article class="agent-node specialist-node api-node" data-node="api">
-                <div class="node-main"><span class="provider-icon claude" aria-hidden="true">✳</span><div><h3>API</h3><span class="provider-name">Claude</span></div></div>
+              <article class="agent-node specialist-node api-node" data-node="api" data-parent="lead">
+                <div class="node-main"><span class="provider-icon moonshot" aria-hidden="true">◒</span><div><h3>API</h3><span class="provider-name" title="Moonshot · Kimi Code">Moonshot</span></div></div>
                 <div class="node-status"><span class="status-dot"></span><span id="api-status">Adding shared access</span></div>
               </article>
-              <article class="agent-node specialist-node mobile-node" data-node="mobile">
+              <article class="agent-node specialist-node mobile-node" data-node="mobile" data-parent="lead">
                 <div class="node-main"><span class="provider-icon gemini" aria-hidden="true">✦</span><div><h3>Mobile</h3><span class="provider-name">Gemini</span></div></div>
                 <div class="node-status"><span class="status-dot"></span><span id="mobile-status">Connecting the app</span></div>
               </article>
-              <article class="agent-node verifier-node" data-node="verifier">
-                <div class="node-main"><span class="provider-icon codex" aria-hidden="true">⌘</span><div><h3>Verifier</h3><span class="provider-name">Codex</span></div></div>
+              <article class="agent-node child-node web-child first-child" data-node="ui" data-parent="web">
+                <div class="node-main"><span class="provider-icon muse" aria-hidden="true">∞</span><div><h3>Interface</h3><span class="provider-name">Muse</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="ui-status">Sharing controls</span></div>
+              </article>
+              <article class="agent-node child-node web-child second-child" data-node="a11y" data-parent="web">
+                <div class="node-main"><span class="provider-icon claude" aria-hidden="true">✳</span><div><h3>Accessibility</h3><span class="provider-name">Claude</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="a11y-status">Keyboard + focus</span></div>
+              </article>
+              <article class="agent-node child-node api-child first-child" data-node="data" data-parent="api">
+                <div class="node-main"><span class="provider-icon moonshot" aria-hidden="true">◒</span><div><h3>Data model</h3><span class="provider-name" title="Moonshot · Kimi Code">Moonshot</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="data-status">Safe migration</span></div>
+              </article>
+              <article class="agent-node child-node api-child second-child" data-node="access" data-parent="api">
+                <div class="node-main"><span class="provider-icon openai" aria-hidden="true">⌘</span><div><h3>Permissions</h3><span class="provider-name" title="OpenAI · Codex">OpenAI</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="access-status">Who can share</span></div>
+              </article>
+              <article class="agent-node child-node mobile-child first-child" data-node="sync" data-parent="mobile">
+                <div class="node-main"><span class="provider-icon muse" aria-hidden="true">∞</span><div><h3>Sync</h3><span class="provider-name">Muse</span></div></div>
+                <div class="node-status"><span class="status-dot"></span><span id="sync-status">Across devices</span></div>
+              </article>
+              <article class="agent-node child-node mobile-child second-child verifier-node" data-node="verifier" data-parent="mobile">
+                <div class="node-main"><span class="provider-icon openai" aria-hidden="true">⌘</span><div><h3>Verifier</h3><span class="provider-name" title="OpenAI · Codex">OpenAI</span></div></div>
                 <div class="node-status"><span class="status-dot"></span><span id="verifier-status">Checking both apps</span></div>
               </article>
 
@@ -105,7 +134,7 @@
                 <div class="exchange-message"><span class="message-direction">Mobile <span aria-hidden="true">→</span> API</span><p>Mobile ships later. Will older app versions still work?</p></div>
                 <div class="exchange-message reply"><span class="message-direction">API <span aria-hidden="true">→</span> Mobile</span><p>Yes. The existing contract stays compatible.</p></div>
               </div>
-              <div class="verification-note"><span aria-hidden="true">✓</span><div><strong>Shared on web. Opened on mobile.</strong><span>Permissions and older app versions checked.</span></div></div>
+              <div class="verification-note"><span aria-hidden="true">✓</span><div><strong>Shared on web. Opened on mobile.</strong><span>Permissions, sync, and older apps checked.</span></div></div>
 
               <div class="decision-card">
                 <div class="decision-heading"><span class="attention-icon" aria-hidden="true">↗</span><span>Ready for your review</span></div>
@@ -121,7 +150,7 @@
                   </div>
                   <div class="preview-phone" aria-hidden="true"><div class="phone-speaker"></div><span class="phone-back">‹ Collections</span><strong>Launch ideas</strong><div class="collection-members"><span class="member-avatar">J</span><span class="member-avatar">M</span><span class="member-avatar">A</span></div><div class="collection-items"><span><i></i> Product inspiration</span><span><i></i> A little inspiration</span><span><i></i> The next big thing</span></div><div class="phone-home"></div></div>
                 </div>
-                <div class="decision-check"><span aria-hidden="true">✓</span> Verification passed <span>·</span> 5 agents, one release</div>
+                <div class="decision-check"><span aria-hidden="true">✓</span> Verified <span>·</span> 10 agents <span>·</span> 5 model families</div>
                 <div class="decision-question">Ready to review the rollout?</div>
                 <button class="review-button" type="button">Review the result <span aria-hidden="true">↗</span></button>
                 <p class="review-feedback screen-reader" role="status" hidden>Example reviewed. In Ribbon Field, this opens the lead’s conversation and result.</p>
@@ -130,7 +159,7 @@
             <div class="example-caption">Illustrative workflow · Scroll to follow the work</div>
           </div>
         </div>
-        <div class="story-bottom"><span class="scroll-cue"><span aria-hidden="true">↓</span> <span id="scroll-label">A little scroll. A bigger picture.</span></span><span class="story-count" aria-hidden="true"><span id="chapter-number">01</span><span class="count-divider">/</span>06</span></div>
+        <div class="story-bottom"><span class="scroll-cue"><span aria-hidden="true">↓</span> <span id="scroll-label">A little scroll. A bigger picture.</span></span><span class="story-count" aria-hidden="true"><span id="chapter-number">01</span><span class="count-divider">/</span><span id="chapter-total">07</span></span></div>
         <div class="story-progress" aria-hidden="true"><div></div></div>
         <span class="screen-reader" id="story-announcement" aria-live="polite"></span>
       </div>
@@ -143,8 +172,8 @@
       <a class="closing-cta" href="https://ribbonfield.com/#pilot">Request macOS early access <span aria-hidden="true">↗</span></a>
       <a class="replay-link" href="#story">Back to the beginning ↑</a>
     </section>
-    <noscript><section class="no-script"><h2>One request becomes a team at work.</h2><p>A lead agent delegates shared collections to web, mobile, and API specialists. They coordinate compatibility with older app versions, bring in another agent to verify the flow across devices, and return with a release ready for your review. Enable JavaScript to explore the scroll animation.</p></section></noscript>
+    <noscript><section class="no-script"><h2>One request becomes a team at work.</h2><p>A Claude lead delegates shared collections to OpenAI, Gemini, and Moonshot specialists. Those agents recruit their own agents for interface work with Muse, accessibility, data, permissions, and sync. The mobile agent brings in a fresh verifier before ten agents return one release for your review. Enable JavaScript to explore the scroll animation.</p></section></noscript>
   </main>
-  <footer><a class="footer-wordmark" href="#story">Ribbon Field.</a><span>Landing-page concept · Example data</span></footer>
+  <footer><a class="footer-wordmark" href="#story" aria-label="Ribbon Field, back to the beginning"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Ribbon Field<span class="wordmark-dot">.</span></a><span>Landing-page concept · Example data</span></footer>
 </body>
 </html>
