@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ribbon Field · Launch Hook & Feature Demo Videos</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:36px 24px 64px;background:#f6f5ef;color:#253d35;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:1180px;margin:auto}
+header{margin-bottom:32px}
+h1{font-size:32px;font-weight:550;letter-spacing:-1px;margin:0 0 8px}
+header p{margin:0;color:#65755e;font-size:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:24px}
+.card{background:#fdfdfa;border:1.5px solid #dfe3d8;border-radius:20px;padding:20px;box-shadow:0 8px 24px #25332d0d;display:flex;flex-direction:column;gap:12px}
+.hook-pill{align-self:flex-start;padding:4px 10px;border-radius:10px;background:#e7eadf;color:#253d35;font:600 13px ui-monospace,Menlo,monospace}
+.card h2{margin:0;font-size:21px;font-weight:550;letter-spacing:-.5px;line-height:1.22}
+.sub{margin:0;font-size:14.5px;color:#5f6d59;line-height:1.45}
+video{display:block;width:100%;aspect-ratio:1/1;background:#f6f5ef;border-radius:14px;border:1px solid #e2e5db}
+.meta{font-size:13.5px;color:#7f8d7a;margin:0}
+.links{display:flex;flex-wrap:wrap;gap:14px;font-size:14px;font-weight:550;margin-top:auto}
+a{color:#3f7062;text-decoration:none}
+a:hover{text-decoration:underline}
+</style>
+<main>
+  <header>
+    <h1>Ribbon Field · Launch Hook &amp; Feature Demo Videos</h1>
+    <p>Minimalist 1080 × 1080 editorial animations (available both silent and with 120 BPM procedural soundtracks).</p>
+  </header>
+  <div class="grid">
+    <section class="card">
+      <span class="hook-pill">Hook A · Repo Collision / Overwrite (45s)</span>
+      <h2>Stop Claude Code and Codex from overwriting each other's files.</h2>
+      <p class="sub">Lease-based write scopes and file-conflict locks for parallel coding agents—in one workspace, without worktree sprawl.</p>
+      <video controls playsinline preload="metadata" poster="../collision/out/poster.png" src="../collision/out/ribbon-field-collision-silent.mp4"></video>
+      <p class="meta"><strong>Hypothesis:</strong> Developers running 2+ agents concurrently feel acute pain from file collisions and will install specifically for <code>begin-work</code> scope locking.</p>
+      <div class="links">
+        <a href="../collision/out/ribbon-field-collision-silent.mp4" download>Download Silent MP4</a>
+        <a href="../collision/out/ribbon-field-collision.mp4" download>Download Music MP4</a>
+        <a href="../collision/player.html">Standalone player</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <span class="hook-pill">Hook B · Terminal Tab Amnesia / Triage (45s)</span>
+      <h2>9 terminal tabs. 4 Claude sessions. Zero idea which agent is waiting on you.</h2>
+      <p class="sub">A native macOS mission control that tracks live agent state, structured checkpoints, and exact next actions across every repo.</p>
+      <video controls playsinline preload="metadata" poster="../amnesia/out/poster.png" src="../amnesia/out/ribbon-field-amnesia-silent.mp4"></video>
+      <p class="meta"><strong>Hypothesis:</strong> Cognitive overload and context-switching—not file locking—is the primary daily bottleneck; users want an inbox/attention queue (<code>Now / Later</code>, <code>next_step.actor=user</code>).</p>
+      <div class="links">
+        <a href="../amnesia/out/ribbon-field-amnesia-silent.mp4" download>Download Silent MP4</a>
+        <a href="../amnesia/out/ribbon-field-amnesia.mp4" download>Download Music MP4</a>
+        <a href="../amnesia/player.html">Standalone player</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <span class="hook-pill">Hook C · Cross-Model Orchestration (45s)</span>
+      <h2>Let Codex review Claude's implementation—without copy-pasting between terminals.</h2>
+      <p class="sub">Direct agent-to-agent messaging, delegation, and shared work-thread state for multi-agent engineering workflows.</p>
+      <video controls playsinline preload="metadata" poster="../delegation/out/poster.png" src="../delegation/out/ribbon-field-delegation-silent.mp4"></video>
+      <p class="meta"><strong>Hypothesis:</strong> Power users want cross-provider orchestration (specialist routing and inbox handoffs) rather than passive monitoring.</p>
+      <div class="links">
+        <a href="../delegation/out/ribbon-field-delegation-silent.mp4" download>Download Silent MP4</a>
+        <a href="../delegation/out/ribbon-field-delegation.mp4" download>Download Music MP4</a>
+        <a href="../delegation/player.html">Standalone player</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <span class="hook-pill">Feature Vignette · Auto-Wake vs. Sleep Polling (30s)</span>
+      <h2>Stop burning turns on sleep 30. Let background jobs wake your agent.</h2>
+      <p class="sub"><code>agent-coord job start --wake-self</code> runs watchers in a detached supervisor at zero model cost and wakes the thread the moment CI finishes.</p>
+      <video controls playsinline preload="metadata" poster="../autowake/out/poster.png" src="../autowake/out/ribbon-field-autowake-silent.mp4"></video>
+      <p class="meta"><strong>Workflow:</strong> Instead of looping on <code>sleep 30 &amp;&amp; gh run view</code>, the agent registers a completion subscription, ends its turn cleanly, and auto-resumes on <code>subscription_matched</code>.</p>
+      <div class="links">
+        <a href="../autowake/out/ribbon-field-autowake-silent.mp4" download>Download Silent MP4</a>
+        <a href="../autowake/out/ribbon-field-autowake.mp4" download>Download Music MP4</a>
+        <a href="../autowake/player.html">Standalone player</a>
+      </div>
+    </section>
+  </div>
+</main>
+</html>

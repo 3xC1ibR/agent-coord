@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ribbon Field · 9 terminal tabs. 4 Claude sessions. Zero idea which agent is waiting on you.</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="stage" aria-label="Animated illustration: native macOS mission control that tracks live agent state, structured checkpoints, and exact next actions across every repo">
+  <div id="brand"><img src="assets/ribbon-field.png" alt=""><span>Ribbon Field</span></div>
+  <h1 id="headline"><span class="l1"></span><span class="l2"></span></h1>
+  <div id="story">
+    <p id="subhead"></p>
+    <div id="top-bar">
+      <span class="repo-chip">acme-api</span>
+      <span class="repo-chip">acme-web</span>
+      <span class="repo-chip">acme-mobile</span>
+      <span id="triage-counter"></span>
+    </div>
+    <div id="grid"></div>
+    <div id="lane-headers">
+      <div class="lane-h" id="lane-now"><span class="dot-now"></span><span>NOW · Needs You (next_step.actor = user)</span></div>
+      <div class="lane-h" id="lane-run"><span class="dot-run"></span><span>WORKING &amp; LATER · Autonomous / Finished</span></div>
+    </div>
+    <div id="lens">
+      <div class="lens-head">
+        <div>
+          <span class="lens-repo" id="lens-repo"></span>
+          <h2 id="lens-title"></h2>
+        </div>
+        <span class="chip" id="lens-chip"></span>
+      </div>
+      <div class="ckpt-box">
+        <div class="ckpt-row"><span class="ckpt-k">phase</span><span class="ckpt-v" id="ckpt-phase"></span></div>
+        <div class="ckpt-row"><span class="ckpt-k">summary</span><span class="ckpt-v" id="ckpt-summary"></span></div>
+        <div class="ckpt-row highlight"><span class="ckpt-k">next_step</span><span class="ckpt-v" id="ckpt-next"></span></div>
+      </div>
+      <div class="lens-action" id="lens-action"></div>
+    </div>
+    <div id="bottom-banner">
+      <span class="banner-dot" id="banner-dot"></span>
+      <span id="banner-text"></span>
+    </div>
+  </div>
+
+  <div id="endcard">
+    <img src="assets/ribbon-field.png" alt="Ribbon Field app icon">
+    <h2>Ribbon Field</h2>
+    <p class="end-promise">9 panes.<br><span>Instant triage.</span></p>
+    <p class="end-detail">A native macOS mission control that tracks live agent state,<br>structured checkpoints, and exact next actions across every repo.<br><em>Keep the context. Lose the scrollback hunt.</em></p>
+  </div>
+  <p id="film-note">Workflow illustration · Activity condensed</p>
+</main>
+<script src="scenes.js"></script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ribbon Field · Let Codex review Claude's implementation—without copy-pasting between terminals.</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="stage" aria-label="Animated illustration: direct agent-to-agent messaging, delegation, and shared work-thread state for multi-agent engineering workflows">
+  <div id="brand"><img src="assets/ribbon-field.png" alt=""><span>Ribbon Field</span></div>
+  <h1 id="headline"><span class="l1"></span><span class="l2"></span></h1>
+  <div id="story">
+    <p id="subhead"></p>
+
+    <div id="thread-bar">
+      <span class="thread-dot"></span>
+      <span id="thread-label">Shared work-thread · OAuth PKCE token refresh · acme-auth</span>
+      <span class="thread-phase" id="thread-phase"></span>
+    </div>
+
+    <svg id="network" viewBox="0 0 1080 1080" aria-hidden="true">
+      <path id="arc-top" d="M 356 520 C 460 410, 620 410, 724 520"/>
+      <path id="arc-top-active" d="M 356 520 C 460 410, 620 410, 724 520"/>
+      <path id="arc-bot" d="M 724 670 C 620 780, 460 780, 356 670"/>
+      <path id="arc-bot-active" d="M 724 670 C 620 780, 460 780, 356 670"/>
+      <circle id="pkt-top" r="6.5"/>
+      <circle id="pkt-bot" r="6.5"/>
+    </svg>
+
+    <div id="clipboard-ghost">
+      <span class="ghost-tag" id="ghost-tag">pbcopy / pbpaste</span>
+      <p class="ghost-txt" id="ghost-txt"></p>
+    </div>
+
+    <div class="agent-col" id="col-claude" style="--tone:#9c7949;--tint:#f1eadd">
+      <div class="col-head">
+        <div class="orb">
+          <svg class="orbit" viewBox="0 0 108 108"><circle class="orbit-track" cx="54" cy="54" r="49"/><circle class="orbit-progress" id="ring-claude" cx="54" cy="54" r="49"/></svg>
+          <div class="symbol"><svg viewBox="0 0 48 48"><path d="M15 16l-7 8 7 8M33 16l7 8-7 8M27 12l-6 24"/></svg></div>
+        </div>
+        <div>
+          <span class="role-label">Implementer</span>
+          <h2>Claude Code</h2>
+          <span class="chip" style="--tone:#9c7949">Anthropic</span>
+        </div>
+      </div>
+      <div class="cli-line" id="cli-claude"></div>
+      <div class="artifact-box" id="art-claude">
+        <div class="art-title" id="art-claude-title"></div>
+        <div class="art-body" id="art-claude-body"></div>
+      </div>
+      <p class="col-status" id="status-claude"></p>
+    </div>
+
+    <div class="agent-col" id="col-codex" style="--tone:#3f7062;--tint:#e4eee8">
+      <div class="col-head">
+        <div class="orb">
+          <svg class="orbit" viewBox="0 0 108 108"><circle class="orbit-track" cx="54" cy="54" r="49"/><circle class="orbit-progress" id="ring-codex" cx="54" cy="54" r="49"/></svg>
+          <div class="symbol"><svg viewBox="0 0 48 48"><path d="M14 25l7 7 13-14"/><rect x="8" y="8" width="32" height="32" rx="7"/></svg></div>
+        </div>
+        <div>
+          <span class="role-label">Specialist Reviewer</span>
+          <h2>Codex</h2>
+          <span class="chip" style="--tone:#3f7062">OpenAI</span>
+        </div>
+      </div>
+      <div class="cli-line" id="cli-codex"></div>
+      <div class="artifact-box" id="art-codex">
+        <div class="art-title" id="art-codex-title"></div>
+        <div class="art-body" id="art-codex-body"></div>
+      </div>
+      <p class="col-status" id="status-codex"></p>
+    </div>
+
+    <div class="msg-pill" id="pill-top"></div>
+    <div class="msg-pill" id="pill-bot"></div>
+
+    <div id="bottom-banner">
+      <span class="banner-dot" id="banner-dot"></span>
+      <span id="banner-text"></span>
+    </div>
+  </div>
+
+  <div id="endcard">
+    <img src="assets/ribbon-field.png" alt="Ribbon Field app icon">
+    <h2>Ribbon Field</h2>
+    <p class="end-promise">Cross-model review.<br><span>Zero copy-pasting.</span></p>
+    <p class="end-detail">Direct agent-to-agent messaging, delegation, and shared<br>work-thread state for multi-agent engineering workflows.<br><em>Claude Code and Codex, working as one team in one place.</em></p>
+  </div>
+  <p id="film-note">Workflow illustration · Activity condensed</p>
+</main>
+<script src="scenes.js"></script>
+</body>
+</html>

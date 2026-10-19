@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ribbon Field · Stop Claude Code and Codex from overwriting each other's files</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="stage" aria-label="Animated illustration: lease-based write scopes and file-conflict locks for parallel coding agents in one workspace">
+  <div id="brand"><img src="assets/ribbon-field.png" alt=""><span>Ribbon Field</span></div>
+  <h1 id="headline"><span class="l1"></span><span class="l2"></span></h1>
+  <div id="story">
+    <p id="subhead"></p>
+
+    <div id="workspace-pill">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <span id="workspace-label">/opt/projects/acme-api · one workspace · no worktree sprawl</span>
+    </div>
+
+    <svg id="network" viewBox="0 0 1080 1080" aria-hidden="true">
+      <path id="wire-left" d="M 338 560 C 410 560, 420 560, 462 560"/>
+      <path id="wire-right" d="M 742 560 C 670 560, 660 560, 618 560"/>
+      <path id="wire-left-active" d="M 338 560 C 410 560, 420 560, 462 560"/>
+      <path id="wire-right-active" d="M 742 560 C 670 560, 660 560, 618 560"/>
+      <path id="peer-arc" d="M 230 430 C 370 320, 710 320, 850 430"/>
+      <path id="peer-arc-active" d="M 230 430 C 370 320, 710 320, 850 430"/>
+      <circle id="pkt-left" r="6"/>
+      <circle id="pkt-right" r="6"/>
+      <circle id="pkt-peer" r="6"/>
+      <circle id="shield-ring" cx="540" cy="560" r="96"/>
+    </svg>
+
+    <div class="agent-card" id="agent-claude" style="--tone:#9c7949;--tint:#f1eadd">
+      <div class="agent-top">
+        <div class="orb">
+          <svg class="orbit" viewBox="0 0 108 108"><circle class="orbit-track" cx="54" cy="54" r="49"/><circle class="orbit-progress" id="ring-claude" cx="54" cy="54" r="49"/></svg>
+          <div class="symbol"><svg viewBox="0 0 48 48"><path d="M15 16l-7 8 7 8M33 16l7 8-7 8M27 12l-6 24"/></svg></div>
+        </div>
+        <div class="agent-meta">
+          <h2>Claude Code</h2>
+          <span class="chip" style="--tone:#9c7949">Anthropic</span>
+        </div>
+      </div>
+      <div class="cmd-box" id="cmd-claude"></div>
+      <div class="scope-row" id="scope-claude"></div>
+      <p class="agent-status" id="status-claude"></p>
+    </div>
+
+    <div class="agent-card" id="agent-codex" style="--tone:#3f7062;--tint:#e4eee8">
+      <div class="agent-top">
+        <div class="orb">
+          <svg class="orbit" viewBox="0 0 108 108"><circle class="orbit-track" cx="54" cy="54" r="49"/><circle class="orbit-progress" id="ring-codex" cx="54" cy="54" r="49"/></svg>
+          <div class="symbol"><svg viewBox="0 0 48 48"><rect x="9" y="11" width="30" height="26" rx="5"/><path d="M16 21l5 4-5 4M24 29h8"/></svg></div>
+        </div>
+        <div class="agent-meta">
+          <h2>Codex</h2>
+          <span class="chip" style="--tone:#3f7062">OpenAI</span>
+        </div>
+      </div>
+      <div class="cmd-box" id="cmd-codex"></div>
+      <div class="scope-row" id="scope-codex"></div>
+      <p class="agent-status" id="status-codex"></p>
+    </div>
+
+    <div id="file-card">
+      <div class="file-head">
+        <span class="file-name">src/billing/checkout.py</span>
+        <span class="lease-badge" id="lease-badge"></span>
+      </div>
+      <div class="code-lines" id="code-lines">
+        <div class="code-line" id="line-0"><span class="ln">41</span><span class="code-txt">def charge_session(cart, token):</span></div>
+        <div class="code-line" id="line-1"><span class="ln">42</span><span class="code-txt" id="line-1-txt">  intent = stripe.create(cart.total)</span></div>
+        <div class="code-line" id="line-2"><span class="ln">43</span><span class="code-txt" id="line-2-txt">  return verify_capture(intent.id)</span></div>
+        <div class="code-line" id="line-3"><span class="ln">44</span><span class="code-txt" id="line-3-txt">  # status: clean</span></div>
+      </div>
+      <div class="file-footer" id="file-footer"></div>
+    </div>
+
+    <div id="peer-pill"></div>
+
+    <div id="bottom-banner">
+      <span class="banner-dot" id="banner-dot"></span>
+      <span id="banner-text"></span>
+    </div>
+  </div>
+
+  <div id="endcard">
+    <img src="assets/ribbon-field.png" alt="Ribbon Field app icon">
+    <h2>Ribbon Field</h2>
+    <p class="end-promise">Parallel agents.<br><span>Zero file stomping.</span></p>
+    <p class="end-detail">Lease-based write scopes and file-conflict locks<br>for Claude Code and Codex in one workspace—without worktree sprawl.<br><em>Parallel coding agents, coordinated in one place.</em></p>
+  </div>
+  <p id="film-note">Workflow illustration · Activity condensed</p>
+</main>
+<script src="scenes.js"></script>
+</body>
+</html>
