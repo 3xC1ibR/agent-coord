@@ -24,6 +24,7 @@ purpose.md
 braindump.txt
 
 # Local editor, experiment, and generated agent artifacts
+.cloudflare/
 .idea/
 dummy-experiment.txt
 .agent-coord/delegations/*.usage.json
