@@ -51,6 +51,16 @@
     svg[data-lineage="off"] .lineage { display: none; }
     .node.family-muted:not(.needs-you) { opacity: .2; }
     .node.family-active { opacity: 1; }
+    .atlas .node.phase-match { opacity: 1; }
+    .atlas .node.phase-muted { opacity: .12; }
+    .node.phase-match > circle.mark { display: block; stroke: var(--accent); }
+    .node.folded-finished { display: none; }
+    .node.folded-finished.phase-match { display: inline; }
+    .phase-entry { cursor: default; outline: none; }
+    .phase-entry-hit { fill: transparent; pointer-events: all; }
+    .phase-entry.active .phase-label { fill: var(--ink); font-weight: 600; }
+    .phase-entry:focus-visible .phase-label { text-decoration: underline; }
+    .phase-guide.phase-match { stroke: var(--accent); stroke-width: 1.3; }
     .node .core.family-core { stroke: none; }
     .parent-center { fill: var(--paper); stroke: none; pointer-events: none; }
     .family-symbol .parent-center { fill: var(--surface); }
@@ -184,7 +194,7 @@
   const norm = label => label.toLowerCase().replace(/[^a-z0-9/]+/g, "");
   const clusterKey = label => { if (!label) return "∅"; const n = norm(label); return CANON[n] || n; };
   const LABEL_W = 175; // label boxes in screen pixels at the cluster's own zoom level
-  const state = {grouping: params.get("cluster") === "group" ? "group" : "domain", historyExpanded: false, level: 0, focus: null, hub: null, view: null, anim: null, hovered: null, selected: null, highlight: null, panel: "right", labels: "auto", targetScale: null, detailScale: null, fitted: true, fitKey: null};
+  const state = {grouping: params.get("cluster") === "group" ? "group" : "domain", phasePreview: null, historyExpanded: false, level: 0, focus: null, hub: null, view: null, anim: null, hovered: null, selected: null, highlight: null, panel: "right", labels: "auto", targetScale: null, detailScale: null, fitted: true, fitKey: null};
   let canvas, svg, panel, toolbar, controls, legend, empty, clusters = new Map(), nodeEls = new Map(), api, currentField = null, drawnScale = 1;
   const W = () => canvas.clientWidth || 1000, H = () => canvas.clientHeight || 700;
   const viewScale = () => W() / (state.view?.w || 1600);
@@ -595,6 +605,7 @@
     panel.append(section);
   }
   function drawCanvas(field) {
+    state.phasePreview = null;
     svg.replaceChildren(); nodeEls.clear(); drawnScale = layoutScale();
     empty.hidden = field.agents.length > 0;
     empty.textContent = "No threads in this project.";
@@ -625,7 +636,7 @@
       }, onEnd: ({dragged}) => { if (dragged) { placeClusters(clusters, c.key); lastDraw.clear(); persist(); draw(); } else activate(); }});
       placeOverviewMembers(c);
       const overviewNodes = svgEl("g", {class: "overview-threads" + (focused ? " focused" : ""), "data-domain": c.key}, gOverview);
-      for (const a of c.members.filter(a => !foldedFinished(field, a))) drawNode(a, field, overviewNodes, {far: true, focused: false, hubView: false, faded: state.level > 0 && !focused && !field.needsUser(a)});
+      for (const a of c.members) drawNode(a, field, overviewNodes, {far: true, focused: false, hubView: false, faded: state.level > 0 && !focused && !field.needsUser(a)});
       if (!focused) continue;
       // Hidden overview marks must not become endpoints for detail lineage.
       for (const a of c.members) nodeEls.delete(a.id);
@@ -634,9 +645,8 @@
       path.addEventListener("click", () => { if (state.level === 2) focusCluster(c.key); });
       drawBands(c, gGuides, true);
       for (const a of c.members) {
-        if (foldedFinished(field, a)) continue;
         const sec = c.secondary.get(a.id) && clusters.get(c.secondary.get(a.id));
-        if (sec) {
+        if (sec && !foldedFinished(field, a)) {
           const dx = sec.x - a._x, dy = sec.y - a._y, d = Math.hypot(dx, dy) || 1, ex = a._x + dx / d * 54 * k, ey = a._y + dy / d * 54 * k;
           svgEl("line", {class: "tie", x1: a._x, y1: a._y, x2: ex, y2: ey}, gTies);
           const text = svgEl("text", {class: "tie-label", x: ex + 3 * k, y: ey + 3 * k, style: `font-size:${8.5 * k}px`}, gTies); text.textContent = "also " + sec.label + " →";
@@ -691,10 +701,36 @@
         svgEl("line", {class: "phase-ruler-line", "data-boundary": band.name, x1: ruler.x - 4 * k, x2: ruler.x + 5 * k, y1: tickY, y2: tickY}, key);
         if (!band.count) continue;
         svgEl("path", {class: "phase-ruler-line", d: `M${ruler.x + 5 * k} ${tickY} L${ruler.x + 10 * k} ${labelY} L${ruler.x + 13 * k} ${labelY}`}, key);
-        const label = svgEl("text", {class: "phase-label", x: ruler.x + 17 * k, y: labelY + 3 * k, style: `font-size:${10 * k}px;stroke-width:${3 * k}px`}, key);
+        const entry = svgEl("g", {class: "phase-entry", tabindex: 0, role: "button", "data-band": band.name,
+          "aria-label": `Highlight ${band.count} ${names[band.name]} threads in ${c.label}`}, key);
+        svgEl("rect", {class: "phase-entry-hit", x: ruler.x + 12 * k, y: labelY - 8 * k, width: (ruler.w / k - 12) * k, height: 15 * k}, entry);
+        const label = svgEl("text", {class: "phase-label", x: ruler.x + 17 * k, y: labelY + 3 * k, style: `font-size:${10 * k}px;stroke-width:${3 * k}px`}, entry);
         label.textContent = names[band.name] + " · " + band.count;
+        const preview = () => { state.phasePreview = {cluster: c.key, band: band.name}; applyPhasePreview(); };
+        const clear = () => { state.phasePreview = null; applyPhasePreview(); };
+        entry.addEventListener("pointerenter", preview);
+        entry.addEventListener("pointerleave", () => { if (document.activeElement !== entry) clear(); });
+        entry.addEventListener("focus", preview);
+        entry.addEventListener("blur", () => { if (!entry.matches(":hover")) clear(); });
+        entry.addEventListener("pointerdown", e => e.stopPropagation());
+        entry.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); preview(); } });
       }
     }
+  }
+
+  const phaseMatches = a => state.phasePreview?.cluster === clusterOf(a.id)?.key && state.phasePreview?.band === a._band;
+  function applyPhasePreview() {
+    const c = state.phasePreview && clusters.get(state.phasePreview.cluster);
+    const members = new Set(c?.members.map(a => a.id));
+    for (const [id, el] of nodeEls) {
+      el.classList.toggle("phase-match", members.has(id) && phaseMatches(currentField.byId(id)));
+      el.classList.toggle("phase-muted", members.has(id) && !phaseMatches(currentField.byId(id)));
+    }
+    for (const el of svg.querySelectorAll(".phase-entry, .phase-guide")) {
+      const match = !!c && el.getAttribute("data-band") === state.phasePreview.band;
+      el.classList.toggle(el.classList.contains("phase-entry") ? "active" : "phase-match", match);
+    }
+    drawLineage(state.hovered || state.selected || state.hub);
   }
 
   function drawLineage(id) {
@@ -713,9 +749,10 @@
           svgEl("line", {class: "pin-tether", "data-agent-id": a.id, x1: a._home.x, y1: a._home.y, x2: a._x, y2: a._y}, layer);
           svgEl("circle", {class: "home-ghost", "data-agent-id": a.id, cx: a._home.x, cy: a._home.y, r: 4 * px()}, layer);
         }
-        if (state.level === 0) continue;
+        if (state.level === 0 || foldedFinished(currentField, a) && !phaseMatches(a)) continue;
         const parent = currentField.parent(a.id);
         if (!parent || !nodeEls.has(parent.id) || !nodeEls.has(a.id)) continue;
+        if (foldedFinished(currentField, parent) && !phaseMatches(parent)) continue;
         const active = a._family === activeFamily, dx = a._x - parent._x, dy = a._y - parent._y, distance = Math.hypot(dx, dy);
         if (distance < .01) continue;
         const start = Math.min(distance * .35, radiusFor(parent, state.level === 0, k) + 4 * k), end = Math.min(distance * .35, radiusFor(a, state.level === 0, k) + 4 * k);
@@ -743,6 +780,7 @@
     const x = far ? a._overview.x : a._x, y = far ? a._overview.y : a._y;
     const parentAgent = field.parent(a.id), relationship = (kids.length ? ". Parent agent" : "") + (parentAgent ? ". Child of " + (parentAgent.name || parentAgent.title) : "");
     const g = svgEl("g", {"data-agent-id": a.id, "data-band": a._band, "data-family": a._family, style: `--node-opacity:${opacityFor(field, a)}`, tabindex: 0, role: "button", "aria-label": a.title + relationship + ". " + nodeDoing(a, field) + (a._pinned ? ". Pinned freely" : ""), class: "node " + stateClass(a) + (far && !field.needsUser(a) ? " overview-quiet" : "") + (a._pinned ? " pinned" : "") + (state.highlight === a.id ? " highlight" : "") + (state.selected === a.id ? " peeked" : "") + (faded ? " faded" : ""), transform: `translate(${x} ${y})`}, parent);
+    g.classList.toggle("folded-finished", foldedFinished(field, a));
     const previous = !far && lastDraw.get(a.id), now = performance.now();
     let motion = previous?.motion;
     if (previous && !a._pinned && Math.hypot(previous.x - a._x, previous.y - a._y) > 0.01) motion = {from: previous, at: now};
@@ -803,7 +841,7 @@
     }
     const ordered = [...field.agents].sort((a, b) => Number(b.id === state.selected) - Number(a.id === state.selected) || Number(field.needsUser(b)) - Number(field.needsUser(a)) || (b.userTurns || 0) - (a.userTurns || 0));
     for (const a of ordered) {
-      const el = nodeEls.get(a.id); if (!el) continue;
+      const el = nodeEls.get(a.id); if (!el || foldedFinished(field, a)) continue;
       const essential = (state.level > 0 && field.needsUser(a)) || a.id === state.selected || a.id === state.highlight;
       const inFamily = state.hub && a._family === rootOf(state.hub)?.id;
       const eligible = essential || inFamily || (state.focus === clusterOf(a.id)?.key && field.children(a.id).length > 0) || prominent.has(a.id);
@@ -820,7 +858,7 @@
   let draw = () => {};
   function loadLayout(field) {
     cancelAnimationFrame(state.anim);
-    Object.assign(state, {historyExpanded: false, level: 0, focus: null, hub: null, view: null, highlight: null, hovered: null, selected: null, targetScale: null, detailScale: null, fitted: true, fitKey: null});
+    Object.assign(state, {phasePreview: null, historyExpanded: false, level: 0, focus: null, hub: null, view: null, highlight: null, hovered: null, selected: null, targetScale: null, detailScale: null, fitted: true, fitKey: null});
     storeKey = layoutKey(field.workspace);
     let positions = {}; try { positions = JSON.parse(localStorage.getItem(storeKey) || "{}") || {}; } catch { /* private mode */ }
     clusterPos.clear(); lastDraw.clear();
