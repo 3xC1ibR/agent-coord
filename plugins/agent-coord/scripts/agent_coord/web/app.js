@@ -984,6 +984,7 @@ function sameConversation(first, second) {
     JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.work_thread.browser_session, second.work_thread.client]);
 }
 async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true, tabId = null} = {}) {
+  const previousTab = state.threadTabs?.selected;
   state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.mobileChat?.close();
@@ -1010,7 +1011,6 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   else if (!tabId || !state.threadTabs?.selectConversation?.(tabId, id))
     state.threadTabs?.open(state.sessions?.find(thread => thread.thread_id === id)
       || state.conversations?.get(id)?.detail?.work_thread || {thread_id: id, title: "Conversation"});
-  state.agentTreeController?.bind();
   state.dispatchDock?.hide();
   if (dock) {
     setChatExpanded(false);
@@ -1030,6 +1030,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   else history.replaceState(null, "", "#" + encodeURIComponent(id));
   $("welcome").hidden = true;
   $("conversation").hidden = false;
+  state.agentTreeController?.bind({preservePanel: !!tabId && tabId === previousTab, dock});
   $("requests").replaceChildren();
   $("thread-context").hidden = true;
   renderTitle();
@@ -2344,7 +2345,7 @@ setNavigation(false);
 const compactContext = window.matchMedia("(max-width: 1100px)");
 function setupAgentTree() {
   const records = new Map();
-  let openThreads = [], closedThreads = [], familyThreads = [], pending;
+  let openThreads = [], closedThreads = [], familyThreads = [], pending, defaultPending = false;
   const currentTab = () => state.threadTabs?.items.find(item => item.thread_id === state.threadTabs.selected);
   const controller = state.agentTreeController = {
     mode: "context", root: null, tree: AgentTree.graph([]),
@@ -2362,7 +2363,8 @@ function setupAgentTree() {
       request.promise = api(threadPath(id) + "/agent-tree").then(result => {
         if (this.root !== id && state.selected !== id) return;
         familyThreads = result.data;
-        state.threadTabs?.setTree(result.root_thread_id, this.mode === "agents");
+        if (result.data.length > 1 || currentTab()?.tree_root)
+          state.threadTabs?.setTree(result.root_thread_id, this.mode === "agents");
         this.update(); state.listSignature = ""; renderList();
       }).finally(() => { if (pending === request) pending = null; });
       return request.promise;
@@ -2382,10 +2384,8 @@ function setupAgentTree() {
       this.root = this.tree.root(tab?.tree_root || state.selected);
       if (tab?.tree_root && this.root !== tab.tree_root) state.threadTabs.setTree(this.root, tab.tree_open);
       if (this.root && this.tree.nodes.has(this.root)) panel.update([...this.tree.nodes.values()], this.root, state.selected);
-      const button = $("show-agent-tree"), members = this.tree.family(this.root);
-      button.hidden = !state.selected || isSessionDraft() || this.childCount(state.selected) === 0;
-      button.textContent = "Agents" + (members.length ? " · " + members.length : "");
-      button.title = "Show the full agent tree";
+      $("conversation").classList.toggle("has-agent-tree", this.tree.family(this.root).length > 1);
+      this.applyDefault();
     },
     childCount(id) { return Math.max(0, this.tree.family(id).length - 1); },
     recipient() {
@@ -2393,13 +2393,24 @@ function setupAgentTree() {
       if (!tab?.tree_root) return "";
       return (state.detail?.work_thread?.thread_id === state.selected ? state.detail.work_thread.title : this.tree.nodes.get(state.selected)?.title) || "selected agent";
     },
-    bind() {
-      const tab = currentTab();
-      this.setMode(tab?.tree_open ? "agents" : "context", false);
+    bind({preservePanel = false, dock = false} = {}) {
+      defaultPending = !preservePanel && !dock && !state.paneMode;
+      if (!preservePanel) this.setMode("context", false);
       this.update();
-      if (this.mode === "agents") this.load().catch(showError);
+      // Discover closed ancestors and children even when overview filters hide them.
+      if (!dock && !state.paneMode) this.load().catch(showError);
     },
+    applyDefault() {
+      if (!defaultPending || !state.selected || isSessionDraft() || this.tree.family(this.root).length < 2) return;
+      defaultPending = false;
+      this.setMode("agents");
+      setContextCollapsed(false);
+      if (state.mobileChat?.matches) state.mobileChat.open("context");
+      renderStatus();
+    },
+    cancelDefault() { defaultPending = false; },
     setMode(mode, remember = true) {
+      if (remember) this.cancelDefault();
       this.mode = mode;
       $("agent-tree-panel").hidden = mode !== "agents"; $("context-info").hidden = mode === "agents";
       $("context-panel").classList.toggle("agents-mode", mode === "agents");
@@ -2441,10 +2452,10 @@ function setupAgentTree() {
       await select(id, {tabId, focus: false});
     })});
   window.agentCoordOpenTree = id => controller.open(id);
-  $("show-agent-tree").onclick = () => action(() => controller.open());
   $("panel-agents").onclick = () => action(() => controller.open());
   $("panel-context").onclick = () => controller.setMode("context");
   $("close-context-panel").onclick = () => {
+    controller.cancelDefault();
     if (state.mobileChat?.matches) state.mobileChat.close();
     else setContextCollapsed(true);
   };
@@ -2494,10 +2505,10 @@ function layoutContext() {
   button.setAttribute("aria-expanded", String(!collapsed));
   button.setAttribute("aria-label", label);
   button.title = label;
-  $("show-agent-tree")?.setAttribute("aria-expanded", String(!collapsed && state.agentTreeController?.mode === "agents"));
   if (collapsed && containsFocus) button.focus({preventScroll: true});
 }
 function setContextCollapsed(collapsed) {
+  state.agentTreeController?.cancelDefault();
   contextCollapsed = collapsed;
   try { localStorage.setItem("agent-coord.context-collapsed", String(collapsed)); } catch { /* Preferences are optional. */ }
   layoutContext();

@@ -102,3 +102,108 @@ test("attention control reveals a folded failed descendant before selecting it",
   assert.equal(panel.cardEls.has("failed"), true); assert.equal(selected.at(-1), "failed");
   assert.equal(panel.root, "root");
 });
+
+function setupController(records, selected = "root", response) {
+  const fs = require("node:fs"), vm = require("node:vm");
+  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+  const elements = new Map();
+  const c = {state: {selected, sessions: records}, collapsed: true, errors: [], requests: [],
+    document: {}, window: {}, localStorage: {getItem() {}, setItem() {}},
+    $: id => {
+      if (!elements.has(id)) elements.set(id, {hidden: false, classList: {toggle() {}},
+        style: {setProperty() {}}, setAttribute() {}, focus() {}});
+      return elements.get(id);
+    },
+    AgentTree: {...Tree, Panel: class { update() {} fit() {} }},
+    isSessionDraft: () => c.state.selected === "new-session", threadPath: id => "threads/" + id,
+    layoutContext: () => { c.$("context-panel").hidden = c.collapsed; },
+    setContextCollapsed: value => { c.state.agentTreeController.cancelDefault(); c.collapsed = value; c.layoutContext(); },
+    renderStatus() {}, renderList() {}, showError: error => c.errors.push(error), action: fn => fn(),
+    api: path => {
+      c.requests.push(path);
+      const loaded = response ? response(path) : Promise.resolve({root_thread_id: Tree.graph(records).root(selected), data: records});
+      return loaded.then(result => {
+        const tree = Tree.graph(result.data);
+        return {...result, data: result.data.map(t => ({...t, agent_parent_id: tree.parents.get(t.thread_id) || null}))};
+      });
+    }};
+  c.state.threadTabs = {selected, items: [{thread_id: selected}],
+    setTree(root, open) { const item = this.items.find(t => t.thread_id === this.selected);
+      if (item) Object.assign(item, {tree_root: root, tree_open: open}); }};
+  vm.runInNewContext(source.slice(source.indexOf("function setupAgentTree()"), source.indexOf("\nlet contextCollapsed")) + "\nsetupAgentTree();", c);
+  c.controller = c.state.agentTreeController;
+  c.controller.inventory(records);
+  return c;
+}
+
+test("opening either a parent or leaf conversation defaults to its full tree and opens the panel", async () => {
+  const records = [thread("root"), thread("child", "root")];
+  for (const selected of ["root", "child"]) {
+    const c = setupController(records, selected);
+    c.controller.bind(); await c.controller.load();
+    assert.equal(c.controller.mode, "agents");
+    assert.equal(c.controller.root, "root");
+    assert.equal(c.collapsed, false);
+    assert.equal(c.state.threadTabs.items[0].tree_open, true);
+  }
+});
+
+test("family discovery includes an archived ancestor missing from overview inventory", async () => {
+  const child = thread("child", "root");
+  const c = setupController([child], "child", () => Promise.resolve({root_thread_id: "root",
+    data: [thread("root", null, {attention: "archived"}), child]}));
+  c.controller.bind(); await c.controller.load();
+  assert.equal(c.controller.mode, "agents");
+  assert.equal(c.controller.root, "root");
+  assert.equal(c.collapsed, false);
+});
+
+test("a standalone conversation keeps Context without forcing the panel open", async () => {
+  const c = setupController([thread("root")]);
+  c.controller.bind(); await c.controller.load();
+  assert.equal(c.controller.mode, "context");
+  assert.equal(c.collapsed, true);
+  assert.equal(c.state.threadTabs.items[0].tree_root, undefined);
+});
+
+test("late family discovery respects explicit Context and close choices", async () => {
+  for (const choice of ["panel-context", "close-context-panel"]) {
+    let resolve;
+    const c = setupController([thread("root")], "root", () => new Promise(yes => { resolve = yes; }));
+    c.controller.bind(); const loaded = c.controller.load();
+    c.$(choice).onclick();
+    resolve({root_thread_id: "root", data: [thread("root"), thread("child", "root")]});
+    await loaded;
+    assert.equal(c.controller.mode, "context");
+    assert.equal(c.collapsed, true);
+  }
+});
+
+test("same-tab child navigation keeps panel choices and does not reopen the mobile sheet", async () => {
+  const c = setupController([thread("root"), thread("child", "root")]);
+  let opened = 0;
+  c.state.mobileChat = {matches: true, open() { opened++; }};
+  c.controller.bind(); await c.controller.load();
+  assert.equal(opened, 1);
+  c.state.selected = "child";
+  c.controller.bind({preservePanel: true}); await c.controller.load();
+  assert.equal(c.controller.mode, "agents");
+  assert.equal(opened, 1);
+  c.controller.setMode("context");
+  c.controller.bind({preservePanel: true}); await c.controller.load();
+  assert.equal(c.controller.mode, "context");
+});
+
+test("late responses from a previous conversation cannot open its tree in a standalone chat", async () => {
+  const replies = new Map();
+  const c = setupController([thread("root"), thread("solo")], "root", path => new Promise(resolve => replies.set(path, resolve)));
+  c.controller.bind(); const previous = c.controller.load();
+  c.state.selected = "solo"; c.state.threadTabs.selected = "solo"; c.state.threadTabs.items.push({thread_id: "solo"});
+  c.controller.bind(); const current = c.controller.load();
+  replies.get("threads/solo/agent-tree")({root_thread_id: "solo", data: [thread("solo")]}); await current;
+  replies.get("threads/root/agent-tree")({root_thread_id: "root", data: [thread("root"), thread("child", "root")]}); await previous;
+  assert.equal(c.controller.root, "solo");
+  assert.equal(c.controller.mode, "context");
+  assert.equal(c.collapsed, true);
+  assert.equal(c.state.threadTabs.items[1].tree_root, undefined);
+});
