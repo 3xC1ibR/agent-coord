@@ -367,6 +367,7 @@ const AgentField = (() => {
         pulses: active ? [lastSeen] : (tool && tool.at > updatedAt ? [tool.at] : []), lastTool: tool,
         userTurns: Math.min(40, t.completions || 0), turns: (t.completions || 0) * 2 + (t.checkpoints || 0),
         workspace: t.cwd, attention: t.attention, real: true,
+        group: t.group || null, groupId: t.group_id || null, lastTurnAt: ms(t.last_completion_at) || ms(t.turn_started_at) || null,
       };
       a._rand2 = mulberry32(hashSeed(a.id));
       if (!a.history.length && cp) a.history.push({at: a.checkpointAt, phase, summary: a.summary, actor: "agent"});

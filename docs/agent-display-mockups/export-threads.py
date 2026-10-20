@@ -130,6 +130,11 @@ def load(path: Path, archived: bool, message_days: float = 14) -> dict:
         if "thread_id" in cols and "choice" in cols:
             for r in db.execute(f"SELECT thread_id, choice FROM response_classifications WHERE thread_id IN ({marks}) ORDER BY id", ids):
                 classifications[r["thread_id"]] = r["choice"]
+    groups: dict[str, dict] = {}
+    if all(db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (n,)).fetchone() for n in ("thread_organization", "named_projects")):
+        for r in db.execute(f"""SELECT o.thread_id, p.id AS group_id, p.name AS group_name FROM thread_organization o
+                                JOIN named_projects p ON p.id = o.project_id WHERE o.thread_id IN ({marks})""", ids):
+            groups[r["thread_id"]] = {"id": r["group_id"], "name": r["group_name"]}
     out = []
     for t in threads:
         tid = t["thread_id"]
@@ -153,6 +158,7 @@ def load(path: Path, archived: bool, message_days: float = 14) -> dict:
             "domain": t.get("domain"), "domain_source": t.get("domain_source"), "scope_cluster": t.get("scope_cluster"),
             "cwd": s.get("cwd") or b.get("cwd") or t.get("project_cwd"), "project_cwd": t.get("project_cwd"),
             "attention": t["attention"], "pinned": bool(t.get("pinned")),
+            "group": groups.get(tid, {}).get("name"), "group_id": groups.get(tid, {}).get("id"),
             "client": b.get("client") or s.get("client") or "codex", "app": bool(b), "dispatcher": tid in dispatchers,
             "created_at": t["created_at"], "updated_at": t["updated_at"], "turn_started_at": t.get("turn_started_at"), "turn_id": t.get("turn_id"),
             "original_request": (t.get("original_request") or "")[:400],
@@ -160,6 +166,7 @@ def load(path: Path, archived: bool, message_days: float = 14) -> dict:
             "history": [{"at": h["created_at"], "phase": h["phase"], "summary": h["summary"][:240], "author": h["author"]} for h in hist[-8:]],
             "checkpoints": len(hist),
             "completions": len(comps), "last_completion": comps[-1]["status"] if comps else None,
+            "last_completion_at": comps[-1]["completed_at"] if comps else None,
             "parent": parent,
             "links": links.get(tid, [])[:6],
             "classification": classifications.get(tid),
