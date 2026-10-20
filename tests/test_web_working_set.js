@@ -375,7 +375,7 @@ test("polling retains page scroll and focus, and unchanged renders keep the DOM"
   assert.equal(c.observers.length, 1);
 });
 test("keyboard navigation is scoped to the visible overview and leaves forms, menus and modifiers alone", () => {
-  const c = setup(); c.render([thread("a")]); assert(c.key("ArrowDown").prevented); assert.deepEqual(c.ids(), []);
+  const c = setup(); c.render([thread("a")]); assert(c.key("ArrowDown").prevented); assert.deepEqual(c.ids(), ["a"]);
   assert(c.key("ArrowDown").prevented); assert.deepEqual(c.ids(), ["a"]);
   for (const tag of ["input", "textarea", "button", "select", "summary", "a"]) assert(!c.key("ArrowUp", c.doc.createElement(tag)).prevented);
   assert(!c.key("ArrowUp", c.doc.body, {ctrlKey: true}).prevented);
@@ -383,6 +383,37 @@ test("keyboard navigation is scoped to the visible overview and leaves forms, me
   c.enable(false); assert(!c.key("ArrowUp").prevented); c.enable(true);
   c.host.hidden = true; assert(!c.key("ArrowUp").prevented); c.host.hidden = false;
   c.key("g"); assert(c.data.values().some(v => JSON.parse(v).dimension === "domain"));
+});
+test("up/down skips empty Replies only in the current group and filtered view", () => {
+  const c = setup(), reply = thread("reply", {project_id: "a", project_name: "A", unread_result: true});
+  const idle = thread("idle", {project_id: "b", project_name: "B"});
+  c.render([reply, idle]);
+  c.key("ArrowDown"); assert.equal(c.page().dataset.level, "1");
+  c.key("ArrowDown"); assert.equal(c.page().dataset.level, "2");
+  c.key("ArrowUp"); assert.equal(c.page().dataset.level, "1");
+  c.selectGroup("B"); c.selectLevel(0);
+  c.key("ArrowDown"); assert.equal(c.page().dataset.level, "2");
+  c.key("ArrowDown"); assert.equal(c.page().dataset.level, "2");
+  c.key("ArrowUp"); assert.equal(c.page().dataset.level, "0");
+  c.key("ArrowUp"); assert.equal(c.page().dataset.level, "0");
+  c.selectGroup("A"); c.key("ArrowDown"); assert.deepEqual(c.ids(), ["reply"]);
+  c.render([idle], {view: "filtered"});
+  c.key("ArrowDown"); assert.equal(c.page().dataset.level, "2");
+  c.key("ArrowUp"); assert.equal(c.page().dataset.level, "0");
+});
+test("reading the last reply stays on Replies and empty map cells remain selectable", () => {
+  const c = setup(), reply = thread("reply", {unread_result: true});
+  c.render([reply]); c.key("ArrowDown"); assert.equal(c.page().dataset.level, "1");
+  c.render([{...reply, unread_result: false}]);
+  assert.equal(c.page().dataset.level, "1"); assert.deepEqual(c.ids(), []);
+  assert.equal(c.host.querySelectorAll(".ws-level").length, 3);
+  c.key("ArrowUp"); assert.equal(c.page().dataset.level, "0");
+  const emptyCell = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === "overview:all" && n.dataset.level === "1");
+  emptyCell.onclick(); assert.equal(c.page().dataset.level, "1");
+  c.key("ArrowDown"); assert.equal(c.page().dataset.level, "2");
+  c.selectLevel(1); assert.equal(c.page().dataset.level, "1");
+  c.key("ArrowDown"); assert.equal(c.page().dataset.level, "2");
+  c.key("ArrowUp"); assert.equal(c.page().dataset.level, "0");
 });
 test("wheel gestures scroll cards before switching states, honor cooldown and preserve browser zoom", () => {
   const c = setup(); c.render([thread("a", {unread_result: true})]);

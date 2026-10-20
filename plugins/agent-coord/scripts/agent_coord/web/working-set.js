@@ -261,11 +261,15 @@ const WorkingSet = (() => {
       groups = derive(source, {dimension, workspace}); order = groups.slice(1).map(g => g.key); save(); paint(false);
       if (selectedGroup != null) onGroupChange?.(null);
     }
+    function stepLevel(direction) {
+      const next = level + direction;
+      go(pageIdx, next === 1 && groups[pageIdx]?.levels[1].length === 0 ? next + direction : next);
+    }
     function keydown(event) {
       if (!active() || event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey ||
         event.target?.closest?.("input, textarea, select, button, a, summary, [contenteditable], [role=menu], [role=tablist]") ||
         document.querySelector("dialog[open], .thread-action-menu, .overview-layout-menu") || document.body.classList.contains("navigation-open")) return;
-      const actions = {ArrowUp: () => go(pageIdx, level - 1), ArrowDown: () => go(pageIdx, level + 1), ArrowLeft: () => go(pageIdx - 1, level), ArrowRight: () => go(pageIdx + 1, level), g: () => changeGrouping(GROUPINGS[(GROUPINGS.indexOf(dimension) + 1) % GROUPINGS.length])};
+      const actions = {ArrowUp: () => stepLevel(-1), ArrowDown: () => stepLevel(1), ArrowLeft: () => go(pageIdx - 1, level), ArrowRight: () => go(pageIdx + 1, level), g: () => changeGrouping(GROUPINGS[(GROUPINGS.indexOf(dimension) + 1) % GROUPINGS.length])};
       if (actions[event.key]) { event.preventDefault(); actions[event.key](); }
     }
     function wheel(event) {
