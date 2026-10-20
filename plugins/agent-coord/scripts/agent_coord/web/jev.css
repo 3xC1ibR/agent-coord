@@ -5,3 +5,10 @@
 .jev-onboarding button { min-height: 40px; padding: 8px 14px; }
 .jev-onboarding .jev-onboarding-error, #jev-error { color: var(--danger); }
 @media (max-width: 540px) { .jev-onboarding { bottom: 16px; left: 16px; width: calc(100vw - 32px); } }
+.overview-statusbar .jev-status-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 28px; min-height: 26px; padding: 4px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; }
+.jev-status-button svg { width: 19px; height: 19px; }
+.jev-status-button[data-state="enabled"] { color: var(--accent); }
+.jev-status-button:hover { background: var(--surface); }
+.jev-status-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.jev-status-button .jev-status-on, .jev-status-button .jev-status-off, .jev-status-button .jev-status-unknown { display: none; }
+.jev-status-button[data-state="enabled"] .jev-status-on, .jev-status-button[data-state="disabled"] .jev-status-off, .jev-status-button[data-state="unknown"] .jev-status-unknown { display: block; }

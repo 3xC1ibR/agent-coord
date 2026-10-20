@@ -13,6 +13,69 @@
       return data;
     };
   }
+  function announceChange() {
+    if (typeof BroadcastChannel === "undefined") return;
+    try {
+      const channel = new BroadcastChannel("ribbon-field-jev-settings");
+      channel.postMessage("changed"); channel.close();
+    } catch { /* Focus and visibility refresh still work without cross-window messaging. */ }
+  }
+  function mountStatus(config, request = client(config)) {
+    const bar = document.querySelector(".overview-statusbar");
+    if (!bar || config.remote || window.parent !== window) return;
+    const button = document.createElement("button");
+    button.id = "jev-overview-status"; button.type = "button";
+    button.className = "quiet jev-status-button";
+    button.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="m10 3 2.4 5.6L18 11l-5.6 2.4L10 19l-2.4-5.6L2 11l5.6-2.4Z"/>
+      <path class="jev-status-on" d="m15 18 2 2 4-5"/>
+      <path class="jev-status-off" d="m3 3 18 18"/>
+      <circle class="jev-status-unknown" cx="18" cy="18" r="3" stroke-dasharray="1 2"/>
+    </svg>`;
+    button.onclick = () => document.getElementById("open-settings").click();
+    bar.append(button);
+    const render = (state, label) => {
+      button.dataset.state = state;
+      button.title = label + " · Open Jev settings";
+      button.setAttribute("aria-label", button.title);
+    };
+    render("unknown", "Checking Jev status");
+    let pending = false, refreshAgain = false, closed = false;
+    async function refresh() {
+      if (closed || document.hidden) return;
+      if (pending) { refreshAgain = true; return; }
+      pending = true;
+      try {
+        const value = await request();
+        if (typeof value.enabled !== "boolean") throw Error("Status unavailable");
+        if (!closed) render(value.enabled ? "enabled" : "disabled", value.enabled ? "Jev enabled" : "Jev disabled");
+      } catch {
+        if (!closed) render("unknown", "Jev status unavailable");
+      } finally {
+        pending = false;
+        if (refreshAgain) { refreshAgain = false; refresh(); }
+      }
+    }
+    let channel;
+    try { if (typeof BroadcastChannel !== "undefined") channel = new BroadcastChannel("ribbon-field-jev-settings"); }
+    catch { /* Some browser profiles do not permit cross-window messaging. */ }
+    if (channel) channel.onmessage = refresh;
+    const dialog = document.getElementById("settings-dialog");
+    dialog?.addEventListener("close", refresh);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    const timer = setInterval(refresh, 30000);
+    function close() {
+      closed = true; clearInterval(timer); channel?.close();
+      dialog?.removeEventListener("close", refresh);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("pagehide", close);
+    }
+    window.addEventListener("pagehide", close);
+    refresh();
+    return {refresh, close};
+  }
   function controls(container, config, request = client(config)) {
     if (config.remote) { container.hidden = true; return; }
     container.hidden = false;
@@ -53,7 +116,7 @@
       pending = true; $("jev-error").hidden = true;
       for (const node of container.querySelectorAll("button, input")) node.disabled = true;
       $("jev-status").textContent = action === "test_enable" ? "Testing with sample text…" : "Saving…";
-      try { render(await request(body)); }
+      try { render(await request(body)); announceChange(); }
       catch (error) { if (current) render(current); else $("jev-status").textContent = "Could not load Jev settings."; report(error); }
       finally { pending = false; for (const node of container.querySelectorAll("button, input")) node.disabled = false; }
     }
@@ -88,11 +151,11 @@
     card.querySelector("[data-jev-setup]").onclick = () => dismiss(true);
     card.querySelector("[data-jev-skip]").onclick = () => dismiss(false);
   }
-  window.agentCoordJev = {mountSettings: controls, onboard};
+  window.agentCoordJev = {mountSettings: controls, mountStatus, onboard};
   if (!document.body.classList.contains("settings-page")) {
     fetch("/api/browser/config", {cache: "no-store"}).then(response => {
       if (!response.ok) throw Error("Settings unavailable");
       return response.json();
-    }).then(config => onboard(config)).catch(() => {});
+    }).then(config => { mountStatus(config); return onboard(config); }).catch(() => {});
   }
 })();
