@@ -228,6 +228,10 @@ async function openProjectDirectory(cwd, {preserveRollUp = false} = {}) {
   await switchProject({restoreConversation: false, preserveRollUp});
 }
 function renderFolders() {
+  const cwd = state.folders?.selected?.cwd || "";
+  $("overview-workspace").textContent = cwd;
+  $("overview-workspace").title = cwd;
+  $("overview-workspace").hidden = !cwd;
   state.projectScratchpad?.setProject(state.folders?.selected);
   $("open-project-scratchpad").disabled = !state.projectScratchpad?.available;
   if (!state.folderPicker) return;

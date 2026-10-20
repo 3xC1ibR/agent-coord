@@ -49,7 +49,8 @@ body.mobile-chat #send-work-notice { right: 16px; bottom: 16px; }
 #welcome[hidden] + #send-work-overview-bar, #send-work-overview-bar[hidden],
 #send-work-dock[hidden], #send-work-profile[hidden], #send-work-new-settings-label[hidden] { display: none; }
 .overview-statusbar { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 4px 22px; gap: 8px; border-top: 1px solid var(--line); color: var(--muted); background: var(--panel); font: 10px/1.5 var(--mono); }
-#send-work-pin { margin-left: auto; padding: 4px 8px; font: inherit; color: var(--ink); }
+.overview-statusbar #results-count { flex-shrink: 0; }
+#send-work-pin { flex-shrink: 0; margin-left: auto; padding: 4px 8px; font: inherit; color: var(--ink); }
 #send-work-pin[aria-pressed=true] { color: var(--accent); }
 .send-work-heading { display: flex; align-items: center; gap: 10px; padding: 14px 20px 0; min-width: 0; }
 .send-work-heading h2 { display: flex; align-items: center; gap: 7px; margin: 0; font: 600 14px/1.4 var(--sans, sans-serif); }
