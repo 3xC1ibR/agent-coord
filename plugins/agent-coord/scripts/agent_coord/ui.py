@@ -358,7 +358,7 @@ def _handler(
                 else:
                     self._json(HTTPStatus.OK, web_push.status(device))
                 return
-            if parsed.path in {"/scratchpad.js", "/project-scratchpad.js", "/project-scratchpad.css"}:
+            if parsed.path in {"/scratchpad.js", "/project-scratchpad.js", "/project-scratchpad.css", "/atlas.js", "/atlas.css", "/atlas-layout.js", "/overview-layout.js"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return

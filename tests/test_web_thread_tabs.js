@@ -301,3 +301,18 @@ test("a background draft completion updates only its original project's tabs and
   assert.equal(reopened.tabs.destination(), "created");
   assert.deepEqual(reopened.ids(), ["created"]);
 });
+
+test("Overview offers one dropdown/context menu without navigating until a layout is selected", () => {
+  const element = () => ({children: [], dataset: {}, attributes: {}, scrollLeft: 0, classList: {add() {}},
+    append(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
+    setAttribute(k, v) { this.attributes[k] = v; }, contains: () => false, querySelectorAll: () => []});
+  const container = element(), opened = [], visits = [];
+  const tabs = new ThreadTabs({container, document: {createElement: element}, onOverviewMenu: (anchor, event) => opened.push({anchor,event}), onSelect: id => visits.push(id)});
+  tabs.setProject('/work');
+  const overview = container.children[0], [tab, arrow] = overview.children;
+  assert.equal(tab.textContent,'Overview'); assert.equal(arrow.attributes['aria-haspopup'],'menu');
+  arrow.onclick({type:'click'}); overview.oncontextmenu({type:'contextmenu'});
+  tab.onkeydown({key:'F10',shiftKey:true}); tab.onkeydown({key:'ArrowDown',altKey:true});
+  assert.equal(opened.length,4); assert(opened.every(call => call.anchor === arrow)); assert.deepEqual(visits,[]);
+  tab.onclick(); assert.deepEqual(visits,[null]);
+});

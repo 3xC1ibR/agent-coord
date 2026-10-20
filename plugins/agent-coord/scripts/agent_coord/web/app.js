@@ -593,7 +593,7 @@ function renderList() {
   if (state.dispatchDock) syncDispatcherOverview();
   renderClosedToggle();
   savedViews?.render(threadsInProject(state.viewThreads || state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)));
-  if (conversationSearch?.update()) { renderStatus(); return; }
+  if (conversationSearch?.update()) { if ($("atlas-overview")) $("atlas-overview").hidden = true; renderStatus(); return; }
   const query = $("search").value.trim().toLocaleLowerCase();
   const projectThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)
     && threadOrganization.matches(t, "", $("project").value));
@@ -604,13 +604,13 @@ function renderList() {
   const groupBy = $("group-by").value;
   $("group-by-domain").setAttribute("aria-pressed", String(groupBy === "domain"));
   const viewId = (state.projectCwd || "") + ":" + (savedViews?.activeId || "all");
-  const signature = JSON.stringify([threads, upcoming, state.selected, [...(state.closing || [])], [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
+  const signature = JSON.stringify([state.overviewLayout?.mode, threads, upcoming, state.selected, [...(state.closing || [])], [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
   $("back-home").setAttribute("aria-current", state.selected && !state.dispatchDock?.active ? "false" : "page");
   const projects = new Set(threads.map(t => t.project_id).filter(Boolean)).size;
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
     " · " + projects + (projects === 1 ? " group" : " groups") +
     (upcoming.length ? " · " + upcoming.length + (upcoming.length === 1 ? " scheduled prompt" : " scheduled prompts") : "");
-  if (signature === state.listSignature) { renderStatus(); state.dispatchDock?.flush(); return; }
+  if (signature === state.listSignature) { if (state.overviewLayout) renderOverviewLayout(threads, upcoming); renderStatus(); state.dispatchDock?.flush(); return; }
   state.listSignature = signature;
   state.overviewMotion ||= createOverviewMotion();
   const motionBefore = state.overviewMotion.capture(JSON.stringify([viewId, groupBy, query,
@@ -725,7 +725,21 @@ function renderList() {
     target?.focus({preventScroll: true});
   }
   renderStatus();
+  if (state.overviewLayout) renderOverviewLayout(threads, upcoming);
   globalThis.threadHover?.refresh();
+}
+function renderOverviewLayout(threads, upcoming = []) {
+  const host = $("atlas-overview");
+  if (!host) return;
+  const atlas = state.overviewLayout?.mode === "atlas";
+  // Scheduled prompts remain available above either overview representation.
+  $("overview").hidden = atlas && !upcoming.length;
+  $("overview").classList.toggle("atlas-schedules-only", atlas);
+  host.hidden = !atlas;
+  if (!atlas || $("welcome").hidden) return;
+  state.atlas ||= LiveAtlas.create({document, window, storage: state.overviewPreferences,
+    onOpen: id => action(() => select(id))});
+  state.atlas.render(threads, host, {workspace: state.projectCwd || "all"});
 }
 function upcomingSchedules(query) {
   if ($("view").value !== "later") return [];
@@ -2850,6 +2864,10 @@ async function boot() {
   if (state.config.remote) notifications.start().catch(showError);
   let windowStorage, preferences;
   try { windowStorage = sessionStorage; preferences = localStorage; } catch { /* Views work without browser storage. */ }
+  state.overviewPreferences = preferences;
+  state.overviewLayout = new OverviewLayout({document, window, storage: preferences,
+    canNavigate: () => !state.busy && !document.querySelector("dialog[open]"),
+    onChange: (_mode, {navigate}) => { state.listSignature = ""; if (navigate) goHome({restoreDispatcher: false}); else renderList(); }});
   const desktop = window.agentCoordDesktop;
   state.conversationWindow = desktop?.conversationWindow === true;
   const publishDesktopProjects = snapshot => api("desktop-projects", {
@@ -2897,6 +2915,7 @@ async function boot() {
     },
     notify: (...args) => state.threadActions.notify(...args), onError: showError});
   state.threadTabs = new ThreadTabs({document, container: $("conversation-tabs"),
+    onOverviewMenu: (anchor, event) => state.overviewLayout.open(anchor, event),
     storage: desktop && !state.conversationWindow ? preferences : windowStorage, fallbackStorage: desktop && !state.conversationWindow ? windowStorage : null,
     scope: (state.config.workspaceRoot || "") + ":" + ((state.conversationWindow ? desktop.windowId : desktop?.folderSlot) || "browser"),
     onError: showError, onScratchpad: openProjectScratchpad,

@@ -4,8 +4,8 @@ const tabViews = typeof module !== "undefined" ? require("./views.js").threadVie
 
 // Tabs are a window's working set, independent of thread placement and filters.
 class ThreadTabs {
-  constructor({document, container, storage, fallbackStorage, scope = "", onSelect, onScratchpad, onError, canNavigate = () => true}) {
-    Object.assign(this, {document, container, storage, fallbackStorage, onSelect, onScratchpad, onError, canNavigate});
+  constructor({document, container, storage, fallbackStorage, scope = "", onSelect, onScratchpad, onOverviewMenu, onError, canNavigate = () => true}) {
+    Object.assign(this, {document, container, storage, fallbackStorage, onSelect, onScratchpad, onOverviewMenu, onError, canNavigate});
     this.baseKey = "agent-coord.thread-tabs." + scope;
     this.projects = new Map(); this.selections = new Map(); this.scratchpads = new Map(); this.items = []; this.selected = null;
     container?.setAttribute("role", "tablist");
@@ -182,7 +182,21 @@ class ThreadTabs {
           const rect = wrapper.getBoundingClientRect(), after = event.clientX >= rect.left + rect.width / 2;
           this.move(this.dragging, target + (after ? 1 : 0) - (from < target ? 1 : 0)); this.endDrag();
         };
-      } else if (!id) wrapper.classList.add("overview-tab");
+      } else if (!id) {
+        wrapper.classList.add("overview-tab");
+        if (this.onOverviewMenu) {
+          const arrow = this.document.createElement("button"); arrow.type = "button"; arrow.className = "overview-layout-arrow"; arrow.textContent = "▾";
+          arrow.title = "Overview layout"; arrow.setAttribute("aria-label", "Choose overview layout");
+          arrow.setAttribute("aria-haspopup", "menu"); arrow.setAttribute("aria-expanded", "false");
+          arrow.onclick = event => this.onOverviewMenu(arrow, event);
+          wrapper.oncontextmenu = event => this.onOverviewMenu(arrow, event);
+          tab.onkeydown = event => {
+            if (event.key === "ContextMenu" || event.shiftKey && event.key === "F10" || event.altKey && event.key === "ArrowDown") this.onOverviewMenu(arrow, event);
+            else this.keydown(event, id);
+          };
+          wrapper.append(arrow);
+        }
+      }
       this.container.append(wrapper);
     };
     add({title: "Overview"}, null);
