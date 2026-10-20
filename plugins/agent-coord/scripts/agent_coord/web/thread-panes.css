@@ -43,7 +43,7 @@
 .pane-maximized > .pane-divider, .pane-maximized .pane-column > .pane-divider,
 .pane-maximized > .pane-column:not(.maximized-column) { display: none; }
 body.panes-visible #welcome, body.panes-visible > main > #conversation { display: none !important; }
-body.panes-visible > main > .conversation-tabs { display: none; }
+body.panes-visible > main > .conversation-tab-strip { display: none; }
 body.panes-visible:not(.conversation-split) main > .views-bar { display: flex; }
 body.conversation-split main > .views-bar { display: none; }
 body.conversation-split .pane-layout { padding: 0; }

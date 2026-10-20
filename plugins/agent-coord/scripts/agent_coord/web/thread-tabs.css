@@ -20,7 +20,7 @@
 }
 .conversation-tab button:focus-visible { outline-offset: -3px; }
 .overview-tab { position: sticky; left: 0; z-index: 1; background: var(--paper); }
-.pane-document .conversation-tabs { display: none; }
+.pane-document .conversation-tab-strip { display: none; }
 @media (max-width: 720px) {
   .conversation-tabs { padding: 0; }
   .conversation-tab { max-width: 190px; }
