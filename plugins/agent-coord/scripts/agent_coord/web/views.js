@@ -387,10 +387,11 @@ class SavedViews {
     const scroll = this.navigation[this.activeId]?.scroll;
     this.$("welcome").scrollTop = Number.isFinite(scroll) ? Math.max(0, scroll) : 0;
   }
-  async activate(id, reset = false) {
+  async activate(id, reset = false, {revealGroup = true} = {}) {
     if (reset) await this.saves.get(id)?.promise;
     const target = this.items.find(view => view.id === id);
     if (!target) return;
+    if (!revealGroup && target.kind === "group" && this.isGroupHidden(target.projectId)) return this.activate("all");
     // Explicit group navigation restores a tab; inventory updates and opening
     // individual conversations never call this path.
     if (target.kind === "group") this.showGroup(target.projectId);

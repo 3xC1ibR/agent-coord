@@ -139,6 +139,19 @@ test("keyboard navigation skips hidden tabs and group list focus survives activi
   assert.equal(c.views.isGroupHidden("a"), true);
 });
 
+test("restoring a conversation's old group view leaves a hidden group hidden", async () => {
+  const c = setup([{id: "launch", name: "Launch"}]);
+  await c.views.openGroup("launch");
+  await c.views.hideGroup(c.views.current());
+  await c.views.activate("group-launch", false, {revealGroup: false});
+  assert.equal(c.views.activeId, "all");
+  assert.equal(groupTab(c, "launch"), undefined);
+  assert.equal(c.views.isGroupHidden("launch"), true);
+  await c.views.activate("group-launch");
+  assert.equal(c.views.activeId, "group-launch");
+  assert.ok(groupTab(c, "launch"), "Explicit group navigation still restores it");
+});
+
 test("delayed restoration and Undo stay in the target workspace", async () => {
   const c = setup([{id: "a", name: "A", cwd: "/one"}, {id: "b", name: "B", cwd: "/two"}]);
   await c.views.setProject("/one"); await c.views.openGroup("a"); await c.views.hideGroup(c.views.current());
