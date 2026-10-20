@@ -136,6 +136,7 @@ h1, h2, h3, h4, p { margin: 0; }
 .mock-shell .spectrum[data-level="radical"] { color: #ffb48f; border-color: #6a3a24; }
 .mock-shell .spectrum[data-level="round two"] { color: var(--sb-ink); border-color: var(--sb-muted); }
 .mock-shell .spectrum[data-level="synthesis"] { color: #9fd3b0; border-color: #9fd3b0; }
+.mock-shell .spectrum[data-level="3D"] { color: #d8c2ff; border-color: #4b3480; }
 .mock-shell .mock-spacer { flex: 1; }
 .mock-shell .btn { background: transparent; color: var(--sb-ink); border-color: var(--sb-line); padding: 5px 9px; font-size: 11px; }
 .mock-shell .btn:hover:not(:disabled) { background: var(--sb-hover); border-color: var(--sb-muted); }

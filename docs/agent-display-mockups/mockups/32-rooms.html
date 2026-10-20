@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mockup 32 · Rooms</title>
+<link rel="stylesheet" href="../shared/tokens.css">
+<style>
+  body { height: 100dvh; overflow: hidden; }
+  #stage { overflow: hidden; }
+  .scene { position: absolute; inset: 0; overflow: hidden; perspective: 900px; perspective-origin: 50% 47%; cursor: grab;
+    background: radial-gradient(ellipse at 50% 44%, var(--surface), var(--paper) 70%); touch-action: none; }
+  .scene.dragging { cursor: grabbing; }
+  .world { position: absolute; left: 50%; top: 47%; width: 0; height: 0; transform-style: preserve-3d; }
+  .surface { position: absolute; pointer-events: none; border: 1px solid var(--line-strong); }
+  .floor { background: color-mix(in srgb, var(--panel) 75%, var(--surface));
+    background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 160px 160px; }
+  .hall { background-color: var(--paper); border-color: var(--line-strong); }
+  .wall { background: color-mix(in srgb, var(--surface) 36%, transparent); border-top: 9px solid var(--line-strong); border-bottom: 8px solid var(--line-strong); }
+  .back { background: color-mix(in srgb, var(--panel) 75%, transparent); }
+  .post { background: var(--line-strong); border: 0; }
+  .threshold { background: var(--line-strong); border: 0; }
+  .room-floor { background-color: color-mix(in srgb, var(--surface) var(--light), var(--panel)); }
+  .room-floor.dusty { background-image: repeating-linear-gradient(24deg, transparent 0 19px, var(--line) 20px 21px); }
+  .plaque, .tail { position: absolute; width: 340px; padding: 14px 17px; text-align: left; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line-strong); border-radius: 5px; cursor: pointer; box-shadow: 0 8px 22px var(--shadow); }
+  .plaque { border-left: 4px solid var(--line-strong); }
+  .plaque.has-ask { border-left-color: var(--warm); }
+  .plaque:hover, .tail:hover { border-color: var(--hover-line); }
+  .plaque strong { font-size: 18px; font-weight: 550; letter-spacing: -.03em; display: block; overflow-wrap: anywhere; }
+  .plaque .counts { font: 11px var(--mono); color: var(--muted); display: block; margin-top: 8px; }
+  .plaque .badge { display: inline-block; margin-top: 10px; font-size: 12px; color: var(--warm); background: var(--warm-tint); padding: 4px 7px; border-radius: 4px; }
+  .plaque .room-no { float: right; font: 11px var(--mono); color: var(--muted); margin-left: 10px; }
+  .plaque.dusty { background: var(--panel); box-shadow: none; border-style: dashed; }
+  .plaque.dusty::after { content: '╱╲  quiet room'; display: block; color: var(--muted); margin-top: 9px; font: 10px var(--mono); }
+  .plaque .entry { display: block; margin-top: 8px; color: var(--muted); font-size: 10px; }
+  .card3d { position: absolute; width: 360px; padding: 15px 17px; display: flex; flex-direction: column; gap: 9px; cursor: pointer;
+    opacity: .92; box-shadow: 0 14px 34px var(--shadow); transition: transform .35s ease, opacity .15s; }
+  .card3d:hover, .card3d:focus-within { opacity: 1; border-color: var(--hover-line); }
+  .card3d.needs-you { opacity: 1; box-shadow: 0 0 0 1px color-mix(in srgb, var(--warm) 35%, transparent), 0 12px 45px color-mix(in srgb, var(--warm) 15%, transparent); }
+  .card3d.compact { width: 250px; padding: 10px 12px; gap: 6px; box-shadow: none; }
+  .identity { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
+  .identity .provider-logo { width: 13px; height: 13px; }
+  .identity .when { margin-left: auto; white-space: nowrap; font: 10px var(--mono); }
+  .card3d h3 { font-size: 16px; font-weight: 550; line-height: 1.4; letter-spacing: -.025em; }
+  .card3d.compact h3 { font-size: 12px; }
+  .state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
+  .state.working { color: var(--accent); }
+  .activity { font-size: 11.5px; line-height: 1.5; color: var(--accent); }
+  .activity::before { content: '▸ '; }
+  .summary { font-size: 12px; line-height: 1.6; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .next { padding-top: 8px; border-top: 1px solid var(--line); font-size: 11px; line-height: 1.5; }
+  .next.user { color: var(--warm); }
+  .agents { display: flex; flex-wrap: wrap; gap: 5px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .agent-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); font-size: 10px; cursor: pointer; max-width: 100%; }
+  .agent-chip span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+  .agent-chip.needs { border-color: var(--warm); }
+  .card3d .ask { font-size: 12px; }
+  .card3d .ask-kind { text-transform: none; letter-spacing: normal; }
+  .tail { width: 280px; font-size: 12px; border-style: dashed; box-shadow: none; }
+  .titleline { position: absolute; top: 22px; left: 26px; z-index: 20; max-width: calc(100% - 355px); font-size: 15px; font-weight: 500; letter-spacing: -.02em; line-height: 1.6; }
+  .titleline span { color: var(--muted); font-weight: 400; }
+  .minimap { position: absolute; z-index: 25; right: 20px; top: 20px; width: 250px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 8px;
+    background: color-mix(in srgb, var(--surface) 96%, transparent); box-shadow: 0 8px 26px var(--shadow); }
+  .map-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted); }
+  .map-head .warm { color: var(--warm); }
+  .map-plan { display: block; width: 100%; overflow: visible; margin: 9px 0; }
+  .map-room { cursor: pointer; }
+  .map-room rect { fill: var(--panel); stroke: var(--line-strong); stroke-width: 1; }
+  .map-room:hover rect, .map-room:focus rect { stroke: var(--ink); }
+  .map-room.here rect { fill: color-mix(in srgb, var(--accent) 12%, var(--surface)); stroke: var(--accent); }
+  .map-room text { fill: var(--muted); font: 9px var(--mono); pointer-events: none; }
+  .map-room.here text { fill: var(--ink); }
+  .map-ask { fill: var(--warm); stroke: var(--surface); stroke-width: .8; }
+  .map-hall { fill: var(--paper); stroke: var(--line); }
+  .map-camera { fill: var(--ink); pointer-events: none; }
+  .map-cone { fill: color-mix(in srgb, var(--accent) 18%, transparent); stroke: color-mix(in srgb, var(--accent) 45%, transparent); stroke-width: .7; }
+  .map-foot { border-top: 1px solid var(--line); padding-top: 8px; font-size: 10px; line-height: 1.8; color: var(--muted); }
+  .map-foot kbd { font: 9px var(--mono); color: var(--ink); }
+  @media (max-width: 760px) { .minimap { width: 210px; right: 12px; top: 12px; padding: 9px; } .titleline { left: 14px; top: 12px; font-size: 12px; max-width: calc(100% - 240px); } }
+  @media (prefers-reduced-motion: reduce) { .card3d { transition: none; } }
+</style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+'use strict';
+(() => {
+  const $ = AgentField.el, P = 900, HALL = 640, STEP = 1450, FIRST = 1300, FLOOR = 300;
+  const modes = ['target', 'domain', 'family'];
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  let grouping = 'target', currentKey = null, F, API, stageEl, scene, world, title, map, marker;
+  let groups = [], geometryKey = '', lastField = null, glide = null, raf = 0, lastFrame = 0, dragging = null;
+  const cam = {x: 0, z: 0, yaw: 0}, held = new Set(), pages = new Map(), cards = new Map(), placements = new Map();
+  let furniture, doorLayer, cardLayer, mapStep = 34, materialKey = '';
+  function heat(a) {
+    const decay = t => Math.pow(.5, Math.max(0, F.now - t) / (20 * 60000));
+    return (a.pulses || []).reduce((s, t) => s + decay(t), 0) + (a.lastTool ? .5 * decay(a.lastTool.at) : 0);
+  }
+  const mass = a => (a.turns || 0) + a.history.length + (a.cost?.minutes || 0) / 10;
+  const neglect = a => Math.max(0, F.now - (a.ask?.askedAt ?? a.updatedAt));
+  function keyFor(r) {
+    if (grouping === 'domain') return [r.domain || 'none', AgentField.DOMAIN_LABELS[r.domain] || r.domain || 'No domain'];
+    if (grouping === 'family') return [r.id, r.name ? r.name + ' · ' + r.title : r.title];
+    return [r.target || 'root:' + r.id, r.target || r.title];
+  }
+  function derive() {
+    const m = new Map();
+    for (const r of F.roots()) {
+      const [key, name] = keyFor(r);
+      if (!m.has(key)) m.set(key, {key, name, roots: [], members: []});
+      const g = m.get(key); g.roots.push(r); g.members.push(r, ...F.descendants(r.id));
+    }
+    const order = new Map(groups.map((g, i) => [g.key, i]));
+    const all = [...m.values()];
+    for (const g of all) {
+      g.mass = g.members.reduce((s, a) => s + mass(a), 0);
+      g.gravity = g.members.reduce((s, a) => s + heat(a), 0);
+      g.asks = g.members.filter(F.needsUser).sort((a, b) => neglect(b) - neglect(a));
+      g.counts = F.counts(g.members); g.dead = g.gravity < .5 && !g.asks.length;
+    }
+    // Establish the floor plan once. Simulation ticks never reorder its rooms.
+    all.sort((a, b) => order.size ? (order.get(a.key) ?? 999) - (order.get(b.key) ?? 999) :
+      Number(!!b.asks.length) - Number(!!a.asks.length) || b.gravity - a.gravity || a.name.localeCompare(b.name));
+    const maxMass = Math.max(1, ...all.map(g => g.mass)), maxGravity = Math.max(1, ...all.map(g => g.gravity));
+    all.forEach((g, i) => {
+      g.i = i; g.side = i % 2 ? 1 : -1; g.z = -FIRST - Math.floor(i / 2) * STEP;
+      g.depth = 1100 + 1000 * Math.sqrt(g.mass / maxMass); g.width = 820 + 400 * Math.sqrt(g.mass / maxMass);
+      g.light = Math.round(15 + 80 * g.gravity / maxGravity);
+    });
+    groups = all;
+    if (currentKey && !groups.some(g => g.key === currentKey)) currentKey = null;
+  }
+  const node = (tag, cls, text) => $(tag, cls, text);
+  function at(el, x, y, z, rotation = '', billboard = false) {
+    el.style.transform = `translate3d(${x}px,${y}px,${z}px) ${billboard ? `rotateY(${-cam.yaw}deg)` : rotation} translate(-50%,-50%)`;
+  }
+  function plane(cls, x, y, z, w, h, rotation) {
+    const el = node('div', 'surface ' + cls); el.style.width = w + 'px'; el.style.height = h + 'px';
+    at(el, x, y, z, rotation); furniture.append(el); return el;
+  }
+  function geometry() {
+    const signature = grouping + groups.map(g => g.key + Math.round(g.depth) + Math.round(g.width) + g.light).join('|');
+    if (signature === geometryKey) return;
+    geometryKey = signature; furniture.replaceChildren();
+    const length = FIRST + Math.ceil(groups.length / 2) * STEP;
+    plane('floor hall', 0, FLOOR, -length / 2 + 500, HALL * 2, length + 1000, 'rotateX(90deg)');
+    for (const g of groups) {
+      const cx = g.side * (HALL + g.depth / 2), back = g.side * (HALL + g.depth);
+      const fl = plane('floor room-floor' + (g.dead ? ' dusty' : ''), cx, FLOOR, g.z, g.depth, g.width, 'rotateX(90deg)');
+      fl.style.setProperty('--light', g.light + '%');
+      const b = plane('wall back', back, 10, g.z, g.width, 580, 'rotateY(90deg)');
+      b.style.background = `color-mix(in srgb, var(--surface) ${g.light}%, var(--panel))`;
+      for (const side of [-1, 1]) {
+        plane('wall', cx, 10, g.z + side * g.width / 2, g.depth, 580, '');
+        plane('post', g.side * HALL, 10, g.z + side * g.width / 2, 14, 580, '');
+      }
+      plane('threshold', g.side * HALL, FLOOR - 2, g.z, 16, g.width, 'rotateX(90deg)');
+    }
+  }
+  function plaque(g) {
+    const el = node('button', 'plaque' + (g.asks.length ? ' has-ask' : '') + (g.dead ? ' dusty' : ''));
+    el.type = 'button'; el.dataset.room = g.key;
+    el.append(node('span', 'room-no', String(g.i + 1).padStart(2, '0')), node('strong', '', g.name),
+      node('span', 'counts', `${g.members.length} agents · ${g.counts.working} working · ${g.counts.done} done`));
+    if (g.asks.length) el.append(node('span', 'badge', `${g.asks.length} need you · oldest ${F.duration(neglect(g.asks[0]))}`));
+    el.append(node('span', 'entry', 'Enter room ↗'));
+    el.onclick = () => jump(g);
+    el.title = `${g.name} · click to enter · room ${g.i + 1}`;
+    const z = g.z + 200;
+    at(el, g.side * (HALL - 260), -260, z, '', true);
+    el._pos = {x: g.side * (HALL - 260), y: -260, z};
+    return el;
+  }
+  function makeCard(a, compact, g, door) {
+    const el = node('article', 'card card3d ' + a.status + (compact ? ' compact' : '') + (F.needsUser(a) ? ' needs-you' : ''));
+    el.dataset.agent = a.id; el.tabIndex = 0; el.setAttribute('aria-label', a.title + ' · ' + F.statusLabel(a));
+    el.title = `${a.name || a.title} · ${F.statusLabel(a)} · ${a.activity || a.summary}`;
+    el.onclick = e => { if (!dragging?.moved && !e.target.closest('button, input')) API.select(a.id); };
+    el.onkeydown = e => { if (e.key === 'Enter' && e.target === e.currentTarget) { e.stopPropagation(); API.select(a.id); } };
+    const identity = node('div', 'identity');
+    identity.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    if (a.name) identity.append(node('span', 'chip', a.name));
+    identity.append(node('span', '', AgentField.ROLE_LABELS[a.role] + (a.kind !== 'app' ? ' · ' + a.kind : '')), node('span', 'when', F.relativeTime(a.updatedAt)));
+    const state = node('div', 'state ' + a.status);
+    state.append(AgentField.statusDot(a), node('span', '', F.statusLabel(a)), AgentField.phaseSteps(a), node('span', '', AgentField.PHASE_LABELS[a.phase]));
+    el.append(identity, node('h3', '', a.title), state);
+    if (compact) return el;
+    if (a.status === 'working' && a.activity) el.append(node('div', 'activity', a.activity));
+    if (a.ask) el.append(Mockup.askBox(a, F, API.select));
+    else {
+      el.append(node('p', 'summary', a.summary));
+      if (a.next?.action && a.status !== 'done') el.append(node('div', 'next ' + a.next.actor,
+        ({user: 'Your next step', agent: 'Up next', external: 'Waiting on'}[a.next.actor] || 'Next') + ' · ' + a.next.action));
+    }
+    const kids = F.children(a.id);
+    if (kids.length) {
+      const row = node('div', 'agents');
+      row.append(node('span', 'muted', kids.length + ' agents'));
+      for (const k of kids.slice(0, 3)) {
+        const chip = node('button', 'agent-chip' + (F.needsUser(k) ? ' needs' : '')); chip.type = 'button';
+        chip.append(AgentField.statusDot(k), node('span', '', k.name || k.title));
+        chip.title = k.title; chip.onclick = e => { e.stopPropagation(); API.select(k.id); }; row.append(chip);
+      }
+      if (kids.length > 3) row.append(node('span', 'muted', '+' + (kids.length - 3)));
+      el.append(row);
+    }
+    return el;
+  }
+  function nearby() {
+    const current = groups.find(g => g.key === currentKey);
+    const anchor = current ? current.i : groups.reduce((best, g, i) => Math.abs(g.z - cam.z) < Math.abs(groups[best].z - cam.z) ? i : best, 0);
+    return new Set(groups.filter(g => Math.abs(Math.floor(g.i / 2) - Math.floor(anchor / 2)) <= (current ? 1 : 0)).map(g => g.key));
+  }
+  function rememberFocus() {
+    const active = document.activeElement;
+    const card = active?.matches('input') ? active.closest('[data-agent]') : null;
+    return card ? {id: card.dataset.agent, index: [...card.querySelectorAll('input')].indexOf(active), start: active.selectionStart, end: active.selectionEnd} : null;
+  }
+  function restoreFocus(focus) {
+    if (!focus) return;
+    const input = cards.get(focus.id)?.el.querySelectorAll('input')[focus.index];
+    if (input && document.activeElement !== input) { input.focus({preventScroll: true}); input.setSelectionRange(focus.start, focus.end); }
+  }
+  function paintCards() {
+    const focus = rememberFocus();
+    const visible = nearby(), used = new Set(); materialKey = [...visible].join('|'); placements.clear();
+    const add = (a, compact, g, door, x, y, z) => {
+      used.add(a.id);
+      const signature = [F.tickCount, a.status, a.updatedAt, a.ask?.question, a.ask?.askedAt, a.summary, a.activity, a.unread, compact, door, g.key].join('|');
+      let record = cards.get(a.id);
+      if (!record || record.signature !== signature || record.field !== F) {
+        const values = record ? [...record.el.querySelectorAll('input')].map(n => n.value) : [];
+        const el = makeCard(a, compact, g, door);
+        values.forEach((v, i) => { const input = el.querySelectorAll('input')[i]; if (input) input.value = v; });
+        if (record) {
+          // Keep the positioned node so status changes can ease to a new wall.
+          record.el.replaceChildren(...el.childNodes); record.el.className = el.className;
+          record.el.title = el.title; record.el.setAttribute('aria-label', el.getAttribute('aria-label'));
+          record.el.onclick = el.onclick; record.el.onkeydown = el.onkeydown;
+          record.signature = signature; record.field = F;
+        } else { cardLayer.append(el); record = {el, signature, field: F}; cards.set(a.id, record); }
+      }
+      placements.set(a.id, {x, y, z, g, el: record.el});
+      at(record.el, x, y, z, '', true);
+    };
+    for (const old of cardLayer.querySelectorAll('.tail')) old.remove();
+    for (const g of groups) {
+      if (!visible.has(g.key)) continue;
+      const inside = currentKey === g.key;
+      // The nearest doorway asks come forward. Every other ask retains a door badge and map dot.
+      if (!inside) {
+        if (g.asks.length) add(g.asks[0], false, g, true, g.side * (HALL - 280), 45, g.z + 200);
+        if (F.scale === 'large') continue;
+      }
+      const asks = inside ? g.asks : [];
+      asks.forEach((a, i) => add(a, false, g, false, g.side * (HALL + g.depth * Math.min(.88, .65 + Math.floor(i / 3) * .1)),
+        -15, g.z + (i % 3 - (Math.min(asks.length, 3) - 1) / 2) * 470));
+      const rest = g.members.filter(a => !F.needsUser(a));
+      const roots = rest.filter(a => g.roots.includes(a));
+      const children = rest.filter(a => !g.roots.includes(a)).sort((a, b) => Number(b.status === 'working') - Number(a.status === 'working') || b.updatedAt - a.updatedAt);
+      const size = inside ? 10 : 3, rootSize = inside ? 3 : 1;
+      const pageCount = Math.max(1, Math.ceil(children.length / size), Math.ceil(roots.length / rootSize));
+      const page = (pages.get(g.key) || 0) % pageCount, start = page * size;
+      const shownRoots = roots.slice(page * rootSize, (page + 1) * rootSize);
+      const chosen = [...shownRoots, ...children.slice(start, start + size)];
+      const indexes = {working: 0, low: 0};
+      for (const a of chosen) {
+        if (g.roots.includes(a)) {
+          const r = shownRoots.indexOf(a);
+          add(a, false, g, false, g.side * (HALL + g.depth - 100), -10, g.z + (r - (shownRoots.length - 1) / 2) * 440);
+        } else {
+          const low = ['idle', 'done'].includes(a.status), key = low ? 'low' : 'working', i = indexes[key]++;
+          add(a, low, g, false, g.side * (HALL + g.depth * .57 + Math.floor(i / 2) * 360), low ? 205 : -15,
+            g.z + (i % 2 ? 1 : -1) * (g.width / 2 - 20));
+        }
+      }
+      if (inside && pageCount > 1) {
+        const tail = node('button', 'tail', `${g.members.length} in room · wall ${page + 1}/${pageCount} · next →`);
+        tail.type = 'button'; tail.onclick = () => { pages.set(g.key, (page + 1) % pageCount); paintCards(); updateCamera(); };
+        at(tail, g.side * (HALL + g.depth - 130), 230, g.z, '', true); cardLayer.append(tail);
+      }
+    }
+    for (const [id, record] of cards) if (!used.has(id)) { record.el.remove(); cards.delete(id); }
+    scene.dataset.liveCards = String(cards.size);
+    restoreFocus(focus);
+  }
+  function svg(tag, attrs = {}, text) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    if (text != null) el.textContent = text; return el;
+  }
+  function mapPoint(x, z) { return {x: 132 + x / 28, y: 13 + (-z) / STEP * mapStep}; }
+  function paintMap() {
+    const rows = Math.ceil(groups.length / 2); mapStep = rows > 8 ? 22 : 34; const h = rows * mapStep + 40, cellH = mapStep - 5;
+    const head = node('div', 'map-head'); head.append(node('span', '', `Floor plan · by ${grouping}`), node('span', 'warm', F.asks().length + ' need you'));
+    const plan = svg('svg', {viewBox: `0 0 264 ${h}`, class: 'map-plan', 'aria-label': 'Rooms, your position, and every ask'});
+    plan.append(svg('rect', {x: 111, y: 5, width: 42, height: h - 10, rx: 2, class: 'map-hall'}));
+    for (const g of groups) {
+      const w = 58 + g.depth / 55, y = mapPoint(0, g.z).y - cellH / 2, x = g.side < 0 ? 111 - w : 153;
+      const cell = svg('g', {class: 'map-room' + (g.key === currentKey ? ' here' : ''), role: 'button', tabindex: '0', 'data-room': g.key,
+        'aria-label': `${g.name}, ${g.members.length} agents, ${g.asks.length} need you`});
+      cell.append(svg('title', {}, `${g.i + 1} · ${g.name} · ${g.members.length} agents · ${g.asks.length} need you`),
+        svg('rect', {x, y, width: w, height: cellH, rx: 2}), svg('text', {x: x + 5, y: y + (mapStep > 22 ? 12 : 8)}, `${g.i + 1} ${g.name.length > 13 ? g.name.slice(0, 12) + '…' : g.name}`));
+      g.asks.forEach((a, i) => {
+        const dot = svg('circle', {cx: x + 7 + (i % 13) * 6, cy: y + cellH - 5 - Math.floor(i / 13) * 5, r: 2.4, class: 'map-ask', 'data-ask': a.id});
+        dot.append(svg('title', {}, a.title + ' · needs you')); cell.append(dot);
+      });
+      cell.onclick = () => jump(g);
+      cell.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); jump(g); } };
+      plan.append(cell);
+    }
+    marker = svg('g'); marker.append(svg('path', {d: 'M0 0 L-11 -23 Q0 -29 11 -23 Z', class: 'map-cone'}), svg('circle', {r: 3, class: 'map-camera'})); plan.append(marker);
+    const foot = node('div', 'map-foot');
+    foot.innerHTML = '<kbd>WASD / arrows</kbd> walk · <kbd>Q E / drag</kbd> turn<br><kbd>Tab / 1–9</kbd> room · <kbd>Esc</kbd> corridor<br><kbd>Enter</kbd> nearest card · <kbd>g</kbd> group';
+    map.replaceChildren(head, plan, foot);
+  }
+  function titleLine() {
+    const g = groups.find(g => g.key === currentKey);
+    title.replaceChildren('Rooms', node('span', '', ` · ${F.agents.length} agents · ${groups.length} rooms · in: ${g?.name || 'corridor'}`));
+  }
+  function updateCamera() {
+    world.style.transform = `translateZ(${P}px) rotateY(${cam.yaw}deg) translate3d(${-cam.x}px,0px,${-cam.z}px)`;
+    const r = cam.yaw * Math.PI / 180;
+    for (const {el, x, y, z} of placements.values()) {
+      el.style.transition = glide || held.size || dragging ? 'none' : '';
+      at(el, x, y, z, '', true);
+      const depth = -(x - cam.x) * Math.sin(r) + (z - cam.z) * Math.cos(r);
+      el.style.visibility = depth < -100 ? 'visible' : 'hidden';
+      el.inert = depth >= -100;
+    }
+    for (const el of doorLayer.children) {
+      const p = el._pos; at(el, p.x, p.y, p.z, '', true);
+      const depth = -(p.x - cam.x) * Math.sin(r) + (p.z - cam.z) * Math.cos(r);
+      el.style.visibility = depth < -100 ? 'visible' : 'hidden'; el.inert = depth >= -100;
+    }
+    const p = mapPoint(cam.x, cam.z);
+    marker?.setAttribute('transform', `translate(${p.x} ${p.y}) rotate(${cam.yaw})`);
+    scene.dataset.camera = JSON.stringify(cam); scene.dataset.currentRoom = currentKey || 'corridor';
+  }
+  function roomAtCamera() { return groups.find(g => cam.x * g.side > HALL && cam.x * g.side < HALL + g.depth && Math.abs(cam.z - g.z) < g.width / 2); }
+  function changedRoom() {
+    const next = roomAtCamera()?.key || null;
+    if (next !== currentKey) { currentKey = next; paintCards(); paintMap(); titleLine(); }
+    else if ([...nearby()].join('|') !== materialKey) paintCards();
+  }
+  function jump(g) {
+    held.clear();
+    const goal = g ? {x: g.side * (HALL + g.depth * .12), z: g.z, yaw: g.side * 90} : {x: 0, z: Math.min(0, cam.z + 180), yaw: 0};
+    currentKey = g?.key || null; paintCards(); paintMap(); titleLine();
+    // Take the short turn even after several rotations.
+    const yawDelta = ((goal.yaw - cam.yaw + 540) % 360 + 360) % 360 - 180;
+    goal.yaw = cam.yaw + yawDelta;
+    if (reduced.matches) { Object.assign(cam, goal); glide = null; updateCamera(); return; }
+    glide = {from: {...cam}, goal, start: performance.now()}; schedule();
+  }
+  function schedule() { if (!raf) { lastFrame = performance.now(); raf = requestAnimationFrame(frame); } }
+  function frame(now) {
+    raf = 0; const dt = Math.min(.04, (now - lastFrame) / 1000); lastFrame = now;
+    if (glide) {
+      const t = clamp((now - glide.start) / 300, 0, 1), ease = t * t * (3 - 2 * t);
+      for (const k of ['x', 'z', 'yaw']) cam[k] = glide.from[k] + (glide.goal[k] - glide.from[k]) * ease;
+      if (t === 1) glide = null;
+    } else if (held.size) {
+      const r = cam.yaw * Math.PI / 180;
+      const f = Number(held.has('w') || held.has('arrowup')) - Number(held.has('s') || held.has('arrowdown'));
+      const s = Number(held.has('d') || held.has('arrowright')) - Number(held.has('a') || held.has('arrowleft'));
+      cam.x += (Math.sin(r) * f + Math.cos(r) * s) * 750 * dt;
+      cam.z += (-Math.cos(r) * f + Math.sin(r) * s) * 750 * dt;
+      cam.yaw += (Number(held.has('e')) - Number(held.has('q'))) * 100 * dt;
+      constrain(); changedRoom();
+    }
+    updateCamera(); if (glide || held.size) raf = requestAnimationFrame(frame);
+  }
+  function constrain() {
+    cam.z = clamp(cam.z, -FIRST - Math.ceil(groups.length / 2) * STEP + 400, 600);
+    const room = groups.find(g => cam.x * g.side > HALL - 70 && Math.abs(cam.z - g.z) < g.width / 2 - 60);
+    cam.x = clamp(cam.x, room?.side === -1 ? -(HALL + room.depth - 180) : -HALL + 70, room?.side === 1 ? HALL + room.depth - 180 : HALL - 70);
+  }
+  function nearest() {
+    const r = cam.yaw * Math.PI / 180;
+    return [...placements.entries()].filter(([, p]) => -(p.x - cam.x) * Math.sin(r) + (p.z - cam.z) * Math.cos(r) < -100)
+      .sort(([, a], [, b]) => Math.hypot(a.x - cam.x, a.z - cam.z) - Math.hypot(b.x - cam.x, b.z - cam.z))[0]?.[0];
+  }
+  function build(stage) {
+    stageEl = stage; scene = node('section', 'scene'); scene.setAttribute('aria-label', 'First-person rooms. Movement instructions are in the mini-map.');
+    world = node('div', 'world'); furniture = node('div'); doorLayer = node('div'); cardLayer = node('div');
+    // Each layer must preserve the world rather than flatten its CSS 3D children.
+    for (const el of [furniture, doorLayer, cardLayer]) el.style.transformStyle = 'preserve-3d';
+    world.append(furniture, doorLayer, cardLayer); title = node('h1', 'titleline'); map = node('nav', 'minimap'); map.setAttribute('aria-label', 'Floor plan and navigation');
+    scene.append(world, title, map);
+    scene.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || e.target.closest('button, input, .minimap, .card3d')) return;
+      dragging = {x: e.clientX, yaw: cam.yaw, moved: false}; scene.setPointerCapture(e.pointerId);
+    });
+    scene.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const dx = e.clientX - dragging.x;
+      if (Math.abs(dx) > 4) { dragging.moved = true; scene.classList.add('dragging'); glide = null; cam.yaw = dragging.yaw - dx * .18; updateCamera(); }
+    });
+    const finish = () => { dragging = null; scene.classList.remove('dragging'); };
+    scene.addEventListener('pointerup', finish); scene.addEventListener('pointercancel', finish);
+    document.addEventListener('keydown', e => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, textarea, select, [contenteditable], .drawer')) return;
+      if (e.target.closest('button, [role="button"]') && ['Enter', ' ', 'Tab'].includes(e.key)) return;
+      const k = e.key.toLowerCase();
+      if (['w','a','s','d','q','e','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) { e.preventDefault(); glide = null; held.add(k); schedule(); }
+      else if (k === 'tab') { e.preventDefault(); const i = groups.findIndex(g => g.key === currentKey); jump(groups[(i + (e.shiftKey ? groups.length - 1 : 1)) % groups.length]); }
+      else if (/^[1-9]$/.test(k)) { if (groups[Number(k) - 1]) jump(groups[Number(k) - 1]); }
+      else if (k === 'escape') { API.close(); jump(null); }
+      else if (k === 'enter') { const id = nearest(); if (id) API.select(id); }
+      else if (k === 'g') {
+        grouping = modes[(modes.indexOf(grouping) + 1) % modes.length]; groups = []; currentKey = null; glide = null;
+        Object.assign(cam, {x: 0, z: 0, yaw: 0}); API.rerender();
+      }
+    });
+    document.addEventListener('keyup', e => held.delete(e.key.toLowerCase()));
+    addEventListener('blur', () => { held.clear(); dragging = null; });
+  }
+  Mockup.mount({
+    number: 32, title: 'Rooms', spectrum: '3D', fullBleed: true, showChrome: false,
+    summary: 'One room per group on a floor plan: walk the corridor, read the door badges, step into a room to see its root on the far wall and its agents by status; asks come to the door.',
+    signals: {current: ['title','phase','summary','next_action','next_actor','created_by','client','status','updated_at','checkpoint_history','messages','tool_activity'],
+      proposed: ['name','role','kind','activity','ask','plan','target','domain','cost']},
+    notes: 'Corridor floor plan: paired doors give a stable route and let asks stand at the threshold. Root families merge by root target; g cycles target/domain/family. Four primary visual channels: mass (turns + history.length + cost.minutes/10) scales room area; group gravity (sum of heat from pulses and lastTool.at, half-life 20 simulated minutes) sets room brightness and dust; status sets wall position/height; neglect orders doorstep asks and is printed on badges. Heat feeds gravity rather than a separate channel. Walking adds travel, occlusion, and spatial-memory costs versus 2D cards. Door badges and every-ask map dots protect discoverability, and map/Tab jumps reduce travel, but they do not compensate for losing simultaneous readable comparisons across groups. Only the current room and neighboring doors materialize cards; large-scale distant rooms remain plaques, and wall pages cap non-ask cards. This is a comparison experiment, not a recommendation to replace the 2D view.',
+    render(field, stage, api) {
+      F = field; API = api; const focus = rememberFocus();
+      if (!scene) build(stage);
+      if (lastField !== field) { cards.clear(); cardLayer.replaceChildren(); lastField = field; geometryKey = ''; }
+      derive(); stage.replaceChildren(scene); geometry();
+      doorLayer.replaceChildren(...groups.map(plaque));
+      paintCards(); paintMap(); titleLine(); updateCamera(); restoreFocus(focus);
+    }
+  });
+})();
+</script>
+</body>
+</html>

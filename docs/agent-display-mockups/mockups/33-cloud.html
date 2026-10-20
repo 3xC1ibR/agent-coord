@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 33 · Cloud</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* A 3D scatter plot of the field: groups around a ring, attention up, heat toward the camera,
+       mass as size, age as fog. Cards are real DOM nodes inside a preserve-3d world and billboard
+       to face the camera; the canvas behind draws far dots, tree lines, and group labels. */
+    html, body { height: 100%; }
+    body { height: 100dvh; overflow: hidden; }
+    #stage { position: relative; overflow: hidden; }
+    .sky { position: absolute; inset: 0; perspective: 1300px; overflow: hidden; touch-action: none; user-select: none; cursor: grab;
+      background: radial-gradient(ellipse at 50% 42%, color-mix(in srgb, var(--accent) 4%, transparent) 0, transparent 55%),
+        radial-gradient(ellipse at 50% 115%, color-mix(in srgb, var(--ink) 5%, transparent) 0, transparent 60%); }
+    .sky.dragging { cursor: grabbing; }
+    .back { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .world { position: absolute; left: 50%; top: 50%; width: 0; height: 0; transform-style: preserve-3d; }
+    .pin { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-style: preserve-3d; }
+
+    /* The materialized card: a compact version of the 01 card. */
+    .cloudcard { position: absolute; left: 0; top: 0; width: 224px; transform: translate(-50%, -50%) scale(var(--size, 1));
+      display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 9px; border: 1px solid var(--line-strong); border-radius: 8px;
+      background: var(--surface); box-shadow: 0 6px 22px color-mix(in srgb, var(--ink) 9%, transparent);
+      font-size: 11px; line-height: 1.5; cursor: pointer; opacity: var(--fog, 1); backdrop-filter: blur(2px); }
+    .cloudcard:hover { opacity: 1; }
+    .cloudcard.working { border-color: color-mix(in srgb, var(--accent) 40%, var(--line-strong)); }
+    .cloudcard.needs-you { border-color: color-mix(in srgb, var(--warm) 60%, var(--line-strong)); border-top: 2px solid var(--warm); }
+    .cloudcard.failed { border-color: color-mix(in srgb, var(--danger) 50%, var(--line-strong)); }
+    .cloudcard.stuck { outline: 1.5px dashed color-mix(in srgb, var(--warm) 55%, transparent); outline-offset: 2px; }
+    .cloudcard.aging { filter: saturate(var(--sat, 1)); }
+    .cloudcard.neglect { animation: neglect-pulse 2.4s ease-in-out infinite; }
+    .cloudcard.flash { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warm) 45%, transparent), 0 6px 22px color-mix(in srgb, var(--ink) 9%, transparent); }
+    @keyframes neglect-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--warm) 16%, transparent), 0 6px 22px color-mix(in srgb, var(--ink) 9%, transparent); } }
+    .cloudcard .identity { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10px; color: var(--muted); }
+    .cloudcard .identity .provider-logo { width: 12px; height: 12px; flex: none; }
+    .cloudcard .identity .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cloudcard .identity .when { margin-left: auto; font-family: var(--mono); white-space: nowrap; }
+    .cloudcard h3 { font-size: 12.5px; font-weight: 550; letter-spacing: -.015em; line-height: 1.4; }
+    .cloudcard .state { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 10.5px; color: var(--muted); }
+    .cloudcard .state .label { color: var(--ink); }
+    .cloudcard .state.working .label { color: var(--accent); }
+    .cloudcard .state.waiting .label, .cloudcard .state.failed .label { color: var(--warm); }
+    .cloudcard .activity { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 11px; color: var(--accent); }
+    .cloudcard .activity::before { content: "▸ "; }
+    .cloudcard .summary { font-size: 11px; line-height: 1.55; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cloudcard .next { display: flex; gap: 7px; border-top: 1px solid var(--line); padding-top: 7px; font-size: 10.5px; line-height: 1.5; color: var(--muted); }
+    .cloudcard .next > span:last-child { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cloudcard .next b { font-weight: 600; }
+    .cloudcard .next.user b { color: var(--warm); }
+    .cloudcard .ask { padding: 8px 10px; }
+    .cloudcard .foot { display: flex; justify-content: flex-end; }
+
+    /* A dead group collapsed into one labeled sphere: a 0x0 billboard wrapper around a sized ball. */
+    .sphereb { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-style: preserve-3d; }
+    .sphereb .ball { position: absolute; left: 0; top: 0; width: var(--d, 56px); height: var(--d, 56px); transform: translate(-50%, -50%); border-radius: 50%;
+      display: grid; place-items: center; cursor: pointer; border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent);
+      background: radial-gradient(circle at 34% 30%, color-mix(in srgb, var(--ink) 20%, transparent) 0, color-mix(in srgb, var(--ink) 7%, transparent) 58%, transparent 78%); }
+    .sphereb .ball:hover { border-color: var(--muted); }
+    .sphereb b { font: 600 11px var(--mono); color: var(--ink); }
+    .sphereb small { position: absolute; top: calc(100% + 3px); left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--muted); white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+    .collapseb { position: absolute; z-index: 4; transform: translate(-50%, -50%); padding: 1px 7px; font: 9.5px var(--mono); color: var(--muted);
+      background: color-mix(in srgb, var(--surface) 88%, transparent); border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer; }
+    .collapseb:hover { color: var(--ink); }
+
+    /* Chrome beyond the cards: title line, mini-map, asks strip. */
+    .titleline { position: absolute; z-index: 5; top: 10px; left: 14px; right: 14px; display: flex; align-items: baseline; gap: 12px; pointer-events: none; }
+    .titleline .tt { padding: 5px 11px; border: 1px solid var(--line); border-radius: 7px; background: color-mix(in srgb, var(--paper) 78%, transparent); font-size: 12.5px; font-weight: 600; letter-spacing: -.01em; backdrop-filter: blur(4px); }
+    .titleline .tt .view { font-weight: 400; color: var(--muted); }
+    .titleline .hint { margin-left: auto; font: 9.5px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .askstrip { position: absolute; z-index: 5; left: 14px; bottom: 12px; display: flex; flex-wrap: nowrap; gap: 6px; right: 150px; align-items: center; }
+    .askchip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid color-mix(in srgb, var(--warm) 50%, var(--line)); border-radius: 12px;
+      background: color-mix(in srgb, var(--surface) 90%, transparent); color: var(--ink); font-size: 11px; cursor: pointer; box-shadow: 0 3px 10px var(--shadow); backdrop-filter: blur(4px); max-width: 220px; min-width: 0; }
+    .askstrip > .askchip { flex: 1 1 0; }
+    .askstrip > .askmore { flex: 0 0 auto; position: relative; }
+    .askmore summary { list-style: none; white-space: nowrap; }
+    .askmore summary::-webkit-details-marker { display: none; }
+    .asklist { position: absolute; bottom: calc(100% + 10px); right: 0; width: min(370px, 75vw); max-height: 240px; overflow-y: auto; display: grid; gap: 6px; padding: 10px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 8px 24px var(--shadow); }
+    .asklist .askchip { max-width: none; width: 100%; box-shadow: none; text-align: left; }
+    .askchip:hover { border-color: var(--warm); }
+    .askchip i { width: 7px; height: 7px; border-radius: 50%; background: var(--warm); flex: none; animation: chip-pulse 2s ease-in-out infinite; }
+    .askchip .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
+    .askchip .kind { color: var(--warm); font: 600 8.5px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    @keyframes chip-pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--warm) 18%, transparent); } }
+    .minimap { position: absolute; z-index: 5; right: 14px; bottom: 12px; width: 118px; padding: 8px 8px 7px; display: grid; gap: 5px; justify-items: center;
+      border: 1px solid var(--line-strong); border-radius: 9px; background: color-mix(in srgb, var(--surface) 88%, transparent); box-shadow: 0 8px 24px var(--shadow); backdrop-filter: blur(5px); }
+    .minimap canvas { display: block; }
+    .mlegend { display: grid; gap: 2px; font: 9px var(--mono); color: var(--muted); justify-items: start; width: 100%; }
+    .mlegend span { display: inline-flex; align-items: center; gap: 5px; }
+    .mlegend i { width: 6px; height: 6px; border-radius: 2px; display: inline-block; }
+    .mlegend .x i { background: var(--muted); } .mlegend .y i { background: var(--accent); } .mlegend .z i { background: var(--warm); }
+    .mask { display: inline-flex; align-items: center; gap: 5px; font: 600 9.5px var(--mono); color: var(--warm); }
+    .mask i { width: 7px; height: 7px; border-radius: 50%; background: var(--warm); }
+    .tip { position: absolute; z-index: 8; max-width: 380px; padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: 6px; background: color-mix(in srgb, var(--surface) 94%, transparent);
+      color: var(--ink); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; box-shadow: 0 4px 14px var(--shadow); backdrop-filter: blur(4px); }
+
+    @media (prefers-reduced-motion: reduce) { .cloudcard.neglect, .askchip i { animation: none; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60000, TAU = Math.PI * 2;
+  const P = 1300;                 // perspective depth, matches .sky perspective
+  const HALF_HEAT = 20 * MIN;     // heat half-life: ~20 simulated minutes
+  const MAX_CARDS = 80;           // DOM cards at scale; the rest are canvas dots
+  const ORBIT = 210;              // orbit radius per tree depth (world px)
+  const HEAT_Z = 360;             // how far heat pushes an agent toward the camera
+  const Y_BOTTOM = -320, Y_TOP = 620;
+  const GROUPINGS = ["target", "domain", "family"];
+  const GROUPING_LABEL = {target: "target", domain: "domain", family: "root family"};
+  const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const hash = text => { let h = 2166136261; for (const ch of text) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const short = (t, n) => (t || "").length > n ? t.slice(0, n - 1) + "…" : t;
+  const wrapDeg = d => ((d % 360) + 540) % 360 - 180;
+  const fogOf = age => 1 - Math.min(1, Math.log1p(age / MIN) / Math.log1p(24 * 60));
+
+  /* View state that survives re-renders: camera, grouping, expanded dead groups, hover. */
+  const cam = {yaw: 0, tilt: -18, dist: 1150, pan: {x: 0, y: 0}};
+  let defaultDist = 1150, fitted = false;
+  let grouping = "target";
+  const expandedDead = new Set();
+  let hoverId = null, focusedId = null, flashId = null, flashUntil = 0;
+  let F = null, API = null, built = null;
+
+  /* Per-agent layout state, rebuilt each render but preserving positions by id. */
+  let n = 0, agentsIdx = new Map();
+  let pos = new Float32Array(0);           // current x,y,z (eased)
+  let tyA = new Float32Array(0), cxA = new Float32Array(0), czA = new Float32Array(0), rA = new Float32Array(0);
+  let zHeatA = new Float32Array(0), angA = new Float32Array(0);
+  let sxA = new Float32Array(0), syA = new Float32Array(0), scA = new Float32Array(0);
+  let fogA = new Float32Array(0), sizeA = new Float32Array(0), heatA = new Float32Array(0);
+  let stuckA = [];
+  let angMap = new Map();
+  let groups = [], matList = [];
+  let visibleCards = new Set(), lastMaterialized = 0;
+  const wraps = new Map(), spheres = new Map(), collapseEls = new Map();
+  let W = 1200, H = 700, dpr = 1, colors = {};
+  let dirty = true, rafId = 0, lastT = 0, tween = null, lastCamSig = "", lastViewName = "";
+
+  /* ---------- signals ---------- */
+  function heatOf(field, a) {
+    let h = 0;
+    const ps = a.pulses || [];
+    for (let i = 0; i < ps.length; i++) h += Math.pow(0.5, (field.now - ps[i]) / HALF_HEAT);
+    if (a.lastTool) h += 0.5 * Math.pow(0.5, (field.now - a.lastTool.at) / HALF_HEAT);
+    return h;
+  }
+  const massOf = a => (a.turns || 0) + a.history.length + a.cost.minutes / 10;
+  const neglectOf = (field, a) => field.needsUser(a) ? Math.max(0, field.now - (a.ask?.askedAt ?? a.updatedAt)) : 0;
+  function stuckOf(field, a) {
+    if (a.status !== "working") return false;
+    const lastPhase = [...a.history].reverse().find(h => h.phase === a.phase);
+    const since = lastPhase ? field.now - lastPhase.at : field.now - a.createdAt;
+    return since > 45 * MIN && (field.now - a.updatedAt) < 8 * MIN;
+  }
+  const doing = (field, a) => a.status === "working" ? (field.toolLabel(a) || a.activity || "Working")
+    : a.status === "done" ? "Done " + field.relativeTime(a.updatedAt)
+    : field.needsUser(a) ? ((a.ask ? a.ask.kind : "needs you") + ": " + (a.ask?.question || a.next.action))
+    : field.statusLabel(a) + " · " + field.relativeTime(field.lastActivity(a));
+
+  /* ---------- groups, as in mockup 30 ---------- */
+  function keyFor(r) {
+    if (grouping === "domain") return [r.domain || "none", r.domain ? AgentField.DOMAIN_LABELS[r.domain] || r.domain : "No domain"];
+    if (grouping === "family") return [r.id, r.name ? r.name + " · " + r.title : r.title];
+    return [r.target || "root:" + r.id, r.target || r.title];
+  }
+  function deriveGroups(field) {
+    const map = new Map();
+    for (const r of field.roots()) {
+      const [key, name] = keyFor(r);
+      let g = map.get(key);
+      if (!g) map.set(key, g = {key, name, roots: [], members: []});
+      g.roots.push(r);
+      g.members.push(r, ...field.descendants(r.id));
+    }
+    for (const g of map.values()) {
+      g.gravity = g.members.reduce((s, a) => s + (heatA[agentsIdx.get(a.id)] || 0), 0);
+      g.needs = g.members.filter(field.needsUser);
+      g.fanout = Math.max(0, ...g.roots.map(r => field.descendants(r.id).length));
+      g.activity = Math.max(...g.members.map(field.lastActivity));
+      g.dead = g.gravity < 0.12 && !g.members.some(a => a.status === "working") && !g.needs.length;
+    }
+    return [...map.values()].sort((a, b) => b.gravity - a.gravity || b.activity - a.activity || a.name.localeCompare(b.name));
+  }
+
+  /* ---------- layout: position computed entirely from the data ---------- */
+  function computeLayout(field) {
+    const ag = field.agents;
+    const prevIdx = agentsIdx, prevPos = pos;
+    n = ag.length;
+    agentsIdx = new Map(ag.map((a, i) => [a.id, i]));
+    pos = new Float32Array(n * 3);
+    tyA = new Float32Array(n); cxA = new Float32Array(n); czA = new Float32Array(n); rA = new Float32Array(n);
+    zHeatA = new Float32Array(n); angA = new Float32Array(n);
+    sxA = new Float32Array(n); syA = new Float32Array(n); scA = new Float32Array(n);
+    fogA = new Float32Array(n); sizeA = new Float32Array(n); heatA = new Float32Array(n);
+    stuckA = new Array(n).fill(false);
+
+    let maxHeat = 0.001, maxMass = 0.001;
+    for (const a of ag) { const h = heatOf(field, a); heatA[agentsIdx.get(a.id)] = h; maxHeat = Math.max(maxHeat, h); maxMass = Math.max(maxMass, massOf(a)); }
+    for (const a of ag) {
+      const i = agentsIdx.get(a.id);
+      fogA[i] = fogOf(field.age(a));
+      sizeA[i] = 0.84 + 0.16 * Math.sqrt(massOf(a) / maxMass);
+      stuckA[i] = stuckOf(field, a);
+      const old = prevIdx.get(a.id);
+      if (old != null && prevPos.length >= (old + 1) * 3) { pos[i * 3] = prevPos[old * 3]; pos[i * 3 + 1] = prevPos[old * 3 + 1]; pos[i * 3 + 2] = prevPos[old * 3 + 2]; }
+      else {
+        pos[i * 3] = (hash(a.id) - 0.5) * 500; pos[i * 3 + 1] = 0; pos[i * 3 + 2] = (hash(a.id + "z") - 0.5) * 500;
+      }
+      if (!angMap.has(a.id)) angMap.set(a.id, hash(a.id) * TAU);
+      angA[i] = angMap.get(a.id);
+    }
+
+    groups = deriveGroups(field);
+    const N = groups.length, ringR = clamp(N * 35, 560, 850);
+    const newAng = new Map();
+    groups.forEach((g, gi) => {
+      const phi = N ? (gi + 0.5) / N * TAU : 0, gx = Math.sin(phi) * ringR, gz = Math.cos(phi) * ringR;
+      g.cx = gx; g.cy = g.dead ? -220 : 0; g.cz = gz - (g.dead ? 340 : 0); g.phi = phi; g.ringR = ringR;
+      const spread = 1 + Math.min(0.4, Math.sqrt(g.fanout) * 0.07);
+      const orbiters = [];
+      const rootOffsets = new Map(g.roots.map((r, ri) => [r.id, (ri - (g.roots.length - 1) / 2) * Math.min(200, 700 / Math.max(1, g.roots.length - 1))]));
+      for (const a of g.members) {
+        const i = agentsIdx.get(a.id);
+        const rootAgent = field.ancestors(a.id).slice(-1)[0] || a;
+        cxA[i] = gx + (rootOffsets.get(rootAgent.id) || 0); czA[i] = g.cz;
+        const root = !a.parentId || !field.byId(a.parentId) || !g.members.includes(field.byId(a.parentId));
+        if (root) { rA[i] = 0; }
+        else {
+          const depth = field.depth(a.id);
+          rA[i] = Math.min(560, depth * ORBIT * spread);
+          orbiters.push(i);
+        }
+        const heatN = heatA[i] / maxHeat;
+        zHeatA[i] = heatN * HEAT_Z;
+        const needs = field.needsUser(a);
+        const att = needs ? 1 : a.status === "working" ? 0.62 : a.status === "blocked" ? 0.5 : a.status === "failed" ? 0.4 : a.status === "idle" ? 0.25 : 0.08;
+        tyA[i] = Y_BOTTOM + att * ((n > 80 ? Y_TOP : 330) - Y_BOTTOM) + (hash(a.id + "y") - 0.5) * 110;
+        if (needs) tyA[i] += Math.min(55, neglectOf(field, a) / MIN * 2.5);
+      }
+      // Slight repulsion within a cluster so orbiting cards do not overlap: two cheap passes in the ring plane.
+      for (let pass = 0; pass < 10; pass++) {
+        for (let u = 0; u < orbiters.length; u++) for (let v = u + 1; v < orbiters.length; v++) {
+          const i = orbiters[u], k = orbiters[v];
+          let px = cxA[i] + Math.cos(angA[i]) * rA[i], pz = czA[i] + Math.sin(angA[i]) * rA[i];
+          let qx = cxA[k] + Math.cos(angA[k]) * rA[k], qz = czA[k] + Math.sin(angA[k]) * rA[k];
+          const dx = qx - px, dz = qz - pz, d = Math.hypot(dx, dz);
+          if (d >= 245 || d < 0.01) continue;
+          const push = (245 - d) / 2 / d;
+          px -= dx * push; pz -= dz * push; qx += dx * push; qz += dz * push;
+          const li = Math.hypot(px - cxA[i], pz - czA[i]), lk = Math.hypot(qx - cxA[k], qz - czA[k]);
+          angA[i] = Math.atan2(pz - czA[i], px - cxA[i]); rA[i] = clamp(li, 60, rA[i] * 1.5 + 40);
+          angA[k] = Math.atan2(qz - czA[k], qx - cxA[k]); rA[k] = clamp(lk, 60, rA[k] * 1.5 + 40);
+        }
+      }
+      for (const i of orbiters) newAng.set(ag[i].id, angA[i]);
+    });
+    angMap = newAng;
+    let fit = 500;
+    for (let i = 0; i < n; i++) {
+      const x = cxA[i] + Math.cos(angA[i]) * rA[i];
+      const y = -tyA[i], z = czA[i] + Math.sin(angA[i]) * rA[i] + zHeatA[i];
+      const tr = -18 * Math.PI / 180;
+      const py = y * Math.cos(tr) - z * Math.sin(tr), pz = y * Math.sin(tr) + z * Math.cos(tr);
+      fit = Math.max(fit, pz + P * (Math.abs(x) / Math.max(150, W / 2 - 140) - 1), pz + P * (Math.abs(py) / Math.max(150, H / 2 - 170) - 1));
+      if (still || !fitted || prevIdx.get(ag[i].id) == null) {
+        pos[i * 3] = x; pos[i * 3 + 1] = tyA[i]; pos[i * 3 + 2] = z;
+      }
+    }
+    defaultDist = fit;
+    if (!fitted) { cam.dist = defaultDist; fitted = true; }
+  }
+
+  /* ---------- camera ---------- */
+  function viewName() {
+    const yawD = Math.abs(wrapDeg(cam.yaw));
+    const dFront = yawD + Math.abs(cam.tilt + 18), dTop = Math.abs(cam.tilt + 90) + yawD * 0.4, dSide = Math.abs(yawD - 90) + Math.abs(cam.tilt + 18);
+    const m = Math.min(dFront, dTop, dSide);
+    return m > 16 ? "free" : m === dTop ? "top" : m === dSide ? "side" : "front";
+  }
+  function tweenCam(to, ms = 340) {
+    if (still) { Object.assign(cam, to); if (to.pan) cam.pan = {...to.pan}; invalidate(); return; }
+    tween = {from: {yaw: cam.yaw, tilt: cam.tilt, dist: cam.dist, pan: {...cam.pan}}, to: {...cam, ...to}, t0: performance.now(), ms};
+    invalidate();
+  }
+  const preset = {
+    front: () => tweenCam({yaw: 0, tilt: -18}),
+    top: () => tweenCam({yaw: 0, tilt: -90}),
+    side: () => tweenCam({yaw: 90, tilt: -18}),
+    reset: () => { tweenCam({yaw: 0, tilt: -18, dist: defaultDist, pan: {x: 0, y: 0}}); },
+  };
+  function flyTo(a) {
+    const g = groups.find(x => x.members.includes(a));
+    if (g?.dead && !expandedDead.has(g.key)) expandedDead.add(g.key);
+    focusedId = a.id;
+    syncDom(F, API);   // make sure the card exists before we fly
+    const i = agentsIdx.get(a.id), tx = cxA[i] + Math.cos(angA[i]) * rA[i], tz = czA[i] + Math.sin(angA[i]) * rA[i] + zHeatA[i];
+    projectOne(tx, tyA[i], tz);   // P1 includes pan; subtract it to get the no-pan projection
+    const pan = {x: W / 2 - (P1.x - cam.pan.x), y: H / 2 - (P1.y - cam.pan.y)};
+    tweenCam({pan}, 380);
+    flashId = a.id; flashUntil = performance.now() + 1300;
+    invalidate();
+  }
+
+  /* ---------- projection: JS mirror of the CSS perspective math ---------- */
+  const P1 = {x: 0, y: 0, s: 0};   // scratch result for projectOne (never clobbers the per-agent arrays)
+  function projectOne(x, yUp, z) {
+    const y = -yUp, yr = cam.yaw * Math.PI / 180, tr = cam.tilt * Math.PI / 180;
+    const cy = Math.cos(yr), sy = Math.sin(yr), ct = Math.cos(tr), st = Math.sin(tr);
+    const x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+    const y2 = y * ct - z1 * st, z2 = y * st + z1 * ct;
+    const w = (P + cam.dist - z2) / P;
+    P1.x = W / 2 + cam.pan.x + x1 / w; P1.y = H / 2 + cam.pan.y + y2 / w; P1.s = 1 / w;
+  }
+  function projectAll() {
+    const yr = cam.yaw * Math.PI / 180, tr = cam.tilt * Math.PI / 180;
+    const cy = Math.cos(yr), sy = Math.sin(yr), ct = Math.cos(tr), st = Math.sin(tr);
+    const ox = W / 2 + cam.pan.x, oy = H / 2 + cam.pan.y;
+    for (let i = 0; i < n; i++) {
+      const x = pos[i * 3], y = -pos[i * 3 + 1], z = pos[i * 3 + 2];
+      const x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+      const y2 = y * ct - z1 * st, z2 = y * st + z1 * ct;
+      const w = (P + cam.dist - z2) / P;
+      sxA[i] = ox + x1 / w; syA[i] = oy + y2 / w; scA[i] = 1 / w;
+    }
+  }
+  const behind = i => scA[i] > 6.5 || scA[i] < 0.1;
+
+  /* ---------- DOM: cards, spheres, chrome ---------- */
+  const cardSig = a => { const i = agentsIdx.get(a.id); return [a.status, a.phase, a.updatedAt, a.ask?.askedAt, a.activity, a.summary, a.unread, a.turns, Math.round(fogA[i] * 24)].join("|"); };
+  function buildCard(a) {
+    const wrap = $("div", "pin");
+    wrap.dataset.id = a.id;
+    wrap.addEventListener("pointerdown", e => e.stopPropagation());
+    wrap.addEventListener("pointerenter", () => { hoverId = a.id; showTip(a); invalidate(); });
+    wrap.addEventListener("pointerleave", () => { if (hoverId === a.id) hoverId = null; built.tip.style.display = "none"; invalidate(); });
+    wrap.addEventListener("click", e => { if (!e.target.closest("button, input, a")) API.select(a.id); });
+    wrap._card = $("article", "cloudcard");
+    wrap.append(wrap._card);
+    return wrap;
+  }
+  function fillCard(wrap, a) {
+    const field = F, card = wrap._card;
+    const needs = field.needsUser(a), neglect = needs && neglectOf(field, a) > 15 * MIN;
+    card.className = "cloudcard aging " + a.status + (needs ? " needs-you" : "") + (stuckA[agentsIdx.get(a.id)] ? " stuck" : "") + (neglect ? " neglect" : "") + (flashId === a.id ? " flash" : "");
+    card.style.setProperty("--fog", (0.62 + 0.38 * fogA[agentsIdx.get(a.id)]).toFixed(2));
+    card.style.setProperty("--sat", (0.35 + 0.65 * fogA[agentsIdx.get(a.id)]).toFixed(2));
+    card.style.setProperty("--size", sizeA[agentsIdx.get(a.id)].toFixed(2));
+    card.replaceChildren();
+    const id = $("div", "identity");
+    id.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    id.append($("span", "who", (a.name && a.name !== ROLE_SHORT[a.role] ? a.name + " · " : "") + ROLE_SHORT[a.role] + (a.kind !== "app" ? " · " + a.kind : "")));
+    const when = $("span", "when", field.relativeTime(a.updatedAt)); when.title = "Updated " + new Date(a.updatedAt).toLocaleString(); id.append(when);
+    card.append(id, $("h3", null, a.title));
+    const st = $("div", "state " + a.status);
+    st.append(AgentField.statusDot(a), $("span", "label", field.statusLabel(a)), AgentField.phaseSteps(a), $("span", null, AgentField.PHASE_LABELS[a.phase]));
+    const prog = field.progress(a); if (prog.total && a.status !== "done") st.append($("span", "mono", prog.done + "/" + prog.total));
+    card.append(st);
+    if (a.ask) card.append(Mockup.askBox(a, field, API.select));
+    else {
+      if (a.activity && a.status === "working") card.append($("div", "activity", a.activity));
+      const s = $("p", "summary", a.summary); s.title = a.summary; card.append(s);
+      if (a.next?.action && a.status !== "done") {
+        const nx = $("div", "next " + a.next.actor);
+        nx.append($("span", null, "↳"), $("span")); nx.lastChild.append($("b", null, ({user: "Your next step", agent: "Up next", external: "Waiting on"}[a.next.actor] || "Next") + " · "), a.next.action);
+        card.append(nx);
+      }
+    }
+    if (a.unread) {
+      const f = $("div", "foot"), d = $("button", "btn quiet small", "Dismiss"); d.type = "button";
+      d.onclick = e => { e.stopPropagation(); field.dismiss(a.id); }; f.append(d); card.append(f);
+    }
+  }
+  function showTip(a) {
+    const tip = built.tip, field = F;
+    tip.textContent = (a.name ? a.name + " · " : "") + a.title + " — " + doing(field, a) + (stuckA[agentsIdx.get(a.id)] ? " · stuck in " + AgentField.PHASE_LABELS[a.phase] : "");
+    tip.style.display = "block";
+  }
+
+  function syncDom(field, api) {
+    // Materialize the nearest MAX_CARDS agents plus everyone who needs the user; the rest stay dots.
+    const rank = field.agents.map(a => agentsIdx.get(a.id)).filter(i => i != null);
+    rank.sort((i, k) => scA[k] - scA[i]);
+    const mat = new Set();
+    for (const i of rank) { if (mat.size >= MAX_CARDS) break; mat.add(field.agents[i].id); }
+    if (focusedId) { if (!mat.has(focusedId) && mat.size >= MAX_CARDS) mat.delete([...mat].pop()); mat.add(focusedId); }
+    matList = [...mat];
+    for (const a of field.agents) {
+      const inCollapsed = groups.some(g => g.dead && !expandedDead.has(g.key) && g.members.includes(a));
+      let wrap = wraps.get(a.id);
+      if (mat.has(a.id) && !inCollapsed) {
+        if (!wrap) { wrap = buildCard(a); wraps.set(a.id, wrap); built.world.append(wrap); }
+        const sig = cardSig(a);
+        if (wrap._sig !== sig) { fillCard(wrap, a); wrap._sig = sig; }
+      } else if (wrap) { wrap.remove(); wraps.delete(a.id); }
+    }
+    for (const [id, wrap] of wraps) if (!field.byId(id)) { wrap.remove(); wraps.delete(id); }
+    // Dead groups collapse into one labeled sphere until clicked.
+    const liveSphere = new Set();
+    for (const g of groups) {
+      if (!g.dead) continue;
+      liveSphere.add(g.key);
+      let el = spheres.get(g.key);
+      if (!expandedDead.has(g.key)) {
+        if (!el) {
+          el = $("div", "sphereb"); el.tabIndex = 0;
+          const ball = $("div", "ball");
+          ball.append($("b", null, String(g.members.length)), $("small", null, short(g.name, 26)));
+          el.append(ball);
+          const expand = () => { expandedDead.add(g.key); api.rerender(); };
+          el.onclick = expand;
+          el.onkeydown = e => { if (e.key === "Enter") expand(); };
+          el.title = g.name + " · " + g.members.length + " agents · quiet for " + field.relativeTime(g.activity) + "\nClick to expand";
+          spheres.set(g.key, el); built.world.append(el);
+        }
+        const ball = el.firstChild;
+        ball.style.setProperty("--d", Math.round(40 + Math.sqrt(g.members.length) * 7) + "px");
+        ball.firstChild.textContent = String(g.members.length);
+        ball.lastChild.textContent = short(g.name, 26);
+        ball.title = g.name + " · " + g.members.length + " agents · quiet for " + field.relativeTime(g.activity) + "\nClick to expand";
+      } else if (el) { el.remove(); spheres.delete(g.key); }
+      // Expanded dead groups get a small collapse chip floating at the group center.
+      let chip = collapseEls.get(g.key);
+      if (expandedDead.has(g.key)) {
+        if (!chip) {
+          chip = $("button", "collapseb", "− collapse"); chip.type = "button";
+          chip.onclick = () => { expandedDead.delete(g.key); api.rerender(); };
+          collapseEls.set(g.key, chip); built.sky.append(chip);
+        }
+      } else if (chip) { chip.remove(); collapseEls.delete(g.key); }
+    }
+    for (const [key, el] of spheres) if (!liveSphere.has(key)) { el.remove(); spheres.delete(key); }
+    for (const [key, el] of collapseEls) if (!expandedDead.has(key) || !groups.some(g => g.key === key && g.dead)) { el.remove(); collapseEls.delete(key); }
+    // Five blocking/oldest asks stay visible; the rest remain in a bounded list.
+    const strip = built.strip, wasOpen = strip.querySelector("details")?.open;
+    strip.replaceChildren();
+    const asks = [...field.asks()].sort((a, b) => Number(!!b.ask?.blocking) - Number(!!a.ask?.blocking) || neglectOf(field, b) - neglectOf(field, a));
+    const askChip = a => {
+      const chip = $("button", "askchip"); chip.type = "button";
+      chip.title = (a.ask ? a.ask.kind + (a.ask.blocking ? " · blocking" : "") + " · asked " + field.relativeTime(a.ask.askedAt) : "Your next step") + "\n" + (a.ask?.question || a.next.action);
+      chip.append($("i"), $("span", "who", a.name || a.title), $("span", "kind", a.ask?.kind || "you"));
+      chip.onclick = () => { const more = strip.querySelector("details"); if (more) more.open = false; flyTo(a); };
+      return chip;
+    };
+    asks.slice(0, 5).forEach(a => strip.append(askChip(a)));
+    if (asks.length > 5) {
+      const more = $("details", "askmore"), summary = $("summary", "askchip", "+" + (asks.length - 5) + " more");
+      const list = $("div", "asklist");
+      asks.slice(5).forEach(a => list.append(askChip(a)));
+      more.append(summary, list); more.open = !!wasOpen; strip.append(more);
+    }
+    // Title line.
+    built.titleCount.textContent = field.agents.length + (field.agents.length === 1 ? " agent" : " agents") + " · " + groups.length + (groups.length === 1 ? " group" : " groups");
+    built.hint.textContent = "by " + GROUPING_LABEL[grouping] + " · drag orbit · wheel zoom · shift-drag pan · 1/2/3 views · 0 reset · g groups";
+    built.askCount.textContent = field.asks().length + (field.asks().length === 1 ? " needs you" : " need you");
+  }
+
+  /* ---------- canvas: far dots, tree lines, group labels, waiting-on edges ---------- */
+  // Occluded cards remain points at their exact data position. Rotating or focusing
+  // reveals them without shifting the scatter plot into an unrelated screen grid.
+  const cardScale = i => Math.min(1, sizeA[i] * clamp(scA[i], 0.88, 1));
+  function resolveCardVisibility() {
+    const entries = [...wraps].sort(([a], [b]) => Number(b === focusedId) - Number(a === focusedId) || scA[agentsIdx.get(b)] - scA[agentsIdx.get(a)]);
+    const rects = []; visibleCards = new Set();
+    for (const [id, wrap] of entries) {
+      const i = agentsIdx.get(id), scale = cardScale(i);
+      const w = 224 * scale, h = wrap._card.offsetHeight * scale;
+      const box = {l: sxA[i] - w / 2, r: sxA[i] + w / 2, t: syA[i] - h / 2, b: syA[i] + h / 2};
+      const fits = box.l > 12 && box.r < W - 12 && box.t > 55 && box.b < H - 65 && !(box.r > W - 145 && box.b > H - 215);
+      const hits = rects.some(r => box.l < r.r + 12 && box.r > r.l - 12 && box.t < r.b + 12 && box.b > r.t - 12);
+      const show = !behind(i) && (id === focusedId || fits && !hits);
+      wrap.style.visibility = show ? "visible" : "hidden";
+      if (show) { rects.push(box); visibleCards.add(id); }
+    }
+  }
+
+  function drawBack() {
+    const ctx = built.bctx;
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    // Ring guide in the horizontal plane.
+    ctx.strokeStyle = colors.ink; ctx.globalAlpha = 0.1; ctx.lineWidth = 1;
+    ctx.beginPath();
+    const R = groups[0]?.ringR || 340;
+    for (let s = 0; s <= 72; s++) {
+      const a = s / 72 * TAU;
+      projectOne(Math.sin(a) * R, 0, Math.cos(a) * R);
+      if (s === 0) ctx.moveTo(P1.x, P1.y); else ctx.lineTo(P1.x, P1.y);
+    }
+    ctx.stroke();
+    // Group labels sit above each cluster's center, with a paper halo so they read over cards.
+    ctx.globalAlpha = 1;
+    ctx.font = "600 10px ui-monospace, monospace";
+    ctx.textAlign = "center";
+    for (const g of groups) {
+      projectOne(g.cx, g.cy, g.cz);
+      if (P1.s < 0.12 || P1.s > 6.5) continue;
+      const label = short(g.name, 24) + " · " + g.members.length;
+      ctx.globalAlpha = 0.55 + 0.45 * Math.min(1, g.gravity / 3);
+      ctx.strokeStyle = colors.paper; ctx.lineWidth = 3; ctx.lineJoin = "round";
+      ctx.strokeText(label, P1.x, P1.y - 70);
+      ctx.fillStyle = colors.muted;
+      ctx.fillText(label, P1.x, P1.y - 70);
+    }
+    ctx.globalAlpha = 1;
+    // Thin lines connect roots to children; dashed waiting-on edges only for hover/peek/focus.
+    ctx.lineWidth = 1;
+    const line = (i, k, dashed, warm) => {
+      if (behind(i) || behind(k)) return;
+      ctx.strokeStyle = warm ? colors.warm : colors.ink;
+      ctx.globalAlpha = warm ? 0.5 : 0.16;
+      ctx.setLineDash(dashed ? [4, 4] : []);
+      ctx.beginPath(); ctx.moveTo(sxA[i], syA[i]); ctx.lineTo(sxA[k], syA[k]); ctx.stroke();
+    };
+    const collapsedGroups = groups.filter(g => g.dead && !expandedDead.has(g.key));
+    for (const g of groups) {
+      if (collapsedGroups.includes(g)) continue;
+      for (const a of g.members) {
+        const p = F.parent(a.id);
+        if (!p || !g.members.includes(p)) continue;
+        line(agentsIdx.get(p.id), agentsIdx.get(a.id), false, false);
+      }
+    }
+    ctx.setLineDash([]);
+    const focus = new Set();
+    if (hoverId && F.byId(hoverId)) focus.add(hoverId);
+    if (API.peeked) focus.add(API.peeked);
+    for (const a of F.asks()) focus.add(a.id);
+    for (const id of focus) {
+      const a = F.byId(id); if (!a) continue;
+      for (const w of a.waitingOn) {
+        if (w.startsWith("external:")) continue;
+        const t = F.byId(w); if (!t) continue;
+        line(agentsIdx.get(a.id), agentsIdx.get(t.id), true, F.needsUser(t) || F.needsUser(a));
+      }
+    }
+    // Dots for everyone not materialized as a card.
+    for (const a of F.agents) {
+      const i = agentsIdx.get(a.id);
+      if (visibleCards.has(a.id) || behind(i)) continue;
+      if (collapsedGroups.some(g => g.members.includes(a))) continue;
+      const r = (1.6 + 1.7 * sizeA[i]) * Math.min(1.8, Math.max(0.5, scA[i]));
+      const fog = fogA[i];
+      if (a.status === "blocked") {
+        ctx.strokeStyle = colors.muted; ctx.globalAlpha = 0.35 + 0.55 * fog; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(sxA[i], syA[i], r, 0, TAU); ctx.stroke();
+      } else {
+        ctx.fillStyle = a.status === "working" ? colors.accent : a.status === "waiting" ? colors.warm : a.status === "failed" ? colors.danger : a.status === "done" ? colors.ok : colors.idle;
+        ctx.globalAlpha = (a.status === "working" || a.status === "waiting" ? 0.55 : 0.4) + 0.45 * fog;
+        ctx.beginPath(); ctx.arc(sxA[i], syA[i], r, 0, TAU); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /* ---------- mini-map: fixed-orientation gnomon, axis legend, warm ask count ---------- */
+  function drawMinimap() {
+    const ctx = built.mctx, S = 104, cx0 = S / 2;
+    ctx.clearRect(0, 0, S, S);
+    ctx.save();
+    // Top-down compass ring: group dots hold their world place, the camera arrow orbits.
+    const cy0 = 40, R = 30;
+    ctx.strokeStyle = colors.line; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx0, cy0, R, 0, TAU); ctx.stroke();
+    for (const g of groups) {
+      const x = cx0 + Math.sin(g.phi) * R, y = cy0 - Math.cos(g.phi) * R;
+      ctx.fillStyle = g.needs.length ? colors.warm : colors.muted;
+      ctx.globalAlpha = g.dead ? 0.35 : 0.55 + 0.45 * Math.min(1, g.gravity / 3);
+      ctx.beginPath(); ctx.arc(x, y, g.needs.length ? 3 : 2, 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    const a = cam.yaw * Math.PI / 180;
+    const ex = cx0 + Math.sin(a) * R, ey = cy0 - Math.cos(a) * R;
+    ctx.fillStyle = colors.accent;
+    ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex - 5, ey - 8); ctx.lineTo(ex + 5, ey - 8); ctx.closePath(); ctx.fill();
+    // Axis triad projected with the current camera: x = group ring, y = attention, z = heat.
+    const c2 = {x: cx0, y: 84}, L = 17;
+    const tri = [[1, 0, 0, colors.ink, "x"], [0, 1, 0, colors.accent, "y"], [0, 0, 1, colors.warm, "z"]];
+    ctx.font = "600 8.5px ui-monospace, monospace"; ctx.textAlign = "left";
+    for (const [x, y, z, col, lab] of tri) {
+      const yr = a, tr = cam.tilt * Math.PI / 180;
+      const x1 = x * Math.cos(yr) + z * Math.sin(yr), z1 = -x * Math.sin(yr) + z * Math.cos(yr);
+      const y2 = -y * Math.cos(tr) - z1 * Math.sin(tr), z2 = -y * Math.sin(tr) + z1 * Math.cos(tr);
+      const w = (P + 700 - z2 * L) / P;
+      const px = c2.x + x1 * L / w, py = c2.y + y2 * L / w;
+      ctx.strokeStyle = col; ctx.globalAlpha = 0.9; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(c2.x, c2.y); ctx.lineTo(px, py); ctx.stroke();
+      ctx.fillStyle = col; ctx.fillText(lab, px + 2, py + 3);
+    }
+    ctx.restore();
+  }
+
+  /* ---------- frame loop: ease positions after field changes, write transforms ---------- */
+  function invalidate() { dirty = true; if (!rafId) { lastT = performance.now(); rafId = requestAnimationFrame(frame); } }
+  function frame(t) {
+    rafId = 0;
+    const dt = clamp((t - lastT) / 1000, 0.001, 0.05); lastT = t;
+    let moved = false;
+    if (tween) {
+      const u = Math.min(1, (t - tween.t0) / tween.ms), e = 1 - Math.pow(1 - u, 3);
+      for (const key of ["yaw", "tilt", "dist"]) cam[key] = tween.from[key] + (tween.to[key] - tween.from[key]) * e;
+      if (tween.to.pan) { cam.pan.x = tween.from.pan.x + (tween.to.pan.x - tween.from.pan.x) * e; cam.pan.y = tween.from.pan.y + (tween.to.pan.y - tween.from.pan.y) * e; }
+      moved = true;
+      if (u >= 1) tween = null;
+    }
+    const k = still ? 1 : 1 - Math.exp(-dt * 5);
+    for (let i = 0; i < n; i++) {
+      const tx = cxA[i] + Math.cos(angA[i]) * rA[i], ty = tyA[i], tz = czA[i] + Math.sin(angA[i]) * rA[i] + zHeatA[i];
+      for (let c = 0; c < 3; c++) {
+        const target = c === 0 ? tx : c === 1 ? ty : tz;
+        const d = target - pos[i * 3 + c];
+        if (Math.abs(d) > 0.04) { pos[i * 3 + c] += d * k; moved = true; }
+      }
+    }
+    if (flashId && t > flashUntil) { flashId = null; for (const [, w] of wraps) w._card.classList.remove("flash"); }
+    const camSig = [cam.yaw.toFixed(2), cam.tilt.toFixed(2), cam.dist.toFixed(0), cam.pan.x.toFixed(1), cam.pan.y.toFixed(1)].join("|");
+    if (moved || camSig !== lastCamSig || dirty) {
+      lastCamSig = camSig;
+      // The same camera distance and pan must drive DOM and canvas projection.
+      let minDist = 0;
+      const yr = cam.yaw * Math.PI / 180, tr = cam.tilt * Math.PI / 180;
+      for (let i = 0; i < n; i++) {
+        const z1 = -pos[i * 3] * Math.sin(yr) + pos[i * 3 + 2] * Math.cos(yr);
+        const z2 = -pos[i * 3 + 1] * Math.sin(tr) + z1 * Math.cos(tr);
+        minDist = Math.max(minDist, z2 + P * (sizeA[i] - 1));
+      }
+      cam.dist = Math.max(minDist, cam.dist);
+      built.world.style.left = (W / 2 + cam.pan.x) + "px";
+      built.world.style.top = (H / 2 + cam.pan.y) + "px";
+      built.sky.style.perspectiveOrigin = (W / 2 + cam.pan.x) + "px " + (H / 2 + cam.pan.y) + "px";
+      built.world.style.transform = "translateZ(" + (-cam.dist).toFixed(1) + "px) rotateX(" + cam.tilt.toFixed(2) + "deg) rotateY(" + cam.yaw.toFixed(2) + "deg)";
+      projectAll();
+      if (t - lastMaterialized > 160 || !tween && !moved) { syncDom(F, API); lastMaterialized = t; }
+      const yw = (-cam.yaw).toFixed(2), tl = (-cam.tilt).toFixed(2);
+      for (const [id, wrap] of wraps) {
+        const i = agentsIdx.get(id); if (i == null) continue;
+        wrap.style.visibility = behind(i) ? "hidden" : "";
+        wrap._card.style.setProperty("--size", (cardScale(i) / scA[i]).toFixed(4));
+        wrap.style.transform = "translate3d(" + pos[i * 3].toFixed(1) + "px," + (-pos[i * 3 + 1]).toFixed(1) + "px," + pos[i * 3 + 2].toFixed(1) + "px) rotateY(" + yw + "deg) rotateX(" + tl + "deg)";
+        if (flashId === id) wrap._card.classList.add("flash");
+      }
+      resolveCardVisibility();
+      for (const [key, el] of spheres) {
+        const g = groups.find(x => x.key === key); if (!g) continue;
+        projectOne(g.cx, g.cy, g.cz);
+        el.style.transform = "translate3d(" + g.cx.toFixed(1) + "px," + (-g.cy).toFixed(1) + "px," + g.cz.toFixed(1) + "px) rotateY(" + yw + "deg) rotateX(" + tl + "deg)";
+        el.style.visibility = P1.s < 0.12 || P1.s > 6.5 ? "hidden" : "";
+      }
+      for (const [key, chip] of collapseEls) {
+        const g = groups.find(x => x.key === key); if (!g) continue;
+        projectOne(g.cx, g.cy + 60, g.cz);
+        chip.style.left = P1.x.toFixed(1) + "px"; chip.style.top = P1.y.toFixed(1) + "px";
+        chip.style.visibility = P1.s < 0.12 || P1.s > 6.5 ? "hidden" : "";
+      }
+      if (hoverId && F.byId(hoverId) && wraps.has(hoverId)) {
+        const i = agentsIdx.get(hoverId);
+        const tip = built.tip;
+        tip.style.left = Math.min(W - 30, sxA[i] + 16) + "px";
+        tip.style.top = (syA[i] + 12) + "px";
+        if (tip.style.display !== "block") showTip(F.byId(hoverId));
+      }
+      drawBack();
+      drawMinimap();
+      const vn = viewName();
+      if (vn !== lastViewName) { lastViewName = vn; built.titleView.textContent = "view: " + vn; }
+      dirty = false;
+    }
+    if (moved || tween || dirty) rafId = requestAnimationFrame(frame);
+  }
+
+  /* ---------- build once ---------- */
+  function refreshColors() {
+    const cs = getComputedStyle(document.documentElement);
+    for (const name of ["ink", "muted", "accent", "warm", "ok", "danger", "line", "dot-idle", "paper", "surface"]) colors[name] = cs.getPropertyValue("--" + name).trim();
+    colors.idle = colors["dot-idle"];
+  }
+  function build(stage, api) {
+    const sky = $("div", "sky");
+    const back = document.createElement("canvas"); back.className = "back";
+    const world = $("div", "world");
+    sky.append(back, world);
+    const titleline = $("div", "titleline");
+    const tt = $("span", "tt");
+    const tCount = $("span", "", ""), tView = $("span", "view", "view: front");
+    tt.append("Cloud · ", tCount, " · ", tView);
+    const hint = $("span", "hint", "");
+    titleline.append(tt, hint);
+    const strip = $("div", "askstrip"); strip.setAttribute("aria-label", "Needs you");
+    const minimap = $("div", "minimap");
+    const mmCanvas = document.createElement("canvas"); mmCanvas.width = 208; mmCanvas.height = 208; mmCanvas.style.width = "104px"; mmCanvas.style.height = "104px";
+    const legend = $("div", "mlegend");
+    for (const [cls, lab] of [["x", "group ring"], ["y", "attention ↑"], ["z", "heat → you"]]) {
+      const s = $("span", cls); s.append($("i"), lab); legend.append(s);
+    }
+    const mask = $("div", "mask"); mask.append($("i"), $("span", "", "0 need you"));
+    minimap.append(mmCanvas, legend, mask);
+    const tip = $("div", "tip"); tip.style.display = "none";
+    sky.append(titleline, strip, minimap, tip);
+    stage.replaceChildren(sky);
+
+    const bctx = back.getContext("2d"), mctx = mmCanvas.getContext("2d"); mctx.scale(2, 2);
+    built = {sky, back, world, bctx, mctx, strip, tip, hint, titleCount: tCount, titleView: tView, askCount: mask.lastChild};
+
+    sky.addEventListener("wheel", e => { e.preventDefault(); tween = null; cam.dist = clamp(cam.dist * Math.exp(e.deltaY * 0.0012), 0, 8000); invalidate(); }, {passive: false});
+    sky.addEventListener("pointerdown", e => {
+      if (e.target.closest("button, input, details, .minimap, .sphereb")) return;
+      tween = null;
+      if (e.button !== 0) return;
+      const mode = e.shiftKey ? "pan" : "rotate";
+      const start = {x: e.clientX, y: e.clientY, yaw: cam.yaw, tilt: cam.tilt, pan: {...cam.pan}, moved: false};
+      sky.classList.add("dragging"); sky.setPointerCapture(e.pointerId);
+      const move = ev => {
+        const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
+        if (!start.moved && Math.hypot(dx, dy) < 3) return;
+        start.moved = true;
+        if (mode === "pan") { cam.pan = {x: start.pan.x + dx, y: start.pan.y + dy}; }
+        else { cam.yaw = start.yaw + dx * 0.35; cam.tilt = clamp(start.tilt - dy * 0.3, -89, 89); }
+        invalidate();
+      };
+      const up = () => { sky.classList.remove("dragging"); sky.removeEventListener("pointermove", move); sky.removeEventListener("pointerup", up); sky.removeEventListener("pointercancel", up); };
+      sky.addEventListener("pointermove", move); sky.addEventListener("pointerup", up); sky.addEventListener("pointercancel", up);
+    });
+    document.addEventListener("keydown", e => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.target?.matches?.("input, textarea, select, [contenteditable]")) return;
+      if (e.key === "g") { grouping = GROUPINGS[(GROUPINGS.indexOf(grouping) + 1) % GROUPINGS.length]; api.rerender(); }
+      else if (e.key === "1") preset.front(); else if (e.key === "2") preset.top(); else if (e.key === "3") preset.side(); else if (e.key === "0") preset.reset();
+      else if (e.key === "ArrowLeft") { cam.yaw -= 15; invalidate(); }
+      else if (e.key === "ArrowRight") { cam.yaw += 15; invalidate(); }
+      else if (e.key === "ArrowUp") { cam.tilt = clamp(cam.tilt + 10, -89, 89); invalidate(); }
+      else if (e.key === "ArrowDown") { cam.tilt = clamp(cam.tilt - 10, -89, 89); invalidate(); }
+    });
+    new ResizeObserver(() => {
+      W = sky.clientWidth || 1200; H = sky.clientHeight || 700; dpr = Math.min(2, devicePixelRatio || 1);
+      back.width = W * dpr; back.height = H * dpr; bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      invalidate();
+    }).observe(sky);
+    W = sky.clientWidth || 1200; H = sky.clientHeight || 700;
+    back.width = W * dpr; back.height = H * dpr; bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    refreshColors();
+  }
+
+  /* ---------- render: idempotent, closure state survives ---------- */
+  function render(field, stage, api) {
+    F = field; API = api;
+    if (!built || !built.sky.isConnected) build(stage, api);
+    refreshColors();
+    computeLayout(field);
+    projectAll();           // seed projection so "nearest" ranking is meaningful
+    syncDom(field, api);
+    dirty = true;
+    invalidate();
+  }
+
+  Mockup.mount({
+    number: 33, title: "Cloud", spectrum: "3D", fullBleed: true, showChrome: false,
+    summary: "Agents float where the data puts them: group around the ring, attention up, heat forward, mass as size; orbit the cloud to see its shape.",
+    signals: {current: ["status", "tool_activity", "age", "created_by", "client", "title", "phase", "summary", "next_action", "next_actor", "updated_at"],
+      proposed: ["ask", "name", "role", "kind", "plan", "target", "domain", "cost", "waiting_on", "activity"]},
+    notes: "Primary channels: position (root families around the ring, attention up, heat forward), size (mass), fog (age), and warm pulses (neglect). Fan-out sets orbital spread; group gravity (sum of heat) collapses quiet clusters. Heat uses pulse/tool activity with a 20-minute half-life; mass uses turns, history length and invested minutes; neglect uses ask age. The volume separates the high attention layer from active clusters and the quiet tail, a shape a grid conceals; orbiting costs more effort for finding a specific agent. The nearest 80 DOM cards are bounded; overlapping or clipped cards resolve to canvas points at their data positions, while the capped asks strip always flies to a readable answerable card. Card size retains mass with perspective compensation below 0.88 for legibility. No autonomous drift; reduced motion also removes easing and pulses.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>

@@ -749,3 +749,81 @@ user to close anything.
   `kind`, `activity`, `ask`, `plan`. `notes` should say the working-set
   boundary is a placeholder; the intended ranking is sketched in
   `docs/feature-ideas.md` under "Working-set ranking for groups".
+
+---
+
+## Round five: the third dimension
+
+Three parallel explorations of a 3D card view, each a different camera
+relationship to the same field. Shared rules on top of the page contract:
+
+- Build the scene with CSS 3D transforms (`perspective`, `preserve-3d`,
+  `translate3d`, `rotate3d`) so every card stays a DOM node: text is crisp,
+  `Mockup.askBox` answers in place, `api.select` opens the drawer. Canvas only
+  for non-interactive backdrop (floor grid, fog, connectors, far dots). No
+  WebGL, no raycaster, no textures or 3D models.
+- Groups: derive them as 30 does (root family keyed by the root's `target`;
+  `g` cycles target, domain, root family).
+- Nothing that needs the user may be hidden by geometry or sit outside the view
+  without a visible indicator. A mini-map ("where am I") is required.
+- Chrome beyond the cards: one title line and the mini-map. No search, filters,
+  or toolbar.
+- `prefers-reduced-motion`: no autonomous camera motion, instant transitions.
+- At `large`, bound the live card DOM: aggregate the old, idle tail into
+  summary slabs, plaques, or spheres.
+
+Derived signals, computed in the page and named in `notes` (use at most four as
+primary channels): **heat** (decayed activity from `pulses` and `lastTool.at`,
+half-life ≈ 20 simulated min), **mass** (`turns + history.length +
+cost.minutes / 10`), **momentum** (phase transitions in the last simulated
+hour), **fan-out** (`descendants(id).length`), **neglect** (age of an
+unanswered ask), **group gravity** (sum of heat over a group), **stuck** (long
+in one phase with summary churn and no phase change).
+
+## 31 · Hangar (3D)
+
+Fixed viewpoint at the front of a long hall; nothing is ever behind the camera.
+Depth is recency (perspective shrinks old things for free, so apparent size reads
+as mass × recency). Left to right is group, as labeled floor lanes ordered by
+group gravity, hottest at the center. Height is attention: asks rise to eye
+level and face the camera, working stands mid-height, idle and done sit on the
+floor. Card size at z=0 is mass; fog and desaturation carry age independently
+of depth. Keys: `←`/`→` strafe a lane, `↑`/`↓` (or `W`/`S`) walk into the past
+and back along a floor time ruler (now, 10m, 1h, 6h, 1d, 1w), `Space`/`Home`
+snap to the front, `Shift+↑` looks up at the needs-you row; wheel and drag
+mirror these. Near cards are the full 01 card, mid-distance collapse to name
+and dot, far cards are slabs, and a lane's tail aggregates into one "N older ·
+last touched 3d" slab. Mini-map bottom-right: a top-down plan, lanes as
+columns, time bands as rows, camera marker, warm dots; click to fly.
+
+## 32 · Rooms (3D)
+
+The literal version: first person, one room per group on a simple floor plan
+(corridor or hub; say which in `notes`). Room size scales with group mass,
+brightness with group gravity; dead groups are dim and dusty. Inside: root on
+the far wall, sub-agents on the side walls by status, idle low near the floor,
+working at eye level with the activity line, needs-you stepping into the middle
+and glowing warm. When you are elsewhere, asks stand in their doorway or come
+down the corridor, and every door shows a warm badge when its room has an ask.
+Movement: `WASD`/arrows, `Q`/`E` or drag to turn (yaw only), `Tab` cycles
+rooms, `1`–`9` jump, `Enter` selects the nearest card, `Esc` returns to the
+corridor; jumps are 300 ms glides. Rooms you are not in collapse to a door
+plaque at `large`. Mini-map top-right: floor plan, position, facing cone, warm
+dots; click a room to glide. `notes` must say honestly what walking costs
+against the 2D card view and whether door badges plus the map compensate.
+
+## 33 · Cloud (3D)
+
+No architecture: a rotatable 3D scatter of agents. Groups spread around a ring
+so the top view reads as clusters; within a group, sub-agents orbit their root
+with radius by tree depth. Up is attention (neglect pushes higher and pulses),
+toward the default camera is heat, size is mass, opacity and saturation are
+age. Thin lines join root to children; `waitingOn` edges are dashed. Clusters
+with near-zero group gravity collapse to one labeled sphere until clicked.
+Orbit camera: drag rotates, wheel zooms, `Shift`+drag pans; presets `1` front,
+`2` top, `3` side, `0` reset; `←`/`→` orbit 15°, `↑`/`↓` tilt. Cards ease
+toward new positions on each tick with slight repulsion. At `large`, positions
+live in typed arrays, only the nearest ~80 cards materialize as DOM, the rest
+are canvas dots. Chrome: title, a gnomon mini-map with an axis legend and warm
+count, and an asks chip strip that flies the camera to a card. `notes` should
+say which channels won and whether the shape told you anything a grid would not.

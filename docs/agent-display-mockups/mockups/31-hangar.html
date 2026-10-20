@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 31 · Hangar</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* You stand at the front of a long hall. Depth is recency, lanes are groups,
+       height is attention, size is investment. Cards are DOM billboards in one
+       preserve-3d world so text stays crisp and asks are answered in place. */
+    body { height: 100dvh; overflow: hidden; }
+    #stage { overflow: hidden; }
+    .scene { position: absolute; inset: 0; overflow: hidden; perspective: 1100px; perspective-origin: 50% 30%; cursor: grab;
+      background: linear-gradient(to bottom, color-mix(in srgb, var(--paper) 66%, var(--tint)), var(--paper) 52%); }
+    .scene:active { cursor: grabbing; }
+    .world { position: absolute; left: 50%; top: 30%; width: 0; height: 0; transform-style: preserve-3d; transition: transform .25s cubic-bezier(.2, .7, .2, 1); will-change: transform; }
+    .world.snap { transition: none; }
+
+    /* Floor, grid, fog. */
+    .floor { position: absolute; left: 0; top: var(--floor); width: 5600px; height: 6400px; margin-left: -2800px; transform-origin: 50% 0;
+      transform: translateZ(220px) rotateX(-90deg); pointer-events: none;
+      background-image: linear-gradient(to bottom, color-mix(in srgb, var(--ink) 5%, transparent) 1px, transparent 1px),
+        linear-gradient(to right, color-mix(in srgb, var(--ink) 5%, transparent) 1px, transparent 1px);
+      background-size: 100% 240px, 400px 100%; }
+    .lane-stripe { position: absolute; top: var(--floor); transform-origin: 50% 0; transform: translateZ(218px) rotateX(-90deg); pointer-events: none;
+      background: color-mix(in srgb, var(--accent) 6%, transparent); border-left: 1px solid color-mix(in srgb, var(--accent) 10%, transparent); border-right: 1px solid color-mix(in srgb, var(--accent) 10%, transparent);
+ }
+    .ruler-line { position: absolute; height: 2px; transform-origin: 50% 0; background: color-mix(in srgb, var(--line-strong) 85%, transparent); pointer-events: none; }
+    .ruler-line.cur { background: color-mix(in srgb, var(--accent) 55%, var(--line-strong)); height: 3px; }
+    .ruler-label { position: absolute; z-index: 20; font: 11px var(--mono); color: var(--muted); pointer-events: none; white-space: nowrap; }
+    .ruler-label.cur { color: var(--accent); }
+
+    /* Cards: every agent is a DOM billboard. Fog (opacity + desaturation) is age. */
+    .card3d { position: absolute; left: 0; top: 0; cursor: pointer; transition: transform .25s ease, opacity .2s ease; }
+    .card3d.full { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 10px;
+      display: flex; flex-direction: column; gap: 8px; box-shadow: 0 12px 34px color-mix(in srgb, var(--ink) 9%, transparent); }
+    .card3d.full.working { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+    .card3d.full.needs-you { border-top: 2px solid var(--warm); }
+    .card3d.full.failed { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+    .card3d.full.done { background: color-mix(in srgb, var(--surface) 60%, var(--paper)); }
+    .card3d.mid { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; max-width: 230px; padding: 5px 10px 5px 8px;
+      background: color-mix(in srgb, var(--surface) 90%, transparent); border: 1px solid var(--line); border-radius: 6px; white-space: nowrap; }
+    .card3d.mid.needs-you { border-color: color-mix(in srgb, var(--warm) 55%, var(--line)); background: color-mix(in srgb, var(--warm-tint) 45%, var(--surface)); }
+    .card3d.mid b { font-size: 11px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; }
+    .card3d.mid .mline { width: 100%; padding-left: 13px; font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+    .card3d.far, .card3d.slab { display: flex; align-items: center; gap: 5px; padding: 3px 8px 3px 6px; border: 1px solid var(--line); border-radius: 5px;
+      background: color-mix(in srgb, var(--surface) 78%, transparent); font-size: 10px; white-space: nowrap; color: var(--muted); }
+    .card3d.slab { border-style: dashed; font-size: 10.5px; }
+    .card3d.slab:hover { border-color: var(--hover-line); color: var(--ink); }
+    .card3d.fog0 { opacity: 1; }
+    .card3d.fog1 { opacity: .86; }
+    .card3d.fog2 { opacity: .6; filter: saturate(.5); }
+    .card3d.fog3 { opacity: .38; filter: saturate(.25); }
+
+    /* The full card internals (the 01 card). */
+    .identity { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10px; color: var(--muted); }
+    .identity .provider-logo { width: 13px; height: 13px; flex: none; }
+    .identity .when { margin-left: auto; font-family: var(--mono); white-space: nowrap; }
+    .card3d h3 { font-size: 13.5px; font-weight: 550; letter-spacing: -.02em; line-height: 1.4; }
+    .state { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
+    .state .label { color: var(--ink); }
+    .state.working .label { color: var(--accent); }
+    .state.waiting .label, .state.failed .label { color: var(--warm); }
+    .state.failed .label { color: var(--danger); }
+    .activity { font-size: 11px; color: var(--accent); line-height: 1.5; }
+    .activity::before { content: "▸ "; }
+    .summary { font-size: 11.5px; line-height: 1.6; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .next { display: flex; gap: 8px; border-top: 1px solid var(--line); padding-top: 8px; font-size: 11px; line-height: 1.55; }
+    .next b { font-weight: 600; }
+    .next.user b { color: var(--warm); }
+    .next.external b { color: var(--muted); }
+    .stale-line { font-size: 10.5px; color: var(--warm); }
+    .agents { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; border-top: 1px solid var(--line); padding-top: 8px; }
+    .agents .count { font: 10px var(--mono); color: var(--muted); margin-right: 2px; }
+    .agent-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 7px 2px 5px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper); font-size: 10.5px; color: var(--ink); cursor: pointer; }
+    .agent-chip:hover { border-color: var(--hover-line); }
+    .agent-chip.needs { border-color: var(--warm); background: var(--warm-tint); }
+    .agent-chip .t { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card3d .footer { display: flex; gap: 6px; }
+    .card3d .ask { font-size: 11px; }
+    .card3d .ask .btn { pointer-events: auto; }
+
+    /* Lane mouth plates float just ahead of the camera. */
+    .plate { position: absolute; left: 0; top: 0; transform-origin: center; cursor: pointer; white-space: nowrap;
+      background: color-mix(in srgb, var(--surface) 84%, transparent); border: 1px solid var(--line-strong); border-radius: 7px; padding: 6px 11px 7px;
+      transition: transform .25s ease; }
+    .plate:hover { border-color: var(--hover-line); }
+    .plate.lit { border-color: var(--accent); }
+    .plate { width: 300px; white-space: normal; }
+    .plate .nm { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+    .plate .ct { font: 11px var(--mono); color: var(--muted); margin-top: 1px; }
+    .plate .ct .u { color: var(--warm); }
+    .plate .bar { height: 2px; border-radius: 1px; background: var(--accent); opacity: .75; margin-top: 4px; }
+
+    /* The only chrome: one title line and the mini-map. */
+    .titleline { position: absolute; left: 16px; top: 12px; z-index: 40; font-size: 12px; color: var(--ink); line-height: 1.5;
+      background: color-mix(in srgb, var(--paper) 82%, transparent); border: 1px solid var(--line); border-radius: 7px; padding: 6px 11px; backdrop-filter: blur(4px); }
+    .titleline b { font-weight: 600; }
+    .titleline .band { font: 10px var(--mono); color: var(--accent); }
+    .titleline .mode { font: 10px var(--mono); color: var(--muted); }
+    .minimap { position: absolute; right: 14px; bottom: 14px; z-index: 40; width: min(430px, calc(100% - 28px)); padding: 8px 10px 7px;
+      background: color-mix(in srgb, var(--surface) 90%, transparent); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 8px 26px var(--shadow); backdrop-filter: blur(6px); }
+    .mm-grid { display: grid; gap: 2px; }
+    .mm-lab { font: 8px var(--mono); color: var(--muted); line-height: 13px; text-align: right; padding-right: 3px; }
+    .mm-lab.cur { color: var(--accent); }
+    .mm-cell { position: relative; border: 1px solid var(--line); border-radius: 2px; background: var(--paper); font: 8px var(--mono); color: var(--muted);
+      padding: 0; min-width: 0; height: 20px; cursor: pointer; overflow: visible; }
+    .mm-cell:hover { border-color: var(--hover-line); color: var(--ink); }
+    .mm-cell.ask { border-color: color-mix(in srgb, var(--warm) 60%, var(--line)); }
+    .mm-cell.ask::after { content: ""; position: absolute; top: -3px; right: -3px; width: 6px; height: 6px; border-radius: 50%; background: var(--warm); box-shadow: 0 0 0 1.5px var(--surface); }
+    .mm-cell.here { outline: 2px solid var(--accent); outline-offset: -1px; z-index: 2; }
+    .mm-cell.here::before { content: "▲"; position: absolute; left: 50%; top: -8px; transform: translateX(-50%); font-size: 7px; color: var(--accent); }
+    .mm-foot { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--line); font: 9px var(--mono); color: var(--muted); }
+    .mm-foot kbd { font: inherit; border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 3px; }
+    .attention { position: absolute; inset: 70px 22px 235px; z-index: 35; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(310px, 100%), 1fr)); gap: 14px; overflow-y: auto; align-content: start; padding: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; }
+    .attention .card3d { position: relative; width: auto !important; transform: none !important; opacity: 1; }
+    .attention .ask-kind { text-transform: none; letter-spacing: normal; }
+    .attention .card3d h3 { font-size: 15px; }
+    .titleline button { color: var(--warm); border: 0; background: transparent; padding: 0; cursor: pointer; }
+    .scene.looking .world { opacity: .18; pointer-events: none; }
+    .card3d .ask-kind { text-transform: none; letter-spacing: normal; }
+    @media (prefers-reduced-motion: reduce) { .world, .card3d, .plate { transition: none !important; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const MIN = 60000, HOUR = 3600000, DAY = 24 * HOUR, WEEK = 7 * DAY;
+  const HL = 20 * MIN; // heat half-life
+  const BANDS = [["now", 0], ["10m", 10 * MIN], ["1h", HOUR], ["6h", 6 * HOUR], ["1d", DAY], ["1w", WEEK]];
+  const depth = age => 440 * Math.log2(age / (10 * MIN) + 1);
+  const BAND_Z = BANDS.map(([, a]) => depth(a));
+  const MAXD = BAND_Z[5] + 500;
+  let FLOOR = 500;
+  const BASE = 320, TIER_NEAR = 1000, TIER_MID = 2100;
+  const GROUPINGS = ["target", "domain", "family"];
+  const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
+  const q = new URLSearchParams(location.search);
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const txt = (el, s) => { if (el && el.__t !== s) { el.__t = s; el.textContent = s; } };
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* Closure view state: camera, grouping, and the DOM node caches. */
+  let grouping = "target";
+  const cam = { lane: 0, key: null, band: clamp(Number(q.get("band")) || 0, 0, 5), lookUp: false, parX: 0, parY: 0 };
+  let F = null, API = null, scene, world, titleEl, mmGrid, mmFoot, attention;
+  let model = null, mmKey = "";
+  const cards = new Map(), slabs = new Map(), plates = new Map(), stripes = new Map(), rulers = [];
+
+  /* Derived signals. */
+  function heat(a, now) {
+    let h = 0;
+    for (const p of a.pulses || []) if (p <= now) h += Math.pow(0.5, (now - p) / HL);
+    if (a.lastTool && a.lastTool.at <= now) h += Math.pow(0.5, (now - a.lastTool.at) / HL) * 0.5;
+    return h;
+  }
+  const mass = a => a.turns + a.history.length + a.cost.minutes / 10;
+  const neglectOf = (a, now) => a.ask ? now - (a.ask.askedAt ?? a.updatedAt) : 0;
+  const bandIndex = z => { let k = 0; for (let i = 1; i < BAND_Z.length; i++) if (z >= BAND_Z[i] - 130) k = i; return k; };
+
+  function keyFor(r) {
+    if (grouping === "domain") return [r.domain || "none", r.domain ? (AgentField.DOMAIN_LABELS[r.domain] || r.domain) : "No domain"];
+    if (grouping === "family") return [r.id, r.name ? r.name + " · " + r.title : r.title];
+    return [r.target || "root:" + r.id, r.target || r.title];
+  }
+
+  function computeModel(field) {
+    const now = field.now, camZ = BAND_Z[cam.band];
+    const groups = new Map();
+    for (const r of field.roots()) {
+      const [key, name] = keyFor(r);
+      let g = groups.get(key);
+      if (!g) groups.set(key, g = { key, name, roots: [], members: [] });
+      g.roots.push(r); g.members.push(r, ...field.descendants(r.id));
+    }
+    const lanes = [...groups.values()];
+    let mmax = 0;
+    for (const a of field.agents) mmax = Math.max(mmax, mass(a));
+    for (const g of lanes) {
+      g.gravity = 0;
+      for (const a of g.members) g.gravity += heat(a, now);
+      g.counts = field.counts(g.members);
+      g.askCount = g.members.filter(field.needsUser).length;
+    }
+    lanes.sort((x, y) => y.gravity - x.gravity || x.name.localeCompare(y.name));
+    const n = lanes.length;
+    const spacing = 420;
+    const place = i => i === 0 ? 0 : (i % 2 ? -Math.ceil(i / 2) : i / 2);
+    let gmax = 0, span = 0;
+    lanes.forEach((g, i) => { g.i = i; g.x = place(i) * spacing; span = Math.max(span, Math.abs(g.x)); gmax = Math.max(gmax, g.gravity); });
+    lanes.sort((a, b) => a.x - b.x);
+    lanes.forEach((g, i) => { g.i = i; });
+    const savedLane = lanes.findIndex(g => g.key === cam.key);
+    cam.lane = savedLane >= 0 ? savedLane : lanes.findIndex(g => g.x === 0);
+    cam.key = lanes[cam.lane]?.key;
+    for (const g of lanes) g.gnorm = gmax ? g.gravity / gmax : 0;
+
+    const laneOf = new Map();
+    for (const g of lanes) for (const a of g.members) laneOf.set(a.id, g);
+    const asksByLane = new Map();
+    for (const a of field.agents) if (field.needsUser(a) && laneOf.has(a.id)) {
+      const g = laneOf.get(a.id);
+      if (!asksByLane.has(g)) asksByLane.set(g, []);
+      asksByLane.get(g).push(a);
+    }
+    for (const list of asksByLane.values()) list.sort((x, y) => neglectOf(y, now) - neglectOf(x, now));
+
+    const placements = [];
+    const walk = (a, parent, idx, lvl) => {
+      const g = laneOf.get(a.id); if (!g) return;
+      const needs = field.needsUser(a);
+      let x = g.x, y, z;
+      z = BASE + Math.min(depth(field.age(a)), MAXD);
+      const zNat = z;
+      if (parent) {
+        x = parent.x + (idx % 2 ? -1 : 1) * (90 + Math.floor(idx / 2) * 65);
+        z = parent.z + 12 + idx * 12;
+      }
+      if (needs) {
+        const rank = asksByLane.get(g).indexOf(a);
+        x = g.x + (rank % 2 ? -50 : 50);
+        y = FLOOR - 420 - rank * 60;
+      } else {
+        y = FLOOR - (a.status === "working" || a.status === "blocked" ? (parent ? 45 : 140) : 0);
+      }
+      const p = { a, g, x, y, z, zNat, needs, lvl, heat: heat(a, now), massN: mmax ? Math.log1p(mass(a)) / Math.log1p(mmax) : 0.5 };
+      placements.push(p);
+      field.children(a.id).forEach((k, i) => walk(k, p, i, lvl + 1));
+    };
+    for (const r of field.roots()) walk(r, null, 0, 0);
+
+    /* The far, old, idle tail of each lane folds into one slab; a live-card cap folds the coldest. */
+    const cap = field.scale === "large" ? 110 : 400;
+    const slabOf = new Map();
+    const live = [];
+    for (const p of placements) {
+      const dist = p.z - camZ;
+      p.tier = p.needs ? "full" : p.lvl ? (dist < TIER_MID ? "mid" : "far") : dist < TIER_NEAR ? "full" : dist < TIER_MID ? "mid" : "far";
+      const fold = !p.needs && ["idle", "done"].includes(p.a.status) && (p.zNat - camZ > TIER_NEAR || p.tier === "far");
+      if (fold) {
+        const s = slabOf.get(p.g) || slabOf.set(p.g, { n: 0, last: 0, z: 0 }).get(p.g);
+        s.n++; s.last = Math.max(s.last, field.lastActivity(p.a)); s.z = Math.max(s.z, p.zNat);
+      } else live.push(p);
+    }
+    if (live.length > cap) {
+      const cold = live.filter(p => !p.needs && field.age(p.a) > 20 * MIN && ["idle", "done"].includes(p.a.status)).sort((x, y) => x.heat - y.heat);
+      for (const p of cold) {
+        if (live.length <= cap) break;
+        live.splice(live.indexOf(p), 1);
+        const s = slabOf.get(p.g) || slabOf.set(p.g, { n: 0, last: 0, z: 0 }).get(p.g);
+        s.n++; s.last = Math.max(s.last, field.lastActivity(p.a)); s.z = Math.max(s.z, p.zNat);
+      }
+    }
+    for (const s of slabOf.values()) s.z = Math.min(Math.max(s.z, camZ + TIER_MID + 120), MAXD + 80);
+    return { lanes, placements: live, all: placements, slabs: slabOf, span, spacing };
+  }
+
+  /* ---------- skeleton ---------- */
+  function build(stage, api) {
+    stage.replaceChildren();
+    scene = $("div", "scene"); world = $("div", "world"); scene.append(world);
+    const floor = $("div", "floor"); world.append(floor);
+    for (let k = 0; k < BANDS.length; k++) {
+      const line = $("div", "ruler-line");
+      const lab = $("div", "ruler-label", BANDS[k][0]);
+      world.append(line); scene.append(lab);
+      rulers.push({ k, line, lab, z: BAND_Z[k] });
+    }
+    titleEl = $("header", "titleline"); 
+    mmGrid = $("div", "mm-grid");
+    mmFoot = $("div", "mm-foot");
+    const mm = $("nav", "minimap"); mm.setAttribute("aria-label", "Where you are"); mm.append(mmGrid, mmFoot);
+    attention = $("section", "attention"); attention.hidden = true; attention.setAttribute("aria-label", "All agents needing you");
+    scene.append(titleEl, attention, mm);
+    stage.append(scene);
+
+    /* Keyboard first. */
+    document.addEventListener("keydown", e => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.target?.matches?.("input, textarea, select, [contenteditable]")) return;
+      if (e.target?.closest?.("button") && [" ", "Enter"].includes(e.key)) return;
+      if (document.querySelector(".drawer:not([hidden])") && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) return;
+      if (e.repeat && e.shiftKey && e.key === "ArrowUp") return;
+      const n = model?.lanes.length || 1;
+      if (e.key === "ArrowLeft") { strafe(-1); }
+      else if (e.key === "ArrowRight") { strafe(1); }
+      else if (e.key === "ArrowUp" && e.shiftKey) { cam.lookUp = !cam.lookUp; API.rerender(); }
+      else if (e.key === "ArrowUp" || e.key === "w" || e.key === "W") { walkTo(cam.band + 1); }
+      else if (e.key === "ArrowDown" || e.key === "s" || e.key === "S") { walkTo(cam.band - 1); }
+      else if (e.key === " " || e.key === "Home" || e.key === "Escape") { cam.band = 0; cam.lookUp = false; API.rerender(); }
+      else if (e.key === "g") { grouping = GROUPINGS[(GROUPINGS.indexOf(grouping) + 1) % GROUPINGS.length]; cam.key = null; API.rerender(); }
+      else if (/^[1-9]$/.test(e.key)) { fly(clamp(Number(e.key) - 1, 0, n - 1), cam.band); }
+      else return;
+      e.preventDefault();
+    });
+
+
+    /* Wheel walks (vertical) and strafes (horizontal); drag pans with a small parallax. */
+    let acc = 0, cool = 0;
+    scene.addEventListener("wheel", e => {
+      if (e.target.closest(".minimap, .attention, .ask")) return;
+      e.preventDefault();
+      const now = performance.now(); if (now < cool) return;
+      const horiz = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+      acc += horiz ? e.deltaX : e.deltaY;
+      if (Math.abs(acc) < 70) return;
+      const dir = Math.sign(acc); acc = 0; cool = now + 280;
+      if (horiz) strafe(dir); else walkTo(cam.band + dir);
+    }, { passive: false });
+    let drag = null;
+    scene.addEventListener("pointerdown", e => {
+      if (e.button !== 0 || e.target.closest(".card3d, .plate, .minimap, .attention, button, input, select, a")) return;
+      drag = { x: e.clientX, y: e.clientY, px: cam.parX, py: cam.parY };
+      world.classList.add("snap");
+      scene.setPointerCapture?.(e.pointerId);
+    });
+    scene.addEventListener("pointermove", e => {
+      if (!drag) return;
+      cam.parX = clamp(drag.px + (e.clientX - drag.x) * 0.3, -120, 120);
+      cam.parY = clamp(drag.py + (e.clientY - drag.y) * 0.3, -90, 90);
+      applyWorld();
+    });
+    const endDrag = () => {
+      if (!drag) return;
+      drag = null;
+      if (reduced) { cam.parX = 0; cam.parY = 0; world.classList.remove("snap"); applyWorld(); return; }
+      cam.parX = 0; cam.parY = 0;
+      world.classList.remove("snap"); // transition eases the parallax back
+      applyWorld();
+    };
+    scene.addEventListener("pointerup", endDrag);
+    scene.addEventListener("pointercancel", endDrag);
+    addEventListener("resize", () => API && API.rerender());
+  }
+
+  function strafe(dir) {
+    cam.lane = clamp(cam.lane + dir, 0, (model?.lanes.length || 1) - 1);
+    cam.key = model.lanes[cam.lane]?.key;
+    API.rerender();
+  }
+  function walkTo(band) {
+    cam.band = clamp(band, 0, BANDS.length - 1);
+    cam.lookUp = false;
+    API.rerender();
+  }
+  function fly(lane, band) { cam.lane = lane; cam.key = model.lanes[lane]?.key; cam.band = band; cam.lookUp = false; API.rerender(); }
+
+  function applyWorld() {
+    if (!world) return;
+    const laneX = model?.lanes[clamp(cam.lane, 0, (model?.lanes.length || 1) - 1)]?.x ?? 0;
+    world.querySelector(".floor").style.left = laneX + "px";
+    const shiftY = cam.parY;
+    world.style.transform = "translate3d(" + (-laneX + cam.parX) + "px, " + shiftY + "px, " + BAND_Z[cam.band] + "px)";
+  }
+
+  /* ---------- cards ---------- */
+  function buildFull(node, a, field, api) {
+    const r = {};
+    const id = $("div", "identity");
+    r.logo = AgentField.providerLogo(a.client, ""); id.append(r.logo);
+    r.name = $("span", "chip"); id.append(r.name);
+    r.role = $("span"); id.append(r.role);
+    r.when = $("span", "when"); id.append(r.when);
+    r.title = $("h3");
+    const st = $("div"); r.state = st;
+    r.dot = AgentField.statusDot(a); st.append(r.dot);
+    r.label = $("span", "label"); st.append(r.label);
+    r.steps = AgentField.phaseSteps(a); st.append(r.steps);
+    r.phase = $("span"); st.append(r.phase);
+    r.prog = $("span", "mono"); st.append(r.prog);
+    r.activity = $("div", "activity");
+    r.askSlot = $("div");
+    r.summary = $("p", "summary");
+    r.next = $("div", "next"); r.next.append($("span", null, "↳"), $("span")); r.nextBody = r.next.lastChild;
+    r.stale = $("div", "stale-line", "New activity since this checkpoint");
+    r.agents = $("div", "agents");
+    r.footer = $("div", "footer");
+    node.append(id, r.title, st, r.activity, r.askSlot, r.summary, r.next, r.stale, r.agents, r.footer);
+    node._r = r;
+    node._ask = undefined;
+    node.tabIndex = 0; node.setAttribute("role", "button"); node.onkeydown = e => { if (e.key === "Enter" && e.target === node) api.select(a.id); };
+    node.onclick = () => api.select(a.id);
+  }
+  function updateFull(node, a, field, api) {
+    const r = node._r, needs = field.needsUser(a);
+    txt(r.name, a.name && a.name !== ROLE_SHORT[a.role] ? a.name : "");
+    r.name.hidden = !r.name.textContent;
+    txt(r.role, ROLE_SHORT[a.role] + (a.kind !== "app" ? " · " + a.kind : ""));
+    txt(r.when, field.relativeTime(a.updatedAt)); r.when.title = new Date(a.updatedAt).toLocaleString();
+    txt(r.title, a.title);
+    r.state.className = "state " + a.status;
+    r.dot.className = "dot " + a.status; r.dot.title = AgentField.STATUS_LABELS[a.status];
+    txt(r.label, field.statusLabel(a));
+    const steps = AgentField.phaseSteps(a); r.steps.replaceWith(steps); r.steps = steps;
+    txt(r.phase, AgentField.PHASE_LABELS[a.phase]);
+    const prog = field.progress(a); txt(r.prog, prog.total && a.status !== "done" ? prog.done + "/" + prog.total : "");
+    const act = a.status === "working" ? (a.activity || field.toolLabel(a) || "") : "";
+    r.activity.hidden = !act; txt(r.activity, act);
+    if (a.ask !== node._ask) {
+      node._ask = a.ask; r.askSlot.replaceChildren();
+      if (a.ask) r.askSlot.append(Mockup.askBox(a, field, api.select));
+    }
+    r.askSlot.hidden = !a.ask;
+    const summ = a.ask ? "" : a.summary;
+    r.summary.hidden = !summ; txt(r.summary, summ); r.summary.title = a.summary;
+    const showNext = !a.ask && a.next?.action && a.status !== "done";
+    r.next.hidden = !showNext; r.next.className = "next " + (a.next?.actor || "");
+    if (showNext) { r.nextBody.replaceChildren(); r.nextBody.append($("b", null, ({user: "Your next step · ", agent: "Up next · ", external: "Waiting on · "}[a.next.actor] || "Next · ")), a.next.action); }
+    r.stale.hidden = !a.stale;
+    const kids = field.children(a.id);
+    r.agents.hidden = !kids.length;
+    if (kids.length) {
+      r.agents.replaceChildren();
+      const nested = kids.reduce((m, k) => m + field.descendants(k.id).length, 0);
+      const nd = field.descendantsNeedingUser(a.id).length;
+      r.agents.append($("span", "count", kids.length + (kids.length === 1 ? " agent" : " agents") + (nested ? " · +" + nested + " nested" : "") + (nd ? " · " + nd + " need you" : "")));
+      for (const k of kids) {
+        const chip = $("button", "agent-chip" + (field.needsUser(k) ? " needs" : "")); chip.type = "button"; chip.title = k.title + " · " + field.statusLabel(k);
+        chip.append(AgentField.statusDot(k), $("span", "t", k.title));
+        chip.onclick = ev => { ev.stopPropagation(); api.select(k.id); };
+        r.agents.append(chip);
+      }
+    }
+    r.footer.hidden = !a.unread;
+    if (a.unread) {
+      r.footer.replaceChildren();
+      const d = $("button", "btn quiet small", "Dismiss"); d.type = "button";
+      d.onclick = ev => { ev.stopPropagation(); field.dismiss(a.id); };
+      r.footer.append(d);
+    }
+  }
+  const midLine = (a, field) => a.status === "working" ? (a.activity || field.toolLabel(a) || "Working")
+    : a.status === "done" ? "Done · " + field.relativeTime(a.updatedAt) : field.statusLabel(a);
+  function buildMid(node, a) {
+    node._r = { dot: AgentField.statusDot(a), name: $("b"), line: $("span", "mline") };
+    node.append(node._r.dot, node._r.name, node._r.line);
+    node.onclick = () => API.select(a.id);
+  }
+  function buildFar(node, a) {
+    node._r = { dot: AgentField.statusDot(a), name: $("span") };
+    node.append(node._r.dot, node._r.name);
+    node.onclick = () => API.select(a.id);
+  }
+
+  function paintCards(field, api) {
+    const camZ = BAND_Z[cam.band], used = new Set();
+    for (const p of model.placements) {
+      const a = p.a, dist = p.z - camZ;
+      if (!p.needs && dist < 110) continue; // stepped behind the camera; the mini-map still shows it
+      used.add(a.id);
+      let node = cards.get(a.id);
+      if (!node) { node = $("article", "card3d"); cards.set(a.id, node); world.append(node); }
+      if (node._tier !== p.tier) {
+        node._tier = p.tier; node.className = "card3d " + p.tier; node.replaceChildren(); node._r = null;
+        if (p.tier === "full") buildFull(node, a, field, api); else if (p.tier === "mid") buildMid(node, a); else buildFar(node, a);
+      }
+      const age = field.age(a);
+      const fog = age < 25 * MIN ? 0 : age < 2 * HOUR ? 1 : age < DAY ? 2 : 3;
+      node.className = "card3d " + a.status + " " + p.tier + (p.tier === "full" ? " card" : "") + " fog" + fog + (p.needs ? " needs-you" : "");
+      node.style.transform = "translate3d(" + p.x + "px, " + p.y + "px, " + -p.z + "px) translate(-50%, -100%) rotate3d(0, 1, 0, 0deg)";
+      if (p.tier === "full") {
+        node.style.width = Math.round((300 + 90 * p.massN) * Math.pow(0.82, p.lvl)) + "px";
+        updateFull(node, a, field, api);
+      } else if (p.tier === "mid") {
+        node.style.width = "";
+        node._r.dot.className = "dot " + a.status;
+        txt(node._r.name, a.name || a.title);
+        txt(node._r.line, midLine(a, field));
+      } else {
+        node.style.width = "";
+        node._r.dot.className = "dot " + a.status;
+        txt(node._r.name, a.name || a.title);
+      }
+      node.title = (a.name ? a.name + " · " : "") + a.title + "\n" + (a.status === "working" ? (a.activity || field.toolLabel(a) || "Working") : field.statusLabel(a));
+      node.style.visibility = dist < 120 ? "hidden" : "";
+      node.style.opacity = dist < 240 ? String(Math.max(0, (dist - 120) / 120)) : "";
+      node.style.zIndex = "auto"; // stacking for the flattened plate edge-cases; 3D sorting does the rest
+    }
+    for (const [id, node] of cards) if (!used.has(id)) { node.remove(); cards.delete(id); }
+
+    /* Aggregate slabs, one per lane tail. */
+    const usedSlabs = new Set();
+    for (const [g, s] of model.slabs) {
+      usedSlabs.add(g.key);
+      let node = slabs.get(g.key);
+      if (!node) {
+        node = $("div", "card3d slab"); slabs.set(g.key, node); world.append(node);
+        node._r = { dot: $("span", "dot done"), body: $("span") };
+        node.append(node._r.dot, node._r.body);
+      }
+      txt(node._r.body, s.n + " older · last touched " + field.relativeTime(s.last));
+      node.title = s.n + " idle or done agents in " + g.name + " · click to walk there";
+      node.onclick = () => fly(g.i, bandIndex(s.z));
+      node.style.transform = "translate3d(" + g.x + "px, " + FLOOR + "px, " + -s.z + "px) translate(-50%, -50%)";
+      node.style.visibility = "";
+      node.style.opacity = "";
+    }
+    for (const [key, node] of slabs) if (!usedSlabs.has(key)) { node.remove(); slabs.delete(key); }
+  }
+
+  function paintLaneFurniture(field) {
+    const camZ = BAND_Z[cam.band], span = model.span * 2 + 840, stripeW = model.spacing - 20;
+    /* Floor stripes: lane brightness reads group gravity. */
+    const usedStripes = new Set();
+    for (const g of model.lanes) {
+      usedStripes.add(g.key);
+      let el = stripes.get(g.key);
+      if (!el) { el = $("div", "lane-stripe"); stripes.set(g.key, el); world.append(el); }
+      el.style.left = (g.x - stripeW / 2) + "px";
+      el.style.width = stripeW + "px";
+      el.style.height = (MAXD + 900) + "px";
+      el.style.background = "color-mix(in srgb, var(--accent) " + Math.round(4 + 9 * g.gnorm) + "%, transparent)";
+    }
+    for (const [key, el] of stripes) if (!usedStripes.has(key)) { el.remove(); stripes.delete(key); }
+    /* The ruler painted on the floor. */
+    for (const ru of rulers) {
+      const behind = camZ > ru.z + BASE + 60;
+      ru.line.style.visibility = behind ? "hidden" : "";
+      ru.lab.style.visibility = behind ? "hidden" : "";
+      ru.line.className = "ruler-line" + (cam.band === ru.k ? " cur" : "");
+      ru.lab.className = "ruler-label" + (cam.band === ru.k ? " cur" : "");
+      ru.line.style.left = (-span / 2) + "px";
+      ru.line.style.width = span + "px";
+      ru.line.style.top = FLOOR + "px";
+      const distance = ru.z + BASE - camZ, projection = 1100 / (1100 + distance);
+      ru.line.style.height = (1 / projection) + "px";
+      ru.line.style.transform = "translateZ(" + -(ru.z + BASE) + "px)";
+      ru.lab.style.left = "24px";
+      ru.lab.style.top = (scene.clientHeight * .3 + FLOOR * projection + 12) + "px";
+      ru.lab.style.padding = "3px 6px";
+      ru.lab.style.background = "var(--paper)";
+      ru.lab.style.borderRadius = "3px";
+    }
+    /* Lane mouth plates float a fixed step ahead of the camera. */
+    const usedPlates = new Set();
+    for (const g of model.lanes) {
+      usedPlates.add(g.key);
+      let el = plates.get(g.key);
+      if (!el) {
+        el = $("div", "plate"); plates.set(g.key, el); world.append(el);
+        el._r = { nm: $("div", "nm"), ct: $("div", "ct"), bar: $("div", "bar") };
+        el.append(el._r.nm, el._r.ct, el._r.bar);
+      }
+      el.onclick = () => fly(g.i, cam.band);
+      txt(el._r.nm, g.name);
+      const c = g.counts;
+      const ct = c.working + " working · " + (g.askCount ? g.askCount + " need you" : "0 need you") + " · " + c.done + " done";
+      if (el._r.ct.__t !== ct) {
+        el._r.ct.replaceChildren(c.working + " working · ");
+        const u = $("span", "u", g.askCount + " need you"); el._r.ct.append(u, " · " + c.done + " done");
+        el._r.ct.__t = ct;
+      }
+      el._r.bar.style.width = Math.round(8 + 92 * g.gnorm) + "%";
+      world.append(el); // Keep keyboard/DOM order aligned with the left-to-right lanes.
+      el.className = "plate" + (g.i === cam.lane ? " lit" : "");
+      el.style.transform = "translate3d(" + g.x + "px, " + (FLOOR + 88) + "px, " + -(camZ + 380) + "px) translate(-50%, -50%)";
+    }
+    for (const [key, el] of plates) if (!usedPlates.has(key)) { el.remove(); plates.delete(key); }
+  }
+
+  /* ---------- title + mini-map ---------- */
+  function paintTitle(field) {
+    const c = field.counts();
+    titleEl.replaceChildren();
+    titleEl.append("Hangar · ", String(model.lanes.length), " groups · ");
+    const nu = $("button", null, c.needsUser + " need you"); nu.type = "button"; nu.title = "Show all asks · Shift+↑ · Home to return"; nu.onclick = () => { cam.lookUp = !cam.lookUp; API.rerender(); }; if (c.needsUser) nu.style.color = "var(--warm)";
+    titleEl.append(nu, " · ", String(c.working), " working · ");
+    titleEl.append($("span", "band", (cam.lookUp ? "needs you · Home returns to hall" : BANDS[cam.band][0])));
+    titleEl.append($("span", "mode", "  by " + grouping));
+  }
+
+  function paintMini(field) {
+    const lanes = model.lanes;
+    const key = grouping + ":" + lanes.map(g => g.key).join("|") + ":" + field.scale;
+    const cellOf = new Map();
+    if (mmKey !== key) {
+      mmKey = key;
+      mmGrid.replaceChildren();
+      mmGrid._rows = [];
+      mmGrid.style.gridTemplateColumns = "26px repeat(" + lanes.length + ", minmax(0, 1fr))";
+      mmGrid.append($("span", "mm-lab", ""));
+      for (const g of lanes) {
+        const lab = $("span", "mm-lab", (g.name || "?").split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase());
+        lab.title = g.name; mmGrid.append(lab);
+      }
+      for (let b = 0; b < BANDS.length; b++) {
+        const lab = $("span", "mm-lab", BANDS[b][0]);
+        mmGrid.append(lab); mmGrid._rows.push(lab);
+        for (let i = 0; i < lanes.length; i++) {
+          const cell = $("button", "mm-cell"); cell.type = "button";
+          cell.onclick = () => {
+            fly(i, b);
+            if (cell.classList.contains("ask")) { cam.lookUp = true; API.rerender(); }
+          };
+          mmGrid.append(cell);
+          cellOf.set(i + ":" + b, cell);
+        }
+      }
+      mmGrid._cells = cellOf;
+      mmFoot.replaceChildren();
+      const k = $("span"); k.append($("kbd", null, "←→"), " lane ", $("kbd", null, "↑↓"), " walk ", $("kbd", null, "space"), " front ", $("kbd", null, "⇧↑"), " asks ", $("kbd", null, "g"), " group");
+      mmFoot.append(k);
+    }
+    mmGrid._rows.forEach((lab, b) => { lab.className = "mm-lab" + (b === cam.band ? " cur" : ""); });
+    const cells = mmGrid._cells;
+    for (const cell of cells.values()) { txt(cell, ""); cell.className = "mm-cell"; cell.style.background = ""; }
+    for (const p of model.all) {
+      const b = bandIndex(p.zNat - BASE), i = p.g.i, cell = cells.get(i + ":" + b);
+      if (!cell) continue;
+      cell.__n = (cell.__n || 0) + 1;
+      if (p.needs) cell.classList.add("ask");
+      const heatTint = Math.min(0.28, 0.04 + p.heat * 0.05);
+      cell.style.background = "color-mix(in srgb, var(--accent) " + Math.round(heatTint * 100) + "%, var(--paper))";
+    }
+    for (const [id, cell] of cells) {
+      txt(cell, cell.__n ? String(cell.__n) : "");
+      cell.__n = 0;
+      const i = Number(id.split(":")[0]), b = Number(id.split(":")[1]);
+      if (i === cam.lane && b === cam.band) cell.classList.add("here");
+      cell.title = lanes[i].name + " · " + BANDS[b][0] + (cell.classList.contains("ask") ? " · needs you" : "");
+    }
+  }
+
+  /* ---------- render ---------- */
+  function render(field, stage, api) {
+    F = field; API = api;
+    if (!scene || !scene.isConnected) build(stage, api);
+    stage.replaceChildren(scene);
+    FLOOR = Math.max(300, scene.clientHeight * .59);
+    scene.style.setProperty("--floor", FLOOR + "px");
+    model = computeModel(field);
+    cam.lane = clamp(cam.lane, 0, model.lanes.length - 1);
+    paintCards(field, api);
+    paintLaneFurniture(field);
+    paintTitle(field);
+    paintMini(field);
+    const askScroll = attention.scrollTop;
+    const drafts = new Map([...attention.querySelectorAll("[data-agent-id]")].map(card => [card.dataset.agentId, card.querySelector("input")?.value]));
+    attention.replaceChildren();
+    attention.hidden = !cam.lookUp;
+    scene.classList.toggle("looking", cam.lookUp);
+    if (cam.lookUp) {
+      for (const a of field.asks()) {
+        const card = $("article", "card3d full needs-you");
+        card.dataset.agentId = a.id;
+        buildFull(card, a, field, api); updateFull(card, a, field, api);
+        const input = card.querySelector("input");
+        if (input && drafts.has(a.id)) input.value = drafts.get(a.id) || "";
+        attention.append(card);
+      }
+      if (!field.asks().length) attention.append($("p", "muted", "Nothing needs you. Home returns to the hall."));
+    }
+    attention.scrollTop = askScroll;
+    applyWorld();
+  }
+
+  Mockup.mount({
+    number: 31, title: "Hangar", spectrum: "3D", fullBleed: true, showChrome: false,
+    summary: "A fixed-viewpoint hall: depth is recency, lanes are groups, height is attention, size is investment; strafe to a group, walk into the past, look up at what needs you.",
+    signals: {
+      current: ["title", "phase", "summary", "next_action", "next_actor", "client", "status", "updated_at", "tool_activity", "age"],
+      proposed: ["name", "role", "kind", "ask", "activity", "plan", "target", "domain", "cost"],
+    },
+    notes: "Depth = recency, x = root families keyed by target (g cycles target/domain/family), height = attention, and size = mass (turns + history.length + cost.minutes / 10). Three derived signals: mass; heat (pulses and lastTool.at, 20-minute half-life); group gravity (sum of heat), which orders the hottest lanes centrally and brightens their floors. Neglect (now minus askedAt, falling back to updatedAt) ranks asks within each lane. Age also reduces opacity and saturation. Sub-agents cluster at their root depth. Old idle/done tails aggregate; the mini-map counts all agents, including folded ones, with warm ask dots. Shift+Up or the title’s ask count raises every ask into a scrollable, answerable eye-level view; Home returns to the hall. Up/W walks into the past; Down/S returns toward now. Camera and grouping survive field updates.",
+    render,
+  });
+})();
+</script>
+</body>
+</html>
