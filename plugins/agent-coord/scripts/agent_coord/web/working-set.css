@@ -7,7 +7,6 @@
 .working-set .ws-page { position: absolute; top: 0; bottom: 0; padding: 22px 4px 225px; overflow-y: auto; overscroll-behavior: contain; container-type: inline-size; }
 .working-set .ws-page.ws-neighbor { opacity: .3; cursor: pointer; }
 .working-set .ws-neighbor > * { pointer-events: none; }
-.working-set .ws-page-title { margin: 0 0 12px; font-size: 24px; font-weight: 600; letter-spacing: -.03em; overflow-wrap: anywhere; }
 .working-set .ws-level-title { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
 .working-set .ws-level-title h3 { margin: 0; font-size: 17px; font-weight: 500; }
 .working-set .ws-level-title > span, .working-set .ws-section-title > span { font-size: 11px; color: var(--muted); }
@@ -57,7 +56,6 @@
   .working-set { height: max(450px, calc(100dvh - 150px)); }
   .working-set .ws-minimap { right: 4px; bottom: 8px; width: calc(100% - 8px); padding: 8px; }
   .working-set .ws-labels { flex-basis: 144px; }
-  .working-set .ws-page-title { font-size: 20px; }
   .working-set .ws-page { padding-bottom: 245px; }
   .working-set .ws-card-links button, .working-set .ws-empty-links button, .working-set .ws-more { min-height: 44px; }
 }

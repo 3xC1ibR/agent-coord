@@ -60,7 +60,7 @@ class SavedViews {
     this.storage = storage; this.preferences = preferences;
     this.key = "agent-coord.views." + (scope || "all");
     this.baseKey = this.key;
-    this.all = {id: "all", name: "All conversations", filters: threadViews.filters(), group_by: this.$("group-by").value || "phase", version: 1};
+    this.all = {id: "all", name: "All", filters: threadViews.filters(), group_by: this.$("group-by").value || "phase", version: 1};
     this.items = [this.all]; this.groups = []; this.saved = []; this.activeId = "all"; this.definition = this.all;
     this.navigation = {}; this.threads = []; this.switchVersion = 0; this.busy = false; this.signature = "";
     this.saves = new Map(); this.groupOrders = new Map(); this.hiddenGroups = new Map();

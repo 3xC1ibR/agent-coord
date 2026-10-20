@@ -143,7 +143,7 @@ const WorkingSet = (() => {
     }
     function makePage(g, i, n) {
       const page = el("section", "ws-page"); page.dataset.key = g.key; page.dataset.level = String(n); page.dataset.index = String(i);
-      const title = el("h2", "ws-page-title", g.name); title.tabIndex = -1;
+      const title = el("h2", "ws-page-title sr-only", g.name); title.tabIndex = -1; // Group tabs already show the visible name.
       const heading = el("div", "ws-level-title"); heading.append(el("h3", "", LEVELS[n]));
       const items = g.levels[n]; if (items.length) heading.append(el("span", "", String(items.length)));
       page.append(title, heading);
