@@ -35,9 +35,6 @@
 .working-set .ws-empty-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .working-set .ws-more { margin-top: 12px; }
 .working-set .ws-minimap { position: absolute; right: 18px; bottom: 18px; z-index: 20; width: min(420px, calc(100% - 36px)); padding: 11px; background: color-mix(in srgb, var(--surface) 95%, transparent); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 8px 26px var(--shadow); backdrop-filter: blur(6px); }
-.working-set .ws-group-nav { display: flex; gap: 8px; align-items: center; padding-bottom: 9px; font-size: 12px; }
-.working-set .ws-group-nav > select { flex: 1; min-width: 0; padding: 3px; border: 0; background: transparent; color: var(--ink); font: inherit; }
-.working-set .ws-group-nav > button { padding: 3px 8px; }
 .working-set .ws-map-body { display: flex; gap: 8px; }
 .working-set .ws-labels { flex: 0 0 156px; display: grid; gap: 5px; }
 .working-set .ws-level { height: 30px; border: 0; border-radius: 4px; background: transparent; text-align: left; font-size: 10px; color: var(--muted); padding: 0 6px; }

@@ -5,7 +5,7 @@ const WorkingSet = require("../plugins/agent-coord/scripts/agent_coord/web/worki
 const thread = (id, extra = {}) => ({thread_id: id, title: "Thread " + id, attention: "now", cwd: "/work", project_cwd: "/work",
   work_phase: "investigation", status: "idle", response_state: "available", created_at: 100, updated_at: 200, ...extra});
 
-function setup({data = new Map(), broken = false} = {}) {
+function setup({data = new Map(), broken = false, onGroupChange} = {}) {
   const doc = {events: {}, activeElement: null, modal: false,
     addEventListener(k, f) { this.events[k] = f; }, removeEventListener(k) { delete this.events[k]; }};
   class Element {
@@ -47,13 +47,13 @@ function setup({data = new Map(), broken = false} = {}) {
     storage: {getItem(k) { if (broken) throw Error(); return data.get(k); }, setItem(k, v) { if (broken) throw Error(); data.set(k, v); }},
     isActive: () => enabled,
     renderCard(t, needs) { const b = new Element("button"); b.dataset.thread = t.thread_id; b.textContent = t.title; b.onclick = () => opened.push(t.thread_id); rendered.push([t.thread_id, needs]); return b; },
-    onOpen: id => opened.push(id), onRead: t => read.push(t.thread_id), onDismiss: t => dismissed.push(t.thread_id)});
+    onOpen: id => opened.push(id), onRead: t => read.push(t.thread_id), onDismiss: t => dismissed.push(t.thread_id), onGroupChange});
   const render = (threads, options = {}) => ui.render(threads, host, {workspace: "/work", ...options});
   const key = (value, target = doc.body, extra = {}) => { const e = {key: value, target, preventDefault() { this.prevented = true; }, ...extra}; doc.events.keydown(e); return e; };
   const page = () => host.querySelectorAll(".ws-page").find(p => p.attrs["aria-hidden"] === "false");
   const ids = () => page().querySelectorAll(".ws-card").map(n => n.dataset.cardThread);
   const selectLevel = n => host.querySelectorAll(".ws-level")[n].onclick();
-  const selectGroup = key => { const select = host.querySelector(".ws-group-nav").querySelector("select"); select.value = String(select.children.findIndex(o => o.textContent === key)); select.onchange(); };
+  const selectGroup = key => host.querySelectorAll(".ws-cell").find(cell => cell.title.startsWith(key + " · ") && cell.dataset.level === page().dataset.level).onclick();
   const event = extra => ({target: page(), deltaX: 0, deltaY: 0, preventDefault() { this.prevented = true; }, ...extra});
   return {ui, doc, host, data, observers, rendered, opened, read, dismissed, render, key, page, ids, selectLevel, selectGroup, event,
     advance: n => { timestamp += n; }, enable: value => { enabled = value; }};
@@ -177,6 +177,54 @@ test("group links preserve level and all groups remain reachable when their curr
   c.selectGroup("B"); assert.deepEqual(c.ids(), []); assert(c.page().querySelector(".ws-empty"));
   c.selectLevel(1); assert.deepEqual(c.ids(), ["b"]);
 });
+test("top tabs and map cells share group selection without resetting Attention / Idle", () => {
+  const list = [thread("a", {project_id: "a", project_name: "A"}), thread("b", {project_id: "b", project_name: "B"})];
+  const changes = [], c = setup({onGroupChange: id => changes.push(id)});
+  c.render(list, {selectedGroup: "a", view: "group-a"});
+  assert.equal(c.page().dataset.key, "group:a");
+  assert.equal(c.host.querySelector(".ws-group-nav"), null);
+  assert.equal(c.host.querySelector('[aria-label="Choose group"]'), null);
+  c.selectLevel(1); assert.deepEqual(changes, []);
+  c.render(list, {selectedGroup: "b", view: "group-b"});
+  assert.deepEqual(c.ids(), ["b"]); assert.equal(c.page().dataset.level, "1");
+  assert.deepEqual(changes, []); // Rendering a tab selection must not activate it again.
+  c.selectGroup("A"); assert.deepEqual(changes, ["a"]);
+  c.render(list, {selectedGroup: "a", view: "group-a"});
+  assert.deepEqual(c.ids(), ["a"]); assert.equal(c.page().dataset.level, "1");
+  c.selectGroup("All groups"); assert.deepEqual(changes, ["a", null]);
+  c.render(list, {selectedGroup: null, view: "all"});
+  assert.equal(c.page().dataset.key, "overview:all");
+  c.key("ArrowRight"); assert.equal(changes.at(-1), "a");
+});
+test("selected empty groups stay selected, and top tabs override a restored map position", () => {
+  const c = setup(); c.render([thread("a", {project_id: "a", project_name: "A"})]); c.selectGroup("A");
+  const reload = setup({data: c.data});
+  reload.render([], {selectedGroup: "empty", groupName: "Empty group", view: "group-empty"});
+  assert.equal(reload.page().dataset.key, "group:empty");
+  assert.equal(reload.page().querySelector(".ws-page-title").textContent, "Empty group");
+  assert(reload.page().querySelector(".ws-empty"));
+  reload.render([], {selectedGroup: null, view: "all"});
+  assert.equal(reload.page().dataset.key, "overview:all");
+});
+test("Ungrouped remains reachable under the All conversations tab", () => {
+  const changes = [], c = setup({onGroupChange: id => changes.push(id)});
+  const list = [thread("a", {project_id: "a", project_name: "A"}), thread("loose")];
+  c.render(list, {selectedGroup: "a", view: "group-a"}); c.selectGroup("Ungrouped");
+  assert.deepEqual(changes, [null]);
+  c.render(list, {selectedGroup: null, view: "all"});
+  assert.equal(c.page().dataset.key, "ungrouped:/work");
+});
+test("domain and workspace maps use All conversations; choosing a group tab returns to groups", () => {
+  const changes = [], c = setup({onGroupChange: id => changes.push(id)});
+  const list = [thread("a", {project_id: "a", project_name: "A", domain: "web"})];
+  c.render(list, {selectedGroup: "a", view: "group-a"});
+  c.key("g"); assert.deepEqual(changes, [null]);
+  c.render(list, {selectedGroup: null, view: "all"});
+  c.key("ArrowRight"); assert.equal(c.page().dataset.key, "domain:web");
+  assert.deepEqual(changes, [null]);
+  c.render(list, {selectedGroup: "a", view: "group-a"});
+  assert.equal(c.page().dataset.key, "group:a");
+});
 test("saved navigation survives reload, remains workspace-specific, and removed groups fall back to All groups", () => {
   const c = setup(), list = [thread("a", {project_id: "a", project_name: "A"})]; c.render(list); c.selectLevel(1); c.selectGroup("A");
   const reloaded = setup({data: c.data}); reloaded.render(list); assert.deepEqual(reloaded.ids(), ["a"]);
@@ -249,14 +297,21 @@ test("grouping changes reset to the aggregate and restore on reload; large inven
 test("production integration shares cards and uses seen receipt IDs without marking a request handled", async () => {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const nodes = {"atlas-overview": {hidden: false}, "working-set-overview": {hidden: true}, overview: {classList: {toggle() {}}}, welcome: {hidden: false}, view: {value: "active"}};
-  let config, options; const calls = [], state = {overviewLayout: {mode: "working-set"}, projectCwd: "/work", listSignature: "rev"};
-  const c = {state, document: {}, window: {}, savedViews: {activeId: "all"}, $: id => nodes[id],
-    WorkingSet: {create(value) { config = value; return {render(t, host, opts) { options = opts; }}; }},
+  let config, options, rendered; const calls = [], state = {overviewLayout: {mode: "working-set"}, projectCwd: "/work", listSignature: "rev"};
+  const c = {state, document: {}, window: {}, savedViews: {activeId: "all", openGroup: id => calls.push(["group", id])}, $: id => nodes[id],
+    WorkingSet: {create(value) { config = value; return {render(t, host, opts) { options = opts; rendered = t; }}; }},
     threadCard: (...args) => calls.push(args), action: f => f(), select: id => calls.push(["open", id]),
     threadPath: id => "threads/" + id, api: async (...args) => calls.push(args), refreshList: async () => calls.push(["refresh"])};
   vm.createContext(c); vm.runInContext(source.slice(source.indexOf("function renderOverviewLayout("), source.indexOf("function upcomingSchedules(")), c);
   c.renderOverviewLayout([]); assert.equal(nodes["atlas-overview"].hidden, true); assert.equal(nodes["working-set-overview"].hidden, false); assert.equal(nodes.overview.hidden, true);
   assert.equal(options.workspace, "/work");
+  assert.equal(options.selectedGroup, null);
+  const inventory = [thread("a"), thread("b")];
+  c.savedViews.activeId = "group-a";
+  c.renderOverviewLayout([inventory[0]], [], inventory);
+  assert.equal(rendered, inventory); assert.equal(options.selectedGroup, "a");
+  await config.onGroupChange("b"); assert.deepEqual(calls.pop(), ["group", "b"]);
+  await config.onGroupChange(null); assert.deepEqual(calls.pop(), ["group", null]);
   const t = thread("a", {attention_target_thread_id: "parent", checkpoint: {id: 8}, turn_completion: {id: 12}});
   config.renderCard(t, true); assert.equal(calls[0][0].attention_target_thread_id, null); assert.equal(calls[0][2], true);
   assert.equal(calls[0][0].can_handle_response, false);

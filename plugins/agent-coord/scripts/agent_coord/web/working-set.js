@@ -62,10 +62,11 @@ const WorkingSet = (() => {
       .sort((a, b) => b.touch - a.touch || a.name.localeCompare(b.name));
     return [all, ...order.filter(key => map.has(key)).map(key => map.get(key)), ...newcomers];
   }
-  function create({document, window, storage, renderCard, onOpen, onRead, onDismiss, isActive = () => true}) {
+  function create({document, window, storage, renderCard, onOpen, onRead, onDismiss, onGroupChange, isActive = () => true}) {
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
     let host, viewport, vtrack, minimap, tracks = [], panes = [], groups = [], source = [], byId = new Map();
     let workspace = "all", context = "", positionKey = "", dimension = "group", level = 0, pageKey = ALL, pageIdx = 0, order = [], signature = "";
+    let selectedGroup;
     const positions = new Map(), scroll = new Map(), expanded = new Set();
     let wheelTimer, touch, observer, horizontal = 0, vertical = 0, cooldown = -Infinity, lastNative = -Infinity;
     const active = () => host && !host.hidden && host.isConnected && isActive();
@@ -169,11 +170,6 @@ const WorkingSet = (() => {
     function drawMinimap() {
       const previousScroll = minimap.querySelector(".ws-matrix")?.scrollLeft || 0;
       minimap.replaceChildren();
-      const nav = el("div", "ws-group-nav"), select = el("select"); select.setAttribute("aria-label", "Choose group");
-      const prev = button("←", "quiet", () => go(pageIdx - 1, level), "Previous group"); prev.disabled = pageIdx === 0;
-      const next = button("→", "quiet", () => go(pageIdx + 1, level), "Next group"); next.disabled = pageIdx === groups.length - 1;
-      groups.forEach((g, i) => { const option = el("option", "", g.name); option.value = String(i); option.selected = i === pageIdx; select.append(option); });
-      select.onchange = () => go(Number(select.value), level); nav.append(prev, select, next); minimap.append(nav);
       const body = el("div", "ws-map-body"), labels = el("div", "ws-labels"), matrix = el("div", "ws-matrix");
       LEVELS.forEach((label, n) => {
         const b = button(label, "ws-level", () => go(pageIdx, n)); b.setAttribute("aria-pressed", String(n === level)); labels.append(b);
@@ -236,12 +232,19 @@ const WorkingSet = (() => {
       if (!groups.length) return;
       const nextIdx = Math.max(0, Math.min(groups.length - 1, i)), nextLevel = Math.max(0, Math.min(LEVELS.length - 1, n));
       if (pageIdx === nextIdx && level === nextLevel) return;
+      const changedGroup = pageIdx !== nextIdx && dimension === "group";
       pageIdx = nextIdx; level = nextLevel; pageKey = groups[pageIdx].key; save(); paint();
+      if (changedGroup) {
+        const nextGroup = pageKey.startsWith("group:") ? pageKey.slice(6) : null;
+        if (selectedGroup !== undefined) selectedGroup = nextGroup;
+        onGroupChange?.(nextGroup);
+      }
     }
     function changeGrouping(value) {
       if (!GROUPINGS.includes(value) || value === dimension) return;
       rememberScroll(); dimension = value; pageKey = ALL; pageIdx = 0; order = []; scroll.clear();
       groups = derive(source, {dimension, workspace}); order = groups.slice(1).map(g => g.key); save(); paint(false);
+      if (selectedGroup != null) onGroupChange?.(null);
     }
     function keydown(event) {
       if (!active() || event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey ||
@@ -296,13 +299,22 @@ const WorkingSet = (() => {
     return {
       render(threads, target, options = {}) {
         if (!host) build(target);
-        const nextContext = JSON.stringify([options.workspace || "all", options.view || "all", options.placement || "active"]);
-        const nextSignature = JSON.stringify([threads, nextContext, options.revision]);
+        const controlled = options.selectedGroup !== undefined;
+        const nextContext = JSON.stringify([options.workspace || "all", controlled ? "groups" : options.view || "all", options.placement || "active"]);
+        const nextSignature = JSON.stringify([threads, nextContext, options.selectedGroup, options.groupName, options.revision]);
         if (signature === nextSignature) { layout(); return; }
         const changedContext = context !== nextContext;
         if (changedContext) { rememberScroll(); context = nextContext; restore("agent-coord.working-set:v2:" + context, options.placement); }
+        if (controlled && (changedContext || selectedGroup !== options.selectedGroup)) {
+          if (options.selectedGroup != null) dimension = "group";
+          if (dimension === "group") pageKey = options.selectedGroup == null ? ALL : "group:" + options.selectedGroup;
+        }
+        selectedGroup = options.selectedGroup;
         workspace = options.workspace || "all"; source = threads; byId = new Map(threads.map(t => [t.thread_id, t]));
         groups = derive(threads, {dimension, workspace, order}); order = groups.slice(1).map(g => g.key);
+        if (controlled && selectedGroup != null && !groups.some(g => g.key === pageKey)) {
+          groups.push({key: pageKey, name: options.groupName || "Unnamed group", levels: LEVELS.map(() => [])});
+        }
         pageIdx = Math.max(0, groups.findIndex(g => g.key === pageKey)); pageKey = groups[pageIdx].key;
         signature = nextSignature; save(); paint(!changedContext);
       },

@@ -613,11 +613,14 @@ function renderList() {
     renderStatus(); return;
   }
   const query = $("search").value.trim().toLocaleLowerCase();
-  const projectThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)
-    && threadOrganization.matches(t, "", $("project").value));
+  const workspaceThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id));
+  const projectThreads = workspaceThreads.filter(t => threadOrganization.matches(t, "", $("project").value));
   const workingSet = state.overviewLayout?.mode === "working-set";
-  const threads = projectThreads.filter(t => threadViews.matches(workingSet && t.attention === "later" && ["active", "completed"].includes($("view").value) ? {...t, attention: "now"} : t,
-    {show: $("view").value, phase: $("phase-filter").value, search: query}));
+  const matchesView = t => threadViews.matches(workingSet && t.attention === "later" && ["active", "completed"].includes($("view").value) ? {...t, attention: "now"} : t,
+    {show: $("view").value, phase: $("phase-filter").value, search: query});
+  const threads = projectThreads.filter(matchesView);
+  // The map keeps neighboring groups available while the tabs own selection.
+  const workingThreads = workingSet && savedViews?.activeId.startsWith("group-") ? workspaceThreads.filter(matchesView) : threads;
   const upcoming = upcomingSchedules(query);
   const archived = $("view").value === "archived";
   const groupBy = $("group-by").value;
@@ -629,7 +632,7 @@ function renderList() {
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
     " · " + projects + (projects === 1 ? " group" : " groups") +
     (upcoming.length ? " · " + upcoming.length + (upcoming.length === 1 ? " scheduled prompt" : " scheduled prompts") : "");
-  if (signature === state.listSignature) { if (state.overviewLayout) renderOverviewLayout(threads, upcoming); renderStatus(); state.dispatchDock?.flush(); return; }
+  if (signature === state.listSignature) { if (state.overviewLayout) renderOverviewLayout(threads, upcoming, workingThreads); renderStatus(); state.dispatchDock?.flush(); return; }
   state.listSignature = signature;
   state.overviewMotion ||= createOverviewMotion();
   const motionBefore = state.overviewMotion.capture(JSON.stringify([viewId, groupBy, query,
@@ -744,10 +747,10 @@ function renderList() {
     target?.focus({preventScroll: true});
   }
   renderStatus();
-  if (state.overviewLayout) renderOverviewLayout(threads, upcoming);
+  if (state.overviewLayout) renderOverviewLayout(threads, upcoming, workingThreads);
   globalThis.threadHover?.refresh();
 }
-function renderOverviewLayout(threads, upcoming = []) {
+function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) {
   const host = $("atlas-overview");
   if (!host) return;
   const atlas = state.overviewLayout?.mode === "atlas";
@@ -762,6 +765,7 @@ function renderOverviewLayout(threads, upcoming = []) {
       isActive: () => state.overviewLayout?.mode === "working-set" && !$("welcome").hidden,
       renderCard: (thread, needsReply) => threadCard({...thread, attention_target_thread_id: null, can_handle_response: false}, false, needsReply),
       onOpen: id => action(() => select(id)),
+      onGroupChange: id => action(() => savedViews.openGroup(id)),
       onDismiss: thread => action(async () => {
         await api(threadPath(thread.thread_id), {handled: true, handled_checkpoint_id: thread.checkpoint?.id || 0,
           handled_completion_id: thread.turn_completion?.id || 0});
@@ -772,7 +776,10 @@ function renderOverviewLayout(threads, upcoming = []) {
           seen_completion_id: thread.turn_completion?.id || 0});
         await refreshList();
       })});
-    state.workingSet.render(threads, workingHost, {workspace: state.projectCwd || "all", view: savedViews?.activeId || "all",
+    const view = savedViews?.activeId || "all";
+    state.workingSet.render(workingThreads, workingHost, {workspace: state.projectCwd || "all", view,
+      selectedGroup: view.startsWith("group-") ? view.slice(6) : view === "all" ? null : undefined,
+      groupName: savedViews?.current?.()?.name,
       placement: $("view").value, revision: state.listSignature});
   }
   if (!atlas || $("welcome").hidden) return;
