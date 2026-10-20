@@ -177,12 +177,25 @@ const WorkingSet = (() => {
         const b = button(label, "ws-level", () => go(pageIdx, n)); b.setAttribute("aria-pressed", String(n === level)); labels.append(b);
         const cells = el("div", "ws-cells");
         groups.forEach((g, i) => {
-          const count = g.levels[n].length, badge = n === 0 ? g.levels[0].filter(t => columnOf(t) !== "working").length : count;
-          const cell = button(badge ? String(badge) : count ? "·" : "", "ws-cell", () => go(i, n));
+          const items = g.levels[n], count = items.length;
+          const unread = items.filter(t => t.unread_result || t.unread).length;
+          const blocked = items.filter(t => columnOf(t) === "blocked").length;
+          const attention = items.filter(t => columnOf(t) === "attention").length;
+          const cell = button("", "ws-cell", () => go(i, n));
+          cell.append(el("span", "ws-cell-count", count ? String(count) : ""));
+          if (unread) {
+            const dot = el("span", "ws-cell-unread"); dot.setAttribute("aria-hidden", "true"); cell.append(dot);
+          }
+          if (blocked || attention) {
+            const marker = el("span", "ws-cell-action", "!"); marker.setAttribute("aria-hidden", "true"); cell.append(marker);
+          }
           cell.dataset.group = g.key; cell.dataset.level = String(n);
           cell.classList.toggle("ws-here", i === pageIdx); cell.classList.toggle("ws-selected", i === pageIdx && n === level);
-          cell.classList.toggle("ws-needs", n === 0 && badge > 0);
-          cell.title = g.name + " · " + label + (badge ? " · " + badge + [" needing attention", " unread", " idle"][n] : !count ? " · Empty" : "");
+          const details = [count ? count + (count === 1 ? " conversation" : " conversations") : "Empty"];
+          if (unread) details.push(unread + " unread");
+          if (blocked) details.push(blocked + " blocked");
+          if (attention) details.push(attention + " needing attention");
+          cell.title = [g.name, label, ...details].join(" · ");
           cell.setAttribute("aria-label", cell.title); cell.setAttribute("aria-current", String(i === pageIdx && n === level)); cells.append(cell);
         }); matrix.append(cells);
       });

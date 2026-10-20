@@ -103,7 +103,7 @@ test("unread child findings render in Replies to read independently of an idle c
     replies.querySelector('[data-thread="child"]').onclick();
     assert.equal(c.opened.at(-1), "child");
     const cell = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === (group === "All groups" ? "overview:all" : "group:evaluations") && n.dataset.level === "1");
-    assert.equal(cell.textContent, "1");
+    assert.equal(cell.querySelector(".ws-cell-count").textContent, "1");
   }
   assert.equal(JSON.stringify(records), before);
   c.render([parent, {...child, unread_result: false, needs_attention: false}]);
@@ -246,7 +246,57 @@ test("aggregate cards omit group labels, and groups keep the level when their cu
 test("map cells count every idle thread, read or unread", () => {
   const c = setup(); c.render([thread("a", {project_id: "a", project_name: "A"}), thread("b", {project_id: "a", project_name: "A"})]);
   const idle = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === "group:a" && n.dataset.level === "2");
-  assert.equal(idle.textContent, "2"); assert.equal(idle.title, "A · Idle · 2 idle");
+  assert.equal(idle.querySelector(".ws-cell-count").textContent, "2"); assert.equal(idle.title, "A · Idle · 2 conversations");
+});
+test("Attention map totals include working and completed cards independently of unread and action counts", () => {
+  const c = setup(), working = thread("working", {response_state: "working"});
+  const done = thread("done", {work_phase: "finished", unhandled_response: true});
+  const cell = () => c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === "overview:all" && n.dataset.level === "0");
+  c.render([working, done]);
+  assert.equal(c.ids().length, 2);
+  assert.equal(cell().querySelector(".ws-cell-count").textContent, "2");
+  assert.equal(cell().title, "All groups · Attention · 2 conversations");
+  assert.equal(cell().querySelector(".ws-cell-unread"), null);
+  assert.equal(cell().querySelector(".ws-cell-action"), null);
+  const blocked = thread("blocked", {status: "needs input", unread_result: true});
+  const review = thread("review", {unhandled_response: true, response_classification: classified("review")});
+  c.render([working, {...done, unread_result: true}, blocked, review]);
+  assert.equal(cell().querySelector(".ws-cell-count").textContent, "4");
+  assert.equal(cell().title, "All groups · Attention · 4 conversations · 2 unread · 1 blocked · 1 needing attention");
+  assert.equal(cell().attrs["aria-label"], cell().title);
+  assert(cell().classList.contains("ws-selected"));
+  assert.equal(cell().querySelector(".ws-cell-unread").attrs["aria-hidden"], "true");
+  assert.equal(cell().querySelector(".ws-cell-action").textContent, "!");
+  c.render([working, done, {...blocked, unread_result: false}, review]);
+  assert.equal(cell().querySelector(".ws-cell-count").textContent, "4");
+  assert.equal(cell().querySelector(".ws-cell-unread"), null);
+  assert(cell().querySelector(".ws-cell-action"), "reading a request does not resolve it");
+  c.render([working, done, thread("blocked"), {...review, unhandled_response: false}]);
+  assert.equal(cell().querySelector(".ws-cell-count").textContent, "2");
+  assert.equal(cell().querySelector(".ws-cell-action"), null);
+});
+test("map signals stay local to each group and state, including unread checkpoints and empty cells", () => {
+  const c = setup(), a = {project_id: "a", project_name: "A"}, b = {project_id: "b", project_name: "B"};
+  const answer = thread("answer", {...a, unread_result: true});
+  const checkpoint = thread("checkpoint", {...a, unread: true});
+  const cell = (group, level) => c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === group && n.dataset.level === String(level));
+  c.render([answer, checkpoint, thread("read", b)]);
+  assert.equal(cell("group:a", 1).querySelector(".ws-cell-count").textContent, "1");
+  assert.equal(cell("group:a", 1).title, "A · Replies to read · 1 conversation · 1 unread");
+  assert(cell("group:a", 1).querySelector(".ws-cell-unread"));
+  assert.equal(cell("group:a", 1).querySelector(".ws-cell-action"), null);
+  assert.equal(cell("group:a", 2).title, "A · Idle · 1 conversation · 1 unread");
+  assert(cell("group:a", 2).querySelector(".ws-cell-unread"));
+  assert.equal(cell("group:b", 2).querySelector(".ws-cell-unread"), null);
+  assert.equal(cell("group:b", 1).querySelector(".ws-cell-count").textContent, "");
+  assert.equal(cell("group:b", 1).title, "B · Replies to read · Empty");
+  assert.equal(cell("group:b", 1).querySelector(".ws-cell-unread"), null);
+  assert.equal(cell("group:b", 1).querySelector(".ws-cell-action"), null);
+  c.render([{...answer, unread_result: false}, {...checkpoint, unread: false}, thread("read", b)]);
+  assert.equal(cell("group:a", 1).title, "A · Replies to read · Empty");
+  assert.equal(cell("group:a", 2).title, "A · Idle · 2 conversations");
+  assert.equal(cell("group:a", 2).querySelector(".ws-cell-unread"), null);
+  assert.equal(cell("overview:all", 2).querySelector(".ws-cell-count").textContent, "3");
 });
 test("top tabs and map cells share group selection without resetting the level", () => {
   const list = [thread("a", {project_id: "a", project_name: "A"}), thread("b", {project_id: "b", project_name: "B"})];
