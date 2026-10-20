@@ -33,11 +33,6 @@ class SendWorkPalette {
     this.$("close").onclick = () => this.close();
     this.$("unlock").onclick = () => { this.locked = null; this.changed(); this.input.focus(); };
     this.$("submit").onclick = () => this.send();
-    this.$("new").onclick = () => {
-      if (this.sending || this.configuring) return;
-      this.locked = this.choices([]).find(row => row.kind === "new");
-      this.changed(); this.input.focus();
-    };
     this.$("pin").onclick = () => this.pin(!this.pinned);
     this.$("profile-toggle").onclick = () => this.openProfile();
     this.$("profile-close").onclick = () => this.closeProfile();
@@ -80,8 +75,7 @@ class SendWorkPalette {
     this.cwd = cwd; this.input.value = saved?.message || ""; this.locked = saved?.locked || null;
     this.draft = saved?.draft || this.defaultSettings();
     this.closeProfile(); this.cancelSuggestions();
-    this.$("project").textContent = cwd?.split("/").filter(Boolean).pop() || "Choose a project";
-    this.$("project").title = cwd || "";
+    this.$("logo").title = "Dispatcher" + (cwd ? " in " + cwd : "");
     this.dialog.setAttribute("aria-label", "Dispatcher" + (cwd ? " in " + cwd : ""));
     this.input.title = cwd ? "Dispatch work in " + cwd : "Choose a project";
   }
@@ -401,8 +395,9 @@ class SendWorkPalette {
       if (this.list.hidden) this.input.removeAttribute("aria-activedescendant");
     }
     this.$("submit").disabled = this.sending || this.configuring || !this.input.value.trim();
-    this.$("new").disabled = this.$("profile-toggle").disabled = !!(this.sending || this.configuring);
-    this.$("submit").textContent = this.sending ? "Sending…" : "Send";
+    this.$("profile-toggle").disabled = !!(this.sending || this.configuring);
+    this.$("submit").setAttribute("aria-label", this.sending ? "Sending…" : "Send");
+    this.$("submit").title = this.sending ? "Sending…" : "Send";
     this.input.disabled = !!(this.sending || this.configuring);
   }
   async send() {

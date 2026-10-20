@@ -326,7 +326,7 @@ test("pinned send clears only the submitted workspace and stays ready for anothe
 });
 
 test("dispatcher settings are saved independently of the new-conversation draft and message", async () => {
-  const h = setup(); h.palette.pin(true); h.$("send-work-new").onclick(); h.type("Fix the build");
+  const h = setup(); h.palette.pin(true); h.type("/new"); await h.palette.send(); h.type("Fix the build");
   h.palette.draft.yolo = true;
   await h.palette.openProfile();
   assert.equal(h.$("send-work-profile").hidden, false);

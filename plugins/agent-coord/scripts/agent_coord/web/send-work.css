@@ -1,8 +1,8 @@
 dialog.send-work-dialog { width: min(640px, calc(100vw - 48px)); max-width: none; max-height: calc(100dvh - 96px); margin: 64px auto auto; padding: 0; overflow: auto; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 24px 80px #142b3240; }
 .send-work-dialog::backdrop { background: #162b2366; backdrop-filter: blur(3px); }
-.send-work-entry { display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px; }
-#send-work-close { flex-shrink: 0; margin-top: 10px; padding: 3px 7px; font-size: 11px; }
-#send-work-input { display: block; flex: 1; width: 100%; min-height: 48px; max-height: 180px; margin: 0; padding: 10px 0; resize: none; border: 0; border-radius: 0; outline: none; box-shadow: none; background: transparent; font: inherit; font-size: 19px; line-height: 28px; }
+.send-work-entry { display: flex; align-items: center; gap: 10px; padding: 12px 20px; }
+#send-work-close { flex-shrink: 0; padding: 3px 7px; font-size: 11px; }
+#send-work-input { display: block; flex: 1; width: 100%; min-width: 0; min-height: 48px; max-height: 180px; margin: 0; padding: 10px 0; resize: none; border: 0; border-radius: 0; outline: none; box-shadow: none; background: transparent; font: inherit; font-size: 19px; line-height: 28px; }
 #send-work-input:focus-visible { box-shadow: 0 2px var(--accent); }
 #send-work-target { display: flex; align-items: center; gap: 6px; margin: 0 20px 12px; color: var(--muted); font-size: 12px; }
 #send-work-target[hidden] { display: none; }
@@ -22,7 +22,9 @@ dialog.send-work-dialog { width: min(640px, calc(100vw - 48px)); max-width: none
 #send-work-results span:empty { display: none; }
 .send-work-content footer { display: flex; align-items: center; gap: 12px; padding: 10px 20px; }
 .send-work-content footer p { flex: 1; margin: 0; font: 11px var(--mono); color: var(--muted); }
-#send-work-submit { margin-left: auto; padding: 5px 10px; font-size: 12px; }
+#send-work-logo { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--accent); }
+#send-work-profile-toggle, #send-work-submit { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 32px; height: 32px; padding: 5px; border-color: transparent; color: var(--muted); }
+#send-work-submit:not(:disabled) { color: var(--accent); }
 #send-work-status { margin: 10px 20px 0; color: var(--muted); font-size: 11px; }
 #send-work-error { margin: 12px 20px; }
 #send-work-notice { position: fixed; bottom: 24px; right: 24px; z-index: 40; max-width: min(560px, calc(100vw - 32px)); padding: 12px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 30px #0002; }
@@ -34,7 +36,7 @@ body.mobile-chat #send-work-mobile-chat { font-size: 12px; padding: 8px; }
 body.mobile-chat .send-work-touch-help { display: block; font-family: inherit; }
 body.mobile-chat dialog.send-work-dialog { width: calc(100vw - 16px); margin-top: calc(var(--mobile-viewport-top, 0px) + 8px); max-height: calc(var(--mobile-viewport-height, 100dvh) - 16px); }
 body.mobile-chat dialog.send-work-dialog[open] { display: flex; flex-direction: column; }
-body.mobile-chat .send-work-entry, body.mobile-chat .send-work-dialog footer { padding: 12px; flex-shrink: 0; }
+body.mobile-chat .send-work-dialog .send-work-entry, body.mobile-chat .send-work-dialog footer { padding: 12px; flex-shrink: 0; }
 body.mobile-chat #send-work-input { font-size: 16px; }
 body.mobile-chat #send-work-target { margin-inline: 12px; flex-shrink: 0; }
 body.mobile-chat #send-work-settings { margin-inline: 12px; flex-shrink: 0; }
@@ -45,21 +47,14 @@ body.mobile-chat #send-work-close { margin-top: 0; }
 body.mobile-chat #send-work-close, body.mobile-chat #send-work-submit, body.mobile-chat #send-work-unlock { min-height: 44px; }
 body.mobile-chat #send-work-notice { right: 16px; bottom: 16px; }
 
-#send-work-overview-bar { flex: 0 0 auto; min-width: 0; background: var(--panel); }
+#send-work-overview-bar { flex: 0 0 auto; min-width: 0; background: transparent; }
 #welcome[hidden] + #send-work-overview-bar, #send-work-overview-bar[hidden],
 #send-work-dock[hidden], #send-work-profile[hidden], #send-work-new-settings-label[hidden] { display: none; }
 .overview-statusbar { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 4px 22px; gap: 8px; border-top: 1px solid var(--line); color: var(--muted); background: var(--panel); font: 10px/1.5 var(--mono); }
 .overview-statusbar #results-count { flex-shrink: 0; }
 #send-work-pin { flex-shrink: 0; margin-left: auto; padding: 4px 8px; font: inherit; color: var(--ink); }
 #send-work-pin[aria-pressed=true] { color: var(--accent); }
-.send-work-heading { display: flex; align-items: center; gap: 10px; padding: 14px 20px 0; min-width: 0; }
-.send-work-heading h2 { display: flex; align-items: center; gap: 7px; margin: 0; font: 600 14px/1.4 var(--sans, sans-serif); }
-.send-work-heading h2 svg { color: var(--accent); flex-shrink: 0; }
-#send-work-project { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
-#send-work-new { margin-left: auto; flex-shrink: 0; padding: 5px 8px; font-size: 11px; }
-#send-work-profile-toggle { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 5px; }
 #send-work-profile-toggle[aria-expanded=true] { background: var(--tint); color: var(--accent); }
-.send-work-heading #send-work-close { margin-top: 0; }
 #send-work-new-settings-label { margin: 0 20px 6px; font-size: 12px; color: var(--muted); }
 #send-work-profile { margin: 12px 20px 4px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 #send-work-profile h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
@@ -69,23 +64,20 @@ body.mobile-chat #send-work-notice { right: 16px; bottom: 16px; }
 .send-work-profile-fields select { width: 100%; min-width: 0; font-size: 12px; }
 .send-work-profile-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .send-work-profile-actions button { font-size: 12px; }
-.send-work-dock { width: min(780px, calc(100% - 40px)); margin: 12px auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 4px 18px #0000000a; max-height: 65dvh; overflow: auto; }
-.send-work-dock .send-work-entry { padding-block: 6px; }
-.send-work-dock #send-work-input { min-height: 40px; font-size: 16px; line-height: 24px; }
+.send-work-dock { width: min(780px, calc(100% - 40px)); margin: 6px auto; background: transparent; max-height: 65dvh; overflow: auto; }
+.send-work-dock .send-work-entry { gap: 8px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; }
+.send-work-dock #send-work-input { min-height: 40px; padding-block: 8px; font-size: 16px; line-height: 24px; }
 .send-work-dock #send-work-results { max-height: 180px; }
 .send-work-dock #send-work-results li { padding-block: 8px; }
 .send-work-dock #send-work-commands { max-height: 180px; }
-.send-work-dock .send-work-content > footer { padding-block: 8px; }
+.send-work-dock .send-work-content > footer { display: none; }
 @media (max-width: 600px) {
-  .send-work-dock { width: calc(100% - 20px); margin-block: 10px; max-height: 60dvh; }
-  .send-work-heading { padding: 12px 12px 0; gap: 6px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; }
-  #send-work-project { grid-row: 2; grid-column: 1 / -1; }
-  #send-work-new { font-size: 11px; }
-  .send-work-heading button { min-height: 40px; }
+  .send-work-dock { width: calc(100% - 20px); max-height: 60dvh; }
+  #send-work-profile-toggle, #send-work-submit { width: 44px; height: 44px; }
   .overview-statusbar { padding-inline: 12px; }
   #send-work-pin { min-height: 40px; }
   #send-work-profile { margin-inline: 12px; }
   .send-work-profile-fields { grid-template-columns: 1fr; }
   .send-work-dock #send-work-results { max-height: 150px; flex: none; }
-  .send-work-dock .send-work-entry, .send-work-dock .send-work-content > footer { padding-inline: 12px; }
+  .send-work-dock .send-work-entry { padding: 0 8px; gap: 6px; }
 }

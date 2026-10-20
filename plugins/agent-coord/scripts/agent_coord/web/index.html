@@ -323,13 +323,13 @@
   <dialog id="project-target-dialog" aria-labelledby="project-target-title"><form method="dialog"><h2 id="project-target-title">Open project</h2><p id="project-target-path" class="muted"></p><div class="dialog-actions"><button value="cancel" class="quiet">Cancel</button><button value="window" class="quiet">New window</button><button value="tab" class="primary" autofocus>New tab</button></div></form></dialog>
   <dialog id="send-work-dialog" class="send-work-dialog" aria-label="Dispatcher">
     <div id="send-work-content" class="send-work-content">
-    <header class="send-work-heading">
-      <h2><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 12h9m-4-5 5 5-5 5m5-5h6M4 5h4M4 19h4"/></svg>Dispatcher</h2>
-      <span id="send-work-project"></span>
-      <button id="send-work-new" type="button" class="quiet">New conversation</button>
+    <div class="send-work-entry">
+      <span id="send-work-logo" role="img" aria-label="Dispatcher" title="Dispatcher"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 12h9m-4-5 5 5-5 5m5-5h6M4 5h4M4 19h4"/></svg></span>
+      <textarea id="send-work-input" rows="1" maxlength="100000" placeholder="Describe work to send…" role="combobox" aria-label="Request to dispatcher" aria-autocomplete="list" aria-expanded="true" aria-controls="send-work-results"></textarea>
       <button id="send-work-profile-toggle" type="button" class="quiet" aria-label="Dispatcher settings" title="Dispatcher settings" aria-expanded="false" aria-controls="send-work-profile"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m9 3-1 3-3 1-2 3 2 2-1 3 3 3 3-1 2 2 3-1 1-3 3-1 1-3-2-2 1-3-3-2-3 1-2-2Z"/><circle cx="12" cy="11" r="3"/></svg></button>
+      <button id="send-work-submit" type="button" class="quiet" aria-label="Send" title="Send"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
       <button id="send-work-close" type="button" class="quiet" aria-label="Close dispatcher">Esc</button>
-    </header>
+    </div>
     <section id="send-work-profile" aria-labelledby="send-work-profile-title" hidden>
       <h3 id="send-work-profile-title">Dispatcher settings</h3>
       <p>Used by the dispatcher in this project. New and existing conversations keep their own settings.</p>
@@ -343,15 +343,12 @@
       <p id="send-work-profile-error" class="dialog-error" role="alert" hidden></p>
       <div class="send-work-profile-actions"><button id="send-work-profile-close" type="button" class="quiet">Cancel</button><button id="send-work-profile-save" type="button" class="primary">Save dispatcher settings</button></div>
     </section>
-    <div class="send-work-entry">
-      <textarea id="send-work-input" rows="1" maxlength="100000" placeholder="Describe work to send…" role="combobox" aria-label="Request to dispatcher" aria-autocomplete="list" aria-expanded="true" aria-controls="send-work-results"></textarea>
-    </div>
     <div id="send-work-target" hidden>To <strong id="send-work-target-name"></strong><button id="send-work-unlock" class="quiet" type="button">Change</button></div>
     <p id="send-work-new-settings-label" hidden>New conversation settings</p>
     <ul id="send-work-results" role="listbox" aria-label="Send to a conversation"></ul>
     <p id="send-work-error" class="dialog-error" role="alert" hidden></p>
     <p id="send-work-status" role="status" hidden></p>
-    <footer><p class="send-work-keyboard-help">↑ ↓ Choose · Tab Lock · ↵ Send</p><p class="send-work-touch-help">Choose a destination</p><button id="send-work-submit" class="quiet" type="button">Send</button></footer>
+    <footer><p class="send-work-keyboard-help">↑ ↓ Choose · Tab Lock · ↵ Send</p><p class="send-work-touch-help">Choose a destination</p></footer>
     </div>
   </dialog>
   <div id="send-work-notice" role="status" aria-live="polite" hidden></div>
