@@ -399,6 +399,9 @@ function threadCard(thread, compact = false, inAttention = false) {
     const summary = outcome + progress;
     const snippet = node("p", summary, "thread-snippet work-summary"); snippet.title = summary;
     const meta = node("div", null, "card-meta");
+    const logo = globalThis.providerLogo?.(thread.client, {codex: "OpenAI · Codex", claude: "Anthropic · Claude Code",
+      muse: "Meta · Muse Code", kimi: "Moonshot · Kimi Code", antigravity: "Google · Antigravity"}[thread.client]);
+    if (logo) meta.append(logo);
     if (thread.attention === "later") meta.append(node("span", "Later", "placement-label"));
     if (snoozeLabel(thread)) meta.append(node("span", snoozeLabel(thread), "placement-label"));
     if (thread.unread && !thread.unread_result && !inAttention) meta.append(node("span", "New checkpoint", "unread-mark"));
