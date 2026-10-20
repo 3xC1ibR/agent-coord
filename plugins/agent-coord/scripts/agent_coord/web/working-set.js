@@ -4,7 +4,7 @@
 // parent's phase, read receipt, or position. Placement is never mutated here.
 const WorkingSet = (() => {
   const grouping = typeof module !== "undefined" ? require("./thread-groups.js") : threadGrouping;
-  const LEVELS = ["Attention", "Idle"];
+  const LEVELS = ["Attention", "Replies to read", "Idle"];
   const PHASES = ["new", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"];
   const GROUPINGS = ["group", "domain", "workspace"], ALL = "overview:all", CAP = 12;
   const parked = t => t.attention === "later" || t.attention === "archived" || t.snoozed;
@@ -13,16 +13,23 @@ const WorkingSet = (() => {
     return !parked(t) && (t.status === "needs input" || t.response_state === "input" ||
       !t.checkpoint_stale && t.checkpoint?.next_actor === "user" && !!t.checkpoint.next_action);
   }
+  const handoff = t => t.response_classification?.status === "classified" ? t.response_classification.choice : null;
+  const completed = t => handoff(t) ? handoff(t) === "done" : !t.checkpoint_stale && grouping.phase(t) === "finished";
   function columnOf(t) {
     if (running(t)) return "working";
     if (parked(t)) return null;
-    if (needsReply(t) || t.response_state === "failed" || t.attention_reason === "blocked" ||
-        t.response_classification?.choice === "blocked") return "blocked";
-    const completed = grouping.phase(t) === "finished" || t.response_classification?.choice === "done";
-    if (completed) return (t.unhandled_response ?? t.unread_result) ? "working" : null;
-    return t.unread_result === true ? "attention" : null;
+    const choice = handoff(t), pending = t.unhandled_response ?? t.unread_result;
+    if (t.status === "needs input" || t.response_state === "failed") return "blocked";
+    if (needsReply(t)) return choice === "review" || t.attention_reason === "review" ? "attention" : "blocked";
+    if (pending && (choice === "blocked" || t.attention_reason === "blocked")) return "blocked";
+    if (pending && (choice === "review" || t.attention_reason === "review")) return "attention";
+    if (completed(t)) return pending ? "working" : null;
+    if (t.unread_result !== true) return null;
+    // Execution updates stay beside running work; ordinary answers and unknown
+    // classifications can be read separately without implying a delivery.
+    return choice === "update" ? "working" : "replies";
   }
-  function levelOf(t) { return columnOf(t) ? 0 : 1; }
+  function levelOf(t) { const column = columnOf(t); return column === "replies" ? 1 : column ? 0 : 2; }
   const workspaceOf = t => t.project_cwd || t.cwd || "unknown";
   const folder = path => path.split("/").filter(Boolean).pop() || path;
   const touchOf = t => Math.max(t.turn_completion?.completed_at || 0, t.turn_started_at || 0, t.created_at || 0);
@@ -85,12 +92,13 @@ const WorkingSet = (() => {
       try {
         value ||= JSON.parse(storage?.getItem(key) || "null");
         if (!value) {
-          const legacy = JSON.parse(storage?.getItem(key.replace(":v2:", ":v1:")) || "null");
-          if (legacy) value = {...legacy, level: legacy.level === 2 ? 1 : 0};
+          const previous = JSON.parse(storage?.getItem(key.replace(":v3:", ":v2:")) || "null");
+          if (previous) value = {...previous, level: previous.level === 1 ? 2 : 0};
+          else value = JSON.parse(storage?.getItem(key.replace(":v3:", ":v1:")) || "null");
         }
       } catch { /* Optional preference. */ }
       dimension = GROUPINGS.includes(value?.dimension) ? value.dimension : "group";
-      level = Number.isInteger(value?.level) && value.level >= 0 && value.level < LEVELS.length ? value.level : ["later", "archived"].includes(placement) ? 1 : 0;
+      level = Number.isInteger(value?.level) && value.level >= 0 && value.level < LEVELS.length ? value.level : ["later", "archived"].includes(placement) ? 2 : 0;
       pageKey = typeof value?.pageKey === "string" ? value.pageKey : ALL;
       order = []; scroll.clear(); expanded.clear();
     }
@@ -122,7 +130,7 @@ const WorkingSet = (() => {
           const link = button(descriptor.name, "quiet ws-group-link", () => go(groups.findIndex(g => g.key === descriptor.key), level));
           link.dataset.action = "group"; links.append(link);
         }
-        if (onDismiss && columnOf(t) === "working" && !running(t)) {
+        if (onDismiss && completed(t) && columnOf(t) === "working" && !running(t)) {
           const dismiss = button("Dismiss", "quiet ws-read", () => onDismiss(t), "Dismiss completed response · " + t.title);
           dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss"; links.append(dismiss);
         } else if (onRead && t.unread_result && !running(t) && t.attention !== "archived") {
@@ -145,17 +153,19 @@ const WorkingSet = (() => {
       const items = g.levels[n]; if (items.length) heading.append(el("span", "", String(items.length)));
       page.append(title, heading);
       if (!items.length) {
-        page.append(el("p", "ws-empty", ["Nothing needs attention", "No idle threads"][n] + (g.aggregate ? " across these groups." : " in this group.")));
+        page.append(el("p", "ws-empty", ["Nothing needs attention", "No replies to read", "No idle threads"][n] + (g.aggregate ? " across these groups." : " in this group.")));
         const links = el("div", "ws-empty-links");
         g.levels.forEach((list, other) => { if (other !== n && list.length) links.append(button(LEVELS[other], "quiet", () => go(i, other))); }); page.append(links);
       }
       if (n === 0) {
         const board = el("div", "ws-attention-board"); board.setAttribute("aria-label", "Increasing attention from left to right");
         for (const [key, title, empty] of [["working", "Working / Completed", "No running agents or completed work."],
-          ["attention", "Needs your attention", "No unread answers or findings."], ["blocked", "Blocked", "No agents waiting for your input."]]) {
+          ["attention", "Needs your attention", "No reviews or decisions requested."], ["blocked", "Blocked", "No agents waiting for your input."]]) {
           section(board, g, items.filter(t => columnOf(t) === key), title, key, true, empty);
         }
         page.append(board);
+      } else if (n === 1) {
+        section(page, g, items, "", "replies");
       } else {
         const board = el("div", "ws-phase-board"); board.setAttribute("aria-label", "Idle threads by phase");
         for (const phase of PHASES) {
@@ -175,12 +185,12 @@ const WorkingSet = (() => {
         const b = button(label, "ws-level", () => go(pageIdx, n)); b.setAttribute("aria-pressed", String(n === level)); labels.append(b);
         const cells = el("div", "ws-cells");
         groups.forEach((g, i) => {
-          const count = g.levels[n].length, badge = n === 0 ? g.levels[0].filter(t => columnOf(t) !== "working").length : 0;
+          const count = g.levels[n].length, badge = n === 0 ? g.levels[0].filter(t => columnOf(t) !== "working").length : n === 1 ? count : 0;
           const cell = button(badge ? String(badge) : count ? "·" : "", "ws-cell", () => go(i, n));
           cell.dataset.group = g.key; cell.dataset.level = String(n);
           cell.classList.toggle("ws-here", i === pageIdx); cell.classList.toggle("ws-selected", i === pageIdx && n === level);
           cell.classList.toggle("ws-needs", n === 0 && badge > 0);
-          cell.title = g.name + " · " + label + (badge ? " · " + badge + " needing attention" : !count ? " · Empty" : "");
+          cell.title = g.name + " · " + label + (badge ? " · " + badge + (n === 1 ? " unread" : " needing attention") : !count ? " · Empty" : "");
           cell.setAttribute("aria-label", cell.title); cell.setAttribute("aria-current", String(i === pageIdx && n === level)); cells.append(cell);
         }); matrix.append(cells);
       });
@@ -304,7 +314,7 @@ const WorkingSet = (() => {
         const nextSignature = JSON.stringify([threads, nextContext, options.selectedGroup, options.groupName, options.revision]);
         if (signature === nextSignature) { layout(); return; }
         const changedContext = context !== nextContext;
-        if (changedContext) { rememberScroll(); context = nextContext; restore("agent-coord.working-set:v2:" + context, options.placement); }
+        if (changedContext) { rememberScroll(); context = nextContext; restore("agent-coord.working-set:v3:" + context, options.placement); }
         if (controlled && (changedContext || selectedGroup !== options.selectedGroup)) {
           if (options.selectedGroup != null) dimension = "group";
           if (dimension === "group") pageKey = options.selectedGroup == null ? ALL : "group:" + options.selectedGroup;

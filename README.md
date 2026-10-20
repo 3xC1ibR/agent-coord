@@ -1159,7 +1159,19 @@ earlier turn and launching terminal forks are not included. Claude forks snapsho
 the native transcript immediately and branch through Claude Code on their first
 message, preserving the snapshot even if the original thread continues first.
 
-The overview keeps one **Attention** queue above fixed work stages:
+The **Focus** overview has three vertical levels: **Attention**, **Replies to
+read**, and **Idle**. Attention keeps running agents, unread execution updates,
+and completed deliveries together, alongside blockers and required reviews or
+decisions. Completed deliveries stay there until dismissed, even after reading.
+Replies to read contains ordinary unread answers, findings, and proposals;
+reading them moves the card into Idle at its existing work stage. Classifier
+results distinguish delivery from findings; when classification is unavailable,
+a current Finished checkpoint supplies the delivery fallback and other unread
+answers remain in Replies to read. Later threads stay in Idle unless running;
+Closed threads stay in Idle. The mini-map and arrow keys navigate all three levels, preserving the
+selected group and migrating saved positions from earlier layouts.
+
+The **Cards** overview keeps one **Attention** queue above fixed work stages:
 **New → Investigating → Planning → Orchestrating → Implementing → Validating →
 Deploying → Done**. Discussion and debugging belong in Investigating. Answering
 an investigation leaves it in Investigating; Done means the requested change or

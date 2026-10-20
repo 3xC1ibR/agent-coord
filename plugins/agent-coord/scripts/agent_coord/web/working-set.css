@@ -39,7 +39,7 @@
 .working-set .ws-labels { flex: 0 0 156px; display: grid; gap: 5px; }
 .working-set .ws-level { height: 30px; border: 0; border-radius: 4px; background: transparent; text-align: left; font-size: 10px; color: var(--muted); padding: 0 6px; }
 .working-set .ws-level[aria-pressed="true"] { background: var(--hover-bg); color: var(--ink); font-weight: 600; }
-.working-set .ws-matrix { flex: 1; min-width: 0; overflow-x: auto; display: grid; grid-template-rows: repeat(2, 30px); gap: 5px; padding: 1px 1px 5px; }
+.working-set .ws-matrix { flex: 1; min-width: 0; overflow-x: auto; display: grid; grid-template-rows: repeat(3, 30px); gap: 5px; padding: 1px 1px 5px; }
 .working-set .ws-cells { display: flex; gap: 4px; }
 .working-set .ws-cell { flex: 0 0 28px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--muted); padding: 0; font-size: 11px; }
 .working-set .ws-cell.ws-here { border-color: var(--accent); color: var(--ink); }

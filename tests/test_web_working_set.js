@@ -4,6 +4,7 @@ const fs = require("node:fs"), vm = require("node:vm");
 const WorkingSet = require("../plugins/agent-coord/scripts/agent_coord/web/working-set.js");
 const thread = (id, extra = {}) => ({thread_id: id, title: "Thread " + id, attention: "now", cwd: "/work", project_cwd: "/work",
   work_phase: "investigation", status: "idle", response_state: "available", created_at: 100, updated_at: 200, ...extra});
+const classified = choice => ({status: "classified", choice});
 
 function setup({data = new Map(), broken = false, onGroupChange} = {}) {
   const doc = {events: {}, activeElement: null, modal: false,
@@ -67,7 +68,7 @@ test("state membership separates unread findings from actual requests, ignores s
     thread("parked", {attention: "later", unread_result: true}), thread("snoozed", {snoozed: true, unread_result: true}),
     thread("later-run", {attention: "later", response_state: "working"}), thread("closed", {attention: "archived", status: "running"}),
     thread("failure", {response_state: "failed", unread_result: true})];
-  assert.deepEqual(list.map(WorkingSet.levelOf), [0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0]);
+  assert.deepEqual(list.map(WorkingSet.levelOf), [0, 0, 0, 1, 2, 1, 2, 2, 0, 2, 0]);
   const before = JSON.stringify(list), groups = WorkingSet.derive(list);
   assert.deepEqual(groups[0].levels.flat().map(t => t.thread_id).sort(), list.map(t => t.thread_id).sort());
   assert.equal(JSON.stringify(list), before);
@@ -83,38 +84,39 @@ test("group IDs distinguish equal names, children inherit root groups, missing p
   assert.equal(groups.find(g => g.key === "group:two").levels.flat().length, 1);
   assert.equal(groups.slice(1).flatMap(g => g.levels.flat()).length, list.length);
 });
-test("unread child findings render in Attention in All groups and their group beside an idle creator", () => {
+test("unread child findings render in Replies to read independently of an idle creator", () => {
   const c = setup(), parent = thread("parent", {project_id: "evaluations", project_name: "Evaluations",
     needs_attention: false, work_phase: "finished", unhandled_response: false});
   const child = thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent",
     response_state: "update", attention_reason: "findings", needs_attention: true, unread_result: true, unhandled_response: true});
   const records = [parent, child], before = JSON.stringify(records);
-  c.render(records);
+  c.render(records); c.selectLevel(1);
   for (const group of ["All groups", "Evaluations"]) {
     c.selectGroup(group);
     assert.deepEqual(c.ids(), ["child"]);
-    const attention = c.page().querySelector('[data-section="attention"]');
-    assert.equal(attention.querySelector(".ws-card").dataset.cardThread, "child");
-    attention.querySelector('[data-thread="child"]').onclick();
+    const replies = c.page().querySelector('[data-section="replies"]');
+    assert.equal(replies.querySelector(".ws-card").dataset.cardThread, "child");
+    replies.querySelector('[data-thread="child"]').onclick();
     assert.equal(c.opened.at(-1), "child");
-    const cell = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === (group === "All groups" ? "overview:all" : "group:evaluations") && n.dataset.level === "0");
+    const cell = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === (group === "All groups" ? "overview:all" : "group:evaluations") && n.dataset.level === "1");
     assert.equal(cell.textContent, "1");
   }
   assert.equal(JSON.stringify(records), before);
   c.render([parent, {...child, unread_result: false, needs_attention: false}]);
   assert.deepEqual(c.ids(), []);
-  c.selectLevel(1);
+  c.selectLevel(2);
   assert.deepEqual(c.ids().sort(), ["child", "parent"]);
 });
 test("attention columns increase left to right and keep completed work until explicit dismissal", () => {
   const c = setup(), completed = thread("done", {work_phase: "finished", unhandled_response: true, unread_result: true});
   const list = [thread("run", {response_state: "working", unread_result: true}), completed,
     thread("answer", {unread_result: true}), thread("ask", {checkpoint: {next_actor: "user", next_action: "Pick one"}}),
-    thread("failed", {response_state: "failed"}), thread("classified-blocker", {response_classification: {choice: "blocked"}})];
+    thread("failed", {response_state: "failed"}), thread("classified-blocker", {response_classification: classified("blocked"), unhandled_response: true}),
+    thread("review", {response_classification: classified("review"), unhandled_response: true})];
   c.render(list);
   const board = c.page().querySelector(".ws-attention-board");
   assert.deepEqual(board.children.map(n => n.dataset.section), ["working", "attention", "blocked"]);
-  assert.deepEqual(list.map(WorkingSet.columnOf), ["working", "working", "attention", "blocked", "blocked", "blocked"]);
+  assert.deepEqual(list.map(WorkingSet.columnOf), ["working", "working", "replies", "blocked", "blocked", "blocked", "attention"]);
   assert.equal(c.ids().length, 6);
   assert.equal(board.children[0].querySelectorAll(".ws-card").length, 2);
   assert.equal(board.children[1].querySelectorAll(".ws-card").length, 1);
@@ -123,18 +125,68 @@ test("attention columns increase left to right and keep completed work until exp
   c.render([{...completed, unread_result: false}]); assert.deepEqual(c.ids(), ["done"]);
   assert(c.page().querySelector('[data-action="dismiss"]'));
   c.render([{...completed, unhandled_response: false}]); assert.deepEqual(c.ids(), []);
-  c.selectLevel(1); assert.deepEqual(c.ids(), ["done"]);
+  c.selectLevel(2); assert.deepEqual(c.ids(), ["done"]);
 });
 test("empty attention columns remain visible, and running work takes precedence over prior input", () => {
   const c = setup(); c.render([]);
   assert.equal(c.page().querySelector(".ws-attention-board").children.length, 3);
   assert.equal(WorkingSet.columnOf(thread("resumed", {response_state: "working", checkpoint: {next_actor: "user", next_action: "Old question"}})), "working");
   assert.equal(WorkingSet.columnOf(thread("handled", {work_phase: "finished", unhandled_response: false, unread_result: true})), null);
-  assert.equal(WorkingSet.columnOf(thread("classified-done", {response_classification: {choice: "done"}, unhandled_response: true, unread_result: false})), "working");
+  assert.equal(WorkingSet.columnOf(thread("classified-done", {response_classification: classified("done"), unhandled_response: true, unread_result: false})), "working");
 });
-test("old navigation migrates unread replies to Attention and Idle to the lower level", () => {
-  const key = 'agent-coord.working-set:v1:["/work","all","active"]';
-  for (const [oldLevel, newLevel] of [[0, 0], [1, 0], [2, 1]]) {
+test("classification distinguishes answers from delivery and execution updates, with checkpoint fallbacks", () => {
+  const unread = {unread_result: true, unhandled_response: true};
+  for (const phase of ["investigation", "planning", "implementation", "deployment", "finished"]) {
+    const answer = thread("answer", {...unread, work_phase: phase, response_classification: classified("findings")});
+    assert.equal(WorkingSet.levelOf(answer), 1, phase);
+    assert.equal(WorkingSet.levelOf({...answer, unread_result: false}), 2, phase);
+    const delivery = {...answer, response_classification: classified("done")};
+    assert.equal(WorkingSet.levelOf(delivery), 0, phase);
+    assert.equal(WorkingSet.levelOf({...delivery, unread_result: false}), 0, phase);
+    assert.equal(WorkingSet.levelOf({...delivery, unhandled_response: false}), 2, phase);
+    const update = {...answer, response_classification: classified("update")};
+    assert.equal(WorkingSet.columnOf(update), "working", phase);
+    assert.equal(WorkingSet.levelOf({...update, unread_result: false}), 2, phase);
+  }
+  for (const status of ["pending", "uncertain", "unavailable"]) {
+    const unknown = thread("unknown", {...unread, response_classification: {status, choice: "done"}});
+    assert.equal(WorkingSet.levelOf(unknown), 1, status);
+    assert.equal(WorkingSet.levelOf({...unknown, work_phase: "finished"}), 0, status);
+    assert.equal(WorkingSet.levelOf({...unknown, work_phase: "finished", checkpoint_stale: true}), 1, status);
+  }
+  assert.equal(WorkingSet.levelOf(thread("missing", unread)), 1);
+});
+test("classified blockers and required reviews stay above ordinary replies until handled", () => {
+  const c = setup();
+  for (const choice of ["blocked", "review"]) {
+    const t = thread(choice, {unread_result: true, unhandled_response: true, response_classification: classified(choice)});
+    c.render([t]); c.selectLevel(0);
+    assert.deepEqual(c.ids(), [choice]);
+    assert.equal(c.page().querySelector('[data-section="' + (choice === "blocked" ? "blocked" : "attention") + '"]').querySelector(".ws-card").dataset.cardThread, choice);
+    c.render([{...t, unread_result: false}]); assert.deepEqual(c.ids(), [choice]);
+    c.render([{...t, unread_result: false, unhandled_response: false}]); assert.deepEqual(c.ids(), []);
+    c.selectLevel(2); assert.deepEqual(c.ids(), [choice]);
+  }
+  const request = thread("permission", {status: "needs input", response_state: "input", unhandled_response: false,
+    response_classification: classified("findings")});
+  assert.equal(WorkingSet.columnOf(request), "blocked");
+});
+test("a question moves from running to unread reply to idle, while execution updates use Mark read", () => {
+  const c = setup(), answer = thread("question", {unread_result: true, unhandled_response: true, response_classification: classified("findings")});
+  c.render([{...answer, status: "running", response_state: "working"}]); assert.deepEqual(c.ids(), ["question"]);
+  c.render([answer]); assert.deepEqual(c.ids(), []);
+  c.selectLevel(1); assert.deepEqual(c.ids(), ["question"]);
+  c.page().querySelector('[data-action="read"]').onclick(); assert.deepEqual(c.read, ["question"]);
+  c.render([{...answer, unread_result: false}]); assert.deepEqual(c.ids(), []);
+  c.selectLevel(2); assert.deepEqual(c.ids(), ["question"]);
+  c.render([{...answer, response_classification: classified("update")}]); c.selectLevel(0);
+  assert.deepEqual(c.ids(), ["question"]);
+  assert(c.page().querySelector('[data-action="read"]'));
+  assert.equal(c.page().querySelector('[data-action="dismiss"]'), null);
+});
+test("saved positions preserve all original levels and migrate two-level Idle to level three", () => {
+  for (const [version, oldLevel, newLevel] of [[1, 0, 0], [1, 1, 1], [1, 2, 2], [2, 0, 0], [2, 1, 2]]) {
+    const key = 'agent-coord.working-set:v' + version + ':["/work","all","active"]';
     const c = setup({data: new Map([[key, JSON.stringify({level: oldLevel, dimension: "domain", pageKey: "overview:all"})]])});
     c.render([thread("a")]); assert.equal(c.page().dataset.level, String(newLevel));
     assert.equal(c.host.querySelector(".ws-map-foot").querySelector("select").children.find(o => o.selected).value, "domain");
@@ -151,46 +203,48 @@ test("groups initially sort by user work recency and keep position through compl
 });
 test("pins stay visible at the front of their state without duplicating a thread", () => {
   const c = setup(), list = Array.from({length: 14}, (_, n) => thread(String(n), {created_at: 200 + n}));
-  list[0].pinned = true; c.render(list); c.selectLevel(1);
+  list[0].pinned = true; c.render(list); c.selectLevel(2);
   assert.equal(c.ids()[0], "0"); assert.equal(c.page().querySelectorAll(".ws-pin").length, 1);
 });
 test("fresh visits start at All groups / Attention; each child appears independently in its own state", () => {
   const c = setup(); c.render([thread("parent"), thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent", unread_result: true}), thread("run", {response_state: "working"})]);
-  assert.deepEqual(c.ids(), ["run", "child"]); assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
+  assert.deepEqual(c.ids(), ["run"]); assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
+  c.selectLevel(1); assert.deepEqual(c.ids(), ["child"]);
   c.page().querySelector(".ws-parent").onclick(); assert.deepEqual(c.opened, ["parent"]);
-  c.selectLevel(0); assert.deepEqual(c.ids(), ["run", "child"]);
-  c.selectLevel(1); assert.deepEqual(c.ids(), ["parent"]); assert(c.page().querySelector(".ws-phase-board"));
+  c.selectLevel(0); assert.deepEqual(c.ids(), ["run"]);
+  c.selectLevel(2); assert.deepEqual(c.ids(), ["parent"]); assert(c.page().querySelector(".ws-phase-board"));
 });
 test("read receipts move responses to Idle without changing phase or dismissing required input", () => {
-  const c = setup(), t = thread("findings", {unread_result: true}); c.render([t]);
+  const c = setup(), t = thread("findings", {unread_result: true}); c.render([t]); c.selectLevel(1);
   c.page().querySelector(".ws-read").onclick(); assert.deepEqual(c.read, ["findings"]);
   c.render([{...t, unread_result: false}]); assert.deepEqual(c.ids(), []);
-  c.selectLevel(1); assert.deepEqual(c.ids(), ["findings"]);
+  c.selectLevel(2); assert.deepEqual(c.ids(), ["findings"]);
   assert.equal(c.page().querySelector(".ws-section-title").querySelector("h4").textContent, "Investigating");
   c.render([{...t, unread_result: false, checkpoint: {next_actor: "user", next_action: "Review"}}]);
   c.selectLevel(0); assert.deepEqual(c.ids(), ["findings"]);
 });
 test("group links preserve level and all groups remain reachable when their current state is empty", () => {
   const c = setup(); c.render([thread("a", {project_id: "a", project_name: "A", unread_result: true}), thread("b", {project_id: "b", project_name: "B"})]);
+  c.selectLevel(1);
   c.page().querySelector(".ws-group-link").onclick(); assert.deepEqual(c.ids(), ["a"]);
   assert.equal(c.page().querySelector(".ws-page-title").textContent, "A");
   c.selectGroup("B"); assert.deepEqual(c.ids(), []); assert(c.page().querySelector(".ws-empty"));
-  c.selectLevel(1); assert.deepEqual(c.ids(), ["b"]);
+  c.selectLevel(2); assert.deepEqual(c.ids(), ["b"]);
 });
-test("top tabs and map cells share group selection without resetting Attention / Idle", () => {
+test("top tabs and map cells share group selection without resetting the level", () => {
   const list = [thread("a", {project_id: "a", project_name: "A"}), thread("b", {project_id: "b", project_name: "B"})];
   const changes = [], c = setup({onGroupChange: id => changes.push(id)});
   c.render(list, {selectedGroup: "a", view: "group-a"});
   assert.equal(c.page().dataset.key, "group:a");
   assert.equal(c.host.querySelector(".ws-group-nav"), null);
   assert.equal(c.host.querySelector('[aria-label="Choose group"]'), null);
-  c.selectLevel(1); assert.deepEqual(changes, []);
+  c.selectLevel(2); assert.deepEqual(changes, []);
   c.render(list, {selectedGroup: "b", view: "group-b"});
-  assert.deepEqual(c.ids(), ["b"]); assert.equal(c.page().dataset.level, "1");
+  assert.deepEqual(c.ids(), ["b"]); assert.equal(c.page().dataset.level, "2");
   assert.deepEqual(changes, []); // Rendering a tab selection must not activate it again.
   c.selectGroup("A"); assert.deepEqual(changes, ["a"]);
   c.render(list, {selectedGroup: "a", view: "group-a"});
-  assert.deepEqual(c.ids(), ["a"]); assert.equal(c.page().dataset.level, "1");
+  assert.deepEqual(c.ids(), ["a"]); assert.equal(c.page().dataset.level, "2");
   c.selectGroup("All groups"); assert.deepEqual(changes, ["a", null]);
   c.render(list, {selectedGroup: null, view: "all"});
   assert.equal(c.page().dataset.key, "overview:all");
@@ -226,34 +280,36 @@ test("domain and workspace maps use All conversations; choosing a group tab retu
   assert.equal(c.page().dataset.key, "group:a");
 });
 test("saved navigation survives reload, remains workspace-specific, and removed groups fall back to All groups", () => {
-  const c = setup(), list = [thread("a", {project_id: "a", project_name: "A"})]; c.render(list); c.selectLevel(1); c.selectGroup("A");
+  const c = setup(), list = [thread("a", {project_id: "a", project_name: "A"})]; c.render(list); c.selectLevel(2); c.selectGroup("A");
   const reloaded = setup({data: c.data}); reloaded.render(list); assert.deepEqual(reloaded.ids(), ["a"]);
   assert.equal(reloaded.page().querySelector(".ws-page-title").textContent, "A");
-  reloaded.render([thread("other", {unread_result: true})], {workspace: "/other"}); assert.deepEqual(reloaded.ids(), ["other"]);
+  reloaded.render([thread("other", {unread_result: true})], {workspace: "/other"});
+  assert.equal(reloaded.page().dataset.level, "0"); reloaded.selectLevel(1); assert.deepEqual(reloaded.ids(), ["other"]);
   reloaded.render(list); assert.equal(reloaded.page().querySelector(".ws-page-title").textContent, "A");
   reloaded.render([thread("replacement")]); assert.equal(reloaded.page().querySelector(".ws-page-title").textContent, "All groups");
 });
 test("Later and Closed open Idle initially; corrupt or unavailable storage leaves navigation usable", () => {
   for (const placement of ["later", "archived"]) { const c = setup(); c.render([thread("parked", {attention: placement})], {placement}); assert.deepEqual(c.ids(), ["parked"]); }
-  const c = setup({broken: true}); c.render([thread("a")]); c.selectLevel(1); c.render([thread("b")], {workspace: "/other"}); c.render([thread("a")]); assert.deepEqual(c.ids(), ["a"]);
+  const c = setup({broken: true}); c.render([thread("a")]); c.selectLevel(2); c.render([thread("b")], {workspace: "/other"}); c.render([thread("a")]); assert.deepEqual(c.ids(), ["a"]);
   const bad = setup({data: new Map([['agent-coord.working-set:v1:["/work","all","active"]', 'null']])}); bad.render([]); assert.equal(bad.page().dataset.level, "0");
 });
 test("per-section caps expand and collapse without hiding groups or losing membership", () => {
   const c = setup(), list = Array.from({length: 16}, (_, n) => thread(String(n), {project_id: "a", project_name: "A", unread_result: true}));
-  c.render(list); assert.equal(c.ids().length, 12); c.page().querySelector(".ws-more").onclick(); assert.equal(c.ids().length, 16);
+  c.render(list); c.selectLevel(1); assert.equal(c.ids().length, 12); c.page().querySelector(".ws-more").onclick(); assert.equal(c.ids().length, 16);
   c.page().querySelector(".ws-more").onclick(); assert.equal(c.ids().length, 12);
-  assert.equal(c.host.querySelectorAll(".ws-cell").length, 4);
+  assert.equal(c.host.querySelectorAll(".ws-cell").length, 6);
 });
 test("polling retains page scroll and focus, and unchanged renders keep the DOM", () => {
-  const c = setup(), t = thread("reply", {unread_result: true}); c.render([t]);
+  const c = setup(), t = thread("reply", {unread_result: true}); c.render([t]); c.selectLevel(1);
   const oldPage = c.page(); oldPage.scrollTop = 145; const control = oldPage.querySelector("button"); control.focus();
   c.render([t]); assert.equal(c.page(), oldPage);
   c.render([{...t, title: "Updated"}]); assert.equal(c.page().scrollTop, 145); assert.equal(c.doc.activeElement.dataset.thread, "reply");
-  c.selectLevel(1); c.selectLevel(0); assert.equal(c.page().scrollTop, 145);
+  c.selectLevel(2); c.selectLevel(1); assert.equal(c.page().scrollTop, 145);
   assert.equal(c.observers.length, 1);
 });
 test("keyboard navigation is scoped to the visible overview and leaves forms, menus and modifiers alone", () => {
-  const c = setup(); c.render([thread("a")]); assert(c.key("ArrowDown").prevented); assert.deepEqual(c.ids(), ["a"]);
+  const c = setup(); c.render([thread("a")]); assert(c.key("ArrowDown").prevented); assert.deepEqual(c.ids(), []);
+  assert(c.key("ArrowDown").prevented); assert.deepEqual(c.ids(), ["a"]);
   for (const tag of ["input", "textarea", "button", "select", "summary", "a"]) assert(!c.key("ArrowUp", c.doc.createElement(tag)).prevented);
   assert(!c.key("ArrowUp", c.doc.body, {ctrlKey: true}).prevented);
   c.doc.modal = true; assert(!c.key("ArrowUp").prevented); c.doc.modal = false;
@@ -289,7 +345,7 @@ test("horizontal gestures scroll narrow attention columns without navigating gro
 });
 test("grouping changes reset to the aggregate and restore on reload; large inventories build only neighbors", () => {
   const c = setup(), list = Array.from({length: 40}, (_, n) => thread("t" + n, {project_id: String(n), project_name: "G" + n, domain: "d" + n}));
-  c.render(list); assert.equal(c.host.querySelectorAll(".ws-page").length, 4); assert.equal(c.host.querySelectorAll(".ws-cell").length, 82);
+  c.render(list); assert.equal(c.host.querySelectorAll(".ws-page").length, 6); assert.equal(c.host.querySelectorAll(".ws-cell").length, 123);
   c.key("g"); const reload = setup({data: c.data}); reload.render(list);
   assert.equal(reload.host.querySelector(".ws-map-foot").querySelector("select").children.find(o => o.selected).value, "domain");
   c.ui.destroy(); assert.equal(c.observers[0].disconnected, true); assert.equal(c.host.children.length, 0); assert.equal(c.doc.events.keydown, undefined);
