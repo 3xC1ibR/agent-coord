@@ -138,6 +138,17 @@ class MuseRPC:
     def _command(connection, method, **params):
         return connection.request(method, {"commandId": command_id(), **params})
 
+    @staticmethod
+    def _input(parts):
+        inputs = []
+        for part in parts:
+            if part["type"] == "text":
+                inputs.append({"type": "text", "text": part["text"]})
+            elif part["type"] == "image":
+                header, data = part["url"].split(",", 1)
+                inputs.append({"type": "image", "mediaType": header[5:].split(";")[0], "base64Data": data})
+        return inputs
+
     def _connection(self, thread_id, options):
         current = self.connections.get(thread_id)
         if current and (current.process.poll() is not None or self.options.get(thread_id) != options):
@@ -246,7 +257,26 @@ class MuseRPC:
                 self._shutdown(thread_id)
             return {}
         if method == "turn/steer":
-            raise CoordinationError("Queue the message or stop the Muse turn before sending another.")
+            # Keep completion behind the acknowledgement and display update.
+            # MuseConnection drains RPC responses independently of its events.
+            with self.lock:
+                turn = self.turns.get(thread_id)
+                if not turn or turn["id"] != params.get("expectedTurnId"):
+                    raise CoordinationError("The active Muse turn changed or finished. Your message was not sent.")
+                connection = self.connections.get(thread_id)
+                if not connection:
+                    raise CoordinationError("Muse disconnected. Stop the turn and send again.")
+                identity = command_id()
+                result = connection.request("turn/steer", {"commandId": identity,
+                    "sessionId": self.native[thread_id], "expectedTurnId": turn["id"],
+                    "input": self._input(params["input"])})
+                if (result.get("commandId") != identity or result.get("turnId") != turn["id"]
+                        or result.get("status") != "accepted"):
+                    raise CoordinationError("Muse did not confirm steering the expected turn. Review the native session before retrying.")
+                user = {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}
+                turn["items"].append(user)
+                self._emit("item/completed", thread_id, turnId=turn["id"], item=copy.deepcopy(user))
+                return {"turnId": turn["id"]}
         if method == "turn/start":
             if thread_id in self.turns:
                 raise CoordinationError("A Muse turn is already running.")
@@ -259,13 +289,7 @@ class MuseRPC:
                             "require_escalated so Muse can ask for approval to access the coordination database "
                             "outside this workspace. An ordinary sandboxed-command approval does not grant "
                             "that filesystem access.")
-            inputs = [{"type": "text", "text": context}]
-            for part in params["input"]:
-                if part["type"] == "text":
-                    inputs.append({"type": "text", "text": part["text"]})
-                elif part["type"] == "image":
-                    header, data = part["url"].split(",", 1)
-                    inputs.append({"type": "image", "mediaType": header[5:].split(";")[0], "base64Data": data})
+            inputs = [{"type": "text", "text": context}, *self._input(params["input"])]
             turn = {"id": command_id(), "status": "inProgress", "items": [
                 {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}]}
             self.turns[thread_id] = turn

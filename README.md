@@ -851,8 +851,11 @@ and its approval prompt. Muse receives this instruction with each turn. Approvin
 an ordinary sandboxed command alone does not widen filesystem access; full
 permissions avoid these prompts.
 
-Follow-ups queue while Muse runs. Stop affects only that conversation; the next
-message resumes its native session, including after an app restart. Workspace
+While Muse runs, **Enter** steers its current turn and **Tab** queues a follow-up
+for after the turn. Steering targets the named active turn; a correction is
+rejected if that turn has already finished. Text and images can be steered
+together. Stop affects only that conversation; the next message resumes its
+native session, including after an app restart. Workspace
 changes require a new Muse conversation. Approvals preserve native choice and
 requirement identifiers, including changes to a pending approval. Single-choice
 questions accept custom text; multiple-choice questions use the native options.

@@ -17,22 +17,22 @@ function composer(client) {
   return {c, calls};
 }
 
-for (const client of ["antigravity", "kimi", "muse"]) test(`sending during a ${client} turn queues instead of issuing unsupported steering`, async () => {
+for (const client of ["antigravity", "kimi"]) test(`sending during a ${client} turn queues instead of issuing unsupported steering`, async () => {
   const {c, calls} = composer(client);
   await c.sendMessage();
   assert.equal(calls[0].path, "sessions/one/queue");
   assert.equal(calls[0].body.expectedTurnId, undefined);
 });
 
-for (const client of ["codex", "claude"]) test(`sending during a ${client} turn steers the expected turn`, async () => {
+for (const client of ["codex", "claude", "muse"]) test(`sending during a ${client} turn steers the expected turn`, async () => {
   const {c, calls} = composer(client);
   await c.sendMessage();
   assert.equal(calls[0].path, "sessions/one/messages");
   assert.equal(calls[0].body.expectedTurnId, "turn");
 });
 
-test("Claude explicit queue keeps the message for after the turn", async () => {
-  const {c, calls} = composer("claude");
+for (const client of ["claude", "muse"]) test(`${client} explicit queue keeps the message for after the turn`, async () => {
+  const {c, calls} = composer(client);
   await c.sendMessage("queue");
   assert.equal(calls[0].path, "sessions/one/queue");
   assert.equal(calls[0].body.expectedTurnId, undefined);
