@@ -1229,18 +1229,34 @@ a disconnected process does not establish task completion.
 ### Automatic reply classification with Jev
 
 The UI backend can classify completed replies using TypeSafe's
-[Choice API](https://docs.typesafe.ai/primitives/choice). Create `jev.json` next
+[Choice API](https://docs.typesafe.ai/primitives/choice). A one-time, optional
+setup prompt introduces automatic conversation status; **Skip for now** dismisses
+it without enabling requests. Setup remains available in **Settings → Automatic
+conversation status**.
+
+Get an API key from the [TypeSafe console](https://console.typesafe.ai/), paste it
+into the masked field, and choose **Test and enable**. The test sends only sample
+text. On success, the app stores the key in macOS Keychain (or an owner-only
+local file on other systems) and enables Jev without a restart. **Disable** stops
+new requests while retaining the key; **Remove key** disables Jev and deletes
+app-managed credentials. Paired remote devices cannot manage these credentials.
+Usage is billed through the user's TypeSafe account. Ribbon Field works without
+Jev, and setup explains which conversation excerpts are sent before opt-in.
+
+Existing manual configuration remains supported. Create `jev.json` next
 to the coordination database (normally `~/.local/state/agent-coord/jev.json`):
 
 ```json
 {"enabled": true, "api_key_file": "/absolute/path/to/typesafe-key"}
 ```
 
-The file referenced by `api_key_file` contains only the API key. Restart the web
-server and desktop app after configuring it. `AGENT_COORD_JEV_CONFIG` can select
+The private file referenced by `api_key_file` contains only the API key. Changes
+are picked up automatically within a few seconds. `AGENT_COORD_JEV_CONFIG` can select
 another configuration file. Remove the configuration or set `enabled` to false
 to stop new requests; saved classifications remain valid for their original reply.
 Missing or invalid configuration leaves automatic classification disabled.
+`TYPESAFE_API_KEY` alone does not enable this integration. Removing a key in
+Settings never deletes a user-managed key file supplied by manual configuration.
 
 The background worker sends a bounded excerpt of recent user messages, final
 assistant replies, the original request, and the current checkpoint to

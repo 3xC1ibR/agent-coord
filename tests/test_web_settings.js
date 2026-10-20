@@ -38,6 +38,7 @@ function fixture({remote = false, desktop, embedded = false, nativePhone = false
       return {ok, json: async () => url.endsWith("config") ? {remote, token: "secret-token"} : {enabled: true}};
     },
     agentCoordSpeech: {mountSettings: async (...args) => speech.push(args)},
+    agentCoordJev: {mountSettings: () => {}},
     RemoteAccessPanel: class {
       constructor(options) { this.options = options; panels.push(this); }
       open() { this.opened = true; }

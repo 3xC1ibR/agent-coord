@@ -1,0 +1,7 @@
+.jev-onboarding { position: fixed; z-index: 20; bottom: 24px; left: 24px; box-sizing: border-box; width: min(400px, calc(100vw - 48px)); padding: 22px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--paper); color: var(--ink); box-shadow: 0 8px 32px #0002; }
+.jev-onboarding h2 { margin: 0 0 12px; font-size: 17px; line-height: 1.4; }
+.jev-onboarding p { margin: 0 0 14px; font-size: 13px; line-height: 1.6; color: var(--muted); }
+.jev-onboarding > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.jev-onboarding button { min-height: 40px; padding: 8px 14px; }
+.jev-onboarding .jev-onboarding-error, #jev-error { color: var(--danger); }
+@media (max-width: 540px) { .jev-onboarding { bottom: 16px; left: 16px; width: calc(100vw - 32px); } }

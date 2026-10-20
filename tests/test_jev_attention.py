@@ -88,6 +88,15 @@ class JevAPITests(unittest.TestCase):
             classify({}, self.config)
         self.factory.assert_not_called()
 
+    def test_keychain_configuration_uses_shared_credential_reader(self):
+        self.config = {"keychain_account": "test-account"}
+        (self.root / "jev.json").write_text(json.dumps({"enabled": True, **self.config}))
+        self.assertEqual(load_config(self.root / "state.sqlite3"), self.config)
+        with patch("agent_coord.jev_settings.Keychain") as keychain:
+            keychain.return_value.read.return_value = "test-only-secret"
+            self.assertEqual(self.call(), decision())
+            keychain.return_value.read.assert_called_once_with("test-account")
+
 
 class JevAttentionTests(unittest.TestCase):
     def setUp(self):

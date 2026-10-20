@@ -29,6 +29,7 @@
       return data;
     }
     const api = (path, body) => request("/api/browser/", path, body);
+    window.agentCoordJev.mountSettings($("jev-settings"), config);
     if (!config.remote) {
       const metrics = await api("launch-metrics");
       if (metrics.available) {

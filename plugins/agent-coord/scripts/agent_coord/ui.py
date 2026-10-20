@@ -34,6 +34,7 @@ from .organization import repository_root
 from .workspace_files import workspace_files
 from .skill_catalog import skill_catalog
 from .speech import Speech, spoken_text
+from .jev_settings import JevSettings
 from . import launch_metrics
 
 DEFAULT_UI_HOST = "127.0.0.1"
@@ -276,6 +277,7 @@ def _handler(
     views = ViewStore(store)
     navigation = NavigationStore(store)
     speech = Speech(store.database_path)
+    jev = JevSettings(store.database_path)
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None) -> None:
@@ -379,7 +381,7 @@ def _handler(
             if parsed.path == "/settings":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "settings.html").read_bytes())
                 return
-            if parsed.path in {"/settings.js", "/settings.css", "/context-lifecycle.js", "/context-lifecycle.css"}:
+            if parsed.path in {"/settings.js", "/settings.css", "/jev.js", "/jev.css", "/context-lifecycle.js", "/context-lifecycle.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -489,6 +491,11 @@ def _handler(
                 self._json(HTTPStatus.OK, store.threads.project_scratchpad(directory))
             elif route == "speech/settings":
                 self._json(HTTPStatus.OK, speech.settings())
+            elif route == "jev/settings":
+                if not self._local_request():
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "Manage Jev in Settings on your Mac."})
+                else:
+                    self._json(HTTPStatus.OK, jev.settings())
             elif route == "launch-metrics":
                 if not self._local_request():
                     self._json(HTTPStatus.FORBIDDEN, {"error": "Use Settings on your Mac."})
@@ -664,6 +671,14 @@ def _handler(
                         if set(body) != {"enabled"} or not isinstance(body["enabled"], bool):
                             raise ValueError("Expected an enabled boolean.")
                         self._json(HTTPStatus.OK, launch_metrics.configure(store, body["enabled"]))
+                    return
+                if route == ["api", "browser", "jev", "settings"]:
+                    if not self._local_request():
+                        self._json(HTTPStatus.FORBIDDEN, {"error": "Manage Jev in Settings on your Mac."})
+                    else:
+                        result = jev.configure(body)
+                        browser_sessions.classifier.wake()
+                        self._json(HTTPStatus.OK, result)
                     return
                 if route == ["api", "browser", "speech", "settings"]:
                     if not self._local_request():

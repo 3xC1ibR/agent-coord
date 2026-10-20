@@ -210,10 +210,8 @@ def classify(state, config, policy=RoutingPolicy(), *, question=None):
     """Jev Choice API; diagnostics never contain credentials or request content."""
     question = question if question is not None else question_for(state, policy)
     try:
-        key = Path(config["api_key_file"]).expanduser().read_text().strip()
-        if not key or len(key) > 4096 or any(c.isspace() for c in key):
-            raise ValueError()
-        key.encode("ascii")
+        from .jev_settings import read_key
+        key = read_key(config)
     except (OSError, KeyError, TypeError, ValueError, UnicodeError):
         raise ClassificationError("credential_unavailable") from None
     body = json.dumps(classifier_input(state, policy, question=question)).replace(key, "[credential redacted]")

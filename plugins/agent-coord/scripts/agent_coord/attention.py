@@ -14,6 +14,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+from .jev_settings import config_path, read_key, validate_key
 
 MODEL = "jev-1.13.0"
 POLICY_VERSION = 2
@@ -74,11 +75,14 @@ class ClassificationError(Exception):
 
 def load_config(database_path):
     """Opt in with a local path-only configuration; no key in the database."""
-    path = Path(os.environ.get("AGENT_COORD_JEV_CONFIG", Path(database_path).parent / "jev.json"))
+    path = config_path(database_path)
     try:
         config = json.loads(path.read_text())
         if not isinstance(config, dict) or config.get("enabled") is not True:
             return None
+        account = config.get("keychain_account")
+        if isinstance(account, str) and account.strip():
+            return {"keychain_account": account}
         key_file = config.get("api_key_file")
         if not isinstance(key_file, str) or not key_file.strip():
             return None
@@ -87,14 +91,11 @@ def load_config(database_path):
         return None
 
 
-def classify(state, config):
+def classify(state, config, *, api_key=None):
     """Fixed HTTPS endpoint: never follow redirects carrying the credential."""
     try:
-        key = Path(config["api_key_file"]).read_text().strip()
-        if not key or len(key) > 4096 or any(c.isspace() for c in key):
-            raise ValueError
-        key.encode("ascii")
-    except (OSError, ValueError, UnicodeError):
+        key = validate_key(api_key) if api_key is not None else read_key(config)
+    except (OSError, KeyError, TypeError, ValueError, UnicodeError):
         raise ClassificationError("credential_unavailable") from None
     body = json.dumps({"model": MODEL, "state": state, "questions": {"handoff": QUESTION}})
     # Even if a user pasted this same credential in chat, it is never context.
@@ -351,12 +352,13 @@ def context_for(store, thread):
 class AttentionClassifier:
     def __init__(self, sessions, *, config=None, classify_fn=classify, start=True):
         self.sessions, self.store = sessions, sessions.store
+        self.dynamic_config = config is None
         self.config = config if config is not None else load_config(self.store.database_path)
         self.classify_fn = classify_fn
         self.stopped = threading.Event()
         self.wakeup = threading.Event()
         self.worker = None
-        if self.config and start:
+        if start:
             self.worker = threading.Thread(target=self._run, name="jev-attention", daemon=True)
             self.worker.start()
 
@@ -364,11 +366,18 @@ class AttentionClassifier:
         self.wakeup.set()
 
     def scan(self):
+        if self.dynamic_config:
+            self.config = load_config(self.store.database_path)
         if not self.config:
             return
         for thread in self.sessions.list_work_threads():
             if self.stopped.is_set():
                 return
+            # Other local UI processes observe opt-out without a restart too.
+            if self.dynamic_config:
+                self.config = load_config(self.store.database_path)
+                if not self.config:
+                    return
             completion = thread["turn_completion"]
             if (not completion or completion["status"] != "completed" or not thread["unhandled_response"]
                     or thread["response_state"] == "working"):
