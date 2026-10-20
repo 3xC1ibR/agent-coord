@@ -320,7 +320,8 @@ Mockup 30 now uses horizontal group pages at every vertical level:
 1. **Running + Needs my reply** — separate sections for required input and
    agents running now.
 2. **Replies to read** — unread responses, independent of checkpoint phase.
-3. **Idle** — remaining threads, sectioned by phase, including Finished.
+3. **Idle** — remaining threads in phase columns, including Finished. Cards
+   stack within each column; columns wrap on smaller screens.
 
 Left/right changes group; up/down changes level while preserving the group.
 **All groups** is always the leftmost page and includes every thread in the

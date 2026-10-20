@@ -719,8 +719,10 @@ recency cutoff that made whole groups disappear.
   the group, grouping mode, and level per dataset/workspace using browser
   storage. Invalid or removed group keys fall back to All groups; unavailable
   storage leaves normal navigation usable. The top level has separate Needs my reply
-  and Running sections. Idle has one section per populated checkpoint phase,
-  including Finished; a finished turn does not imply a finished investigation.
+  and Running sections. Idle has one column per populated checkpoint phase,
+  including Finished, with cards stacked beneath each heading. Columns wrap
+  on smaller screens without introducing a competing horizontal scroll area.
+  A finished turn does not imply a finished investigation.
 - **Thread membership is exclusive.** Running agents and required user replies
   occupy the top level. Other unread responses occupy the middle. All remaining
   threads occupy Idle. Nonrunning threads parked in Later remain in Idle and

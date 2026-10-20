@@ -14,7 +14,7 @@
     .vtrack, .htrack { transition: transform .34s cubic-bezier(.2,.7,.2,1); }
     .still .vtrack, .still .htrack, .still .page { transition: none !important; }
     .pane { position: absolute; left: 0; right: 0; height: 100%; overflow: hidden; }
-    .page { position: absolute; top: 0; bottom: 0; padding: 26px 4px 225px; overflow-y: auto; overscroll-behavior: contain; transition: opacity .34s; }
+    .page { position: absolute; top: 0; bottom: 0; padding: 26px 4px 225px; overflow-y: auto; overscroll-behavior: contain; transition: opacity .34s; container-type: inline-size; }
     .page.neighbor { opacity: .3; cursor: pointer; }
     .page.neighbor > * { pointer-events: none; }
     .page.far { visibility: hidden; }
@@ -30,6 +30,14 @@
     .section-title span { font: 11px var(--mono); color: var(--muted); }
     .section.asks .section-title h4 { color: var(--warm); }
     .section.running .section-title h4 { color: var(--accent); }
+    .phase-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 14px; align-items: start; margin: 22px 0; }
+    .phase-board > .section { min-width: 0; margin: 0; }
+    .phase-board .cards { grid-template-columns: minmax(0, 1fr); }
+    .phase-board .thread { min-width: 0; overflow-wrap: anywhere; }
+    .phase-board .identity { flex-wrap: wrap; }
+    @container (max-width: 900px) {
+      .phase-board { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+    }
     .parent-link { border: 0; background: transparent; text-align: left; padding: 0; font-size: 10px; color: var(--muted); cursor: pointer; }
     .parent-link:hover { color: var(--ink); }
     .group-link { align-self: flex-start; max-width: 100%; border: 1px solid var(--line); border-radius: 4px; background: transparent; padding: 3px 7px; color: var(--muted); font-size: 10px; text-align: left; cursor: pointer; }
@@ -266,7 +274,9 @@
       section(page, g, items, "Unread responses", "replies");
       if (isReal() && g.members.some(a => !a.readStateKnown)) page.append($("p", "description", "Read status is unavailable for some threads in this snapshot."));
     } else {
-      for (const phase of AgentField.PHASES) section(page, g, items.filter(a => a.phase === phase), AgentField.PHASE_LABELS[phase], "phase-" + phase);
+      const board = $("div", "phase-board"); board.setAttribute("aria-label", "Idle threads by phase");
+      for (const phase of AgentField.PHASES) section(board, g, items.filter(a => a.phase === phase), AgentField.PHASE_LABELS[phase], "phase-" + phase);
+      if (board.children.length) page.append(board);
     }
     page.addEventListener("click", e => { if (i !== pageIdx) { e.stopPropagation(); e.preventDefault(); goPage(i); } }, true);
     return page;
@@ -373,7 +383,7 @@
   Mockup.mount({
     number: 30, title: "Working set", spectrum: "moderate", showChrome: false, fullBleed: true, showDatasetCounts: false,
     defaultScale: globalThis.AGENT_COORD_SNAPSHOT ? "real" : "small",
-    summary: "All groups at the far left, individual groups to the right; Running + Needs my reply, Replies to read, and Idle from top to bottom. Idle is sectioned by phase.",
+    summary: "All groups at the far left, individual groups to the right; Running + Needs my reply, Replies to read, and Idle from top to bottom. Idle uses phase columns.",
     signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "unread_result", "updated_at", "checkpoint_history"], proposed: ["name", "role", "kind", "activity", "ask", "plan", "target"]},
     notes: "All groups is a fixed leftmost overview of the selected workspace, including Ungrouped. Aggregate cards link to their group at the same level. Fresh visits start at All groups / Replies to read; returns restore group, grouping mode, and level per dataset and workspace when browser storage is available. Every group stays reachable at every level, including empty levels. Running and required replies take precedence over unread responses; everything else appears in Idle by phase. Later responses stay parked in Idle. Real unread responses come from the current turn completion and its read receipt. Mark read is preview-only and moves a response to Idle without changing its phase. Individual groups are initially ordered by recency and keep their position during updates.",
     render(field, stage, api) {
