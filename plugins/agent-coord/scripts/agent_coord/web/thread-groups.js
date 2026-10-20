@@ -26,6 +26,12 @@ const threadGrouping = (() => {
     return thread.attention !== "archived" && !thread.snoozed && (typeof thread.needs_attention === "boolean"
       ? thread.needs_attention : thread.attention === "now" && ["input", "action", "reply", "failed", "update"].includes(thread.response_state));
   }
+  function acknowledgedRequest(thread) {
+    // Dismiss keeps the saved request for context; live provider input is separate.
+    return ["input", "action"].includes(thread.response_state) && thread.needs_attention === false &&
+      thread.unhandled_response === false && thread.can_handle_response === false &&
+      !["running", "needs input"].includes(thread.status);
+  }
   const stable = (a, b) => (a.created_at || 0) - (b.created_at || 0) || a.thread_id.localeCompare(b.thread_id);
   const activityAt = thread => thread.updated_at || thread.created_at || 0;
   const stageOrder = (a, b) => Number(status(b).key === "running") - Number(status(a).key === "running") ||
@@ -37,17 +43,18 @@ const threadGrouping = (() => {
     if (thread.attention === "archived") return {key: "idle", label: "Closed"};
     if (thread.response_state === "working" || thread.status === "running" && thread.response_state !== "input")
       return {key: "running", label: "Working"};
-    if (thread.snooze_due && !["input", "action", "failed"].includes(thread.response_state))
+    const acknowledged = acknowledgedRequest(thread);
+    if (thread.snooze_due && (acknowledged || !["input", "action", "failed"].includes(thread.response_state)))
       return {key: "idle", label: "Reminder"};
-    if (["input", "action", "reply", "update", "failed"].includes(thread.response_state))
+    if (!acknowledged && ["input", "action", "reply", "update", "failed"].includes(thread.response_state))
       return {key: thread.response_state === "failed" ? "failed" : ["blocked", "review"].includes(reason(thread).key) ? "waiting" : "idle", label: reason(thread).label};
     return {key: "idle", label: thread.response_state === "interrupted" ? "Stopped" : phaseLabel(thread)};
   }
   function cardAge(thread, now = Date.now() / 1000) {
     // Required actions and deliberately pinned work must not disappear with age.
     if (thread.pinned || thread.snooze_due || status(thread).key === "running" ||
-        ["input", "action", "failed"].includes(thread.response_state) ||
-        (!thread.checkpoint_stale && thread.checkpoint?.next_actor === "user" && thread.checkpoint.next_action)) return "fresh";
+        !acknowledgedRequest(thread) && (["input", "action", "failed"].includes(thread.response_state) ||
+        (!thread.checkpoint_stale && thread.checkpoint?.next_actor === "user" && thread.checkpoint.next_action))) return "fresh";
     const activity = activityAt(thread);
     if (!activity) return "fresh";
     const hours = (now - activity) / 3600;
@@ -68,7 +75,7 @@ const threadGrouping = (() => {
       closed: threads.filter(thread => thread.attention === "archived").sort(stable),
     };
   }
-  return {awaitsUser, groupThreads, status, phase, phaseLabel, reason, attentionOrder, activityAt, cardAge};
+  return {awaitsUser, acknowledgedRequest, groupThreads, status, phase, phaseLabel, reason, attentionOrder, activityAt, cardAge};
 })();
 
 if (typeof module !== "undefined") module.exports = threadGrouping;

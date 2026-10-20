@@ -388,6 +388,41 @@ class ThreadAttentionTests(unittest.TestCase):
         self.assertTrue(reopened.threads.get("terminal")["unread_result"])
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed only for frontend integration")
+    def test_dismissed_review_projection_stays_idle_until_a_changed_request(self):
+        self.start()
+        self.checkpoint("validation", "user")
+        self.finish()
+        requested = self.thread()
+        dismissed = self.sessions.update_work_thread("terminal", {
+            "handled": True, "handled_checkpoint_id": requested["checkpoint"]["id"],
+            "handled_completion_id": requested["turn_completion"]["id"],
+        })
+        self.assertEqual(dismissed["checkpoint"], requested["checkpoint"])
+        self.now += 1
+        self.checkpoint("validation", "user")
+        refreshed = self.thread()
+        reopened = BrowserSessions(CoordinationStore(self.store.database_path, clock=lambda: self.now),
+                                   str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(reopened.close)
+        restored = reopened.work_thread("terminal")
+        self.store.threads.checkpoint("terminal", {
+            "phase": "validation", "summary": "A different review is ready.",
+            "next_actor": "user", "next_action": "Check the new Phone board view.",
+        })
+        changed = self.thread()
+        script = """const g = require('./plugins/agent-coord/scripts/agent_coord/web/thread-groups.js');
+const w = require('./plugins/agent-coord/scripts/agent_coord/web/working-set.js');
+const threads = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+console.log(JSON.stringify(threads.map(t => ({attention:g.awaitsUser(t), level:w.levelOf(t), label:g.status(t).label}))));"""
+        result = subprocess.run([shutil.which("node"), "-e", script],
+                                input=json.dumps([requested, dismissed, refreshed, restored, changed]),
+                                cwd=Path(__file__).resolve().parents[1], text=True, capture_output=True,
+                                timeout=10, check=True)
+        pending = {"attention": True, "level": 0, "label": "Review requested"}
+        idle = {"attention": False, "level": 2, "label": "Validating"}
+        self.assertEqual(json.loads(result.stdout), [pending, idle, idle, idle, pending])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed only for frontend integration")
     def test_api_finished_and_discussion_responses_both_need_attention_until_handled(self):
         self.start()
         self.checkpoint()

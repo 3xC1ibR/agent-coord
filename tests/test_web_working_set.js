@@ -182,6 +182,30 @@ test("classified blockers and required reviews stay above ordinary replies until
     response_classification: classified("findings")});
   assert.equal(WorkingSet.columnOf(request), "blocked");
 });
+test("dismissed saved requests leave Focus attention and its map until new input is needed", () => {
+  for (const reason of ["review", "blocked"]) {
+    const c = setup(), request = thread("request", {response_state: "input", attention_reason: reason,
+      work_phase: "validation", checkpoint: {next_actor: "user", next_action: "Check the Phone board."},
+      needs_attention: true, unhandled_response: true, can_handle_response: true, unread_result: true});
+    c.render([request]);
+    assert.deepEqual(c.ids(), ["request"]);
+    const dismissed = {...request, needs_attention: false, unhandled_response: false, can_handle_response: false};
+    c.render([dismissed]);
+    assert.deepEqual(c.ids(), []);
+    assert.equal(WorkingSet.needsReply(dismissed), false);
+    const cell = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === "overview:all" && n.dataset.level === "0");
+    assert.equal(cell.querySelector(".ws-cell-count").textContent, "");
+    assert.equal(cell.querySelector(".ws-cell-action"), null);
+    c.selectLevel(2);
+    assert.deepEqual(c.ids(), ["request"]);
+    assert.ok(c.page().querySelector('[data-section="phase-validation"]'));
+    c.render([request]); c.selectLevel(0);
+    assert.deepEqual(c.ids(), ["request"], "A changed request surfaces again");
+    assert.equal(WorkingSet.columnOf({...dismissed, status: "needs input", needs_attention: true}), "blocked",
+      "Live approval is independent of the saved request receipt");
+    assert.equal(WorkingSet.columnOf({...dismissed, status: "running", response_state: "working"}), "working");
+  }
+});
 test("a question moves from running to unread reply to idle, while execution updates use Mark read", () => {
   const c = setup(), answer = thread("question", {unread_result: true, unhandled_response: true, response_classification: classified("findings")});
   c.render([{...answer, status: "running", response_state: "working"}]); assert.deepEqual(c.ids(), ["question"]);

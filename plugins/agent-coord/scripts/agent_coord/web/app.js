@@ -375,6 +375,7 @@ async function resumeThreadSnooze(thread) {
 }
 function threadCard(thread, compact = false, inAttention = false) {
   const reason = threadGrouping.reason(thread);
+  const acknowledged = threadGrouping.acknowledgedRequest(thread);
   const needsInput = threadGrouping.awaitsUser(thread) && ["blocked", "review"].includes(reason.key);
   const {key: status, label: statusLabel} = threadGrouping.status(thread);
   const button = node("button", null, "session" + (compact ? " compact" : "") + (status === "running" ? " active-thread" : "") + (needsInput ? " needs-attention" : "") + (state.selected === thread.thread_id ? " selected" : ""));
@@ -401,7 +402,7 @@ function threadCard(thread, compact = false, inAttention = false) {
   } else {
     title.append(node("span", thread.title));
     const failed = status !== "running" && (thread.response_state === "failed" || thread.turn_completion?.status === "failed");
-    const stateLabel = failed ? "Failed" : (inAttention && status !== "running" ? reason.label : statusLabel).replace(/^✓\s*/, "");
+    const stateLabel = failed ? "Failed" : (inAttention && status !== "running" && !acknowledged ? reason.label : statusLabel).replace(/^✓\s*/, "");
     title.append(node("span", stateLabel, status === "running" ? "sr-only" : "card-state " + (failed ? "failed" : needsInput ? "waiting" : status)));
     const progress = thread.checkpoint?.summary || thread.original_request || "Ready for your first message.";
     // The name identifies the conversation; this saved update describes its latest work.
@@ -423,7 +424,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     const content = inAttention ? node("div", null, "attention-copy") : button;
     if (inAttention) button.append(content);
     content.append(title, snippet);
-    if (!thread.checkpoint_stale && thread.checkpoint?.next_action) {
+    if (!thread.checkpoint_stale && thread.checkpoint?.next_action && !(acknowledged && thread.checkpoint.next_actor === "user")) {
       const next = node("div", null, "next-action"), copy = node("span", null, "next-copy");
       const actor = {user: "Your next step", agent: "Up next", external: "Waiting on"}[thread.checkpoint.next_actor] || "Next";
       copy.append(node("span", actor + " · ", "next-label"), document.createTextNode(thread.checkpoint.next_action));

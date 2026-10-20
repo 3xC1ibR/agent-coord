@@ -10,14 +10,14 @@ const WorkingSet = (() => {
   const parked = t => t.attention === "later" || t.attention === "archived" || t.snoozed;
   const running = t => t.attention !== "archived" && grouping.status(t).key === "running";
   function needsReply(t) {
-    return !parked(t) && (t.status === "needs input" || t.response_state === "input" ||
+    return !parked(t) && !grouping.acknowledgedRequest(t) && (t.status === "needs input" || t.response_state === "input" ||
       !t.checkpoint_stale && t.checkpoint?.next_actor === "user" && !!t.checkpoint.next_action);
   }
   const handoff = t => t.response_classification?.status === "classified" ? t.response_classification.choice : null;
   const completed = t => handoff(t) ? handoff(t) === "done" : !t.checkpoint_stale && grouping.phase(t) === "finished";
   function columnOf(t) {
     if (running(t)) return "working";
-    if (parked(t)) return null;
+    if (parked(t) || grouping.acknowledgedRequest(t)) return null;
     const choice = handoff(t), pending = t.unhandled_response ?? t.unread_result;
     if (t.status === "needs input" || t.response_state === "failed") return "blocked";
     if (needsReply(t)) return choice === "review" || t.attention_reason === "review" ? "attention" : "blocked";

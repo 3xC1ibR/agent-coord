@@ -38,6 +38,23 @@ test('Attention preserves a current required next action',()=>{
  assert.equal(result.nodes.find(n=>n.className==='next-action').title,'Approve the staged installer.');
  assert.equal(result.nodes.find(n=>n.className==='stale-checkpoint'),undefined);
 });
+test('dismissed saved requests show their phase without prompting the user again',()=>{
+ for(const response_state of ['input','action']) {
+  const checkpoint={phase:'validation',summary:'Phone views are ready.',next_actor:'user',next_action:'Check the Phone board.'};
+  const dismissed={response_state,attention_reason:'review',needs_attention:false,unhandled_response:false,
+   can_handle_response:false,work_phase:'validation',checkpoint};
+  const result=card(dismissed);
+  assert.equal(result.nodes.find(n=>n.className.split(' ').includes('card-state')).textContent,'Validating');
+  assert.equal(result.nodes.find(n=>n.className==='next-action'),undefined);
+  assert.equal(result.summary.textContent,checkpoint.summary);
+  assert.equal(grouping.cardAge({...dismissed,updated_at:1},100000),'old');
+  for(const extra of [{needs_attention:true,unhandled_response:true,can_handle_response:true},
+   {status:'needs input',needs_attention:true}]) {
+   const active=card({...dismissed,...extra});
+   assert.equal(active.nodes.find(n=>n.className==='next-action').title,checkpoint.next_action);
+  }
+ }
+});
 test('resumed work hides the old user next step while retaining checkpoint context',()=>{
  const checkpoint={summary:'Waiting for credentials.',next_actor:'user',next_action:'Run aws login.'};
  for(const response_state of ['working','reply']) {
