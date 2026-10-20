@@ -104,8 +104,12 @@ def build_state(snapshot, request, policy=RoutingPolicy(), *, retrieval=None):
     inventory = [t for t in _recent_threads(snapshot, request)
                  if t["thread_id"] not in excluded and not t.get("dispatcher")
                  and (request.get("cwd") is None or t.get("cwd") == request["cwd"])]
+    def lifecycle_prose(t):
+        lc = t.get("context_lifecycle") or {}
+        return " ".join([lc.get("reason", ""), *lc.get("reuse_for", []), *lc.get("fresh_for", [])])
+
     idf = {word: 1 + math.log((len(inventory) + 1) / (1 + sum(
-        word in terms(" ".join(str(t.get(k) or "") for k in ("title", "summary", "original_request")))
+        word in terms(" ".join(str(t.get(k) or "") for k in ("title", "summary", "original_request")) + " " + lifecycle_prose(t))
         for t in inventory))) for word in query | context_terms}
 
     def match(text, words=query):
@@ -122,6 +126,7 @@ def build_state(snapshot, request, policy=RoutingPolicy(), *, retrieval=None):
         score = (3 * match(thread.get("title")) + 2 * match(thread.get("summary"))
                  + match(thread.get("original_request")) + 4 * match(latest_user.get("text"))
                  + 6 * match(route_text) + 2 * match(assigned) + 3 * match(artifacts)
+                 + 2 * match(lifecycle_prose(thread))
                  + max((match(m["text"]) for m in relevant), default=0))
         age = max(0, snapshot["captured_at"] - thread.get("last_work_at", 0))
         # Recency only breaks close matches; it cannot erase relevant old history.
@@ -154,6 +159,16 @@ def build_state(snapshot, request, policy=RoutingPolicy(), *, retrieval=None):
                          recent_routes=[{"request_id": r.get("request_id"), "status": r.get("status"),
                                          **excerpt(r.get("message"), query, 1000)} for r in thread.get("recent_routes", [])[-3:]],
                          file_freshness=thread.get("file_freshness", "unknown"))
+        if isinstance(thread.get("context_lifecycle"), dict):
+            lc = thread["context_lifecycle"]
+            candidate["context_lifecycle"] = {
+                "checkpoint_id": lc.get("checkpoint_id"),
+                "stale": bool(lc.get("stale")),
+                "recommendation": lc.get("recommendation"),
+                "reason": str(lc.get("reason") or "")[:500],
+                "reuse_for": [str(x)[:400] for x in (lc.get("reuse_for") or [])[:8]],
+                "fresh_for": [str(x)[:400] for x in (lc.get("fresh_for") or [])[:8]],
+            }
         candidates.append(candidate)
     found = {c["thread_id"] for c in candidates}
     return {"request": {"message": request["message"][:6000], "truncated": len(request["message"]) > 6000,
@@ -173,9 +188,13 @@ def question_for(state, policy):
                    "when reference resolution, decomposition, or further investigation is necessary.")
     if policy.name == "continuity":
         instruction += (" Prefer explicit continuation, then extension of active work, then the same artifact with useful "
-                        "past decisions. Recently routed assignments count immediately even without a checkpoint. "
-                        "Running and closed conversations remain valid destinations; delivery is separate. Age alone "
-                        "never disqualifies a conversation; rereading changed files does not erase decision history. "
+                        "past decisions. Consult candidate context_lifecycle (recommendation, reason, reuse_for, fresh_for, stale) "
+                        "when present: choose the candidate when the request matches reuse_for or benefits from its retained trajectory; "
+                        "when a candidate owns the prior work/artifacts for this request but its context_lifecycle recommends fresh or "
+                        "matches fresh_for, choose dispatcher so the LLM dispatcher can start a replacement with the saved handover "
+                        "(unless the request is completely unrelated, which is new). Recently routed assignments count immediately "
+                        "even without a checkpoint. Running and closed conversations remain valid destinations; delivery is separate. "
+                        "Age alone never disqualifies a conversation; rereading changed files does not erase decision history. "
                         "Shared technology or generic UI words alone do not establish continuity. Requests about routing "
                         "itself or changing dispatcher behavior belong to dispatcher. Ambiguous 'yes/do that' without "
                         "one supported referent belongs to dispatcher. An explicit fresh-conversation request means new. "

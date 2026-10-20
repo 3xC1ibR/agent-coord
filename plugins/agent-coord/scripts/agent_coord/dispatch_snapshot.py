@@ -25,14 +25,22 @@ def read_snapshot(database_path, *, now=None, cwd=None):
         if not required <= tables:
             raise ValueError("Database does not contain an app conversation inventory")
         browser_columns = {r[1] for r in db.execute("PRAGMA table_info(browser_sessions)")}
+        checkpoint_columns = {r[1] for r in db.execute("PRAGMA table_info(thread_checkpoints)")}
+        thread_columns = {r[1] for r in db.execute("PRAGMA table_info(work_threads)")}
         cwd_source = "b.cwd" if "cwd" in browser_columns else "s.cwd"
+        lifecycle_select = (
+            ", c.id AS lifecycle_checkpoint_id, c.context_lifecycle_json, "
+            + ("c.context_lifecycle_turn_key IS NOT t.turn_key" if "turn_key" in thread_columns and "context_lifecycle_turn_key" in checkpoint_columns else "0")
+            + " AS lifecycle_stale"
+            if "context_lifecycle_json" in checkpoint_columns else ""
+        )
         source = """FROM work_threads t JOIN browser_sessions b ON b.thread_id=t.thread_id
             JOIN sessions s ON s.session_id=t.thread_id"""
         where, params = (f" WHERE {cwd_source}=?", (cwd,)) if cwd is not None else ("", ())
         eligible = "WITH eligible AS (SELECT t.thread_id " + source + where + ") "
         rows = db.execute(f"""SELECT t.thread_id, t.title, t.original_request, t.attention,
             t.created_at, {cwd_source} AS cwd, s.client, s.turn_active, s.write_scope_json,
-            c.summary, c.phase, c.created_at AS checkpoint_at
+            c.summary, c.phase, c.created_at AS checkpoint_at{lifecycle_select}
             {source}
             LEFT JOIN thread_checkpoints c ON c.id=(SELECT MAX(id) FROM thread_checkpoints
                                                    WHERE thread_id=t.thread_id)
@@ -40,6 +48,19 @@ def read_snapshot(database_path, *, now=None, cwd=None):
         inventory = {}
         for row in rows:
             item = dict(row)
+            raw_lifecycle = item.pop("context_lifecycle_json", None)
+            lifecycle_id = item.pop("lifecycle_checkpoint_id", None)
+            lifecycle_stale = item.pop("lifecycle_stale", False)
+            if raw_lifecycle is not None:
+                try:
+                    report = json.loads(raw_lifecycle)
+                    item["context_lifecycle"] = {
+                        "checkpoint_id": lifecycle_id,
+                        "stale": bool(lifecycle_stale),
+                        **{k: report[k] for k in ("recommendation", "reason", "reuse_for", "fresh_for") if k in report},
+                    }
+                except (ValueError, TypeError, KeyError):
+                    pass
             item.update(dispatcher=False, running=bool(item.pop("turn_active")),
                         scopes=json.loads(item.pop("write_scope_json")),
                         messages=[], history_status="missing", wake_paused=False,

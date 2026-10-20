@@ -154,6 +154,31 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("tax identifiers", candidate["relevant_messages"][0]["text"])
         self.assertIn("sidebar", candidate["latest_user_message"]["text"])
 
+    def test_context_lifecycle_is_included_in_candidate_state_and_retrieval_score(self):
+        self.snapshot["threads"][1]["context_lifecycle"] = {
+            "checkpoint_id": 42,
+            "stale": False,
+            "recommendation": "reuse",
+            "reason": "Retained debugging constraints help with related fixes.",
+            "reuse_for": ["Canary rollout healthchecks"],
+            "fresh_for": ["Independent security audit"],
+            "handover": {"confirmed_facts": ["Secret"], "constraints": [], "tried_and_failed": [], "open_questions": []},
+        }
+        state = self.state(message="Adjust canary rollout healthchecks")
+        self.assertEqual(state["candidates"][0]["thread_id"], "helm")
+        lc = state["candidates"][0]["context_lifecycle"]
+        self.assertEqual(lc, {
+            "checkpoint_id": 42,
+            "stale": False,
+            "recommendation": "reuse",
+            "reason": "Retained debugging constraints help with related fixes.",
+            "reuse_for": ["Canary rollout healthchecks"],
+            "fresh_for": ["Independent security audit"],
+        })
+        self.assertNotIn("handover", lc)
+        self.assertNotIn("context_lifecycle", state["candidates"][1])
+        self.assertIn("context_lifecycle", question_for(state, RoutingPolicy())["instructions"])
+
     def test_invalid_policy_rejected(self):
         for kw in ({"candidate_limit": 0}, {"min_confidence": float("nan")}, {"timeout": -1}, {"name": "unknown"}):
             with self.subTest(kw=kw), self.assertRaises(ValueError):
@@ -298,6 +323,40 @@ class SnapshotTests(unittest.TestCase):
             self.assertTrue(result["read_only"])
             self.assertEqual([m["text"] for m in result["threads"][0]["messages"]], ["Support multiple vendors"])
             self.assertEqual(path.read_bytes(), before)
+
+    def test_snapshot_reads_context_lifecycle_and_staleness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "app.sqlite3"
+            report = {
+                "recommendation": "fresh",
+                "reason": "Implementation complete; independent review should start clean.",
+                "reuse_for": ["Small follow-up tweaks"],
+                "fresh_for": ["Independent code review"],
+                "handover": {"confirmed_facts": ["Done"], "constraints": [], "tried_and_failed": [], "open_questions": []},
+            }
+            with closing(sqlite3.connect(path)) as db:
+                db.executescript("""CREATE TABLE browser_sessions(thread_id TEXT);
+                    CREATE TABLE sessions(session_id TEXT,cwd TEXT,client TEXT,turn_active INTEGER,write_scope_json TEXT);
+                    CREATE TABLE work_threads(thread_id TEXT,title TEXT,original_request TEXT,attention TEXT,created_at REAL,turn_key TEXT);
+                    CREATE TABLE thread_checkpoints(id INTEGER,thread_id TEXT,summary TEXT,phase TEXT,created_at REAL,context_lifecycle_json TEXT,context_lifecycle_turn_key TEXT);
+                    INSERT INTO browser_sessions VALUES ('vendor'),('stale_vendor');
+                    INSERT INTO sessions VALUES ('vendor','/project','codex',0,'[]'),('stale_vendor','/project','codex',0,'[]');
+                    INSERT INTO work_threads VALUES ('vendor','Vendor form','Build form','now',1,'turn-1'),('stale_vendor','Stale vendor','Build','now',1,'turn-2');
+                """)
+                db.execute("INSERT INTO thread_checkpoints VALUES (10,'vendor','Done','finished',2,?,'turn-1')", (json.dumps(report),))
+                db.execute("INSERT INTO thread_checkpoints VALUES (11,'stale_vendor','Done','finished',2,?,'turn-1')", (json.dumps(report),))
+                db.commit()
+            snap = read_snapshot(path, now=10)
+            by_id = {t["thread_id"]: t for t in snap["threads"]}
+            self.assertEqual(by_id["vendor"]["context_lifecycle"], {
+                "checkpoint_id": 10,
+                "stale": False,
+                "recommendation": "fresh",
+                "reason": "Implementation complete; independent review should start clean.",
+                "reuse_for": ["Small follow-up tweaks"],
+                "fresh_for": ["Independent code review"],
+            })
+            self.assertTrue(by_id["stale_vendor"]["context_lifecycle"]["stale"])
 
 
 class IndexedSnapshotTests(unittest.TestCase):
