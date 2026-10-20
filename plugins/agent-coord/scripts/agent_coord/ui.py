@@ -379,7 +379,7 @@ def _handler(
             if parsed.path == "/settings":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "settings.html").read_bytes())
                 return
-            if parsed.path in {"/settings.js", "/settings.css"}:
+            if parsed.path in {"/settings.js", "/settings.css", "/context-lifecycle.js", "/context-lifecycle.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -541,6 +541,11 @@ def _handler(
                     limit=20, cursor=query.get("cursor", [None])[0],
                     my_messages=query.get("my_messages") == ["true"],
                     thread_ids=[t["thread_id"] for t in threads]))
+            elif route.startswith("threads/") and route.endswith("/close-when-done"):
+                from .thread_control import ThreadControl
+                thread_id = unquote(route[8:-16])
+                browser_sessions.work_thread(thread_id, history=False)
+                self._json(HTTPStatus.OK, ThreadControl(store).status(thread_id))
             elif route.startswith("threads/") and route.endswith("/close-plan"):
                 from .subagent_close import close_plan
                 self._json(HTTPStatus.OK, close_plan(browser_sessions, unquote(route[8:-11])))
@@ -553,7 +558,11 @@ def _handler(
             elif route.startswith("threads/") and route.endswith("/messages"):
                 self._json(HTTPStatus.OK, {"data": message_timeline(store, unquote(route[8:-9]), browser_sessions.cwd)})
             elif route.startswith("threads/"):
-                self._json(HTTPStatus.OK, browser_sessions.work_thread(unquote(route[8:])))
+                from .thread_control import ThreadControl
+                thread_id = unquote(route[8:])
+                thread = browser_sessions.work_thread(thread_id)
+                thread["close_when_done"] = ThreadControl(store).status(thread_id)
+                self._json(HTTPStatus.OK, thread)
             elif route.startswith("sessions/"):
                 self._json(HTTPStatus.OK, browser_sessions.read(unquote(route[9:])))
             elif route == "events":
@@ -864,6 +873,18 @@ def _handler(
                         if set(body) != {"cwd"}:
                             raise CoordinationError("Moving a thread accepts its destination cwd only.")
                         result = move_work_thread(browser_sessions, thread_id, body["cwd"])
+                    elif route[4] == "close-when-done":
+                        from .thread_control import ThreadControl
+                        if set(body) != {"enabled"} or not isinstance(body["enabled"], bool):
+                            raise CoordinationError("Close when done accepts enabled: true or false.")
+                        with browser_sessions._thread_lock(thread_id):
+                            thread = browser_sessions.work_thread(thread_id, history=False)
+                            if not thread["browser_session"]:
+                                raise CoordinationError("Close when done requires an app conversation.")
+                            control = ThreadControl(store)
+                            result = (control.request_close(thread_id, after_turn=True, success_only=True)
+                                      if body["enabled"] else control.cancel(thread_id))
+                        browser_sessions._publish("browser/changed", {"threadId": thread_id})
                     elif route[4] == "close":
                         from .subagent_close import close_with_subagents
                         result = close_with_subagents(browser_sessions, thread_id, body)

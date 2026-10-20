@@ -6,10 +6,12 @@ import threading
 import uuid
 
 from .store import CoordinationError
+from .attention import AttentionStore, load_config
 from .session_close import is_external_codex_session
 from .workspaces import matches_workspace
 
 RUNTIME_LEASE_SECONDS = 60
+SUCCESS_CHECK_SECONDS = 60
 
 
 def cancel_pending(db, thread_id: str, now: float) -> None:
@@ -46,6 +48,10 @@ class ThreadControl:
                     id TEXT PRIMARY KEY, heartbeat REAL NOT NULL
                 );
             """)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(thread_close_requests)")}
+            if "success_only" not in columns:
+                db.execute("ALTER TABLE thread_close_requests ADD COLUMN success_only INTEGER NOT NULL DEFAULT 0")
 
     def _is_closed(self, thread_id, thread):
         if thread["attention"] != "archived":
@@ -77,18 +83,23 @@ class ThreadControl:
     def _describe(self, db, row):
         result = dict(row)
         result["after_turn"] = bool(result["after_turn"])
+        result["success_only"] = bool(result["success_only"])
         result.pop("owner", None)
         result["waiting_for"] = None
         if result["status"] == "queued":
             session = db.execute("SELECT turn_active FROM sessions WHERE session_id = ?", (result["thread_id"],)).fetchone()
             if result["after_turn"] and session["turn_active"]:
                 result["waiting_for"] = "turn"
+            elif result["success_only"]:
+                result["waiting_for"] = "result"
             else:
                 result["waiting_for"] = "runtime"
             result["message"] = "Queued for the Ribbon Field runtime. If it is not running, start or restart the updated app."
         return result
 
-    def request_close(self, thread_id: str, *, after_turn=False) -> dict:
+    def request_close(self, thread_id: str, *, after_turn=False, success_only=False) -> dict:
+        if success_only and not after_turn:
+            raise CoordinationError("Close when done must wait for a turn.")
         self.store.threads.ensure(thread_id)
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -98,20 +109,22 @@ class ThreadControl:
                 WHERE t.thread_id = ?""", (thread_id,)).fetchone()
             if self._is_closed(thread_id, thread):
                 return {"thread_id": thread_id, "status": "closed", "request_id": None}
+            if success_only and (not thread["turn_active"] or thread["ended_at"] is not None):
+                raise CoordinationError("Start a task before enabling Close when done.")
             if after_turn and thread["turn_active"] and not thread["turn_key"]:
                 raise CoordinationError("The active turn has no recorded identity; cannot safely queue an after-turn close.")
             existing = db.execute("SELECT * FROM thread_close_requests WHERE thread_id = ? AND status IN ('queued', 'closing')", (thread_id,)).fetchone()
             if existing:
-                if bool(existing["after_turn"]) != bool(after_turn):
+                if (bool(existing["after_turn"]), bool(existing["success_only"])) != (bool(after_turn), bool(success_only)):
                     raise CoordinationError("A different close is already pending. Use thread cancel-close before changing its mode.")
                 request_id = existing["request_id"]
             else:
                 request_id = str(uuid.uuid4())
                 now = self.store.clock()
                 db.execute("""INSERT INTO thread_close_requests
-                    (request_id, thread_id, turn_key, after_turn, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'queued', ?, ?)""",
-                    (request_id, thread_id, thread["turn_key"], int(after_turn), now, now))
+                    (request_id, thread_id, turn_key, after_turn, success_only, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)""",
+                    (request_id, thread_id, thread["turn_key"], int(after_turn), int(success_only), now, now))
         # An already-ended terminal needs no running provider to release its
         # declaration and close its thread. Browser archival belongs to its runtime.
         if thread["ended_at"] is not None and not self.store.threads.is_browser_session(thread_id):
@@ -154,7 +167,40 @@ class ThreadControl:
             self._reconcile(db)
             return [dict(row) for row in db.execute("SELECT * FROM thread_close_requests WHERE status = 'queued' ORDER BY created_at, rowid")]
 
-    def claim(self, request_id: str, owner: str) -> bool:
+    def _success_state(self, db, row):
+        """Require a successful delivery, rather than merely a stopped provider.
+
+        Return None while a configured classifier is still checking the reply;
+        an explanation keeps uncertain or incomplete work open.
+        """
+        completion = db.execute("SELECT * FROM turn_completions WHERE thread_id = ? AND turn_key = ?",
+                                (row["thread_id"], row["turn_key"])).fetchone()
+        if not completion or completion["status"] != "completed":
+            return "The turn did not complete successfully."
+        turn = db.execute("SELECT turn_started_at FROM work_threads WHERE thread_id = ?", (row["thread_id"],)).fetchone()
+        checkpoint = db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1",
+                                (row["thread_id"],)).fetchone()
+        stale = bool(checkpoint and turn["turn_started_at"] and checkpoint["refreshed_at"] < turn["turn_started_at"])
+        current = checkpoint if not stale else None
+        if current and current["next_actor"] != "nobody":
+            return "The task has a required next step."
+        classification = AttentionStore.read(db, {"turn_completion": completion,
+            "checkpoint": checkpoint, "checkpoint_stale": stale})
+        if classification:
+            if classification["status"] == "pending":
+                return (None if self.store.clock() - completion["completed_at"] < SUCCESS_CHECK_SECONDS
+                        else "Successful task completion could not be confirmed.")
+            if classification["status"] == "classified" and classification["choice"] == "done":
+                return ""
+            return "The reply needs attention or successful completion could not be confirmed."
+        if load_config(self.store.database_path):
+            return (None if self.store.clock() - completion["completed_at"] < SUCCESS_CHECK_SECONDS
+                    else "Successful task completion could not be confirmed.")
+        if current and current["phase"] == "finished":
+            return ""
+        return "Successful task completion could not be confirmed."
+
+    def claim(self, request_id: str, owner: str, *, pending_input=False) -> bool:
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             self._reconcile(db)
@@ -162,11 +208,21 @@ class ThreadControl:
                 JOIN sessions s ON s.session_id = r.thread_id WHERE request_id = ?""", (request_id,)).fetchone()
             if not row or row["status"] != "queued":
                 return False
+            if row["success_only"] and (pending_input or row["turn_active"]):
+                return False
             if row["after_turn"] and row["ended_at"] is None:
                 if row["turn_active"]:
                     return False
                 if row["turn_key"] and not db.execute("SELECT 1 FROM turn_completions WHERE thread_id = ? AND turn_key = ?",
                                                       (row["thread_id"], row["turn_key"])).fetchone():
+                    return False
+            if row["success_only"]:
+                reason = self._success_state(db, row)
+                if reason is None:
+                    return False
+                if reason:
+                    db.execute("UPDATE thread_close_requests SET status = 'cancelled', error = ?, updated_at = ? WHERE request_id = ?",
+                               (reason, self.store.clock(), request_id))
                     return False
             return bool(db.execute("""UPDATE thread_close_requests SET status = 'closing', owner = ?, updated_at = ?
                 WHERE request_id = ? AND status = 'queued'""", (owner, self.store.clock(), request_id)).rowcount)
@@ -217,7 +273,8 @@ class ThreadControlWorker:
                     continue
                 if request["after_turn"] and running:
                     continue
-                if not self.control.claim(request["request_id"], self.owner):
+                pending_input = bool(sessions.pending_requests(thread_id)) if browser else False
+                if not self.control.claim(request["request_id"], self.owner, pending_input=pending_input):
                     continue
                 try:
                     sessions.close_work_thread(thread_id)
@@ -225,6 +282,9 @@ class ThreadControlWorker:
                     self.control.complete(request["request_id"], error=str(exc))
                 else:
                     self.control.complete(request["request_id"])
+                    if request["success_only"]:
+                        sessions._publish("thread/closedWhenDone", {"threadId": thread_id,
+                                          "requestId": request["request_id"]})
 
     def _run(self):
         while not self.stopped.is_set() and not self.sessions.closed:

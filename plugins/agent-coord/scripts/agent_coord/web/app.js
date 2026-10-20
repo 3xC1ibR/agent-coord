@@ -1041,6 +1041,7 @@ async function refreshDetail() {
     const detail = work.browser_session ? await api(sessionPath(id)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
       coordinationMessages: (await api(threadPath(id) + "/messages")).data};
     detail.work_thread ||= work;
+    detail.close_when_done = work.close_when_done;
     detail.work_thread = reconcileAttentionSnapshot(detail.work_thread, attentionRevision);
     const changed = revision !== entry.revision;
     // A background snapshot must not erase newer streamed messages or approvals.
@@ -1074,6 +1075,7 @@ async function refreshThread() {
   const thread = await api(threadPath(id));
   if (id !== state.selected || !state.detail) return;
   const previous = state.detail.work_thread;
+  if (!state.closeWhenDoneSaving?.has(id)) state.detail.close_when_done = thread.close_when_done;
   const forksChanged = JSON.stringify([previous.forked_from, previous.forked_from_turn_id, previous.forked_sessions]) !==
     JSON.stringify([thread.forked_from, thread.forked_from_turn_id, thread.forked_sessions]);
   state.detail.work_thread = reconcileAttentionSnapshot(thread, revision); renderThread(); renderStatus();
@@ -1109,6 +1111,7 @@ function renderThread() {
     if (checkpoint.next_action) $("checkpoint").append(node("p", "Next · " + ({user: "You", agent: "Agent", external: "Waiting externally"}[checkpoint.next_actor] || "") + ": " + checkpoint.next_action, "checkpoint-next"));
   }
   if (work.checkpoint_stale) $("checkpoint").append(node("p", "This checkpoint predates the latest turn. Review the conversation for newer work.", "stale-checkpoint"));
+  globalThis.agentCoordContextLifecycle?.render($("checkpoint"), work, {sameThread, opened});
   const links = node("div", null, "thread-links");
   for (const link of work.links) {
     const row = node("div", null, "thread-link");
@@ -1277,6 +1280,7 @@ function renderStatus() {
   $("stop").hidden = !running;
   $("close-thread").textContent = archived ? "Reopen" : running || ["running", "needs input"].includes(work?.status) ? "Stop and close" : "Close thread";
   $("close-thread").disabled = !state.detail || state.closing.has(state.selected);
+  renderCloseWhenDone();
   $("fork-thread").hidden = !["codex", "claude"].includes(work?.client);
   $("fork-thread").disabled = state.detailRefreshing || !work?.can_fork || active || !!state.detail?.requests?.length || state.forking || state.closing.has(state.selected);
   $("park").disabled = !state.detail || archived || state.closing.has(state.selected);
@@ -1294,6 +1298,22 @@ function renderStatus() {
   state.mentions?.render();
   state.resizeComposer?.();
   if (state.paneMode) globalThis.agentCoordPane?.updateStatus();
+}
+function renderCloseWhenDone() {
+  const button = $("close-when-done"), detail = state.detail, work = detail?.work_thread;
+  const request = detail?.close_when_done;
+  const pending = ["queued", "closing"].includes(request?.status);
+  const armed = !!request?.success_only && pending;
+  const kept = request?.success_only && ["cancelled", "failed"].includes(request.status) && !detail?.running;
+  button.hidden = !work?.browser_session || work.attention === "archived";
+  button.textContent = request?.status === "closing" && armed ? "Closing…" : armed ? "Close when done ✓" : kept ? "Kept open" : "Close when done";
+  button.setAttribute?.("aria-pressed", String(armed));
+  button.disabled = !detail || state.detailRefreshing || state.closing.has(state.selected) ||
+    state.closeWhenDoneSaving?.has(state.selected) || request?.status === "closing" || pending && !armed || !armed && !detail.running;
+  button.title = kept ? "Thread kept open: " + (request.error || "Automatic closure was cancelled.") : armed
+    ? "Close after successful completion. Click to cancel. New input cancels automatic closure."
+    : detail?.running ? "Close after successful completion; keep open for blockers, approvals, or required review."
+    : "Start a task, then enable automatic closure after successful completion.";
 }
 function renderTurnElapsed(now = Date.now() / 1000) {
   const element = $("turn-elapsed"), detail = state.detail, work = detail?.work_thread;
@@ -1690,6 +1710,7 @@ function scheduleTimelineRender() {
   }, 50);
 }
 function applyEvent(event) {
+  if (event.method === "thread/closedWhenDone") { threadClosedWhenDone(event.params.threadId).catch(showError); return; }
   const cached = state.conversations?.get(event.params.threadId);
   if (cached) cached.revision++;
   if (event.method === "browser/changed" && event.params.projectCwd) {
@@ -2419,6 +2440,34 @@ function composerKeydown(event) {
 $("message").onkeydown = composerKeydown;
 $("queue").onclick = () => action(() => sendMessage("queue"));
 $("stop").onclick = () => action(async () => { await api(sessionPath(state.selected) + "/interrupt", {}); }, $("stop"));
+async function toggleCloseWhenDone() {
+  const id = state.selected;
+  if (!id || !state.detail || state.closeWhenDoneSaving?.has(id)) return;
+  state.closeWhenDoneSaving ||= new Set(); state.closeWhenDoneSaving.add(id);
+  const request = state.detail.close_when_done;
+  const enabled = !(request?.success_only && ["queued", "closing"].includes(request.status));
+  renderStatus();
+  try {
+    const result = await api(threadPath(id) + "/close-when-done", {enabled});
+    const entry = state.conversations?.get(id);
+    if (entry) entry.revision++;
+    if (id === state.selected && state.detail) state.detail.close_when_done = result;
+  } finally { state.closeWhenDoneSaving.delete(id); renderStatus(); }
+}
+async function threadClosedWhenDone(id) {
+  // The host handles the shared tab strip for pane documents.
+  if (state.paneMode) return;
+  const thread = await api(threadPath(id));
+  if (thread.attention !== "archived") return;
+  state.sessions = state.sessions.filter(item => item.thread_id !== id);
+  state.viewThreads = state.viewThreads?.filter(item => item.thread_id !== id);
+  state.threadActions?.notify("close:" + id, "Thread closed after successful completion");
+  await state.threadTabs?.close(id, {force: true});
+  if (state.selected === id) goHome();
+  renderList();
+  refreshList().catch(showError);
+}
+$("close-when-done").onclick = () => action(toggleCloseWhenDone);
 async function toggleThreadClosed(thread = state.detail?.work_thread, onSuccess = () => {}) {
   const id = thread?.thread_id || state.selected;
   if (!id || !thread || state.closing.has(id) || state.confirmingCloses?.has(id)) return;

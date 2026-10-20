@@ -34,10 +34,173 @@ class ThreadControlTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    def complete_turn(self, thread_id):
+    def complete_turn(self, thread_id, status="completed"):
         turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
-        turn["status"] = "completed"
+        turn["status"] = status
         self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
+
+    def arm_success_close(self):
+        thread_id = self.create()
+        self.sessions.send(thread_id, {"message": "Implement the fix."})
+        self.control.request_close(thread_id, after_turn=True, success_only=True)
+        return thread_id
+
+    def checkpoint_done(self, thread_id, **fields):
+        self.store.threads.checkpoint(thread_id, {"phase": "finished", "summary": "Implemented and tested.",
+                                                 "next_step": None, **fields})
+
+    def classify_reply(self, thread_id, choice):
+        thread = self.store.threads.get(thread_id)
+        token = self.store.threads.attention.claim(thread)
+        self.store.threads.attention.save(thread, token, result={"choice": choice, "confidence": .99,
+                                                              "probabilities": {choice: .99}})
+
+    def test_close_when_done_waits_for_success_and_preserves_history(self):
+        thread_id = self.arm_success_close()
+        receipt = self.control.status(thread_id)
+        self.assertTrue(receipt["success_only"])
+        self.assertEqual(ThreadControl(CoordinationStore(self.root / "coord.sqlite3")).status(thread_id), receipt)
+        self.checkpoint_done(thread_id)
+        self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "queued")
+        self.complete_turn(thread_id)
+        self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "closed")
+        self.assertEqual(self.store.threads.get(thread_id)["original_request"], "Implement the fix.")
+        self.assertFalse(any(method == "turn/interrupt" for method, _ in self.sessions.rpc.calls))
+
+    def test_close_when_done_keeps_failed_and_interrupted_turns_open(self):
+        for status in ("failed", "interrupted"):
+            with self.subTest(status=status):
+                thread_id = self.arm_success_close()
+                self.checkpoint_done(thread_id)
+                self.complete_turn(thread_id, status)
+                self.worker.process_once()
+                self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
+                self.assertEqual(self.store.threads.get(thread_id)["attention"], "now")
+
+    def test_close_when_done_keeps_required_actions_and_unconfirmed_results_open(self):
+        for fields in ({}, {"phase": "implementation"},
+                       *({"next_step": {"actor": actor, "action": "Required action."}}
+                         for actor in ("user", "external", "agent"))):
+            with self.subTest(fields=fields):
+                thread_id = self.arm_success_close()
+                if fields:
+                    self.checkpoint_done(thread_id, **fields)
+                self.complete_turn(thread_id)
+                self.worker.process_once()
+                self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
+                self.assertEqual(self.store.threads.get(thread_id)["attention"], "now")
+
+    def test_close_when_done_does_not_trust_a_previous_turns_finished_checkpoint(self):
+        thread_id = self.create()
+        self.checkpoint_done(thread_id)
+        self.sessions.send(thread_id, {"message": "Implement another fix."})
+        self.control.request_close(thread_id, after_turn=True, success_only=True)
+        self.complete_turn(thread_id)
+        self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
+
+    def test_close_when_done_waits_for_pending_approval_even_after_completion(self):
+        thread_id = self.arm_success_close()
+        self.checkpoint_done(thread_id)
+        self.sessions._event({"id": 123, "method": "item/commandExecution/requestApproval",
+                              "params": {"threadId": thread_id}})
+        self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "queued")
+        self.complete_turn(thread_id)
+        # Providers normally clear approvals on completion; protect against an
+        # outstanding request reported by a runtime during that transition.
+        with patch.object(self.sessions, "pending_requests", return_value=[{"id": 123}]):
+            self.worker.process_once()
+            self.assertEqual(self.store.threads.get(thread_id)["attention"], "now")
+            self.assertEqual(self.control.status(thread_id)["status"], "queued")
+
+    def test_close_when_done_waits_for_classification_and_respects_blocked_reply(self):
+        thread_id = self.arm_success_close()
+        self.checkpoint_done(thread_id)
+        self.complete_turn(thread_id)
+        with patch("agent_coord.thread_control.load_config", return_value={"enabled": True}):
+            self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "queued")
+        self.classify_reply(thread_id, "blocked")
+        self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
+        self.assertEqual(self.store.threads.get(thread_id)["attention"], "now")
+
+    def test_close_when_done_accepts_classified_success_without_checkpoint(self):
+        thread_id = self.arm_success_close()
+        self.complete_turn(thread_id)
+        self.classify_reply(thread_id, "done")
+        self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "closed")
+
+    def test_close_when_done_keeps_review_update_and_uncertain_classification_open(self):
+        for choice in ("review", "update", "findings"):
+            with self.subTest(choice=choice):
+                thread_id = self.arm_success_close()
+                self.checkpoint_done(thread_id)
+                self.complete_turn(thread_id)
+                self.classify_reply(thread_id, choice)
+                self.worker.process_once()
+                self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
+        thread_id = self.arm_success_close()
+        self.checkpoint_done(thread_id)
+        self.complete_turn(thread_id)
+        thread = self.store.threads.get(thread_id)
+        token = self.store.threads.attention.claim(thread)
+        self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "queued")
+        self.store.threads.attention.save(thread, token, error="context_unavailable")
+        self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
+
+    def test_close_when_done_can_be_disabled_and_new_input_cancels_it(self):
+        for action in ("cancel", "steer", "queue"):
+            with self.subTest(action=action):
+                thread_id = self.arm_success_close()
+                self.checkpoint_done(thread_id)
+                if action == "cancel":
+                    self.control.cancel(thread_id)
+                elif action == "steer":
+                    self.sessions.send(thread_id, {"message": "Another thing."})
+                else:
+                    self.sessions.queue.enqueue(thread_id, {"message": "Follow up."})
+                self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
+                self.complete_turn(thread_id)
+                self.worker.process_once()
+                self.assertEqual(self.store.threads.get(thread_id)["attention"], "now")
+
+    def test_close_when_done_requires_active_turn_and_does_not_replace_explicit_close(self):
+        thread_id = self.create()
+        with self.assertRaisesRegex(CoordinationError, "Start a task"):
+            self.control.request_close(thread_id, after_turn=True, success_only=True)
+        self.sessions.send(thread_id, {"message": "Fix it."})
+        self.control.request_close(thread_id, after_turn=True)
+        with self.assertRaisesRegex(CoordinationError, "different close"):
+            self.control.request_close(thread_id, after_turn=True, success_only=True)
+
+    def test_close_when_done_keeps_thread_open_if_classifier_never_finishes(self):
+        thread_id = self.arm_success_close()
+        self.checkpoint_done(thread_id)
+        self.complete_turn(thread_id)
+        with self.store._connection() as db:
+            db.execute("UPDATE turn_completions SET completed_at = completed_at - 61 WHERE thread_id = ?", (thread_id,))
+        with patch("agent_coord.thread_control.load_config", return_value={"enabled": True}):
+            self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
+        self.assertEqual(self.store.threads.get(thread_id)["attention"], "now")
+
+    def test_upgrading_existing_close_requests_preserves_their_explicit_behavior(self):
+        with self.store._connection() as db:
+            db.execute("ALTER TABLE thread_close_requests DROP COLUMN success_only")
+        control = ThreadControl(self.store)
+        thread_id = self.create()
+        self.sessions.send(thread_id, {"message": "Working."})
+        control.request_close(thread_id, after_turn=True)
+        self.complete_turn(thread_id, "failed")
+        self.worker.process_once()
+        self.assertEqual(control.status(thread_id)["status"], "closed")
 
     def test_cli_after_turn_is_durable_and_preserves_history_checkpoint_and_other_threads(self):
         thread_id, other = self.create(), self.create()
@@ -246,3 +409,41 @@ class ThreadControlTests(unittest.TestCase):
         while self.control.status(thread_id)["status"] == "closing" and time.monotonic() < deadline:
             threading.Event().wait(.02)
         self.assertEqual(self.cli("close-status", thread_id)["status"], "closed")
+
+
+class CloseWhenDoneHTTPTests(unittest.TestCase):
+    import test_ui as _http
+    setUp = _http.BrowserHTTPTests.setUp
+    stop_server = _http.BrowserHTTPTests.stop_server
+    request = _http.BrowserHTTPTests.request
+
+    def test_enable_read_and_cancel_without_submitting_a_model_message(self):
+        thread_id = self.sessions.create({"name": "Fix"})["session"]["thread_id"]
+        self.sessions.send(thread_id, {"message": "Fix it."})
+        path = "/api/browser/threads/" + thread_id + "/close-when-done"
+        self.assertEqual(self.request(path)[1]["status"], "none")
+        status, result = self.request(path, {"enabled": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(result["success_only"])
+        self.assertEqual(result["waiting_for"], "turn")
+        self.assertEqual(self.request(path)[1]["request_id"], result["request_id"])
+        self.assertEqual(self.request(path, {"enabled": True})[1]["request_id"], result["request_id"])
+        self.assertEqual(self.request(path, {"enabled": False})[1]["status"], "cancelled")
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
+
+    def test_endpoint_rejects_invalid_settings_and_requires_csrf(self):
+        thread_id = self.sessions.create({"name": "Fix"})["session"]["thread_id"]
+        self.sessions.send(thread_id, {"message": "Fix it."})
+        path = "/api/browser/threads/" + thread_id + "/close-when-done"
+        for body in ({}, {"enabled": "true"}, {"enabled": True, "extra": True}):
+            self.assertEqual(self.request(path, body)[0], 400)
+        self.assertEqual(self.request(path, {"enabled": True}, {"X-Agent-Coord-Token": ""})[0], 403)
+
+    def test_endpoint_requires_an_active_app_turn_and_restricts_workspace(self):
+        thread_id = self.sessions.create({"name": "Fix"})["session"]["thread_id"]
+        path = "/api/browser/threads/" + thread_id + "/close-when-done"
+        self.assertEqual(self.request(path, {"enabled": True})[0], 400)
+        self.store.register(session_id="outside", client="codex", cwd=str(self.root.parent))
+        outside = "/api/browser/threads/outside/close-when-done"
+        self.assertEqual(self.request(outside)[0], 400)
+        self.assertEqual(self.request(outside, {"enabled": True})[0], 400)
