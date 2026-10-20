@@ -232,6 +232,11 @@ test("aggregate cards omit group labels, and groups keep the level when their cu
   c.selectGroup("B"); assert.deepEqual(c.ids(), []); assert(c.page().querySelector(".ws-empty"));
   c.selectLevel(2); assert.deepEqual(c.ids(), ["b"]);
 });
+test("map cells count every idle thread, read or unread", () => {
+  const c = setup(); c.render([thread("a", {project_id: "a", project_name: "A"}), thread("b", {project_id: "a", project_name: "A"})]);
+  const idle = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === "group:a" && n.dataset.level === "2");
+  assert.equal(idle.textContent, "2"); assert.equal(idle.title, "A · Idle · 2 idle");
+});
 test("top tabs and map cells share group selection without resetting the level", () => {
   const list = [thread("a", {project_id: "a", project_name: "A"}), thread("b", {project_id: "b", project_name: "B"})];
   const changes = [], c = setup({onGroupChange: id => changes.push(id)});

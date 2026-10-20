@@ -1,4 +1,6 @@
-.working-set { position: relative; width: 100%; height: max(520px, calc(100dvh - 190px)); min-height: 0; overflow: hidden; }
+/* Fill the overview above the dispatcher bar so the map stays in view when it opens. */
+.welcome:has(> .working-set:not([hidden])) { display: flex; flex-direction: column; }
+.working-set { position: relative; width: 100%; flex: 1 0 0; min-height: 320px; overflow: hidden; }
 .working-set[hidden] { display: none; }
 .working-set .ws-viewport, .working-set .ws-vtrack, .working-set .ws-htrack { position: absolute; inset: 0; }
 .working-set .ws-viewport { overflow: hidden; }
@@ -52,7 +54,6 @@
   .working-set .ws-phase-board { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
 }
 @media (max-width: 720px) {
-  .working-set { height: max(450px, calc(100dvh - 150px)); }
   .working-set .ws-minimap { right: 4px; bottom: 8px; width: calc(100% - 8px); padding: 8px; }
   .working-set .ws-labels { flex-basis: 144px; }
   .working-set .ws-page { padding-bottom: 245px; }

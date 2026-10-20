@@ -179,12 +179,12 @@ const WorkingSet = (() => {
         const b = button(label, "ws-level", () => go(pageIdx, n)); b.setAttribute("aria-pressed", String(n === level)); labels.append(b);
         const cells = el("div", "ws-cells");
         groups.forEach((g, i) => {
-          const count = g.levels[n].length, badge = n === 0 ? g.levels[0].filter(t => columnOf(t) !== "working").length : n === 1 ? count : 0;
+          const count = g.levels[n].length, badge = n === 0 ? g.levels[0].filter(t => columnOf(t) !== "working").length : count;
           const cell = button(badge ? String(badge) : count ? "·" : "", "ws-cell", () => go(i, n));
           cell.dataset.group = g.key; cell.dataset.level = String(n);
           cell.classList.toggle("ws-here", i === pageIdx); cell.classList.toggle("ws-selected", i === pageIdx && n === level);
           cell.classList.toggle("ws-needs", n === 0 && badge > 0);
-          cell.title = g.name + " · " + label + (badge ? " · " + badge + (n === 1 ? " unread" : " needing attention") : !count ? " · Empty" : "");
+          cell.title = g.name + " · " + label + (badge ? " · " + badge + [" needing attention", " unread", " idle"][n] : !count ? " · Empty" : "");
           cell.setAttribute("aria-label", cell.title); cell.setAttribute("aria-current", String(i === pageIdx && n === level)); cells.append(cell);
         }); matrix.append(cells);
       });
