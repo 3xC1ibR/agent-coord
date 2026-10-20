@@ -2347,7 +2347,7 @@ function setupAgentTree() {
       if (tab?.tree_root && this.root !== tab.tree_root) state.threadTabs.setTree(this.root, tab.tree_open);
       if (this.root && this.tree.nodes.has(this.root)) panel.update([...this.tree.nodes.values()], this.root, state.selected);
       const button = $("show-agent-tree"), members = this.tree.family(this.root);
-      button.hidden = !state.selected || isSessionDraft();
+      button.hidden = !state.selected || isSessionDraft() || this.childCount(state.selected) === 0;
       button.textContent = "Agents" + (members.length ? " · " + members.length : "");
       button.title = "Show the full agent tree";
     },
