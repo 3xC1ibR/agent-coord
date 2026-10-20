@@ -22,12 +22,6 @@
 .working-set .ws-attention-board .ws-empty { padding: 8px 0; }
 .working-set .thread-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 14px; align-items: start; }
 .working-set .ws-card { min-width: 0; overflow-wrap: anywhere; }
-.working-set .thread-card > .session { padding: 14px 16px 11px; }
-.working-set .attention-card > .session { padding-right: 70px; }
-.working-set .session-title { font-size: 14px; font-weight: 550; line-height: 1.4; }
-.working-set .thread-snippet { font-size: 12px; line-height: 1.65; -webkit-line-clamp: 2; }
-.working-set .session.card-age-old .thread-snippet, .working-set .session.card-age-settled .thread-snippet { display: -webkit-box; }
-.working-set .session.card-age-old .next-action, .working-set .session.card-age-settled .next-action { display: flex; }
 .working-set .ws-card-links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 2px 0; }
 .working-set .ws-card-links button { max-width: 100%; text-align: left; font-size: 10px; padding: 3px 7px; color: var(--muted); }
 .working-set .ws-card-links .ws-parent { flex-basis: 100%; border: 0; padding-inline: 0; }

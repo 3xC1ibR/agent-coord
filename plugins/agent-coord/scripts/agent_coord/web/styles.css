@@ -786,59 +786,59 @@ body.mobile-chat .mobile-thread-sheet .session-statusbar { display: flex; paddin
   #overview > .phase-board, #overview > .organization-board { grid-column: 1 / -1; }
   #overview:has(> .pinned) > .attention-panel { padding-bottom: 0; border-bottom: 0; }
 }
-#overview .thread-card { --card-control-bg: var(--surface); position: relative; display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; border: 1px solid var(--line-strong, var(--line)); border-radius: 8px; background: var(--card-control-bg); }
-#overview .thread-card:hover, #overview .thread-card:focus-within, #overview .thread-card:has(.card-more[aria-expanded="true"]) { --card-control-bg: var(--hover-bg, var(--tint)); }
-#overview .thread-card.response-unread { border-color: var(--hover-line, var(--muted)); }
-#overview .thread-card:has(> .session.selected) { border-color: var(--hover-line, var(--muted)); }
-#overview .thread-card > .session { min-height: 0; margin: 0; padding: 16px; border: 0; border-radius: 8px; background: transparent; box-shadow: none; }
-#overview .thread-card > .session:hover { background: transparent; }
-#overview .thread-card .session-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-height: 32px; padding: 0; font-size: 16px; font-weight: 650; line-height: 1.4; letter-spacing: -.015em; }
-#overview .thread-card .session-title > span:first-child { min-width: 0; overflow-wrap: anywhere; }
-#overview .card-state { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500; line-height: 1.5; letter-spacing: 0; color: var(--muted); }
-#overview .card-state::before { content: ""; flex: none; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-#overview .card-state.waiting { color: var(--warm); }
-#overview .card-state.failed { color: var(--danger, var(--warm)); }
-#overview .thread-card .work-summary { max-width: 70ch; margin: 6px 0 0; font-size: 14px; font-weight: 400; line-height: 1.5; color: var(--muted); -webkit-line-clamp: 2; }
-#overview .thread-card .card-meta { flex-wrap: wrap; gap: 8px; margin-top: 8px; padding: 0; font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-#overview .thread-card .card-time { margin-left: 0; }
-#overview .thread-card .next-action { max-width: 70ch; margin-top: 8px; padding-top: 0; border: 0; font-size: 13px; line-height: 1.5; color: var(--ink); }
-#overview .thread-card .next-copy { display: block; overflow: visible; -webkit-line-clamp: unset; }
-#overview .thread-card .stale-checkpoint { display: block; margin-top: 6px; }
-#overview .thread-card > .card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 0 12px 12px; border: 0; border-radius: 0; background: transparent; }
-#overview .card-end-actions { margin-left: 0; }
+:is(#overview, #working-set-overview) .thread-card { --card-control-bg: var(--surface); position: relative; display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; border: 1px solid var(--line-strong, var(--line)); border-radius: 8px; background: var(--card-control-bg); }
+:is(#overview, #working-set-overview) .thread-card:hover, :is(#overview, #working-set-overview) .thread-card:focus-within, :is(#overview, #working-set-overview) .thread-card:has(.card-more[aria-expanded="true"]) { --card-control-bg: var(--hover-bg, var(--tint)); }
+:is(#overview, #working-set-overview) .thread-card.response-unread { border-color: var(--hover-line, var(--muted)); }
+:is(#overview, #working-set-overview) .thread-card:has(> .session.selected) { border-color: var(--hover-line, var(--muted)); }
+:is(#overview, #working-set-overview) .thread-card > .session { min-height: 0; margin: 0; padding: 16px; border: 0; border-radius: 8px; background: transparent; box-shadow: none; }
+:is(#overview, #working-set-overview) .thread-card > .session:hover { background: transparent; }
+:is(#overview, #working-set-overview) .thread-card .session-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-height: 32px; padding: 0; font-size: 16px; font-weight: 650; line-height: 1.4; letter-spacing: -.015em; }
+:is(#overview, #working-set-overview) .thread-card .session-title > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+:is(#overview, #working-set-overview) .card-state { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500; line-height: 1.5; letter-spacing: 0; color: var(--muted); }
+:is(#overview, #working-set-overview) .card-state::before { content: ""; flex: none; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+:is(#overview, #working-set-overview) .card-state.waiting { color: var(--warm); }
+:is(#overview, #working-set-overview) .card-state.failed { color: var(--danger, var(--warm)); }
+:is(#overview, #working-set-overview) .thread-card .work-summary { max-width: 70ch; margin: 6px 0 0; font-size: 14px; font-weight: 400; line-height: 1.5; color: var(--muted); -webkit-line-clamp: 2; }
+:is(#overview, #working-set-overview) .thread-card .card-meta { flex-wrap: wrap; gap: 8px; margin-top: 8px; padding: 0; font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+:is(#overview, #working-set-overview) .thread-card .card-time { margin-left: 0; }
+:is(#overview, #working-set-overview) .thread-card .next-action { max-width: 70ch; margin-top: 8px; padding-top: 0; border: 0; font-size: 13px; line-height: 1.5; color: var(--ink); }
+:is(#overview, #working-set-overview) .thread-card .next-copy { display: block; overflow: visible; -webkit-line-clamp: unset; }
+:is(#overview, #working-set-overview) .thread-card .stale-checkpoint { display: block; margin-top: 6px; }
+:is(#overview, #working-set-overview) .thread-card > .card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 0 12px 12px; border: 0; border-radius: 0; background: transparent; }
+:is(#overview, #working-set-overview) .card-end-actions { margin-left: 0; }
 /* Overlay controls leave the title's wrapping and card height unchanged on reveal. */
-#overview .card-title-actions { position: absolute; top: 10px; right: 10px; display: flex; gap: 2px; background: var(--card-control-bg); border-radius: 4px; opacity: 0; pointer-events: none; }
-#overview .card-title-actions::before { content: ""; position: absolute; inset: 0 100% 0 -28px; background: linear-gradient(to right, transparent, var(--card-control-bg)); pointer-events: none; }
-#overview .card-title-actions button { flex: none; width: 36px; height: 36px; padding: 0; border: 0; background: transparent; color: var(--muted); }
-#overview .card-title-actions .card-close { position: static; font-size: 20px; }
-#overview .card-title-actions .card-more { font-size: 20px; line-height: 1; }
-#overview .card-title-actions button:hover:not(:disabled) { color: var(--ink); background: var(--tint); }
-#overview .card-title-actions .card-close:hover:not(:disabled) { color: var(--warm); background: var(--warm-tint); }
-#overview .thread-card:hover > .card-title-actions, #overview .thread-card:focus-within > .card-title-actions,
-#overview .thread-card:has(.card-more[aria-expanded="true"]) > .card-title-actions { opacity: 1; pointer-events: auto; }
-#overview .card-actions button[data-action="handle"], #overview .card-actions button[data-action="resume-snooze"] { min-height: 28px; font-size: 12px; }
-#overview .thread-card > .agent-origin { grid-column: 1 / -1; width: auto; min-width: 0; max-width: calc(100% - 32px); margin: 0 16px 12px; padding: 0; font-size: 12px; line-height: 1.5; }
-#overview .attention-card { grid-template-columns: minmax(0, 1fr); }
-#overview .attention-card > .card-actions { padding: 12px 12px 0 0; }
+:is(#overview, #working-set-overview) .card-title-actions { position: absolute; top: 10px; right: 10px; display: flex; gap: 2px; background: var(--card-control-bg); border-radius: 4px; opacity: 0; pointer-events: none; }
+:is(#overview, #working-set-overview) .card-title-actions::before { content: ""; position: absolute; inset: 0 100% 0 -28px; background: linear-gradient(to right, transparent, var(--card-control-bg)); pointer-events: none; }
+:is(#overview, #working-set-overview) .card-title-actions button { flex: none; width: 36px; height: 36px; padding: 0; border: 0; background: transparent; color: var(--muted); }
+:is(#overview, #working-set-overview) .card-title-actions .card-close { position: static; font-size: 20px; }
+:is(#overview, #working-set-overview) .card-title-actions .card-more { font-size: 20px; line-height: 1; }
+:is(#overview, #working-set-overview) .card-title-actions button:hover:not(:disabled) { color: var(--ink); background: var(--tint); }
+:is(#overview, #working-set-overview) .card-title-actions .card-close:hover:not(:disabled) { color: var(--warm); background: var(--warm-tint); }
+:is(#overview, #working-set-overview) .thread-card:hover > .card-title-actions, :is(#overview, #working-set-overview) .thread-card:focus-within > .card-title-actions,
+:is(#overview, #working-set-overview) .thread-card:has(.card-more[aria-expanded="true"]) > .card-title-actions { opacity: 1; pointer-events: auto; }
+:is(#overview, #working-set-overview) .card-actions button[data-action="handle"], :is(#overview, #working-set-overview) .card-actions button[data-action="resume-snooze"] { min-height: 28px; font-size: 12px; }
+:is(#overview, #working-set-overview) .thread-card > .agent-origin { grid-column: 1 / -1; width: auto; min-width: 0; max-width: calc(100% - 32px); margin: 0 16px 12px; padding: 0; font-size: 12px; line-height: 1.5; }
+:is(#overview, #working-set-overview) .attention-card { grid-template-columns: minmax(0, 1fr); }
+:is(#overview, #working-set-overview) .attention-card > .card-actions { padding: 12px 12px 0 0; }
 #overview .attention-panel .thread-cards { gap: 8px; }
-#overview .phase-board .thread-card .session-title { font-size: 14px; }
-#overview .phase-board .thread-card > .session { padding: 12px; }
-#overview .phase-board .thread-card > .card-actions { flex-wrap: wrap; padding-inline: 8px; }
+:is(#overview, #working-set-overview) :is(.phase-board, .ws-phase-board) .thread-card .session-title { font-size: 14px; }
+:is(#overview, #working-set-overview) :is(.phase-board, .ws-phase-board) .thread-card > .session { padding: 12px; }
+:is(#overview, #working-set-overview) :is(.phase-board, .ws-phase-board) .thread-card > .card-actions { flex-wrap: wrap; padding-inline: 8px; }
 @container (max-width: 680px) {
-  #overview .attention-card { grid-template-columns: minmax(0, 1fr); }
-  #overview .attention-card > .card-actions { padding: 0 12px 12px; }
-  #overview .thread-card > .session { padding: 12px; }
-  #overview .thread-card > .agent-origin { margin-inline: 12px; max-width: calc(100% - 24px); }
-  #overview .thread-card .card-actions button { min-width: 44px; min-height: 44px; }
+  :is(#overview, #working-set-overview) .attention-card { grid-template-columns: minmax(0, 1fr); }
+  :is(#overview, #working-set-overview) .attention-card > .card-actions { padding: 0 12px 12px; }
+  :is(#overview, #working-set-overview) .thread-card > .session { padding: 12px; }
+  :is(#overview, #working-set-overview) .thread-card > .agent-origin { margin-inline: 12px; max-width: calc(100% - 24px); }
+  :is(#overview, #working-set-overview) .thread-card .card-actions button { min-width: 44px; min-height: 44px; }
 }
 @media (forced-colors: active) {
-  #overview .thread-card.response-unread { outline: 2px solid Highlight; }
-  #overview .card-title-actions { background: Canvas; }
-  #overview .card-title-actions::before { background: Canvas; }
+  :is(#overview, #working-set-overview) .thread-card.response-unread { outline: 2px solid Highlight; }
+  :is(#overview, #working-set-overview) .card-title-actions { background: Canvas; }
+  :is(#overview, #working-set-overview) .card-title-actions::before { background: Canvas; }
 }
 @media (hover: none) {
-  #overview .thread-card > .card-title-actions { opacity: 1; pointer-events: auto; }
-  #overview .card-title-actions::before { display: none; }
-  #overview .card-title-actions button { width: 44px; height: 44px; }
-  #overview .thread-card .session-title { min-height: 44px; padding-right: 92px; }
+  :is(#overview, #working-set-overview) .thread-card > .card-title-actions { opacity: 1; pointer-events: auto; }
+  :is(#overview, #working-set-overview) .card-title-actions::before { display: none; }
+  :is(#overview, #working-set-overview) .card-title-actions button { width: 44px; height: 44px; }
+  :is(#overview, #working-set-overview) .thread-card .session-title { min-height: 44px; padding-right: 92px; }
 }
