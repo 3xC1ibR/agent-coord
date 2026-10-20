@@ -227,7 +227,7 @@ class SendWorkTests(unittest.TestCase):
         receipt = post("send", self.body())["receipt"]
         self.runtime.process_once(); self.sessions.queue._dispatch(self.target)
         self.assertEqual(post("status", {"cwd": self.root, "id": receipt["id"]})["state"], "accepted")
-        for path in ("/send-work.js", "/send-work.css"):
+        for path in ("/transient-notice.js", "/send-work.js", "/send-work.css"):
             with urllib.request.urlopen(base + path) as response:
                 self.assertEqual(response.status, 200)
 

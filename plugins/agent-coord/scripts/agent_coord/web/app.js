@@ -18,12 +18,18 @@ const base = "/api/browser/";
 const sessionPath = id => "sessions/" + encodeURIComponent(id);
 const threadPath = id => "threads/" + encodeURIComponent(id);
 function node(tag, text, className) { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; }
+const errorNotice = createTransientNotice($("error"), window);
 function showError(error) {
   const message = error.message || String(error), dialogError = document.querySelector("dialog[open] .dialog-error");
   if (dialogError) { dialogError.hidden = false; dialogError.textContent = message; }
-  else { $("error").hidden = false; $("error").querySelector("span").textContent = message; }
+  else {
+    const copy = $("error").querySelector("span");
+    const changed = $("error").hidden || copy.textContent !== message;
+    copy.textContent = message;
+    if (changed) errorNotice.show(10000);
+  }
 }
-$("error").querySelector("button").onclick = () => { $("error").hidden = true; };
+$("error").querySelector("button").onclick = () => errorNotice.dismiss();
 async function api(path, body, requestOptions = {}) {
   const viewMutation = body !== undefined && (path === "views" || path.startsWith("views/"));
   if (viewMutation) ++listRequest;

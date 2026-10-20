@@ -6,6 +6,9 @@ class SendWorkPalette {
     this.$ = id => document.getElementById("send-work-" + id);
     this.dialog = this.$("dialog"); this.input = this.$("input"); this.list = this.$("results");
     this.error = this.$("error"); this.hint = this.$("status"); this.notice = this.$("notice");
+    this.noticeTimer = createTransientNotice(this.notice, view, () => {
+      this.notice.hidden = true; this.view.clearTimeout(this.poll);
+    });
     this.generation = 0; this.rows = []; this.active = 0;
     this.draft = this.defaultSettings(); this.catalogs = new Map(); this.modelLoading = new Map();
     this.settings = document.createElement("div"); this.settings.id = "send-work-settings";
@@ -271,7 +274,12 @@ class SendWorkPalette {
   }
   showReceipt() {
     const receipt = this.receipt;
-    this.notice.replaceChildren(); this.notice.hidden = false;
+    // Polling unchanged progress must not rebuild focused links or extend the
+    // popup forever. A meaningful update gets a new reading interval.
+    const signature = JSON.stringify([receipt.id, receipt.state, receipt.target_id, receipt.target_title, receipt.error]);
+    if (!this.notice.hidden && signature === this.noticeSignature) return;
+    this.noticeSignature = signature;
+    this.notice.replaceChildren();
     const labels = {pending: "Preparing request…", routing: "Preparing request…", creating: "Creating conversation…", queued: "Queued", sending: "Sending…", accepted: "Sent", failed: "Request failed", uncertain: "Delivery needs review", paused: "Delivery paused", cancelled: "Cancelled"};
     const text = this.document.createElement("span");
     text.textContent = labels[receipt.state] || receipt.state; this.notice.append(text);
@@ -284,8 +292,9 @@ class SendWorkPalette {
     }
     if (receipt.error) { const error = this.document.createElement("span"); error.textContent = receipt.error; this.notice.append(error); }
     const close = this.document.createElement("button"); close.type = "button"; close.className = "quiet";
-    close.textContent = "Dismiss"; close.onclick = () => { this.notice.hidden = true; this.view.clearTimeout(this.poll); };
+    close.textContent = "Dismiss"; close.onclick = () => this.noticeTimer.dismiss();
     this.notice.append(close);
+    this.noticeTimer.show(receipt.error || ["failed", "uncertain", "paused"].includes(receipt.state) ? 10000 : 6000);
   }
   pollReceipt() {
     this.view.clearTimeout(this.poll);
