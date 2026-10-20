@@ -160,6 +160,40 @@ class AntigravityTests(unittest.TestCase):
         self.assertFalse(two.writes)
         self.assertEqual(len(self.sessions.pending_requests(second)), 1)
 
+    def test_context_outside_display_turn_keeps_consumption_unsupported(self):
+        thread = self.create()
+        connection = self.start(thread)
+        connection.future.set_result({"stopReason": "end_turn"})
+        self.update(thread, sessionUpdate="usage_update", used=13759, size=1000000)
+        summary = self.store.usage.summary(thread)
+        self.assertEqual(summary["context"], {"used_tokens": 13759, "limit_tokens": 1000000})
+        self.assertEqual(summary["totals"], {})
+        self.assertIn("unsupported", summary["note"])
+        self.update(thread, sessionUpdate="usage_update", used=123, size=200000)
+        self.assertEqual(self.store.usage.summary(thread)["context"], {"used_tokens": 123, "limit_tokens": 200000})
+
+    def test_reconnect_display_guard_does_not_discard_context(self):
+        thread = self.create()
+        self.start(thread)
+        self.sessions.antigravity.delivery_turns[thread]["reconnecting"] = True
+        self.update(thread, sessionUpdate="usage_update", used=123, size=200000)
+        self.assertEqual(self.store.usage.summary(thread)["context"]["used_tokens"], 123)
+
+    def test_retired_process_context_and_telemetry_failure_are_isolated(self):
+        thread = self.create()
+        old = self.start(thread)
+        self.update(thread, sessionUpdate="usage_update", used=50, size=100)
+        self.sessions.interrupt(thread)
+        self.start(thread)
+        old.callback({"method": "session/update", "params": {
+            "sessionId": self.sessions.antigravity.native[thread],
+            "update": {"sessionUpdate": "usage_update", "used": 99, "size": 100}}})
+        self.assertEqual(self.store.usage.summary(thread)["context"]["used_tokens"], 50)
+        with patch.object(self.store.usage, "record_context", side_effect=RuntimeError("database failure")), \
+                self.assertLogs("agent_coord.antigravity", level="WARNING"):
+            self.update(thread, sessionUpdate="usage_update", used=90, size=100)
+        self.assertIn(thread, self.sessions.antigravity.turns)
+
     def test_fixed_choice_questions_require_an_offered_option_even_in_yolo(self):
         thread = self.create(yolo=True)
         connection = self.start(thread)

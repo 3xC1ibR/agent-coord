@@ -1014,6 +1014,42 @@ the lifecycle hook. The `.agent-coord/` directory is local runtime output; add
 it to the repository's ignore policy if it should stay out of working-tree
 reports.
 
+### Thread token usage
+
+The conversation footer shows provider-reported token consumption for the current
+thread. Open the count to see input, output, cache and reasoning counters, model
+breakdowns when available, and whether the count includes provider subagents.
+Partial coverage is labeled; unavailable telemetry is not displayed as zero.
+The last reported context usage is a separate capacity meter and is never added
+to consumed tokens. Independent app-agent threads retain their own usage.
+
+Usage is persisted locally in SQLite. Cumulative provider snapshots replace earlier
+snapshots; request records are deduplicated by their native event identity. Forks
+exclude inherited parent consumption when the boundary is known and report unknown
+coverage when it cannot be established. Native cache conventions are normalized
+without adding cache or reasoning subsets twice. Only counters and attribution
+metadata are stored, not copied prompt or response text.
+
+Codex, Claude Code and Muse Code collect live usage from their native protocols.
+Kimi Code imports its native usage journals, including supported compaction usage,
+with explicit main-agent and child coverage. Antigravity currently exposes context
+usage through its ACP bridge; consumed tokens remain unavailable until that bridge
+provides a consumption feed. These counts describe recorded token processing and
+do not establish actual subscription debits or billed amounts.
+
+Opening a thread can recover existing local usage once without submitting a model
+request. For an explicit recovery or to inspect the saved counters from a terminal:
+
+```bash
+agent-coord thread usage --session-id <thread-id>
+agent-coord thread usage --session-id <thread-id> --backfill
+```
+
+An explicit native transcript can be supplied with `--backfill --transcript-path
+<path>`; the importer verifies its native identity. Missing, truncated, unsupported,
+or interrupted records retain partial or unavailable coverage. Recovery is bounded
+and does not scan transcript histories during overview polling.
+
 The result creates a durable message in the parent inbox. If the child process
 exits before it reports a result, the SessionEnd hook records the delegation as
 failed and sends that failure to the parent. A second active delegation for the

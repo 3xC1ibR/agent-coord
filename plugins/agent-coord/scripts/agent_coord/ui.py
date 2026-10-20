@@ -381,7 +381,7 @@ def _handler(
             if parsed.path == "/settings":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "settings.html").read_bytes())
                 return
-            if parsed.path in {"/settings.js", "/settings.css", "/jev.js", "/jev.css", "/context-lifecycle.js", "/context-lifecycle.css"}:
+            if parsed.path in {"/settings.js", "/settings.css", "/jev.js", "/jev.css", "/thread-usage.js", "/context-lifecycle.js", "/context-lifecycle.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return

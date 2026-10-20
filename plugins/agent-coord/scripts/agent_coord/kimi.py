@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 from pathlib import Path
 import threading
@@ -16,6 +17,7 @@ import uuid
 from .acp import ACPConnection
 from .context import client_environment, coordination_bootstrap
 from .kimi_setup import ensure_hooks, resolve_runtime
+from .kimi_usage import backfill_usage
 from .store import CoordinationError
 
 
@@ -79,6 +81,25 @@ class KimiRPC:
 
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
+
+    def _capture_usage(self, thread_id):
+        try:
+            usage = backfill_usage(self.store, thread_id)
+            self._emit("thread/usage/updated", thread_id, usage=usage)
+        except Exception:
+            # Telemetry must never fail a provider turn or close its transport.
+            logging.getLogger(__name__).warning("Could not capture Kimi usage")
+
+    def _context_usage(self, thread_id, update):
+        if any(type(update.get(key)) is not int or update[key] < 0 for key in ("used", "size")):
+            return
+        try:
+            self.store.usage.record_context(thread_id, provider="kimi", native_id=self.native[thread_id],
+                used=update.get("used"), limit=update.get("size"))
+            self._emit("thread/usage/updated", thread_id,
+                usage=self.store.usage.summary(thread_id, provider="kimi"))
+        except Exception:
+            logging.getLogger(__name__).warning("Could not capture Kimi context usage")
 
     def _history(self, thread_id):
         with self.store._connection() as db:
@@ -160,6 +181,8 @@ class KimiRPC:
             session = self._select(connection, native_id, session, "mode", "yolo" if options["yolo"] else "default")
             self.settings[thread_id] = current_settings(session)
             self.options[thread_id] = dict(options)
+            if row:
+                self._capture_usage(thread_id)
             return connection
         except Exception:
             self._shutdown(thread_id)
@@ -300,6 +323,7 @@ class KimiRPC:
             # changes a successful turn into an interrupted, incomplete one.
             self.completed[thread_id] = copy.deepcopy(turn)
             self.requests = {key: value for key, value in self.requests.items() if value["thread"] != thread_id}
+        self._capture_usage(thread_id)
         self._emit("turn/completed", thread_id, turn=copy.deepcopy(turn))
 
     def _message(self, thread_id, generation, message):
@@ -329,6 +353,11 @@ class KimiRPC:
             return
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
+        if kind == "usage_update":
+            # Kimi sends this after settling session/prompt, outside display
+            # turns. The generation and native-session checks still apply.
+            self._context_usage(thread_id, update)
+            return
         if kind == "config_option_update":
             self.settings[thread_id] = current_settings(update)
         with self.lock:
@@ -458,6 +487,7 @@ class KimiRPC:
                 except CoordinationError:
                     pass
             connection.close()
+            self._capture_usage(thread_id)
 
     def close(self):
         self.closed = True

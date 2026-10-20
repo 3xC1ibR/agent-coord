@@ -159,6 +159,10 @@ def _parser() -> argparse.ArgumentParser:
             options.add_argument("--no-" + field, dest=field + "_id", action="store_const", const=None, default=argparse.SUPPRESS)
     thread_show = thread_commands.add_parser("show")
     thread_show.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
+    usage = thread_commands.add_parser("usage", help="Read durable thread token consumption without running a model.")
+    usage.add_argument("--session-id", help="Target thread; defaults to the current caller.")
+    usage.add_argument("--backfill", action="store_true", help="Recover one bounded native transcript without running a model.")
+    usage.add_argument("--transcript-path", help="Explicit native transcript path; requires --backfill and matching native identity.")
     dispatch_history = thread_commands.add_parser("dispatch-history", help="Read saved dispatcher requests and delivery receipts.")
     dispatch_history.add_argument("--session-id", help="Dispatcher; defaults to the current caller.")
     dispatch_history.add_argument("--after", type=int, default=0, help="Event cursor returned by the previous page.")
@@ -663,6 +667,12 @@ def run(arguments: argparse.Namespace) -> Any:
             raise CoordinationError("Checkpoint must be valid JSON.") from exc
         return store.threads.checkpoint(arguments.session_id, payload)
     if command == "thread":
+        if arguments.thread_command == "usage":
+            if arguments.transcript_path and not arguments.backfill:
+                raise CoordinationError("--transcript-path requires --backfill.")
+            if arguments.backfill:
+                return store.usage.backfill(arguments.session_id, transcript_path=arguments.transcript_path)
+            return store.usage.summary(arguments.session_id)
         if arguments.thread_command == "dispatch-history":
             from .dispatch_runtime import routing_history
             return routing_history(store, arguments.session_id, after=arguments.after, limit=arguments.limit)

@@ -89,6 +89,12 @@ class ClaudeTransportTests(unittest.TestCase):
         self.assertEqual(result["session"], "test-session")
         self.assertNotIn("--allow-dangerously-skip-permissions", args)
 
+    def test_native_resume_id_does_not_replace_app_coordination_identity(self):
+        result = self.connection(resume=True, nativeId="provider-native").control("initialize")
+        args = result["args"]
+        self.assertEqual(args[args.index("--resume") + 1], "provider-native")
+        self.assertEqual(result["session"], "test-session")
+
     def test_shell_api_key_cannot_override_subscription_authentication(self):
         subscription_env = {"CLAUDE_CODE_OAUTH_TOKEN": "subscription-token",
                             "CLAUDE_CONFIG_DIR": str(self.root / "claude-config")}

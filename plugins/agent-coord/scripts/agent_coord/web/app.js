@@ -1310,6 +1310,8 @@ function renderStatus() {
   state.rollUp?.changed();
   renderSessionSettings();
   renderTurnElapsed();
+  globalThis.agentCoordThreadUsage?.render($("thread-usage"), state.detail?.work_thread?.usage,
+    state.detail?.work_thread?.thread_id === state.selected ? state.selected : null);
   const running = !!state.detail?.running;
   const work = state.detail?.work_thread;
   const dispatcher = !!work?.dispatcher;
@@ -1789,6 +1791,14 @@ function applyEvent(event) {
   if (event.method === "thread/closedWhenDone") { threadClosedWhenDone(event.params.threadId).catch(showError); return; }
   const cached = state.conversations?.get(event.params.threadId);
   if (cached) cached.revision++;
+  if (event.method === "thread/usage/updated") {
+    if (cached?.detail?.work_thread) cached.detail.work_thread.usage = event.params.usage;
+    if (state.detail?.work_thread?.thread_id === event.params.threadId) {
+      state.detail.work_thread.usage = event.params.usage;
+      renderStatus();
+    }
+    return;
+  }
   if (event.method === "browser/changed" && event.params.projectCwd) {
     for (const list of [state.sessions, state.viewThreads]) for (const thread of list || []) {
       if (thread.thread_id === event.params.threadId) Object.assign(thread, {project_cwd: event.params.projectCwd, cwd: event.params.projectCwd});
@@ -1861,7 +1871,7 @@ function connect() {
     for (const event of batch.events) {
       if (event.method === "bridge/disconnected") { for (const entry of state.conversations?.values() || []) entry.revision++; showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail?.work_thread?.client === "codex" && state.detail) { state.detail.running = false; state.detailRefreshing = true; renderRequests(); } renderStatus(); }
       else applyEvent(event);
-      if (!event.method.endsWith("/delta") && !event.method.endsWith("/outputDelta")) scheduleList();
+      if (!["thread/usage/updated", "thread/tokenUsage/updated"].includes(event.method) && !event.method.endsWith("/delta") && !event.method.endsWith("/outputDelta")) scheduleList();
     }
   };
   window.addEventListener("pagehide", () => events.close(), {once: true});

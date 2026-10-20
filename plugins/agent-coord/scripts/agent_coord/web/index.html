@@ -50,6 +50,7 @@
   <script src="/conversation-scroll.js" defer></script>
   <script src="/mobile-chat.js" defer></script>
   <script src="/model-picker.js" defer></script>
+  <script src="/thread-usage.js" defer></script>
   <link rel="stylesheet" href="/thread-mentions.css">
   <script src="/thread-mentions.js" defer></script>
   <script src="/schedules.js" defer></script>
@@ -272,7 +273,7 @@
         <details id="thread-context" class="thread-context" open><summary>Where you left it <span id="checkpoint-phase"></span></summary><div id="checkpoint"></div><div class="context-actions"><button id="edit-checkpoint" class="quiet">Edit checkpoint</button><button id="add-link" class="quiet">Add link</button><button id="resume-browser" class="primary" hidden>Continue in browser</button></div></details>
         </div>
       </aside>
-      <footer class="session-statusbar" aria-label="Session information"><span id="workspace" class="status-cwd"></span><div id="session-settings" class="session-settings" hidden><span id="session-model"></span><span id="session-effort"></span><span id="session-yolo" class="yolo-badge" title="No sandbox or approval prompts" hidden>YOLO</span><button id="edit-permissions" type="button" class="quiet">Permissions</button></div></footer>
+      <footer class="session-statusbar" aria-label="Session information"><span id="workspace" class="status-cwd"></span><div id="session-settings" class="session-settings" hidden><span id="session-model"></span><span id="session-effort"></span><span id="session-yolo" class="yolo-badge" title="No sandbox or approval prompts" hidden>YOLO</span><button id="edit-permissions" type="button" class="quiet">Permissions</button></div><details id="thread-usage" class="thread-usage" hidden></details></footer>
     </section>
   </main>
   <dialog id="settings-dialog" class="settings-dialog" aria-label="Settings"><iframe id="settings-frame" title="Settings"></iframe></dialog>

@@ -19,6 +19,25 @@ from agent_coord.store import CoordinationError
 
 
 class CliTests(unittest.TestCase):
+    @patch("agent_coord.cli.CoordinationStore")
+    def test_thread_usage_explicit_recovery_does_not_resume_provider(self, store_class):
+        store = store_class.return_value
+        args = _parser().parse_args(["thread", "usage", "--session-id", "one"])
+        self.assertEqual(cli_run(args), store.usage.summary.return_value)
+        store.usage.summary.assert_called_once_with("one")
+        store.usage.backfill.assert_not_called()
+        args = _parser().parse_args(["thread", "usage", "--session-id", "one", "--backfill",
+                                    "--transcript-path", "/tmp/one.jsonl"])
+        self.assertEqual(cli_run(args), store.usage.backfill.return_value)
+        store.usage.backfill.assert_called_once_with("one", transcript_path="/tmp/one.jsonl")
+
+    @patch("agent_coord.cli.CoordinationStore")
+    def test_thread_usage_rejects_transcript_without_explicit_recovery(self, store_class):
+        args = _parser().parse_args(["thread", "usage", "--session-id", "one", "--transcript-path", "/tmp/one.jsonl"])
+        with self.assertRaises(CoordinationError):
+            cli_run(args)
+        store_class.return_value.usage.backfill.assert_not_called()
+
     @patch("agent_coord.cli.validate_claimed_bead")
     @patch("agent_coord.cli.CoordinationStore")
     def test_begin_work_accepts_scope_without_bead(self, store_class, validate) -> None:

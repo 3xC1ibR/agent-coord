@@ -17,6 +17,7 @@ from concurrent.futures import Future, TimeoutError
 from pathlib import Path
 
 from .context import client_environment
+from .claude_usage import ClaudeUsage, native_id as usage_native_id
 from .store import CoordinationError
 
 
@@ -30,10 +31,11 @@ class ClaudeConnection:
         args = list(command or ["claude"])
         args += ["--print", "--input-format", "stream-json", "--output-format", "stream-json",
                  "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio"]
+        native_id = options.get("nativeId") or options["threadId"]
         if options.get("forkPath"):
-            args += ["--resume", options["forkPath"], "--fork-session", "--session-id", options["threadId"]]
+            args += ["--resume", options["forkPath"], "--fork-session", "--session-id", native_id]
         else:
-            args += ["--resume" if options.get("resume") else "--session-id", options["threadId"]]
+            args += ["--resume" if options.get("resume") else "--session-id", native_id]
         if options.get("probe"):
             # Capability discovery sends no prompts and must not register a
             # phantom work thread through SessionStart/SessionEnd hooks.
@@ -156,6 +158,9 @@ class ClaudeRPC:
             columns = {row[1] for row in db.execute("PRAGMA table_info(claude_sessions)")}
             if "fork_path" not in columns:
                 db.execute("ALTER TABLE claude_sessions ADD COLUMN fork_path TEXT")
+            if "native_id" not in columns:
+                db.execute("ALTER TABLE claude_sessions ADD COLUMN native_id TEXT")
+        self.usage = ClaudeUsage(store, on_event)
 
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
@@ -175,9 +180,10 @@ class ClaudeRPC:
             current = None
         if current is None:
             with self.store._connection() as db:
-                row = db.execute("SELECT started, fork_path FROM claude_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+                row = db.execute("SELECT started, fork_path, native_id FROM claude_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
             current = self.connection_factory(self.store, lambda m: self._message(thread_id, m),
                 {**options, "threadId": thread_id, "resume": bool(row and row["started"]),
+                 "nativeId": row["native_id"] if row and row["native_id"] else thread_id,
                  "forkPath": row["fork_path"] if row and not row["started"] else None})
             self.connections[thread_id] = current
             self.options[thread_id] = dict(options)
@@ -212,7 +218,7 @@ class ClaudeRPC:
                 # turns, even after restart or when forking an unused fork.
                 try:
                     if source["started"]:
-                        session_id = str(uuid.UUID(thread_id))
+                        session_id = str(uuid.UUID(source["native_id"] or thread_id))
                         root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
                         paths = list((root / "projects").glob(f"*/{session_id}.jsonl"))
                         if len(paths) != 1:
@@ -245,8 +251,8 @@ class ClaudeRPC:
             history["id"] = child_id
             try:
                 with self.store._connection() as db:
-                    db.execute("INSERT INTO claude_sessions (thread_id, fork_path) VALUES (?, ?)",
-                               (child_id, str(snapshot) if snapshot else None))
+                    db.execute("INSERT INTO claude_sessions (thread_id, fork_path, native_id) VALUES (?, ?, ?)",
+                               (child_id, str(snapshot) if snapshot else None, child_id))
                     db.execute("INSERT INTO browser_history (thread_id, history_json) VALUES (?, ?)",
                                (child_id, json.dumps(history)))
             except Exception:
@@ -298,7 +304,7 @@ class ClaudeRPC:
             options = self._options(params)
             self._connection(thread_id, options)
             with self.store._connection() as db:
-                db.execute("INSERT INTO claude_sessions (thread_id) VALUES (?)", (thread_id,))
+                db.execute("INSERT INTO claude_sessions (thread_id,native_id) VALUES (?,?)", (thread_id, thread_id))
             return {"thread": self._history(thread_id), "model": options["model"], "reasoningEffort": options["effort"]}
         if method == "thread/resume":
             # Opening saved history does not need authentication or a running CLI.
@@ -373,7 +379,7 @@ class ClaudeRPC:
             elif part["type"] == "image":
                 header, data = part["url"].split(",", 1)
                 content.append({"type": "image", "source": {"type": "base64", "media_type": header[5:].split(";")[0], "data": data}})
-        connection.write({"type": "user", "session_id": thread_id, "parent_tool_use_id": None,
+        connection.write({"type": "user", "session_id": usage_native_id(self.store, thread_id), "parent_tool_use_id": None,
                           "uuid": user["id"], "message": {"role": "user", "content": content}})
 
     def _item(self, thread_id, item, *, completed=False):
@@ -404,6 +410,8 @@ class ClaudeRPC:
             self._handle_message(thread_id, message)
 
     def _handle_message(self, thread_id, message):
+        # Results can describe background work outside the visible turn.
+        self.usage.capture(thread_id, message)
         kind = message.get("type")
         if kind == "control_request":
             self._permission(thread_id, message)

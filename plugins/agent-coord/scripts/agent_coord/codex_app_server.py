@@ -23,6 +23,7 @@ from .context import client_environment
 from .store import CoordinationError, CoordinationStore
 from .browser_queue import BrowserMessageQueue
 from .browser_persistence import BrowserPersistence
+from .thread_usage import codex_totals
 from .app_agent_failures import notify_agent_failure
 from .browser_wake import BrowserInboxWake
 from .message_timeline import message_timeline
@@ -203,6 +204,7 @@ class BrowserSessions:
         self.histories: dict[str, dict] = {}
         self.dirty_histories: set[str] = set()
         self.history_revisions: dict[str, int] = {}
+        self.usage_recovery_attempts: set[str] = set()
         self.persistence = BrowserPersistence()
         self.history_lock = threading.Lock()
         self.desktop_project_windows: dict[str, dict] = {}
@@ -336,8 +338,9 @@ class BrowserSessions:
                 self.active = {t: v for t, v in self.active.items() if t not in disconnected}
                 self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") not in disconnected}
             self._publish(method, params)
-            if method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected"}:
+            if method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected", "thread/tokenUsage/updated"}:
                 saved_params = copy.deepcopy(params)
+                saved_params["usage_observed_at"] = self.store.clock()
                 if method == "turn/started":
                     saved_params["notification_context"] = self.starting_notification_context.get(thread_id)
                 self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected, disconnected_turns))
@@ -345,6 +348,26 @@ class BrowserSessions:
     def _persist_event(self, method, params, disconnected, disconnected_turns=None):
         """Idempotent bookkeeping only: never replay a streamed event or prompt."""
         thread_id = params.get("threadId")
+        if method == "thread/tokenUsage/updated" and thread_id:
+            usage = params.get("tokenUsage") or {}
+            # The provider notification's total is cumulative, while last is
+            # one model request (not a user turn). Never add either repeatedly.
+            if self.store.get_session(thread_id)["client"] == "codex":
+                totals = codex_totals(usage.get("total"))
+                if totals:
+                    self.store.usage.record_snapshot(
+                        thread_id, provider="codex", native_id=thread_id,
+                        source_key="codex-cumulative", totals=totals, raw=usage.get("total"),
+                        coverage="complete", observed_at=params.get("usage_observed_at"))
+                last = codex_totals(usage["last"]) if isinstance(usage.get("last"), dict) else {}
+                if last or usage.get("modelContextWindow") is not None:
+                    self.store.usage.record_context(
+                        thread_id, provider="codex", native_id=thread_id,
+                        used=last.get("total_tokens"), limit=usage.get("modelContextWindow"),
+                        observed_at=params.get("usage_observed_at"))
+                self._publish("thread/usage/updated", {"threadId": thread_id,
+                              "usage": self.store.usage.summary(thread_id)})
+            return
         if hasattr(self, "schedules"):
             self.schedules.event(method, params)
         if method == "turn/started" and thread_id:
@@ -881,6 +904,18 @@ class BrowserSessions:
         else:
             thread["forked_sessions"] = _inventory.forks[thread_id]
         if history:
+            usage = self.store.usage.summary(thread_id)
+            # Detail-only, bounded, no-model recovery. Durable notes prevent
+            # repeated failed scans after restart; overview never reads logs.
+            if usage["observed_at"] is None and thread_id not in self.usage_recovery_attempts:
+                self.usage_recovery_attempts.add(thread_id)
+                try:
+                    usage = self.store.usage.backfill(thread_id)
+                except Exception:
+                    # An adapter can be unavailable while plugin versions are
+                    # changing; usage must never prevent opening a conversation.
+                    pass
+            thread["usage"] = usage
             with self.store._connection() as db:
                 children = db.execute("SELECT DISTINCT d.child_session_id FROM delegations d JOIN work_threads t ON t.thread_id = d.child_session_id WHERE d.parent_session_id = ?", (thread_id,)).fetchall()
             thread["children"] = [self.store.threads.get(row["child_session_id"]) for row in children]
@@ -1061,12 +1096,39 @@ class BrowserSessions:
             params = {"threadId": thread_id, **self._options(record)}
             if latest.get("id"):
                 params["lastTurnId"] = latest["id"]
+            baseline = None
+            if source["client"] == "codex":
+                try:
+                    # Freeze *raw* native counters before the fork. A parent's
+                    # later total is never a valid child baseline, and nested
+                    # forks inherit the full raw ancestry, not adjusted totals.
+                    # The native turn can already be idle while its last usage
+                    # event is queued behind SQLite contention. Freeze only
+                    # after prior bookkeeping drains; a stale immutable baseline
+                    # would charge inherited tokens to the child. If the bounded
+                    # wait expires, leave it unknown for native-prefix recovery.
+                    if self.persistence.flush(timeout=1):
+                        self.store.usage.backfill(thread_id)
+                        with self.lock:
+                            # Do not wait holding the event lock: a worker may
+                            # need it to publish its durable usage notification.
+                            # Newly queued work during backfill also fails closed.
+                            if self.persistence.flush(timeout=0):
+                                baseline = self.store.usage.raw_snapshot(thread_id, provider="codex", native_id=thread_id)
+                except Exception:
+                    pass
             result = self._rpc(thread_id).request("thread/fork", params)
             child_id = result["thread"]["id"]
             # thread.sessionId may identify the shared Codex tree root. Only the
             # new thread.id is an independent Agent Coord checkpoint identity.
             self.store.register(session_id=child_id, client=source["client"], cwd=record["cwd"], name=name)
             self.store.threads.record_fork(child_id, source, turn_id=latest.get("id"))
+            if source["client"] == "codex":
+                try:
+                    self.store.usage.set_baseline(child_id, provider="codex", native_id=child_id, totals=baseline)
+                except Exception:
+                    # Lineage itself makes absent baseline fail closed.
+                    pass
             with self.store._connection() as db:
                 now = self.store.clock()
                 db.execute("""INSERT INTO browser_sessions

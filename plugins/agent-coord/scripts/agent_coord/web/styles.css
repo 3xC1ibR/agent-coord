@@ -344,6 +344,21 @@ main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; pad
 .message .speaker { display: block; color: var(--muted); font: 9px var(--mono); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 11px; }
 .message .text { white-space: pre-wrap; }
 .session-statusbar { grid-column: 1 / -1; display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 5px 24px; min-width: 0; min-height: 34px; padding: 8px 22px; border-top: 1px solid var(--line); color: var(--muted); background: var(--panel); font: 10px/1.5 var(--mono); }
+.session-statusbar { position: relative; }
+.thread-usage { margin-left: auto; }
+.thread-usage > summary { cursor: pointer; white-space: nowrap; border-radius: 4px; padding: 3px 0; }
+.thread-usage > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.thread-usage-panel { position: absolute; right: 16px; bottom: calc(100% + 8px); z-index: 30; width: min(360px, calc(100% - 32px)); max-height: min(560px, 65vh); overflow: auto; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: 0 12px 40px var(--shadow); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.thread-usage-panel h3 { margin: 0 0 4px; font-size: 15px; }
+.thread-usage-panel h4 { margin: 16px 0 6px; font-size: 12px; }
+.thread-usage-panel p { margin: 4px 0; }
+.thread-usage-panel dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; margin: 14px 0; }
+.thread-usage-panel dt { min-width: 0; overflow-wrap: anywhere; color: var(--muted); }
+.thread-usage-panel dd { margin: 0; font-variant-numeric: tabular-nums; }
+.thread-usage-panel .thread-usage-note { margin-top: 10px; color: var(--muted); font-size: 11px; }
+.thread-usage-panel .thread-usage-scope { color: var(--muted); }
+.mobile-thread-sheet .thread-usage[open] { flex-basis: 100%; margin-left: 0; }
+.mobile-thread-sheet .thread-usage-panel { position: static; width: 100%; max-height: none; margin-top: 8px; box-shadow: none; }
 .status-cwd { flex: 1 1 200px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 16px; max-width: 100%; }
 .session-settings > span { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

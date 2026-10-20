@@ -198,6 +198,76 @@ class KimiTests(unittest.TestCase):
         self.assertEqual(one.writes[-1]["result"]["outcome"], {"outcome": "selected", "optionId": "reject"})
         self.assertFalse(two.writes)
 
+    def test_late_context_is_saved_without_creating_consumption(self):
+        thread = self.create()
+        connection = self.start(thread)
+        self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Done"})
+        connection.future.set_result({"stopReason": "end_turn"})
+        self.assertNotIn(thread, self.sessions.kimi.turns)
+        self.update(thread, sessionUpdate="usage_update", used=71414, size=1000000)
+        summary = self.store.usage.summary(thread)
+        self.assertEqual(summary["context"], {"used_tokens": 71414, "limit_tokens": 1000000})
+        self.assertEqual(summary["totals"], {})
+        self.update(thread, sessionUpdate="usage_update", used=1000, size=1000000)
+        self.assertEqual(self.store.usage.summary(thread)["context"]["used_tokens"], 1000)
+        self.update(thread, sessionUpdate="usage_update", used=True, size=1000000)
+        self.assertEqual(self.store.usage.summary(thread)["context"]["used_tokens"], 1000)
+
+    def test_retired_generation_cannot_replace_context(self):
+        thread = self.create()
+        old = self.start(thread)
+        self.update(thread, sessionUpdate="usage_update", used=50, size=100)
+        self.sessions.interrupt(thread)
+        self.start(thread)
+        old.callback({"method": "session/update", "params": {"sessionId": old.native_id,
+            "update": {"sessionUpdate": "usage_update", "used": 99, "size": 100}}})
+        self.assertEqual(self.store.usage.summary(thread)["context"]["used_tokens"], 50)
+
+    def test_telemetry_failure_does_not_break_streaming_or_completion(self):
+        thread = self.create()
+        connection = self.start(thread)
+        with patch.object(self.store.usage, "record_context", side_effect=RuntimeError("database failure")), \
+                self.assertLogs("agent_coord.kimi", level="WARNING"):
+            self.update(thread, sessionUpdate="usage_update", used=50, size=100)
+        with patch("agent_coord.kimi.backfill_usage", side_effect=RuntimeError("database failure")), \
+                self.assertLogs("agent_coord.kimi", level="WARNING"):
+            self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Done"})
+            connection.future.set_result({"stopReason": "end_turn"})
+        self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1]["status"], "completed")
+        self.assertFalse(connection.closed)
+
+    def test_journals_are_not_scanned_on_streamed_content_or_detail_reads(self):
+        thread = self.create()
+        connection = self.start(thread)
+        with patch("agent_coord.kimi.backfill_usage", return_value={}) as capture:
+            for _ in range(10):
+                self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "x"})
+                self.sessions.kimi.request("thread/read", {"threadId": thread})
+            capture.assert_not_called()
+            connection.future.set_result({"stopReason": "end_turn"})
+            capture.assert_called_once_with(self.store, thread)
+
+    def test_completed_journal_import_uses_real_usage_store(self):
+        thread = self.create()
+        connection = self.start(thread)
+        home = self.root / "native-kimi"
+        directory = home / "sessions/workspace" / connection.native_id
+        wire = directory / "agents/main/wire.jsonl"
+        wire.parent.mkdir(parents=True)
+        (directory / "state.json").write_text(json.dumps({"id": connection.native_id, "cwd": str(self.root)}))
+        wire.write_text(json.dumps({"type": "metadata", "protocol_version": "1.5"}) + "\n" + json.dumps({
+            "type": "usage.record", "agentId": "main", "model": "native-k3", "usageScope": "session",
+            "usage": {"inputOther": 10, "output": 2, "inputCacheRead": 20, "inputCacheCreation": 3}}) + "\n")
+        with patch.dict(os.environ, {"KIMI_CODE_HOME": str(home)}):
+            self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Done"})
+            connection.future.set_result({"stopReason": "end_turn"})
+            summary = self.store.usage.summary(thread)
+            self.assertEqual(summary["totals"]["total_tokens"], 35)
+            self.assertEqual(summary["models"][0]["model"], "native-k3")
+            self.assertEqual(summary["status"], "partial")
+            self.sessions.kimi._capture_usage(thread)
+            self.assertEqual(self.store.usage.summary(thread)["totals"]["total_tokens"], 35)
+
     def test_native_forms_preserve_multiple_questions_and_multiselect_in_yolo(self):
         thread = self.create(yolo=True)
         connection = self.start(thread)

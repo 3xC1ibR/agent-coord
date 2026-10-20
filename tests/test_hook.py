@@ -15,6 +15,43 @@ from agent_coord.store import CoordinationError, CoordinationStore
 
 
 class HookTests(unittest.TestCase):
+    def test_claude_native_hooks_keep_stable_app_identity_and_ignore_children(self):
+        self.store.register(session_id="app-claude", client="claude", cwd=str(self.root))
+        with self.store._connection() as db:
+            db.execute("CREATE TABLE browser_sessions (thread_id TEXT PRIMARY KEY)")
+            db.execute("INSERT INTO browser_sessions VALUES ('app-claude')")
+            db.execute("CREATE TABLE claude_sessions (thread_id TEXT PRIMARY KEY,native_id TEXT)")
+            db.execute("INSERT INTO claude_sessions VALUES ('app-claude','native-claude')")
+        self.store.register(session_id="sender", client="codex", cwd=str(self.root))
+        message = self.store.send_message(sender_session_id="sender", recipient_session_id="app-claude",
+                                         classification="action_required", reply_required=False, body="Read this")
+        with patch.dict("os.environ", {"AGENT_COORD_CLIENT": "claude", "AGENT_COORD_SESSION_ID": "app-claude"}):
+            self.assertEqual(handle(self.payload("UserPromptSubmit", session_id="native-child", prompt="child"), self.store), {})
+            self.assertEqual(self.store.inbox("app-claude", mark_delivered=False)[0]["id"], message["id"])
+            result = handle(self.payload("UserPromptSubmit", session_id="native-claude", prompt="top level"), self.store)
+        self.assertIn("Read this", result["hookSpecificOutput"]["additionalContext"])
+        for phantom in ("native-claude", "native-child"):
+            with self.assertRaises(CoordinationError):
+                self.store.get_session(phantom)
+
+    def test_ordinary_terminal_stop_and_end_capture_thread_usage_idempotently(self):
+        handle(self.payload("SessionStart"), self.store)
+        path = self.root / "terminal.jsonl"
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"id": "codex-one"}}) + "\n"
+                        + json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+                            "total_token_usage": {"input_tokens": 90, "output_tokens": 10, "total_tokens": 100}}}}) + "\n")
+        for event in ("Stop", "SessionEnd"):
+            handle(self.payload(event, transcript_path=str(path)), self.store)
+        self.assertEqual(self.store.usage.summary("codex-one")["totals"]["total_tokens"], 100)
+        self.assertEqual(self.store.list_delegations(), [])
+
+    def test_thread_usage_capture_failure_does_not_block_stop_or_end(self):
+        handle(self.payload("SessionStart"), self.store)
+        with patch.object(self.store.usage, "backfill", side_effect=RuntimeError("database unavailable")):
+            self.assertEqual(handle(self.payload("Stop"), self.store), {})
+            self.assertEqual(handle(self.payload("SessionEnd"), self.store), {})
+        self.assertEqual(self.store.get_session("codex-one")["presence"], "offline")
+
     def setUp(self) -> None:
         wake_environment = patch.dict(
             "os.environ",

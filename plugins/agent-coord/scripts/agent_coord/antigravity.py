@@ -169,6 +169,19 @@ class AntigravityRPC:
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
 
+    def _context_usage(self, thread_id, update):
+        if any(type(update.get(key)) is not int or update[key] < 0 for key in ("used", "size")):
+            return
+        try:
+            self.store.usage.record_unavailable(thread_id, provider="antigravity", native_id=self.native[thread_id],
+                note="Antigravity ACP reports context occupancy; cumulative token consumption is unsupported")
+            self.store.usage.record_context(thread_id, provider="antigravity", native_id=self.native[thread_id],
+                used=update.get("used"), limit=update.get("size"))
+            self._emit("thread/usage/updated", thread_id,
+                usage=self.store.usage.summary(thread_id, provider="antigravity"))
+        except Exception:
+            logging.getLogger(__name__).warning("Could not capture Antigravity context usage")
+
     def _history(self, thread_id):
         with self.store._connection() as db:
             row = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
@@ -225,6 +238,7 @@ class AntigravityRPC:
             params = {"cwd": options["cwd"], "mcpServers": []}
             method = "session/new"
             if row:
+                self.native[thread_id] = row[0]
                 caps = initialized["agentCapabilities"]
                 if "resume" in caps.get("sessionCapabilities", {}):
                     method = "session/resume"
@@ -240,6 +254,12 @@ class AntigravityRPC:
             with self.store._connection() as db:
                 db.execute("INSERT OR REPLACE INTO antigravity_sessions VALUES (?, ?)", (thread_id, native_id))
             self.native[thread_id] = native_id
+            if row:
+                try:
+                    self.store.usage.record_unavailable(thread_id, provider="antigravity", native_id=native_id,
+                        note="Antigravity ACP reports context occupancy; cumulative token consumption is unsupported")
+                except Exception:
+                    logging.getLogger(__name__).warning("Could not record Antigravity usage availability")
             self.catalog = model_catalog(session)
             model = options.get("model")
             current_model = next((o.get("currentValue") for o in session.get("configOptions", []) if o.get("id") == "model"), None)
@@ -567,6 +587,11 @@ class AntigravityRPC:
             return
         if method != "session/update":
             return
+        update = params.get("update", {})
+        kind = update.get("sessionUpdate")
+        if kind == "usage_update":
+            self._context_usage(thread_id, update)
+            return
         state = self.delivery_turns.get(thread_id)
         if state and state["reconnecting"]:
             return  # Resuming the same native transcript must not replay display items.
@@ -576,8 +601,6 @@ class AntigravityRPC:
             if now - self.last_activity.get(thread_id, -30) >= 15:
                 self.store.touch(thread_id)
                 self.last_activity[thread_id] = now
-        update = params.get("update", {})
-        kind = update.get("sessionUpdate")
         if kind == "config_option_update":
             self.catalog = model_catalog(update)
         with self.lock:

@@ -215,6 +215,21 @@ def _capture_terminal_delegation_usage(
                 pass
 
 
+def _capture_thread_usage(store, payload, session_id):
+    """Ordinary terminal sessions also get durable usage; preserve delegation capture."""
+    try:
+        if store.threads.is_browser_session(session_id):
+            return  # App adapters own their native identities and telemetry.
+        if store.get_session(session_id)["client"] not in {"codex", "claude"}:
+            return
+        path = payload.get("transcript_path")
+        if path is not None and (not isinstance(path, str) or not path):
+            return
+        store.usage.backfill(session_id, transcript_path=path)
+    except Exception:  # Telemetry must never block Stop or SessionEnd.
+        return
+
+
 def handle(
     payload: dict[str, Any], store: CoordinationStore | None = None
 ) -> dict[str, Any]:
@@ -232,6 +247,32 @@ def handle(
     if not isinstance(event, str):
         raise CoordinationError("Hook input does not contain hook_event_name.")
     owner = os.environ.get("AGENT_COORD_SESSION_ID")
+    if _client() == "claude" and owner and payload.get("session_id") != owner:
+        try:
+            app_session = coordination.get_session(owner)
+            app_owner = app_session["client"] == "claude" and coordination.threads.is_browser_session(owner)
+        except CoordinationError:
+            app_owner = False
+        if app_owner:
+            try:
+                with coordination._connection() as db:
+                    native = db.execute("SELECT native_id FROM claude_sessions WHERE thread_id=?", (owner,)).fetchone()
+                native_id = native["native_id"] if native else None
+            except Exception:
+                native_id = None
+            if native_id and native_id == payload.get("session_id"):
+                # Claude may resume a native ID distinct from the stable app
+                # identity. Keep its hooks/inbox attached to the app thread.
+                payload = {**payload, "session_id": owner}
+            else:
+                # Native children (and as-yet-unverified native IDs) must not
+                # create phantom threads or drain/mutate the app's lifecycle.
+                if event == "PreToolUse" and payload.get("tool_name") in WRITE_TOOLS:
+                    paths, outside = _extract_paths(payload, app_session["cwd"])
+                    reason = check_write(coordination, owner, paths, has_outside=outside)
+                    if reason:
+                        return _deny(event, reason)
+                return {}
     if _client() == "muse" and owner and payload.get("session_id") != owner:
         # Native reminder/subagent hooks inherit the parent's configuration.
         # They share its write scope, but must never drain its inbox or change
@@ -253,6 +294,7 @@ def handle(
             f"The delegated {client_label} session ended before it reported a result.",
         )
         _capture_terminal_delegation_usage(coordination, payload, session_id)
+        _capture_thread_usage(coordination, payload, session_id)
         coordination.disable_wake(session_id)
         coordination.end_session(session_id)
         return {}
@@ -271,6 +313,7 @@ def handle(
         activity = "waiting" if unfinished else "idle"
         coordination.touch(session_id, activity, turn_active=False)
         _capture_terminal_delegation_usage(coordination, payload, session_id)
+        _capture_thread_usage(coordination, payload, session_id)
         return {}
 
     if event == "UserPromptSubmit":

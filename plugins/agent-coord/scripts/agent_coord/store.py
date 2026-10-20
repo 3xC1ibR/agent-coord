@@ -238,6 +238,8 @@ class CoordinationStore:
         self._initialize()
         from .threads import ThreadStore
         self.threads = ThreadStore(self)
+        from .thread_usage import ThreadUsageStore
+        self.usage = ThreadUsageStore(self)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=5.0)

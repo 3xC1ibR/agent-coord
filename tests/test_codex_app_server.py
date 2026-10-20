@@ -122,6 +122,151 @@ class BrowserSessionTests(unittest.TestCase):
     def create(self, **values):
         return self.sessions.create({"name": "Feature discussion", **values})["session"]["thread_id"]
 
+    def usage_event(self, thread_id, total, **kwargs):
+        self.sessions._event({"method": "thread/tokenUsage/updated", "params": {
+            "threadId": thread_id, "tokenUsage": {"total": {"inputTokens": total-10,
+            "outputTokens": 10, "totalTokens": total}, "last": {"totalTokens": 20},
+            "modelContextWindow": 1000}, **kwargs}})
+
+    def test_usage_snapshot_replay_is_durable_and_emits_detail_event(self):
+        thread_id = self.create()
+        self.usage_event(thread_id, 100)
+        self.usage_event(thread_id, 100)
+        self.usage_event(thread_id, 200)
+        summary = CoordinationStore(self.store.database_path).usage.summary(thread_id)
+        self.assertEqual(summary["totals"]["total_tokens"], 200)
+        self.assertEqual(summary["context"], {"used_tokens": 20, "limit_tokens": 1000})
+        self.assertEqual(summary["models"], [])  # Current setting isn't historical attribution.
+        self.assertEqual(self.sessions.work_thread(thread_id)["usage"], summary)
+        emitted = [event for event in self.sessions.events if event["method"] == "thread/usage/updated"]
+        self.assertEqual(emitted[-1]["params"]["usage"], summary)
+
+    def test_usage_failure_never_breaks_turn_completion(self):
+        thread_id = self.create()
+        self.sessions.send(thread_id, {"message": "Continue"})
+        with patch.object(self.store.usage, "record_snapshot", side_effect=ValueError("invalid telemetry")):
+            with self.assertLogs("agent_coord.browser_persistence", level="ERROR"):
+                self.usage_event(thread_id, 100)
+        self.sessions.interrupt(thread_id)
+        self.assertNotIn(thread_id, self.sessions.active)
+        self.assertFalse(self.store.get_session(thread_id)["turn_active"])
+
+    def test_usage_busy_retry_does_not_replay_provider_work(self):
+        thread_id = self.create()
+        original = self.store.usage.record_snapshot
+        calls = []
+        def busy_once(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return original(*args, **kwargs)
+        with patch.object(self.store.usage, "record_snapshot", side_effect=busy_once):
+            self.usage_event(thread_id, 100)
+            self.usage_event(thread_id, 200)
+            self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        self.assertEqual(self.store.usage.summary(thread_id)["totals"]["total_tokens"], 200)
+        self.assertFalse(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))
+
+    def test_usage_fork_uses_frozen_raw_baseline_not_parent_later_total(self):
+        parent = self.create()
+        self.usage_event(parent, 1000)
+        child = self.sessions.fork_work_thread(parent)["thread_id"]
+        self.usage_event(parent, 2000)
+        self.usage_event(child, 1100, sessionId=parent)
+        self.assertEqual(self.store.usage.summary(child)["totals"]["total_tokens"], 100)
+        self.assertEqual(self.store.usage.summary(parent)["totals"]["total_tokens"], 2000)
+        # A nested fork inherits the child's raw 1100, not its attributed 100.
+        grandchild = self.sessions.fork_work_thread(child)["thread_id"]
+        self.usage_event(grandchild, 1140)
+        self.assertEqual(self.store.usage.summary(grandchild)["totals"]["total_tokens"], 40)
+        self.assertEqual(CoordinationStore(self.store.database_path).usage.summary(child)["totals"]["total_tokens"], 100)
+
+    def test_fork_waits_for_deferred_final_usage_before_freezing_baseline(self):
+        parent = self.create()
+        self.sessions.rpc.fast_turn = True
+        self.sessions.send(parent, {"message": "Finish before the fork"})
+        self.usage_event(parent, 1000)
+        original = self.store.usage.record_snapshot
+        release = threading.Event()
+        flush_entered = threading.Event()
+        original_flush = self.sessions.persistence.flush
+
+        def deferred(*args, **kwargs):
+            if not release.is_set():
+                raise sqlite3.OperationalError("database is locked")
+            return original(*args, **kwargs)
+
+        def flush(*args, **kwargs):
+            flush_entered.set()
+            return original_flush(*args, **kwargs)
+
+        with patch.object(self.store.usage, "record_snapshot", side_effect=deferred):
+            self.usage_event(parent, 2000)
+            self.assertEqual(self.store.usage.raw_snapshot(parent, provider="codex", native_id=parent)["total_tokens"], 1000)
+            try:
+                with patch.object(self.sessions.persistence, "flush", side_effect=flush):
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        fork = executor.submit(self.sessions.fork_work_thread, parent)
+                        self.assertTrue(flush_entered.wait(timeout=2))
+                        release.set()
+                        child = fork.result(timeout=3)["thread_id"]
+            finally:
+                release.set()
+        self.usage_event(child, 2100)
+        self.assertEqual(self.store.usage.summary(child)["totals"]["total_tokens"], 100)
+        self.assertEqual(self.store.usage.summary(parent)["totals"]["total_tokens"], 2000)
+
+    def test_fork_leaves_baseline_unknown_if_deferred_usage_cannot_drain(self):
+        parent = self.create()
+        self.usage_event(parent, 1000)
+        original = self.store.usage.record_snapshot
+        release = threading.Event()
+        original_flush = self.sessions.persistence.flush
+
+        def deferred(*args, **kwargs):
+            if not release.is_set():
+                raise sqlite3.OperationalError("database is locked")
+            return original(*args, **kwargs)
+
+        def short_wait(*, timeout):
+            self.assertEqual(timeout, 1)
+            return original_flush(timeout=0.02)
+
+        with patch.object(self.store.usage, "record_snapshot", side_effect=deferred):
+            self.usage_event(parent, 2000)
+            try:
+                with patch.object(self.sessions.persistence, "flush", side_effect=short_wait):
+                    child = self.sessions.fork_work_thread(parent)["thread_id"]
+                # The native fork still succeeds, but stale 1000 cannot become
+                # an immutable baseline while final 2000 remains deferred.
+                with self.store._connection() as db:
+                    baseline = db.execute("SELECT totals_json FROM thread_usage_baselines WHERE thread_id=?", (child,)).fetchone()
+                self.assertIsNone(baseline["totals_json"])
+            finally:
+                release.set()
+            self.assertTrue(original_flush(timeout=3))
+        self.usage_event(child, 2100)
+        self.assertEqual(self.store.usage.summary(parent)["totals"]["total_tokens"], 2000)
+        self.assertEqual(self.store.usage.summary(child)["status"], "unavailable")
+        self.assertEqual(self.store.usage.summary(child)["totals"], {})
+
+    def test_overview_never_queries_usage_or_transcripts_detail_recovers_once(self):
+        thread_id = self.create()
+        with patch.object(self.store.usage, "summary", wraps=self.store.usage.summary) as summary:
+            with patch.object(self.store.usage, "backfill", wraps=self.store.usage.backfill) as backfill:
+                self.sessions.list_work_threads()
+                summary.assert_not_called()
+                backfill.assert_not_called()
+                self.sessions.work_thread(thread_id)
+                self.sessions.work_thread(thread_id)
+                self.assertEqual(backfill.call_count, 1)
+        # Durable unavailable note prevents the next process from rescanning.
+        other = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(other.close)
+        with patch.object(self.store.usage, "backfill") as backfill:
+            other.work_thread(thread_id)
+            backfill.assert_not_called()
+
     def test_resolved_defaults_are_visible_and_restored(self):
         thread_id = self.create()
         record = self.sessions.read(thread_id)["session"]

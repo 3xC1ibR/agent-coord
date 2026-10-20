@@ -20,6 +20,7 @@ import uuid
 from .acp import ACPConnection
 from .context import client_environment, coordination_bootstrap
 from .muse_setup import SCHEMA_FINGERPRINT, TESTED_VERSION, host_config, resolve_runtime
+from .muse_usage import MuseUsage
 from .store import CoordinationError
 
 
@@ -108,6 +109,7 @@ class MuseRPC:
         self.closed = False
         with store._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS muse_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL, cwd TEXT NOT NULL)")
+        self.usage = MuseUsage(store, on_event)
 
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
@@ -186,6 +188,7 @@ class MuseRPC:
             native_id = session["sessionId"]
             if native_id != self.native[thread_id]:
                 raise CoordinationError("Muse returned a different session identity; refusing to replace the conversation.")
+            self.usage.snapshot(thread_id, native_id, result)
             # Preserve the native identity even when a subsequent setting fails.
             with self.store._connection() as db:
                 db.execute("INSERT OR REPLACE INTO muse_sessions VALUES (?, ?, ?)", (thread_id, native_id, options["cwd"]))
@@ -368,6 +371,9 @@ class MuseRPC:
                 return
         if params.get("sessionId") != self.native.get(thread_id):
             return
+        # Retain native generation/identity checks, but do not drop telemetry
+        # merely because it belongs to replay or an already-finished UI turn.
+        self.usage.capture(thread_id, self.native[thread_id], method, params)
         if method == "session/closed":
             self._shutdown(thread_id)
             self._finish(thread_id, "failed", "Muse unloaded the session. Send again to resume.")
