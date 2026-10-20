@@ -5,7 +5,7 @@ class OverviewLayout {
     Object.assign(this, {document, window, storage, onChange, canNavigate});
     this.key = "agent-coord.overview-layout";
     this.preference = "cards";
-    try { if (storage?.getItem(this.key) === "atlas") this.preference = "atlas"; } catch { /* Optional preference. */ }
+    try { const saved = storage?.getItem(this.key); if (["atlas", "working-set"].includes(saved)) this.preference = saved; } catch { /* Optional preference. */ }
     this.narrow = window.matchMedia("(max-width: 720px)");
     this.narrow.addEventListener("change", () => { this.close(); this.onChange?.(this.mode, {navigate: false}); });
     document.addEventListener("pointerdown", event => {
@@ -17,9 +17,9 @@ class OverviewLayout {
     window.addEventListener("resize", () => this.close());
     window.addEventListener("scroll", () => this.close(), {capture: true, passive: true});
   }
-  get mode() { return this.narrow.matches ? "cards" : this.preference; }
+  get mode() { return this.narrow.matches && this.preference === "atlas" ? "cards" : this.preference; }
   choose(mode) {
-    if (!["cards", "atlas"].includes(mode) || mode === "atlas" && this.narrow.matches || !this.canNavigate()) return false;
+    if (!["cards", "atlas", "working-set"].includes(mode) || mode === "atlas" && this.narrow.matches || !this.canNavigate()) return false;
     this.preference = mode;
     try { this.storage?.setItem(this.key, mode); } catch { /* Switching still works without storage. */ }
     this.close(true);
@@ -40,7 +40,7 @@ class OverviewLayout {
     this.close(); this.anchor = anchor;
     const doc = this.document, panel = doc.createElement("div");
     panel.className = "overview-layout-menu"; panel.setAttribute("role", "menu"); panel.setAttribute("aria-label", "Overview layout");
-    for (const [mode, title] of [["cards", "Cards"], ["atlas", "Atlas"]]) {
+    for (const [mode, title] of [["cards", "Cards"], ["atlas", "Atlas"], ["working-set", "Working Set"]]) {
       const button = doc.createElement("button"); button.type = "button";
       button.dataset.layout = mode; button.setAttribute("role", "menuitemradio"); button.setAttribute("aria-checked", String(this.mode === mode));
       button.disabled = mode === "atlas" && this.narrow.matches;

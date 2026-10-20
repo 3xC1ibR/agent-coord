@@ -593,11 +593,16 @@ function renderList() {
   if (state.dispatchDock) syncDispatcherOverview();
   renderClosedToggle();
   savedViews?.render(threadsInProject(state.viewThreads || state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)));
-  if (conversationSearch?.update()) { if ($("atlas-overview")) $("atlas-overview").hidden = true; renderStatus(); return; }
+  if (conversationSearch?.update()) {
+    if ($("atlas-overview")) $("atlas-overview").hidden = true;
+    if ($("working-set-overview")) $("working-set-overview").hidden = true;
+    renderStatus(); return;
+  }
   const query = $("search").value.trim().toLocaleLowerCase();
   const projectThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)
     && threadOrganization.matches(t, "", $("project").value));
-  const threads = projectThreads.filter(t => threadViews.matches(t,
+  const workingSet = state.overviewLayout?.mode === "working-set";
+  const threads = projectThreads.filter(t => threadViews.matches(workingSet && t.attention === "later" && ["active", "completed"].includes($("view").value) ? {...t, attention: "now"} : t,
     {show: $("view").value, phase: $("phase-filter").value, search: query}));
   const upcoming = upcomingSchedules(query);
   const archived = $("view").value === "archived";
@@ -732,10 +737,25 @@ function renderOverviewLayout(threads, upcoming = []) {
   const host = $("atlas-overview");
   if (!host) return;
   const atlas = state.overviewLayout?.mode === "atlas";
+  const workingSet = state.overviewLayout?.mode === "working-set", workingHost = $("working-set-overview");
   // Scheduled prompts remain available above either overview representation.
-  $("overview").hidden = atlas && !upcoming.length;
-  $("overview").classList.toggle("atlas-schedules-only", atlas);
+  $("overview").hidden = (atlas || workingSet) && !upcoming.length;
+  $("overview").classList.toggle("atlas-schedules-only", atlas || workingSet);
   host.hidden = !atlas;
+  if (workingHost) workingHost.hidden = !workingSet;
+  if (workingSet && workingHost && !$("welcome").hidden) {
+    state.workingSet ||= WorkingSet.create({document, window, storage: state.overviewPreferences,
+      isActive: () => state.overviewLayout?.mode === "working-set" && !$("welcome").hidden,
+      renderCard: (thread, needsReply) => threadCard({...thread, attention_target_thread_id: null}, false, needsReply),
+      onOpen: id => action(() => select(id)),
+      onRead: thread => action(async () => {
+        await api(threadPath(thread.thread_id), {seen: true, seen_checkpoint_id: thread.checkpoint?.id || 0,
+          seen_completion_id: thread.turn_completion?.id || 0});
+        await refreshList();
+      })});
+    state.workingSet.render(threads, workingHost, {workspace: state.projectCwd || "all", view: savedViews?.activeId || "all",
+      placement: $("view").value, revision: state.listSignature});
+  }
   if (!atlas || $("welcome").hidden) return;
   state.atlas ||= LiveAtlas.create({document, window, storage: state.overviewPreferences,
     onOpen: id => action(() => select(id))});

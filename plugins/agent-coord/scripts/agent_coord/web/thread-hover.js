@@ -225,7 +225,8 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   const observer = new window.MutationObserver(() => {
     if (!anchor || anchor.isConnected) return;
     if (pinned && current) {
-      const again = overview.querySelector?.('[data-thread="' + current.thread_id + '"]');
+      const again = [...overview.querySelectorAll('[data-thread="' + current.thread_id + '"]')]
+        .find(element => !element.closest('[hidden], [aria-hidden="true"]'));
       if (again) { anchor = again; anchor.setAttribute("aria-describedby", panel.id); position(); return; }
     }
     hide();
@@ -235,7 +236,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
 }
 
 if (typeof module !== "undefined" && module.exports) module.exports = {createThreadHover};
-else globalThis.threadHover = createThreadHover({overview: document.getElementById("overview"), document, window,
+else globalThis.threadHover = createThreadHover({overview: document.getElementById("welcome"), document, window,
   getThread: id => state.sessions.find(thread => thread.thread_id === id),
   loadPreview: id => api(threadPath(id) + "/preview"),
   relativeTime, select: id => action(() => select(id))});

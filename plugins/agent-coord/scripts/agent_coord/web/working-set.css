@@ -1,0 +1,70 @@
+.working-set { position: relative; width: 100%; height: max(520px, calc(100dvh - 190px)); min-height: 0; overflow: hidden; }
+.working-set[hidden] { display: none; }
+.working-set .ws-viewport, .working-set .ws-vtrack, .working-set .ws-htrack { position: absolute; inset: 0; }
+.working-set .ws-viewport { overflow: hidden; }
+.working-set .ws-vtrack, .working-set .ws-htrack { transition: transform .34s cubic-bezier(.2,.7,.2,1); }
+.working-set .ws-pane { position: absolute; left: 0; right: 0; height: 100%; overflow: hidden; }
+.working-set .ws-page { position: absolute; top: 0; bottom: 0; padding: 22px 4px 225px; overflow-y: auto; overscroll-behavior: contain; container-type: inline-size; }
+.working-set .ws-page.ws-neighbor { opacity: .3; cursor: pointer; }
+.working-set .ws-neighbor > * { pointer-events: none; }
+.working-set .ws-page-title { margin: 0 0 12px; font-size: 24px; font-weight: 600; letter-spacing: -.03em; overflow-wrap: anywhere; }
+.working-set .ws-level-title { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.working-set .ws-level-title h3 { margin: 0; font-size: 17px; font-weight: 500; }
+.working-set .ws-level-title > span, .working-set .ws-section-title > span { font-size: 11px; color: var(--muted); }
+.working-set .ws-section { margin: 22px 0; min-width: 0; }
+.working-set .ws-section-title { display: flex; align-items: baseline; gap: 10px; padding-bottom: 9px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+.working-set .ws-section-title h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.working-set [data-section="asks"] > .ws-section-title h4 { color: var(--warm); }
+.working-set [data-section="running"] > .ws-section-title h4 { color: var(--accent); }
+.working-set .thread-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 14px; align-items: start; }
+.working-set .ws-card { min-width: 0; overflow-wrap: anywhere; }
+.working-set .thread-card > .session { padding: 14px 16px 11px; }
+.working-set .attention-card > .session { padding-right: 70px; }
+.working-set .session-title { font-size: 14px; font-weight: 550; line-height: 1.4; }
+.working-set .thread-snippet { font-size: 12px; line-height: 1.65; -webkit-line-clamp: 2; }
+.working-set .session.card-age-old .thread-snippet, .working-set .session.card-age-settled .thread-snippet { display: -webkit-box; }
+.working-set .session.card-age-old .next-action, .working-set .session.card-age-settled .next-action { display: flex; }
+.working-set .ws-card-links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 2px 0; }
+.working-set .ws-card-links button { max-width: 100%; text-align: left; font-size: 10px; padding: 3px 7px; color: var(--muted); }
+.working-set .ws-card-links .ws-parent { flex-basis: 100%; border: 0; padding-inline: 0; }
+.working-set .ws-card-links .ws-read { margin-left: auto; }
+.working-set .ws-pin { font-size: 10px; color: var(--muted); }
+.working-set .ws-parked { opacity: .65; }
+.working-set .ws-phase-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 14px; align-items: start; margin: 22px 0; }
+.working-set .ws-phase-board > .ws-section { margin: 0; }
+.working-set .ws-phase-board .thread-cards { grid-template-columns: minmax(0, 1fr); }
+.working-set .ws-empty { color: var(--muted); font-size: 12px; padding: 30px 0; }
+.working-set .ws-empty-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.working-set .ws-more { margin-top: 12px; }
+.working-set .ws-minimap { position: absolute; right: 18px; bottom: 18px; z-index: 20; width: min(420px, calc(100% - 36px)); padding: 11px; background: color-mix(in srgb, var(--surface) 95%, transparent); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 8px 26px var(--shadow); backdrop-filter: blur(6px); }
+.working-set .ws-group-nav { display: flex; gap: 8px; align-items: center; padding-bottom: 9px; font-size: 12px; }
+.working-set .ws-group-nav > select { flex: 1; min-width: 0; padding: 3px; border: 0; background: transparent; color: var(--ink); font: inherit; }
+.working-set .ws-group-nav > button { padding: 3px 8px; }
+.working-set .ws-map-body { display: flex; gap: 8px; }
+.working-set .ws-labels { flex: 0 0 156px; display: grid; gap: 5px; }
+.working-set .ws-level { height: 30px; border: 0; border-radius: 4px; background: transparent; text-align: left; font-size: 10px; color: var(--muted); padding: 0 6px; }
+.working-set .ws-level[aria-pressed="true"] { background: var(--hover-bg); color: var(--ink); font-weight: 600; }
+.working-set .ws-matrix { flex: 1; min-width: 0; overflow-x: auto; display: grid; grid-template-rows: repeat(3, 30px); gap: 5px; padding: 1px 1px 5px; }
+.working-set .ws-cells { display: flex; gap: 4px; }
+.working-set .ws-cell { flex: 0 0 28px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--muted); padding: 0; font-size: 11px; }
+.working-set .ws-cell.ws-here { border-color: var(--accent); color: var(--ink); }
+.working-set .ws-cell.ws-needs { color: var(--warm); }
+.working-set .ws-cell.ws-selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.working-set .ws-map-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 10px; color: var(--muted); }
+.working-set .ws-map-foot > label { display: flex; align-items: center; flex-direction: row; gap: 3px; margin: 0; font-size: inherit; }
+.working-set .ws-map-foot select { width: auto; padding: 2px 4px; border: 0; background: transparent; font: inherit; color: var(--ink); }
+.welcome:has(> .working-set:not([hidden])) > .overview-footer { display: none; }
+@container (max-width: 900px) {
+  .working-set .ws-phase-board { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+}
+@media (max-width: 720px) {
+  .working-set { height: max(450px, calc(100dvh - 150px)); }
+  .working-set .ws-minimap { right: 4px; bottom: 8px; width: calc(100% - 8px); padding: 8px; }
+  .working-set .ws-labels { flex-basis: 144px; }
+  .working-set .ws-page-title { font-size: 20px; }
+  .working-set .ws-page { padding-bottom: 245px; }
+  .working-set .ws-card-links button, .working-set .ws-empty-links button, .working-set .ws-more { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .working-set .ws-vtrack, .working-set .ws-htrack { transition: none; }
+}
