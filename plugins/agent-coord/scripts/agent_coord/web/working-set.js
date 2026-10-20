@@ -4,7 +4,7 @@
 // parent's phase, read receipt, or position. Placement is never mutated here.
 const WorkingSet = (() => {
   const grouping = typeof module !== "undefined" ? require("./thread-groups.js") : threadGrouping;
-  const LEVELS = ["Running + Needs my reply", "Replies to read", "Idle"];
+  const LEVELS = ["Attention", "Idle"];
   const PHASES = ["new", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"];
   const GROUPINGS = ["group", "domain", "workspace"], ALL = "overview:all", CAP = 12;
   const parked = t => t.attention === "later" || t.attention === "archived" || t.snoozed;
@@ -13,7 +13,16 @@ const WorkingSet = (() => {
     return !parked(t) && (t.status === "needs input" || t.response_state === "input" ||
       !t.checkpoint_stale && t.checkpoint?.next_actor === "user" && !!t.checkpoint.next_action);
   }
-  function levelOf(t) { return running(t) || needsReply(t) ? 0 : !parked(t) && t.unread_result === true ? 1 : 2; }
+  function columnOf(t) {
+    if (running(t)) return "working";
+    if (parked(t)) return null;
+    if (needsReply(t) || t.response_state === "failed" || t.attention_reason === "blocked" ||
+        t.response_classification?.choice === "blocked") return "blocked";
+    const completed = grouping.phase(t) === "finished" || t.response_classification?.choice === "done";
+    if (completed) return (t.unhandled_response ?? t.unread_result) ? "working" : null;
+    return t.unread_result === true ? "attention" : null;
+  }
+  function levelOf(t) { return columnOf(t) ? 0 : 1; }
   const workspaceOf = t => t.project_cwd || t.cwd || "unknown";
   const folder = path => path.split("/").filter(Boolean).pop() || path;
   const touchOf = t => Math.max(t.turn_completion?.completed_at || 0, t.turn_started_at || 0, t.created_at || 0);
@@ -36,10 +45,10 @@ const WorkingSet = (() => {
   }
   function derive(threads, {dimension = "group", workspace = "all", order = []} = {}) {
     const byId = new Map(threads.map(t => [t.thread_id, t])), map = new Map();
-    const all = {key: ALL, name: "All groups", aggregate: true, levels: [[], [], []]};
+    const all = {key: ALL, name: "All groups", aggregate: true, levels: LEVELS.map(() => [])};
     for (const t of threads) {
       const descriptor = groupFor(t, byId, dimension, workspace);
-      if (!map.has(descriptor.key)) map.set(descriptor.key, {...descriptor, levels: [[], [], []]});
+      if (!map.has(descriptor.key)) map.set(descriptor.key, {...descriptor, levels: LEVELS.map(() => [])});
       map.get(descriptor.key).levels[levelOf(t)].push(t); all.levels[levelOf(t)].push(t);
     }
     for (const g of [all, ...map.values()]) {
@@ -53,10 +62,10 @@ const WorkingSet = (() => {
       .sort((a, b) => b.touch - a.touch || a.name.localeCompare(b.name));
     return [all, ...order.filter(key => map.has(key)).map(key => map.get(key)), ...newcomers];
   }
-  function create({document, window, storage, renderCard, onOpen, onRead, isActive = () => true}) {
+  function create({document, window, storage, renderCard, onOpen, onRead, onDismiss, isActive = () => true}) {
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
     let host, viewport, vtrack, minimap, tracks = [], panes = [], groups = [], source = [], byId = new Map();
-    let workspace = "all", context = "", positionKey = "", dimension = "group", level = 1, pageKey = ALL, pageIdx = 0, order = [], signature = "";
+    let workspace = "all", context = "", positionKey = "", dimension = "group", level = 0, pageKey = ALL, pageIdx = 0, order = [], signature = "";
     const positions = new Map(), scroll = new Map(), expanded = new Set();
     let wheelTimer, touch, observer, horizontal = 0, vertical = 0, cooldown = -Infinity, lastNative = -Infinity;
     const active = () => host && !host.hidden && host.isConnected && isActive();
@@ -72,17 +81,23 @@ const WorkingSet = (() => {
       if (positionKey === key) return;
       positionKey = key;
       let value = positions.get(key);
-      try { value ||= JSON.parse(storage?.getItem(key) || "null"); } catch { /* Optional preference. */ }
+      try {
+        value ||= JSON.parse(storage?.getItem(key) || "null");
+        if (!value) {
+          const legacy = JSON.parse(storage?.getItem(key.replace(":v2:", ":v1:")) || "null");
+          if (legacy) value = {...legacy, level: legacy.level === 2 ? 1 : 0};
+        }
+      } catch { /* Optional preference. */ }
       dimension = GROUPINGS.includes(value?.dimension) ? value.dimension : "group";
-      level = Number.isInteger(value?.level) && value.level >= 0 && value.level < 3 ? value.level : ["later", "archived"].includes(placement) ? 2 : 1;
+      level = Number.isInteger(value?.level) && value.level >= 0 && value.level < LEVELS.length ? value.level : ["later", "archived"].includes(placement) ? 1 : 0;
       pageKey = typeof value?.pageKey === "string" ? value.pageKey : ALL;
       order = []; scroll.clear(); expanded.clear();
     }
     function rememberScroll() {
       for (const track of tracks) for (const page of track.children) scroll.set(page.dataset.level + ":" + page.dataset.key, page.scrollTop);
     }
-    function section(page, g, items, title, key, count = false) {
-      if (!items.length) return;
+    function section(page, g, items, title, key, count = false, empty = "") {
+      if (!items.length && !empty) return;
       const section = el("section", "ws-section"); section.dataset.section = key;
       if (title) {
         const heading = el("header", "ws-section-title"); heading.append(el("h4", "", title));
@@ -106,13 +121,17 @@ const WorkingSet = (() => {
           const link = button(descriptor.name, "quiet ws-group-link", () => go(groups.findIndex(g => g.key === descriptor.key), level));
           link.dataset.action = "group"; links.append(link);
         }
-        if (onRead && t.unread_result && t.attention !== "archived") {
+        if (onDismiss && columnOf(t) === "working" && !running(t)) {
+          const dismiss = button("Dismiss", "quiet ws-read", () => onDismiss(t), "Dismiss completed response · " + t.title);
+          dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss"; links.append(dismiss);
+        } else if (onRead && t.unread_result && !running(t) && t.attention !== "archived") {
           const read = button("Mark read", "quiet ws-read", () => onRead(t), "Mark response read · " + t.title);
           read.dataset.thread = t.thread_id; read.dataset.action = "read"; links.append(read);
         }
         if (links.children.length) wrap.append(links); cards.append(wrap);
       }
       section.append(cards);
+      if (!items.length) section.append(el("p", "ws-empty", empty));
       if (items.length > CAP) section.append(button(expanded.has(expansionKey) ? "Show recent" : "Show all", "quiet ws-more", () => {
         expanded.has(expansionKey) ? expanded.delete(expansionKey) : expanded.add(expansionKey); paint();
       }));
@@ -122,18 +141,21 @@ const WorkingSet = (() => {
       const page = el("section", "ws-page"); page.dataset.key = g.key; page.dataset.level = String(n); page.dataset.index = String(i);
       const title = el("h2", "ws-page-title", g.name); title.tabIndex = -1;
       const heading = el("div", "ws-level-title"); heading.append(el("h3", "", LEVELS[n]));
-      const items = g.levels[n]; if (n === 1 && items.length) heading.append(el("span", "", String(items.length)));
+      const items = g.levels[n]; if (items.length) heading.append(el("span", "", String(items.length)));
       page.append(title, heading);
       if (!items.length) {
-        page.append(el("p", "ws-empty", ["Nothing running or waiting for your reply", "No unread replies", "No idle threads"][n] + (g.aggregate ? " across these groups." : " in this group.")));
+        page.append(el("p", "ws-empty", ["Nothing needs attention", "No idle threads"][n] + (g.aggregate ? " across these groups." : " in this group.")));
         const links = el("div", "ws-empty-links");
         g.levels.forEach((list, other) => { if (other !== n && list.length) links.append(button(LEVELS[other], "quiet", () => go(i, other))); }); page.append(links);
       }
       if (n === 0) {
-        section(page, g, items.filter(needsReply), "Needs my reply", "asks", true);
-        section(page, g, items.filter(t => !needsReply(t)), "Running", "running");
-      } else if (n === 1) section(page, g, items, "", "replies");
-      else {
+        const board = el("div", "ws-attention-board"); board.setAttribute("aria-label", "Increasing attention from left to right");
+        for (const [key, title, empty] of [["working", "Working / Completed", "No running agents or completed work."],
+          ["attention", "Needs your attention", "No unread answers or findings."], ["blocked", "Blocked", "No agents waiting for your input."]]) {
+          section(board, g, items.filter(t => columnOf(t) === key), title, key, true, empty);
+        }
+        page.append(board);
+      } else {
         const board = el("div", "ws-phase-board"); board.setAttribute("aria-label", "Idle threads by phase");
         for (const phase of PHASES) {
           const list = items.filter(t => grouping.phase(t) === phase);
@@ -157,12 +179,12 @@ const WorkingSet = (() => {
         const b = button(label, "ws-level", () => go(pageIdx, n)); b.setAttribute("aria-pressed", String(n === level)); labels.append(b);
         const cells = el("div", "ws-cells");
         groups.forEach((g, i) => {
-          const count = g.levels[n].length, badge = n === 0 ? g.levels[0].filter(needsReply).length : n === 1 ? count : 0;
+          const count = g.levels[n].length, badge = n === 0 ? g.levels[0].filter(t => columnOf(t) !== "working").length : 0;
           const cell = button(badge ? String(badge) : count ? "·" : "", "ws-cell", () => go(i, n));
           cell.dataset.group = g.key; cell.dataset.level = String(n);
           cell.classList.toggle("ws-here", i === pageIdx); cell.classList.toggle("ws-selected", i === pageIdx && n === level);
           cell.classList.toggle("ws-needs", n === 0 && badge > 0);
-          cell.title = g.name + " · " + label + (badge ? " · " + badge + (n === 0 ? " awaiting your reply" : " unread") : !count ? " · Empty" : "");
+          cell.title = g.name + " · " + label + (badge ? " · " + badge + " needing attention" : !count ? " · Empty" : "");
           cell.setAttribute("aria-label", cell.title); cell.setAttribute("aria-current", String(i === pageIdx && n === level)); cells.append(cell);
         }); matrix.append(cells);
       });
@@ -212,7 +234,7 @@ const WorkingSet = (() => {
     }
     function go(i, n) {
       if (!groups.length) return;
-      const nextIdx = Math.max(0, Math.min(groups.length - 1, i)), nextLevel = Math.max(0, Math.min(2, n));
+      const nextIdx = Math.max(0, Math.min(groups.length - 1, i)), nextLevel = Math.max(0, Math.min(LEVELS.length - 1, n));
       if (pageIdx === nextIdx && level === nextLevel) return;
       pageIdx = nextIdx; level = nextLevel; pageKey = groups[pageIdx].key; save(); paint();
     }
@@ -233,6 +255,10 @@ const WorkingSet = (() => {
       const now = window.performance.now(), unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
       window.clearTimeout(wheelTimer); wheelTimer = window.setTimeout(() => { horizontal = vertical = 0; }, 220);
       if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+        const board = event.target.closest?.(".ws-attention-board");
+        if (board && (event.deltaX > 0 ? board.scrollLeft + board.clientWidth < board.scrollWidth - 1 : board.scrollLeft > 0)) {
+          horizontal = 0; return;
+        }
         event.preventDefault(); if (now < cooldown) return; horizontal += event.deltaX * unit;
         if (Math.abs(horizontal) > 70) { go(pageIdx + Math.sign(horizontal), level); horizontal = 0; cooldown = now + 420; } return;
       }
@@ -251,13 +277,15 @@ const WorkingSet = (() => {
       viewport.addEventListener("wheel", wheel, {passive: false});
       viewport.addEventListener("touchstart", event => {
         const t = event.touches[0], page = event.target.closest?.(".ws-page");
-        touch = event.touches.length === 1 ? {x: t.clientX, y: t.clientY, page, top: !page || page.scrollTop <= 0,
+        touch = event.touches.length === 1 ? {x: t.clientX, y: t.clientY, page, board: event.target.closest?.(".ws-attention-board"), top: !page || page.scrollTop <= 0,
           bottom: !page || page.scrollTop + page.clientHeight >= page.scrollHeight - 1, scroll: page?.scrollTop || 0} : null;
       }, {passive: true});
       viewport.addEventListener("touchend", event => {
         if (!touch || !active()) return;
         const t = event.changedTouches[0], dx = t.clientX - touch.x, dy = t.clientY - touch.y;
-        if (Math.abs(dx) > 60 && Math.abs(dx) > 1.4 * Math.abs(dy)) go(pageIdx - Math.sign(dx), level);
+        if (Math.abs(dx) > 60 && Math.abs(dx) > 1.4 * Math.abs(dy)) {
+          if (!touch.board || touch.board.scrollWidth <= touch.board.clientWidth) go(pageIdx - Math.sign(dx), level);
+        }
         else if (Math.abs(dy) > 80 && Math.abs(dy) > 1.4 * Math.abs(dx) && (dy > 0 ? touch.top : touch.bottom) && (!touch.page || Math.abs(touch.page.scrollTop - touch.scroll) < 2)) go(pageIdx, level - Math.sign(dy));
         touch = null;
       }, {passive: true});
@@ -272,7 +300,7 @@ const WorkingSet = (() => {
         const nextSignature = JSON.stringify([threads, nextContext, options.revision]);
         if (signature === nextSignature) { layout(); return; }
         const changedContext = context !== nextContext;
-        if (changedContext) { rememberScroll(); context = nextContext; restore("agent-coord.working-set:v1:" + context, options.placement); }
+        if (changedContext) { rememberScroll(); context = nextContext; restore("agent-coord.working-set:v2:" + context, options.placement); }
         workspace = options.workspace || "all"; source = threads; byId = new Map(threads.map(t => [t.thread_id, t]));
         groups = derive(threads, {dimension, workspace, order}); order = groups.slice(1).map(g => g.key);
         pageIdx = Math.max(0, groups.findIndex(g => g.key === pageKey)); pageKey = groups[pageIdx].key;
@@ -281,6 +309,6 @@ const WorkingSet = (() => {
       destroy() { document.removeEventListener("keydown", keydown); window.clearTimeout(wheelTimer); observer?.disconnect(); host?.replaceChildren(); },
     };
   }
-  return {create, derive, levelOf, needsReply, groupFor};
+  return {create, derive, levelOf, columnOf, needsReply, groupFor};
 })();
 if (typeof module !== "undefined") module.exports = WorkingSet;

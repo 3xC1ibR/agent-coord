@@ -746,8 +746,13 @@ function renderOverviewLayout(threads, upcoming = []) {
   if (workingSet && workingHost && !$("welcome").hidden) {
     state.workingSet ||= WorkingSet.create({document, window, storage: state.overviewPreferences,
       isActive: () => state.overviewLayout?.mode === "working-set" && !$("welcome").hidden,
-      renderCard: (thread, needsReply) => threadCard({...thread, attention_target_thread_id: null}, false, needsReply),
+      renderCard: (thread, needsReply) => threadCard({...thread, attention_target_thread_id: null, can_handle_response: false}, false, needsReply),
       onOpen: id => action(() => select(id)),
+      onDismiss: thread => action(async () => {
+        await api(threadPath(thread.thread_id), {handled: true, handled_checkpoint_id: thread.checkpoint?.id || 0,
+          handled_completion_id: thread.turn_completion?.id || 0});
+        await refreshList();
+      }),
       onRead: thread => action(async () => {
         await api(threadPath(thread.thread_id), {seen: true, seen_checkpoint_id: thread.checkpoint?.id || 0,
           seen_completion_id: thread.turn_completion?.id || 0});

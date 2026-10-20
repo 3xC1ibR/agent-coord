@@ -42,12 +42,12 @@ function setup({data = new Map(), broken = false} = {}) {
   const win = {performance: {now: () => timestamp}, setTimeout: f => { timers.set(++counter, f); return counter; }, clearTimeout: n => timers.delete(n),
     ResizeObserver: class { constructor(f) { this.callback = f; observers.push(this); } observe() {} disconnect() { this.disconnected = true; } }};
   const host = new Element("section"); host.hidden = false; doc.body.append(host);
-  const opened = [], read = [], rendered = [];
+  const opened = [], read = [], dismissed = [], rendered = [];
   const ui = WorkingSet.create({document: doc, window: win,
     storage: {getItem(k) { if (broken) throw Error(); return data.get(k); }, setItem(k, v) { if (broken) throw Error(); data.set(k, v); }},
     isActive: () => enabled,
     renderCard(t, needs) { const b = new Element("button"); b.dataset.thread = t.thread_id; b.textContent = t.title; b.onclick = () => opened.push(t.thread_id); rendered.push([t.thread_id, needs]); return b; },
-    onOpen: id => opened.push(id), onRead: t => read.push(t.thread_id)});
+    onOpen: id => opened.push(id), onRead: t => read.push(t.thread_id), onDismiss: t => dismissed.push(t.thread_id)});
   const render = (threads, options = {}) => ui.render(threads, host, {workspace: "/work", ...options});
   const key = (value, target = doc.body, extra = {}) => { const e = {key: value, target, preventDefault() { this.prevented = true; }, ...extra}; doc.events.keydown(e); return e; };
   const page = () => host.querySelectorAll(".ws-page").find(p => p.attrs["aria-hidden"] === "false");
@@ -55,7 +55,7 @@ function setup({data = new Map(), broken = false} = {}) {
   const selectLevel = n => host.querySelectorAll(".ws-level")[n].onclick();
   const selectGroup = key => { const select = host.querySelector(".ws-group-nav").querySelector("select"); select.value = String(select.children.findIndex(o => o.textContent === key)); select.onchange(); };
   const event = extra => ({target: page(), deltaX: 0, deltaY: 0, preventDefault() { this.prevented = true; }, ...extra});
-  return {ui, doc, host, data, observers, rendered, opened, read, render, key, page, ids, selectLevel, selectGroup, event,
+  return {ui, doc, host, data, observers, rendered, opened, read, dismissed, render, key, page, ids, selectLevel, selectGroup, event,
     advance: n => { timestamp += n; }, enable: value => { enabled = value; }};
 }
 
@@ -67,7 +67,7 @@ test("state membership separates unread findings from actual requests, ignores s
     thread("parked", {attention: "later", unread_result: true}), thread("snoozed", {snoozed: true, unread_result: true}),
     thread("later-run", {attention: "later", response_state: "working"}), thread("closed", {attention: "archived", status: "running"}),
     thread("failure", {response_state: "failed", unread_result: true})];
-  assert.deepEqual(list.map(WorkingSet.levelOf), [0, 0, 0, 1, 2, 1, 2, 2, 0, 2, 1]);
+  assert.deepEqual(list.map(WorkingSet.levelOf), [0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0]);
   const before = JSON.stringify(list), groups = WorkingSet.derive(list);
   assert.deepEqual(groups[0].levels.flat().map(t => t.thread_id).sort(), list.map(t => t.thread_id).sort());
   assert.equal(JSON.stringify(list), before);
@@ -83,6 +83,40 @@ test("group IDs distinguish equal names, children inherit root groups, missing p
   assert.equal(groups.find(g => g.key === "group:two").levels.flat().length, 1);
   assert.equal(groups.slice(1).flatMap(g => g.levels.flat()).length, list.length);
 });
+test("attention columns increase left to right and keep completed work until explicit dismissal", () => {
+  const c = setup(), completed = thread("done", {work_phase: "finished", unhandled_response: true, unread_result: true});
+  const list = [thread("run", {response_state: "working", unread_result: true}), completed,
+    thread("answer", {unread_result: true}), thread("ask", {checkpoint: {next_actor: "user", next_action: "Pick one"}}),
+    thread("failed", {response_state: "failed"}), thread("classified-blocker", {response_classification: {choice: "blocked"}})];
+  c.render(list);
+  const board = c.page().querySelector(".ws-attention-board");
+  assert.deepEqual(board.children.map(n => n.dataset.section), ["working", "attention", "blocked"]);
+  assert.deepEqual(list.map(WorkingSet.columnOf), ["working", "working", "attention", "blocked", "blocked", "blocked"]);
+  assert.equal(c.ids().length, 6);
+  assert.equal(board.children[0].querySelectorAll(".ws-card").length, 2);
+  assert.equal(board.children[1].querySelectorAll(".ws-card").length, 1);
+  assert.equal(board.children[2].querySelectorAll(".ws-card").length, 3);
+  c.page().querySelector('[data-action="dismiss"]').onclick(); assert.deepEqual(c.dismissed, ["done"]);
+  c.render([{...completed, unread_result: false}]); assert.deepEqual(c.ids(), ["done"]);
+  assert(c.page().querySelector('[data-action="dismiss"]'));
+  c.render([{...completed, unhandled_response: false}]); assert.deepEqual(c.ids(), []);
+  c.selectLevel(1); assert.deepEqual(c.ids(), ["done"]);
+});
+test("empty attention columns remain visible, and running work takes precedence over prior input", () => {
+  const c = setup(); c.render([]);
+  assert.equal(c.page().querySelector(".ws-attention-board").children.length, 3);
+  assert.equal(WorkingSet.columnOf(thread("resumed", {response_state: "working", checkpoint: {next_actor: "user", next_action: "Old question"}})), "working");
+  assert.equal(WorkingSet.columnOf(thread("handled", {work_phase: "finished", unhandled_response: false, unread_result: true})), null);
+  assert.equal(WorkingSet.columnOf(thread("classified-done", {response_classification: {choice: "done"}, unhandled_response: true, unread_result: false})), "working");
+});
+test("old navigation migrates unread replies to Attention and Idle to the lower level", () => {
+  const key = 'agent-coord.working-set:v1:["/work","all","active"]';
+  for (const [oldLevel, newLevel] of [[0, 0], [1, 0], [2, 1]]) {
+    const c = setup({data: new Map([[key, JSON.stringify({level: oldLevel, dimension: "domain", pageKey: "overview:all"})]])});
+    c.render([thread("a")]); assert.equal(c.page().dataset.level, String(newLevel));
+    assert.equal(c.host.querySelector(".ws-map-foot").querySelector("select").children.find(o => o.selected).value, "domain");
+  }
+});
 test("groups initially sort by user work recency and keep position through completion and metadata changes", () => {
   const a = thread("a", {project_id: "a", project_name: "A", turn_started_at: 1000, updated_at: 999999});
   const b = thread("b", {project_id: "b", project_name: "B", turn_started_at: 2000});
@@ -94,21 +128,21 @@ test("groups initially sort by user work recency and keep position through compl
 });
 test("pins stay visible at the front of their state without duplicating a thread", () => {
   const c = setup(), list = Array.from({length: 14}, (_, n) => thread(String(n), {created_at: 200 + n}));
-  list[0].pinned = true; c.render(list); c.selectLevel(2);
+  list[0].pinned = true; c.render(list); c.selectLevel(1);
   assert.equal(c.ids()[0], "0"); assert.equal(c.page().querySelectorAll(".ws-pin").length, 1);
 });
-test("fresh visits start at All groups / Replies to read; each child appears independently in its own state", () => {
+test("fresh visits start at All groups / Attention; each child appears independently in its own state", () => {
   const c = setup(); c.render([thread("parent"), thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent", unread_result: true}), thread("run", {response_state: "working"})]);
-  assert.deepEqual(c.ids(), ["child"]); assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
+  assert.deepEqual(c.ids(), ["run", "child"]); assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
   c.page().querySelector(".ws-parent").onclick(); assert.deepEqual(c.opened, ["parent"]);
-  c.selectLevel(0); assert.deepEqual(c.ids(), ["run"]);
-  c.selectLevel(2); assert.deepEqual(c.ids(), ["parent"]); assert(c.page().querySelector(".ws-phase-board"));
+  c.selectLevel(0); assert.deepEqual(c.ids(), ["run", "child"]);
+  c.selectLevel(1); assert.deepEqual(c.ids(), ["parent"]); assert(c.page().querySelector(".ws-phase-board"));
 });
 test("read receipts move responses to Idle without changing phase or dismissing required input", () => {
   const c = setup(), t = thread("findings", {unread_result: true}); c.render([t]);
   c.page().querySelector(".ws-read").onclick(); assert.deepEqual(c.read, ["findings"]);
   c.render([{...t, unread_result: false}]); assert.deepEqual(c.ids(), []);
-  c.selectLevel(2); assert.deepEqual(c.ids(), ["findings"]);
+  c.selectLevel(1); assert.deepEqual(c.ids(), ["findings"]);
   assert.equal(c.page().querySelector(".ws-section-title").querySelector("h4").textContent, "Investigating");
   c.render([{...t, unread_result: false, checkpoint: {next_actor: "user", next_action: "Review"}}]);
   c.selectLevel(0); assert.deepEqual(c.ids(), ["findings"]);
@@ -118,10 +152,10 @@ test("group links preserve level and all groups remain reachable when their curr
   c.page().querySelector(".ws-group-link").onclick(); assert.deepEqual(c.ids(), ["a"]);
   assert.equal(c.page().querySelector(".ws-page-title").textContent, "A");
   c.selectGroup("B"); assert.deepEqual(c.ids(), []); assert(c.page().querySelector(".ws-empty"));
-  c.selectLevel(2); assert.deepEqual(c.ids(), ["b"]);
+  c.selectLevel(1); assert.deepEqual(c.ids(), ["b"]);
 });
 test("saved navigation survives reload, remains workspace-specific, and removed groups fall back to All groups", () => {
-  const c = setup(), list = [thread("a", {project_id: "a", project_name: "A"})]; c.render(list); c.selectLevel(2); c.selectGroup("A");
+  const c = setup(), list = [thread("a", {project_id: "a", project_name: "A"})]; c.render(list); c.selectLevel(1); c.selectGroup("A");
   const reloaded = setup({data: c.data}); reloaded.render(list); assert.deepEqual(reloaded.ids(), ["a"]);
   assert.equal(reloaded.page().querySelector(".ws-page-title").textContent, "A");
   reloaded.render([thread("other", {unread_result: true})], {workspace: "/other"}); assert.deepEqual(reloaded.ids(), ["other"]);
@@ -130,21 +164,21 @@ test("saved navigation survives reload, remains workspace-specific, and removed 
 });
 test("Later and Closed open Idle initially; corrupt or unavailable storage leaves navigation usable", () => {
   for (const placement of ["later", "archived"]) { const c = setup(); c.render([thread("parked", {attention: placement})], {placement}); assert.deepEqual(c.ids(), ["parked"]); }
-  const c = setup({broken: true}); c.render([thread("a")]); c.selectLevel(2); c.render([thread("b")], {workspace: "/other"}); c.render([thread("a")]); assert.deepEqual(c.ids(), ["a"]);
-  const bad = setup({data: new Map([['agent-coord.working-set:v1:["/work","all","active"]', 'null']])}); bad.render([]); assert.equal(bad.page().dataset.level, "1");
+  const c = setup({broken: true}); c.render([thread("a")]); c.selectLevel(1); c.render([thread("b")], {workspace: "/other"}); c.render([thread("a")]); assert.deepEqual(c.ids(), ["a"]);
+  const bad = setup({data: new Map([['agent-coord.working-set:v1:["/work","all","active"]', 'null']])}); bad.render([]); assert.equal(bad.page().dataset.level, "0");
 });
 test("per-section caps expand and collapse without hiding groups or losing membership", () => {
   const c = setup(), list = Array.from({length: 16}, (_, n) => thread(String(n), {project_id: "a", project_name: "A", unread_result: true}));
   c.render(list); assert.equal(c.ids().length, 12); c.page().querySelector(".ws-more").onclick(); assert.equal(c.ids().length, 16);
   c.page().querySelector(".ws-more").onclick(); assert.equal(c.ids().length, 12);
-  assert.equal(c.host.querySelectorAll(".ws-cell").length, 6);
+  assert.equal(c.host.querySelectorAll(".ws-cell").length, 4);
 });
 test("polling retains page scroll and focus, and unchanged renders keep the DOM", () => {
   const c = setup(), t = thread("reply", {unread_result: true}); c.render([t]);
   const oldPage = c.page(); oldPage.scrollTop = 145; const control = oldPage.querySelector("button"); control.focus();
   c.render([t]); assert.equal(c.page(), oldPage);
   c.render([{...t, title: "Updated"}]); assert.equal(c.page().scrollTop, 145); assert.equal(c.doc.activeElement.dataset.thread, "reply");
-  c.selectLevel(2); c.selectLevel(1); assert.equal(c.page().scrollTop, 145);
+  c.selectLevel(1); c.selectLevel(0); assert.equal(c.page().scrollTop, 145);
   assert.equal(c.observers.length, 1);
 });
 test("keyboard navigation is scoped to the visible overview and leaves forms, menus and modifiers alone", () => {
@@ -159,21 +193,32 @@ test("keyboard navigation is scoped to the visible overview and leaves forms, me
 test("wheel gestures scroll cards before switching states, honor cooldown and preserve browser zoom", () => {
   const c = setup(); c.render([thread("a", {unread_result: true})]);
   const page = c.page(), viewport = c.host.querySelector(".ws-viewport"); page.scrollHeight = 1500;
-  const native = c.event({deltaY: 200}); viewport.emit("wheel", native); assert(!native.prevented); assert.equal(c.page().dataset.level, "1");
-  page.scrollTop = 800; c.advance(400); viewport.emit("wheel", c.event({deltaY: 10, deltaMode: 1})); assert.equal(c.page().dataset.level, "2");
-  c.advance(1000); viewport.emit("wheel", c.event({deltaY: -250, ctrlKey: true})); assert.equal(c.page().dataset.level, "2");
-  viewport.emit("wheel", c.event({deltaY: -250})); assert.equal(c.page().dataset.level, "1");
+  const native = c.event({deltaY: 200}); viewport.emit("wheel", native); assert(!native.prevented); assert.equal(c.page().dataset.level, "0");
+  page.scrollTop = 800; c.advance(400); viewport.emit("wheel", c.event({deltaY: 10, deltaMode: 1})); assert.equal(c.page().dataset.level, "1");
+  c.advance(1000); viewport.emit("wheel", c.event({deltaY: -250, ctrlKey: true})); assert.equal(c.page().dataset.level, "1");
+  viewport.emit("wheel", c.event({deltaY: -250})); assert.equal(c.page().dataset.level, "0");
 });
 test("touch scroll does not unexpectedly change levels; an edge swipe does", () => {
   const c = setup(); c.render([thread("a", {unread_result: true})]); const viewport = c.host.querySelector(".ws-viewport");
+  c.selectLevel(1);
   const start = () => viewport.emit("touchstart", {target: c.page(), touches: [{clientX: 100, clientY: 300}]});
   const end = () => viewport.emit("touchend", {changedTouches: [{clientX: 100, clientY: 450}]});
   start(); c.page().scrollTop = 100; end(); assert.equal(c.page().dataset.level, "1");
   c.page().scrollTop = 0; start(); end(); assert.equal(c.page().dataset.level, "0");
 });
+test("horizontal gestures scroll narrow attention columns without navigating groups", () => {
+  const c = setup(); c.render([thread("a", {unread_result: true})]);
+  const viewport = c.host.querySelector(".ws-viewport"), board = c.page().querySelector(".ws-attention-board");
+  board.clientWidth = 300; board.scrollWidth = 760;
+  const event = c.event({target: board, deltaX: 180}); viewport.emit("wheel", event);
+  assert(!event.prevented); assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
+  viewport.emit("touchstart", {target: board, touches: [{clientX: 300, clientY: 100}]});
+  viewport.emit("touchend", {changedTouches: [{clientX: 100, clientY: 100}]});
+  assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
+});
 test("grouping changes reset to the aggregate and restore on reload; large inventories build only neighbors", () => {
   const c = setup(), list = Array.from({length: 40}, (_, n) => thread("t" + n, {project_id: String(n), project_name: "G" + n, domain: "d" + n}));
-  c.render(list); assert.equal(c.host.querySelectorAll(".ws-page").length, 6); assert.equal(c.host.querySelectorAll(".ws-cell").length, 123);
+  c.render(list); assert.equal(c.host.querySelectorAll(".ws-page").length, 4); assert.equal(c.host.querySelectorAll(".ws-cell").length, 82);
   c.key("g"); const reload = setup({data: c.data}); reload.render(list);
   assert.equal(reload.host.querySelector(".ws-map-foot").querySelector("select").children.find(o => o.selected).value, "domain");
   c.ui.destroy(); assert.equal(c.observers[0].disconnected, true); assert.equal(c.host.children.length, 0); assert.equal(c.doc.events.keydown, undefined);
@@ -191,7 +236,12 @@ test("production integration shares cards and uses seen receipt IDs without mark
   assert.equal(options.workspace, "/work");
   const t = thread("a", {attention_target_thread_id: "parent", checkpoint: {id: 8}, turn_completion: {id: 12}});
   config.renderCard(t, true); assert.equal(calls[0][0].attention_target_thread_id, null); assert.equal(calls[0][2], true);
+  assert.equal(calls[0][0].can_handle_response, false);
   await config.onRead(t); assert.equal(calls[1][0], "threads/a");
   assert.equal(JSON.stringify(calls[1][1]), JSON.stringify({seen: true, seen_checkpoint_id: 8, seen_completion_id: 12}));
   assert(!Object.hasOwn(calls[1][1], "handled"));
+  calls.length = 0; await config.onDismiss(t);
+  assert.equal(calls[0][0], "threads/a");
+  assert.equal(JSON.stringify(calls[0][1]), JSON.stringify({handled: true, handled_checkpoint_id: 8, handled_completion_id: 12}));
+  assert.deepEqual(calls[1], ["refresh"]);
 });
