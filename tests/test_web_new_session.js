@@ -53,6 +53,71 @@ test("configuration commands can be the first submission and display their feedb
   }
 });
 
+async function commandFocusSetup() {
+  const c = setup(); await c.newSession();
+  const input = c.$("message"), doc = {body: {}, documentElement: {}, hasFocus: () => true, querySelector: () => null};
+  input.ownerDocument = doc;
+  input.focus = options => { doc.activeElement = input; input.focusOptions = options; };
+  input.focus();
+  c.state.navigationRevision = 0;
+  const select = c.select, api = c.api;
+  c.select = async (id, {focus = true} = {}) => {
+    c.state.navigationRevision++;
+    // Selecting an uncached conversation briefly hides the composer. Pane
+    // selection returns without explicitly focusing it again.
+    doc.activeElement = doc.body;
+    await select(id);
+    if (focus && !c.state.paneMode) input.focus({preventScroll: true});
+  };
+  c.api = async (path, body) => path.endsWith("/messages")
+    ? {command: {message: "Command applied"}} : api(path, body);
+  return c;
+}
+
+test("first permission commands retain composer focus in standalone and pane conversations", async () => {
+  for (const paneMode of [false, true]) for (const mode of ["yolo", "default"]) {
+    const c = await commandFocusSetup(), input = c.$("message"), doc = input.ownerDocument;
+    c.state.paneMode = paneMode;
+    input.value = "/permissions " + mode;
+    await c.sendMessage();
+    assert.equal(c.state.selected, "created");
+    assert.equal(input.value, "");
+    assert.equal(doc.activeElement, input, `${mode}, pane=${paneMode}`);
+    assert.equal(input.focusOptions.preventScroll, true);
+  }
+});
+
+test("a first command does not restore composer focus over user interaction", async () => {
+  for (const interaction of ["click", "dialog", "blur", "navigate", "navigate-back"]) {
+    const c = await commandFocusSetup(), input = c.$("message"), doc = input.ownerDocument;
+    const other = {}, select = c.select;
+    c.state.paneMode = true;
+    c.select = async (...args) => {
+      await select(...args);
+      if (interaction === "click") doc.activeElement = other;
+      if (interaction === "dialog") doc.querySelector = () => ({});
+      if (interaction === "blur") doc.hasFocus = () => false;
+      if (interaction === "navigate") c.state.selected = "other";
+      if (interaction === "navigate-back") c.state.navigationRevision += 2;
+    };
+    input.value = "/permissions yolo";
+    await c.sendMessage();
+    assert.equal(doc.activeElement, interaction === "click" ? other : doc.body, interaction);
+  }
+});
+
+test("a first command does not reclaim focus after navigation while sending", async () => {
+  const c = await commandFocusSetup(), input = c.$("message"), doc = input.ownerDocument, api = c.api;
+  c.state.paneMode = true;
+  c.api = async (path, body) => {
+    if (path.endsWith("/messages")) c.state.navigationRevision += 2;
+    return api(path, body);
+  };
+  input.value = "/permissions default";
+  await c.sendMessage();
+  assert.equal(doc.activeElement, doc.body);
+});
+
 test("creating a conversation in a hidden group restores that group only after creation succeeds", async () => {
   const c = setup(), restored = [];
   c.savedViews = {showGroup: (id, cwd) => restored.push({id, cwd})};

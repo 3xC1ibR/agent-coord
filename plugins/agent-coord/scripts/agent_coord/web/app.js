@@ -2099,6 +2099,10 @@ async function newSession() {
   await loadSessionModels();
 }
 async function sendSessionDraft(text, images, mentions = []) {
+  const input = $("message"), doc = input.ownerDocument;
+  const hadComposerFocus = doc?.activeElement === input;
+  const navigationRevision = state.navigationRevision;
+  let restoreFocus = false, focusRevision;
   const draft = state.newSessionDraft;
   const cwd = state.projectCwd || draft.session.cwd, draftId = draft.draftId || "new-session";
   if (!draft.createdId) {
@@ -2131,9 +2135,17 @@ async function sendSessionDraft(text, images, mentions = []) {
   if (destination?.tab === "new-session") destination.tab = draft.createdId;
   if (current && state.selected === "new-session") {
     $("message").value = "";
-    await select(draft.createdId);
+    restoreFocus = !!result.command && hadComposerFocus && state.navigationRevision === navigationRevision;
+    const selecting = select(draft.createdId, {focus: !result.command});
+    focusRevision = state.navigationRevision;
+    await selecting;
   }
   await refreshList();
+  // The first command replaces the draft, including inside a pane where select
+  // does not focus the composer. Preserve any intervening navigation or click.
+  if (restoreFocus && state.selected === draft.createdId && state.navigationRevision === focusRevision &&
+      !$("composer").hidden && !input.disabled && doc.hasFocus() && !doc.querySelector("dialog[open]") &&
+      [input, doc.body, doc.documentElement].includes(doc.activeElement)) input.focus({preventScroll: true});
 }
 $("new-session").onclick = $("welcome-new").onclick = () => action(newSession);
 function filtersChanged() { savedViews?.persist(); navigation?.remember(); renderList(); }
