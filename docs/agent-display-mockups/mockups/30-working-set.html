@@ -127,12 +127,16 @@
     .mm-cell.mark { border-color: var(--accent); color: var(--ink); }
     .mm-cell .ask-dot { position: absolute; top: -3px; right: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warm); box-shadow: 0 0 0 2px var(--surface); }
     .mm-foot { display: flex; gap: 8px; justify-content: space-between; padding-top: 4px; border-top: 1px solid var(--line); color: var(--muted); font: 9.5px var(--mono); }
+    .mm-rule { color: var(--muted); font: 9.5px var(--mono); }
+    .memory.later { opacity: .55; }
+    .more { margin-top: 12px; }
     .mm-foot kbd { font: inherit; border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 3px; }
     @media (prefers-reduced-motion: reduce) { .vtrack, .htrack, .page, .row-head .chev { transition: none !important; } }
   </style>
 </head>
 <body>
 <main id="stage"></main>
+<script src="../shared/real-threads.js"></script>
 <script src="../shared/fixture.js"></script>
 <script src="../shared/mockup.js"></script>
 <script>
@@ -140,50 +144,104 @@
 (() => {
   const $ = AgentField.el;
   const HOUR = 3_600_000;
-  // Placeholder boundary: a working or blocked agent, or a user touch within this window. See docs/feature-ideas.md.
-  const TOUCH_WINDOW = 3 * HOUR;
-  const GROUPINGS = ["target", "domain", "family"];
-  const GROUPING_LABELS = {target: "target", domain: "domain", family: "root family"};
+  // Placeholder boundary: live work, or a touch within this window. Real activity spreads over days. See docs/feature-ideas.md.
+  const TOUCH_WINDOW = 3 * HOUR, REAL_TOUCH_WINDOW = 24 * HOUR;
+  // Real groups can hold 50 threads: show the most recently touched dozen until asked for all.
+  const REAL_CARD_CAP = 12;
+  const GROUPINGS = {sim: ["target", "domain", "family"], real: ["group", "domain", "workspace"]};
+  const GROUPING_LABELS = {target: "target", domain: "domain", family: "root family", group: "group", workspace: "workspace"};
   const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
   const STATUS_ORDER = {waiting: 0, failed: 1, working: 2, blocked: 3, idle: 4, done: 5};
 
   // View state that survives re-renders.
   let lens = 1, grouping = "target", pageKey = null, pageIdx = 0, scrollTo = null;
-  const expanded = new Set(), pageScroll = new Map();
+  const expanded = new Set(), showAll = new Set(), pageScroll = new Map();
   let F = null, API = null, model = {all: [], set: []};
   let stageEl = null, viewport, vtrack, needsLens, workLens, htrack, allLens, minimap;
 
-  /* Groups: root families keyed by the grouping, named after the key. */
-  function keyFor(r) {
+  /* Groups. Simulated: root families keyed by the grouping, named after the key. Real: the thread's named group
+     (children without one inherit their root's), else one Ungrouped group per workspace. */
+  const isReal = () => F?.scale === "real";
+  const windowMs = () => isReal() ? REAL_TOUCH_WINDOW : TOUCH_WINDOW;
+  const folder = path => (path || "unknown").replace(/\/$/, "").split("/").pop() || path;
+  const later = a => a.attention === "later";
+  function rootOf(field, a) { let r = a; while (r.parentId && field.byId(r.parentId)) r = field.byId(r.parentId); return r; }
+  function keyFor(field, a) {
+    const r = rootOf(field, a);
+    if (isReal()) {
+      if (grouping === "domain") return ["d:" + (a.domain || "none"), a.domain || "No domain"];
+      if (grouping === "workspace") return ["w:" + (a.workspace || "unknown"), (a.workspace || "unknown").replace(/^\/opt\/projects\/?/, "") || folder(a.workspace)];
+      const g = a.group ? a : r.group ? r : null;
+      return g ? ["g:" + (g.groupId || g.group), g.group] : ["u:" + (a.workspace || "unknown"), "Ungrouped · " + folder(a.workspace)];
+    }
     if (grouping === "domain") return [r.domain || "none", r.domain ? AgentField.DOMAIN_LABELS[r.domain] || r.domain : "No domain"];
     if (grouping === "family") return [r.id, r.name ? r.name + " · " + r.title : r.title];
     return [r.target || "root:" + r.id, r.target || r.title];
   }
+  // Real touch: the latest turn, user checkpoint, or creation.
+  function touchOf(a) {
+    const user = a.history.filter(h => h.actor === "user").map(h => h.at);
+    const t = Math.max(a.lastTurnAt || 0, a.createdAt || 0, ...user);
+    return {at: t, by: user.length && Math.max(...user) === t ? "user" : a.lastTurnAt === t ? "turn" : "created"};
+  }
   function derive(field) {
     const map = new Map();
-    for (const r of field.roots()) {
-      const [key, name] = keyFor(r);
+    for (const a of field.agents) {
+      const [key, name] = keyFor(field, a);
       let g = map.get(key); if (!g) map.set(key, g = {key, name, roots: [], members: []});
-      g.roots.push(r); g.members.push(r, ...field.descendants(r.id));
+      g.members.push(a);
     }
     for (const g of map.values()) {
-      const touches = g.members.flatMap(a => a.history.filter(h => h.actor === "user").map(h => h.at));
-      const apps = g.members.filter(a => a.kind === "app");
-      g.touchedByUser = touches.length > 0;
-      g.touch = touches.length ? Math.max(...touches) : Math.max(...(apps.length ? apps : g.roots).map(a => a.createdAt));
-      g.live = g.members.some(a => a.status === "working" || a.status === "blocked");
+      const ids = new Set(g.members.map(a => a.id));
+      g.roots = g.members.filter(a => !a.parentId || !ids.has(a.parentId));
       g.counts = field.counts(g.members);
       g.latest = g.members.reduce((x, y) => y.updatedAt > x.updatedAt ? y : x);
       g.activity = Math.max(...g.members.map(field.lastActivity));
-      g.inSet = g.live || field.now - g.touch <= TOUCH_WINDOW;
+      if (isReal()) {
+        // Threads parked in Later never qualify a group; an all-Later group sits at the bottom of the shelf.
+        const now = g.members.filter(a => !later(a));
+        g.later = !now.length;
+        const best = (now.length ? now : g.members).map(touchOf).reduce((x, y) => y.at > x.at ? y : x);
+        g.touch = best.at; g.touchBy = best.by;
+        g.live = now.some(a => a.status === "working" || field.needsUser(a));
+        g.inSet = !g.later && (g.live || field.now - g.touch <= REAL_TOUCH_WINDOW);
+      } else {
+        const touches = g.members.flatMap(a => a.history.filter(h => h.actor === "user").map(h => h.at));
+        const apps = g.members.filter(a => a.kind === "app");
+        g.touchBy = touches.length ? "user" : "created";
+        g.touch = touches.length ? Math.max(...touches) : Math.max(...(apps.length ? apps : g.roots).map(a => a.createdAt));
+        g.live = g.members.some(a => a.status === "working" || a.status === "blocked");
+        g.inSet = g.live || field.now - g.touch <= TOUCH_WINDOW;
+      }
     }
-    const all = [...map.values()].sort((a, b) => b.touch - a.touch || b.activity - a.activity || a.name.localeCompare(b.name));
+    const all = [...map.values()].sort((a, b) => Number(!!a.later) - Number(!!b.later) || b.touch - a.touch || b.activity - a.activity || a.name.localeCompare(b.name));
     const set = all.filter(g => g.inSet);
     set.forEach((g, i) => { g.page = i; });
     return {all, set};
   }
   const current = () => model.set[pageIdx] || null;
-  const touchText = g => (g.touchedByUser ? "you, " : "opened ") + F.relativeTime(g.touch);
+  const touchText = g => ({user: "you, ", turn: "last turn ", created: "opened "}[g.touchBy]) + F.relativeTime(g.touch);
+  const ruleText = () => "set: " + (isReal() ? "running, asking" : "running, blocked") + ", or touched < " + Math.round(windowMs() / HOUR) + "h";
+  // Most recently touched first; Later threads last. Only real groups are capped.
+  function capped(g, list) {
+    const sorted = isReal() ? [...list].sort((x, y) => Number(later(x)) - Number(later(y)) || touchOf(y).at - touchOf(x).at) : list;
+    const limit = isReal() && !showAll.has(g.key) ? REAL_CARD_CAP : Infinity;
+    return {shown: sorted.slice(0, limit), hidden: Math.max(0, sorted.length - limit)};
+  }
+  function moreButton(g, hidden, total) {
+    const b = $("button", "btn quiet small more", showAll.has(g.key) ? "Show the recent " + REAL_CARD_CAP : "Show all " + total + " (" + hidden + " more)"); b.type = "button";
+    b.onclick = e => { e.stopPropagation(); showAll.has(g.key) ? showAll.delete(g.key) : showAll.add(g.key); paint(false); };
+    return b;
+  }
+  /* Real asks are free text with no options: show the question and open the thread to answer, as in mockup 29. */
+  function askFor(a, field, api) {
+    if (a.ask?.options?.length || !a.real) return Mockup.askBox(a, field, api ? api.select : null);
+    const box = $("div", "ask");
+    box.append($("span", "ask-kind", a.ask ? a.ask.kind : "next step"), $("div", "ask-question", a.ask?.question || a.next.action), $("span", "ask-impact", "Asked " + field.relativeTime(a.ask?.askedAt || a.updatedAt)));
+    const open = $("button", "btn small", "Open thread"); open.type = "button"; open.style.marginTop = "8px"; open.style.display = "block";
+    open.onclick = e => { e.stopPropagation(); (api || API).select(a.id); }; box.append(open);
+    return box;
+  }
 
   /* Live card, as in mockup 01. Cards shown as cards don't repeat as chips; deeper agents ride along as chips. */
   function liveCard(a, field, api, {lead = false, chips = true} = {}) {
@@ -200,7 +258,7 @@
     const prog = field.progress(a); if (prog.total && a.status !== "done") st.append($("span", "mono", prog.done + "/" + prog.total));
     el.append(st);
     if (a.activity && a.status === "working") el.append($("div", "activity", a.activity));
-    if (a.ask) el.append(Mockup.askBox(a, field, null));
+    if (a.ask) el.append(askFor(a, field, null));
     else { const s = $("p", "summary", a.summary); s.title = a.summary; el.append(s); }
     if (!a.ask && a.next?.action && a.status !== "done") {
       const n = $("div", "next " + a.next.actor);
@@ -230,11 +288,12 @@
 
   /* Memory card for the shelf: the checkpoint and its next step, nothing live. */
   function memoryCard(a, field, api) {
-    const el = $("article", "card memory"); el.tabIndex = 0;
+    const el = $("article", "card memory" + (later(a) ? " later" : "")); el.tabIndex = 0;
     el.onclick = () => api.select(a.id); el.onkeydown = e => { if (e.key === "Enter") api.select(a.id); };
     const meta = $("div", "meta");
     meta.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("span", "who", (a.name && a.name !== ROLE_SHORT[a.role] ? a.name + " · " : "") + ROLE_SHORT[a.role] + " · " + AgentField.PHASE_LABELS[a.phase]));
     if (field.needsUser(a)) meta.append($("span", "user", "needs you"));
+    if (later(a)) meta.append($("span", null, "later"));
     const when = $("span", "when", field.relativeTime(a.checkpointAt)); when.title = "Checkpoint saved " + new Date(a.checkpointAt).toLocaleString(); meta.append(when);
     el.append(meta, $("h4", null, a.title));
     const s = $("p", null, a.summary); s.title = a.summary; el.append(s);
@@ -255,7 +314,7 @@
     el.append(id, $("h4", null, a.title));
     const chain = field.ancestors(a.id);
     if (chain.length) el.append($("span", "via", "Under " + chain.map(p => p.name || p.title).reverse().join(" → ")));
-    if (a.ask) el.append(Mockup.askBox(a, field, api.select));
+    if (a.ask) el.append(askFor(a, field, api));
     else {
       const n = $("div", "next user"); n.append($("span", null, "↳"), $("span")); n.lastChild.append($("b", null, "Your next step · "), a.next.action); el.append(n);
       const open = $("button", "btn quiet small", "Open thread"); open.type = "button"; open.style.alignSelf = "flex-start";
@@ -288,7 +347,7 @@
     needsLens.replaceChildren(inner);
   }
   function pageBadge(g, cls = "") {
-    if (!g.inSet) { const s = $("span", "page-badge off " + cls, "shelf"); s.title = "Not in the working set: nothing running and untouched for " + F.duration(F.now - g.touch); return s; }
+    if (!g.inSet) { const s = $("span", "page-badge off " + cls, g.later ? "later" : "shelf"); s.title = g.later ? "Every thread here is parked in Later, so it never joins the working set" : "Not in the working set: nothing running" + (isReal() ? " or asking" : "") + " and untouched for " + F.duration(F.now - g.touch); return s; }
     const b = $("button", "page-badge " + cls, "page " + (g.page + 1)); b.type = "button"; b.title = "Open this group in Working";
     b.onclick = e => { e.stopPropagation(); goPage(g.page); goLens(1); }; return b;
   }
@@ -301,15 +360,18 @@
     const counts = $("span", "counts");
     counts.append($("b", null, String(c.total)), c.total === 1 ? " agent · " : " agents · ", $("b", null, String(c.working)), " working · ");
     const nu = $("span", needs ? "warm" : null, needs + " need you"); counts.append(nu, " · " + (c.blocked ? c.blocked + " waiting · " : "") + c.done + " done");
-    head.append(counts, $("span", "touch", touchText(g)));
+    const touch = $("span", "touch", touchText(g)); touch.title = "Working " + ruleText(); head.append(counts, touch);
     page.append(head);
     const grid = $("div", "cards");
     // Roots lead; their children are cards; grandchildren and deeper ride on their parent's card as chips.
-    const roots = [...g.roots].sort((x, y) => y.updatedAt - x.updatedAt);
-    for (const r of roots) grid.append(liveCard(r, field, api, {lead: true, chips: false}));
-    const kids = roots.flatMap(r => field.children(r.id)).sort((x, y) => (STATUS_ORDER[x.status] - STATUS_ORDER[y.status]) || Number(field.needsUser(y)) - Number(field.needsUser(x)) || y.updatedAt - x.updatedAt);
+    const sortedRoots = [...g.roots].sort((x, y) => y.updatedAt - x.updatedAt);
+    const {shown: roots, hidden} = capped(g, sortedRoots);
+    const lead = !isReal() || roots.length <= 2, inGroup = new Set(g.members.map(a => a.id));
+    for (const r of roots) grid.append(liveCard(r, field, api, {lead, chips: false}));
+    const kids = roots.flatMap(r => field.children(r.id)).filter(k => inGroup.has(k.id)).sort((x, y) => (STATUS_ORDER[x.status] - STATUS_ORDER[y.status]) || Number(field.needsUser(y)) - Number(field.needsUser(x)) || y.updatedAt - x.updatedAt);
     for (const k of kids) grid.append(liveCard(k, field, api));
     page.append(grid);
+    if (hidden || showAll.has(g.key) && sortedRoots.length > REAL_CARD_CAP) page.append(moreButton(g, hidden, sortedRoots.length));
     page.addEventListener("click", e => { if (Number(page.dataset.i) !== pageIdx) { e.stopPropagation(); e.preventDefault(); goPage(Number(page.dataset.i)); } }, true);
     return page;
   }
@@ -327,18 +389,26 @@
     for (const g of model.all) {
       const age = F.now - g.touch;
       const row = $("section", "row" + (expanded.has(g.key) ? " open" : "")); row.dataset.key = g.key;
-      if (!g.inSet) row.dataset.age = age > 24 * HOUR ? "3" : age > 12 * HOUR ? "2" : "1";
+      if (g.later) row.dataset.age = "3";
+      else if (!g.inSet) row.dataset.age = isReal() ? (age > 7 * 24 * HOUR ? "3" : age > 3 * 24 * HOUR ? "2" : "1") : (age > 24 * HOUR ? "3" : age > 12 * HOUR ? "2" : "1");
       const head = $("button", "row-head"); head.type = "button"; head.setAttribute("aria-expanded", String(expanded.has(g.key)));
       const line = $("span", "line", g.latest.summary); line.title = g.latest.title + " · " + g.latest.summary;
-      head.append($("span", "chev", "▸"), $("span", "name", g.name), tally(g.counts, g.counts.needsUser), line, $("span", "ago", touchText(g)), pageBadge(g));
+      head.append($("span", "chev", "▸"), $("span", "name", g.name), tally(g.counts, g.counts.needsUser), line, $("span", "ago", (g.later ? "later · " : "") + touchText(g)), pageBadge(g));
       head.querySelector(".name").title = g.name;
       head.onclick = () => { expanded.has(g.key) ? expanded.delete(g.key) : expanded.add(g.key); paint(false); };
       row.append(head);
       if (expanded.has(g.key)) {
         const body = $("div", "row-body"); const grid = $("div", "memory-cards");
-        const rows = field.treeRows(g.roots.map(r => r.id));
-        for (const {agent} of rows) grid.append(memoryCard(agent, field, api));
-        body.append(grid); row.append(body);
+        if (isReal()) {
+          const {shown, hidden} = capped(g, g.members);
+          for (const a of shown) grid.append(memoryCard(a, field, api));
+          body.append(grid);
+          if (hidden || showAll.has(g.key) && g.members.length > REAL_CARD_CAP) body.append(moreButton(g, hidden, g.members.length));
+        } else {
+          for (const {agent} of field.treeRows(g.roots.map(r => r.id))) grid.append(memoryCard(agent, field, api));
+          body.append(grid);
+        }
+        row.append(body);
       }
       shelf.append(row);
     }
@@ -366,7 +436,7 @@
     const foot = $("div", "mm-foot");
     const keys = $("span"); keys.append($("kbd", null, "↑↓"), " lens ", $("kbd", null, "←→"), " page");
     const g = $("span"); g.append("by " + GROUPING_LABELS[grouping] + " ", $("kbd", null, "g")); foot.append(keys, g);
-    minimap.append(foot);
+    minimap.append(foot, $("div", "mm-rule", "Working " + ruleText()));
   }
 
   /* Placement and motion */
@@ -401,7 +471,8 @@
     if (!scrollTo) return;
     const host = scrollTo.lens === 0 ? needsLens : allLens;
     const target = [...host.querySelectorAll("[data-key]")].find(x => x.dataset.key === scrollTo.key);
-    if (target) host.scrollTop = Math.max(0, target.offsetTop - 18);
+    const first = host.querySelector("[data-key]");
+    if (target) host.scrollTop = target === first ? 0 : Math.max(0, target.offsetTop - 18);
     scrollTo = null;
   }
 
@@ -443,7 +514,7 @@
       if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); goLens(lens + (e.key === "ArrowDown" ? 1 : -1), {directional: true}); }
       else if (e.key === "ArrowLeft" || e.key === "ArrowRight") { if (lens === 1) { e.preventDefault(); goPage(pageIdx + (e.key === "ArrowRight" ? 1 : -1)); } }
       else if (/^[1-9]$/.test(e.key)) { const i = Number(e.key) - 1; if (i < model.set.length) { goPage(i); goLens(1); } }
-      else if (e.key === "g") { grouping = GROUPINGS[(GROUPINGS.indexOf(grouping) + 1) % GROUPINGS.length]; pageKey = null; pageIdx = 0; paint(false); }
+      else if (e.key === "g") { const list = GROUPINGS[isReal() ? "real" : "sim"]; grouping = list[(list.indexOf(grouping) + 1) % list.length]; pageKey = null; pageIdx = 0; paint(false); }
     });
     addEventListener("resize", () => layout(false));
   }
@@ -466,12 +537,14 @@
 
   Mockup.mount({
     number: 30, title: "Working set", spectrum: "moderate", showChrome: false, fullBleed: true,
+    defaultScale: globalThis.AGENT_COORD_SNAPSHOT ? "real" : "small",
     summary: "Groups as short-term memory: Needs you on top, the working set as swipeable pages, everyone else on a shelf that sinks and dims instead of closing.",
-    signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "unread", "updated_at", "checkpoint_history"],
+    signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "unread", "updated_at", "checkpoint_history", "pinned"],
       proposed: ["name", "role", "kind", "activity", "ask", "plan", "target", "domain"]},
-    notes: "Groups are root families keyed by the root’s target (g cycles target, domain, root family). The working-set boundary (a working or blocked agent, or a user touch in the last 3 simulated hours, read from user checkpoint-history entries and falling back to app-agent creation) is a placeholder; the intended ranking is sketched in docs/feature-ideas.md under “Working-set ranking for groups”.",
+    notes: "Simulated: groups are root families keyed by the root’s target (g cycles target, domain, root family); the working set is a working or blocked agent or a user touch in the last 3 simulated hours. Real: groups are the user’s named thread groups (children inherit their root’s; the rest fall into Ungrouped per workspace; g cycles group, domain, workspace); the working set is a running thread, an ask, or a touch (last turn, user checkpoint, or creation) in the last 24 hours, and threads parked in Later never qualify. Both boundaries are placeholders; the intended ranking is sketched in docs/feature-ideas.md under “Working-set ranking for groups”.",
     render(field, stage, api) {
       F = field; API = api;
+      const list = GROUPINGS[isReal() ? "real" : "sim"]; if (!list.includes(grouping)) { grouping = list[0]; pageKey = null; pageIdx = 0; }
       if (!viewport) build(stage);
       if (viewport.parentNode !== stage) stage.replaceChildren(viewport, minimap);
       paint(false);
