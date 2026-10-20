@@ -1566,9 +1566,13 @@ function renderTimeline() {
           const icon = node("span", null, "tool-icon" + (terminal ? " terminal" : ""));
           icon.setAttribute("aria-hidden", "true");
           summary.append(icon, node("span", label, "tool-label"), node("span", preview, "tool-preview"));
-          summary.setAttribute("aria-label", [label, item.status, preview].filter(Boolean).join(" · "));
-          summary.title = [label, item.status, preview].filter(Boolean).join(" · ");
-          detail.append(summary, node("pre", text));
+          const statusLabel = item.status === "unknown" ? "Outcome unknown" : item.status;
+          if (item.status === "unknown") summary.append(node("span", statusLabel, "tool-label"));
+          summary.setAttribute("aria-label", [label, statusLabel, preview].filter(Boolean).join(" · "));
+          summary.title = [label, statusLabel, item.statusReason, preview].filter(Boolean).join(" · ");
+          detail.append(summary);
+          if (item.statusReason) detail.append(node("p", item.statusReason));
+          detail.append(node("pre", text));
         }
         if (["completed", "failed", "interrupted"].includes(turn.status)) {
           let group = workGroups.get(turn);
@@ -1580,8 +1584,11 @@ function renderTimeline() {
             const count = (turn.items || []).filter(i => !["userMessage", "agentMessage", "reasoning", "plan"].includes(i.type)).length;
             const summary = node("summary");
             const icon = node("span", null, "tool-icon"); icon.setAttribute("aria-hidden", "true");
-            const outcome = turn.status === "failed" ? "Failed" : turn.status === "interrupted" ? "Stopped" : "Completed";
-            const completion = node("span", turn.status === "completed" ? "✓" : turn.status === "failed" ? "!" : "■", "work-state");
+            const unknown = (turn.items || []).filter(i => i.status === "unknown").length;
+            const turnOutcome = turn.status === "failed" ? "Failed" : turn.status === "interrupted" ? "Stopped" : "Completed";
+            const outcome = unknown ? "Turn " + turnOutcome.toLowerCase() + " · " + unknown +
+              " tool outcome" + (unknown === 1 ? "" : "s") + " unknown" : turnOutcome;
+            const completion = node("span", turn.status === "completed" ? (unknown ? "?" : "✓") : turn.status === "failed" ? "!" : "■", "work-state");
             completion.setAttribute("aria-label", outcome); completion.title = outcome;
             summary.append(icon, node("span", count ? "Tool calls · " + count : "Work", "work-label"), completion);
             group.append(summary);

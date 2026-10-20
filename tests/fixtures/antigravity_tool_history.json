@@ -1,0 +1,49 @@
+{
+  "description": "Captured from Antigravity ACP 1.3.0 on 2026-10-20. Both reads report completed without a result; the native transcript distinguishes success from failure. Paths and call IDs are retained from an isolated synthetic probe.",
+  "updates": [
+    {
+      "toolCallId": "call_546329",
+      "title": "Running view_file",
+      "kind": "read",
+      "status": "in_progress",
+      "locations": [
+        {
+          "path": "/tmp/antigravity-tool-history-probe/known.txt"
+        }
+      ],
+      "rawInput": {
+        "absolute_path": "/tmp/antigravity-tool-history-probe/known.txt"
+      },
+      "sessionUpdate": "tool_call"
+    },
+    {
+      "toolCallId": "call_739587",
+      "title": "Running view_file",
+      "kind": "read",
+      "status": "in_progress",
+      "locations": [
+        {
+          "path": "/tmp/antigravity-tool-history-probe/absent.txt"
+        }
+      ],
+      "rawInput": {
+        "absolute_path": "/tmp/antigravity-tool-history-probe/absent.txt"
+      },
+      "sessionUpdate": "tool_call"
+    },
+    {
+      "toolCallId": "call_546329",
+      "status": "completed",
+      "sessionUpdate": "tool_call_update"
+    },
+    {
+      "toolCallId": "call_739587",
+      "status": "completed",
+      "sessionUpdate": "tool_call_update"
+    }
+  ],
+  "native_tool_responses": [
+    "Created At: 2026-10-20T14:28:31-05:00\nCompleted At: 2026-10-20T14:28:31-05:00\nTool response for view_file:\n```json\n{\"result\": \"tool-history-probe: violet-731\\n\"}\n```",
+    "Created At: 2026-10-20T14:28:33-05:00\nCompleted At: 2026-10-20T14:28:33-05:00\nTool view_file failed with error message: [Errno 2] No such file or directory: '/tmp/antigravity-tool-history-probe/absent.txt'"
+  ]
+}

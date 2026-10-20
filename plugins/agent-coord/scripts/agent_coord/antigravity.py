@@ -181,8 +181,19 @@ class AntigravityRPC:
                 for turn in history.get("turns", []):
                     if turn.get("status") == "inProgress":
                         turn["status"] = "interrupted"
+                    self._unconfirmed_tools(turn, "The session ended before Antigravity reported this tool's outcome.")
         history["status"] = {"type": "active" if active else "idle"}
         return history
+
+    @staticmethod
+    def _unconfirmed_tools(turn, reason):
+        """Turn termination is not evidence that an individual tool stopped."""
+        changed = []
+        for item in turn.get("items", []):
+            if item.get("type") == "mcpToolCall" and item.get("status") == "inProgress":
+                item.update(status="unknown", statusReason=reason)
+                changed.append(copy.deepcopy(item))
+        return changed
 
     @staticmethod
     def _options(params):
@@ -502,12 +513,9 @@ class AntigravityRPC:
             turn = self.turns.get(thread_id)
             if not turn or turn["id"] != state["id"]:
                 return
-            interrupted = []
-            for item in turn["items"]:
-                if item.get("status") == "inProgress":
-                    item["status"] = "interrupted"
-                    interrupted.append(copy.deepcopy(item))
-        for item in interrupted:
+            unconfirmed = self._unconfirmed_tools(turn,
+                "Antigravity reconnected before reporting this tool's outcome.")
+        for item in unconfirmed:
             self._emit("item/completed", thread_id, turnId=state["id"], item=item)
         self._submit_prompt(thread_id, state["id"], connection, [{"type": "text", "text":
             coordination_bootstrap(self.store, thread_id) + "\n\nRibbon Field paused the native turn to deliver coordination messages. Continue the existing user request "
@@ -525,9 +533,8 @@ class AntigravityRPC:
                 self.delivery.failed(turn["id"], state["batch"], error or "The turn was stopped; receipt is not acknowledgment.")
                 self.delivery.failed(turn["id"], state["pending_batch"], error or "Stopped before coordination delivery.")
             turn["status"] = status
-            for item in turn["items"]:
-                if item.get("status") == "inProgress":
-                    item["status"] = "completed" if status == "completed" else status
+            self._unconfirmed_tools(turn,
+                "The turn ended before Antigravity reported this tool's outcome.")
             if error:
                 turn["error"] = {"message": str(error)}
             self.requests = {k: v for k, v in self.requests.items() if v[0] != thread_id}
@@ -603,13 +610,27 @@ class AntigravityRPC:
                 if "rawInput" in update:
                     item["arguments"] = self._bounded(update["rawInput"])
                 if "rawOutput" in update or "content" in update:
-                    item["result"] = self._bounded(update.get("rawOutput", update.get("content")))
+                    output = update.get("rawOutput")
+                    if output is None:
+                        output = update.get("content")
+                    if output is not None:
+                        item["result"] = self._bounded(output)
                 if "status" in update:
-                    item["status"] = {"pending": "inProgress", "in_progress": "inProgress"}.get(update["status"], update["status"])
+                    item["providerStatus"] = update["status"]
+                provider_status = item.get("providerStatus", "in_progress")
+                item["status"] = {"pending": "inProgress", "in_progress": "inProgress"}.get(provider_status, provider_status)
+                # History merges item fields, so explicitly clear an earlier
+                # uncertainty reason when a late result resolves the outcome.
+                item["statusReason"] = None
+                # ACP 1.3.0 can report both a successful read and a missing-file
+                # error as completed, omitting the result in both cases. Keep
+                # the provider status, but do not present that as a known outcome.
+                if provider_status == "completed" and (item.get("result") is None or item.get("result") == []):
+                    item.update(status="unknown", statusReason="Antigravity reported completion without a tool result.")
             else:
                 return
             snapshot, turn_id = copy.deepcopy(item), turn["id"]
-        self._emit("item/completed" if snapshot.get("status") in {"completed", "failed"} else "item/started", thread_id, turnId=turn_id, item=snapshot)
+        self._emit("item/completed" if snapshot.get("status") in {"completed", "failed", "unknown"} else "item/started", thread_id, turnId=turn_id, item=snapshot)
 
     @staticmethod
     def _bounded(value):
