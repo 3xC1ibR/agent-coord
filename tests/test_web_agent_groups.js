@@ -74,7 +74,7 @@ test("only explicit orchestration creations nest across phases without changing 
   assert.ok(c.rows()[0].className.split(" ").includes("working"));
   c.rows()[0].onclick(); assert.deepEqual(c.selected, ["orchestrated"]);
   assert.equal(withClass(c.$("sessions"), "agent-row").length, 1);
-  assert.equal(withClass(c.$("overview"), "agent-origin")[0].textContent, "Created by parent");
+  assert.equal(withClass(c.$("overview"), "card-app-agent")[0].attrs["aria-label"], "App agent · Created by parent");
 });
 
 test("card menu exposes fork and group actions for the card rather than the selected conversation", async () => {
@@ -150,8 +150,8 @@ test("required input stays in Attention while routine agent replies remain neste
     thread("approval", "parent", {response_state: "input", attention_reason: "blocked"})]);
   assert.deepEqual(c.cards(), ["approval", "parent"]);
   assert.deepEqual(c.rows().map(n => n.dataset.thread), ["answer", "approval"]);
-  const origin = withClass(c.$("overview"), "agent-origin")[0];
-  assert.equal(origin.textContent, "Created by parent"); origin.onclick(); assert.deepEqual(c.selected, ["parent"]);
+  const origin = withClass(c.$("overview"), "card-app-agent")[0];
+  assert.equal(origin.attrs["aria-label"], "App agent · Created by parent"); origin.onclick(); assert.deepEqual(c.selected, ["parent"]);
   assert.ok(origin.parent.className.split(" ").includes("thread-card"), "creator belongs inside its overview card");
   assert.ok(walk(c.$("overview")).filter(n => n.tag === "button").every(n => !walk(n).slice(1).some(x => x.tag === "button")), "card controls must not nest buttons");
 });
@@ -204,7 +204,34 @@ test("nested spawns are navigable, malformed cycles stay visible, and unavailabl
     assert.equal(harness(items).cards().length, items.length);
   }
   const outside = harness([thread("child", "parent", {created_by: {title: "Outside workspace", available: false}})]);
-  assert.equal(withClass(outside.$("overview"), "agent-origin")[0].disabled, true);
+  const origin = withClass(outside.$("overview"), "card-app-agent")[0];
+  assert.equal(origin.attrs["aria-disabled"], "true");
+  origin.onclick(); assert.deepEqual(outside.selected, []);
+});
+
+test("app-agent identity and creator navigation use the shared card renderer in every state", () => {
+  const c = harness([thread("parent")]);
+  for (const creation_mode of ["orchestration", "dispatch", null]) {
+    for (const attention of ["now", "later", "archived"]) {
+      const child = thread("child", "parent", {creation_mode, attention});
+      const before = JSON.stringify(child);
+      for (const inAttention of [true, false]) {
+        const card = c.threadCard(child, false, inAttention);
+        const icon = withClass(card, "card-app-agent")[0];
+        assert.ok(icon, creation_mode + " / " + attention);
+        assert.equal(icon.children[0].tag, "svg");
+        assert.equal(icon.attrs["aria-label"], "App agent · Created by parent");
+        assert.equal(withClass(card, "agent-origin").length, 0);
+        let stopped = false;
+        icon.onclick({stopPropagation() { stopped = true; }});
+        assert.equal(stopped, true);
+        assert.equal(c.selected.at(-1), "parent");
+        assert.ok(walk(card).filter(n => n.tag === "button").every(n => !walk(n).slice(1).some(x => x.tag === "button")));
+      }
+      assert.equal(JSON.stringify(child), before);
+    }
+  }
+  assert.equal(withClass(c.threadCard(thread("direct")), "card-app-agent").length, 0);
 });
 
 test("pinned agents remain directly accessible and Later and Closed support grouping", () => {

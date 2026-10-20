@@ -195,7 +195,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     const button = target(event);
     if (!button) return;
     cancel(closeTimer);
-    if (button === anchor) return;
+    if (button === anchor && !panel.hidden) return;
     if (pinned) return; // A pinned lens stays until it is closed or another one is opened.
     hide(); anchor = button;
     // Avoid native tooltips covering the richer preview.
@@ -205,8 +205,10 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   }
   function leave(event) {
     if (pinned) return;
+    if (event.target && !anchor?.contains(event.target)) return;
     if (anchor?.contains(event.relatedTarget) || panel.contains(event.relatedTarget)) return;
     cancel(openTimer);
+    cancel(closeTimer);
     closeTimer = schedule(() => {
       if (!pointerInside && document.activeElement !== anchor) hide();
     }, 180);

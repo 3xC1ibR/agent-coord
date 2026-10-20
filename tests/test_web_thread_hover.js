@@ -32,7 +32,7 @@ function setup() {
     relativeTime: () => "Just now", select: id => opened.push(id),
     loadPreview: id => new Promise((resolve, reject) => requests.push({id, resolve, reject}))});
   return {...result, overview, document, window, first, second, requests, threads, opened,
-    async flush() { const pending = [...tasks.values()]; tasks.clear(); for (const fn of pending) fn(); await Promise.resolve(); },
+    async flush() { for (const [id, fn] of [...tasks]) if (tasks.delete(id)) fn(); await Promise.resolve(); },
     enter(target, type = "pointerover") { overview.handlers[type]({target, type, pointerType: "mouse"}); },
     leave(target) { overview.handlers.pointerout({target, relatedTarget: null}); }};
 }
@@ -48,6 +48,28 @@ test("brief hover makes no request; focus opens and Escape dismisses", async () 
   assert.equal(s.panel.hidden, true); assert.equal(s.first.attributes["aria-describedby"], undefined);
   s.requests[0].resolve(response("first")); await Promise.resolve();
   assert.equal(s.panel.hidden, true);
+});
+
+test("repeated card exits and unrelated Focus controls cannot cancel a new preview", async () => {
+  const s = setup();
+  s.enter(s.first);
+  s.leave(s.first); s.leave(s.first);
+  s.enter(s.second);
+  s.leave(s.first); // A focusout from a previous card/control can follow pointerover.
+  await s.flush();
+  assert.equal(s.panel.hidden, false);
+  assert.equal(s.requests.length, 1);
+  assert.equal(s.requests[0].id, "second");
+  assert.equal(s.second.attributes["aria-describedby"], "thread-hover");
+});
+
+test("returning from a card control before the preview opens restarts its hover delay", async () => {
+  const s = setup();
+  s.enter(s.first); s.leave(s.first); s.enter(s.first);
+  await s.flush();
+  assert.equal(s.panel.hidden, false);
+  assert.equal(s.requests.length, 1);
+  assert.equal(s.requests[0].id, "first");
 });
 
 test("late responses cannot overwrite another card and raw HTML is escaped", async () => {

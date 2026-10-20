@@ -453,6 +453,10 @@ function threadCard(thread, compact = false, inAttention = false) {
       action(() => toggleThreadClosed(thread), close);
     };
     card.append(button);
+    if (thread.created_by_thread_id) {
+      card.className += " has-app-agent";
+      card.append(appAgentIndicator(thread));
+    }
     const actions = node("div", null, "card-actions");
     function addAction(label, name, callback, target = actions) {
       const control = node("button", label, "quiet");
@@ -500,7 +504,33 @@ function threadCard(thread, compact = false, inAttention = false) {
     if (actions.children.length) card.append(actions);
     return card;
   }
+  if (!compact && thread.created_by_thread_id) {
+    const card = node("div", null, "thread-card has-app-agent");
+    card.append(button, appAgentIndicator(thread));
+    return card;
+  }
   return button;
+}
+function appAgentIndicator(thread) {
+  const creator = thread.created_by || state.sessions.find(t => t.thread_id === thread.created_by_thread_id);
+  const available = creator?.available ?? state.sessions.some(t => t.thread_id === thread.created_by_thread_id);
+  const label = "App agent · Created by " + (creator?.title || "another agent") + (available ? "" : " (unavailable)");
+  const control = node("button", null, "card-app-agent");
+  control.type = "button";
+  control.dataset.thread = thread.created_by_thread_id; control.dataset.action = "creator";
+  control.setAttribute("aria-label", label);
+  control.setAttribute("aria-disabled", String(!available));
+  // A branch leading into a window distinguishes an app agent from a Git fork.
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  for (const [key, value] of Object.entries({viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", focusable: "false"})) icon.setAttribute(key, value);
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M4 5.5v9m0-4.5h5M9 7h9M10.5 4.5h6A1.5 1.5 0 0 1 18 6v8a1.5 1.5 0 0 1-1.5 1.5h-6A1.5 1.5 0 0 1 9 14V6a1.5 1.5 0 0 1 1.5-1.5ZM5.5 4A1.5 1.5 0 1 1 4 2.5 1.5 1.5 0 0 1 5.5 4ZM5.5 16A1.5 1.5 0 1 1 4 14.5 1.5 1.5 0 0 1 5.5 16Z");
+  icon.append(path);
+  const tooltip = node("span", label, "card-app-agent-tooltip");
+  tooltip.setAttribute("aria-hidden", "true");
+  control.append(icon, tooltip);
+  control.onclick = event => { event?.stopPropagation(); if (available) action(() => select(thread.created_by_thread_id)); };
+  return control;
 }
 function groupHeading(label, tag = "div") {
   const heading = node(tag, null, "group-heading");
@@ -855,7 +885,7 @@ function agentThreadCard(thread, tree, compact = false, inAttention = false) {
     group.append(list);
   }
   if (forks) group.append(forkLinks(thread));
-  if (thread.created_by_thread_id) {
+  if (thread.created_by_thread_id && compact) {
     const creator = thread.created_by;
     const origin = node("button", "Created by " + (creator?.title || "another agent"), "agent-origin");
     origin.type = "button";
@@ -864,8 +894,7 @@ function agentThreadCard(thread, tree, compact = false, inAttention = false) {
     origin.dataset.thread = thread.created_by_thread_id;
     origin.dataset.action = "creator";
     origin.onclick = () => action(() => select(thread.created_by_thread_id));
-    if (!compact && thread.attention !== "archived") card.append(origin);
-    else group.append(origin);
+    group.append(origin);
   }
   if (children.length) group.append(agentThreadChildren(thread, tree, compact));
   return group;

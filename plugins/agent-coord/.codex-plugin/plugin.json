@@ -1,6 +1,6 @@
 {
   "name": "agent-coord",
-  "version": "0.1.0+codex.20261020193630072927",
+  "version": "0.1.0+codex.20261020195030013382",
   "description": "Review and organize work threads across workspaces, and coordinate local Codex and Claude Code sessions through write-conflict detection, durable messages, and delegation.",
   "author": {
     "name": "r",

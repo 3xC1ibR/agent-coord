@@ -788,6 +788,7 @@ body.mobile-chat .mobile-thread-sheet .session-statusbar { display: flex; paddin
 }
 /* WebKit sizes auto rows against a near-zero column, so wrapped summaries make cards thousands of pixels tall. */
 :is(#overview, #working-set-overview) .thread-card { --card-control-bg: var(--surface); position: relative; display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; align-items: start; border: 1px solid var(--line-strong, var(--line)); border-radius: 8px; background: var(--card-control-bg); }
+:is(#overview, #working-set-overview) .thread-card:has(> .card-actions) { grid-template-rows: minmax(0, 1fr) auto; }
 :is(#overview, #working-set-overview) .thread-card:hover, :is(#overview, #working-set-overview) .thread-card:focus-within, :is(#overview, #working-set-overview) .thread-card:has(.card-more[aria-expanded="true"]) { --card-control-bg: var(--hover-bg, var(--tint)); }
 :is(#overview, #working-set-overview) .thread-card.response-unread { border-color: var(--hover-line, var(--muted)); }
 :is(#overview, #working-set-overview) .thread-card:has(> .session.selected) { border-color: var(--hover-line, var(--muted)); }
@@ -806,7 +807,7 @@ body.mobile-chat .mobile-thread-sheet .session-statusbar { display: flex; paddin
 :is(#overview, #working-set-overview) .thread-card .next-copy { display: block; overflow: visible; -webkit-line-clamp: unset; }
 :is(#overview, #working-set-overview) .thread-card .stale-checkpoint { display: block; margin-top: 6px; }
 :is(#overview, #working-set-overview) .thread-card > .card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 0 12px 12px; border: 0; border-radius: 0; background: transparent; }
-:is(#overview, #working-set-overview) .card-end-actions { margin-left: 0; }
+:is(#overview, #working-set-overview) .card-end-actions { margin-left: auto; }
 /* Overlay controls leave the title's wrapping and card height unchanged on reveal. */
 :is(#overview, #working-set-overview) .card-title-actions { position: absolute; top: 10px; right: 10px; display: flex; gap: 2px; background: var(--card-control-bg); border-radius: 4px; opacity: 0; pointer-events: none; }
 :is(#overview, #working-set-overview) .card-title-actions::before { content: ""; position: absolute; inset: 0 100% 0 -28px; background: linear-gradient(to right, transparent, var(--card-control-bg)); pointer-events: none; }
@@ -820,15 +821,24 @@ body.mobile-chat .mobile-thread-sheet .session-statusbar { display: flex; paddin
 :is(#overview, #working-set-overview) .card-actions button[data-action="handle"], :is(#overview, #working-set-overview) .card-actions button[data-action="resume-snooze"] { min-height: 28px; font-size: 12px; }
 :is(#overview, #working-set-overview) .thread-card > .agent-origin { grid-column: 1 / -1; width: auto; min-width: 0; max-width: calc(100% - 32px); margin: 0 16px 12px; padding: 0; font-size: 12px; line-height: 1.5; }
 :is(#overview, #working-set-overview) .attention-card { grid-template-columns: minmax(0, 1fr); }
-:is(#overview, #working-set-overview) .attention-card > .card-actions { padding: 12px 12px 0 0; }
+:is(#overview, #working-set-overview) .attention-card > .card-actions { padding: 0 12px 12px; }
 #overview .attention-panel .thread-cards { gap: 8px; }
 :is(#overview, #working-set-overview) :is(.phase-board, .ws-phase-board) .thread-card .session-title { font-size: 14px; }
 :is(#overview, #working-set-overview) :is(.phase-board, .ws-phase-board) .thread-card > .session { padding: 12px; }
 :is(#overview, #working-set-overview) :is(.phase-board, .ws-phase-board) .thread-card > .card-actions { flex-wrap: wrap; padding-inline: 8px; }
+:is(#overview, #working-set-overview) .thread-card.has-app-agent .session-title { padding-left: 28px; }
+:is(#overview, #working-set-overview) .card-app-agent { position: absolute; top: 13px; left: 12px; z-index: 2; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 4px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); }
+:is(#overview, #working-set-overview) .card-app-agent:hover, :is(#overview, #working-set-overview) .card-app-agent:focus-visible { color: var(--ink); background: var(--tint); }
+:is(#overview, #working-set-overview) .card-app-agent svg { width: 20px; height: 20px; flex: none; }
+:is(#overview, #working-set-overview) .card-app-agent-tooltip { display: none; position: absolute; top: calc(100% + 5px); left: 0; width: max-content; max-width: min(240px, calc(100vw - 64px)); padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); box-shadow: 0 4px 14px var(--shadow); color: var(--ink); font-size: 12px; line-height: 1.4; font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; pointer-events: none; }
+:is(#overview, #working-set-overview) .card-app-agent:hover .card-app-agent-tooltip, :is(#overview, #working-set-overview) .card-app-agent:focus-visible .card-app-agent-tooltip { display: block; }
+:is(#overview, #working-set-overview) :is(.phase-board, .ws-phase-board) .card-app-agent { top: 9px; left: 8px; }
+:is(#overview, #working-set-overview) .card-actions .ws-dismiss { min-height: 28px; font-size: 12px; color: var(--ink); }
 @container (max-width: 680px) {
   :is(#overview, #working-set-overview) .attention-card { grid-template-columns: minmax(0, 1fr); }
   :is(#overview, #working-set-overview) .attention-card > .card-actions { padding: 0 12px 12px; }
   :is(#overview, #working-set-overview) .thread-card > .session { padding: 12px; }
+  :is(#overview, #working-set-overview) .card-app-agent { top: 9px; left: 8px; }
   :is(#overview, #working-set-overview) .thread-card > .agent-origin { margin-inline: 12px; max-width: calc(100% - 24px); }
   :is(#overview, #working-set-overview) .thread-card .card-actions button { min-width: 44px; min-height: 44px; }
 }
@@ -838,6 +848,9 @@ body.mobile-chat .mobile-thread-sheet .session-statusbar { display: flex; paddin
   :is(#overview, #working-set-overview) .card-title-actions::before { background: Canvas; }
 }
 @media (hover: none) {
+  :is(#overview, #working-set-overview) .card-app-agent { width: 44px; height: 44px; top: 10px; left: 4px; }
+  :is(#overview, #working-set-overview) :is(.phase-board, .ws-phase-board) .card-app-agent { top: 10px; left: 4px; }
+  :is(#overview, #working-set-overview) .thread-card.has-app-agent .session-title { padding-left: 38px; }
   :is(#overview, #working-set-overview) .thread-card > .card-title-actions { opacity: 1; pointer-events: auto; }
   :is(#overview, #working-set-overview) .card-title-actions::before { display: none; }
   :is(#overview, #working-set-overview) .card-title-actions button { width: 44px; height: 44px; }

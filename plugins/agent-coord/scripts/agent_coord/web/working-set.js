@@ -119,14 +119,12 @@ const WorkingSet = (() => {
         wrap.append(card);
         const links = el("div", "ws-card-links");
         if (t.pinned) links.append(el("span", "ws-pin", "Pinned"));
-        if (t.creation_mode === "orchestration" && t.created_by_thread_id && (byId.has(t.created_by_thread_id) || t.created_by?.available)) {
-          const parent = byId.get(t.created_by_thread_id) || t.created_by;
-          const link = button("Under " + (parent.title || "parent conversation"), "quiet ws-parent", () => onOpen(t.created_by_thread_id));
-          link.dataset.thread = t.created_by_thread_id; link.dataset.action = "creator"; links.append(link);
-        }
         if (onDismiss && completed(t) && columnOf(t) === "working" && !running(t)) {
-          const dismiss = button("Dismiss", "quiet ws-read", () => onDismiss(t), "Dismiss completed response · " + t.title);
-          dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss"; links.append(dismiss);
+          const dismiss = button("Dismiss", "quiet ws-dismiss", event => { event?.stopPropagation(); onDismiss(t); }, "Dismiss completed response · " + t.title);
+          dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss";
+          const actions = card.querySelector(".card-actions") || el("div", "card-actions");
+          const end = el("div", "card-end-actions"); end.append(dismiss); actions.append(end);
+          if (!card.contains(actions)) card.append(actions);
         } else if (onRead && t.unread_result && !running(t) && t.attention !== "archived") {
           const read = button("Mark read", "quiet ws-read", () => onRead(t), "Mark response read · " + t.title);
           read.dataset.thread = t.thread_id; read.dataset.action = "read"; links.append(read);

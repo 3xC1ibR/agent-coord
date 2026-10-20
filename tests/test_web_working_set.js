@@ -47,7 +47,11 @@ function setup({data = new Map(), broken = false, onGroupChange} = {}) {
   const ui = WorkingSet.create({document: doc, window: win,
     storage: {getItem(k) { if (broken) throw Error(); return data.get(k); }, setItem(k, v) { if (broken) throw Error(); data.set(k, v); }},
     isActive: () => enabled,
-    renderCard(t, needs) { const b = new Element("button"); b.dataset.thread = t.thread_id; b.textContent = t.title; b.onclick = () => opened.push(t.thread_id); rendered.push([t.thread_id, needs]); return b; },
+    renderCard(t, needs) {
+      const card = new Element("div"); card.className = "thread-card";
+      const b = new Element("button"); b.className = "session"; b.dataset.thread = t.thread_id; b.textContent = t.title; b.onclick = () => opened.push(t.thread_id);
+      card.append(b); rendered.push([t.thread_id, needs]); return card;
+    },
     onOpen: id => opened.push(id), onRead: t => read.push(t.thread_id), onDismiss: t => dismissed.push(t.thread_id), onGroupChange});
   const render = (threads, options = {}) => ui.render(threads, host, {workspace: "/work", ...options});
   const key = (value, target = doc.body, extra = {}) => { const e = {key: value, target, preventDefault() { this.prevented = true; }, ...extra}; doc.events.keydown(e); return e; };
@@ -121,7 +125,14 @@ test("attention columns increase left to right and keep completed work until exp
   assert.equal(board.children[0].querySelectorAll(".ws-card").length, 2);
   assert.equal(board.children[1].querySelectorAll(".ws-card").length, 1);
   assert.equal(board.children[2].querySelectorAll(".ws-card").length, 3);
-  c.page().querySelector('[data-action="dismiss"]').onclick(); assert.deepEqual(c.dismissed, ["done"]);
+  const dismiss = c.page().querySelector('[data-action="dismiss"]');
+  assert.ok(dismiss.closest(".thread-card"), "Dismiss stays inside the card");
+  assert.ok(dismiss.closest(".card-end-actions"), "Dismiss uses the trailing card controls");
+  assert.equal(dismiss.closest(".ws-card-links"), null);
+  assert.equal(dismiss.parent.parent.parent.querySelector("button").contains(dismiss), false, "Dismiss is not nested in the card's open button");
+  let stopped = false;
+  dismiss.onclick({stopPropagation() { stopped = true; }}); assert.deepEqual(c.dismissed, ["done"]);
+  assert.equal(stopped, true); assert.deepEqual(c.opened, []);
   c.render([{...completed, unread_result: false}]); assert.deepEqual(c.ids(), ["done"]);
   assert(c.page().querySelector('[data-action="dismiss"]'));
   c.render([{...completed, unhandled_response: false}]); assert.deepEqual(c.ids(), []);
@@ -210,7 +221,7 @@ test("fresh visits start at All groups / Attention; each child appears independe
   const c = setup(); c.render([thread("parent"), thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent", unread_result: true}), thread("run", {response_state: "working"})]);
   assert.deepEqual(c.ids(), ["run"]); assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
   c.selectLevel(1); assert.deepEqual(c.ids(), ["child"]);
-  c.page().querySelector(".ws-parent").onclick(); assert.deepEqual(c.opened, ["parent"]);
+  assert.equal(c.page().querySelector(".ws-parent"), null, "creator identity belongs to the shared card renderer");
   c.selectLevel(0); assert.deepEqual(c.ids(), ["run"]);
   c.selectLevel(2); assert.deepEqual(c.ids(), ["parent"]); assert(c.page().querySelector(".ws-phase-board"));
 });

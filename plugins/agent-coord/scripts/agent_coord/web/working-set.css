@@ -24,7 +24,6 @@
 .working-set .ws-card { min-width: 0; overflow-wrap: anywhere; }
 .working-set .ws-card-links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 2px 0; }
 .working-set .ws-card-links button { max-width: 100%; text-align: left; font-size: 10px; padding: 3px 7px; color: var(--muted); }
-.working-set .ws-card-links .ws-parent { flex-basis: 100%; border: 0; padding-inline: 0; }
 .working-set .ws-card-links .ws-read { margin-left: auto; }
 .working-set .ws-pin { font-size: 10px; color: var(--muted); }
 .working-set .ws-parked { opacity: .65; }
