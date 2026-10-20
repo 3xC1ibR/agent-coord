@@ -709,8 +709,16 @@ recency cutoff that made whole groups disappear.
   including groups with no running agents. The selected group stays the same
   when moving vertically. Group order starts by recency and stays stable while
   replies arrive, are read, or change phase.
+- **All groups is fixed at the far left.** It aggregates the selected project's
+  threads, including Ungrouped, through the same three states. Each card shows
+  its group with a link that opens that group at the current level. Individual
+  groups follow to the right. Counts and section caps apply to the aggregate
+  independently of individual groups.
 - **Three levels, top to bottom:** Running + Needs my reply; Replies to read;
-  Idle. Start at the middle level. The top level has separate Needs my reply
+  Idle. Fresh visits start at All groups on the middle level; returning restores
+  the group, grouping mode, and level per dataset/workspace using browser
+  storage. Invalid or removed group keys fall back to All groups; unavailable
+  storage leaves normal navigation usable. The top level has separate Needs my reply
   and Running sections. Idle has one section per populated checkpoint phase,
   including Finished; a finished turn does not imply a finished investigation.
 - **Thread membership is exclusive.** Running agents and required user replies

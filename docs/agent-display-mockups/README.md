@@ -323,6 +323,11 @@ Mockup 30 now uses horizontal group pages at every vertical level:
 3. **Idle** — remaining threads, sectioned by phase, including Finished.
 
 Left/right changes group; up/down changes level while preserving the group.
+**All groups** is always the leftmost page and includes every thread in the
+selected project, including Ungrouped. Cards there show their group name;
+clicking it opens that group at the same level. Fresh visits start on All groups
+at Replies to read. Returning restores the group, level, and grouping mode for
+that dataset and workspace when browser storage is available.
 The mini-map aligns the same groups across all levels and includes a group
 picker. No recency cutoff removes a group. Nonrunning Later threads remain
 parked in Idle. Groups keep their position as state changes.
