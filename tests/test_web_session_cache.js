@@ -233,6 +233,81 @@ test("an approval notification recovers missing controls without an item event",
   assert.equal(c.$("message").value, "Keep this draft");
 });
 
+function readStateSetup() {
+  const c = setup();
+  c.document = {hidden: false, hasFocus: () => true};
+  c.state.threadTabs = new ThreadTabs({});
+  c.state.threadTabs.setProject("/project");
+  const api = c.api;
+  c.api = async (path, body) => {
+    if (body?.seen) {
+      const work = c.replies.get(path.split("/")[1])?.work_thread;
+      if (work) work.unread_result = work.turn_completion.id > body.seen_completion_id;
+    }
+    return api(path, body);
+  };
+  c.refreshList = async () => c.state.threadTabs.update([...c.replies.values()].map(detail => detail.work_thread));
+  c.reply = (id, completion) => {
+    const detail = fixture(id, "Reply " + completion, completion);
+    detail.work_thread.unread_result = true;
+    c.replies.set(id, detail);
+  };
+  return c;
+}
+
+test("a reply displayed in the current tab stays read after switching away", async () => {
+  const c = readStateSetup();
+  await c.select("one");
+  c.reply("one", 2); c.reply("other", 3);
+  await c.refreshDetail();
+  assert.equal(c.$("timeline").childNodes[0].textContent, "Reply 2");
+  assert.equal(c.replies.get("one").work_thread.unread_result, false);
+  assert.equal(c.calls.filter(call => call.body?.seen).at(-1).body.seen_completion_id, 2);
+  await c.select("two");
+  assert.equal(c.state.threadTabs.items.find(item => item.thread_id === "one").unread_result, false);
+  assert.equal(c.replies.get("other").work_thread.unread_result, true, "background replies stay unread");
+});
+
+test("hidden, unfocused and collapsed conversations do not consume new replies", async () => {
+  for (const hide of [c => { c.document.hidden = true; }, c => { c.document.hasFocus = () => false; },
+    c => { c.$("conversation").hidden = true; }, c => {
+      c.state.dispatchDock = {active: "one", expanded: false}; c.replies.get("one").work_thread.dispatcher = true;
+    }]) {
+    const c = readStateSetup(); await c.select("one");
+    const receipts = c.calls.filter(call => call.body?.seen).length;
+    c.reply("one", 2); hide(c);
+    await c.refreshDetail();
+    assert.equal(c.calls.filter(call => call.body?.seen).length, receipts);
+    assert.equal(c.replies.get("one").work_thread.unread_result, true);
+  }
+});
+
+test("a read receipt cannot consume a reply arriving after the displayed snapshot", async () => {
+  const c = readStateSetup(); await c.select("one");
+  c.reply("one", 2);
+  const api = c.api;
+  c.api = async (path, body) => {
+    if (body?.seen) {
+      c.reply("one", 3);
+      c.state.conversations.get("one").revision++;
+    }
+    return api(path, body);
+  };
+  await c.refreshDetail();
+  assert.equal(c.calls.filter(call => call.body?.seen).at(-1).body.seen_completion_id, 2);
+  assert.equal(c.replies.get("one").work_thread.unread_result, true);
+  assert.equal(c.state.threadTabs.items.find(item => item.thread_id === "one").unread_result, true);
+  assert.ok(c.scheduled > 0, "updates arriving during the receipt get another detail refresh");
+});
+
+test("a fresh live snapshot acknowledges a reply after a previously invalidated refresh", async () => {
+  const c = readStateSetup(); await c.select("one");
+  c.state.detailRefreshing = true;
+  c.reply("one", 2);
+  await c.refreshDetail();
+  assert.equal(c.replies.get("one").work_thread.unread_result, false);
+});
+
 test("the transcript cache evicts old conversations while retaining the current selection", async () => {
   const c = setup();
   for (const id of ["one", "two", "three", "four", "five", "six"]) await c.select(id);

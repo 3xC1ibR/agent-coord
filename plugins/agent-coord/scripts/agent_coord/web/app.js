@@ -1003,7 +1003,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   }
   const restorePosition = !cached.detail && state.conversationPositions?.get(id);
   renderList();
-  const fresh = await refreshDetail();
+  const fresh = await refreshDetail({markSeen: false});
   if (state.selected !== id) return;
   if (restorePosition && !restorePosition.following) {
     if (state.timelineScroll) state.timelineScroll.restore(restorePosition.scroll);
@@ -1028,7 +1028,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
     if (focus) (state.mobileChat?.matches && !dock ? $("timeline") : $("message")).focus({preventScroll: true});
   } else $("session-name").focus({preventScroll: true});
 }
-async function refreshDetail() {
+async function refreshDetail({markSeen = true} = {}) {
   state.schedules?.refresh({background: true}).catch(showError);
   const id = state.selected;
   if (!id || isSessionDraft()) return;
@@ -1062,7 +1062,15 @@ async function refreshDetail() {
     renderThread();
     if (!same || state.timelineThread !== id) renderTimeline();
     renderRequests(); renderQueuedMessages(); renderStatus();
-    if (changed) scheduleDetail();
+    // Opening a tab sends its own receipt. Also acknowledge replies rendered
+    // while the user stays in the conversation, using only this snapshot's IDs.
+    if (markSeen && !state.paneMode && detail.work_thread.unread_result && !document.hidden && document.hasFocus() &&
+        !$("conversation").hidden && (!state.dispatchDock?.active || state.dispatchDock.expanded)) {
+      await api(threadPath(id), {seen: true, seen_checkpoint_id: detail.work_thread.checkpoint?.id || 0,
+        seen_completion_id: detail.work_thread.turn_completion?.id || 0});
+      await refreshList();
+    }
+    if (revision !== entry.revision) scheduleDetail();
     return !changed;
   })().finally(() => { entry.pending = null; });
   return entry.pending;
