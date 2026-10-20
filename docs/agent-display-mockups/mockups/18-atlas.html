@@ -106,6 +106,8 @@
     .toolbar .crumb b { font-weight: 550; }
     .toolbar .crumb small { color: var(--muted); font-size: 10px; }
     .toolbar .hint { color: var(--muted); font-size: 11px; margin-left: 4px; }
+    .toolbar .clustering { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+    .toolbar .clustering select { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; font: inherit; }
     .legend { position: absolute; z-index: 3; left: 14px; bottom: 48px; display: flex; flex-wrap: wrap; gap: 14px; font: 10px var(--mono); letter-spacing: .04em; color: var(--muted); }
     .legend span { display: inline-flex; align-items: center; gap: 6px; }
     .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
@@ -173,8 +175,8 @@
   const MIN = 60000;
   const params = new URLSearchParams(location.search);
   const scenario = (params.get("scale") || "real") === "real" ? "real" : (params.get("domains") || "clean");
-  const layoutKey = workspace => "atlas:radial-v1:" + (params.get("scale") || "real") + ":" + scenario + (workspace && workspace !== "all" ? ":" + workspace : "");
-  let storeKey = layoutKey(params.get("workspace"));
+  const layoutKey = workspace => "atlas:radial-v1:" + (params.get("scale") || "real") + ":" + scenario + (workspace && workspace !== "all" ? ":" + workspace : "") + (state.grouping === "group" ? ":groups" : "");
+  let storeKey;
   const clusterPos = new Map();
   let radial = AtlasLayout.create(), lastDraw = new Map();
   const persist = () => { try { localStorage.setItem(storeKey, JSON.stringify({clusters: Object.fromEntries(clusterPos), radial: radial.snapshot()})); } catch { /* private mode */ } };
@@ -182,7 +184,7 @@
   const norm = label => label.toLowerCase().replace(/[^a-z0-9/]+/g, "");
   const clusterKey = label => { if (!label) return "∅"; const n = norm(label); return CANON[n] || n; };
   const LABEL_W = 175; // label boxes in screen pixels at the cluster's own zoom level
-  const state = {historyExpanded: false, level: 0, focus: null, hub: null, view: null, anim: null, hovered: null, selected: null, highlight: null, panel: "right", labels: "auto", targetScale: null, detailScale: null, fitted: true, fitKey: null};
+  const state = {grouping: params.get("cluster") === "group" ? "group" : "domain", historyExpanded: false, level: 0, focus: null, hub: null, view: null, anim: null, hovered: null, selected: null, highlight: null, panel: "right", labels: "auto", targetScale: null, detailScale: null, fitted: true, fitKey: null};
   let canvas, svg, panel, toolbar, controls, legend, empty, clusters = new Map(), nodeEls = new Map(), api, currentField = null, drawnScale = 1;
   const W = () => canvas.clientWidth || 1000, H = () => canvas.clientHeight || 700;
   const viewScale = () => W() / (state.view?.w || 1600);
@@ -280,19 +282,30 @@
     for (const a of field.agents) a.atlasPhase = field.scale === "real" && !a.history?.length ? "starting" : a.phase;
     const map = new Map();
     const add = (key, a, raw) => { if (!map.has(key)) map.set(key, {key, members: [], raw: new Map(), secondary: new Map()}); const c = map.get(key); c.members.push(a); if (raw) c.raw.set(raw, (c.raw.get(raw) || 0) + 1); return c; };
-    for (const a of field.roots()) { const ds = field.domainsOf(a); const c = add(ds[0] ? clusterKey(ds[0]) : "∅", a, ds[0] || null); if (ds[1]) c.secondary.set(a.id, clusterKey(ds[1])); }
+    const byGroup = state.grouping === "group";
+    if (byGroup) {
+      for (const a of field.agents) {
+        // Keep unassigned children with their root, but honor explicit child groups.
+        const owner = a.group ? a : rootOf(a.id), workspace = a.workspace || "";
+        const key = owner.group ? "group:" + (owner.groupId || JSON.stringify([workspace, owner.group])) : "ungrouped:" + workspace;
+        const c = add(key, a);
+        c.label = owner.group || "Ungrouped" + (workspace && (!field.workspace || field.workspace === "all") ? " · " + (workspace.split("/").filter(Boolean).pop() || workspace) : "");
+      }
+    } else {
+      for (const a of field.roots()) { const ds = field.domainsOf(a); const c = add(ds[0] ? clusterKey(ds[0]) : "∅", a, ds[0] || null); if (ds[1]) c.secondary.set(a.id, clusterKey(ds[1])); }
+    }
     const odd = c => c.members.length === 1 && c.key !== "∅" && !c.key.includes("/") && !AgentField.DOMAINS.includes(c.key) && scenario !== "none" && c.members.every(a => a.domainSource !== "derived");
-    const singles = [...map.values()].filter(odd);
+    const singles = byGroup ? [] : [...map.values()].filter(odd);
     if (singles.length >= 3) { const other = {key: "other", members: [], raw: new Map(), secondary: new Map(), merged: singles.map(c => c.key)}; for (const c of singles) { map.delete(c.key); other.members.push(...c.members); for (const [r, n] of c.raw) other.raw.set(r, n); } map.set("other", other); }
     for (const c of map.values()) {
       const top = [...c.raw.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
       const pretty = text => text.includes("/") ? text : text.replace(/\b[a-z]/g, ch => ch.toUpperCase());
-      c.derived = c.key !== "∅" && c.members.length > 0 && c.members.every(a => a.domainSource === "derived");
-      c.label = c.key === "∅" ? "No domain reported" : c.key === "other" ? "Other" : (AgentField.DOMAIN_LABELS[c.key] || (top ? pretty(top) : pretty(c.key)));
+      c.derived = !byGroup && c.key !== "∅" && c.members.length > 0 && c.members.every(a => a.domainSource === "derived");
+      if (!byGroup) c.label = c.key === "∅" ? "No domain reported" : c.key === "other" ? "Other" : (AgentField.DOMAIN_LABELS[c.key] || (top ? pretty(top) : pretty(c.key)));
       c.aliases = [...new Set([...c.raw.keys()].filter(r => clusterKey(r) === c.key && norm(r) !== norm(c.label) && norm(r) !== c.key))];
       c.source = c.derived ? "from write scope" : c.key === "other" ? c.merged.length + " labels" : c.aliases.length ? "also " + c.aliases.slice(0, 3).join(", ") : "";
       c.roots = [...c.members];
-      c.members = c.roots.flatMap(a => [a, ...field.descendants(a.id)]);
+      if (!byGroup) c.members = c.roots.flatMap(a => [a, ...field.descendants(a.id)]);
       c.needs = c.members.filter(field.needsUser).length;
       c.working = c.members.filter(a => a.status === "working").length;
       c.lastActivity = Math.max(...c.members.map(field.lastActivity));
@@ -429,7 +442,7 @@
   function back() { if (state.level === 2) focusCluster(state.focus); else if (state.level === 1) fitAll(); }
   function clusterOf(id) { for (const c of clusters.values()) if (c.members.some(a => a.id === id)) return c; const p = currentField.parent(id); return p ? clusterOf(p.id) : null; }
   function rootOf(id) { let a = currentField.byId(id); while (a && a.parentId && currentField.byId(a.parentId)) a = currentField.byId(a.parentId); return a; }
-  function flyTo(id) { const a = currentField.byId(id), c = clusterOf(id); if (!a || !c) return; state.highlight = id; const root = rootOf(id); if (root.id !== id) focusHub(root.id); else focusCluster(c.key); }
+  function flyTo(id) { const a = currentField.byId(id), c = clusterOf(id); if (!a || !c) return; state.highlight = id; const root = rootOf(id); if (root.id !== id) focusHub(id); else focusCluster(c.key); }
   function toCanvas(dxPx, dyPx) { const k = state.view.w / W(); return {dx: dxPx * k, dy: dyPx * k}; }
   function zoomDetailAt(x, y) {
     if (state.focus) {
@@ -468,21 +481,34 @@
       applyView();
     }, {passive: false});
     document.addEventListener("keydown", e => { if (e.key === "Escape" && !document.querySelector(".lens") && state.level > 0) back(); }, true);
-    window.addEventListener("resize", () => { if (state.level === 2) focusHub(state.hub, false); else if (state.level === 1) focusCluster(state.focus, false); else setView(allBounds(), false); });
+    window.addEventListener("resize", () => { if (state.level > 0) fitCurrent(false); else setView(allBounds(), false); });
   }
   function drawToolbar(field) {
+    svg.setAttribute("aria-label", state.grouping === "group" ? "Group atlas" : "Domain atlas");
     toolbar.replaceChildren();
+    const clustering = $("label", "clustering", "Cluster by");
+    const clusterSel = $("select"); clusterSel.setAttribute("aria-label", "Cluster by");
+    for (const [value, label] of [["domain", "Domain"], ["group", "Group"]]) { const option = $("option", null, label); option.value = value; option.selected = value === state.grouping; clusterSel.append(option); }
+    clusterSel.onchange = () => {
+      persist(); state.grouping = clusterSel.value;
+      const url = new URL(location.href);
+      if (state.grouping === "group") url.searchParams.set("cluster", "group"); else url.searchParams.delete("cluster");
+      history.replaceState(null, "", url);
+      loadLayout(field); layout(field); fitAll(false);
+    };
+    clustering.append(clusterSel); toolbar.append(clustering);
     const crumb = $("span", "crumb");
     if (field.scale === "real") {
       const projectName = field.workspace && field.workspace !== "all" ? field.workspace.replace(/\/$/, "").split("/").pop() || field.workspace : "All projects";
       crumb.append($("b", null, projectName), $("small", null, field.agents.length + (field.agents.length === 1 ? " thread" : " threads")), $("span", "muted", "›"));
     }
-    const all = $("button", null, "All domains"); all.type = "button"; all.onclick = () => fitAll(); crumb.append(all);
+    const all = $("button", null, state.grouping === "group" ? "All groups" : "All domains"); all.type = "button"; all.onclick = () => fitAll(); crumb.append(all);
     const c = state.focus && clusters.get(state.focus);
     if (c) { crumb.append($("span", "muted", "›")); if (state.level === 2) { const b = $("button", null, c.label); b.type = "button"; b.onclick = () => focusCluster(c.key); crumb.append(b); } else crumb.append($("b", null, c.label)); if (c.source && state.level === 1) crumb.append($("small", null, c.source)); }
     if (state.level === 2 && field.byId(state.hub)) { const h = field.byId(state.hub); crumb.append($("span", "muted", "›"), $("b", null, h.name || h.title)); }
     toolbar.append(crumb);
-    toolbar.append($("span", "hint", state.level === 2 ? "Family highlighted · click to inspect · drag outside to pin · back inside to release · Esc goes back" : state.level === 1 ? "Click to inspect · drag around a contour · drag outside to pin" : "Click a domain to zoom in · drag a domain to move it · scroll to zoom"));
+    const clusterNoun = state.grouping === "group" ? "group" : "domain";
+    toolbar.append($("span", "hint", state.level === 2 ? "Family highlighted · click to inspect · drag outside to pin · back inside to release · Esc goes back" : state.level === 1 ? "Click to inspect · drag around a contour · drag outside to pin" : `Click a ${clusterNoun} to zoom in · drag a ${clusterNoun} to move it · scroll to zoom`));
     legend.replaceChildren();
     const geometry = $("span", null, "Center → rim: checkpoint phases");
     const needs = $("span"); needs.append($("i", "needs-you"), "Needs you");
@@ -512,7 +538,7 @@
     }
     controls.replaceChildren();
     const panelSel = $("select"); for (const [v, l] of [["right", "Panel: right"], ["bottom", "Panel: bottom"]]) { const o = $("option", null, l); o.value = v; o.selected = v === state.panel; panelSel.append(o); }
-    panelSel.onchange = () => { state.panel = panelSel.value; document.getElementById("stage").dataset.panel = state.panel; requestAnimationFrame(() => { layout(field); if (state.level === 2) focusHub(state.hub, false); else if (state.level === 1) focusCluster(state.focus, false); else setView(allBounds(), false); draw(); }); };
+    panelSel.onchange = () => { state.panel = panelSel.value; document.getElementById("stage").dataset.panel = state.panel; requestAnimationFrame(() => { layout(field); if (state.level > 0) fitCurrent(false); else setView(allBounds(), false); draw(); }); };
     const labelSel = $("select"); for (const [v, l] of [["auto", "Labels: auto"], ["on", "Labels: on"], ["needs", "Labels: needs you"], ["off", "Labels: off"]]) { const o = $("option", null, l); o.value = v; o.selected = v === state.labels; labelSel.append(o); }
     labelSel.onchange = () => { state.labels = labelSel.value; resolveLabels(field); applyView(); };
     const fit = $("button", "btn small", "Fit"); fit.type = "button"; fit.onclick = () => fitCurrent();
@@ -558,6 +584,7 @@
       text.append($("small", null, (a.id === root.id ? "Parent" : "Child" + (children.length ? " · also a parent" : "")) + " · " + nodeDoing(a, field)));
       button.append(dot, text); item.append(button); list.append(item);
       button.onclick = () => {
+        if (clusterOf(a.id)?.key !== state.focus) focusHub(a.id, false);
         state.selected = a.id; state.highlight = a.id; draw();
         nodeEls.get(a.id)?.focus({preventScroll: true});
         api.peek(a.id, nodeEls.get(a.id) || button);
@@ -577,7 +604,7 @@
       const focused = state.focus === c.key;
       const g = svgEl("g", {class: "cluster" + (focused ? " focused" : state.level ? " dim" : "") + (c.needs ? " needs" : ""), "data-domain": c.key, "data-activity": c.activity.toFixed(3), "data-threads": c.members.length, style: `--hull-activity:${c.activity}`}, gBlobs);
       const overview = svgEl("g", {class: "overview-hull", role: "button", tabindex: 0,
-        "aria-label": `${c.label}. ${c.members.length} threads. ${c.needs ? c.needs + " need you. " : ""}Zoom into domain.`}, g);
+        "aria-label": `${c.label}. ${c.members.length} threads. ${c.needs ? c.needs + " need you. " : ""}Zoom into ${state.grouping === "group" ? "group" : "domain"}.`}, g);
       svgEl("path", {class: "overview-hit", d: overviewPath(c)}, overview);
       for (const ring of overviewRings(c)) svgEl("path", {class: "overview-contour hull-surface", "data-band": ring.name, "data-radius": ring.radius, d: overviewPath(c, ring.radius)}, overview);
       const title = svgEl("title", {}, overview);
@@ -745,7 +772,7 @@
     g.addEventListener("pointerleave", () => { state.hovered = null; drawLineage(state.selected || state.hub); });
     const activate = () => { state.selected = a.id; state.highlight = null;
       const root = rootOf(a.id);
-      if (field.children(root.id).length && state.hub !== root.id) focusHub(root.id);
+      if (field.children(root.id).length && state.hub !== root.id) focusHub(a.id);
       else if (far) { focusCluster(c.key); state.selected = a.id; draw(); }
       else {
         if (state.hub && root.id !== state.hub) { focusCluster(c.key, false); state.selected = a.id; }
@@ -791,17 +818,18 @@
     }
   }
   let draw = () => {};
+  function loadLayout(field) {
+    cancelAnimationFrame(state.anim);
+    Object.assign(state, {historyExpanded: false, level: 0, focus: null, hub: null, view: null, highlight: null, hovered: null, selected: null, targetScale: null, detailScale: null, fitted: true, fitKey: null});
+    storeKey = layoutKey(field.workspace);
+    let positions = {}; try { positions = JSON.parse(localStorage.getItem(storeKey) || "{}") || {}; } catch { /* private mode */ }
+    clusterPos.clear(); lastDraw.clear();
+    try { radial = AtlasLayout.create(positions.radial || {}); } catch { radial = AtlasLayout.create(); }
+    for (const [key, value] of Object.entries(positions.clusters || {})) clusterPos.set(key, value);
+  }
   function render(field, stage, mockupApi) {
     const changed = currentField !== field;
-    if (changed) {
-      cancelAnimationFrame(state.anim);
-      Object.assign(state, {historyExpanded: false, level: 0, focus: null, hub: null, view: null, highlight: null, hovered: null, selected: null, targetScale: null, detailScale: null, fitted: true, fitKey: null});
-      storeKey = layoutKey(field.workspace);
-      let positions = {}; try { positions = JSON.parse(localStorage.getItem(storeKey) || "{}"); } catch { /* private mode */ }
-      clusterPos.clear(); lastDraw.clear();
-      try { radial = AtlasLayout.create(positions.radial || {}); } catch { radial = AtlasLayout.create(); }
-      for (const [key, value] of Object.entries(positions.clusters || {})) clusterPos.set(key, value);
-    }
+    if (changed) loadLayout(field);
     api = mockupApi; currentField = field; assignFamilySymbols(field);
     if (!svg || !svg.isConnected) { build(stage); layout(field); state.view = null; setView(allBounds(), false); } else layout(field);
     if (changed) { const box = allBounds(); state.overviewScale = W() / box.w; setView(box, false); }
@@ -817,9 +845,9 @@
   }
   Mockup.mount({
     number: 18, title: "Atlas", spectrum: "synthesis", fullBleed: true, domainScenarios: true, defaultScale: "real", projectTabs: true,
-    summary: "Three thin contours show the core, work in progress, and rim of each domain, sized by thread count. Orange dots and text mark requests. Full domain names sit above their contours; counts include older finished threads, which can be revealed when zoomed in. Click a thread or domain for detailed phase rings and family relationships.",
+    summary: "Cluster by domain or saved thread group. Three thin contours show the core, work in progress, and rim of each cluster, sized by thread count. Orange dots and text mark requests. Full names sit above their contours; counts include older finished threads, which can be revealed when zoomed in. Click a thread or cluster for detailed phase rings and family relationships.",
     signals: {current: ["status", "tool_activity", "age", "messages", "pending_approval", "created_by", "client", "title", "write_scope", "scope_cluster", "phase", "summary", "next_action"], proposed: ["domain", "ask", "name", "activity"]},
-    notes: "Each project tab is a working directory, such as agent-coord or rig. All projects shows every directory; each directory keeps its own layout. The real snapshot loads shared/real-threads.js (regenerate with export-threads.py). Domains and agent lineage come from your actual threads; simulated datasets remain available in the data selector.",
+    notes: "Each project tab is a working directory, such as agent-coord or rig. All projects shows every directory; each directory and clustering mode keeps its own layout. Group uses saved thread groups; unassigned children inherit their root’s group, and other threads appear under Ungrouped per project. The real snapshot loads shared/real-threads.js (regenerate with export-threads.py). Domains, groups, and agent lineage come from your actual threads; simulated datasets remain available in the data selector.",
     render,
   });
 })();
