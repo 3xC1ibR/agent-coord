@@ -20,7 +20,6 @@
     .page.far { visibility: hidden; }
     .page-title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
     .page-title h2 { font-size: 24px; font-weight: 600; letter-spacing: -.03em; }
-    .page-title .pos, .page-title .counts { font: 11px var(--mono); color: var(--muted); }
     .level-title { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
     .level-title h3 { font-size: 17px; font-weight: 500; }
     .level-title span { font: 11px var(--mono); color: var(--muted); }
@@ -54,7 +53,8 @@
     .mm-cell.mark { border-color: var(--accent); color: var(--ink); }
     .mm-cell.lit { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     .mm-cell.empty-cell:not(.lit) { opacity: .5; }
-    .mm-cell .ask-dot { position: absolute; top: -2px; right: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--warm); }
+    .mm-cell.needs-reply:not(.lit) { color: var(--warm); }
+    .mm-cell .presence-dot { display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: currentColor; vertical-align: middle; }
     .mm-foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); font: 10px var(--mono); color: var(--muted); }
     .mm-note { margin-top: 5px; color: var(--muted); font-size: 9px; }
     @media (max-width: 600px) { .cards { grid-template-columns: 1fr !important; } .page-title h2 { font-size: 20px; } .mm-labels { flex-basis: 144px; } }
@@ -106,7 +106,6 @@
   const REAL_CARD_CAP = 12;
   const ALL_GROUPS_KEY = "overview:all";
   const LEVELS = ["Running + Needs my reply", "Replies to read", "Idle"];
-  const DESCRIPTIONS = ["Agents working now and conversations waiting for your input.", "Responses waiting to be read. Reading does not finish the investigation.", "Remaining conversations, organized by phase. Includes threads parked for later."];
   const GROUPINGS = {sim: ["target", "domain", "family"], real: ["group", "domain", "workspace"]};
   const GROUPING_LABELS = {target: "target", domain: "domain", family: "root family", group: "group", workspace: "workspace"};
   const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
@@ -141,7 +140,7 @@
       if (grouping === "domain") return ["d:" + (a.domain || "none"), a.domain || "No domain"];
       if (grouping === "workspace") return ["w:" + (a.workspace || "unknown"), (a.workspace || "unknown").replace(/^\/opt\/projects\/?/, "") || folder(a.workspace)];
       const g = a.group ? a : r.group ? r : null;
-      return g ? ["g:" + (g.groupId || g.group), g.group] : ["u:" + (a.workspace || "unknown"), "Ungrouped · " + folder(a.workspace)];
+      return g ? ["g:" + (g.groupId || g.group), g.group] : ["u:" + (a.workspace || "unknown"), "Ungrouped" + (field.workspace === "all" ? " · " + folder(a.workspace) : "")];
     }
     if (grouping === "domain") return [r.domain || "none", r.domain ? AgentField.DOMAIN_LABELS[r.domain] || r.domain : "No domain"];
     if (grouping === "family") return [r.id, r.name ? r.name + " · " + r.title : r.title];
@@ -221,7 +220,11 @@
   function section(page, g, items, title, key, cls = "") {
     if (!items.length) return;
     const sec = $("section", "section " + cls); sec.dataset.section = key;
-    const head = $("header", "section-title"); head.append($("h4", null, title), $("span", null, String(items.length))); sec.append(head);
+    if (key !== "replies") {
+      const head = $("header", "section-title"); head.append($("h4", null, title));
+      if (key === "asks") head.append($("span", null, String(items.length)));
+      sec.append(head);
+    }
     const expandedKey = g.key + ":" + key;
     const cap = isReal() && !showAll.has(expandedKey) ? REAL_CARD_CAP : Infinity;
     const grid = $("div", "cards");
@@ -237,7 +240,7 @@
     }
     sec.append(grid);
     if (isReal() && items.length > REAL_CARD_CAP) {
-      const expanded = showAll.has(expandedKey), b = $("button", "btn quiet small more", expanded ? "Show recent " + REAL_CARD_CAP : "Show all " + items.length);
+      const expanded = showAll.has(expandedKey), b = $("button", "btn quiet small more", expanded ? "Show recent" : "Show all");
       b.type = "button"; b.onclick = () => { expanded ? showAll.delete(expandedKey) : showAll.add(expandedKey); paint(false); }; sec.append(b);
     }
     page.append(sec);
@@ -245,15 +248,15 @@
   function pageFor(g, i, level) {
     const page = $("section", "page"); page.dataset.key = g.key; page.dataset.i = i; page.dataset.level = level;
     const items = g.levels[level], head = $("header", "page-title");
-    const name = g.aggregate && isReal() ? g.name + " · " + (F.workspace === "all" ? "All projects" : folder(F.workspace)) : g.name;
-    const count = g.members.length + (g.aggregate ? " threads across " + (groups.length - 1) + " groups" : " threads in group");
-    head.append($("h2", null, name), $("span", "pos", (i + 1) + " / " + groups.length), $("span", "counts", count)); page.append(head);
-    const title = $("div", "level-title"); title.append($("h3", null, LEVELS[level]), $("span", null, String(items.length))); page.append(title, $("p", "description", DESCRIPTIONS[level]));
+    head.append($("h2", null, g.name)); page.append(head);
+    const title = $("div", "level-title"); title.append($("h3", null, LEVELS[level]));
+    if (level === 1 && items.length) title.append($("span", null, String(items.length)));
+    page.append(title);
     if (!items.length) {
       const scope = g.aggregate ? "across these groups" : "in this group";
       page.append($("p", "empty", ["Nothing running or waiting for your reply ", "No unread replies ", "No idle threads "][level] + scope + "."));
       const links = $("div", "empty-links");
-      g.levels.forEach((list, n) => { if (n === level || !list.length) return; const b = $("button", "btn small", LEVELS[n] + " · " + list.length); b.type = "button"; b.onclick = () => goLens(n); links.append(b); });
+      g.levels.forEach((list, n) => { if (n === level || !list.length) return; const b = $("button", "btn small", LEVELS[n]); b.type = "button"; b.onclick = () => goLens(n); links.append(b); });
       page.append(links);
     }
     if (level === 0) {
@@ -283,9 +286,11 @@
       const b = $("button", "mm-label" + (lens === level ? " here" : ""), label); b.type = "button"; b.setAttribute("aria-pressed", String(lens === level)); b.onclick = () => goLens(level); labels.append(b);
       const cells = $("div", "mm-cells");
       groups.forEach((g, i) => {
-        const count = g.levels[level].length, cell = $("button", "mm-cell" + (i === pageIdx ? lens === level ? " lit" : " mark" : "") + (!count ? " empty-cell" : ""), String(count));
-        cell.type = "button"; cell.title = g.name + " · " + label + " · " + count; cell.setAttribute("aria-label", cell.title); cell.setAttribute("aria-current", String(i === pageIdx && lens === level));
-        if (level === 0 && g.levels[0].some(F.needsUser)) cell.append($("i", "ask-dot"));
+        const count = g.levels[level].length, badge = level === 0 ? g.levels[0].filter(F.needsUser).length : level === 1 ? count : 0;
+        const cell = $("button", "mm-cell" + (i === pageIdx ? lens === level ? " lit" : " mark" : "") + (!count ? " empty-cell" : "") + (level === 0 && badge ? " needs-reply" : ""), badge ? String(badge) : "");
+        const status = badge ? badge + (level === 0 ? " awaiting your reply" : " unread") : !count ? "Empty" : level === 0 ? "Running" : "";
+        cell.type = "button"; cell.title = [g.name, label, status].filter(Boolean).join(" · "); cell.setAttribute("aria-label", cell.title); cell.setAttribute("aria-current", String(i === pageIdx && lens === level));
+        if (count && !badge) { const dot = $("i", "presence-dot"); dot.setAttribute("aria-hidden", "true"); cell.append(dot); }
         cell.onclick = () => { goPage(i); goLens(level); }; cells.append(cell);
       }); matrix.append(cells);
     });
@@ -366,7 +371,7 @@
     savePosition(); drawMinimap(); layout(animate);
   }
   Mockup.mount({
-    number: 30, title: "Working set", spectrum: "moderate", showChrome: false, fullBleed: true,
+    number: 30, title: "Working set", spectrum: "moderate", showChrome: false, fullBleed: true, showDatasetCounts: false,
     defaultScale: globalThis.AGENT_COORD_SNAPSHOT ? "real" : "small",
     summary: "All groups at the far left, individual groups to the right; Running + Needs my reply, Replies to read, and Idle from top to bottom. Idle is sectioned by phase.",
     signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "unread_result", "updated_at", "checkpoint_history"], proposed: ["name", "role", "kind", "activity", "ask", "plan", "target"]},

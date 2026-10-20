@@ -94,7 +94,7 @@ const Mockup = (() => {
     tools.append(search, $("span", "btn quiet", "Filters ⌄"), seg, $("span", "spacer"), $("span", "btn", "Open dispatcher ↗"), $("span", "btn primary", "New session ＋"));
     wrap.append(tabs, tools); return wrap;
   }
-  function mount({number, title, spectrum = "moderate", summary = "", signals = {current: [], proposed: []}, render, fullBleed = false, showChrome = true, defaultScale = "small", notes = "", domainScenarios = false, projectTabs = false}) {
+  function mount({number, title, spectrum = "moderate", summary = "", signals = {current: [], proposed: []}, render, fullBleed = false, showChrome = true, defaultScale = "small", notes = "", domainScenarios = false, projectTabs = false, showDatasetCounts = true}) {
     const q = params();
     const theme = q.get("theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     const snapshot = globalThis.AGENT_COORD_SNAPSHOT;
@@ -128,13 +128,13 @@ const Mockup = (() => {
     sig.append(pop); shell.append(sig);
     shell.append($("span", "mock-spacer"));
     const clock = $("span", "mock-id"); shell.append(clock);
-    const scaleOptions = [["small", "16 agents"], ["medium", "≈45 agents"], ["large", "≈160 agents"]];
-    if (snapshot?.threads) scaleOptions.push(["real", "Real · " + snapshot.threads.length]);
+    const scaleOptions = showDatasetCounts ? [["small", "16 agents"], ["medium", "≈45 agents"], ["large", "≈160 agents"]] : [["small", "Small"], ["medium", "Medium"], ["large", "Large"]];
+    if (snapshot?.threads) scaleOptions.push(["real", "Real" + (showDatasetCounts ? " · " + snapshot.threads.length : "")]);
     const scaleSel = $("select"); for (const [v, l] of scaleOptions) { const o = $("option", null, l); o.value = v; o.selected = v === scale; scaleSel.append(o); }
     let workspaceSel = null;
     if (scale === "real" && snapshot && !projectTabs) {
-      workspaceSel = $("select"); const all = $("option", null, "All workspaces · " + snapshot.threads.length); all.value = "all"; all.selected = workspace === "all"; workspaceSel.append(all);
-      for (const w of snapshot.workspaces || []) { const o = $("option", null, w.cwd.replace(/^\/opt\/projects\//, "") + " · " + w.count); o.value = w.cwd; o.selected = w.cwd === workspace; workspaceSel.append(o); }
+      workspaceSel = $("select"); const all = $("option", null, "All workspaces" + (showDatasetCounts ? " · " + snapshot.threads.length : "")); all.value = "all"; all.selected = workspace === "all"; workspaceSel.append(all);
+      for (const w of snapshot.workspaces || []) { const o = $("option", null, w.cwd.replace(/^\/opt\/projects\//, "") + (showDatasetCounts ? " · " + w.count : "")); o.value = w.cwd; o.selected = w.cwd === workspace; workspaceSel.append(o); }
       workspaceSel.title = "Workspace"; workspaceSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {workspace: workspaceSel.value === "all" ? null : workspaceSel.value}); };
     }
     scaleSel.title = "Data source"; scaleSel.onchange = () => { location.href = withParams(location.pathname.split("/").pop(), {scale: scaleSel.value, workspace: null, project: null}); };

@@ -712,8 +712,8 @@ recency cutoff that made whole groups disappear.
 - **All groups is fixed at the far left.** It aggregates the selected project's
   threads, including Ungrouped, through the same three states. Each card shows
   its group with a link that opens that group at the current level. Individual
-  groups follow to the right. Counts and section caps apply to the aggregate
-  independently of individual groups.
+  groups follow to the right. Section caps apply to the aggregate independently
+  of individual groups.
 - **Three levels, top to bottom:** Running + Needs my reply; Replies to read;
   Idle. Fresh visits start at All groups on the middle level; returning restores
   the group, grouping mode, and level per dataset/workspace using browser
@@ -738,10 +738,15 @@ recency cutoff that made whole groups disappear.
 - **Groups.** Real data uses the named group (or the root's group for children
   without one), otherwise Ungrouped per workspace. `g` cycles group, domain,
   workspace. Simulated data uses root target, domain, or root family.
+- **Minimal labels.** Show the group name and state without repeating the
+  selected project, page position, general thread totals, or state descriptions.
+  Only required replies and unread responses show counts, in their headings
+  and mini-map cells. Running and Idle use presence dots; empty cells are blank.
+  The project and data selectors omit counts.
 - **Navigation.** Arrow keys, horizontal wheel/swipe, the group picker, and
   mini-map cells change group. Up/down keys and vertical wheel/swipe at a page
   edge change state. The mini-map has aligned group columns across all three
-  levels and shows zero-count cells. Empty states link to populated levels of
+  levels and keeps empty cells navigable. Empty states link to populated levels of
   the same group. Preserve scroll position per group and level. Text inputs and
   the thread drawer retain their own keyboard behavior.
 - Keep short transitions, respect reduced motion, and do not add eyebrow labels.

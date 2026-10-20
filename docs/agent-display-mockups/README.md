@@ -332,6 +332,11 @@ The mini-map aligns the same groups across all levels and includes a group
 picker. No recency cutoff removes a group. Nonrunning Later threads remain
 parked in Idle. Groups keep their position as state changes.
 
+Headings show the group and state without repeating the selected project,
+page position, or thread totals. Only required replies and unread responses
+show counts. Running and Idle use presence dots in the mini-map; empty cells
+remain clickable. The project and data selectors omit counts in this mockup.
+
 Regenerate the real snapshot with `python3 docs/agent-display-mockups/export-threads.py`
 to include unread-response receipts. The exporter matches the current turn's
 completion against its read receipt; checkpoints alone are not unread replies.
