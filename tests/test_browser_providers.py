@@ -182,8 +182,7 @@ class ProviderTests(unittest.TestCase):
         self.sessions.send(thread, {"message": "Continue"})
         options = self.sessions.claude.connections[thread].options
         self.assertEqual((options["model"], options["effort"], options["yolo"]), ("sonnet", "high", True))
-        with self.assertRaises(CoordinationError):
-            self.sessions.send(thread, {"message": "steer", "expectedTurnId": self.sessions.active[thread]})
+        self.sessions.send(thread, {"message": "steer", "expectedTurnId": self.sessions.active[thread]})
         self.assertTrue(self.sessions.read(thread)["running"])
 
     def test_claude_context_alias_survives_another_sessions_catalog_refresh(self):

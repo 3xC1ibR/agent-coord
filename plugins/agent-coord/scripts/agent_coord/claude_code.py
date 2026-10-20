@@ -316,7 +316,24 @@ class ClaudeRPC:
                     connection.close()
             return {}
         if method == "turn/steer":
-            raise CoordinationError("Claude does not support steering here. Queue the message or stop the turn first.")
+            with self.lock:
+                turn = self.turns.get(thread_id)
+                if not turn or turn["id"] != params.get("expectedTurnId"):
+                    raise CoordinationError("The active Claude turn changed or finished. Your message was not sent.")
+                connection = self.connections.get(thread_id)
+                if not connection:
+                    raise CoordinationError("Claude Code disconnected. Stop the turn and send again.")
+                user = {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}
+                # Record before writing: the reader can deliver a result as
+                # soon as stdin is flushed. Roll back a rejected write.
+                turn["items"].append(user)
+                try:
+                    self._send_user(connection, thread_id, user)
+                except Exception:
+                    turn["items"].remove(user)
+                    raise
+                self._item(thread_id, user, completed=True)
+                return {"turnId": turn["id"]}
         if method == "turn/start":
             if thread_id in self.turns:
                 raise CoordinationError("A Claude turn is already running.")
@@ -329,16 +346,8 @@ class ClaudeRPC:
             self.blocks[thread_id] = {}
             self.confirmed_blocks[thread_id] = set()
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
-            content = []
-            for part in params["input"]:
-                if part["type"] == "text":
-                    content.append({"type": "text", "text": part["text"]})
-                elif part["type"] == "image":
-                    header, data = part["url"].split(",", 1)
-                    content.append({"type": "image", "source": {"type": "base64", "media_type": header[5:].split(";")[0], "data": data}})
             try:
-                connection.write({"type": "user", "session_id": thread_id, "parent_tool_use_id": None,
-                                  "uuid": user["id"], "message": {"role": "user", "content": content}})
+                self._send_user(connection, thread_id, user)
             except Exception:
                 self._finish(thread_id, "failed", "Claude Code disconnected before accepting the message.")
                 raise
@@ -355,6 +364,17 @@ class ClaudeRPC:
             self._finish(thread_id, "interrupted")
             return {}
         raise CoordinationError(f"Claude does not support {method}.")
+
+    def _send_user(self, connection, thread_id, user):
+        content = []
+        for part in user["content"]:
+            if part["type"] == "text":
+                content.append({"type": "text", "text": part["text"]})
+            elif part["type"] == "image":
+                header, data = part["url"].split(",", 1)
+                content.append({"type": "image", "source": {"type": "base64", "media_type": header[5:].split(";")[0], "data": data}})
+        connection.write({"type": "user", "session_id": thread_id, "parent_tool_use_id": None,
+                          "uuid": user["id"], "message": {"role": "user", "content": content}})
 
     def _item(self, thread_id, item, *, completed=False):
         turn = self.turns.get(thread_id)
@@ -458,7 +478,11 @@ class ClaudeRPC:
             # answering our new prompt. Match the consumed input UUIDs, not
             # merely the session: otherwise an empty notification result ends
             # the visible turn and all subsequent research/output is dropped.
-            prompt_id = turn["items"][0]["id"]
+            # Only a result consuming the latest submitted instruction can
+            # complete the visible turn. Earlier results may precede another
+            # Claude response when stdin arrived near a turn boundary.
+            prompt_id = next((i["id"] for i in reversed(turn["items"]) if i.get("type") == "userMessage"),
+                             turn["items"][0]["id"])
             prompt_ids = message.get("user_message_uuids") or []
             prompt_ids = [*prompt_ids, message.get("user_message_uuid")]
             if any(prompt_ids):

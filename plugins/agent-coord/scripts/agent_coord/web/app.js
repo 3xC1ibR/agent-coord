@@ -1287,8 +1287,8 @@ function renderStatus() {
     state.detail?.requests?.length ? "input" : active ? "running" : status?.key || "idle");
   $("composer").hidden = !work?.browser_session;
   $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (!dispatcher && running && !state.detail.activeTurn) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
-  $("send").textContent = dispatcher ? "Send ↑" : running ? (work?.client !== "codex" ? "Queue ↑" : "Steer ↑") : "Send ↑";
-  $("queue").hidden = dispatcher || !running || work?.client !== "codex";
+  $("send").textContent = dispatcher ? "Send ↑" : running ? (!["codex", "claude"].includes(work?.client) ? "Queue ↑" : "Steer ↑") : "Send ↑";
+  $("queue").hidden = dispatcher || !running || !["codex", "claude"].includes(work?.client);
   $("queue").disabled = $("send").disabled;
   $("message").disabled = archived || !!state.transferLocks?.has(state.selected);
   $("stop").hidden = !running;
@@ -1304,7 +1304,7 @@ function renderStatus() {
   $("organize-thread").disabled = !state.detail;
   $("move-thread").disabled = !!threadMoveUnavailable(work) || state.detailRefreshing;
   $("move-thread").title = threadMoveUnavailable(work);
-  $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (work?.client !== "codex" ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
+  $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (!["codex", "claude"].includes(work?.client) ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
   if (!archived && !running && work?.client === "codex") $("composer-hint").textContent += " · $ skills";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
   state.attachments?.render();
@@ -2342,7 +2342,7 @@ $("search").onkeydown = event => {
   if (event.key === "Escape") { $("search").value = ""; filtersChanged(); }
 };
 async function sendMessage(mode = "steer") {
-  if (state.detail?.running && ["claude", "antigravity", "kimi", "muse"].includes(state.detail?.work_thread?.client)) mode = "queue";
+  if (state.detail?.running && ["antigravity", "kimi", "muse"].includes(state.detail?.work_thread?.client)) mode = "queue";
   const detail = state.detail;
   const dispatcher = !!detail?.work_thread?.dispatcher;
   const id = state.selected, text = $("message").value;
