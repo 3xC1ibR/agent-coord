@@ -15,7 +15,7 @@ function assignmentHarness() {
       });
       return elements.get(id);
     },
-    Option: function(text, value) { return {text, value}; },
+    Option: function(text, value) { return {text, value}; }, savedViews: null,
     state: {selected: "other", folders: {selected: {cwd: "/other"}},
       detail: {work_thread: {thread_id: "other", project_cwd: "/other"}}},
     action: fn => fn(), threadPath: id => "threads/" + id,
@@ -73,6 +73,38 @@ test("card group assignment supports an existing group and removing the associat
       {path: "threads/card", body: {project_id: project || null}},
     ]);
   }
+});
+
+test("assigning to a hidden group restores it only after success without changing conversation selection", async () => {
+  const c = assignmentHarness(), restored = [];
+  c.savedViews = {isGroupHidden: (id, cwd) => id === "card-group" && cwd === "/card",
+    showGroup: (id, cwd) => restored.push({id, cwd})};
+  await c.organizeThread({thread_id: "card", project_cwd: "/card"});
+  assert.equal(c.$("edit-project").children.find(item => item.value === "card-group").text, "Card group · Hidden");
+  c.$("edit-project").value = "card-group";
+  const original = c.api;
+  let release;
+  c.api = async (...args) => { await new Promise(resolve => { release = resolve; }); return original(...args); };
+  c.$("organization-form").onsubmit({preventDefault() {}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(restored, []);
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(restored, [{id: "card-group", cwd: "/card"}]);
+  assert.equal(c.state.selected, "other");
+});
+
+test("failed group assignment leaves the group hidden", async () => {
+  const c = assignmentHarness();
+  c.savedViews = {isGroupHidden: () => true, showGroup: () => assert.fail("Failed assignment must not restore a group")};
+  await c.organizeThread({thread_id: "card", project_cwd: "/card"});
+  c.$("edit-project").value = "card-group";
+  c.api = async () => { throw new Error("Offline"); };
+  let submitted;
+  c.action = fn => { submitted = fn(); submitted.catch(() => {}); };
+  c.$("organization-form").onsubmit({preventDefault() {}});
+  await assert.rejects(submitted, /Offline/);
+  assert.equal(c.$("organization-dialog").open, true);
 });
 
 const threads = [

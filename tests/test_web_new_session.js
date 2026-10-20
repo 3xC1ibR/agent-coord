@@ -14,7 +14,7 @@ function setup() {
   const c = {
     $: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); },
     node: (tag, text) => Object.assign(element(), {tag, textContent: text}),
-    Option: function(text, value) { return {text, value}; }, navigation: null,
+    Option: function(text, value) { return {text, value}; }, navigation: null, savedViews: null,
     state: {busy: false, config: {cwd: "/server-process"}, folders: {selected: {cwd: "/workspace"}}, organization: {repositories: [], projects: []}, drafts: new Map(), commandFeedback: new Map(), closing: new Set()},
     threadOrganization: {NONE: "__none__"}, action: fn => fn(), sessionPath: id => "sessions/" + id,
     api: async (path, body) => {
@@ -51,6 +51,21 @@ test("configuration commands can be the first submission and display their feedb
     assert.equal(c.state.selected, "created");
     assert.equal(c.state.busy, false);
   }
+});
+
+test("creating a conversation in a hidden group restores that group only after creation succeeds", async () => {
+  const c = setup(), restored = [];
+  c.savedViews = {showGroup: (id, cwd) => restored.push({id, cwd})};
+  c.sessionContext = () => ({cwd: "/workspace", project_id: "launch"});
+  await c.newSession();
+  assert.deepEqual(restored, [], "Opening a draft is not creation");
+  const api = c.api;
+  c.api = async (path, body) => { if (path === "sessions") throw new Error("Unavailable"); return api(path, body); };
+  await assert.rejects(c.sendSessionDraft("Hello", []), /Unavailable/);
+  assert.deepEqual(restored, []);
+  c.api = api;
+  await c.sendSessionDraft("Hello", []);
+  assert.deepEqual(restored, [{id: "launch", cwd: "/workspace"}]);
 });
 
 test("draft thread commands never create a provider session or become prompts", async () => {
@@ -375,7 +390,7 @@ function projectSetup(readFile = async () => "data:image/png;base64,YQ==") {
   c.renderList = () => {};
   c.refreshDetail = async () => {};
   c.showError = error => c.errors.push(error);
-  c.savedViews = {setProject: async () => {}, restoreScroll() {}};
+  c.savedViews = {setProject: async () => {}, restoreScroll() {}, showGroup() {}};
   vm.runInContext(source.slice(source.indexOf("async function switchProject("), source.indexOf("function renderFolders()")), c);
   c.switchTo = async cwd => {
     c.state.folders.selected = {cwd};

@@ -53,16 +53,17 @@ const threadViews = (() => {
 })();
 
 class SavedViews {
-  constructor({document, api, onSwitch, onRefresh, onError, storage, preferences, scope = ""}) {
+  constructor({document, api, onSwitch, onRefresh, onError, notify, storage, preferences, scope = ""}) {
     this.doc = document; this.api = api; this.onSwitch = onSwitch; this.onError = onError;
     this.onRefresh = onRefresh;
+    this.notify = notify;
     this.storage = storage; this.preferences = preferences;
     this.key = "agent-coord.views." + (scope || "all");
     this.baseKey = this.key;
     this.all = {id: "all", name: "All conversations", filters: threadViews.filters(), group_by: this.$("group-by").value || "phase", version: 1};
     this.items = [this.all]; this.groups = []; this.saved = []; this.activeId = "all"; this.definition = this.all;
     this.navigation = {}; this.threads = []; this.switchVersion = 0; this.busy = false; this.signature = "";
-    this.saves = new Map(); this.groupOrders = new Map();
+    this.saves = new Map(); this.groupOrders = new Map(); this.hiddenGroups = new Map();
     try { this.navigation = JSON.parse(storage?.getItem(this.key) || "{}"); } catch { /* Optional window state. */ }
     if (!this.navigation || typeof this.navigation !== "object" || Array.isArray(this.navigation)) this.navigation = {};
     this.bind();
@@ -79,7 +80,7 @@ class SavedViews {
     bar.prepend(navigation); bar.append(utilities);
     const placement = this.doc.querySelector(".placement-switch"), search = this.doc.querySelector(".search-field");
     const filters = this.doc.querySelector(".view-filters"), actions = this.doc.querySelector(".workspace-actions");
-    const elements = ["welcome-new", "view-menu", "add-group", "reset-view", "update-view", "saved-view-tabs",
+    const elements = ["welcome-new", "view-menu", "groups-menu", "add-group", "reset-view", "update-view", "saved-view-tabs",
       "tile-threads", "leave-tiles", "group-by-domain", "start-dispatcher", "send-work-mobile-open"].map(id => this.$(id));
     const viewPicker = host.querySelector(".mobile-view-picker");
     const homes = [...elements, viewPicker, placement, search, filters, actions].map(element => {
@@ -97,10 +98,10 @@ class SavedViews {
         // Phones keep one header row: project, Send work, New, and options. Group choice lives in Filters.
         host.append(this.$("send-work-mobile-open"), this.$("welcome-new"), this.$("view-menu"));
         this.$("mobile-view-actions").append(this.$("add-group"), this.$("reset-view"), this.$("update-view"));
-        this.doc.querySelector(".filter-panel").prepend(viewPicker, this.$("group-by-domain"));
+        this.doc.querySelector(".filter-panel").prepend(viewPicker, this.$("groups-menu"), this.$("group-by-domain"));
       } else {
         hostHome.after(host);
-        navigation.append(this.$("saved-view-tabs"), this.$("add-group"), this.$("view-menu"), placement,
+        navigation.append(this.$("saved-view-tabs"), this.$("groups-menu"), this.$("add-group"), this.$("view-menu"), placement,
           this.$("reset-view"), this.$("update-view"));
         utilities.append(search, filters, this.$("tile-threads"), this.$("leave-tiles"));
         this.doc.querySelector(".filter-panel").prepend(this.$("group-by-domain"));
@@ -117,6 +118,65 @@ class SavedViews {
   $(id) { return this.doc.getElementById(id); }
   scoped(items) { return items.filter(view => this.cwd === undefined || view.cwd === this.cwd); }
   local(view) { return view.id === "all" || view.kind === "group"; }
+  groupVisibilityKey(cwd = this.cwd) {
+    return (cwd === undefined ? this.baseKey : this.baseKey + ":project:" + (cwd || "")) + ".hidden-groups";
+  }
+  hiddenGroupIds(cwd = this.cwd) {
+    const key = this.groupVisibilityKey(cwd);
+    if (!this.hiddenGroups.has(key)) {
+      let ids = [];
+      try { ids = JSON.parse(this.preferences?.getItem(key) || "[]"); } catch { /* Optional preference. */ }
+      this.hiddenGroups.set(key, new Set(Array.isArray(ids) ? ids.filter(id => typeof id === "string") : []));
+    }
+    return this.hiddenGroups.get(key);
+  }
+  isGroupHidden(id, cwd = this.cwd) { return this.hiddenGroupIds(cwd).has(id); }
+  storeHiddenGroups(cwd = this.cwd) {
+    try { this.preferences?.setItem(this.groupVisibilityKey(cwd), JSON.stringify([...this.hiddenGroupIds(cwd)])); }
+    catch { /* Keep the choice in this window when storage is unavailable. */ }
+  }
+  visibleTab(view) { return this.local(view) && !this.isGroupHidden(view.projectId); }
+  showGroup(id, cwd = this.cwd) {
+    if (!id || !this.hiddenGroupIds(cwd).delete(id)) return;
+    this.storeHiddenGroups(cwd);
+    if (cwd === this.cwd) this.render();
+  }
+  renderGroups() {
+    const views = this.groupItems(), signature = JSON.stringify(views.map(view =>
+      [view.projectId, view.name, this.isGroupHidden(view.projectId)]));
+    if (signature === this.groupsSignature) return;
+    this.groupsSignature = signature;
+    const groups = this.$("groups-list");
+    groups.replaceChildren();
+    for (const view of views) {
+      const hidden = this.isGroupHidden(view.projectId), button = this.doc.createElement("button");
+      button.type = "button"; button.dataset.groupId = view.projectId;
+      const name = this.doc.createElement("span"); name.textContent = view.name;
+      const action = this.doc.createElement("span"); action.className = "group-visibility-action";
+      action.textContent = hidden ? "Show in tabs" : "Open";
+      button.append(name); button.append(action);
+      button.setAttribute("aria-label", view.name + (hidden ? " · Hidden · Show in tabs" : " · Open group"));
+      button.onclick = () => {
+        if (hidden) { this.closeMenu(); this.showGroup(view.projectId); this.$("groups-menu-toggle").focus(); }
+        else this.activate(view.id).catch(this.onError);
+      };
+      groups.append(button);
+    }
+    this.$("groups-empty").hidden = views.length > 0;
+  }
+  async hideGroup(view) {
+    if (this.busy || view?.kind !== "group") return;
+    const cwd = this.cwd, active = this.activeId === view.id;
+    this.remember(); this.closeMenu();
+    this.hiddenGroupIds().add(view.projectId); this.storeHiddenGroups();
+    if (active) await this.activate("all", true);
+    else { this.render(); this.focusActive(); }
+    const version = this.switchVersion;
+    this.notify?.("hide-group:" + view.projectId, "“" + view.name + "” hidden from tabs.", async () => {
+      this.showGroup(view.projectId, cwd);
+      if (active && this.cwd === cwd && this.switchVersion === version) await this.activate(view.id);
+    });
+  }
   groupItems() {
     if (!this.groupOrders.has(this.key)) {
       let order = [];
@@ -297,7 +357,7 @@ class SavedViews {
     }
     let active = "all";
     try { active = this.preferences?.getItem(this.key + ".active") || active; } catch { /* Optional preference. */ }
-    this.activeId = this.items.some(view => view.id === active) ? active : "all";
+    this.activeId = this.items.some(view => view.id === active && !this.isGroupHidden(view.projectId)) ? active : "all";
     this.definition = this.current();
     const remembered = this.navigation[this.activeId];
     this.apply(remembered?.version === this.definition.version ? remembered : this.definition);
@@ -331,6 +391,9 @@ class SavedViews {
     if (reset) await this.saves.get(id)?.promise;
     const target = this.items.find(view => view.id === id);
     if (!target) return;
+    // Explicit group navigation restores a tab; inventory updates and opening
+    // individual conversations never call this path.
+    if (target.kind === "group") this.showGroup(target.projectId);
     this.remember();
     const version = ++this.switchVersion;
     if (reset) { this.saves.delete(id); delete this.navigation[id]; }
@@ -367,7 +430,10 @@ class SavedViews {
       tab?.scrollIntoView({block: "nearest", inline: "nearest"});
     } else this.$("filter-toggle").focus({preventScroll: true});
   }
-  closeMenu() { this.$("view-menu").open = false; this.$("filter-menu").open = false; this.closeGroupMenu(); }
+  closeMenu() {
+    this.$("view-menu").open = false; this.$("filter-menu").open = false;
+    this.$("groups-menu").open = false; this.closeGroupMenu();
+  }
   closeGroupMenu(focus = false) {
     this.$("group-context-menu").hidden = true;
     if (focus) this.groupMenuTrigger?.focus();
@@ -393,7 +459,7 @@ class SavedViews {
     if (cwd !== this.cwd || request !== this.groupRemovalRequest) return;
     if (!group.thread_count) return this.removeGroup(group);
     this.removeTarget = group;
-    this.$("remove-group-title").textContent = "Remove “" + group.name + "”?";
+    this.$("remove-group-title").textContent = "Delete “" + group.name + "”?";
     this.$("remove-group-description").textContent = "Its " + group.thread_count +
       (group.thread_count === 1 ? " conversation will" : " conversations will") +
       " become ungrouped. All conversations will be kept, and running work will continue.";
@@ -408,6 +474,7 @@ class SavedViews {
         const id = "group-" + group.id, active = this.activeId === id;
         this.groups = this.groups.filter(item => item.id !== group.id);
         this.items = this.items.filter(item => item.id !== id);
+        this.hiddenGroupIds().delete(group.id); this.storeHiddenGroups();
         delete this.navigation[id]; this.storeNavigation();
         this.removeTarget = null; this.$("remove-group-dialog").close();
         if (active) await this.activate("all", true);
@@ -429,6 +496,8 @@ class SavedViews {
     this.$("view-menu").hidden = !custom && !group && !this.mobile?.matches;
     this.$("view-custom-actions").hidden = !custom;
     this.$("group-rename").hidden = !group;
+    this.$("group-hide").hidden = !group;
+    this.$("group-hide").disabled = this.busy;
     this.$("group-remove").hidden = this.current().kind !== "group";
     this.$("group-remove").disabled = this.busy;
     const f = this.read().filters;
@@ -458,20 +527,22 @@ class SavedViews {
     if (this.dragGroup?.key === this.key) return;
     this.changed();
     const badges = this.items.map(view => threadViews.badges(threads, this.effective(view).filters));
-    const signature = JSON.stringify([this.items, this.activeId, badges]);
+    const signature = JSON.stringify([this.items, this.activeId, badges, [...this.hiddenGroupIds()]]);
     if (signature === this.signature) return;
     this.signature = signature;
     const tabs = this.$("saved-view-tabs"), hadFocus = tabs.contains(this.doc.activeElement);
     tabs.replaceChildren();
     const picker = this.$("mobile-view");
     picker.replaceChildren();
+    this.renderGroups();
     const savedPicker = this.$("saved-filter");
     const placeholder = this.doc.createElement("option"); placeholder.value = ""; placeholder.textContent = "Choose saved filters…";
     savedPicker.replaceChildren(placeholder);
     this.items.forEach((view, index) => {
       const option = this.doc.createElement("option"), counts = badges[index];
       option.value = view.id;
-      option.textContent = (this.local(view) ? "" : "Saved filters: ") + view.name + (view.id === this.activeId ? "" :
+      option.textContent = (this.local(view) ? "" : "Saved filters: ") + view.name +
+        (this.isGroupHidden(view.projectId) ? " · Hidden" : "") + (view.id === this.activeId ? "" :
         (counts.attention ? " · " + counts.attention + " need attention" : "") +
         (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
       picker.append(option);
@@ -479,6 +550,7 @@ class SavedViews {
         const savedOption = this.doc.createElement("option"); savedOption.value = view.id; savedOption.textContent = view.name;
         savedPicker.append(savedOption); return;
       }
+      if (!this.visibleTab(view)) return;
       const tab = this.doc.createElement("button"), selected = view.id === this.activeId;
       tab.type = "button"; tab.className = "saved-view-tab"; tab.dataset.viewId = view.id;
       tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(selected));
@@ -557,7 +629,7 @@ class SavedViews {
     }
     this.$("saved-view-tabs").onkeydown = event => {
       if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
-      const custom = this.items.filter(view => this.local(view));
+      const custom = this.items.filter(view => this.visibleTab(view));
       if (!custom.length) return;
       const focused = event.target?.dataset?.viewId || this.activeId;
       const next = threadViews.shortcut(event, Math.max(0, custom.findIndex(view => view.id === focused)), custom.length, true);
@@ -571,6 +643,8 @@ class SavedViews {
     };
     this.$("group-rename").onclick = () => this.openDialog("group-rename").catch(this.onError);
     this.$("context-rename-group").onclick = () => this.openDialog("group-rename", this.contextGroup).catch(this.onError);
+    this.$("group-hide").onclick = () => this.hideGroup(this.current()).catch(this.onError);
+    this.$("context-hide-group").onclick = () => this.hideGroup(this.contextGroup).catch(this.onError);
     this.$("group-context-menu").onkeydown = event => {
       if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
       event.preventDefault();
@@ -644,10 +718,14 @@ class SavedViews {
       if (event.key === "Escape" && this.$("view-menu").open) {
         event.preventDefault(); this.closeMenu(); this.$("view-menu-toggle").focus();
       }
+      if (event.key === "Escape" && this.$("groups-menu").open) {
+        event.preventDefault(); this.$("groups-menu").open = false; this.$("groups-menu-toggle").focus();
+      }
     });
     this.doc.addEventListener("pointerdown", event => {
       if (!this.$("group-context-menu").contains(event.target)) this.closeGroupMenu();
       if (!this.$("view-menu").contains(event.target)) this.$("view-menu").open = false;
+      if (!this.$("groups-menu").contains(event.target)) this.$("groups-menu").open = false;
     });
     this.doc.defaultView?.addEventListener("scroll", () => this.closeGroupMenu(), {capture: true, passive: true});
     this.doc.defaultView?.addEventListener("resize", () => this.closeGroupMenu());

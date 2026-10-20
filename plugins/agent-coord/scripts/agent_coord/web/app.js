@@ -1837,7 +1837,9 @@ async function fillAssignments(prefix, thread = null) {
   for (const item of state.organization.repositories) repository.append(new Option(item.name + " · " + item.root, item.id));
   repository.append(new Option("Add a repository…", "__new__"));
   project.replaceChildren(new Option("No group", ""));
-  for (const item of state.organization.projects.filter(item => item.cwd === (thread?.project_cwd || thread?.cwd || state.folders?.selected?.cwd))) project.append(new Option(item.name, item.id));
+  for (const item of state.organization.projects.filter(item => item.cwd === (thread?.project_cwd || thread?.cwd || state.folders?.selected?.cwd))) {
+    project.append(new Option(item.name + (savedViews?.isGroupHidden(item.id, item.cwd) ? " · Hidden" : ""), item.id));
+  }
   project.append(new Option("Create a group…", "__new__"));
   repository.value = thread ? thread.repository_id || "" : "__auto__";
   if (!thread) {
@@ -1922,6 +1924,7 @@ $("organization-form").onsubmit = event => {
   action(async () => {
     const thread = organizationThread, id = thread.thread_id, values = await assignmentPayload("edit", thread);
     await api(threadPath(id), values);
+    savedViews?.showGroup(values.project_id, thread.project_cwd || thread.cwd);
     $("organization-dialog").close();
     if (state.selected === id) await refreshThread();
     await refreshList();
@@ -2089,6 +2092,7 @@ async function sendSessionDraft(text, images, mentions = []) {
   if (!draft.createdId) {
     const result = await api("sessions", {...draft.session});
     draft.createdId = result.session.thread_id;
+    if (draft.session.project_id) savedViews?.showGroup(draft.session.project_id, draft.session.cwd);
   }
   const body = {message: text, windowId: state.sourceWindowId};
   if (mentions.length) body.mentions = mentions;
@@ -2992,6 +2996,7 @@ async function boot() {
   state.projectTabs = new ProjectTabs({document, folders: state.folders, onSwitch: switchProject, onError: showError});
   savedViews = new SavedViews({document, api, storage: windowStorage, preferences,
     onRefresh: refreshList,
+    notify: (...args) => state.threadActions.notify(...args),
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
     onSwitch: async () => { goHome(); await refreshList(); window.agentCoordPanes?.restoreView(); }, onError: showError});
   state.projectCwd = state.folders.selected?.cwd || "";
