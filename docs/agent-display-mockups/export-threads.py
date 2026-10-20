@@ -106,7 +106,7 @@ def load(path: Path, archived: bool, message_days: float = 14) -> dict:
     for r in db.execute(f"SELECT thread_id, phase, summary, next_action, next_actor, author, created_at, turn_id FROM thread_checkpoints WHERE thread_id IN ({marks}) ORDER BY id", ids):
         history.setdefault(r["thread_id"], []).append(dict(r))
     completions: dict[str, list] = {}
-    for r in db.execute(f"SELECT thread_id, status, completed_at FROM turn_completions WHERE thread_id IN ({marks}) ORDER BY id", ids):
+    for r in db.execute(f"SELECT id, thread_id, turn_key, status, completed_at FROM turn_completions WHERE thread_id IN ({marks}) ORDER BY id", ids):
         completions.setdefault(r["thread_id"], []).append(dict(r))
     links: dict[str, list] = {}
     for r in db.execute(f"SELECT thread_id, kind, label, target FROM thread_links WHERE thread_id IN ({marks}) ORDER BY id", ids):
@@ -141,6 +141,11 @@ def load(path: Path, archived: bool, message_days: float = 14) -> dict:
         hist = history.get(tid, [])
         latest = hist[-1] if hist else None
         comps = completions.get(tid, [])
+        # Match the app's unread-result receipt: a checkpoint alone is not a
+        # response, and a previous turn must not make a new turn look unread.
+        current_completion = next((c for c in reversed(comps) if c["turn_key"] == t.get("turn_key")), None)
+        unread_result = bool(current_completion and current_completion["status"] != "interrupted"
+                             and current_completion["id"] > (t.get("seen_completion_id") or 0))
         s = sessions.get(tid) or {}
         b = browser.get(tid) or {}
         creator = creators.get(tid)
@@ -167,6 +172,7 @@ def load(path: Path, archived: bool, message_days: float = 14) -> dict:
             "checkpoints": len(hist),
             "completions": len(comps), "last_completion": comps[-1]["status"] if comps else None,
             "last_completion_at": comps[-1]["completed_at"] if comps else None,
+            "unread_result": unread_result,
             "parent": parent,
             "links": links.get(tid, [])[:6],
             "classification": classifications.get(tid),

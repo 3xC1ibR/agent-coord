@@ -701,54 +701,42 @@ agent, zoom from overview to a family) with orchestration as the subject:
 
 ## 30 · Working set (moderate)
 
-The overview stripped to agent cards, a page title, and a small mini-map. No
-search bar, no filter row, no toolbar. The subject is a user who keeps 15 to 20
-groups open as short-term memory but works in only a few at a time: the view
-must make the few swipeable and the rest retrievable, and must never push the
-user to close anything.
+Revision agreed October 20, 2026: one horizontal axis for groups and one
+vertical axis for state. Preserve the card view and mini-map; remove the
+recency cutoff that made whole groups disappear.
 
-- **Groups.** The fixture has no groups; derive one. A group is a root family
-  (root and everyone below it) keyed by the root's `target`, so roots on the
-  same target merge; name the group after the target. Expect roughly 5 groups
-  at `small` and up to 20 at `large`.
-- **Three lenses, stacked vertically** (`↑`/`↓`, or a vertical wheel/swipe):
-  **Needs you** on top, **Working** in the middle as home, **Everyone** below.
-  A lens is a filter over the one field, not a separate place.
-- **Needs you is one page.** Every `field.needsUser` agent across all groups,
-  under group headers in working-set order, each with `Mockup.askBox` so it
-  can be answered in place. No horizontal paging here.
-- **Working is the swipe path.** One page per group in the working set, ordered
-  by recency of the user's touch, most recent leftmost (the app-switcher
-  pattern, not alphabetical). Working set = groups with a working or blocked
-  agent, or a user touch within a window (a page constant, start at 3 simulated
-  hours). Derive "touched" from `history` entries with `actor: "user"`, falling
-  back to `createdAt` of app agents. `←`/`→`, a horizontal wheel/swipe, or
-  `1`–`9` move between pages; neighbor pages peek at the edges. Cards here are
-  live: identity row, phase stepper, activity line, sub-agent chips (the 01
-  card). The page title is the group name with its counts.
-- **Everyone is one page, a shelf.** One row per group, same order, collapsed
-  to the group name, counts (working, needs you, done), and the latest
-  checkpoint summary line of its most recently updated thread. Click a row to
-  expand its cards. Shelf cards are memory cards: checkpoint summary and next
-  step, nothing live. Rows untouched for a long time sink down the shelf and
-  dim; nothing is hidden or closed. Swiping down from a Working page lands on
-  the shelf with that group's row already expanded.
-- **Mini-map**, bottom-right, the only chrome besides the title. Three rows for
-  the lenses. The Working row has one cell per page with its count, the current
-  page lit, and a warm dot where the group has an ask. The Needs-you row and the
-  Everyone row are one wide cell each with a total. Click any cell to jump. It
-  is also the "where am I" indicator for keyboard navigation.
-- Optional, last: `g` cycles the grouping between target, domain, and root
-  family. This is a mode, not a gesture; changing it re-cuts the pages.
-- Short slide transitions for both axes; respect `prefers-reduced-motion`.
-- Keep lens, page index, expanded shelf rows, and grouping in closure
-  variables across re-renders. At `large` the Working row may hold a dozen
-  pages; the mini-map must stay readable, and the Needs-you page should keep
-  its group headers with counts.
-- `signals`: the current ones the view uses plus proposed `name`, `role`,
-  `kind`, `activity`, `ask`, `plan`. `notes` should say the working-set
-  boundary is a placeholder; the intended ranking is sketched in
-  `docs/feature-ideas.md` under "Working-set ranking for groups".
+- **Left/right changes group at every level.** All groups remain reachable,
+  including groups with no running agents. The selected group stays the same
+  when moving vertically. Group order starts by recency and stays stable while
+  replies arrive, are read, or change phase.
+- **Three levels, top to bottom:** Running + Needs my reply; Replies to read;
+  Idle. Start at the middle level. The top level has separate Needs my reply
+  and Running sections. Idle has one section per populated checkpoint phase,
+  including Finished; a finished turn does not imply a finished investigation.
+- **Thread membership is exclusive.** Running agents and required user replies
+  occupy the top level. Other unread responses occupy the middle. All remaining
+  threads occupy Idle. Nonrunning threads parked in Later remain in Idle and
+  retain their Later label; a running turn stays visible at the top.
+- **Real response receipts.** `export-threads.py` supplies `unread_result` from
+  the current turn completion and `seen_completion_id`, excluding interrupted
+  turns. A checkpoint update alone does not count as a response. Old snapshots
+  without this field report that read status is unavailable, rather than
+  guessing from phase or recency. `Mark read` changes only the preview and moves
+  a response to Idle without changing its phase. Reload restores the snapshot.
+- **Cards are selected per thread.** Show every qualifying member independently,
+  including descendants whose parents occupy other levels. Parent links open
+  context without bringing older siblings into the current view. For real data,
+  cap each populated section at 12 cards with Show all / Show recent controls.
+- **Groups.** Real data uses the named group (or the root's group for children
+  without one), otherwise Ungrouped per workspace. `g` cycles group, domain,
+  workspace. Simulated data uses root target, domain, or root family.
+- **Navigation.** Arrow keys, horizontal wheel/swipe, the group picker, and
+  mini-map cells change group. Up/down keys and vertical wheel/swipe at a page
+  edge change state. The mini-map has aligned group columns across all three
+  levels and shows zero-count cells. Empty states link to populated levels of
+  the same group. Preserve scroll position per group and level. Text inputs and
+  the thread drawer retain their own keyboard behavior.
+- Keep short transitions, respect reduced motion, and do not add eyebrow labels.
 
 ---
 

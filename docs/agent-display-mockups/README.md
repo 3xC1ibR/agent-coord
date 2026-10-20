@@ -313,6 +313,30 @@ python3 docs/agent-display-mockups/export-threads.py
 open "docs/agent-display-mockups/mockups/29-orchestration-atlas.html?scale=real"
 ```
 
+## Working set (30)
+
+Mockup 30 now uses horizontal group pages at every vertical level:
+
+1. **Running + Needs my reply** — separate sections for required input and
+   agents running now.
+2. **Replies to read** — unread responses, independent of checkpoint phase.
+3. **Idle** — remaining threads, sectioned by phase, including Finished.
+
+Left/right changes group; up/down changes level while preserving the group.
+The mini-map aligns the same groups across all levels and includes a group
+picker. No recency cutoff removes a group. Nonrunning Later threads remain
+parked in Idle. Groups keep their position as state changes.
+
+Regenerate the real snapshot with `python3 docs/agent-display-mockups/export-threads.py`
+to include unread-response receipts. The exporter matches the current turn's
+completion against its read receipt; checkpoints alone are not unread replies.
+`Mark read` only affects the preview and moves a thread into Idle at the same
+phase. It does not update app read receipts, and reload restores the snapshot.
+The snapshot does not contain the full assistant response; the drawer shows
+checkpoint context. Older snapshots without receipts indicate unavailable read
+status. Every real section initially shows its most recent 12 cards, with a
+Show all control.
+
 ## Who built what
 
 Mockups 01, 11, and 18, the shared fixture, shell, tokens, lens, probe, index,
