@@ -39,8 +39,7 @@ main:has(> .conversation:not([hidden])) > .projects-bar { display: none; }
 @media (min-width: 721px) {
   main > .workspace-bar.header-tabs { min-height: 50px; padding: 0 12px; gap: 14px; background: var(--panel); }
   .header-tabs .breadcrumb { flex: none; gap: 8px; }
-  .header-tabs .breadcrumb > :not(#menu-toggle):not(#back-home) { display: none !important; }
-  .header-tabs #back-home { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-tabs .breadcrumb > :not(#menu-toggle) { display: none !important; }
   .header-tabs #menu-toggle { width: 30px; height: 30px; padding: 5px; border: 0; background: transparent; color: var(--muted); }
   .header-tabs .projects-bar { align-self: stretch; flex: 1; align-items: end; gap: 7px; padding: 0; border: 0; }
   .header-tabs .view-tabs { align-self: stretch; align-items: end; flex: 0 1 auto; padding: 7px 2px 0; gap: 3px; scrollbar-width: none; }
