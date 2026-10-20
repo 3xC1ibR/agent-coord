@@ -33,6 +33,7 @@ const Mockup = (() => {
     ["27-critical-path.html", "Critical path", "radical"],
     ["28-office-floor.html", "Office floor", "radical"],
     ["29-orchestration-atlas.html", "Orchestration atlas", "synthesis"],
+    ["30-working-set.html", "Working set", "moderate"],
   ];
   const CURRENT_SIGNALS = {
     title: "checkpoint title (3–6 words, auto/agent/user source)", phase: "checkpoint phase (8 values)", summary: "checkpoint summary (1–2 sentences)",

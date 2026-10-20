@@ -1,6 +1,6 @@
 # Agent display mockups
 
-Ten interactive mockups exploring how Ribbon Field could show the user's agents:
+Interactive mockups exploring how Ribbon Field could show the user's agents:
 what agents exist, what each is doing and on what, which sub-agents it has, and
 what needs the user. They range from a conservative restyle of today's card to
 views that assume a richer checkpoint. Open `index.html` for the gallery.

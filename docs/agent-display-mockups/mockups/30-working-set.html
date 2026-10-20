@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mockup 30 · Working set</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Three lenses stacked vertically over one field; Working pages slide horizontally. Nothing but cards, titles, and the mini-map. */
+    body { height: 100dvh; overflow: hidden; }
+    #stage { overflow: hidden; }
+    .viewport { position: absolute; inset: 0; overflow: hidden; }
+    .vtrack, .htrack { position: absolute; inset: 0; transition: transform .34s cubic-bezier(.2, .7, .2, 1); will-change: transform; }
+    .still .vtrack, .still .htrack, .still .page { transition: none !important; }
+    .pane { position: absolute; left: 0; right: 0; height: 100%; }
+    .pane.needs { top: 0; } .pane.work { top: 100%; overflow: hidden; } .pane.all { top: 200%; }
+    .scroller { overflow-y: auto; overscroll-behavior: contain; }
+    .pane.needs, .pane.all { padding: 26px 28px 150px; }
+    .pane-inner { max-width: 1240px; margin: 0 auto; }
+    .page { position: absolute; top: 0; bottom: 0; padding: 26px 4px 150px; transition: opacity .34s; }
+    .page.neighbor { opacity: .38; cursor: pointer; }
+    .page.neighbor > * { pointer-events: none; }
+    .page.far { visibility: hidden; }
+
+    /* Page titles: the group name with its counts. */
+    .page-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 18px; }
+    .page-title h2 { font-size: 22px; font-weight: 600; letter-spacing: -.03em; }
+    .page-title .pos { font: 11px var(--mono); color: var(--muted); }
+    .page-title .counts { font: 11px var(--mono); color: var(--muted); }
+    .page-title .counts b { font-weight: 500; color: var(--ink); }
+    .page-title .counts .warm { color: var(--warm); }
+    .page-title .touch { font: 11px var(--mono); color: var(--muted); margin-left: auto; }
+
+    /* Live cards (the 01 card). */
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; align-items: start; }
+    .cards .lead { grid-column: span 2; }
+    @media (max-width: 760px) { .cards .lead { grid-column: auto; } }
+    .thread { position: relative; display: flex; flex-direction: column; gap: 9px; padding: 14px 16px 11px; cursor: pointer; }
+    .thread:hover { border-color: var(--hover-line); box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 4%, transparent); }
+    .identity { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10px; color: var(--muted); }
+    .identity .provider-logo { width: 13px; height: 13px; flex: none; }
+    .identity .when { margin-left: auto; font-family: var(--mono); white-space: nowrap; }
+    .thread h3 { font-size: 14px; font-weight: 550; letter-spacing: -.02em; line-height: 1.4; }
+    .lead.thread h3 { font-size: 16px; }
+    .state { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+    .state .label { color: var(--ink); }
+    .state.working .label { color: var(--accent); }
+    .state.waiting .label { color: var(--warm); }
+    .state.failed .label { color: var(--danger); }
+    .activity { font-size: 11.5px; color: var(--accent); line-height: 1.5; }
+    .activity::before { content: "▸ "; }
+    .summary { font-size: 12px; line-height: 1.65; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .lead .summary { -webkit-line-clamp: 3; }
+    .thread.done .summary::before { content: "Completed · "; color: var(--ok); }
+    .next { display: flex; gap: 8px; border-top: 1px solid var(--line); padding-top: 9px; font-size: 11px; line-height: 1.55; }
+    .next b { font-weight: 600; }
+    .next.external b, .next.agent b { color: var(--muted); }
+    .agents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; border-top: 1px solid var(--line); padding-top: 9px; }
+    .agents .count { font: 10px var(--mono); color: var(--muted); margin-right: 2px; }
+    .agent-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px 3px 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); font-size: 11px; color: var(--ink); cursor: pointer; }
+    .agent-chip:hover { border-color: var(--hover-line); }
+    .agent-chip.needs { border-color: var(--warm); background: var(--warm-tint); }
+    .agent-chip small { color: var(--muted); font-size: 10px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-chip .t { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .footer { display: flex; align-items: center; gap: 6px; }
+    .empty { color: var(--muted); font-size: 12px; padding: 30px 0; }
+
+    /* Needs you: one page, group headers in working-set order. */
+    .pane-title { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+    .pane-title h2 { font-size: 22px; font-weight: 600; letter-spacing: -.03em; }
+    .pane-title small { font: 11px var(--mono); color: var(--muted); }
+    .ask-group { margin-bottom: 26px; }
+    .group-head { display: flex; align-items: baseline; gap: 10px; padding-bottom: 8px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+    .group-head h3 { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+    .group-head .n { font: 10px var(--mono); color: var(--warm); }
+    .group-head .where { margin-left: auto; }
+    .page-badge { font: 10px var(--mono); color: var(--muted); border: 1px solid var(--line-strong); border-radius: 4px; padding: 1px 6px; background: transparent; cursor: pointer; }
+    .page-badge:hover { color: var(--ink); border-color: var(--hover-line); }
+    .page-badge.off { cursor: default; border-style: dashed; }
+    .ask-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; align-items: start; }
+    .ask-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; cursor: pointer; }
+    .ask-card h4 { font-size: 13px; font-weight: 550; letter-spacing: -.01em; line-height: 1.4; }
+    .ask-card .via { font-size: 10.5px; color: var(--muted); }
+    .ask-card .next { border-top: 0; padding-top: 0; }
+    .ask-card .next b { color: var(--warm); }
+
+    /* Everyone: a shelf of collapsed group rows. Old rows sink and dim; nothing is hidden. */
+    .shelf { display: grid; gap: 4px; }
+    .row { border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+    .row-head { display: grid; grid-template-columns: 14px minmax(140px, 220px) auto minmax(0, 1fr) auto auto; align-items: center; gap: 14px; width: 100%; padding: 10px 14px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; font-size: 12px; }
+    .row-head:hover { background: var(--hover-bg); border-radius: 7px; }
+    .row-head .chev { color: var(--muted); font-size: 10px; transition: transform .2s; }
+    .row.open .row-head .chev { transform: rotate(90deg); }
+    .row-head .name { font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-head .tally { display: inline-flex; gap: 10px; font: 10.5px var(--mono); color: var(--muted); white-space: nowrap; }
+    .row-head .tally .w { color: var(--accent); } .row-head .tally .u { color: var(--warm); } .row-head .tally .d { color: var(--ok); }
+    .row-head .tally .zero { color: var(--muted); opacity: .55; }
+    .row-head .line { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-head .ago { font: 10.5px var(--mono); color: var(--muted); white-space: nowrap; }
+    .row[data-age="1"] { opacity: .82; } .row[data-age="2"] { opacity: .64; } .row[data-age="3"] { opacity: .48; }
+    .row[data-age]:hover, .row.open { opacity: 1; }
+    .row-body { padding: 4px 14px 14px 42px; }
+    .memory-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; align-items: start; }
+    .memory { display: flex; flex-direction: column; gap: 6px; padding: 11px 13px; cursor: pointer; background: color-mix(in srgb, var(--surface) 55%, var(--paper)); }
+    .memory:hover { border-color: var(--hover-line); }
+    .memory .meta { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10px; color: var(--muted); white-space: nowrap; }
+    .memory .meta .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .memory .meta .provider-logo { width: 12px; height: 12px; }
+    .memory .meta .when { margin-left: auto; font-family: var(--mono); }
+    .memory .meta .user { color: var(--warm); }
+    .memory h4 { font-size: 12.5px; font-weight: 550; line-height: 1.4; }
+    .memory p { font-size: 11.5px; line-height: 1.6; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .memory .next { padding-top: 6px; }
+    .memory .next.user b { color: var(--warm); }
+
+    /* Mini-map: the only chrome besides the title, and the "where am I" for the keyboard. */
+    .minimap { position: absolute; right: 18px; bottom: 18px; z-index: 30; width: 286px; padding: 10px 10px 8px; display: grid; gap: 6px; background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 8px 26px var(--shadow); backdrop-filter: blur(6px); font-size: 10px; }
+    .mm-row { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: start; gap: 8px; }
+    .mm-row > span { padding-top: 4px; color: var(--muted); font-size: 10px; }
+    .mm-row.here > span { color: var(--ink); font-weight: 600; }
+    .mm-cells { display: flex; flex-wrap: wrap; gap: 3px; }
+    .mm-cell { position: relative; min-width: 23px; height: 20px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--muted); font: 10px var(--mono); cursor: pointer; }
+    .mm-cell:hover { border-color: var(--hover-line); color: var(--ink); }
+    .mm-cell.wide { width: 100%; text-align: left; padding: 0 7px; }
+    .mm-cell.wide.warm { color: var(--warm); }
+    .mm-cell.lit { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .mm-cell.mark { border-color: var(--accent); color: var(--ink); }
+    .mm-cell .ask-dot { position: absolute; top: -3px; right: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warm); box-shadow: 0 0 0 2px var(--surface); }
+    .mm-foot { display: flex; gap: 8px; justify-content: space-between; padding-top: 4px; border-top: 1px solid var(--line); color: var(--muted); font: 9.5px var(--mono); }
+    .mm-foot kbd { font: inherit; border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 3px; }
+    @media (prefers-reduced-motion: reduce) { .vtrack, .htrack, .page, .row-head .chev { transition: none !important; } }
+  </style>
+</head>
+<body>
+<main id="stage"></main>
+<script src="../shared/fixture.js"></script>
+<script src="../shared/mockup.js"></script>
+<script>
+"use strict";
+(() => {
+  const $ = AgentField.el;
+  const HOUR = 3_600_000;
+  // Placeholder boundary: a working or blocked agent, or a user touch within this window. See docs/feature-ideas.md.
+  const TOUCH_WINDOW = 3 * HOUR;
+  const GROUPINGS = ["target", "domain", "family"];
+  const GROUPING_LABELS = {target: "target", domain: "domain", family: "root family"};
+  const ROLE_SHORT = {dispatcher: "Dispatcher", orchestrator: "Orchestrator", implementer: "Implementer", reviewer: "Reviewer", researcher: "Researcher", releaser: "Release", delegate: "Delegate", subagent: "Subagent"};
+  const STATUS_ORDER = {waiting: 0, failed: 1, working: 2, blocked: 3, idle: 4, done: 5};
+
+  // View state that survives re-renders.
+  let lens = 1, grouping = "target", pageKey = null, pageIdx = 0, scrollTo = null;
+  const expanded = new Set(), pageScroll = new Map();
+  let F = null, API = null, model = {all: [], set: []};
+  let stageEl = null, viewport, vtrack, needsLens, workLens, htrack, allLens, minimap;
+
+  /* Groups: root families keyed by the grouping, named after the key. */
+  function keyFor(r) {
+    if (grouping === "domain") return [r.domain || "none", r.domain ? AgentField.DOMAIN_LABELS[r.domain] || r.domain : "No domain"];
+    if (grouping === "family") return [r.id, r.name ? r.name + " · " + r.title : r.title];
+    return [r.target || "root:" + r.id, r.target || r.title];
+  }
+  function derive(field) {
+    const map = new Map();
+    for (const r of field.roots()) {
+      const [key, name] = keyFor(r);
+      let g = map.get(key); if (!g) map.set(key, g = {key, name, roots: [], members: []});
+      g.roots.push(r); g.members.push(r, ...field.descendants(r.id));
+    }
+    for (const g of map.values()) {
+      const touches = g.members.flatMap(a => a.history.filter(h => h.actor === "user").map(h => h.at));
+      const apps = g.members.filter(a => a.kind === "app");
+      g.touchedByUser = touches.length > 0;
+      g.touch = touches.length ? Math.max(...touches) : Math.max(...(apps.length ? apps : g.roots).map(a => a.createdAt));
+      g.live = g.members.some(a => a.status === "working" || a.status === "blocked");
+      g.counts = field.counts(g.members);
+      g.latest = g.members.reduce((x, y) => y.updatedAt > x.updatedAt ? y : x);
+      g.activity = Math.max(...g.members.map(field.lastActivity));
+      g.inSet = g.live || field.now - g.touch <= TOUCH_WINDOW;
+    }
+    const all = [...map.values()].sort((a, b) => b.touch - a.touch || b.activity - a.activity || a.name.localeCompare(b.name));
+    const set = all.filter(g => g.inSet);
+    set.forEach((g, i) => { g.page = i; });
+    return {all, set};
+  }
+  const current = () => model.set[pageIdx] || null;
+  const touchText = g => (g.touchedByUser ? "you, " : "opened ") + F.relativeTime(g.touch);
+
+  /* Live card, as in mockup 01. Cards shown as cards don't repeat as chips; deeper agents ride along as chips. */
+  function liveCard(a, field, api, {lead = false, chips = true} = {}) {
+    const el = $("article", "card thread " + a.status + (field.needsUser(a) ? " needs-you" : "") + (a.status === "working" ? " working" : "") + (lead ? " lead" : ""));
+    el.tabIndex = 0; el.onclick = () => api.select(a.id); el.onkeydown = e => { if (e.key === "Enter" && e.target === el) api.select(a.id); };
+    const id = $("div", "identity");
+    id.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    if (a.name && a.name !== ROLE_SHORT[a.role]) id.append($("span", "chip", a.name));
+    id.append($("span", null, ROLE_SHORT[a.role] + (a.kind !== "app" ? " · " + a.kind : "")));
+    const when = $("span", "when", field.relativeTime(a.updatedAt)); when.title = new Date(a.updatedAt).toLocaleString(); id.append(when);
+    el.append(id, $("h3", null, a.title));
+    const st = $("div", "state " + a.status);
+    st.append(AgentField.statusDot(a), $("span", "label", field.statusLabel(a)), AgentField.phaseSteps(a), $("span", null, AgentField.PHASE_LABELS[a.phase]));
+    const prog = field.progress(a); if (prog.total && a.status !== "done") st.append($("span", "mono", prog.done + "/" + prog.total));
+    el.append(st);
+    if (a.activity && a.status === "working") el.append($("div", "activity", a.activity));
+    if (a.ask) el.append(Mockup.askBox(a, field, null));
+    else { const s = $("p", "summary", a.summary); s.title = a.summary; el.append(s); }
+    if (!a.ask && a.next?.action && a.status !== "done") {
+      const n = $("div", "next " + a.next.actor);
+      n.append($("span", null, "↳"), $("span")); n.lastChild.append($("b", null, ({user: "Your next step", agent: "Up next", external: "Waiting on"}[a.next.actor] || "Next") + " · "), a.next.action);
+      el.append(n);
+    }
+    const kids = field.children(a.id);
+    if (kids.length) {
+      const row = $("div", "agents");
+      const nested = kids.reduce((n, k) => n + field.descendants(k.id).length, 0);
+      const needs = field.descendantsNeedingUser(a.id).length;
+      row.append($("span", "count", kids.length + (kids.length === 1 ? " agent" : " agents") + (nested ? " · +" + nested + " nested" : "") + (needs ? " · " + needs + " need you" : "") + (chips ? "" : " · below")));
+      if (chips) for (const k of kids) {
+        const chip = $("button", "agent-chip" + (field.needsUser(k) ? " needs" : "")); chip.type = "button"; chip.title = k.title + " · " + field.statusLabel(k);
+        chip.append(AgentField.statusDot(k), $("span", "t", k.title), $("small", null, k.status === "working" && k.activity ? k.activity : field.statusLabel(k)));
+        chip.onclick = e => { e.stopPropagation(); api.select(k.id); };
+        row.append(chip);
+      }
+      el.append(row);
+    }
+    if (a.unread) {
+      const f = $("div", "footer"); const d = $("button", "btn quiet small", "Dismiss"); d.type = "button";
+      d.onclick = e => { e.stopPropagation(); field.dismiss(a.id); }; f.append(d); el.append(f);
+    }
+    return el;
+  }
+
+  /* Memory card for the shelf: the checkpoint and its next step, nothing live. */
+  function memoryCard(a, field, api) {
+    const el = $("article", "card memory"); el.tabIndex = 0;
+    el.onclick = () => api.select(a.id); el.onkeydown = e => { if (e.key === "Enter") api.select(a.id); };
+    const meta = $("div", "meta");
+    meta.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]), $("span", "who", (a.name && a.name !== ROLE_SHORT[a.role] ? a.name + " · " : "") + ROLE_SHORT[a.role] + " · " + AgentField.PHASE_LABELS[a.phase]));
+    if (field.needsUser(a)) meta.append($("span", "user", "needs you"));
+    const when = $("span", "when", field.relativeTime(a.checkpointAt)); when.title = "Checkpoint saved " + new Date(a.checkpointAt).toLocaleString(); meta.append(when);
+    el.append(meta, $("h4", null, a.title));
+    const s = $("p", null, a.summary); s.title = a.summary; el.append(s);
+    if (a.next?.action && a.next.actor !== "nobody") {
+      const n = $("div", "next " + a.next.actor);
+      n.append($("span", null, "↳"), $("span")); n.lastChild.append($("b", null, ({user: "Your next step", agent: "Up next", external: "Waiting on"}[a.next.actor] || "Next") + " · "), a.next.action);
+      el.append(n);
+    }
+    return el;
+  }
+
+  function askCard(a, field, api) {
+    const el = $("article", "card ask-card needs-you"); el.onclick = () => api.select(a.id);
+    const id = $("div", "identity");
+    id.append(AgentField.providerLogo(a.client, AgentField.PROVIDER_NAMES[a.client]));
+    if (a.name && a.name !== ROLE_SHORT[a.role]) id.append($("span", "chip", a.name));
+    id.append($("span", null, ROLE_SHORT[a.role] + (a.kind !== "app" ? " · " + a.kind : "")), $("span", "when", field.relativeTime(a.ask?.askedAt ?? a.updatedAt)));
+    el.append(id, $("h4", null, a.title));
+    const chain = field.ancestors(a.id);
+    if (chain.length) el.append($("span", "via", "Under " + chain.map(p => p.name || p.title).reverse().join(" → ")));
+    if (a.ask) el.append(Mockup.askBox(a, field, api.select));
+    else {
+      const n = $("div", "next user"); n.append($("span", null, "↳"), $("span")); n.lastChild.append($("b", null, "Your next step · "), a.next.action); el.append(n);
+      const open = $("button", "btn quiet small", "Open thread"); open.type = "button"; open.style.alignSelf = "flex-start";
+      open.onclick = e => { e.stopPropagation(); api.select(a.id); }; el.append(open);
+    }
+    return el;
+  }
+
+  function tally(c, needs) {
+    const t = $("span", "tally");
+    for (const [n, label, cls] of [[c.working, "working", "w"], [needs, "need you", "u"], [c.done, "done", "d"]]) t.append($("span", n ? cls : "zero", n + " " + label));
+    return t;
+  }
+
+  /* Lens contents */
+  function drawNeeds(field, api) {
+    const inner = $("div", "pane-inner");
+    const asks = field.asks(); const rank = new Map(asks.map((a, i) => [a.id, i]));
+    const groups = [...model.set, ...model.all.filter(g => !g.inSet)].map(g => ({g, items: g.members.filter(field.needsUser).sort((x, y) => rank.get(x.id) - rank.get(y.id))})).filter(x => x.items.length);
+    const t = $("div", "pane-title"); t.append($("h2", null, "Needs you"), $("small", null, asks.length + (asks.length === 1 ? " ask" : " asks") + " · " + groups.length + (groups.length === 1 ? " group" : " groups")));
+    inner.append(t);
+    if (!groups.length) inner.append($("p", "empty", "Nothing needs you. Everything that is running is in Working, below."));
+    for (const {g, items} of groups) {
+      const sec = $("section", "ask-group"); sec.dataset.key = g.key;
+      const h = $("div", "group-head"); h.append($("h3", null, g.name), $("span", "n", items.length + " need you"));
+      h.append(pageBadge(g, "where")); sec.append(h);
+      const grid = $("div", "ask-cards"); for (const a of items) grid.append(askCard(a, field, api)); sec.append(grid);
+      inner.append(sec);
+    }
+    needsLens.replaceChildren(inner);
+  }
+  function pageBadge(g, cls = "") {
+    if (!g.inSet) { const s = $("span", "page-badge off " + cls, "shelf"); s.title = "Not in the working set: nothing running and untouched for " + F.duration(F.now - g.touch); return s; }
+    const b = $("button", "page-badge " + cls, "page " + (g.page + 1)); b.type = "button"; b.title = "Open this group in Working";
+    b.onclick = e => { e.stopPropagation(); goPage(g.page); goLens(1); }; return b;
+  }
+
+  function pageFor(g, field, api, i) {
+    const page = $("section", "page scroller"); page.dataset.key = g.key; page.dataset.i = i;
+    const head = $("header", "page-title");
+    head.append($("span", "pos", (i + 1) + " / " + model.set.length), $("h2", null, g.name));
+    const c = g.counts, needs = c.needsUser;
+    const counts = $("span", "counts");
+    counts.append($("b", null, String(c.total)), c.total === 1 ? " agent · " : " agents · ", $("b", null, String(c.working)), " working · ");
+    const nu = $("span", needs ? "warm" : null, needs + " need you"); counts.append(nu, " · " + (c.blocked ? c.blocked + " waiting · " : "") + c.done + " done");
+    head.append(counts, $("span", "touch", touchText(g)));
+    page.append(head);
+    const grid = $("div", "cards");
+    // Roots lead; their children are cards; grandchildren and deeper ride on their parent's card as chips.
+    const roots = [...g.roots].sort((x, y) => y.updatedAt - x.updatedAt);
+    for (const r of roots) grid.append(liveCard(r, field, api, {lead: true, chips: false}));
+    const kids = roots.flatMap(r => field.children(r.id)).sort((x, y) => (STATUS_ORDER[x.status] - STATUS_ORDER[y.status]) || Number(field.needsUser(y)) - Number(field.needsUser(x)) || y.updatedAt - x.updatedAt);
+    for (const k of kids) grid.append(liveCard(k, field, api));
+    page.append(grid);
+    page.addEventListener("click", e => { if (Number(page.dataset.i) !== pageIdx) { e.stopPropagation(); e.preventDefault(); goPage(Number(page.dataset.i)); } }, true);
+    return page;
+  }
+  function drawWork(field, api) {
+    const pages = model.set.map((g, i) => pageFor(g, field, api, i));
+    if (!pages.length) { const p = $("section", "page scroller"); p.dataset.i = 0; p.append($("p", "empty", "Nothing is in the working set right now. Every group is on the shelf below; touching one brings it back.")); pages.push(p); }
+    htrack.replaceChildren(...pages);
+  }
+
+  function drawAll(field, api) {
+    const inner = $("div", "pane-inner");
+    const t = $("div", "pane-title"); t.append($("h2", null, "Everyone"), $("small", null, model.all.length + " groups · " + field.agents.length + " agents · grouped by " + GROUPING_LABELS[grouping]));
+    inner.append(t);
+    const shelf = $("div", "shelf");
+    for (const g of model.all) {
+      const age = F.now - g.touch;
+      const row = $("section", "row" + (expanded.has(g.key) ? " open" : "")); row.dataset.key = g.key;
+      if (!g.inSet) row.dataset.age = age > 24 * HOUR ? "3" : age > 12 * HOUR ? "2" : "1";
+      const head = $("button", "row-head"); head.type = "button"; head.setAttribute("aria-expanded", String(expanded.has(g.key)));
+      const line = $("span", "line", g.latest.summary); line.title = g.latest.title + " · " + g.latest.summary;
+      head.append($("span", "chev", "▸"), $("span", "name", g.name), tally(g.counts, g.counts.needsUser), line, $("span", "ago", touchText(g)), pageBadge(g));
+      head.querySelector(".name").title = g.name;
+      head.onclick = () => { expanded.has(g.key) ? expanded.delete(g.key) : expanded.add(g.key); paint(false); };
+      row.append(head);
+      if (expanded.has(g.key)) {
+        const body = $("div", "row-body"); const grid = $("div", "memory-cards");
+        const rows = field.treeRows(g.roots.map(r => r.id));
+        for (const {agent} of rows) grid.append(memoryCard(agent, field, api));
+        body.append(grid); row.append(body);
+      }
+      shelf.append(row);
+    }
+    inner.append(shelf);
+    allLens.replaceChildren(inner);
+  }
+
+  function drawMinimap(field) {
+    minimap.replaceChildren();
+    const row = (label, i, cells) => { const r = $("div", "mm-row" + (lens === i ? " here" : "")); r.append($("span", null, label), cells); minimap.append(r); };
+    const needs = field.asks().length;
+    const n = $("div", "mm-cells"); const nb = $("button", "mm-cell wide" + (lens === 0 ? " lit" : needs ? " warm" : ""), needs + (needs === 1 ? " needs you" : " need you"));
+    nb.type = "button"; nb.title = "Needs you (↑)"; nb.onclick = () => goLens(0); n.append(nb); row("Needs you", 0, n);
+    const w = $("div", "mm-cells");
+    model.set.forEach((g, i) => {
+      const c = $("button", "mm-cell" + (i === pageIdx ? (lens === 1 ? " lit" : " mark") : ""), String(g.counts.total)); c.type = "button";
+      c.title = (i + 1) + " · " + g.name + " · " + g.counts.total + " agents, " + g.counts.working + " working" + (g.counts.needsUser ? ", " + g.counts.needsUser + " need you" : "");
+      if (g.counts.needsUser) c.append($("i", "ask-dot"));
+      c.onclick = () => { goPage(i); goLens(1); }; w.append(c);
+    });
+    if (!model.set.length) w.append($("span", "muted", "empty"));
+    row("Working", 1, w);
+    const e = $("div", "mm-cells"); const eb = $("button", "mm-cell wide" + (lens === 2 ? " lit" : ""), model.all.length + " groups · " + field.agents.length + " agents");
+    eb.type = "button"; eb.title = "Everyone (↓)"; eb.onclick = () => goLens(2); e.append(eb); row("Everyone", 2, e);
+    const foot = $("div", "mm-foot");
+    const keys = $("span"); keys.append($("kbd", null, "↑↓"), " lens ", $("kbd", null, "←→"), " page");
+    const g = $("span"); g.append("by " + GROUPING_LABELS[grouping] + " ", $("kbd", null, "g")); foot.append(keys, g);
+    minimap.append(foot);
+  }
+
+  /* Placement and motion */
+  function layout(animate) {
+    if (!viewport) return;
+    const vw = viewport.clientWidth, peek = vw < 900 ? 22 : 64, gap = vw < 900 ? 12 : 26, pw = Math.max(280, vw - 2 * peek - 2 * gap);
+    if (!animate) stageEl.classList.add("still");
+    vtrack.style.transform = "translateY(" + (-lens * 100) + "%)";
+    for (const p of htrack.children) {
+      const i = Number(p.dataset.i); p.style.left = (peek + gap + i * (pw + gap)) + "px"; p.style.width = pw + "px";
+      p.classList.toggle("neighbor", i !== pageIdx); p.classList.toggle("far", Math.abs(i - pageIdx) > 1);
+    }
+    htrack.style.transform = "translateX(" + (-pageIdx * (pw + gap)) + "px)";
+    for (const [el, i] of [[needsLens, 0], [workLens, 1], [allLens, 2]]) { el.inert = i !== lens; el.setAttribute("aria-hidden", String(i !== lens)); }
+    if (!animate) { void stageEl.offsetWidth; stageEl.classList.remove("still"); }
+  }
+  function goPage(i) {
+    if (!model.set.length) return;
+    const next = Math.max(0, Math.min(model.set.length - 1, i));
+    if (next === pageIdx && pageKey === model.set[next].key) return;
+    pageIdx = next; pageKey = model.set[next].key; drawMinimap(F); layout(true);
+  }
+  function goLens(n, {directional = false} = {}) {
+    n = Math.max(0, Math.min(2, n)); if (n === lens) return;
+    const from = lens; lens = n; const g = current();
+    if (directional && from === 1 && n === 2 && g) { expanded.add(g.key); scrollTo = {lens: 2, key: g.key}; paint(true); return; }
+    if (directional && from === 1 && n === 0 && g) scrollTo = {lens: 0, key: g.key};
+    if (scrollTo) { applyScrollTo(); }
+    drawMinimap(F); layout(true);
+  }
+  function applyScrollTo() {
+    if (!scrollTo) return;
+    const host = scrollTo.lens === 0 ? needsLens : allLens;
+    const target = [...host.querySelectorAll("[data-key]")].find(x => x.dataset.key === scrollTo.key);
+    if (target) host.scrollTop = Math.max(0, target.offsetTop - 18);
+    scrollTo = null;
+  }
+
+  function build(stage) {
+    stageEl = stage;
+    viewport = $("div", "viewport"); vtrack = $("div", "vtrack");
+    needsLens = $("section", "pane needs scroller"); needsLens.setAttribute("aria-label", "Needs you");
+    workLens = $("section", "pane work"); workLens.setAttribute("aria-label", "Working"); htrack = $("div", "htrack"); workLens.append(htrack);
+    allLens = $("section", "pane all scroller"); allLens.setAttribute("aria-label", "Everyone");
+    vtrack.append(needsLens, workLens, allLens); viewport.append(vtrack);
+    minimap = $("nav", "minimap"); minimap.setAttribute("aria-label", "Where you are");
+    // Wheel: vertical scrolls the page until its edge, then moves between lenses; horizontal moves between Working pages.
+    let vAcc = 0, hAcc = 0, cool = -Infinity, lastNative = -Infinity, resetT = null;
+    viewport.addEventListener("wheel", e => {
+      const now = performance.now();
+      clearTimeout(resetT); resetT = setTimeout(() => { vAcc = 0; hAcc = 0; }, 220);
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        if (lens !== 1) return;
+        e.preventDefault(); if (now < cool) return;
+        hAcc += e.deltaX; if (Math.abs(hAcc) > 70) { goPage(pageIdx + Math.sign(hAcc)); hAcc = 0; cool = now + 420; }
+        return;
+      }
+      const sc = e.target.closest?.(".scroller"), dir = Math.sign(e.deltaY);
+      if (sc && (dir > 0 ? sc.scrollTop + sc.clientHeight < sc.scrollHeight - 1 : sc.scrollTop > 0)) { lastNative = now; vAcc = 0; return; }
+      e.preventDefault(); if (now < cool || now - lastNative < 320) return;
+      vAcc += e.deltaY; if (Math.abs(vAcc) > 140) { goLens(lens + Math.sign(vAcc), {directional: true}); vAcc = 0; cool = now + 700; }
+    }, {passive: false});
+    let touch = null;
+    viewport.addEventListener("touchstart", e => { const t = e.touches[0]; const sc = e.target.closest?.(".scroller"); touch = {x: t.clientX, y: t.clientY, top: !sc || sc.scrollTop <= 0, bottom: !sc || sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 1}; }, {passive: true});
+    viewport.addEventListener("touchend", e => {
+      if (!touch) return; const t = e.changedTouches[0]; const dx = t.clientX - touch.x, dy = t.clientY - touch.y;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > 1.4 * Math.abs(dy) && lens === 1) goPage(pageIdx - Math.sign(dx));
+      else if (Math.abs(dy) > 80 && Math.abs(dy) > 1.4 * Math.abs(dx) && (dy > 0 ? touch.top : touch.bottom)) goLens(lens - Math.sign(dy), {directional: true});
+      touch = null;
+    }, {passive: true});
+    document.addEventListener("keydown", e => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.target?.matches?.("input, textarea, select, [contenteditable]")) return;
+      if (document.querySelector(".drawer") && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); goLens(lens + (e.key === "ArrowDown" ? 1 : -1), {directional: true}); }
+      else if (e.key === "ArrowLeft" || e.key === "ArrowRight") { if (lens === 1) { e.preventDefault(); goPage(pageIdx + (e.key === "ArrowRight" ? 1 : -1)); } }
+      else if (/^[1-9]$/.test(e.key)) { const i = Number(e.key) - 1; if (i < model.set.length) { goPage(i); goLens(1); } }
+      else if (e.key === "g") { grouping = GROUPINGS[(GROUPINGS.indexOf(grouping) + 1) % GROUPINGS.length]; pageKey = null; pageIdx = 0; paint(false); }
+    });
+    addEventListener("resize", () => layout(false));
+  }
+
+  function paint(animate) {
+    const field = F, api = API;
+    model = derive(field);
+    const found = pageKey == null ? -1 : model.set.findIndex(g => g.key === pageKey);
+    pageIdx = found >= 0 ? found : Math.max(0, Math.min(pageIdx, model.set.length - 1));
+    pageKey = model.set[pageIdx]?.key ?? null;
+    // Keep each scroll position across rebuilds.
+    const keep = {needs: needsLens.scrollTop, all: allLens.scrollTop};
+    for (const p of htrack.children) if (p.dataset.key) pageScroll.set(p.dataset.key, p.scrollTop);
+    drawNeeds(field, api); drawWork(field, api); drawAll(field, api); drawMinimap(field);
+    needsLens.scrollTop = keep.needs; allLens.scrollTop = keep.all;
+    for (const p of htrack.children) if (pageScroll.has(p.dataset.key)) p.scrollTop = pageScroll.get(p.dataset.key);
+    applyScrollTo();
+    layout(animate);
+  }
+
+  Mockup.mount({
+    number: 30, title: "Working set", spectrum: "moderate", showChrome: false, fullBleed: true,
+    summary: "Groups as short-term memory: Needs you on top, the working set as swipeable pages, everyone else on a shelf that sinks and dims instead of closing.",
+    signals: {current: ["title", "phase", "summary", "next_action", "next_actor", "created_by", "client", "status", "unread", "updated_at", "checkpoint_history"],
+      proposed: ["name", "role", "kind", "activity", "ask", "plan", "target", "domain"]},
+    notes: "Groups are root families keyed by the root’s target (g cycles target, domain, root family). The working-set boundary (a working or blocked agent, or a user touch in the last 3 simulated hours, read from user checkpoint-history entries and falling back to app-agent creation) is a placeholder; the intended ranking is sketched in docs/feature-ideas.md under “Working-set ranking for groups”.",
+    render(field, stage, api) {
+      F = field; API = api;
+      if (!viewport) build(stage);
+      if (viewport.parentNode !== stage) stage.replaceChildren(viewport, minimap);
+      paint(false);
+    },
+  });
+})();
+</script>
+</body>
+</html>
