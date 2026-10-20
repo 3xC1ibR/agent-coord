@@ -190,7 +190,7 @@ const WorkingSet = (() => {
       });
       body.append(labels, matrix); minimap.append(body);
       const foot = el("div", "ws-map-foot"), label = el("label", "", "Group by "), dimensionSelect = el("select");
-      dimensionSelect.setAttribute("aria-label", "Working Set grouping");
+      dimensionSelect.setAttribute("aria-label", "Focus grouping");
       for (const value of GROUPINGS) { const o = el("option", "", value); o.value = value; o.selected = value === dimension; dimensionSelect.append(o); }
       dimensionSelect.onchange = () => changeGrouping(dimensionSelect.value); label.append(dimensionSelect);
       foot.append(el("span", "", "← → groups · ↑ ↓ state"), label); minimap.append(foot);

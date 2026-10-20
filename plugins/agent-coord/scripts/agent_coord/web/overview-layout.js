@@ -40,7 +40,7 @@ class OverviewLayout {
     this.close(); this.anchor = anchor;
     const doc = this.document, panel = doc.createElement("div");
     panel.className = "overview-layout-menu"; panel.setAttribute("role", "menu"); panel.setAttribute("aria-label", "Overview layout");
-    for (const [mode, title] of [["cards", "Cards"], ["atlas", "Atlas"], ["working-set", "Working Set"]]) {
+    for (const [mode, title] of [["cards", "Cards"], ["atlas", "Atlas"], ["working-set", "Focus"]]) {
       const button = doc.createElement("button"); button.type = "button";
       button.dataset.layout = mode; button.setAttribute("role", "menuitemradio"); button.setAttribute("aria-checked", String(this.mode === mode));
       button.disabled = mode === "atlas" && this.narrow.matches;

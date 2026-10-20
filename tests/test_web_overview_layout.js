@@ -56,7 +56,7 @@ test('desktop preference survives phone fallback, and blocked drafts prevent swi
 test('unavailable storage does not prevent switching', () => {
   const c = setup({brokenStorage:true}); assert.equal(c.ui.mode,'cards'); c.ui.choose('atlas'); assert.equal(c.ui.mode,'atlas');
 });
-test('Working Set is a remembered third layout available on desktop and phones', () => {
+test('Focus is a remembered third layout available on desktop and phones', () => {
   const c = setup(); c.ui.open(c.trigger);
   assert.equal(c.ui.menu.children[2].dataset.layout, 'working-set');
   c.ui.menu.children[2].onclick(); assert.equal(c.ui.mode, 'working-set');
