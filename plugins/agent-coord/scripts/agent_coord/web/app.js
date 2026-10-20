@@ -83,6 +83,7 @@ async function loadThreadList(view, request) {
   if (request !== listRequest || view !== $("view").value) return;
   state.sessions = (closed || open).data.map(overlayPendingAttention);
   state.viewThreads = open.data.map(overlayPendingAttention);
+  state.agentTreeController?.inventory(state.viewThreads, closed?.data);
   state.threadTabs?.update([...(state.conversationWindow ? state.sessions : state.viewThreads), ...(closed?.data || [])]);
   state.dispatchWorkspace?.update(state.viewThreads, state.detail);
   state.rollUp?.sync(state.viewThreads);
@@ -210,7 +211,7 @@ async function restoreProjectTab(id = state.threadTabs?.destination(), {refreshI
   if (id === "project-scratchpad") { openProjectScratchpad(); return; }
   if (!id || !state.threadTabs?.items.some(item => item.thread_id === id)
       || id === "new-session" && !state.newSessionDraft) return;
-  const opening = select(id, {focus: false, stayInProject: true, refreshInventory});
+  const opening = select(state.threadTabs?.conversationFor?.(id) || id, {tabId: id, focus: false, stayInProject: true, refreshInventory});
   const revision = state.navigationRevision;
   try { await opening; }
   catch (error) {
@@ -467,6 +468,9 @@ function threadCard(thread, compact = false, inAttention = false) {
     peek.setAttribute("aria-label", "Peek · " + thread.title);
     peek.onclick = event => { event.stopPropagation(); globalThis.threadHover?.open(peek, thread.thread_id); };
     actions.append(peek);
+    const childCount = state.agentTreeController?.childCount(thread.thread_id) || 0;
+    if (childCount) addAction("⑂ " + childCount + (childCount === 1 ? " agent" : " agents"), "agent-tree",
+      () => state.agentTreeController.open(thread.thread_id));
     const endActions = node("div", null, "card-end-actions");
     if (thread.can_handle_response) addAction("Dismiss", "handle", () => markThreadHandled(thread), endActions);
     if (thread.snooze_due) addAction("Dismiss reminder", "resume-snooze", () => resumeThreadSnooze(thread), endActions);
@@ -950,12 +954,12 @@ function sameConversation(first, second) {
   return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.work_thread.browser_session, first.work_thread.client]) ===
     JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.work_thread.browser_session, second.work_thread.client]);
 }
-async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true} = {}) {
+async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true, tabId = null} = {}) {
   state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.mobileChat?.close();
   if (id === "new-session") return newSession();
-  if (!state.paneMode && !state.conversationWindow) {
+  if ((!tabId || tabId === id) && !state.paneMode && !state.conversationWindow) {
     const known = state.sessions?.find(thread => thread.thread_id === id) || state.conversations?.get(id)?.detail?.work_thread;
     if (stayInProject && (known?.project_cwd || known?.cwd) && (known.project_cwd || known.cwd) !== state.projectCwd) return;
     const cwd = known?.project_cwd || known?.cwd;
@@ -974,8 +978,10 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   state.selected = id;
   state.scratchpad?.select(id);
   if (dock) state.threadTabs?.suspend();
-  else state.threadTabs?.open(state.sessions?.find(thread => thread.thread_id === id)
-    || state.conversations?.get(id)?.detail?.work_thread || {thread_id: id, title: "Conversation"});
+  else if (!tabId || !state.threadTabs?.selectConversation?.(tabId, id))
+    state.threadTabs?.open(state.sessions?.find(thread => thread.thread_id === id)
+      || state.conversations?.get(id)?.detail?.work_thread || {thread_id: id, title: "Conversation"});
+  state.agentTreeController?.bind();
   state.dispatchDock?.hide();
   if (dock) {
     setChatExpanded(false);
@@ -1033,7 +1039,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   if (fresh === false) return;
   if (state.paneMode) return;
   const displayed = state.detail.work_thread;
-  if (!state.conversationWindow && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
+  if ((!tabId || tabId === id) && !state.conversationWindow && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
     if (stayInProject) { goHome({restoreDispatcher: false}); return; }
     await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp});
     return select(id, {rollUp});
@@ -1110,6 +1116,7 @@ async function refreshThread() {
 function renderThread() {
   const detail = state.detail, work = detail.work_thread, checkpoint = work.checkpoint;
   state.threadTabs?.update([work]);
+  state.agentTreeController?.update(work);
   $("thread-context").hidden = false;
   renderTitle();
   $("page-location").textContent = state.dispatchDock?.active ? "Dispatcher" : "Thread";
@@ -1284,7 +1291,12 @@ function renderStatus() {
     state.dispatchWorkspace?.update(state.viewThreads, state.detail);
   }
   if ($("dispatch-direct-label")) $("dispatch-direct-label").hidden = !dispatcher;
-  const composerLabel = dispatcher ? "Send a request" : work?.client === "muse" ? "Message Muse" : work?.client === "kimi" ? "Message Kimi" : work?.client === "antigravity" ? "Message Antigravity" : work?.client === "claude" ? "Message Claude" : "Message Codex";
+  const recipient = state.agentTreeController?.recipient();
+  const composerLabel = recipient ? "Message " + recipient : dispatcher ? "Send a request" : work?.client === "muse" ? "Message Muse" : work?.client === "kimi" ? "Message Kimi" : work?.client === "antigravity" ? "Message Antigravity" : work?.client === "claude" ? "Message Claude" : "Message Codex";
+  if ($("agent-recipient")) {
+    $("agent-recipient").hidden = !recipient;
+    $("agent-recipient").textContent = recipient ? "Messaging " + recipient : "";
+  }
   $("message-label").textContent = composerLabel;
   $("message").placeholder = composerLabel + " or drop images…";
   const archived = work?.attention === "archived";
@@ -2294,6 +2306,140 @@ $("sidebar-backdrop").onclick = () => { setNavigation(false); $("menu-toggle").f
 mobileNavigation.addEventListener("change", () => setNavigation(false));
 setNavigation(false);
 const compactContext = window.matchMedia("(max-width: 1100px)");
+function setupAgentTree() {
+  const records = new Map();
+  let openThreads = [], closedThreads = [], familyThreads = [], pending;
+  const currentTab = () => state.threadTabs?.items.find(item => item.thread_id === state.threadTabs.selected);
+  const controller = state.agentTreeController = {
+    mode: "context", root: null, tree: AgentTree.graph([]),
+    inventory(open, closed) {
+      openThreads = open;
+      if (closed) closedThreads = closed;
+      this.update();
+      if (this.mode === "agents" && state.selected) this.load().catch(showError);
+    },
+    async load() {
+      const id = this.root || state.selected;
+      if (!id) return;
+      if (pending?.id === id) return pending.promise;
+      const request = {id}; pending = request;
+      request.promise = api(threadPath(id) + "/agent-tree").then(result => {
+        if (this.root !== id && state.selected !== id) return;
+        familyThreads = result.data;
+        state.threadTabs?.setTree(result.root_thread_id, this.mode === "agents");
+        this.update(); state.listSignature = ""; renderList();
+      }).finally(() => { if (pending === request) pending = null; });
+      return request.promise;
+    },
+    update(work) {
+      if (work) records.set(work.thread_id, work);
+      // Inventory wins over old detail snapshots, except for the displayed agent.
+      const family = new Map(familyThreads.map(t => [t.thread_id, t]));
+      const all = [...records.values(), ...familyThreads, ...closedThreads, ...openThreads].map(t =>
+        family.has(t.thread_id) ? {...t, agent_parent_id: family.get(t.thread_id).agent_parent_id} : t);
+      if (state.detail?.work_thread?.thread_id === state.selected) {
+        const work = state.detail.work_thread, relationship = family.get(work.thread_id);
+        all.push(relationship ? {...work, agent_parent_id: relationship.agent_parent_id} : work);
+      }
+      this.tree = AgentTree.graph(all);
+      const tab = currentTab();
+      this.root = this.tree.root(tab?.tree_root || state.selected);
+      if (tab?.tree_root && this.root !== tab.tree_root) state.threadTabs.setTree(this.root, tab.tree_open);
+      if (this.root && this.tree.nodes.has(this.root)) panel.update([...this.tree.nodes.values()], this.root, state.selected);
+      const button = $("show-agent-tree"), members = this.tree.family(this.root);
+      button.hidden = !state.selected || isSessionDraft();
+      button.textContent = "Agents" + (members.length ? " · " + members.length : "");
+      button.title = "Show the full agent tree";
+    },
+    childCount(id) { return Math.max(0, this.tree.family(id).length - 1); },
+    recipient() {
+      const tab = currentTab();
+      if (!tab?.tree_root) return "";
+      return (state.detail?.work_thread?.thread_id === state.selected ? state.detail.work_thread.title : this.tree.nodes.get(state.selected)?.title) || "selected agent";
+    },
+    bind() {
+      const tab = currentTab();
+      this.setMode(tab?.tree_open ? "agents" : "context", false);
+      this.update();
+      if (this.mode === "agents") this.load().catch(showError);
+    },
+    setMode(mode, remember = true) {
+      this.mode = mode;
+      $("agent-tree-panel").hidden = mode !== "agents"; $("context-info").hidden = mode === "agents";
+      $("context-panel").classList.toggle("agents-mode", mode === "agents");
+      $("context-panel").setAttribute("aria-label", mode === "agents" ? "Agent tree" : "Thread context");
+      for (const key of ["agents", "context"]) {
+        $("panel-" + key).setAttribute("aria-selected", String(mode === key));
+        $("panel-" + key).tabIndex = mode === key ? 0 : -1;
+      }
+      if (remember) state.threadTabs?.setTree(this.root, mode === "agents");
+      layoutContext();
+    },
+    async open(id = state.selected) {
+      if (!id || id === "new-session") return;
+      if (state.paneMode) { await window.parent.agentCoordOpenTree(id); return; }
+      if (globalThis.agentCoordPanes?.active) globalThis.agentCoordPanes.leave();
+      if (state.selected !== id || !currentTab()) await select(id);
+      if (state.selected !== id) return;
+      this.update();
+      this.root = currentTab()?.tree_root || this.tree.root(id);
+      state.threadTabs?.setTree(this.root, true);
+      this.setMode("agents");
+      setContextCollapsed(false);
+      if (state.mobileChat?.matches) state.mobileChat.open("context");
+      panel.fit(); renderStatus();
+      try { await this.load(); }
+      catch (error) {
+        panel.empty.textContent = "Could not load the full tree. Open Agents again to retry.";
+        if (!panel.tree?.nodes.size) panel.empty.hidden = false;
+        throw error;
+      }
+      if (state.selected === id && this.mode === "agents") { this.update(); panel.fit(); }
+    },
+  };
+  const panel = new AgentTree.Panel({document, window, host: $("agent-tree-panel"), providerLogo: globalThis.providerLogo,
+    onSelect: id => action(async () => {
+      if (id === state.selected) return;
+      const tabId = state.threadTabs?.selected;
+      // Use the ordinary conversation path so all state remains thread-local.
+      await select(id, {tabId, focus: false});
+    })});
+  window.agentCoordOpenTree = id => controller.open(id);
+  $("show-agent-tree").onclick = () => action(() => controller.open());
+  $("panel-agents").onclick = () => action(() => controller.open());
+  $("panel-context").onclick = () => controller.setMode("context");
+  $("close-context-panel").onclick = () => {
+    if (state.mobileChat?.matches) state.mobileChat.close();
+    else setContextCollapsed(true);
+  };
+  for (const key of ["agents", "context"]) $("panel-" + key).onkeydown = event => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? "agents" : event.key === "End" ? "context" : key === "agents" ? "context" : "agents";
+    $("panel-" + next).focus(); $("panel-" + next).click();
+  };
+  const grip = $("agent-panel-resize");
+  let resizing = false, width = 52;
+  try { width = Number(localStorage.getItem("agent-coord.agent-panel-width")) || 52; } catch { /* Optional preference. */ }
+  const resize = value => {
+    width = Math.max(30, Math.min(70, value));
+    $("conversation").style.setProperty("--agent-panel-width", width + "%");
+    grip.setAttribute("aria-valuenow", Math.round(width));
+  };
+  resize(width);
+  const saveWidth = () => { try { localStorage.setItem("agent-coord.agent-panel-width", width); } catch { /* Optional preference. */ } };
+  grip.onpointerdown = event => { resizing = true; grip.setPointerCapture(event.pointerId); event.preventDefault(); };
+  grip.onpointermove = event => {
+    if (!resizing) return;
+    const rect = $("conversation").getBoundingClientRect();
+    resize((rect.right - event.clientX) / rect.width * 100);
+  };
+  grip.onpointerup = grip.onpointercancel = () => { resizing = false; saveWidth(); };
+  grip.onkeydown = event => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault(); resize(event.key === "Home" ? 30 : event.key === "End" ? 70 : width + (event.key === "ArrowLeft" ? 5 : -5)); saveWidth();
+  };
+}
 let contextCollapsed = null;
 try {
   const saved = localStorage.getItem("agent-coord.context-collapsed");
@@ -2307,10 +2453,12 @@ function layoutContext() {
   panel.hidden = collapsed;
   context.open = !collapsed;
   $("conversation").classList.toggle("context-collapsed", collapsed);
-  const label = collapsed ? "Show thread context" : "Hide thread context";
+  $("conversation").classList.toggle("agents-visible", !collapsed && state.agentTreeController?.mode === "agents");
+  const label = (collapsed ? "Show " : "Hide ") + (state.agentTreeController?.mode === "agents" ? "agent tree" : "thread context");
   button.setAttribute("aria-expanded", String(!collapsed));
   button.setAttribute("aria-label", label);
   button.title = label;
+  $("show-agent-tree")?.setAttribute("aria-expanded", String(!collapsed && state.agentTreeController?.mode === "agents"));
   if (collapsed && containsFocus) button.focus({preventScroll: true});
 }
 function setContextCollapsed(collapsed) {
@@ -2320,13 +2468,14 @@ function setContextCollapsed(collapsed) {
 }
 $("toggle-context").onclick = () => setContextCollapsed(!$("context-panel").hidden);
 $("thread-context").addEventListener("toggle", () => {
-  if (state.mobileChat?.matches) return;
+  if (state.mobileChat?.matches || state.agentTreeController?.mode === "agents") return;
   // Clicking the panel heading also collapses the whole column.
   const collapsed = !$("thread-context").open;
   if (collapsed !== $("context-panel").hidden) setContextCollapsed(collapsed);
 });
 compactContext.addEventListener("change", layoutContext);
 layoutContext();
+if (typeof AgentTree !== "undefined") setupAgentTree();
 state.scratchpad = new ThreadScratchpad({panel: $("thread-scratchpad"), input: $("scratchpad-text"), status: $("scratchpad-status"), api});
 if (!state.paneMode) {
   state.projectScratchpad = new ProjectScratchpad({document, view: window, api});
@@ -3045,7 +3194,7 @@ async function boot() {
       if (await globalThis.agentCoordPanes?.selectTab(id)) return;
       // Explicit overview tiling and dispatcher workspaces remain separate destinations.
       if (globalThis.agentCoordPanes?.active || state.dispatchDock?.active) goHome({restoreDispatcher: false});
-      if (id) await select(id);
+      if (id) await select(state.threadTabs.conversationFor(id), {tabId: id});
       else goHome({restoreDispatcher: false});
     }});
   state.threadTabs.setProject(state.projectCwd);
@@ -3089,6 +3238,7 @@ async function boot() {
       ...(savedViews.current().kind === "group" ? {groupId: savedViews.current().projectId} : {}),
       ...(state.projectScratchpad?.tabActive ? {scratchpad: true} : {}),
       ...(state.dispatchWorkspace?.active ? {dispatcher: state.dispatchWorkspace.id} : {}),
+      ...(state.threadTabs?.selected && state.threadTabs.selected !== state.selected ? {conversationTab: state.threadTabs.selected} : {}),
       tiled: Boolean(window.agentCoordPanes?.active && !state.dispatchWorkspace?.active),
       thread: window.agentCoordPanes?.active ? window.agentCoordPanes.selected : state.dispatchDock?.active ? null : state.selected}),
     apply: async route => {
@@ -3127,7 +3277,7 @@ async function boot() {
       if (snapshot.dispatcher) await select(snapshot.dispatcher, {dock: true, focus: false});
       else if (snapshot.tiled) window.agentCoordPanes?.restoreView();
       else goHome();
-      if (snapshot.thread) await select(snapshot.thread);
+      if (snapshot.thread) await select(snapshot.thread, {tabId: snapshot.conversationTab || null});
       else if (snapshot.scratchpad) openProjectScratchpad();
     },
   });
@@ -3142,7 +3292,10 @@ async function boot() {
   });
   if (initialNavigation) await navigation.open(initialNavigation, {push: false});
   if (initialDispatcher) await select(initialDispatcher, {dock: true, focus: false});
-  if (initialThread && initialThread !== initialDispatcher) await select(initialThread);
+  if (initialThread && initialThread !== initialDispatcher) {
+    const home = state.threadTabs.destination();
+    await select(initialThread, {tabId: home && state.threadTabs.conversationFor(home) === initialThread ? home : null});
+  }
   if (!initialThread && !initialDispatcher && projectQuery.get("scratchpad") === "1") openProjectScratchpad();
   if (!initialNavigation && !initialThread && !initialDispatcher && projectQuery.get("scratchpad") !== "1") {
     await restoreProjectTab().catch(showError);

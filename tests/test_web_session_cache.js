@@ -95,6 +95,49 @@ test("switching conversations restores each retained transcript", async () => {
   assert.equal(c.renders, 2);
 });
 
+test("agent-tree navigation swaps transcripts, drafts and scroll inside the original tab", async () => {
+  const c = setup();
+  c.state.threadTabs = new ThreadTabs({});
+  c.state.threadTabs.setProject("/project");
+  c.replies.set("root", fixture("root", "Orchestrator history"));
+  c.replies.set("child", fixture("child", "Child history"));
+  await c.select("root");
+  c.state.threadTabs.setTree("root", true);
+  c.$("message").value = "Root draft";
+  c.$("timeline").scrollTop = 123;
+  const rootNodes = c.$("timeline").childNodes[0];
+  await c.select("child", {tabId: "root", focus: false});
+  assert.equal(c.$("timeline").childNodes[0].textContent, "Child history");
+  assert.equal(c.$("message").value, "");
+  assert.equal(c.state.selected, "child");
+  assert.equal(c.state.threadTabs.selected, "root");
+  assert.deepEqual(c.state.threadTabs.items.map(t => t.thread_id), ["root"]);
+  assert.equal(c.state.threadTabs.conversationFor("root"), "child");
+  c.$("message").value = "Child draft"; c.$("timeline").scrollTop = 456;
+  await c.select("root", {tabId: "root", focus: false});
+  assert.equal(c.$("timeline").childNodes[0], rootNodes);
+  assert.equal(c.$("message").value, "Root draft");
+  assert.equal(c.$("timeline").scrollTop, 123);
+  await c.select("child", {tabId: "root", focus: false});
+  assert.equal(c.$("message").value, "Child draft");
+  assert.equal(c.$("timeline").scrollTop, 456);
+});
+
+test("a slow tree selection cannot overwrite a more recently selected sibling", async () => {
+  const c = setup();
+  c.state.threadTabs = new ThreadTabs({}); c.state.threadTabs.setProject("/project");
+  await c.select("root");
+  c.gate = {id: "slow", ...deferred()};
+  const slow = c.select("slow", {tabId: "root", focus: false});
+  await Promise.resolve(); await Promise.resolve();
+  await c.select("fast", {tabId: "root", focus: false});
+  c.gate.resolve(fixture("slow", "Late response")); await slow;
+  assert.equal(c.state.selected, "fast");
+  assert.equal(c.state.detail.work_thread.thread_id, "fast");
+  assert.equal(c.state.threadTabs.selected, "root");
+  assert.equal(c.state.threadTabs.conversationFor("root"), "fast");
+});
+
 test("opening loads model controls even when a streamed update invalidates its first snapshot", async () => {
   const c = setup(); let catalogs = 0;
   c.loadSessionModels = () => { catalogs++; };

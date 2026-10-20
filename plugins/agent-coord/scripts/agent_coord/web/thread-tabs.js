@@ -26,7 +26,9 @@ class ThreadTabs {
       this.projects.set(cwd, Array.isArray(items) ? items.filter(item => {
         if (!item || typeof item.thread_id !== "string" || !item.thread_id || item.thread_id === "new-session" || ids.has(item.thread_id)) return false;
         ids.add(item.thread_id); return true;
-      }).map(item => ({thread_id: item.thread_id, title: typeof item.title === "string" ? item.title : "Conversation"})) : []);
+      }).map(item => ({thread_id: item.thread_id, title: typeof item.title === "string" ? item.title : "Conversation",
+        ...(typeof item.conversation_id === "string" && item.conversation_id ? {conversation_id: item.conversation_id} : {}),
+        ...(typeof item.tree_root === "string" && item.tree_root ? {tree_root: item.tree_root, tree_open: item.tree_open === true} : {})})) : []);
       this.selections.set(cwd, typeof saved?.selected === "string" ? saved.selected : null);
       this.scratchpads.set(cwd, saved?.scratchpadOpen === true);
     }
@@ -41,7 +43,9 @@ class ThreadTabs {
   save(rememberSelection = false, cwd = this.cwd) {
     if (rememberSelection) this.selections.set(this.cwd, this.selected ?? null);
     try { this.storage?.setItem(this.baseKey + ":" + cwd, JSON.stringify({
-      items: (this.projects.get(cwd) || []).filter(item => item.thread_id !== "new-session").map(({thread_id, title}) => ({thread_id, title})),
+      items: (this.projects.get(cwd) || []).filter(item => item.thread_id !== "new-session").map(({thread_id, title, conversation_id, tree_root, tree_open}) =>
+        ({thread_id, title, ...(conversation_id && conversation_id !== thread_id ? {conversation_id} : {}),
+          ...(tree_root ? {tree_root, tree_open: tree_open === true} : {})})),
       selected: this.destination(cwd),
       scratchpadOpen: this.scratchpads.get(cwd) === true,
     })); } catch { /* Tabs still work without storage. */ }
@@ -49,9 +53,22 @@ class ThreadTabs {
   open(thread) {
     if (!thread?.thread_id) return;
     const item = this.items.find(item => item.thread_id === thread.thread_id);
-    if (item) Object.assign(item, thread);
+    if (item) Object.assign(item, thread, {conversation_id: thread.thread_id});
     else this.items.push({...thread, title: thread.title || "Conversation"});
     this.selected = thread.thread_id; this.save(true); this.render(); this.reveal(this.selected);
+  }
+  conversationFor(id) { return this.items.find(item => item.thread_id === id)?.conversation_id || id; }
+  selectConversation(tabId, conversationId) {
+    const item = this.items.find(item => item.thread_id === tabId);
+    if (!item || !conversationId) return false;
+    item.conversation_id = conversationId;
+    this.selected = tabId; this.save(true); this.render();
+    return true;
+  }
+  setTree(root, open) {
+    const item = this.items.find(item => item.thread_id === this.selected);
+    if (!item) return;
+    item.tree_root = root; item.tree_open = open; this.save();
   }
   overview({remember = true} = {}) { this.selected = null; if (remember) this.save(true); this.render(); }
   scratchpad() {

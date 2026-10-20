@@ -360,7 +360,7 @@ def _handler(
                 else:
                     self._json(HTTPStatus.OK, web_push.status(device))
                 return
-            if parsed.path in {"/scratchpad.js", "/project-scratchpad.js", "/project-scratchpad.css", "/atlas.js", "/atlas.css", "/atlas-layout.js", "/overview-layout.js", "/working-set.js", "/working-set.css"}:
+            if parsed.path in {"/scratchpad.js", "/project-scratchpad.js", "/project-scratchpad.css", "/atlas.js", "/atlas.css", "/atlas-layout.js", "/overview-layout.js", "/working-set.js", "/working-set.css", "/agent-tree.js", "/agent-tree.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -553,6 +553,9 @@ def _handler(
                 thread_id = unquote(route[8:-16])
                 browser_sessions.work_thread(thread_id, history=False)
                 self._json(HTTPStatus.OK, ThreadControl(store).status(thread_id))
+            elif route.startswith("threads/") and route.endswith("/agent-tree"):
+                from .agent_tree import agent_tree
+                self._json(HTTPStatus.OK, agent_tree(browser_sessions, unquote(route[8:-11])))
             elif route.startswith("threads/") and route.endswith("/close-plan"):
                 from .subagent_close import close_plan
                 self._json(HTTPStatus.OK, close_plan(browser_sessions, unquote(route[8:-11])))

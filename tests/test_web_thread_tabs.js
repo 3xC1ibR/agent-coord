@@ -25,6 +25,35 @@ test("overview and repeated opens preserve the working set and user order", asyn
   assert.deepEqual(ids(), ["c", "a", "b"]);
 });
 
+test("agent-tree selection keeps the original tab identity and persists its displayed conversation", () => {
+  const {tabs, ids, storage} = setup();
+  tabs.open(thread("orchestrator")); tabs.setTree("orchestrator", true);
+  assert.equal(tabs.selectConversation("orchestrator", "child"), true);
+  assert.deepEqual(ids(), ["orchestrator"]);
+  assert.equal(tabs.selected, "orchestrator");
+  assert.equal(tabs.items[0].title, "Thread orchestrator");
+  assert.equal(tabs.conversationFor("orchestrator"), "child");
+  tabs.update([{...thread("child"), title: "Renamed child"}]);
+  assert.equal(tabs.items[0].title, "Thread orchestrator");
+  const restored = setup(storage).tabs;
+  assert.equal(restored.destination(), "orchestrator");
+  assert.equal(restored.conversationFor("orchestrator"), "child");
+  assert.equal(restored.items[0].tree_root, "orchestrator");
+  assert.equal(restored.items[0].tree_open, true);
+  assert.equal(restored.selectConversation("missing", "child"), false);
+  assert.equal(restored.conversationFor("missing"), "missing");
+});
+
+test("a child can have its own tab and closing the family tab keeps that child tab", async () => {
+  const {tabs, ids, visits} = setup();
+  tabs.open(thread("root")); tabs.open(thread("child"));
+  tabs.selectConversation("root", "child");
+  await tabs.close("root");
+  assert.deepEqual(ids(), ["child"]);
+  assert.equal(tabs.selected, "child");
+  assert.deepEqual(visits, ["child"]);
+});
+
 test("project scratchpad starts closed and persists explicit opens and closes", async () => {
   const {tabs, ids, visits, storage} = setup();
   tabs.onScratchpad = () => tabs.scratchpad();
@@ -279,6 +308,7 @@ test("startup restores the saved tab only when no explicit destination was reque
     {initialDispatcher: "dispatcher"}, {scratchpad: "1"}]) {
     const calls = [];
     const context = {initialNavigation: null, initialThread: "", initialDispatcher: null, initialMessage: null,
+      state: {threadTabs: {destination: () => null}},
       ...destination, projectQuery: new URLSearchParams(destination.scratchpad ? "scratchpad=1" : ""),
       navigation: {open: async () => calls.push("link")}, select: async id => calls.push(id),
       openProjectScratchpad: () => calls.push("scratchpad"), restoreProjectTab: async () => calls.push("restore"), showError() {}};
@@ -286,6 +316,16 @@ test("startup restores the saved tab only when no explicit destination was reque
     assert.deepEqual(calls, [destination.initialNavigation ? "link" : destination.initialThread || destination.initialDispatcher
       || (destination.scratchpad ? "scratchpad" : "restore")]);
   }
+});
+
+test("reload of a selected child restores the family tab instead of creating a child tab", async () => {
+  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+  const startup = source.slice(source.indexOf("  if (initialNavigation) await navigation.open"), source.indexOf("  state.dispatchReady = true;"));
+  const calls = [], context = {initialNavigation: null, initialThread: "child", initialDispatcher: null, initialMessage: null,
+    state: {threadTabs: {destination: () => "root", conversationFor: () => "child"}},
+    projectQuery: new URLSearchParams(), select: async (id, options) => calls.push([id, options.tabId])};
+  await vm.runInNewContext("(async () => {" + startup + "})()", context);
+  assert.deepEqual(calls, [["child", "root"]]);
 });
 
 test("a background draft completion updates only its original project's tabs and saved destination", () => {
