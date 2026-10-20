@@ -83,6 +83,29 @@ test("group IDs distinguish equal names, children inherit root groups, missing p
   assert.equal(groups.find(g => g.key === "group:two").levels.flat().length, 1);
   assert.equal(groups.slice(1).flatMap(g => g.levels.flat()).length, list.length);
 });
+test("unread child findings render in Attention in All groups and their group beside an idle creator", () => {
+  const c = setup(), parent = thread("parent", {project_id: "evaluations", project_name: "Evaluations",
+    needs_attention: false, work_phase: "finished", unhandled_response: false});
+  const child = thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent",
+    response_state: "update", attention_reason: "findings", needs_attention: true, unread_result: true, unhandled_response: true});
+  const records = [parent, child], before = JSON.stringify(records);
+  c.render(records);
+  for (const group of ["All groups", "Evaluations"]) {
+    c.selectGroup(group);
+    assert.deepEqual(c.ids(), ["child"]);
+    const attention = c.page().querySelector('[data-section="attention"]');
+    assert.equal(attention.querySelector(".ws-card").dataset.cardThread, "child");
+    attention.querySelector('[data-thread="child"]').onclick();
+    assert.equal(c.opened.at(-1), "child");
+    const cell = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === (group === "All groups" ? "overview:all" : "group:evaluations") && n.dataset.level === "0");
+    assert.equal(cell.textContent, "1");
+  }
+  assert.equal(JSON.stringify(records), before);
+  c.render([parent, {...child, unread_result: false, needs_attention: false}]);
+  assert.deepEqual(c.ids(), []);
+  c.selectLevel(1);
+  assert.deepEqual(c.ids().sort(), ["child", "parent"]);
+});
 test("attention columns increase left to right and keep completed work until explicit dismissal", () => {
   const c = setup(), completed = thread("done", {work_phase: "finished", unhandled_response: true, unread_result: true});
   const list = [thread("run", {response_state: "working", unread_result: true}), completed,

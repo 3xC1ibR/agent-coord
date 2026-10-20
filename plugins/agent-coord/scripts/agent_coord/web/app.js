@@ -806,8 +806,10 @@ function agentThreadTree(threads) {
     ["blocked", "review"].includes(thread.attention_reason) ||
     (!thread.checkpoint_stale && thread.checkpoint?.next_actor === "user" && thread.checkpoint.next_action));
   return {children, requiresInput,
+    // Use the badge's attention predicate: unread findings and replies need
+    // their own card even when their creator has nothing in Attention.
     roots: threads.filter(thread => !visible.has(thread.attention_grouped_under) &&
-      (!parents.has(thread.thread_id) || requiresInput(thread)))};
+      (!parents.has(thread.thread_id) || threadGrouping.awaitsUser(thread)))};
 }
 function agentThreadCard(thread, tree, compact = false, inAttention = false) {
   const card = threadCard(thread, compact, inAttention);

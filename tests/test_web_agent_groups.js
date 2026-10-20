@@ -146,7 +146,7 @@ test("collapse persists with count-free disclosure and styled unread child rows"
 });
 
 test("required input stays in Attention while routine agent replies remain nested", () => {
-  const c = harness([thread("parent"), thread("answer", "parent", {response_state: "reply", unread_result: true}),
+  const c = harness([thread("parent"), thread("answer", "parent", {response_state: "reply", unread_result: true, needs_attention: false}),
     thread("approval", "parent", {response_state: "input", attention_reason: "blocked"})]);
   assert.deepEqual(c.cards(), ["approval", "parent"]);
   assert.deepEqual(c.rows().map(n => n.dataset.thread), ["answer", "approval"]);
@@ -154,6 +154,34 @@ test("required input stays in Attention while routine agent replies remain neste
   assert.equal(origin.textContent, "Created by parent"); origin.onclick(); assert.deepEqual(c.selected, ["parent"]);
   assert.ok(origin.parent.className.split(" ").includes("thread-card"), "creator belongs inside its overview card");
   assert.ok(walk(c.$("overview")).filter(n => n.tag === "button").every(n => !walk(n).slice(1).some(x => x.tag === "button")), "card controls must not nest buttons");
+});
+
+test("every counted child response stays visible in Attention beside its idle parent", () => {
+  for (const [response_state, attention_reason] of [["update", "findings"], ["update", "done"],
+    ["update", "update"], ["reply", "reply"], ["action", "review"], ["failed", "blocked"]]) {
+    const records = [thread("parent", null, {needs_attention: false}),
+      thread("child", "parent", {response_state, attention_reason, needs_attention: true, unread_result: true})];
+    const before = JSON.stringify(records), c = harness(records);
+    assert.equal(c.threadViews.badges(records, {}).attention, 1);
+    assert.deepEqual(c.cards(), ["child", "parent"], attention_reason);
+    assert.equal(withClass(c.$("overview"), "attention-card").length, 1, attention_reason);
+    assert.equal(JSON.stringify(records), before);
+    c.$("view").value = "attention"; c.renderList();
+    assert.deepEqual(c.cards(), ["child"]);
+    c.$("view").value = "active";
+    records[1].needs_attention = false; c.renderList();
+    assert.equal(c.threadViews.badges(records, {}).attention, 0);
+    assert.deepEqual(c.cards(), ["parent"]);
+  }
+});
+
+test("findings stay in Attention through nested orchestration and return to nesting when snoozed", () => {
+  const child = thread("findings", "middle", {needs_attention: true, response_state: "update", attention_reason: "findings"});
+  const c = harness([thread("root"), thread("middle", "root"), child]);
+  assert.deepEqual(c.cards(), ["findings", "root"]);
+  child.snoozed = true; c.renderList();
+  assert.deepEqual(c.cards(), ["root"]);
+  assert.equal(c.threadViews.badges(c.state.sessions, {}).attention, 0);
 });
 
 test("missing, closed, differently placed and filtered creators never hide a child", () => {
