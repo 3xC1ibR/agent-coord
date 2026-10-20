@@ -598,6 +598,7 @@ function createOverviewMotion() {
   };
 }
 function renderList() {
+  globalThis.agentCoordSendWork?.syncOverview();
   if (state.paneMode) { renderStatus(); return; }
   if (state.dispatchDock) syncDispatcherOverview();
   renderClosedToggle();
@@ -3099,7 +3100,7 @@ async function boot() {
       if (snapshot.directory) await openProjectDirectory(snapshot.directory);
       else if (snapshot.directory === "" && state.projectCwd) { state.folders.activate(""); await switchProject({restoreConversation: false}); }
       if (snapshot.viewId === "all") await savedViews.overview(snapshot.filters, snapshot.group_by);
-      else await savedViews.activate(snapshot.viewId);
+      else await savedViews.activate(snapshot.viewId, false, {revealGroup: !snapshot.thread});
       if (snapshot.dispatcher) await select(snapshot.dispatcher, {dock: true, focus: false});
       else if (snapshot.tiled) window.agentCoordPanes?.restoreView();
       else goHome();

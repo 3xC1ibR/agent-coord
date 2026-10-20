@@ -5,6 +5,9 @@ class SendWorkPalette {
     Object.assign(this, {document, view, api, workspace, threads, openThread, storage});
     this.$ = id => document.getElementById("send-work-" + id);
     this.dialog = this.$("dialog"); this.input = this.$("input"); this.list = this.$("results");
+    this.content = this.$("content"); this.dock = this.$("dock"); this.overviewBar = this.$("overview-bar");
+    this.overview = document.getElementById("welcome"); this.drafts = new Map();
+    try { this.preferences = view.localStorage || storage; this.pinned = this.preferences.getItem("ribbon-field.floating-dispatch") === "true"; } catch { this.pinned = false; }
     this.error = this.$("error"); this.hint = this.$("status"); this.notice = this.$("notice");
     this.noticeTimer = createTransientNotice(this.notice, view, () => {
       this.notice.hidden = true; this.view.clearTimeout(this.poll);
@@ -15,12 +18,12 @@ class SendWorkPalette {
     this.settings.hidden = true;
     this.menu = document.createElement("div"); this.menu.id = "send-work-commands";
     this.menu.className = "slash-commands"; this.menu.hidden = true; this.menu.setAttribute("role", "listbox");
-    this.dialog.insertBefore(this.settings, this.list); this.dialog.insertBefore(this.menu, this.list);
+    this.content.insertBefore(this.settings, this.list); this.content.insertBefore(this.menu, this.list);
     this.slash = new ChatSlashCommands({input: this.input, menu: this.menu,
       getThread: () => "send-work:" + this.cwd, getSession: () => this.draft,
       catalogs: this.catalogs, loadModels: client => this.loadModels(client),
       getModelClients: () => ["codex", "claude", "antigravity", "kimi", "muse"],
-      getCommands: () => this.commands(), canComplete: () => this.dialog.open && !this.sending && !this.configuring,
+      getCommands: () => this.commands(), canComplete: () => this.visible && !this.sending && !this.configuring,
       onSelectModel: choice => { this.modelChoice = choice; },
       onChange: () => this.changed(),
       onComplete: ({query, command}) => {
@@ -30,6 +33,17 @@ class SendWorkPalette {
     this.$("close").onclick = () => this.close();
     this.$("unlock").onclick = () => { this.locked = null; this.changed(); this.input.focus(); };
     this.$("submit").onclick = () => this.send();
+    this.$("new").onclick = () => {
+      if (this.sending || this.configuring) return;
+      this.locked = this.choices([]).find(row => row.kind === "new");
+      this.changed(); this.input.focus();
+    };
+    this.$("pin").onclick = () => this.pin(!this.pinned);
+    this.$("profile-toggle").onclick = () => this.openProfile();
+    this.$("profile-close").onclick = () => this.closeProfile();
+    this.$("profile-save").onclick = () => this.saveProfile();
+    this.$("profile-client").onchange = () => this.profileModels();
+    this.$("profile-model").onchange = () => this.profileEfforts();
     this.input.addEventListener("input", () => this.changed());
     this.input.addEventListener("keydown", event => {
       if (event.isComposing || this.sending || this.configuring) return;
@@ -52,6 +66,137 @@ class SendWorkPalette {
       const rect = this.dialog.getBoundingClientRect();
       if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) this.close();
     });
+    if (view.MutationObserver && this.overview) {
+      this.overviewObserver = new view.MutationObserver(() => this.syncOverview());
+      this.overviewObserver.observe(this.overview, {attributes: true, attributeFilter: ["hidden"]});
+    }
+    this.syncOverview();
+  }
+  get visible() { return this.dialog.open || this.docked; }
+  setWorkspace(cwd) {
+    if (this.cwd === cwd) return;
+    if (this.cwd) this.drafts.set(this.cwd, {message: this.input.value, locked: this.locked, draft: this.draft});
+    const saved = this.drafts.get(cwd);
+    this.cwd = cwd; this.input.value = saved?.message || ""; this.locked = saved?.locked || null;
+    this.draft = saved?.draft || this.defaultSettings();
+    this.closeProfile(); this.cancelSuggestions();
+    this.$("project").textContent = cwd?.split("/").filter(Boolean).pop() || "Choose a project";
+    this.$("project").title = cwd || "";
+    this.dialog.setAttribute("aria-label", "Dispatcher" + (cwd ? " in " + cwd : ""));
+    this.input.title = cwd ? "Dispatch work in " + cwd : "Choose a project";
+  }
+  syncOverview() {
+    const cwd = this.workspace();
+    const changed = this.cwd !== cwd;
+    this.setWorkspace(cwd);
+    this.overviewBar.hidden = !this.overview || this.overview.hidden;
+    this.$("pin").disabled = !cwd;
+    this.$("pin").textContent = this.pinned ? "Hide dispatcher" : "Show dispatcher";
+    this.$("pin").setAttribute("aria-pressed", String(this.pinned));
+    const docked = this.pinned && !this.overviewBar.hidden && !!cwd;
+    if (docked && this.dialog.open) { this.returnFocus = null; this.dialog.close(); }
+    const moved = this.docked !== docked;
+    if (moved) {
+      this.slash.close(); this.cancelSuggestions(); this.closeProfile();
+      (docked ? this.dock : this.dialog).append(this.content);
+      this.docked = docked;
+    }
+    this.dock.hidden = !docked;
+    this.$("close").hidden = docked;
+    if (this.visible && (changed || moved)) this.changed();
+  }
+  pin(value) {
+    this.pinned = value;
+    try { this.preferences?.setItem("ribbon-field.floating-dispatch", String(value)); } catch { /* Optional display preference. */ }
+    this.syncOverview();
+    if (this.docked) this.input.focus({preventScroll: true});
+    else this.$("pin").focus({preventScroll: true});
+  }
+  closeProfile() {
+    this.profileGeneration = (this.profileGeneration || 0) + 1;
+    this.$("profile").hidden = true;
+    this.$("profile-toggle").setAttribute("aria-expanded", "false");
+  }
+  async openProfile() {
+    if (this.sending || this.configuring || this.profileSaving) return;
+    if (!this.$("profile").hidden) { this.closeProfile(); return; }
+    const cwd = this.cwd, generation = this.profileGeneration = (this.profileGeneration || 0) + 1;
+    this.slash.close(); this.$("profile").hidden = false;
+    this.$("profile-toggle").setAttribute("aria-expanded", "true");
+    this.$("profile-error").hidden = true; this.$("profile-save").disabled = true;
+    this.$("profile-client").disabled = true;
+    this.$("profile-model").replaceChildren(); this.$("profile-model").disabled = true;
+    this.$("profile-effort").replaceChildren(); this.$("profile-effort").disabled = true;
+    try {
+      const result = await this.api("send-work/dispatcher-settings", {cwd});
+      if (cwd !== this.cwd || generation !== this.profileGeneration) return;
+      this.profile = {...result.settings};
+      this.$("profile-client").value = this.profile.client;
+      this.$("profile-permissions").value = this.profile.yolo ? "yolo" : "default";
+      await this.profileModels(this.profile.model, this.profile.effort);
+    } catch (error) {
+      if (cwd === this.cwd && generation === this.profileGeneration) {
+        this.$("profile-error").textContent = error.message; this.$("profile-error").hidden = false;
+      }
+    } finally {
+      if (cwd === this.cwd && generation === this.profileGeneration) this.$("profile-client").disabled = false;
+    }
+  }
+  async profileModels(model, effort) {
+    const client = this.$("profile-client").value, cwd = this.cwd;
+    const generation = this.profileGeneration = (this.profileGeneration || 0) + 1;
+    this.$("profile-error").hidden = true; this.$("profile-save").disabled = true;
+    this.$("profile-model").disabled = true; this.$("profile-effort").disabled = true;
+    try {
+      const models = await this.loadModels(client);
+      if (cwd !== this.cwd || generation !== this.profileGeneration) return;
+      const picker = this.$("profile-model"); picker.replaceChildren();
+      for (const item of models) {
+        const option = this.document.createElement("option"); option.value = item.model;
+        option.textContent = item.displayName || item.model; picker.append(option);
+      }
+      picker.value = models.find(item => item.model === model)?.model || models.find(item => item.isDefault)?.model || models[0]?.model || "";
+      if (!models.length) throw new Error("No models available for this provider.");
+      this.profileEfforts(effort); picker.disabled = false;
+      this.$("profile-save").disabled = false;
+    } catch (error) {
+      if (cwd === this.cwd && generation === this.profileGeneration) {
+        this.$("profile-error").textContent = error.message; this.$("profile-error").hidden = false;
+      }
+    } finally {
+      if (cwd === this.cwd && generation === this.profileGeneration) this.$("profile-client").disabled = false;
+    }
+  }
+  profileEfforts(effort) {
+    const selected = this.catalogs.get(this.$("profile-client").value)?.find(m => m.model === this.$("profile-model").value);
+    const picker = this.$("profile-effort"); picker.replaceChildren();
+    for (const value of ["", ...(selected?.supportedReasoningEfforts || []).map(e => e.reasoningEffort)]) {
+      const option = this.document.createElement("option"); option.value = value;
+      option.textContent = value || "Model default"; picker.append(option);
+    }
+    picker.value = selected?.supportedReasoningEfforts?.some(e => e.reasoningEffort === effort) ? effort : "";
+    picker.disabled = !selected?.supportedReasoningEfforts?.length;
+  }
+  async saveProfile() {
+    if (this.profileSaving || this.$("profile-save").disabled) return;
+    const cwd = this.cwd, generation = this.profileGeneration;
+    const settings = {client: this.$("profile-client").value, model: this.$("profile-model").value,
+      effort: this.$("profile-effort").value || null, yolo: this.$("profile-permissions").value === "yolo"};
+    this.profileSaving = true; this.$("profile-save").disabled = true;
+    this.$("profile-error").hidden = true;
+    try {
+      await this.api("send-work/dispatcher-settings", {cwd, settings});
+      if (cwd !== this.cwd || generation !== this.profileGeneration) return;
+      this.closeProfile(); this.$("profile-toggle").focus();
+      this.hint.textContent = "Dispatcher settings saved for this project."; this.hint.hidden = false;
+    } catch (error) {
+      if (cwd === this.cwd && generation === this.profileGeneration) {
+        this.$("profile-error").textContent = error.message; this.$("profile-error").hidden = false;
+      }
+    } finally {
+      this.profileSaving = false;
+      if (cwd === this.cwd && generation === this.profileGeneration) this.$("profile-save").disabled = false;
+    }
   }
   defaultSettings() { return {client: "codex", model: null, effort: null, yolo: false}; }
   commands() {
@@ -73,6 +218,7 @@ class SendWorkPalette {
   }
   async configure() {
     if (this.configuring || this.sending) return;
+    const cwd = this.cwd, draft = this.draft;
     const match = /^\s*\/(\S+)(?:[ \t]+([^\r\n]*))?(?:\r?\n|$)/.exec(this.input.value);
     if (!match) return;
     const command = match[1].toLowerCase(), argument = (match[2] || "").trim();
@@ -101,12 +247,14 @@ class SendWorkPalette {
             else {
               const clients = [client, ...["codex", "claude", "antigravity", "kimi", "muse"].filter(c => c !== client)];
               await Promise.allSettled(clients.map(c => this.loadModels(c)));
+              if (cwd !== this.cwd || draft !== this.draft) return;
               client = clients.find(c => this.catalogs.get(c)?.some(m => m.model === model));
               if (!client) throw new Error("Choose an available model from /model.");
             }
           }
           if (!model) throw new Error("Choose a model with /model before setting effort.");
           const selected = (await this.loadModels(client)).find(m => m.model === model);
+          if (cwd !== this.cwd || draft !== this.draft) return;
           if (!selected) throw new Error("Choose an available model from /model.");
           if (effort && !selected.supportedReasoningEfforts?.some(e => e.reasoningEffort === effort)) {
             throw new Error("Reasoning effort is not supported by this model.");
@@ -121,7 +269,7 @@ class SendWorkPalette {
       this.error.textContent = error.message; this.error.hidden = false;
     } finally {
       this.configuring = false; this.render();
-      if (this.dialog.open) this.input.focus({preventScroll: true});
+      if (this.visible) this.input.focus({preventScroll: true});
       this.slash.render();
     }
   }
@@ -141,23 +289,24 @@ class SendWorkPalette {
     return this.available && (!other || other === this.dialog);
   }
   toggle() {
+    if (this.docked) {
+      if (!this.canToggle()) return false;
+      this.input.focus({preventScroll: true}); return true;
+    }
     if (this.dialog.open) { this.close(); return true; }
     if (!this.canToggle()) return false;
     let element = this.document.activeElement;
     while (element?.contentDocument?.activeElement) element = element.contentDocument.activeElement;
     this.returnFocus = {element, start: element?.selectionStart, end: element?.selectionEnd,
       direction: element?.selectionDirection, top: element?.scrollTop, left: element?.scrollLeft};
-    const cwd = this.workspace();
-    if (this.cwd !== cwd) { this.input.value = ""; this.locked = null; this.draft = this.defaultSettings(); }
-    this.cwd = cwd;
-    this.dialog.setAttribute("aria-label", "Send work in " + cwd);
-    this.input.title = "Send work in " + cwd;
+    this.setWorkspace(this.workspace());
     this.dialog.showModal(); this.changed(); this.input.focus({preventScroll: true});
     return true;
   }
   close() {
     if (this.sending || this.configuring) return;
-    this.slash.close(); this.cancelSuggestions(); this.dialog.close(); this.restoreFocus();
+    this.slash.close(); this.closeProfile(); this.cancelSuggestions();
+    if (!this.docked) { this.dialog.close(); this.restoreFocus(); }
   }
   restoreFocus() {
     const previous = this.returnFocus; this.returnFocus = null;
@@ -201,7 +350,7 @@ class SendWorkPalette {
       const controller = this.controller = new AbortController();
       try {
         const result = await this.api("send-work/suggest", {cwd: this.cwd, message}, {signal: controller.signal});
-        if (!this.dialog.open || generation !== this.generation || this.locked) return;
+        if (!this.visible || generation !== this.generation || this.locked) return;
         const merged = new Map();
         for (const row of [...result.candidates.map(c => ({...c, kind: "thread"})), ...this.rows.filter(r => r.kind === "thread")]) {
           if (!merged.has(row.id)) merged.set(row.id, row);
@@ -233,7 +382,9 @@ class SendWorkPalette {
     this.$("target").hidden = !this.locked;
     this.$("target-name").textContent = this.locked?.title || "";
     this.settings.hidden = this.locked?.kind !== "new";
-    this.list.hidden = this.locked?.kind === "new";
+    this.settings.setAttribute("aria-label", "New conversation settings");
+    this.$("new-settings-label").hidden = this.settings.hidden;
+    this.list.hidden = this.locked?.kind === "new" || (this.docked && !this.input.value.trim());
     this.settings.replaceChildren();
     if (!this.settings.hidden) {
       const labels = {codex: "Codex", claude: "Claude Code", antigravity: "Google Antigravity", kimi: "Kimi Code", muse: "Muse Code"};
@@ -250,6 +401,7 @@ class SendWorkPalette {
       if (this.list.hidden) this.input.removeAttribute("aria-activedescendant");
     }
     this.$("submit").disabled = this.sending || this.configuring || !this.input.value.trim();
+    this.$("new").disabled = this.$("profile-toggle").disabled = !!(this.sending || this.configuring);
     this.$("submit").textContent = this.sending ? "Sending…" : "Send";
     this.input.disabled = !!(this.sending || this.configuring);
   }
@@ -260,16 +412,21 @@ class SendWorkPalette {
     if (this.sending || !row || !this.input.value.trim()) return;
     this.locked = row; this.cancelSuggestions(); this.sending = true; this.error.hidden = true; this.render();
     const destination = row.kind === "thread" ? {kind: "thread", id: row.id} : {kind: row.kind};
-    const body = {cwd: this.cwd, message: this.input.value, destination};
+    const cwd = this.cwd, body = {cwd, message: this.input.value, destination};
     if (row.kind === "new") body.settings = {...this.draft};
     try {
-      const requestId = DispatchUI.requestKey(this.storage, "send-work:" + this.cwd, body);
+      const requestId = DispatchUI.requestKey(this.storage, "send-work:" + cwd, body);
       const result = await this.api("send-work/send", {...body, requestId});
-      this.storage.removeItem("dispatch-request:send-work:" + this.cwd);
-      this.input.value = ""; this.locked = null; this.draft = this.defaultSettings(); this.sending = false; this.render(); this.close();
+      this.storage.removeItem("dispatch-request:send-work:" + cwd);
+      this.drafts.delete(cwd);
+      this.sending = false;
+      if (this.cwd === cwd) {
+        this.input.value = ""; this.locked = null; this.draft = this.defaultSettings(); this.render(); this.close();
+        if (this.docked) { this.changed(); this.input.focus({preventScroll: true}); }
+      }
       this.receipt = result.receipt; this.showReceipt(); this.pollReceipt();
     } catch (error) {
-      this.error.textContent = error.message; this.error.hidden = false;
+      if (this.cwd === cwd) { this.error.textContent = error.message; this.error.hidden = false; }
     } finally { this.sending = false; this.render(); }
   }
   showReceipt() {
@@ -321,8 +478,13 @@ class SendWorkPalette {
     document.addEventListener("keydown", event => {
       if (event.defaultPrevented || event.isComposing) return;
       const palette = getPalette();
-      if (event.key === "Escape" && palette?.dialog.open) {
+      if (event.key === "Escape" && palette?.visible && palette.canToggle() &&
+          (palette.dialog.open || palette.content.contains(document.activeElement))) {
+        if (!palette.$("profile").hidden) {
+          event.preventDefault(); event.stopImmediatePropagation(); palette.closeProfile(); palette.$("profile-toggle").focus(); return;
+        }
         if (!palette.menu.hidden && palette.slash.keydown(event)) { event.stopImmediatePropagation(); return; }
+        if (palette.docked) return;
         event.preventDefault(); event.stopImmediatePropagation(); palette.close(); return;
       }
       if (!event.shiftKey || event.altKey || !(event.metaKey || event.ctrlKey) || event.key?.toLowerCase() !== "k" || !palette?.canToggle()) return;

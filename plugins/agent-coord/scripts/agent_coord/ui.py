@@ -783,7 +783,8 @@ def _handler(
                     return
                 if route[:3] == ["api", "browser", "send-work"]:
                     from . import send_work
-                    operation = {"suggest": send_work.suggestions, "send": send_work.submit, "status": send_work.status}.get(route[3] if len(route) == 4 else "")
+                    operation = {"suggest": send_work.suggestions, "send": send_work.submit, "status": send_work.status,
+                                 "dispatcher-settings": send_work.dispatcher_settings}.get(route[3] if len(route) == 4 else "")
                     if operation is None:
                         raise CoordinationError("Unknown send-work action.")
                     self._json(HTTPStatus.OK, operation(browser_sessions.dispatch, body))

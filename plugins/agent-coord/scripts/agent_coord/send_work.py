@@ -27,6 +27,74 @@ def directory(runtime, body):
     return resolve_workspace(body["cwd"], workspace=runtime.sessions.cwd)
 
 
+def dispatcher_profile(runtime, cwd):
+    """The palette's dispatcher configuration never supplies worker defaults."""
+    with runtime.store._connection() as db:
+        profile = db.execute("SELECT * FROM send_work_dispatchers WHERE cwd=?", (cwd,)).fetchone()
+        target = profile["thread_id"] if profile else None
+        if not profile:
+            existing = db.execute("""SELECT b.thread_id FROM browser_sessions b
+                JOIN dispatch_settings d ON d.thread_id=b.thread_id AND d.enabled=1
+                JOIN work_threads t ON t.thread_id=b.thread_id
+                WHERE b.cwd=? AND t.attention!='archived' ORDER BY t.updated_at DESC LIMIT 1""", (cwd,)).fetchone()
+            target = existing[0] if existing else None
+        record = db.execute("""SELECT b.* FROM browser_sessions b
+            JOIN dispatch_settings d ON d.thread_id=b.thread_id AND d.enabled=1
+            JOIN work_threads t ON t.thread_id=b.thread_id
+            WHERE b.thread_id=? AND b.cwd=? AND t.attention!='archived'""", (target, cwd)).fetchone()
+    settings = json.loads(profile["settings_json"]) if profile else {
+        "client": "codex", "model": None, "effort": None, "yolo": False}
+    if record:
+        settings = {key: record[key] for key in ("client", "model", "effort", "yolo")}
+        settings["yolo"] = bool(settings["yolo"])
+    return {"settings": settings, "thread_id": target if record else None}
+
+
+def dispatcher_settings(runtime, body):
+    if set(body) - {"cwd", "settings"}:
+        raise CoordinationError("Choose dispatcher settings for this project.")
+    cwd = directory(runtime, body)
+    # Serialize settings with dispatcher selection/creation, including the first request.
+    with runtime.sessions._thread_lock(channel(cwd)):
+        profile = dispatcher_profile(runtime, cwd)
+        if "settings" not in body:
+            return profile
+        settings = body["settings"]
+        if not isinstance(settings, dict) or set(settings) != {"client", "model", "effort", "yolo"}:
+            raise CoordinationError("Choose the dispatcher's provider, model, effort, and permissions.")
+        for field, limit in (("client", 40), ("model", 200)):
+            runtime.sessions._text(settings[field], field, limit)
+        if settings["effort"] is not None:
+            runtime.sessions._text(settings["effort"], "effort", 40)
+        runtime.sessions._creation_settings({**settings, "cwd": cwd})
+        target = profile["thread_id"]
+        with runtime.store._connection() as db:
+            pending = db.execute("""SELECT 1 FROM dispatch_requests WHERE dispatcher_id=?
+                AND state IN ('pending','routing','creating','queued','sending','uncertain')
+                AND json_extract(body_json, '$.sendWork.kind')='dispatcher' LIMIT 1""", (channel(cwd),)).fetchone()
+        if pending:
+            raise CoordinationError("Wait for pending dispatcher requests before changing its settings.")
+        if target and settings["client"] == profile["settings"]["client"]:
+            with runtime.sessions._thread_lock(target):
+                if runtime.sessions.queue.list(target):
+                    raise CoordinationError("Wait for queued dispatcher messages before changing its settings.")
+                # Use the normal settings path for runtime reconciliation and busy/permission guards.
+                runtime.sessions.update(target, {"yolo": settings["yolo"]})
+                # Creation validation above also supports returning to model-default effort.
+                with runtime.store._connection() as db:
+                    db.execute("UPDATE browser_sessions SET model=?,effort=?,updated_at=? WHERE thread_id=?",
+                               (settings["model"], settings["effort"], time.time(), target))
+            runtime.changed(target)
+        elif target:
+            # Provider contexts cannot move between clients. Retain the old conversation.
+            target = None
+        with runtime.store._connection() as db:
+            db.execute("""INSERT INTO send_work_dispatchers(cwd,settings_json,thread_id) VALUES (?,?,?)
+                ON CONFLICT(cwd) DO UPDATE SET settings_json=excluded.settings_json,thread_id=excluded.thread_id""",
+                       (cwd, json.dumps(settings), target))
+        return {"settings": settings, "thread_id": target}
+
+
 def suggestions(runtime, body):
     if set(body) - {"cwd", "message"}:
         raise CoordinationError("Suggestions accept only a project and typed request.")
@@ -127,24 +195,32 @@ def status(runtime, body):
 
 
 def execute(runtime, item):
+    # Prevent a settings save from racing dispatcher creation or delivery.
+    with runtime.sessions._thread_lock(channel(item["cwd"])):
+        _execute(runtime, item)
+
+
+def _execute(runtime, item):
     identity, body, cwd = item["id"], item["body"], item["cwd"]
     destination = body["sendWork"]
     target = destination.get("id")
     if destination["kind"] == "dispatcher":
-        with runtime.store._connection() as db:
-            existing = db.execute("""SELECT b.thread_id FROM browser_sessions b
-                JOIN dispatch_settings d ON d.thread_id=b.thread_id AND d.enabled=1
-                JOIN work_threads t ON t.thread_id=b.thread_id
-                WHERE b.cwd=? AND t.attention!='archived' ORDER BY t.updated_at DESC LIMIT 1""", (cwd,)).fetchone()
-        target = existing[0] if existing else None
+        profile = dispatcher_profile(runtime, cwd)
+        target = profile["thread_id"]
     if not target:
         runtime.update(identity, "creating")
-        settings = body.get("sendWorkSettings", {}) if destination["kind"] == "new" else {}
+        settings = body.get("sendWorkSettings", {}) if destination["kind"] == "new" else profile["settings"]
         created = runtime.sessions.create({**settings, "cwd": cwd, "name": "Dispatcher" if destination["kind"] == "dispatcher" else body["message"][:80]},
             on_created=lambda tid: runtime.update(identity, "creating", target_id=tid))
         target = created["session"]["thread_id"]
         if destination["kind"] == "dispatcher":
-            runtime.configure(target, {"enabled": True})
+            runtime.configure(target, {"enabled": True, "defaults": {
+                "client": "codex", "model": None, "effort": None, "yolo": False}})
+    if destination["kind"] == "dispatcher":
+        with runtime.store._connection() as db:
+            db.execute("""INSERT INTO send_work_dispatchers(cwd,settings_json,thread_id) VALUES (?,?,?)
+                ON CONFLICT(cwd) DO UPDATE SET thread_id=excluded.thread_id""",
+                       (cwd, json.dumps(profile["settings"]), target))
     runtime.update(identity, "routing", target_id=target,
                    decision_json=json.dumps({"action": destination["kind"], "thread_id": target, "reason": "user_selected"}))
     with runtime.sessions._thread_lock(target):

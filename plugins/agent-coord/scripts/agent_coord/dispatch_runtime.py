@@ -49,6 +49,8 @@ class DispatchRuntime:
                 CREATE TABLE IF NOT EXISTS dispatch_settings (
                     thread_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0,
                     defaults_json TEXT NOT NULL DEFAULT '{}', seen_event INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS send_work_dispatchers (
+                    cwd TEXT PRIMARY KEY, settings_json TEXT NOT NULL, thread_id TEXT);
                 CREATE TABLE IF NOT EXISTS dispatch_requests (
                     id INTEGER PRIMARY KEY, dispatcher_id TEXT NOT NULL, request_id TEXT NOT NULL,
                     body_json TEXT NOT NULL, cwd TEXT NOT NULL, state TEXT NOT NULL,

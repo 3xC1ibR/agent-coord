@@ -8,11 +8,16 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 
 function setup(api) {
   const document = new EventTarget(), elements = new Map(), timers = new Map(), saved = new Map();
-  let timer = 0, now = 0;
+  let timer = 0, now = 0, cwd = "/work";
   class Element extends EventTarget {
     constructor(id) { super(); Object.assign(this, {id, children: [], value: "", hidden: false, isConnected: true,
       ownerDocument: document, selectionStart: 0, selectionEnd: 0, selectionDirection: "forward", scrollTop: 0, scrollLeft: 0, scrollHeight: 48, style: {}, attrs: {}}); }
-    append(...children) { this.children.push(...children); }
+    append(...children) {
+      for (const child of children) {
+        if (child.parentElement) child.parentElement.children = child.parentElement.children.filter(c => c !== child);
+        child.parentElement = this; this.children.push(child);
+      }
+    }
     replaceChildren(...children) { this.children = children; }
     contains(target) { return this === target || this.children.some(child => child.contains?.(target)); }
     setAttribute(key, value) { this.attrs[key] = value; }
@@ -45,17 +50,19 @@ function setup(api) {
   const threads = [{thread_id: "release", title: "Release deployment", cwd: "/work", browser_session: {}, checkpoint: {summary: "Deploy the app"}},
     {thread_id: "theme", title: "Gradient theme", cwd: "/work", browser_session: {}, checkpoint: {summary: "App appearance"}}];
   const calls = [], opened = [], storage = {getItem: k => saved.get(k), setItem: (k, v) => saved.set(k, v), removeItem: k => saved.delete(k)};
-  const palette = new SendWorkPalette({document, view, storage, workspace: () => "/work", threads: () => threads,
+  const palette = new SendWorkPalette({document, view, storage, workspace: () => cwd, threads: () => threads,
     openThread: id => opened.push(id), api: async (path, body, options) => {
       calls.push({path, body, options});
       if (api) return api(path, body, options);
       if (path.startsWith("models?")) return {data: [{model: path.endsWith("claude") ? "claude-model" : "available-model",
         supportedReasoningEfforts: [{reasoningEffort: "medium"}, {reasoningEffort: "high"}]}]};
       if (path.endsWith("suggest")) return {candidates: []};
+      if (path.endsWith("dispatcher-settings")) return {settings: body.settings || {client: "codex", model: "available-model", effort: null, yolo: false}};
       return {receipt: {id: 1, cwd: "/work", state: "queued", target_id: "release", target_title: "Release deployment"}};
     }});
   SendWorkPalette.bindShortcut(document, () => palette);
   return {palette, document, $, calls, opened, saved, threads, timers, advance,
+    workspace(value) { cwd = value; palette.syncOverview(); },
     type(value) { palette.input.value = value; palette.input.setSelectionRange(value.length, value.length); palette.input.dispatchEvent(new Event("input")); },
     key(key, target = palette.input, extra = {}) {
       const event = new Event("keydown", {cancelable: true}); Object.assign(event, {key, ...extra}); target.dispatchEvent(event); return event;
@@ -273,4 +280,78 @@ test("failed new submissions retain settings and retry identity; changing destin
   assert.equal(h.palette.draft.yolo, true); assert.equal(h.palette.input.value, "Fix the build");
   h.$("send-work-unlock").onclick(); h.palette.locked = {kind: "thread", id: "theme"};
   await h.palette.send(); assert.equal("settings" in h.calls[2].body, false);
+});
+
+test("pinned dispatcher exists only on overview and shares its draft and selection with the popup", () => {
+  const h = setup(); h.palette.pin(true);
+  assert.equal(h.palette.content.parentElement, h.palette.dock);
+  assert.equal(h.palette.dialog.open, undefined);
+  assert.equal(h.palette.list.hidden, true);
+  assert.equal(h.saved.get("ribbon-field.floating-dispatch"), "true");
+  h.type("deploy"); h.key("Tab");
+  h.$("welcome").hidden = true; h.palette.syncOverview();
+  assert.equal(h.palette.overviewBar.hidden, true); assert.equal(h.palette.dock.hidden, true);
+  h.key("K", h.document, {metaKey: true, shiftKey: true});
+  assert.equal(h.palette.dialog.open, true);
+  assert.equal(h.palette.input.value, "deploy"); assert.equal(h.palette.locked.id, "release");
+  h.key("Escape", h.document);
+  h.$("welcome").hidden = false; h.palette.syncOverview();
+  h.key("K", h.document, {metaKey: true, shiftKey: true});
+  assert.equal(h.palette.dialog.open, false); assert.equal(h.document.activeElement, h.palette.input);
+  assert.equal(h.palette.input.value, "deploy"); assert.equal(h.palette.locked.id, "release");
+  h.palette.pin(false);
+  assert.equal(h.palette.dock.hidden, true); h.palette.toggle();
+  assert.equal(h.palette.input.value, "deploy");
+});
+
+test("workspace switches retain separate drafts and never carry a target across projects", () => {
+  const h = setup(); h.palette.pin(true); h.type("deploy"); h.key("Tab");
+  h.workspace("/other"); assert.equal(h.palette.input.value, ""); assert.equal(h.palette.locked, null);
+  h.type("Other project work");
+  h.workspace("/work"); assert.equal(h.palette.input.value, "deploy"); assert.equal(h.palette.locked.id, "release");
+  h.workspace("/other"); assert.equal(h.palette.input.value, "Other project work"); assert.equal(h.palette.locked, null);
+});
+
+test("pinned send clears only the submitted workspace and stays ready for another request", async () => {
+  const h = setup(); h.palette.pin(true); h.type("deploy"); await h.palette.send();
+  assert.equal(h.palette.docked, true); assert.equal(h.palette.input.value, "");
+  assert.equal(h.document.activeElement, h.palette.input); assert.equal(h.palette.list.hidden, true);
+  let resolve;
+  const delayed = setup(() => new Promise(done => { resolve = done; }));
+  delayed.palette.pin(true); delayed.type("deploy"); const sending = delayed.palette.send();
+  delayed.workspace("/other"); delayed.type("Keep this draft");
+  resolve({receipt: {id: 1, state: "accepted", target_id: "release"}}); await sending;
+  assert.equal(delayed.palette.input.value, "Keep this draft");
+  delayed.workspace("/work"); assert.equal(delayed.palette.input.value, "");
+});
+
+test("dispatcher settings are saved independently of the new-conversation draft and message", async () => {
+  const h = setup(); h.palette.pin(true); h.$("send-work-new").onclick(); h.type("Fix the build");
+  h.palette.draft.yolo = true;
+  await h.palette.openProfile();
+  assert.equal(h.$("send-work-profile").hidden, false);
+  h.$("send-work-profile-permissions").value = "default";
+  h.$("send-work-profile-effort").value = "high";
+  await h.palette.saveProfile();
+  const save = h.calls.find(c => c.path === "send-work/dispatcher-settings" && c.body.settings);
+  assert.deepEqual(save.body.settings, {client: "codex", model: "available-model", effort: "high", yolo: false});
+  assert.equal(h.palette.draft.yolo, true); assert.equal(h.palette.draft.model, null);
+  assert.equal(h.palette.input.value, "Fix the build"); assert.equal(h.palette.locked.kind, "new");
+  assert.equal(h.$("send-work-profile").hidden, true);
+});
+
+test("late dispatcher settings cannot populate another project or reopen a closed panel", async () => {
+  let resolve;
+  const h = setup(() => new Promise(done => { resolve = done; }));
+  h.palette.pin(true); const loading = h.palette.openProfile(); h.workspace("/other");
+  resolve({settings: {client: "claude", model: "other", effort: null, yolo: true}}); await loading;
+  assert.equal(h.$("send-work-profile").hidden, true); assert.equal(h.palette.profile, undefined);
+  assert.equal(h.calls.length, 1);
+});
+
+test("overview refresh does not reset keyboard destination selection", () => {
+  const h = setup(); h.palette.pin(true); h.type("deploy"); h.key("ArrowDown");
+  const chosen = h.palette.locked;
+  h.palette.syncOverview();
+  assert.equal(h.palette.locked, chosen); assert.equal(h.palette.rows[h.palette.active], chosen);
 });

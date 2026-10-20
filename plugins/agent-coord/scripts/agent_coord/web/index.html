@@ -60,6 +60,8 @@
   <script src="/dispatch.js" defer></script>
   <script src="/send-work.js" defer></script>
   <link rel="stylesheet" href="/send-work.css">
+  <link rel="stylesheet" href="/jev.css">
+  <script src="/jev.js" defer></script>
   <link rel="stylesheet" href="/dispatch.css">
   <script src="/dispatcher-workspace.js" defer></script>
   <link rel="stylesheet" href="/dispatcher-workspace.css">
@@ -182,7 +184,10 @@
       <div id="overview" aria-label="Thread overview"></div>
       <section id="atlas-overview" aria-label="Atlas overview" hidden></section>
       <section id="working-set-overview" aria-label="Working Set overview" hidden></section>
-      <footer class="overview-footer"><span id="results-count" role="status"></span></footer>
+    </section>
+    <section id="send-work-overview-bar" aria-label="Overview tools">
+      <div id="send-work-dock" class="send-work-dock" role="region" aria-label="Dispatcher" hidden></div>
+      <footer class="overview-statusbar"><span id="results-count" role="status"></span><button id="send-work-pin" class="quiet" type="button" aria-pressed="false" aria-controls="send-work-dock">Show dispatcher</button></footer>
     </section>
     <section id="dispatcher-empty" aria-label="Dispatcher canvas" hidden><div><h1>What would you like to work on?</h1><p>Send a request below. Your conversations will open here.</p></div></section>
     <aside id="dispatcher-workspace" aria-label="Dispatcher activity and results" hidden>
@@ -316,16 +321,38 @@
   <dialog id="organization-dialog" aria-labelledby="organization-title"><form id="organization-form"><h2 id="organization-title">Group</h2><p class="muted">Choose an existing group, create one, or select No group to remove this thread from its group.</p><div class="organization-fields"><label>Group (optional)<select id="edit-project"></select></label><label hidden>Repository<select id="edit-repository"></select></label></div><label id="edit-project-input" hidden>Group name<input id="edit-project-value" maxlength="160" placeholder="Anthropic migration"></label><label id="edit-repository-input" hidden>Repository directory<input id="edit-repository-value" maxlength="4000" placeholder="/path/to/repository"></label><p id="edit-organization-error" class="dialog-error" role="alert" hidden></p><p id="organization-workspace" class="muted"></p><div class="dialog-actions"><button type="button" class="quiet" data-close="organization-dialog">Cancel</button><button id="save-organization" class="primary">Save</button></div></form></dialog>
   <dialog id="move-thread-dialog" aria-labelledby="move-thread-title"><form id="move-thread-form"><h2 id="move-thread-title">Move to project</h2><p class="muted">Move this conversation and change its working directory to the selected project. Conversation history is preserved.</p><label>Project directory<input id="move-thread-directory" list="move-thread-projects" required maxlength="4000" placeholder="/path/to/project" autocomplete="off"></label><datalist id="move-thread-projects"></datalist><p id="move-thread-error" class="dialog-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="quiet" data-close="move-thread-dialog">Cancel</button><button id="save-thread-move" class="primary">Move thread</button></div></form></dialog>
   <dialog id="project-target-dialog" aria-labelledby="project-target-title"><form method="dialog"><h2 id="project-target-title">Open project</h2><p id="project-target-path" class="muted"></p><div class="dialog-actions"><button value="cancel" class="quiet">Cancel</button><button value="window" class="quiet">New window</button><button value="tab" class="primary" autofocus>New tab</button></div></form></dialog>
-  <dialog id="send-work-dialog" class="send-work-dialog" aria-label="Send work">
+  <dialog id="send-work-dialog" class="send-work-dialog" aria-label="Dispatcher">
+    <div id="send-work-content" class="send-work-content">
+    <header class="send-work-heading">
+      <h2><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 12h9m-4-5 5 5-5 5m5-5h6M4 5h4M4 19h4"/></svg>Dispatcher</h2>
+      <span id="send-work-project"></span>
+      <button id="send-work-new" type="button" class="quiet">New conversation</button>
+      <button id="send-work-profile-toggle" type="button" class="quiet" aria-label="Dispatcher settings" title="Dispatcher settings" aria-expanded="false" aria-controls="send-work-profile"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m9 3-1 3-3 1-2 3 2 2-1 3 3 3 3-1 2 2 3-1 1-3 3-1 1-3-2-2 1-3-3-2-3 1-2-2Z"/><circle cx="12" cy="11" r="3"/></svg></button>
+      <button id="send-work-close" type="button" class="quiet" aria-label="Close dispatcher">Esc</button>
+    </header>
+    <section id="send-work-profile" aria-labelledby="send-work-profile-title" hidden>
+      <h3 id="send-work-profile-title">Dispatcher settings</h3>
+      <p>Used by the dispatcher in this project. New and existing conversations keep their own settings.</p>
+      <div class="send-work-profile-fields">
+        <label>Provider<select id="send-work-profile-client"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="antigravity">Google Antigravity</option><option value="kimi">Kimi Code</option><option value="muse">Muse Code</option></select></label>
+        <label>Dispatcher model<select id="send-work-profile-model"></select></label>
+        <label>Reasoning effort<select id="send-work-profile-effort"></select></label>
+        <label>Dispatcher permissions<select id="send-work-profile-permissions"><option value="default">Default permissions</option><option value="yolo">Full access · no approvals</option></select></label>
+      </div>
+      <p>Changing provider starts a new dispatcher conversation with your next request.</p>
+      <p id="send-work-profile-error" class="dialog-error" role="alert" hidden></p>
+      <div class="send-work-profile-actions"><button id="send-work-profile-close" type="button" class="quiet">Cancel</button><button id="send-work-profile-save" type="button" class="primary">Save dispatcher settings</button></div>
+    </section>
     <div class="send-work-entry">
-      <textarea id="send-work-input" rows="1" maxlength="100000" placeholder="What would you like to do?" role="combobox" aria-label="Request to send" aria-autocomplete="list" aria-expanded="true" aria-controls="send-work-results"></textarea>
-      <button id="send-work-close" type="button" class="quiet" aria-label="Close Send work">Esc</button>
+      <textarea id="send-work-input" rows="1" maxlength="100000" placeholder="Describe work to send…" role="combobox" aria-label="Request to dispatcher" aria-autocomplete="list" aria-expanded="true" aria-controls="send-work-results"></textarea>
     </div>
     <div id="send-work-target" hidden>To <strong id="send-work-target-name"></strong><button id="send-work-unlock" class="quiet" type="button">Change</button></div>
+    <p id="send-work-new-settings-label" hidden>New conversation settings</p>
     <ul id="send-work-results" role="listbox" aria-label="Send to a conversation"></ul>
     <p id="send-work-error" class="dialog-error" role="alert" hidden></p>
     <p id="send-work-status" role="status" hidden></p>
     <footer><p class="send-work-keyboard-help">↑ ↓ Choose · Tab Lock · ↵ Send</p><p class="send-work-touch-help">Choose a destination</p><button id="send-work-submit" class="quiet" type="button">Send</button></footer>
+    </div>
   </dialog>
   <div id="send-work-notice" role="status" aria-live="polite" hidden></div>
 </body>

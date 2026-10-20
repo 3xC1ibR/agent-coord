@@ -157,6 +157,74 @@ class SendWorkTests(unittest.TestCase):
         self.assertEqual(content[-1], {"type": "text", "text": "Redeploy the release"})
         self.assertNotIn("Unrelated conversation", str(content))
 
+    def test_dispatcher_profile_is_persistent_and_separate_from_worker_defaults(self):
+        settings = {"client": "codex", "model": "other-model", "effort": "low", "yolo": True}
+        before = len(self.sessions.rpc.threads)
+        result = send_work.dispatcher_settings(self.runtime, {"cwd": self.root, "settings": settings})
+        self.assertIsNone(result["thread_id"])
+        self.assertEqual(len(self.sessions.rpc.threads), before)
+        self.assertEqual(send_work.dispatcher_settings(self.runtime, {"cwd": self.root})["settings"], settings)
+        item = self.send("dispatcher")
+        target = item["target_id"]
+        self.assertEqual(send_work.dispatcher_profile(self.runtime, self.root)["thread_id"], target)
+        record = self.sessions._record(target)
+        self.assertEqual((record["model"], record["effort"], bool(record["yolo"])), ("other-model", "low", True))
+        defaults = self.runtime.settings(target)["defaults"]
+        self.assertFalse(defaults["yolo"])
+        self.assertIsNone(defaults["model"])
+        self.assertFalse(self.sessions._record(self.send("new", "new-worker")["target_id"])["yolo"])
+        self.assertFalse(self.sessions._record(self.target)["yolo"])
+        child = Path(self.root) / "child"; child.mkdir()
+        other = send_work.dispatcher_settings(self.runtime, {"cwd": str(child)})
+        self.assertIsNone(other["thread_id"]); self.assertFalse(other["settings"]["yolo"])
+
+    def test_dispatcher_settings_update_idle_dispatcher_and_keep_worker_defaults(self):
+        target = self.create("Dispatcher")
+        self.runtime.configure(target, {"enabled": True})
+        defaults = self.runtime.settings(target)["defaults"]
+        settings = {"client": "codex", "model": "other-model", "effort": "low", "yolo": True}
+        send_work.dispatcher_settings(self.runtime, {"cwd": self.root, "settings": settings})
+        self.assertEqual(send_work.dispatcher_profile(self.runtime, self.root)["thread_id"], target)
+        self.assertEqual(self.runtime.settings(target)["defaults"], defaults)
+        settings.update(effort=None, yolo=False)
+        send_work.dispatcher_settings(self.runtime, {"cwd": self.root, "settings": settings})
+        self.assertIsNone(self.sessions._record(target)["effort"])
+        self.assertFalse(self.sessions._record(target)["yolo"])
+        self.assertEqual(self.send("dispatcher")["target_id"], target)
+
+    def test_dispatcher_settings_reject_pending_and_running_work(self):
+        settings = {"client": "codex", "model": "other-model", "effort": "low", "yolo": True}
+        send_work.submit(self.runtime, self.body("dispatcher"))
+        with self.assertRaisesRegex(CoordinationError, "pending"):
+            send_work.dispatcher_settings(self.runtime, {"cwd": self.root, "settings": settings})
+        self.runtime.process_once()
+        target = send_work.dispatcher_profile(self.runtime, self.root)["thread_id"]
+        self.sessions.queue._dispatch(target)
+        with self.assertRaisesRegex(CoordinationError, "running"):
+            send_work.dispatcher_settings(self.runtime, {"cwd": self.root, "settings": settings})
+        self.assertFalse(self.sessions._record(target)["yolo"])
+
+    def test_dispatcher_provider_change_is_lazy_and_preserves_old_conversation(self):
+        target = self.create("Dispatcher")
+        self.runtime.configure(target, {"enabled": True})
+        settings = {"client": "claude", "model": "claude-test", "effort": None, "yolo": False}
+        before = len(self.sessions.rpc.threads)
+        with patch.object(self.sessions, "models", return_value=[{"model": "claude-test", "supportedReasoningEfforts": []}]):
+            result = send_work.dispatcher_settings(self.runtime, {"cwd": self.root, "settings": settings})
+        self.assertIsNone(result["thread_id"])
+        self.assertIsNone(send_work.dispatcher_profile(self.runtime, self.root)["thread_id"])
+        self.assertEqual(len(self.sessions.rpc.threads), before)
+        self.assertEqual(self.sessions._record(target)["client"], "codex")
+        self.assertTrue(self.runtime.settings(target)["enabled"])
+
+    def test_invalid_dispatcher_settings_do_not_mutate_saved_profile(self):
+        original = send_work.dispatcher_profile(self.runtime, self.root)
+        for settings in (None, {}, {"client": "codex", "model": "other-model", "effort": "high", "yolo": False},
+                         {"client": "codex", "model": "other-model", "effort": "low", "yolo": "true"}):
+            with self.subTest(settings=settings), self.assertRaises(CoordinationError):
+                send_work.dispatcher_settings(self.runtime, {"cwd": self.root, "settings": settings})
+        self.assertEqual(send_work.dispatcher_profile(self.runtime, self.root), original)
+
     def test_suggestions_are_read_only_and_have_no_source_context(self):
         before = list(self.sessions.rpc.calls)
         with patch("agent_coord.send_work.load_config", return_value=None):
@@ -224,6 +292,9 @@ class SendWorkTests(unittest.TestCase):
             result = post("suggest", {"cwd": self.root, "message": "deployment"})
         self.assertEqual(result["candidates"][0]["id"], self.target)
         self.assertFalse(self.runtime.process_once())
+        settings = {"client": "codex", "model": "other-model", "effort": "low", "yolo": False}
+        self.assertEqual(post("dispatcher-settings", {"cwd": self.root, "settings": settings})["settings"], settings)
+        self.assertEqual(post("dispatcher-settings", {"cwd": self.root})["settings"], settings)
         receipt = post("send", self.body())["receipt"]
         self.runtime.process_once(); self.sessions.queue._dispatch(self.target)
         self.assertEqual(post("status", {"cwd": self.root, "id": receipt["id"]})["state"], "accepted")
