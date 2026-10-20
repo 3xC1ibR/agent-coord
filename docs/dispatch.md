@@ -29,7 +29,13 @@ Use arrows or click to choose, Tab to lock the destination while continuing to
 type, and Enter or **Send** to submit. Shift+Enter inserts a newline. **New
 conversation** and **Ask dispatcher** remain available. Selecting a thread
 sends directly to that thread; choosing New creates a normal Codex conversation
-with default settings. Ask dispatcher reuses the project's dispatcher or creates
+with default settings. `/new` locks a new-conversation draft in the popup and
+reveals its model, effort, and permissions settings. `/model`, `/effort`, and
+`/permissions` then offer the same provider model and supported effort choices
+as the conversation composer. Selecting a value clears the command and updates
+the visible settings; the settings can also be clicked. These commands configure
+only the new agent. The conversation is created only when a request is sent;
+Escape preserves the draft and settings without creating anything. Ask dispatcher reuses the project's dispatcher or creates
 one if needed. Direct sends do not require a dispatcher conversation.
 
 Only the typed request is delivered. The conversation behind the dialog, its

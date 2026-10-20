@@ -97,6 +97,53 @@ class SendWorkTests(unittest.TestCase):
         self.assertEqual(self.sessions.rpc.threads[target]["turns"][0]["items"][0]["content"],
                          [{"type": "text", "text": "Redeploy the release"}])
 
+    def test_new_settings_are_saved_and_applied_before_the_first_turn(self):
+        settings = {"client": "codex", "model": "other-model", "effort": "low", "yolo": True}
+        body = self.body("new", settings=settings)
+        before = len(self.sessions.rpc.threads)
+        item = send_work.submit(self.runtime, body)["receipt"]
+        self.assertEqual(len(self.sessions.rpc.threads), before)
+        self.assertEqual(item["body"]["sendWorkSettings"], settings)
+        self.runtime.process_once()
+        item = self.runtime.get(item["id"])
+        target = item["target_id"]
+        record = self.sessions._record(target)
+        self.assertEqual((record["client"], record["model"], record["effort"], bool(record["yolo"])),
+                         ("codex", "other-model", "low", True))
+        options = next(params for method, params in reversed(self.sessions.rpc.calls) if method == "thread/start")
+        self.assertEqual(options["sandbox"], "danger-full-access")
+        self.assertEqual(options["approvalPolicy"], "never")
+        self.sessions.queue._dispatch(target)
+        self.assertEqual(self.sessions.rpc.threads[target]["turns"][0]["items"][0]["content"],
+                         [{"type": "text", "text": "Redeploy the release"}])
+        self.assertTrue(send_work.submit(self.runtime, body)["replayed"])
+        with self.assertRaisesRegex(CoordinationError, "different input"):
+            send_work.submit(self.runtime, {**body, "settings": {**settings, "yolo": False}})
+
+    def test_new_settings_reject_invalid_values_before_creating_or_saving(self):
+        before = len(self.sessions.rpc.threads)
+        for settings in (None, [], {"cwd": "/"}, {"client": "unknown"}, {"client": []},
+                         {"model": "unavailable"}, {"model": "other-model", "effort": "high"},
+                         {"effort": "high"}, {"yolo": "true"}):
+            with self.subTest(settings=settings), self.assertRaises(CoordinationError):
+                send_work.submit(self.runtime, self.body("new", settings=settings))
+        self.assertEqual(len(self.sessions.rpc.threads), before)
+        self.assertFalse(self.runtime.process_once())
+
+    def test_settings_cannot_change_existing_thread_or_dispatcher(self):
+        for kind in ("thread", "dispatcher"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(CoordinationError, "only to a new"):
+                send_work.submit(self.runtime, self.body(kind, settings={"yolo": True}))
+        self.assertFalse(self.sessions._record(self.target)["yolo"])
+
+    def test_new_settings_select_the_receiving_provider(self):
+        with patch.object(self.sessions, "models", return_value=[{"model": "claude-test", "supportedReasoningEfforts": []}]), \
+             patch.object(self.sessions, "create", return_value={"session": {"thread_id": self.target}}) as create:
+            send_work.submit(self.runtime, self.body("new", settings={"client": "claude", "model": "claude-test"}))
+            self.runtime.process_once()
+        self.assertEqual(create.call_args.args[0]["client"], "claude")
+        self.assertEqual(create.call_args.args[0]["model"], "claude-test")
+
     def test_dispatcher_is_created_only_on_explicit_choice_and_reused(self):
         first = self.send("dispatcher")
         target = first["target_id"]

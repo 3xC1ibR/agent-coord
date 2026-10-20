@@ -13,9 +13,9 @@
   class ChatSlashCommands {
     constructor({input, menu, getThread, getSession = () => ({}), loadModels = async () => [], loadSkills = async () => [],
       catalogs = new Map(), getModelClients = () => [getSession()?.client || "codex"],
-      onSelectModel = () => {}, canComplete, onReplace = () => {}, onChange}) {
+      onSelectModel = () => {}, getCommands = () => commands, onComplete = () => {}, canComplete, onReplace = () => {}, onChange}) {
       Object.assign(this, {input, menu, getThread, getSession, loadModels, loadSkills, getModelClients,
-        onSelectModel, canComplete, onReplace, onChange});
+        onSelectModel, getCommands, onComplete, canComplete, onReplace, onChange});
       this.catalogs = catalogs;
       this.skillCatalogs = new Map();
       this.skillLoading = new Set();
@@ -52,6 +52,7 @@
       if (caret <= command[0].length) return {kind: "command",
         prefix: input.value.slice(command[1].length, caret).toLowerCase(), start: command[1].length, end: command[0].length};
       const name = command[2].toLowerCase();
+      if (!this.getCommands().some(command => command.name === name)) return null;
       if (!["/model", "/effort", "/permissions"].includes(name) || /[\r\n]/.test(input.value.slice(0, caret))) return null;
       // Track token boundaries so editing an argument keeps its neighbors intact.
       const tokens = [...input.value.matchAll(/"[^"\r\n]*(?:"|$)|'[^'\r\n]*(?:'|$)|[^\s]+/g)];
@@ -87,7 +88,7 @@
     suggestions(query) {
       if (query.kind === "skill") return this.skills().map(skill => ({name: "$" + skill.name,
         arguments: skill.scope || "", description: skill.description || ""}));
-      if (query.kind === "command") return commands;
+      if (query.kind === "command") return this.getCommands();
       if (query.kind === "permissions") return [
         {name: "default", arguments: "", description: "Configured permissions with approval prompts"},
         {name: "yolo", arguments: "", description: "Full machine access without approval prompts"},
@@ -100,6 +101,7 @@
           arguments: [clients.length > 1 ? labels[client] || client : "", model.displayName || ""].filter(Boolean).join(" · "),
           description: model.description || ""})));
       }
+      if (!query.model) return [];
       const models = this.models();
       const model = models.find(model => model.model === query.model);
       return (model?.supportedReasoningEfforts || []).map(effort => ({name: effort.reasoningEffort,
@@ -187,6 +189,7 @@
       this.close();
       if (query.kind === "model") this.onSelectModel({client: command.client, model: command.name});
       this.onChange();
+      this.onComplete({query, command});
       this.render();
     }
 

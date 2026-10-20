@@ -1,6 +1,7 @@
 "use strict";
 const {test} = require("node:test"), assert = require("node:assert/strict");
 globalThis.DispatchUI = require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js");
+require("../plugins/agent-coord/scripts/agent_coord/web/slash-commands.js");
 const {SendWorkPalette} = require("../plugins/agent-coord/scripts/agent_coord/web/send-work.js");
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -9,10 +10,18 @@ function setup(api) {
   let timer = 0;
   class Element extends EventTarget {
     constructor(id) { super(); Object.assign(this, {id, children: [], value: "", hidden: false, isConnected: true,
-      selectionStart: 0, selectionEnd: 0, selectionDirection: "forward", scrollTop: 0, scrollLeft: 0, scrollHeight: 48, style: {}, attrs: {}}); }
+      ownerDocument: document, selectionStart: 0, selectionEnd: 0, selectionDirection: "forward", scrollTop: 0, scrollLeft: 0, scrollHeight: 48, style: {}, attrs: {}}); }
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
     setAttribute(key, value) { this.attrs[key] = value; }
+    getAttribute(key) { return this.attrs[key]; }
+    removeAttribute(key) { delete this.attrs[key]; }
+    insertBefore(child, before) { const index = this.children.indexOf(before); this.children.splice(index < 0 ? this.children.length : index, 0, child); }
+    scrollIntoView() {}
+    setRangeText(value, start, end) {
+      this.value = this.value.slice(0, start) + value + this.value.slice(end);
+      this.selectionStart = this.selectionEnd = start + value.length;
+    }
     focus() { document.activeElement = this; }
     setSelectionRange(start, end, direction) { Object.assign(this, {selectionStart: start, selectionEnd: end, selectionDirection: direction}); }
     showModal() { this.open = true; }
@@ -29,12 +38,14 @@ function setup(api) {
     openThread: id => opened.push(id), api: async (path, body, options) => {
       calls.push({path, body, options});
       if (api) return api(path, body, options);
+      if (path.startsWith("models?")) return {data: [{model: path.endsWith("claude") ? "claude-model" : "available-model",
+        supportedReasoningEfforts: [{reasoningEffort: "medium"}, {reasoningEffort: "high"}]}]};
       if (path.endsWith("suggest")) return {candidates: []};
       return {receipt: {id: 1, cwd: "/work", state: "queued", target_id: "release", target_title: "Release deployment"}};
     }});
   SendWorkPalette.bindShortcut(document, () => palette);
   return {palette, document, $, calls, opened, saved, threads,
-    type(value) { palette.input.value = value; palette.input.dispatchEvent(new Event("input")); },
+    type(value) { palette.input.value = value; palette.input.setSelectionRange(value.length, value.length); palette.input.dispatchEvent(new Event("input")); },
     key(key, target = palette.input, extra = {}) {
       const event = new Event("keydown", {cancelable: true}); Object.assign(event, {key, ...extra}); target.dispatchEvent(event); return event;
     },
@@ -120,4 +131,81 @@ test("workspace matching excludes other projects and dispatchers", () => {
   const h = setup(); h.threads.push({thread_id: "other", title: "deploy", cwd: "/other", browser_session: {}},
     {thread_id: "dispatcher", title: "deploy", cwd: "/work", browser_session: {}, dispatcher: true});
   assert.deepEqual(SendWorkPalette.matches(h.threads, "/work", "deploy").map(r => r.id), ["release"]);
+});
+
+test("/new prepares a local draft, exposes only configuration commands, and survives Escape", async () => {
+  const h = setup(); h.palette.toggle(); h.type("/");
+  assert.deepEqual(h.palette.slash.matches.map(c => c.name), ["/new"]);
+  h.key("Enter");
+  assert.equal(h.palette.locked.kind, "new"); assert.equal(h.palette.input.value, "");
+  assert.equal(h.palette.settings.hidden, false); assert.equal(h.palette.list.hidden, true);
+  assert.equal(h.calls.length, 0);
+  h.type("/");
+  assert.deepEqual(h.palette.slash.matches.map(c => c.name), ["/new", "/model", "/effort", "/permissions"]);
+  h.key("Escape", h.document); assert.equal(h.palette.dialog.open, true); assert.equal(h.palette.menu.hidden, true);
+  h.type("Fix the build"); h.key("Escape", h.document); h.palette.toggle();
+  assert.equal(h.palette.locked.kind, "new"); assert.equal(h.palette.input.value, "Fix the build");
+  await h.tick(); assert.equal(h.calls.length, 0);
+});
+
+test("new-agent commands configure provider, model, effort and permissions without sending", async () => {
+  const h = setup(); h.palette.toggle(); h.type("/new"); h.key("Enter");
+  h.type("/model claude"); await settle();
+  assert.equal(h.palette.slash.matches.length, 1); h.key("Enter"); await settle();
+  assert.equal(h.palette.input.value, "");
+  assert.equal(h.palette.draft.client, "claude"); assert.equal(h.palette.draft.model, "claude-model");
+  h.type("/effort hi"); h.key("Enter"); await settle();
+  assert.equal(h.palette.draft.effort, "high"); assert.equal(h.palette.input.value, "");
+  h.type("/permissions yo"); h.key("Tab");
+  assert.equal(h.palette.draft.yolo, true); assert.equal(h.palette.input.value, "");
+  assert.match(h.palette.settings.children[2].textContent, /Full access/);
+  assert.equal(h.calls.some(c => c.path === "send-work/send" || c.path === "send-work/suggest"), false);
+  h.type("Fix the build"); h.key("Enter"); await settle();
+  const sent = h.calls.find(c => c.path === "send-work/send").body;
+  assert.equal(sent.message, "Fix the build"); assert.deepEqual(sent.destination, {kind: "new"});
+  assert.deepEqual(sent.settings, {client: "claude", model: "claude-model", effort: "high", yolo: true});
+  assert.deepEqual(h.opened, []); assert.equal(h.palette.dialog.open, false);
+  assert.deepEqual(h.palette.draft, {client: "codex", model: null, effort: null, yolo: false});
+});
+
+test("clickable settings preserve request text and unsupported commands cannot create conversations", async () => {
+  const h = setup(); h.palette.toggle(); h.type("/new"); h.key("Enter");
+  h.type("Fix the build"); h.palette.settings.children[2].onclick();
+  h.palette.slash.choose(1);
+  assert.equal(h.palette.draft.yolo, true); assert.equal(h.palette.input.value, "Fix the build");
+  for (const command of ["/fork", "/close", "/effort high"]) {
+    h.type(command); await h.palette.send();
+    assert.equal(h.palette.error.hidden, false); assert.equal(h.palette.input.value, command);
+  }
+  assert.equal(h.calls.length, 0);
+});
+
+test("manual configuration validates values, preserves message lines and resets effort for a new model", async () => {
+  const h = setup(); h.palette.toggle(); h.type("/new\nFix the build"); await h.palette.send();
+  assert.equal(h.palette.input.value, "Fix the build");
+  h.type("/model available-model high\nFix the build"); await h.palette.send();
+  assert.equal(h.palette.draft.effort, "high"); assert.equal(h.palette.input.value, "Fix the build");
+  h.type("/effort impossible"); await h.palette.send(); assert.equal(h.palette.error.hidden, false);
+  assert.equal(h.palette.draft.effort, "high");
+  h.type("/model claude-model"); await h.palette.send();
+  assert.equal(h.palette.draft.effort, null); assert.equal(h.palette.draft.client, "claude");
+  h.type("/permissions default"); await h.palette.send(); assert.equal(h.palette.draft.yolo, false);
+  assert.equal(h.calls.some(c => c.path === "send-work/send"), false);
+});
+
+test("configuration before /new stays local and does not load model catalogs", async () => {
+  const h = setup(); h.palette.toggle(); h.type("/model available-model"); await h.palette.send();
+  assert.equal(h.palette.error.hidden, false); assert.match(h.palette.error.textContent, /\/new/);
+  await h.tick(); assert.equal(h.calls.length, 0);
+});
+
+test("failed new submissions retain settings and retry identity; changing destination omits settings", async () => {
+  const h = setup(async () => { throw new Error("Offline"); });
+  h.palette.toggle(); h.type("/new"); h.key("Enter");
+  h.type("/permissions yolo"); await h.palette.send();
+  h.type("Fix the build"); await h.palette.send(); await h.palette.send();
+  assert.equal(h.calls[0].body.requestId, h.calls[1].body.requestId);
+  assert.equal(h.palette.draft.yolo, true); assert.equal(h.palette.input.value, "Fix the build");
+  h.$("send-work-unlock").onclick(); h.palette.locked = {kind: "thread", id: "theme"};
+  await h.palette.send(); assert.equal("settings" in h.calls[2].body, false);
 });

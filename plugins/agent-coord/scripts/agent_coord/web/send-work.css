@@ -6,6 +6,11 @@ dialog.send-work-dialog { width: min(640px, calc(100vw - 48px)); max-width: none
 #send-work-input:focus-visible { box-shadow: 0 2px var(--accent); }
 #send-work-target { display: flex; align-items: center; gap: 6px; margin: 0 20px 12px; color: var(--muted); font-size: 12px; }
 #send-work-target[hidden] { display: none; }
+#send-work-settings { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 20px 12px; }
+#send-work-settings[hidden], #send-work-results[hidden] { display: none; }
+#send-work-settings button { padding: 5px 8px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; }
+#send-work-commands { position: static; margin: 0 12px 12px; max-height: min(320px, 40dvh); }
+#send-work-commands [role=group] + [role=group] { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
 #send-work-target-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: var(--ink); }
 #send-work-unlock { flex-shrink: 0; margin-left: auto; padding: 3px 7px; font-size: 11px; }
 #send-work-results { margin: 0; padding: 6px; list-style: none; border-block: 1px solid var(--line); max-height: min(390px, calc(100dvh - 380px)); overflow-y: auto; }
@@ -32,6 +37,8 @@ body.mobile-chat dialog.send-work-dialog[open] { display: flex; flex-direction: 
 body.mobile-chat .send-work-entry, body.mobile-chat .send-work-dialog footer { padding: 12px; flex-shrink: 0; }
 body.mobile-chat #send-work-input { font-size: 16px; }
 body.mobile-chat #send-work-target { margin-inline: 12px; flex-shrink: 0; }
+body.mobile-chat #send-work-settings { margin-inline: 12px; flex-shrink: 0; }
+body.mobile-chat #send-work-settings button { min-height: 44px; }
 body.mobile-chat #send-work-results { max-height: none; min-height: 48px; flex: 1 1 auto; }
 body.mobile-chat #send-work-results li { min-height: 44px; }
 body.mobile-chat #send-work-close { margin-top: 0; }

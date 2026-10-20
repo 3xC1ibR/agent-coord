@@ -61,7 +61,7 @@ def suggestions(runtime, body):
 
 
 def submit(runtime, body):
-    if set(body) - {"cwd", "message", "destination", "requestId"}:
+    if set(body) - {"cwd", "message", "destination", "requestId", "settings"}:
         raise CoordinationError("Send work accepts only the typed request and destination.")
     cwd = directory(runtime, body)
     message = runtime.sessions._text(body.get("message"), "Request", 100000)
@@ -71,6 +71,17 @@ def submit(runtime, body):
         raise CoordinationError("Choose a conversation, New conversation, or Ask dispatcher.")
     if set(destination) != ({"kind", "id"} if destination["kind"] == "thread" else {"kind"}):
         raise CoordinationError("Invalid destination.")
+    settings = body.get("settings")
+    if "settings" in body:
+        if destination["kind"] != "new":
+            raise CoordinationError("Settings apply only to a new conversation.")
+        if not isinstance(settings, dict) or set(settings) - {"client", "model", "effort", "yolo"}:
+            raise CoordinationError("Invalid new conversation settings.")
+        for field, limit in (("client", 40), ("model", 200), ("effort", 40)):
+            if field in settings and settings[field] is not None:
+                runtime.sessions._text(settings[field], field, limit)
+        # Validate before saving a receipt or creating a provider conversation.
+        runtime.sessions._creation_settings({**settings, "cwd": cwd})
     if destination["kind"] == "thread":
         runtime.sessions._text(destination["id"], "Destination ID", 200)
         target = runtime.sessions._record(destination["id"])
@@ -78,6 +89,8 @@ def submit(runtime, body):
             raise CoordinationError("Choose a normal conversation in this project.")
     saved = {"message": message, "images": [], "mentions": [], "windowId": None,
              "sendWork": destination}
+    if settings is not None:
+        saved["sendWorkSettings"] = settings
     payload = json.dumps(saved, sort_keys=True)
     owner = channel(cwd)
     with runtime.store._connection() as db:
@@ -126,7 +139,8 @@ def execute(runtime, item):
         target = existing[0] if existing else None
     if not target:
         runtime.update(identity, "creating")
-        created = runtime.sessions.create({"cwd": cwd, "name": "Dispatcher" if destination["kind"] == "dispatcher" else body["message"][:80]},
+        settings = body.get("sendWorkSettings", {}) if destination["kind"] == "new" else {}
+        created = runtime.sessions.create({**settings, "cwd": cwd, "name": "Dispatcher" if destination["kind"] == "dispatcher" else body["message"][:80]},
             on_created=lambda tid: runtime.update(identity, "creating", target_id=tid))
         target = created["session"]["thread_id"]
         if destination["kind"] == "dispatcher":
