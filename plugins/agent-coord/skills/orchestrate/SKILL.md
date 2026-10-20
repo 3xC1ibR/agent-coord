@@ -131,8 +131,8 @@ as well as later messages. Follow-up communication can start a new
 request when needed; a previous completion does not end collaboration.
 
 Ask agents to return useful results, artifact references, relevant
-validation, and unresolved limitations. Orchestration-created agents also save
-the [context lifecycle report](../agent-coordination/SKILL.md#context-lifecycle-for-orchestration-agents)
+validation, and unresolved limitations. All app agents also save
+the [context lifecycle report](../agent-coordination/SKILL.md#context-lifecycle-for-app-agents)
 in their normal result checkpoint. Intermediate findings are worth sharing
 when they change another agent's work. For an explicit reply-required request,
 a final response in the agent's own conversation does not replace its requested reply.

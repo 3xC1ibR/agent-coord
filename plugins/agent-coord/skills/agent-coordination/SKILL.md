@@ -213,17 +213,18 @@ Closing does not imply task completion. Terminal shutdown requires a verified
 Codex transcript owner and never targets a remembered Zellij pane or shared
 app-server. When that cannot be verified, exit the terminal session first.
 
-## Context lifecycle for orchestration agents
+## Context lifecycle for app agents
 
-Only app agents created with `thread create --mode orchestration` are required
-to report context lifecycle advice. User-created conversations, ordinary
-dispatch-created agents, and terminal delegates keep their existing behavior.
-Reusing a conversation does not change its creation mode. Independent peer
-coordination and direct user follow-ups remain available.
+All app agents report context lifecycle advice at meaningful task completion
+or handoff, including user-created and ordinary dispatch conversations.
+Terminal delegates keep their existing behavior. Reporting is passive metadata;
+it does not change creation mode, ownership, notifications, or conversation lifecycle.
+Independent peer coordination and direct user follow-ups remain available.
 
-When returning an assignment result, including blocked or failed work, add
+When returning a meaningful task result, including blocked or failed work, add
 `context_lifecycle` to the normal checkpoint before returning control or sending
-any requested reply. Associate it with the delivered assignment message ID:
+any requested reply. The runtime binds it to the current turn. Include
+`assignment_message_id` for an agent assignment; omit it for direct user work:
 
 ```json
 {
@@ -258,6 +259,8 @@ completion events and explicit result replies attach a snapshot matched to the
 assignment and exact turn, with its source `checkpoint_id`. Missing reports
 remain unknown and do not block ordinary result delivery. This requires an
 updated app runtime for automatic completion delivery as well as refreshed plugins.
+The chat view's right-hand panel displays the saved recommendation, task-specific
+reuse advice, and expandable handover. Advice from an earlier turn is marked as such.
 
 Do not send a separate lifecycle assessment message. Only send a conversational
 reply where one was requested. A recommendation for fresh context does not close,
@@ -526,7 +529,7 @@ reply obligation to the creator.
 
 Creation automatically subscribes the creator to completion of the created
 agent's initial assignment turn. The completion event carries the saved
-checkpoint and, for an eligible orchestration agent, its matching context
+checkpoint and, when saved, its matching context
 lifecycle envelope. No result reply is needed solely to deliver that event.
 Review the reported outcome against the assignment; a completed turn does not
 by itself prove the task is complete. Completion events require no reply.

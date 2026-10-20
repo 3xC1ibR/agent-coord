@@ -1,0 +1,10 @@
+.context-lifecycle-panel { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; overflow-wrap: anywhere; }
+.context-lifecycle-panel h3 { font-size: 14px; font-weight: 600; margin: 0 0 10px; }
+.context-lifecycle-panel h4 { font-size: 12px; font-weight: 600; margin: 14px 0 5px; }
+.context-lifecycle-panel p { margin: 6px 0; }
+.context-lifecycle-panel .context-lifecycle-recommendation { font-weight: 600; }
+.context-lifecycle-panel ul { padding-left: 18px; margin: 5px 0 10px; }
+.context-lifecycle-panel li { margin: 4px 0; }
+.context-lifecycle-panel details { margin-top: 12px; }
+.context-lifecycle-panel summary { cursor: pointer; font-weight: 500; }
+.context-lifecycle-panel .context-lifecycle-stale { color: var(--muted); font-size: 12px; }

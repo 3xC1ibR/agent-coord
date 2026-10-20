@@ -26,6 +26,11 @@ subagents and managed terminal delegates are separate mechanisms.
   context, or when the user explicitly requests a fresh agent.
 - Let responsibilities emerge from prior work. A specialist is a
   role, not a permanent restriction on what an agent can handle.
+- Consult saved `context_lifecycle` advice in the normal thread shortlist and
+  inspection. Match its recommendation, `reuse_for`, and `fresh_for` to the next
+  task. Treat earlier-turn advice as historical and recheck current artifacts;
+  do not wake an agent solely to ask whether to reuse it. Full handover state is
+  available in `thread show` when a replacement is useful.
 - Closing a thread does not disqualify it from reuse. Ordinary
   actionable messages automatically reopen closed app conversations.
 - Answer questions about this dispatch workflow here when
@@ -58,8 +63,8 @@ This removes the reply obligation, not the request to do the work.
 Creation also subscribes you to the created agent's initial assignment turn
 completion without imposing a result-reply obligation. Handle completion events
 without conversational acknowledgements. Consume a matching context lifecycle
-envelope when one is available for an orchestration-created agent, but do not
-require ordinary dispatch agents or user-created conversations to produce one.
+envelope when one is available. All app agents save advice at meaningful task
+completion or handoff, including ordinary dispatch and user-created conversations.
 Use `--no-subscribe` when the creation should not report its completion to you.
 
 Have the app agent answer the user directly in its own conversation

@@ -29,6 +29,9 @@ class ContextLifecycleTests(unittest.TestCase):
         self.store = CoordinationStore(self.root / "state.sqlite3")
         for name in ("owner", "worker", "peer", "direct", "dispatched"):
             self.store.register(session_id=name, client="codex", cwd=str(self.root))
+        with self.store._connection() as db:
+            db.execute("CREATE TABLE browser_sessions (thread_id TEXT PRIMARY KEY)")
+            db.execute("INSERT INTO browser_sessions VALUES ('direct')")
         self.control = AppControl(self.store)
         self.created("worker", "orchestration")
         self.created("dispatched", None)
@@ -172,21 +175,56 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertIsNone(self.snapshot(turn_id="unknown", checkpoint_id=original["id"]))
         self.assertIsNone(self.snapshot(checkpoint_id=99999))
 
-    def test_only_orchestration_creations_receive_guidance_and_can_report(self):
+    def test_all_app_agents_receive_guidance_and_can_report_assignments(self):
         self.assertIn(REPORTING_INSTRUCTIONS, self.store.threads.instructions("worker"))
         for child in ("direct", "dispatched"):
             with self.subTest(child=child):
+                self.store.threads.start_turn(child, turn_id="assignment-turn")
                 assignment = self.assign(child)
-                self.assertNotIn(REPORTING_INSTRUCTIONS, self.store.threads.instructions(child))
-                with self.assertRaisesRegex(CoordinationError, "orchestration-created"):
-                    self.store.threads.checkpoint(child, {"phase": "investigation", "summary": "Result.",
-                        "context_lifecycle": self.report(assignment["id"])})
+                self.assertIn(REPORTING_INSTRUCTIONS, self.store.threads.instructions(child))
+                saved = self.store.threads.checkpoint(child, {"phase": "investigation", "summary": "Result.",
+                    "context_lifecycle": self.report(assignment["id"])})
                 reply = self.store.reply_message(sender_session_id=child, message_id=assignment["id"], body="Result")
-                self.assertNotIn("context_lifecycle", reply)
+                self.assertEqual(reply["context_lifecycle"], {"checkpoint_id": saved["checkpoint"]["id"],
+                    **self.report(assignment["id"])})
         # Reusing the orchestration worker from a peer does not change its creation intent.
         peer_request = self.store.send_message(sender_session_id="peer", recipient_session_id="worker", body="Related fix")
         self.save(self.report(peer_request["id"]))
         self.assertIsNotNone(self.snapshot(peer_request["id"]))
+
+    def test_direct_user_work_is_turn_bound_without_an_assignment_or_notification(self):
+        self.store.threads.start_turn("direct", turn_id="user-turn")
+        report = self.report()
+        del report["assignment_message_id"]
+        with self.store._connection() as db:
+            before = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        update_checkpoint({"session_id": "direct", "phase": "investigation", "summary": "Research complete.",
+                           "context_lifecycle": report}, store=self.store)
+        saved = self.store.threads.get("direct")["checkpoint"]
+        self.assertEqual(saved["context_lifecycle"], report)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], before)
+            self.assertEqual(snapshot_for_assignment(db, "direct", None, "user-turn"),
+                             {"checkpoint_id": saved["id"], **report})
+            self.assertIsNone(snapshot_for_assignment(db, "direct", self.assignment["id"], "user-turn"))
+        request = self.assign("direct")
+        reply = self.store.reply_message(sender_session_id="direct", message_id=request["id"], body="Result")
+        self.assertNotIn("context_lifecycle", reply)
+        self.store.threads.start_turn("direct", turn_id="next-user-turn")
+        next_saved = self.store.threads.checkpoint("direct", {"summary": "New task."})
+        self.assertNotIn("context_lifecycle", next_saved["checkpoint"])
+
+    def test_terminal_sessions_keep_existing_behavior_and_reports_need_a_turn(self):
+        report = self.report()
+        del report["assignment_message_id"]
+        self.assertNotIn(REPORTING_INSTRUCTIONS, self.store.threads.instructions("peer"))
+        self.store.threads.start_turn("peer", turn_id="terminal-turn")
+        with self.assertRaisesRegex(CoordinationError, "only supported for app agents"):
+            self.store.threads.checkpoint("peer", {"phase": "investigation", "summary": "Result.",
+                "context_lifecycle": report})
+        with self.assertRaisesRegex(CoordinationError, "current app-agent turn"):
+            self.store.threads.checkpoint("direct", {"phase": "investigation", "summary": "Result.",
+                "context_lifecycle": report})
 
     def test_report_must_reference_an_actionable_assignment_to_its_owner(self):
         wrong_recipient = self.assign("peer")

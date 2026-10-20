@@ -299,9 +299,8 @@ class AppControlWorker:
                     reporting += "The runtime will notify the creating agent when this request's turn ends. "
                     if not reply_required:
                         reporting += "No separate completion message is needed. "
-                if mode == "orchestration":
-                    from .context_lifecycle import REPORTING_INSTRUCTIONS
-                    reporting += REPORTING_INSTRUCTIONS + " "
+                from .context_lifecycle import REPORTING_INSTRUCTIONS
+                reporting += REPORTING_INSTRUCTIONS + " "
                 body = (reporting +
                           "You are an independent app agent; specialist describes your role. "
                           "Follow repository work rules, release scopes after assignments, and keep this conversation "

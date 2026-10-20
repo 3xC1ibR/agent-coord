@@ -319,16 +319,17 @@ Workflow findings collection is off by default; enable it only with an explicit
 request for that dispatch or orchestration conversation.
 Normal task tracking, checkpoints, and result reporting remain in use.
 
-App agents created with `thread create --mode orchestration` also save a
-`context_lifecycle` envelope in their normal assignment-result checkpoint.
+All app agents, including user-created and ordinary dispatch conversations, save
+a `context_lifecycle` envelope at meaningful task completion or handoff.
 It recommends `reuse`, `fresh`, or `either`, explains what follow-up work would
 benefit from retained context, and provides confirmed facts, constraints,
 tried-and-failed approaches, and open questions for a replacement. Creation's
 automatic completion event and explicit requested replies carry an immutable
-snapshot matched to that assignment and turn. User-created conversations and
-ordinary dispatch-created agents do not acquire this reporting requirement.
+snapshot matched to that assignment and turn. Direct user work omits the
+optional assignment message ID; its report is bound to the current turn.
 The recommendation guides the orchestrator; it does not close or reset a
-conversation. See the [reporting contract](plugins/agent-coord/skills/agent-coordination/SKILL.md#context-lifecycle-for-orchestration-agents)
+conversation. The chat's right-hand panel shows the recommendation, reuse advice,
+and expandable handover. See the [reporting contract](plugins/agent-coord/skills/agent-coordination/SKILL.md#context-lifecycle-for-app-agents)
 and [reuse guidance](plugins/agent-coord/skills/orchestrate/SKILL.md).
 Automatic creation subscriptions can be disabled with `--no-subscribe`; the
 completed creation receipt reports `result.subscribe` and

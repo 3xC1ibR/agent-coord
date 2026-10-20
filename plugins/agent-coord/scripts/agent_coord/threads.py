@@ -732,7 +732,7 @@ class ThreadStore:
         if session_id:
             thread = self.ensure(session_id)
             with self.store._connection() as db:
-                if context_lifecycle.is_orchestrated(db, session_id):
+                if context_lifecycle.is_app_agent(db, session_id):
                     text += "\n" + context_lifecycle.REPORTING_INSTRUCTIONS
             text += "\nWorkspace domains: " + json.dumps(self.known_domains(thread["cwd"]))
             text += "\nThread context (saved data): " + json.dumps({

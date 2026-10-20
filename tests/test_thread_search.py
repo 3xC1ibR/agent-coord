@@ -116,6 +116,27 @@ class ThreadSearchTests(unittest.TestCase):
         self.assertTrue(rows[0]["wake_paused"])
         self.assertEqual(rows[0]["wake_pause_reason"], "Stopped by user")
 
+    def test_app_context_advice_is_available_for_routing_without_handover_bloat(self):
+        from test_codex_app_server import BrowserSessions, FakeCodex
+        sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(sessions.close)
+        thread = sessions.create({"name": "Database app specialist"})["session"]["thread_id"]
+        self.store.threads.start_turn(thread, turn_id="research")
+        report = {"recommendation": "reuse", "reason": "Useful source knowledge.",
+                  "reuse_for": ["Source questions"], "fresh_for": ["Independent review"],
+                  "handover": {"confirmed_facts": ["The index fits the query."], "constraints": [],
+                               "tried_and_failed": [], "open_questions": []}}
+        checkpoint = self.checkpoint(thread, context_lifecycle=report)["checkpoint"]
+        result = search_threads(self.store, "database", app_only=True, source="context")["items"][0]
+        self.assertEqual(result["context_lifecycle"], {"checkpoint_id": checkpoint["id"], "stale": False,
+            **{key: report[key] for key in ("recommendation", "reason", "reuse_for", "fresh_for")}})
+        self.assertEqual(self.store.threads.get(thread)["checkpoint"]["context_lifecycle"]["handover"], report["handover"])
+        self.store.threads.start_turn(thread, turn_id="follow-up")
+        stale = search_threads(self.store, "database", app_only=True)["items"][0]
+        self.assertTrue(stale["context_lifecycle"]["stale"])
+        self.checkpoint(thread, summary="Starting a new task.")
+        self.assertNotIn("context_lifecycle", search_threads(self.store, "database", app_only=True)["items"][0])
+
     def test_small_output_does_not_hydrate_inventory(self):
         for index in range(10):
             self.create(str(index), request="x" * 10000 + "database" + "y" * 10000)

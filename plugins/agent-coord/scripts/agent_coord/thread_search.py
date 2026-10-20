@@ -129,6 +129,8 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                    s.turn_active, o.repository_id, r.name AS repository_name,
                    o.project_id, p.name AS project_name, c.phase, c.summary, c.next_action,
                    c.next_actor, c.created_at AS checkpoint_at, {app} AS app_conversation,
+                   c.id AS lifecycle_checkpoint_id, c.context_lifecycle_json,
+                   c.context_lifecycle_turn_key IS NOT t.turn_key AS lifecycle_stale,
                    {context_match} AS context_match,
                    done.status AS last_turn_status,
                    MAX(t.created_at, COALESCE(t.turn_started_at, 0),
@@ -151,6 +153,12 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
         items = []
         for row in rows[:limit]:
             item = dict(row)
+            raw_lifecycle = item.pop("context_lifecycle_json")
+            lifecycle_id, lifecycle_stale = item.pop("lifecycle_checkpoint_id"), item.pop("lifecycle_stale")
+            if raw_lifecycle is not None:
+                report = json.loads(raw_lifecycle)
+                item["context_lifecycle"] = {"checkpoint_id": lifecycle_id, "stale": bool(lifecycle_stale),
+                    **{key: report[key] for key in ("recommendation", "reason", "reuse_for", "fresh_for")}}
             item["context_match"] = bool(item["context_match"]) and source != "messages"
             item["matches"] = []
             item["message_count"] = 0
