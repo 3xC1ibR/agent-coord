@@ -223,10 +223,11 @@ test("read receipts move responses to Idle without changing phase or dismissing 
   c.render([{...t, unread_result: false, checkpoint: {next_actor: "user", next_action: "Review"}}]);
   c.selectLevel(0); assert.deepEqual(c.ids(), ["findings"]);
 });
-test("group links preserve level and all groups remain reachable when their current state is empty", () => {
+test("aggregate cards omit group labels, and groups keep the level when their current state is empty", () => {
   const c = setup(); c.render([thread("a", {project_id: "a", project_name: "A", unread_result: true}), thread("b", {project_id: "b", project_name: "B"})]);
-  c.selectLevel(1);
-  c.page().querySelector(".ws-group-link").onclick(); assert.deepEqual(c.ids(), ["a"]);
+  c.selectLevel(1); assert.deepEqual(c.ids(), ["a"]);
+  assert.equal(c.page().querySelector(".ws-group-link"), null);
+  c.selectGroup("A"); assert.deepEqual(c.ids(), ["a"]);
   assert.equal(c.page().querySelector(".ws-page-title").textContent, "A");
   c.selectGroup("B"); assert.deepEqual(c.ids(), []); assert(c.page().querySelector(".ws-empty"));
   c.selectLevel(2); assert.deepEqual(c.ids(), ["b"]);

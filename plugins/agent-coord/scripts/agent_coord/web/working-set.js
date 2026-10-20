@@ -125,11 +125,6 @@ const WorkingSet = (() => {
           const link = button("Under " + (parent.title || "parent conversation"), "quiet ws-parent", () => onOpen(t.created_by_thread_id));
           link.dataset.thread = t.created_by_thread_id; link.dataset.action = "creator"; links.append(link);
         }
-        if (g.aggregate) {
-          const descriptor = groupFor(t, byId, dimension, workspace);
-          const link = button(descriptor.name, "quiet ws-group-link", () => go(groups.findIndex(g => g.key === descriptor.key), level));
-          link.dataset.action = "group"; links.append(link);
-        }
         if (onDismiss && completed(t) && columnOf(t) === "working" && !running(t)) {
           const dismiss = button("Dismiss", "quiet ws-read", () => onDismiss(t), "Dismiss completed response · " + t.title);
           dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss"; links.append(dismiss);
