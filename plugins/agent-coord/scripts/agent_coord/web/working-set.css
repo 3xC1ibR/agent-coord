@@ -9,7 +9,6 @@
 .working-set .ws-neighbor > * { pointer-events: none; }
 .working-set .ws-level-title { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
 .working-set .ws-level-title h3 { margin: 0; font-size: 17px; font-weight: 500; }
-.working-set .ws-level-title > span, .working-set .ws-section-title > span { font-size: 11px; color: var(--muted); }
 .working-set .ws-section { margin: 22px 0; min-width: 0; }
 .working-set .ws-section-title { display: flex; align-items: baseline; gap: 10px; padding-bottom: 9px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
 .working-set .ws-section-title h4 { margin: 0; font-size: 13px; font-weight: 600; }

@@ -105,12 +105,11 @@ const WorkingSet = (() => {
     function rememberScroll() {
       for (const track of tracks) for (const page of track.children) scroll.set(page.dataset.level + ":" + page.dataset.key, page.scrollTop);
     }
-    function section(page, g, items, title, key, count = false, empty = "") {
+    function section(page, g, items, title, key, empty = "") {
       if (!items.length && !empty) return;
       const section = el("section", "ws-section"); section.dataset.section = key;
       if (title) {
-        const heading = el("header", "ws-section-title"); heading.append(el("h4", "", title));
-        if (count) heading.append(el("span", "", String(items.length))); section.append(heading);
+        const heading = el("header", "ws-section-title"); heading.append(el("h4", "", title)); section.append(heading);
       }
       const cards = el("div", "thread-cards"), expansionKey = g.key + ":" + key;
       for (const t of items.slice(0, expanded.has(expansionKey) ? Infinity : CAP)) {
@@ -145,7 +144,7 @@ const WorkingSet = (() => {
       const page = el("section", "ws-page"); page.dataset.key = g.key; page.dataset.level = String(n); page.dataset.index = String(i);
       const title = el("h2", "ws-page-title sr-only", g.name); title.tabIndex = -1; // Group tabs already show the visible name.
       const heading = el("div", "ws-level-title"); heading.append(el("h3", "", LEVELS[n]));
-      const items = g.levels[n]; if (items.length) heading.append(el("span", "", String(items.length)));
+      const items = g.levels[n];
       page.append(title, heading);
       if (!items.length) {
         page.append(el("p", "ws-empty", ["Nothing needs attention", "No replies to read", "No idle threads"][n] + (g.aggregate ? " across these groups." : " in this group.")));
@@ -156,7 +155,7 @@ const WorkingSet = (() => {
         const board = el("div", "ws-attention-board"); board.setAttribute("aria-label", "Increasing attention from left to right");
         for (const [key, title, empty] of [["working", "Working / Completed", "No running agents or completed work."],
           ["attention", "Needs your attention", "No reviews or decisions requested."], ["blocked", "Blocked", "No agents waiting for your input."]]) {
-          section(board, g, items.filter(t => columnOf(t) === key), title, key, true, empty);
+          section(board, g, items.filter(t => columnOf(t) === key), title, key, empty);
         }
         page.append(board);
       } else if (n === 1) {
