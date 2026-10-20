@@ -116,7 +116,7 @@ function setup({saved = [], groups = [], windowStorage = storage(), preferences 
     "view-rename", "view-duplicate", "view-delete", "view-menu-toggle", "view-custom-actions", "filter-count",
     "filter-toggle", "filter-label", "saved-filter", "add-group", "group-rename", "mobile-view", "mobile-view-attention", "mobile-view-activity", "saved-view-tabs", "show-now", "show-later", "show-closed"];
   const controls = Object.fromEntries(ids.map(id => [id, new Element(id)]));
-  for (const id of ["group-remove", "group-context-menu", "context-remove-group", "remove-group-dialog", "remove-group-form",
+  for (const id of ["group-remove", "group-context-menu", "context-rename-group", "context-remove-group", "remove-group-dialog", "remove-group-form",
     "remove-group-title", "remove-group-description", "remove-group-error", "confirm-remove-group", "cancel-remove-group"]) controls[id] = new Element(id);
   controls["group-context-menu"].hidden = true;
   controls.view.value = "active"; controls["group-by"].value = "phase";

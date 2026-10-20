@@ -7,6 +7,10 @@
 .saved-view-tab { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; max-width: 220px; padding: 10px 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); font-size: 12px; }
 .saved-view-tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
 .saved-view-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.saved-view-tab[draggable="true"] { cursor: grab; }
+.saved-view-tab[data-group-dragging] { opacity: .5; cursor: grabbing; }
+.saved-view-tab[data-group-drop="before"] { box-shadow: -3px 0 var(--accent); }
+.saved-view-tab[data-group-drop="after"] { box-shadow: 3px 0 var(--accent); }
 .saved-view-tab.view-drop-allowed { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .saved-view-tab.view-drop-blocked { opacity: .5; }
 .saved-view-tab.view-drop-over { background: var(--tint) !important; outline-style: solid; color: var(--accent); }

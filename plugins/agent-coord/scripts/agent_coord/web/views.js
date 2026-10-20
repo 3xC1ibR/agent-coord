@@ -62,7 +62,7 @@ class SavedViews {
     this.all = {id: "all", name: "All conversations", filters: threadViews.filters(), group_by: this.$("group-by").value || "phase", version: 1};
     this.items = [this.all]; this.groups = []; this.saved = []; this.activeId = "all"; this.definition = this.all;
     this.navigation = {}; this.threads = []; this.switchVersion = 0; this.busy = false; this.signature = "";
-    this.saves = new Map();
+    this.saves = new Map(); this.groupOrders = new Map();
     try { this.navigation = JSON.parse(storage?.getItem(this.key) || "{}"); } catch { /* Optional window state. */ }
     if (!this.navigation || typeof this.navigation !== "object" || Array.isArray(this.navigation)) this.navigation = {};
     this.bind();
@@ -118,13 +118,63 @@ class SavedViews {
   scoped(items) { return items.filter(view => this.cwd === undefined || view.cwd === this.cwd); }
   local(view) { return view.id === "all" || view.kind === "group"; }
   groupItems() {
+    if (!this.groupOrders.has(this.key)) {
+      let order = [];
+      try { order = JSON.parse(this.preferences?.getItem(this.key + ".group-order") || "[]"); } catch { /* Optional preference. */ }
+      this.groupOrders.set(this.key, Array.isArray(order) ? order.filter(id => typeof id === "string") : []);
+    }
+    const rank = new Map(this.groupOrders.get(this.key).map((id, index) => [id, index]));
     return this.groups.filter(group => this.cwd === undefined || group.cwd === this.cwd)
       .map(group => ({id: "group-" + group.id, kind: "group", projectId: group.id, name: group.name,
-        cwd: this.cwd, version: 1, filters: threadViews.filters({project: group.id}), group_by: "phase"}));
+        cwd: this.cwd, version: 1, filters: threadViews.filters({project: group.id}), group_by: "phase"}))
+      .sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity));
+  }
+  moveGroup(id, targetId, after = false) {
+    const order = this.groupItems().map(view => view.id);
+    if (this.busy || id === targetId || !order.includes(id) || !order.includes(targetId)) return;
+    order.splice(order.indexOf(id), 1);
+    order.splice(order.indexOf(targetId) + Number(after), 0, id);
+    this.groupOrders.set(this.key, order);
+    try { this.preferences?.setItem(this.key + ".group-order", JSON.stringify(order)); } catch { /* Keep the order in this window. */ }
+    this.rebuild(); this.render();
+  }
+  clearGroupDrag() {
+    this.dragGroup = null;
+    for (const tab of this.$("saved-view-tabs").children) {
+      delete tab.dataset.groupDrop; delete tab.dataset.groupDragging;
+    }
+  }
+  bindGroupDrag(tab, view) {
+    tab.draggable = true;
+    tab.title += " · Drag to reorder";
+    tab.ondragstart = event => {
+      if (this.busy) { event.preventDefault(); return; }
+      this.closeMenu(); this.dragGroup = {id: view.id, key: this.key};
+      tab.dataset.groupDragging = "true";
+      event.dataTransfer.setData("application/x-ribbon-field-group", view.id);
+      event.dataTransfer.effectAllowed = "move";
+    };
+    tab.ondragover = event => {
+      if (!this.dragGroup || this.dragGroup.key !== this.key || this.dragGroup.id === view.id) return;
+      event.preventDefault(); event.dataTransfer.dropEffect = "move";
+      const rect = tab.getBoundingClientRect();
+      for (const other of this.$("saved-view-tabs").children) delete other.dataset.groupDrop;
+      tab.dataset.groupDrop = event.clientX >= rect.left + rect.width / 2 ? "after" : "before";
+    };
+    tab.ondragleave = () => { delete tab.dataset.groupDrop; };
+    tab.ondrop = event => {
+      const source = this.dragGroup;
+      if (!source || source.key !== this.key) return;
+      event.preventDefault(); event.stopPropagation();
+      const rect = tab.getBoundingClientRect(), after = event.clientX >= rect.left + rect.width / 2;
+      this.clearGroupDrag(); this.moveGroup(source.id, view.id, after);
+    };
+    tab.ondragend = () => { this.clearGroupDrag(); this.render(); };
   }
   rebuild() { this.items = [this.all, ...this.groupItems(), ...this.scoped(this.saved)]; }
   async openGroup(id) { return this.activate(id ? "group-" + id : "all"); }
   async setProject(cwd) {
+    this.clearGroupDrag();
     this.remember();
     const version = ++this.switchVersion;
     await Promise.all([...this.saves.values()].map(pending => pending.promise));
@@ -333,7 +383,7 @@ class SavedViews {
     const y = event.type === "contextmenu" ? event.clientY : rect.bottom;
     menu.style.left = Math.max(8, Math.min(x, (win?.innerWidth || 1024) - bounds.width - 8)) + "px";
     menu.style.top = Math.max(8, Math.min(y, (win?.innerHeight || 768) - bounds.height - 8)) + "px";
-    this.$("context-remove-group").focus();
+    this.$("context-rename-group").focus();
   }
   async requestGroupRemoval(view) {
     if (!view?.projectId || this.busy) return;
@@ -404,6 +454,8 @@ class SavedViews {
   }
   render(threads = this.threads) {
     this.threads = threads;
+    // Inventory polling must not replace the native drag source mid-gesture.
+    if (this.dragGroup?.key === this.key) return;
     this.changed();
     const badges = this.items.map(view => threadViews.badges(threads, this.effective(view).filters));
     const signature = JSON.stringify([this.items, this.activeId, badges]);
@@ -446,6 +498,7 @@ class SavedViews {
       }
       tab.onclick = () => this.activate(view.id).catch(this.onError);
       if (view.kind === "group") {
+        this.bindGroupDrag(tab, view);
         tab.oncontextmenu = event => this.openGroupMenu(view, tab, event);
         tab.onkeydown = event => {
           if (event.key === "ContextMenu" || event.shiftKey && event.key === "F10") this.openGroupMenu(view, tab, event);
@@ -472,14 +525,15 @@ class SavedViews {
     catch (error) { this.onError(error); }
     finally { this.busy = false; this.$("save-view").disabled = false; this.render(); }
   }
-  async openDialog(mode) {
+  async openDialog(mode, target = this.current()) {
     const id = this.activeId, cwd = this.cwd;
     await this.saves.get(id)?.promise;
     if (this.activeId !== id || this.cwd !== cwd || cwd === "") return;
     this.closeMenu();
     // Capture the target and definition so polling or navigation cannot retarget a save.
-    const view = this.current();
-    this.edit = {mode, id: view.id, projectId: view.projectId, version: this.definition.version, cwd,
+    const view = this.items.find(view => view.id === target.id);
+    if (!view) return;
+    this.edit = {mode, id: view.id, projectId: view.projectId, version: view.version, cwd,
       value: mode === "duplicate" ? {filters: view.filters, group_by: view.group_by} : this.read()};
     this.$("view-dialog-title").textContent = mode === "group-rename" ? "Rename group" : mode === "rename" ? "Rename saved filters" : mode === "duplicate" ? "Duplicate saved filters" : "Save filters";
     this.$("view-dialog-description").textContent = mode === "group-rename" ? "Change the name wherever this group appears."
@@ -516,6 +570,16 @@ class SavedViews {
       if (this.$("saved-filter").value) return this.activate(this.$("saved-filter").value).catch(this.onError);
     };
     this.$("group-rename").onclick = () => this.openDialog("group-rename").catch(this.onError);
+    this.$("context-rename-group").onclick = () => this.openDialog("group-rename", this.contextGroup).catch(this.onError);
+    this.$("group-context-menu").onkeydown = event => {
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const buttons = [...this.$("group-context-menu").children];
+      const current = buttons.indexOf(this.doc.activeElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 :
+        (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    };
     this.$("group-remove").onclick = () => this.requestGroupRemoval(this.current()).catch(this.onError);
     this.$("context-remove-group").onclick = () => this.requestGroupRemoval(this.contextGroup).catch(this.onError);
     this.$("remove-group-form").onsubmit = event => {
