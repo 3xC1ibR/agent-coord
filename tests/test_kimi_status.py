@@ -123,3 +123,35 @@ class KimiStatusTests(unittest.TestCase):
         cursor = self.cursor()
         self.append(self.prompt(), {"type": "prompt.completed", "agentId": "main", "promptId": "0", "reason": "failed"})
         self.assertIn("failed without error details", cursor.failure()["message"])
+
+    def test_delayed_flush_of_terminal_turn_failure_is_captured(self):
+        cursor = self.cursor()
+        self.append(self.prompt(), {"type": "agent.message.appended", "agentId": "main", "turnId": 0})
+        polls = 0
+        def flush_on_second_poll(_seconds):
+            nonlocal polls
+            polls += 1
+            if polls == 2:
+                self.append(self.ended())
+        with patch("agent_coord.kimi_status.time.sleep", side_effect=flush_on_second_poll):
+            failure = cursor.failure()
+        self.assertEqual(polls, 2)
+        self.assertEqual(failure["statusCode"], 429)
+        self.assertEqual(failure["name"], "APIProviderQuotaExhaustedError")
+
+    def test_step_interrupted_error_and_pre_turn_prompt_failure_are_captured(self):
+        cursor = self.cursor()
+        self.append(
+            self.prompt(),
+            {"type": "turn.step.interrupted", "agentId": "main", "turnId": 0, "stepIndex": 8,
+             "reason": "error", "message": "429 You've reached your 5-hour usage limit."},
+            {"type": "prompt.completed", "agentId": "main", "promptId": "0", "reason": "failed"},
+        )
+        self.assertEqual(cursor.failure(), {"message": "429 You've reached your 5-hour usage limit."})
+        pre_turn = self.cursor()
+        self.append(
+            {"type": "prompt.submitted", "agentId": "main", "promptId": "p-early", "time": 10**15},
+            {"type": "prompt.completed", "agentId": "main", "promptId": "p-early", "reason": "failed", "time": 10**15},
+        )
+        self.assertIn("failed without error details", pre_turn.failure()["message"])
+

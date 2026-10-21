@@ -222,7 +222,7 @@ class KimiUsageTests(unittest.TestCase):
         self.store.usage.replace_snapshots.assert_not_called()
         self.assertIn("bounded import size", self.store.usage.record_unavailable.call_args.kwargs["note"])
 
-    def test_mutation_during_scan_is_rejected(self):
+    def test_mutation_during_scan_is_rejected_and_backfill_retries_until_stable(self):
         path = self.journal(measured())
         stat = path.stat()
         changed = SimpleNamespace(st_dev=stat.st_dev, st_ino=stat.st_ino,
@@ -230,6 +230,20 @@ class KimiUsageTests(unittest.TestCase):
         with patch.object(Path, "stat", return_value=changed):
             with self.assertRaisesRegex(ValueError, "changed during import"):
                 read_journal(path, "main")
+        real_read = read_journal
+        calls = 0
+        def flaky_read(target, agent_id, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise ValueError("Kimi journal changed during import")
+            return real_read(target, agent_id, **kwargs)
+        with patch("agent_coord.kimi_usage.read_journal", side_effect=flaky_read), \
+                patch("agent_coord.kimi_usage.time.sleep"):
+            backfill_usage(self.store, "thread")
+        self.assertEqual(calls, 3)
+        self.assertEqual(self.snapshots()["direct"]["totals"]["total_tokens"], 15)
+        self.store.usage.record_unavailable.assert_not_called()
 
     def test_agent_enumeration_is_bounded_and_missing_child_is_not_zero(self):
         self.journal(measured())

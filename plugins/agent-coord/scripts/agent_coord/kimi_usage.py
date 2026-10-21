@@ -12,6 +12,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 from .kimi_setup import kimi_home
@@ -23,6 +24,8 @@ _IMPORT_LOCK = threading.RLock()
 _MAX_LINE = 8 * 1024 * 1024
 _MAX_IMPORT_BYTES = 64 * 1024 * 1024
 _MAX_AGENT_ENTRIES = 64
+_FLUSH_RETRIES = 10
+_FLUSH_RETRY_SECONDS = 0.01
 _COUNTERS = {
     "inputOther": "uncached_input_tokens",
     "output": "output_tokens",
@@ -189,6 +192,16 @@ def _child_journals(directory):
     return sorted(paths), truncated
 
 
+def _read_stable_journal(path, agent_id, *, forked=False, max_bytes=_MAX_IMPORT_BYTES):
+    for attempt in range(_FLUSH_RETRIES):
+        try:
+            return read_journal(path, agent_id, forked=forked, max_bytes=max_bytes)
+        except ValueError as exc:
+            if str(exc) != "Kimi journal changed during import" or attempt + 1 >= _FLUSH_RETRIES:
+                raise
+            time.sleep(_FLUSH_RETRY_SECONDS)
+
+
 def backfill_usage(store, thread_id, transcript_path=None):
     """Replace canonical native totals at lifecycle boundaries or explicit import.
 
@@ -210,7 +223,7 @@ def backfill_usage(store, thread_id, transcript_path=None):
             main_path = directory / "agents/main/wire.jsonl"
             if not main_path.resolve().is_relative_to(directory.resolve()):
                 raise ValueError("Kimi journal is outside its mapped native session")
-            main = read_journal(main_path, "main", forked=bool(state.get("forkedFrom")), max_bytes=_MAX_IMPORT_BYTES)
+            main = _read_stable_journal(main_path, "main", forked=bool(state.get("forkedFrom")), max_bytes=_MAX_IMPORT_BYTES)
         except (OSError, ValueError) as exc:
             store.usage.record_unavailable(thread_id, provider="kimi", native_id=native_id, note=str(exc))
             return store.usage.summary(thread_id, provider="kimi")
@@ -224,7 +237,7 @@ def backfill_usage(store, thread_id, transcript_path=None):
             try:
                 if not path.resolve().is_relative_to(directory.resolve()):
                     raise ValueError("Kimi child journal is outside its native session")
-                child = read_journal(path, path.parent.name, forked=bool(state.get("forkedFrom")), max_bytes=remaining)
+                child = _read_stable_journal(path, path.parent.name, forked=bool(state.get("forkedFrom")), max_bytes=remaining)
                 children.append(child)
                 remaining -= child["provenance"]["size_bytes"]
             except (OSError, ValueError):

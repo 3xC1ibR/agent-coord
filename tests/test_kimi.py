@@ -427,8 +427,8 @@ class KimiTests(unittest.TestCase):
     def test_native_quota_failure_overrides_end_turn_even_after_tool_output(self):
         from agent_coord.app_control import AppControl
         self.store.register(session_id="parent", client="codex", cwd=str(self.root))
-        for with_output in (False, True):
-            with self.subTest(with_output=with_output):
+        for with_output, delayed_flush in ((False, False), (True, False), (True, True)):
+            with self.subTest(with_output=with_output, delayed_flush=delayed_flush):
                 thread = self.create()
                 native = self.sessions.kimi.native[thread]
                 directory = self.root / "kimi/sessions/workspace" / native
@@ -447,16 +447,20 @@ class KimiTests(unittest.TestCase):
                 if with_output:
                     self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Working"})
                     self.update(thread, sessionUpdate="tool_call", toolCallId="tool", status="completed")
-                records = [
-                    {"type": "turn.prompt", "agentId": "main", "turnId": 4, "promptId": "new"},
-                    {"type": "turn.ended", "agentId": "main", "turnId": 4, "reason": "failed", "error": {
-                        "code": "provider.api_error", "name": "APIProviderQuotaExhaustedError",
-                        "message": "429 You've reached your 5-hour usage limit.", "retryable": False,
-                        "details": {"statusCode": 429, "private": "not retained"}}}]
+                prompt_record = {"type": "turn.prompt", "agentId": "main", "turnId": 4, "promptId": "new"}
+                ended_record = {"type": "turn.ended", "agentId": "main", "turnId": 4, "reason": "failed", "error": {
+                    "code": "provider.api_error", "name": "APIProviderQuotaExhaustedError",
+                    "message": "429 You've reached your 5-hour usage limit.", "retryable": False,
+                    "details": {"statusCode": 429, "private": "not retained"}}}
                 with path.open("a") as journal:
-                    for record in records:
-                        journal.write(json.dumps(record) + "\n")
-                connection.future.set_result({"stopReason": "end_turn"})
+                    journal.write(json.dumps(prompt_record) + "\n")
+                    if not delayed_flush:
+                        journal.write(json.dumps(ended_record) + "\n")
+                def flush_turn_ended(_seconds):
+                    with path.open("a") as journal:
+                        journal.write(json.dumps(ended_record) + "\n")
+                with patch("agent_coord.kimi_status.time.sleep", side_effect=flush_turn_ended if delayed_flush else None):
+                    connection.future.set_result({"stopReason": "end_turn"})
                 turn = self.sessions.read(thread)["thread"]["turns"][-1]
                 self.assertEqual(turn["status"], "failed")
                 self.assertEqual(turn["error"]["statusCode"], 429)

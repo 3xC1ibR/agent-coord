@@ -14,6 +14,8 @@ from .kimi_usage import WIRE_VERSIONS, _session_directory
 
 MAX_BYTES = 64 * 1024 * 1024
 MAX_LINE = 8 * 1024 * 1024
+FLUSH_WAIT_SECONDS = 0.25
+FLUSH_POLL_SECONDS = 0.005
 
 
 class PromptJournal:
@@ -39,58 +41,108 @@ class PromptJournal:
         return directory / "agents" / "main" / "wire.jsonl"
 
     def failure(self):
+        deadline = time.monotonic() + FLUSH_WAIT_SECONDS
+        while True:
+            settled, failure = self._scan()
+            if settled or time.monotonic() >= deadline:
+                return failure
+            time.sleep(FLUSH_POLL_SECONDS)
+
+    def _scan(self):
         try:
             path = self._path()  # Revalidate native ID and cwd at completion.
             if self.path is not None and self.path != path:
-                return None
+                return True, None
+        except (OSError, ValueError):
+            return True, None
+        try:
             with path.open("rb") as journal:
                 stat = os.fstat(journal.fileno())
                 if self.identity is not None:
                     if ((stat.st_dev, stat.st_ino) != self.identity or stat.st_size < self.offset):
-                        return None
+                        return True, None
                     journal.seek(max(0, self.offset - 128))
                     if journal.read(len(self.anchor)) != self.anchor:
-                        return None
+                        return True, None
                 if stat.st_size - self.offset > MAX_BYTES:
-                    return None
+                    return True, None
                 journal.seek(0)
-                header = json.loads(journal.readline(MAX_LINE + 1))
-                if header.get("type") != "metadata" or header.get("protocol_version") not in WIRE_VERSIONS:
-                    return None
+                header_line = journal.readline(MAX_LINE + 1)
+                if len(header_line) > MAX_LINE:
+                    return True, None
+                if not header_line.endswith(b"\n"):
+                    return False, None
+                header = json.loads(header_line)
+                if not isinstance(header, dict) or header.get("type") != "metadata" or header.get("protocol_version") not in WIRE_VERSIONS:
+                    return True, None
                 journal.seek(self.offset or journal.tell())
                 # Never interpret the suffix of a record already being written
                 # at submission as a new event.
                 if self.offset and not self.anchor.endswith(b"\n"):
-                    journal.readline(MAX_LINE + 1)
-                turn_id, prompt_id, failure = None, None, None
+                    partial = journal.readline(MAX_LINE + 1)
+                    if len(partial) > MAX_LINE:
+                        return True, None
+                    if not partial.endswith(b"\n"):
+                        return False, None
+                turn_id, prompt_id = None, None
+                settled, failure, step_failure = False, None, None
                 while journal.tell() < stat.st_size:
                     line = journal.readline(min(MAX_LINE + 1, stat.st_size - journal.tell()))
                     if len(line) > MAX_LINE:
-                        return None
+                        return True, None
                     if not line.endswith(b"\n"):
                         break  # Ignore an incomplete tail after a terminal event.
                     record = json.loads(line)
                     if not isinstance(record, dict) or record.get("type") == "metadata":
-                        return None
+                        return True, None
                     if record.get("agentId") != "main":
                         continue
-                    if record.get("type") == "turn.prompt":
-                        if self.identity is None and (not isinstance(record.get("time"), (int, float))
-                                or record["time"] < self.started_ms):
+                    fresh = (self.identity is not None
+                             or (isinstance(record.get("time"), (int, float)) and record["time"] >= self.started_ms))
+                    kind = record.get("type")
+                    if kind == "turn.prompt":
+                        if not fresh:
                             continue
                         turn_id, prompt_id = record.get("turnId"), record.get("promptId")
-                        failure = None
-                    elif (turn_id is not None and record.get("type") == "turn.ended"
+                        settled, failure, step_failure = False, None, None
+                    elif kind in {"prompt.submitted", "prompt.started"}:
+                        if not fresh:
+                            continue
+                        if prompt_id != record.get("promptId"):
+                            turn_id, prompt_id = None, record.get("promptId")
+                            settled, failure, step_failure = False, None, None
+                    elif (turn_id is not None and kind == "turn.step.interrupted"
+                          and record.get("turnId") == turn_id and record.get("reason") == "error"):
+                        step_failure = _step_error(record.get("message"))
+                    elif (turn_id is not None and kind == "turn.ended"
                           and record.get("turnId") == turn_id):
-                        failure = _error(record.get("error")) if record.get("reason") == "failed" else None
-                        if record.get("reason") == "failed" and failure is None:
-                            failure = {"message": "Kimi's native turn failed without error details."}
-                    elif (prompt_id is not None and record.get("type") == "prompt.completed"
-                          and record.get("promptId") == prompt_id and record.get("reason") == "failed" and failure is None):
-                        failure = {"message": "Kimi's native prompt failed without error details."}
-                return failure
+                        settled = True
+                        if record.get("reason") == "failed":
+                            failure = (_error(record.get("error")) or step_failure
+                                       or {"message": "Kimi's native turn failed without error details."})
+                        else:
+                            failure, step_failure = None, None
+                    elif kind in {"prompt.completed", "prompt.aborted"}:
+                        if prompt_id is not None and record.get("promptId") == prompt_id:
+                            settled = True
+                            if kind == "prompt.completed" and record.get("reason") == "failed" and failure is None:
+                                failure = step_failure or {"message": "Kimi's native prompt failed without error details."}
+                        elif turn_id is None and prompt_id is None and fresh:
+                            prompt_id = record.get("promptId")
+                            settled = True
+                            if kind == "prompt.completed" and record.get("reason") == "failed":
+                                failure = {"message": "Kimi's native prompt failed without error details."}
+                return settled, failure or step_failure
+        except FileNotFoundError:
+            return self.identity is not None, None
         except (OSError, ValueError, TypeError, AttributeError):
-            return None  # An unavailable/unsupported log cannot establish failure.
+            return True, None  # An unavailable/unsupported log cannot establish failure.
+
+
+def _step_error(value):
+    if isinstance(value, str) and value.strip():
+        return {"message": value.strip()[:2000]}
+    return {"message": "Kimi's native turn failed without error details."}
 
 
 def _error(value):
