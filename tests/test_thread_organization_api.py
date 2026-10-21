@@ -93,6 +93,46 @@ class ThreadOrganizationTests(unittest.TestCase):
         explicit = self.create_agent(parent, project_id=other["id"])
         self.assertEqual(self.store.threads.get(explicit)["project_id"], other["id"])
 
+    def test_orchestration_workspace_visibility_survives_closed_ancestors_and_restart(self):
+        other = self.root / "other"
+        other.mkdir()
+        parent = self.create(cwd=str(self.root))
+        child = self.create_agent(parent, cwd=str(self.repo))
+        grandchild = self.create_agent(child, cwd=str(other))
+        self.store.threads.update(parent, attention="archived")
+        self.store.threads.update(child, attention="later")
+        # Execution cwd is mutable; the project where work began stays stable.
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET cwd = ? WHERE session_id = ?", (str(self.repo), parent))
+        restarted = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(restarted.close)
+        listed = {t["thread_id"]: t for t in restarted.list_work_threads()}
+        self.assertNotIn(parent, listed)
+        self.assertEqual(listed[child]["orchestration_workspaces"], [str(self.root)])
+        self.assertEqual(listed[grandchild]["orchestration_workspaces"], [str(self.repo), str(self.root)])
+        self.assertEqual(listed[grandchild]["cwd"], str(other))
+        self.assertEqual(listed[grandchild]["project_cwd"], str(other))
+        self.assertEqual(restarted.work_thread(grandchild)["orchestration_workspaces"],
+                         listed[grandchild]["orchestration_workspaces"])
+
+    def test_dispatch_workspace_stays_independent_of_creator(self):
+        parent = self.create(cwd=str(self.root))
+        specialist = self.create_agent(parent, mode=None, cwd=str(self.repo))
+        worker = self.create_agent(specialist)
+        self.assertEqual(self.sessions.work_thread(specialist)["orchestration_workspaces"], [])
+        self.assertEqual(self.sessions.work_thread(worker)["orchestration_workspaces"], [str(self.repo)])
+
+    def test_workspace_visibility_handles_historical_creation_cycles(self):
+        parent = self.create(cwd=str(self.root))
+        child = self.create_agent(parent, cwd=str(self.repo))
+        control = AppControl(self.store)
+        request = control.request("create", child, {"prompt": "Old provenance", "mode": "orchestration"})
+        control.claim(request["request_id"], "test")
+        control.identified(request["request_id"], parent)
+        control.complete(request["request_id"], result={"thread_id": parent})
+        self.assertEqual(self.sessions.work_thread(child)["orchestration_workspaces"], [str(self.root)])
+        self.assertEqual(self.sessions.work_thread(parent)["orchestration_workspaces"], [str(self.repo)])
+
     def test_group_recurses_through_mixed_terminal_and_app_descendants(self):
         parent = self.create(project_id=self.project["id"])
         self.store.register(session_id="terminal-child", client="codex", cwd=str(self.root))

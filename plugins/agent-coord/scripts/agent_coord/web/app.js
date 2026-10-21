@@ -398,6 +398,11 @@ function threadCard(thread, compact = false, inAttention = false) {
     title.append(node("span", thread.title));
 
     button.append(title);
+    if (thread.creation_mode === "orchestration" && thread.cwd) {
+      const folder = node("small", thread.cwd.split("/").filter(Boolean).pop() || "/", "placement-label");
+      folder.title = "Working folder: " + thread.cwd;
+      button.append(folder);
+    }
     if (snoozeLabel(thread)) button.append(node("small", snoozeLabel(thread), "placement-label"));
   } else {
     title.append(node("span", thread.title));
@@ -414,6 +419,11 @@ function threadCard(thread, compact = false, inAttention = false) {
     const logo = globalThis.providerLogo?.(thread.client, {codex: "OpenAI · Codex", claude: "Anthropic · Claude Code",
       muse: "Meta · Muse Code", kimi: "Moonshot · Kimi Code", antigravity: "Google · Antigravity"}[thread.client]);
     if (logo) meta.append(logo);
+    if (thread.creation_mode === "orchestration" && thread.cwd) {
+      const folder = node("span", thread.cwd.split("/").filter(Boolean).pop() || "/", "placement-label");
+      folder.title = "Working folder: " + thread.cwd;
+      meta.append(folder);
+    }
     if (thread.attention === "later") meta.append(node("span", "Later", "placement-label"));
     if (snoozeLabel(thread)) meta.append(node("span", snoozeLabel(thread), "placement-label"));
     if (thread.unread && !thread.unread_result && !inAttention) meta.append(node("span", "New checkpoint", "unread-mark"));
@@ -489,6 +499,9 @@ function threadCard(thread, compact = false, inAttention = false) {
     more.disabled = state.closing.has(thread.thread_id) || state.updatingThreads.has(thread.thread_id);
     more.onclick = event => {
       const items = [
+        ...(thread.orchestration_workspaces?.includes(state.projectCwd)
+          && (thread.project_cwd || thread.cwd) !== state.projectCwd
+          ? [{label: "Open agent’s project", run: () => action(() => openProjectDirectory(thread.project_cwd || thread.cwd))}] : []),
         {label: thread.project_id ? "Change group" : "Add to group", run: () => action(() => organizeThread(thread))},
         {label: "Move to project…", disabled: !!threadMoveUnavailable(thread), run: () => openThreadMove(thread)},
         {label: thread.pinned ? "Unpin" : "Pin", run: () => action(() => toggleThreadPinned(thread))},
@@ -936,8 +949,10 @@ function agentThreadChildren(parent, tree, compact) {
       : child.client === "muse" ? "Muse Code" : child.client === "kimi" ? "Kimi" : child.client === "antigravity" ? "Antigravity" : "Unknown provider";
     const logoLabel = child.client === "codex" ? "OpenAI · Codex" : child.client === "claude" ? "Anthropic · Claude Code" : child.client === "muse" ? "Meta · Muse Code" : child.client === "kimi" ? "Moonshot · Kimi Code" : "Google · Antigravity";
     const logo = globalThis.providerLogo?.(child.client, logoLabel);
-    const labels = [!logo && provider, phase, status.key !== "running" && status.label !== phase && status.label].filter(Boolean);
+    const labels = [!logo && provider, phase, status.key !== "running" && status.label !== phase && status.label,
+      child.cwd && (child.cwd.split("/").filter(Boolean).pop() || "/")].filter(Boolean);
     const metadata = node("span", labels.join(" · "), "agent-row-status");
+    if (child.cwd) metadata.title = "Working folder: " + child.cwd;
     if (logo) metadata.replaceChildren(logo, node("span", labels.join(" · ")));
     button.append(metadata);
     if (status.key === "running") button.append(node("span", status.label, "sr-only"));
@@ -992,9 +1007,10 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   if (id === "new-session") return newSession();
   if ((!tabId || tabId === id) && !state.paneMode && !state.conversationWindow) {
     const known = state.sessions?.find(thread => thread.thread_id === id) || state.conversations?.get(id)?.detail?.work_thread;
-    if (stayInProject && (known?.project_cwd || known?.cwd) && (known.project_cwd || known.cwd) !== state.projectCwd) return;
+    const related = known?.orchestration_workspaces?.includes(state.projectCwd);
+    if (stayInProject && !related && (known?.project_cwd || known?.cwd) && (known.project_cwd || known.cwd) !== state.projectCwd) return;
     const cwd = known?.project_cwd || known?.cwd;
-    if (cwd && cwd !== state.folders?.selected?.cwd) await openProjectDirectory(cwd, {preserveRollUp: rollUp});
+    if (!related && cwd && cwd !== state.folders?.selected?.cwd) await openProjectDirectory(cwd, {preserveRollUp: rollUp});
   }
   $("conversation").classList.remove("session-draft");
   if (!rollUp) state.rollUp?.stop();
@@ -1070,7 +1086,8 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   if (fresh === false) return;
   if (state.paneMode) return;
   const displayed = state.detail.work_thread;
-  if ((!tabId || tabId === id) && !state.conversationWindow && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
+  if ((!tabId || tabId === id) && !state.conversationWindow && !displayed.orchestration_workspaces?.includes(state.projectCwd)
+      && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
     if (stayInProject) { goHome({restoreDispatcher: false}); return; }
     await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp});
     return select(id, {rollUp});

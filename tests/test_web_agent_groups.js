@@ -44,6 +44,38 @@ function harness(threads) {
   return c;
 }
 
+test("cross-folder descendants render in the parent's project with working-directory labels", async () => {
+  const root = thread("parent", null, {project_cwd: "/projects", cwd: "/projects"});
+  const child = thread("child", "parent", {project_cwd: "/projects/foobar", cwd: "/projects/foobar",
+    orchestration_workspaces: ["/projects"]});
+  const unrelated = thread("unrelated", null, {project_cwd: "/projects/other", cwd: "/projects/other"});
+  const c = harness([root, child, unrelated]);
+  const {inProject} = require("../plugins/agent-coord/scripts/agent_coord/web/folders.js");
+  c.state.projectCwd = "/projects";
+  c.threadsInProject = records => records.filter(t => inProject(t, c.state.projectCwd));
+  c.renderList();
+  assert.deepEqual(c.cards(), ["parent"]);
+  assert.deepEqual(c.rows().map(row => row.dataset.thread), ["child"]);
+  const metadata = withClass(c.rows()[0], "agent-row-status")[0];
+  assert.match(metadata.textContent, /foobar/);
+  assert.equal(metadata.title, "Working folder: /projects/foobar");
+  c.rows()[0].onclick(); assert.deepEqual(c.selected, ["child"]);
+  // A closed/hidden creator doesn't strand its child or require its folder open.
+  c.state.sessions = [child, unrelated]; c.renderList();
+  assert.deepEqual(c.cards(), ["child"]);
+  assert.ok(withClass(c.$("overview"), "placement-label").some(label =>
+    label.textContent === "foobar" && label.title === "Working folder: /projects/foobar"));
+  let menu, opened;
+  c.state.threadActions = {showMenu: (_trigger, _title, items) => { menu = items; }};
+  c.openProjectDirectory = cwd => { opened = cwd; };
+  withClass(c.threadCard(child), "card-more")[0].onclick({stopPropagation() {}});
+  await menu.find(item => item.label === "Open agent’s project").run();
+  assert.equal(opened, "/projects/foobar");
+  // The agent's own project shows the same conversation, with no duplicate row.
+  c.state.projectCwd = "/projects/foobar"; c.renderList();
+  assert.deepEqual(c.cards(), ["child"]);
+});
+
 test("an orchestration escalation has one card with a link to the child and survives filtering", () => {
   const parent = thread("parent", null, {needs_attention: true, attention_reason: "blocked",
     attention_items: [{thread_id: "child", title: "child", action: "Approve the command"}],

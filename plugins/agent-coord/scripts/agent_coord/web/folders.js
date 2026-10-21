@@ -12,7 +12,7 @@ function newThreadContext(organization, filters, folder) {
 }
 
 function inProject(thread, cwd) {
-  return !!cwd && (thread.project_cwd || thread.cwd) === cwd;
+  return !!cwd && ((thread.project_cwd || thread.cwd) === cwd || thread.orchestration_workspaces?.includes(cwd) === true);
 }
 
 class WorkingFolders {
@@ -185,7 +185,7 @@ class ProjectTabs {
     this.threads = threads;
     const tabs = this.doc.getElementById("view-tabs");
     const signature = JSON.stringify([this.folders.projects, this.folders.selected?.cwd,
-      threads.map(t => [t.thread_id, t.project_cwd, t.attention, t.needs_attention, t.attention_reason, t.snoozed, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
+      threads.map(t => [t.thread_id, t.project_cwd, t.orchestration_workspaces, t.attention, t.needs_attention, t.attention_reason, t.snoozed, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
     if (signature === this.signature) return;
     this.signature = signature;
     this.renderMobilePicker(threads);

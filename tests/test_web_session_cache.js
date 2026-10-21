@@ -406,6 +406,38 @@ function projectSetup(storage) {
   return c;
 }
 
+test("cross-folder children open and restore in the initiating project without opening their folder", async () => {
+  const values = new Map(), storage = {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)};
+  const c = projectSetup(storage);
+  const child = c.state.sessions.find(t => t.thread_id === "three");
+  child.orchestration_workspaces = ["/a"];
+  c.replies.get("three").work_thread.orchestration_workspaces = ["/a"];
+  await c.select("one");
+  await c.select("three");
+  assert.equal(c.state.selected, "three");
+  assert.equal(c.state.projectCwd, "/a");
+  assert.equal(c.state.folders.selected.cwd, "/a");
+  assert.deepEqual(c.state.threadTabs.items.map(t => t.thread_id), ["one", "three"]);
+  assert.equal(c.state.threadTabs.projects.has("/b"), false);
+  const restarted = projectSetup(storage);
+  restarted.state.sessions.find(t => t.thread_id === "three").orchestration_workspaces = ["/a"];
+  restarted.replies.get("three").work_thread.orchestration_workspaces = ["/a"];
+  await restarted.restoreProjectTab();
+  assert.equal(restarted.state.selected, "three");
+  assert.equal(restarted.state.projectCwd, "/a");
+  assert.equal(restarted.state.threadTabs.projects.has("/b"), false);
+});
+
+test("a child absent from inventory uses fresh relationship data to stay in the initiating project", async () => {
+  const c = projectSetup();
+  c.state.sessions = c.state.sessions.filter(t => t.thread_id !== "three");
+  c.replies.get("three").work_thread.orchestration_workspaces = ["/a"];
+  await c.select("three");
+  assert.equal(c.state.selected, "three");
+  assert.equal(c.state.projectCwd, "/a");
+  assert.equal(c.state.threadTabs.projects.has("/b"), false);
+});
+
 test("project tabs restore independent conversations, drafts and reading positions", async () => {
   const c = projectSetup();
   await c.select("one"); await c.select("two");

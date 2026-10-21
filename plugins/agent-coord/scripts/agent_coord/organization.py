@@ -15,7 +15,8 @@ def app_agent_creators(db):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
         return {}
     rows = db.execute("""SELECT r.thread_id, r.sender_session_id, r.payload_json,
-        COALESCE(t.title, s.name, r.sender_session_id) AS title, s.cwd
+        COALESCE(t.title, s.name, r.sender_session_id) AS title, s.cwd,
+        COALESCE(t.project_cwd, s.cwd) AS project_cwd
         FROM app_control_requests r
         LEFT JOIN sessions s ON s.session_id = r.sender_session_id
         LEFT JOIN work_threads t ON t.thread_id = r.sender_session_id
@@ -33,6 +34,7 @@ def app_agent_creators(db):
         mode = payload.get("mode") if isinstance(payload, dict) else None
         creators.setdefault(row["thread_id"], {
             "thread_id": row["sender_session_id"], "title": row["title"], "cwd": row["cwd"],
+            "project_cwd": row["project_cwd"],
             "mode": "orchestration" if mode == "orchestration" else None,
         })
     return creators

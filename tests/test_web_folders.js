@@ -15,6 +15,19 @@ const api = async (route, body) => {
   return {cwd: body.path, repository: body.path.startsWith(rig.root) ? rig : null};
 };
 
+test("orchestration children appear in ancestor projects and their own project without broadening folder filters", () => {
+  const child = {project_cwd: "/projects/foobar", cwd: "/projects/foobar/src",
+    orchestration_workspaces: ["/projects", "/another-repo"]};
+  assert.equal(inProject(child, "/projects"), true);
+  assert.equal(inProject(child, "/another-repo"), true);
+  assert.equal(inProject(child, "/projects/foobar"), true);
+  assert.equal(inProject(child, "/projects/foobar/src"), false);
+  assert.equal(inProject(child, "/"), false);
+  assert.equal(inProject(child, ""), false);
+  assert.equal(inProject({...child, orchestration_workspaces: []}, "/projects"), false);
+  assert.equal(inProject({cwd: "/projects/unrelated"}, "/projects"), false);
+});
+
 test("project dots identify the project needing action and update when only the blocker reason changes", async () => {
   global.threadViews = require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews;
   try {

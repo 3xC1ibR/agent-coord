@@ -787,6 +787,17 @@ class BrowserSessions:
                 creators = app_agent_creators(connection)
         else:
             creators = app_agent_creators(db)
+        # Project visibility follows orchestration ancestry, independently of
+        # execution cwd and open/closed placement. Dispatch remains independent.
+        for child, creator in creators.items():
+            workspaces, seen, ancestor = [], {child}, creator
+            while ancestor and ancestor["mode"] == "orchestration" and ancestor["thread_id"] not in seen:
+                seen.add(ancestor["thread_id"])
+                workspace = ancestor["project_cwd"]
+                if workspace and workspace not in workspaces:
+                    workspaces.append(workspace)
+                ancestor = creators.get(ancestor["thread_id"])
+            creator["workspaces"] = workspaces
         for creator in creators.values():
             cwd = creator.pop("cwd")
             creator["available"] = bool(cwd and matches_workspace(cwd, self.cwd))
@@ -801,6 +812,7 @@ class BrowserSessions:
         thread["created_by"] = creators.get(thread_id)
         thread["created_by_thread_id"] = thread["created_by"]["thread_id"] if thread["created_by"] else None
         thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
+        thread["orchestration_workspaces"] = thread["created_by"]["workspaces"] if thread["created_by"] else []
         if _inventory is None:
             with self.store._connection() as db:
                 thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
