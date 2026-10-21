@@ -290,7 +290,10 @@ def _parser() -> argparse.ArgumentParser:
 
     list_parser = subcommands.add_parser("list", help="List known sessions.")
     list_parser.add_argument("--cwd", default=os.getcwd())
-    list_parser.add_argument("--relevant", action="store_true")
+    list_parser.add_argument(
+        "--relevant", action="store_true",
+        help="Show sessions with work or an active turn, excluding the current caller when known.",
+    )
     list_parser.add_argument("--include-offline", action="store_true")
 
     conflicts = subcommands.add_parser(
@@ -751,11 +754,15 @@ def run(arguments: argparse.Namespace) -> Any:
     if command == "unregister":
         return store.end_session(arguments.session_id)
     if command == "list":
-        return store.list_sessions(
+        sessions = store.list_sessions(
             cwd=find_repository_root(arguments.cwd),
             relevant_only=arguments.relevant,
             include_offline=arguments.include_offline,
         )
+        if arguments.relevant:
+            identity = caller_session()
+            sessions = [session for session in sessions if session["session_id"] != identity]
+        return sessions
     if command == "conflicts":
         return {"conflicts": store.check_conflicts(arguments.session_id)}
     if command == "send":

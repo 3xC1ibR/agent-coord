@@ -61,6 +61,32 @@ class CliContextTests(unittest.TestCase):
         self.assertIn("AGENT_COORD_SESSION_ID", result["error"])
         self.assertIsNone(self.store.threads.get("one")["checkpoint"])
 
+    def test_relevant_list_excludes_caller_with_identity_precedence(self):
+        for identity in ("one", "two"):
+            self.store.touch(identity, "discussing", turn_active=True)
+        code, sessions = self.invoke("list", "--relevant", "--cwd", str(self.root))
+        self.assertEqual(code, 0)
+        self.assertEqual([session["session_id"] for session in sessions], ["two"])
+        with patch.dict(os.environ, {"AGENT_COORD_SESSION_ID": "two"}):
+            code, sessions = self.invoke("list", "--relevant", "--cwd", str(self.root))
+        self.assertEqual(code, 0)
+        self.assertEqual([session["session_id"] for session in sessions], ["one"])
+        self.store.touch("two", turn_active=False)
+        self.assertEqual(self.invoke("list", "--relevant", "--cwd", str(self.root)), (0, []))
+
+    def test_ordinary_list_includes_caller(self):
+        code, sessions = self.invoke("list", "--cwd", str(self.root))
+        self.assertEqual(code, 0)
+        self.assertEqual({session["session_id"] for session in sessions}, {"one", "two", "three"})
+
+    def test_relevant_list_without_caller_keeps_all_relevant_sessions(self):
+        for identity in ("one", "two"):
+            self.store.touch(identity, "discussing", turn_active=True)
+        with patch.dict(os.environ, {"AGENT_COORD_DB": str(self.database)}, clear=True):
+            code, sessions = self.invoke("list", "--relevant", "--cwd", str(self.root))
+        self.assertEqual(code, 0)
+        self.assertEqual({session["session_id"] for session in sessions}, {"one", "two"})
+
     def test_reply_uses_caller_identity_and_cannot_impersonate_recipient(self):
         original = self.store.send_message(sender_session_id="two", recipient_session_id="one", body="Confirm receipt")
         code, receipt = self.invoke("reply", "--message-id", str(original["id"]), "Received")
