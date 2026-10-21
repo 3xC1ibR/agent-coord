@@ -256,6 +256,8 @@ class BrowserSessions:
         self.event_subscriptions = EventSubscriptions(store, cwd=self.cwd)
         from .dispatch_runtime import DispatchRuntime
         self.dispatch = DispatchRuntime(self)
+        from .turn_watchdog import TurnWatchdog
+        self.watchdog = TurnWatchdog(self)
 
     def _thread_lock(self, thread_id: str):
         with self.lock:
@@ -292,6 +294,12 @@ class BrowserSessions:
         method, params = message["method"], message.get("params") or {}
         thread_id = params.get("threadId")
         with self.lock:
+            # A late completion for an older turn must not end a newer turn.
+            if (method == "turn/completed" and self.active.get(thread_id)
+                    and self.active[thread_id] != params.get("turn", {}).get("id")):
+                return
+            if hasattr(self, "watchdog"):
+                self.watchdog.observe(method, params)
             if thread_id and method in {"turn/started", "turn/completed", "thread/closed"}:
                 self.turn_revisions[thread_id] = self.turn_revisions.get(thread_id, 0) + 1
             if method == "bridge/disconnected":
@@ -879,8 +887,15 @@ class BrowserSessions:
                                          and thread["status"] not in {"running", "needs input"}
                                          and thread["response_state"] in {"input", "action", "reply", "failed", "update"})
         policy = notification_policy.decide(thread, waiting=bool(waiting), owners=owners)
+        health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
+        thread["turn_health"] = health
+        if health and health["state"] == "stalled" and not waiting:
+            thread.update(status="stalled", response_state="action", needs_attention=thread["attention"] != "archived",
+                          attention_reason="blocked", attention_key=f"stall:{health['turn_id']}",
+                          can_handle_response=False)
         thread["attention_owner_thread_id"] = policy["owner_thread_id"]
         thread["attention_action"] = ("Approval or answer needed" if waiting else
+                                      "Review the stalled agent" if health and health["state"] == "stalled" else
                                       checkpoint["next_action"] if checkpoint_input else
                                       "Review the failed agent" if thread["response_state"] == "failed" else "")
         if policy["quiet"] and not thread["snooze_due"]:
@@ -1386,24 +1401,8 @@ class BrowserSessions:
                 thread = self._read_thread(thread_id)
             else:
                 thread = self._read_thread(thread_id)
+            self._reconcile_turn(thread_id, thread, revision)
             with self.lock:
-                # A response predating a turn event cannot replace live state.
-                if revision == self.turn_revisions.get(thread_id, 0):
-                    turns = thread.get("turns", [])
-                    latest = turns[-1] if turns else {}
-                    status = thread.get("status", {}).get("type")
-                    known = self.active.get(thread_id)
-                    missing_live_turn = known and not any(t["id"] == known for t in turns)
-                    if status in {"idle", "notLoaded"}:
-                        self.active.pop(thread_id, None)
-                    elif not missing_live_turn:
-                        # Earlier turns can retain stale inProgress statuses;
-                        # only the latest turn can still be running. Incomplete
-                        # stored history must not replace a streamed turn ID.
-                        if latest.get("status") == "inProgress":
-                            self.active[thread_id] = latest["id"]
-                        elif status != "active":
-                            self.active.pop(thread_id, None)
                 active_turn = self.active.get(thread_id)
                 running = thread_id in self.active
             # Read-side recovery may have changed the live turn. Project the card
@@ -1414,6 +1413,37 @@ class BrowserSessions:
                     "dispatchRequests": self.dispatch.receipts(thread_id),
                     "dispatchSettings": self.dispatch.settings(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
+
+    def _reconcile_turn(self, thread_id, thread, revision):
+        """Repair a missed completion in both live and durable state.
+
+        A status-only idle response cannot establish a turn's outcome. Keep
+        that uncertainty for the watchdog instead of inventing a completion.
+        """
+        with self.lock:
+            if revision != self.turn_revisions.get(thread_id, 0):
+                return
+            turns = thread.get("turns", [])
+            latest = turns[-1] if turns else {}
+            known = self.active.get(thread_id)
+            current = self.store.threads.get(thread_id, history=False)
+            expected = known or current["turn_id"]
+            if (latest.get("id") == expected and latest.get("status") in {"completed", "failed", "interrupted"}):
+                # Use normal completion bookkeeping, including wake gates and
+                # failure notifications. Replaying persistence is idempotent.
+                if known or self.store.get_session(thread_id)["turn_active"] or not current["turn_completion"]:
+                    self._event({"method": "turn/completed", "params": {
+                        "threadId": thread_id, "turn": copy.deepcopy(latest)}})
+                return
+            status = thread.get("status", {}).get("type")
+            missing_live_turn = known and not any(t["id"] == known for t in turns)
+            if status in {"idle", "notLoaded"}:
+                self.active.pop(thread_id, None)
+            elif not missing_live_turn:
+                if latest.get("status") == "inProgress":
+                    self.active[thread_id] = latest["id"]
+                elif status != "active":
+                    self.active.pop(thread_id, None)
 
     def submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
@@ -1636,6 +1666,7 @@ class BrowserSessions:
             self.closed = True
             self.changed.notify_all()
         self.classifier.close()
+        self.watchdog.close()
         self.dispatch.close()
         self.event_subscriptions.close()
         self.inbox_wake.close()

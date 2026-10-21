@@ -23,7 +23,7 @@ def turn_failure_message(db, creator, child, turn_id):
     return row["id"] if row else None
 
 
-def _notify(store, db, request, *, event_key, stage, error, turn_id=None):
+def _notify(store, db, request, *, event_key, stage, error, turn_id=None, event="app_agent_failed", guidance=None):
     creator = request["sender_session_id"]
     child = request["thread_id"]
     if child == creator or not db.execute(
@@ -34,7 +34,7 @@ def _notify(store, db, request, *, event_key, stage, error, turn_id=None):
     # writer transaction, including across callback retries and backend restarts.
     if db.execute("SELECT 1 FROM messages WHERE thread_id = ?", (message_thread,)).fetchone():
         return
-    if turn_id and db.execute("SELECT 1 FROM sqlite_master WHERE name = 'event_subscription_items'").fetchone():
+    if event == "app_agent_failed" and turn_id and db.execute("SELECT 1 FROM sqlite_master WHERE name = 'event_subscription_items'").fetchone():
         # The completion matcher may win the race with failure persistence.
         # Both paths use a writer transaction, so only one wakes the creator.
         existing = db.execute("""SELECT 1 FROM event_subscription_items i
@@ -59,12 +59,12 @@ def _notify(store, db, request, *, event_key, stage, error, turn_id=None):
             result = {"assignment_message_id": assignment["id"],
                       **result_snapshot(db, child, turn_id, assignment["id"])}
     body = json.dumps({
-        "event": "app_agent_failed", "source": "runtime", "stage": stage,
+        "event": event, "source": "runtime", "stage": stage,
         "request_id": request["request_id"], "session_id": child,
         "name": child_row["title"] if child_row else None, "turn_id": turn_id,
         "error": str(error or "The app agent failed without an error description.")[:8000],
         **result,
-        "guidance": "Review the failed agent and decide how to continue the original task. "
+        "guidance": guidance or "Review the failed agent and decide how to continue the original task. "
                     "This is an automatic failure report, not a result from the agent. "
                     "No reply is required. The failed work has not been retried.",
     }, ensure_ascii=True)
@@ -91,3 +91,19 @@ def notify_agent_failure(store, thread_id, *, event_key, stage, error=None, turn
             ORDER BY created_at, request_id LIMIT 1""", (thread_id,)).fetchone()
         if request:
             _notify(store, db, request, event_key=event_key, stage=stage, error=error, turn_id=turn_id)
+
+
+def notify_agent_stall(store, thread_id, *, turn_id, error):
+    with store._connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
+            return
+        request = db.execute("""SELECT * FROM app_control_requests WHERE operation = 'create'
+            AND thread_id = ? AND status = 'completed' ORDER BY created_at, request_id LIMIT 1""", (thread_id,)).fetchone()
+        if request:
+            _notify(store, db, request, event_key=["stall", turn_id], stage="watchdog", error=error,
+                    turn_id=turn_id, event="app_agent_stalled", guidance=
+                    "Inspect this exact turn and continue coordinating the original assignment. "
+                    "The runtime attempted state reconciliation and, when supported and safe, one same-turn continuation. "
+                    "Silence is not proof that the agent or its tools stopped. Confirm termination before transferring its write scope. "
+                    "No tool or original prompt was replayed. No reply is required.")

@@ -1632,6 +1632,41 @@ declare work before any implementation, including shell-based writes.
 Validation lease mode expresses non-editing intent and protects structured
 write tools; it is not a security boundary for arbitrary shell commands.
 
+## Stalled app turns
+
+The app runtime supervises its loaded conversations every 15 seconds, even when
+no agent or browser tab is polling. Provider turn events own app turn liveness;
+late prompt, tool, and Stop hooks cannot resurrect an interrupted turn or finish
+a newer one. A provider read confirming the exact turn has ended repairs both
+the live status and durable coordination state, including completion events and
+failure reports.
+
+After five minutes without streamed work, the watchdog reads provider state.
+For a delegated Codex or Claude app agent with no outstanding tool, approval,
+question, queued user input, Stop, or Close, it may request **one continuation of
+the same turn**. That attempt is recorded before sending; an uncertain delivery
+is never retried, including after restart. Acknowledgment or echoed input is not
+proof of progress. Reasoning, output, and tool events are progress; metadata and
+status polling are not. Other providers receive state reconciliation without
+unsupported steering.
+
+After ten minutes without progress, an unresolved turn becomes **stalled** in
+the app and its creating orchestrator receives one durable `app_agent_stalled`
+message for that turn. An idle orchestrator wakes through the normal inbox; a
+busy orchestrator receives the alert at its next inbox delivery. Ordinary user
+conversations show the stall in the app without receiving automatic input.
+Pending user approvals and questions are waiting states. A quiet outstanding
+tool gets a longer, twenty-minute threshold and an uncertainty alert, without
+automatic steering or cancellation.
+
+The watchdog never assumes silence proves termination, restarts a shared
+provider, replays the original prompt, releases a write scope, or declares the
+assignment complete. The orchestrator must confirm termination before handing
+off unfinished writes. Monitoring is limited to conversations owned by this
+running app backend; it is not a machine-wide process supervisor. Loading a
+saved conversation starts a fresh observation grace period, while durable
+recovery and notification receipts prevent duplicate actions.
+
 ## Develop and validate
 
 The runtime supports Python 3.10 or later and has no third-party dependencies.

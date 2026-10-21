@@ -286,6 +286,7 @@ def handle(
         return {}
     session = _ensure_registered(coordination, payload)
     session_id = session["session_id"]
+    browser = coordination.threads.is_browser_session(session_id)
 
     if event == "SessionEnd":
         client_label = "Claude Code" if session["client"] == "claude" else "Codex"
@@ -302,7 +303,7 @@ def handle(
     if event == "Stop":
         # Browser turns can still be interrupted or fail after a hook runs;
         # app-server supplies their authoritative completion and outcome.
-        if not coordination.threads.is_browser_session(session_id):
+        if not browser:
             coordination.threads.finish_turn(session_id, turn_id=payload.get("turn_id"))
         unfinished = (
             bool(session["write_scope"])
@@ -311,13 +312,13 @@ def handle(
             in {"planning", "implementing", "validating", "waiting"}
         )
         activity = "waiting" if unfinished else "idle"
-        coordination.touch(session_id, activity, turn_active=False)
+        coordination.touch(session_id, activity, turn_active=None if browser else False)
         _capture_terminal_delegation_usage(coordination, payload, session_id)
         _capture_thread_usage(coordination, payload, session_id)
         return {}
 
     if event == "UserPromptSubmit":
-        if coordination.threads.is_browser_session(session_id):
+        if browser:
             prompt = payload.get("prompt")
             if isinstance(prompt, str):
                 coordination.threads.capture_request(session_id, prompt)
@@ -330,9 +331,9 @@ def handle(
             if not isinstance(prompt, str) or prompt.strip() != WAKE_PROMPT:
                 coordination.threads.user_message(session_id)
         if session["bead_id"] is None and session["activity"] == "idle":
-            coordination.touch(session_id, "discussing", turn_active=True)
+            coordination.touch(session_id, "discussing", turn_active=None if browser else True)
         else:
-            coordination.touch(session_id, turn_active=True)
+            coordination.touch(session_id, turn_active=None if browser else True)
         # Codex injects CODEX_THREAD_ID into tool shells, not necessarily hooks.
         text = coordination.threads.instructions(
             session_id, caller_context=session["client"] == "codex",
@@ -400,7 +401,9 @@ def handle(
             text += "\n\n" + formatted
         return _context(event, text)
 
-    coordination.touch(session_id, turn_active=True)
+    # Browser runtime events own turn liveness. Late tool/prompt hooks from an
+    # interrupted turn must not resurrect it (nor may a Stop hook end a new one).
+    coordination.touch(session_id, turn_active=None if browser else True)
     tool_name = payload.get("tool_name")
     if event in {"PreToolUse", "PostToolUse"} and isinstance(tool_name, str) and tool_name.strip():
         _record_tool(coordination, session_id, session["cwd"], tool_name, payload)

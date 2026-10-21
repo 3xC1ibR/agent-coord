@@ -1032,6 +1032,7 @@ def make_ui_server(
     sessions.schedules.start()
     sessions.inbox_wake.start()
     sessions.event_subscriptions.start()
+    sessions.watchdog.start()
     sessions.dispatch.wake()
     return server
 
