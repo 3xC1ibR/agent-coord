@@ -211,7 +211,7 @@ Times in feature rows are approximate storyboard positions. D1's actual media du
 
 ### Repository link definitions
 
-[readme]: ../README.md
+[readme]: reference.md
 [folders]: ../plugins/agent-coord/scripts/agent_coord/web/folders.js
 [workspaces]: ../plugins/agent-coord/scripts/agent_coord/workspaces.py
 [organization]: ../plugins/agent-coord/scripts/agent_coord/organization.py

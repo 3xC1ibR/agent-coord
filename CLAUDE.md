@@ -56,9 +56,9 @@ Run the test suite with:
 python3 -W error::ResourceWarning -m unittest discover -s tests -v
 ```
 
-After changing a file under `plugins/agent-coord/`, follow **Refresh installed
-plugins after changes** in `README.md` before live testing. Use the documented
-cachebuster helper and reinstall commands. Do not hand-edit marketplace files
+After changing a file under `plugins/agent-coord/`, follow [**Refresh installed
+plugins after changes**](docs/reference.md#refresh-installed-plugins-after-changes)
+before live testing. Use the documented cachebuster helper and reinstall commands. Do not hand-edit marketplace files
 or reuse a session that loaded the previous plugin version.
 Commit your changes once you are done.
 

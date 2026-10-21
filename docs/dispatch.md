@@ -139,7 +139,7 @@ eligible one in that directory.
    Specialists normally answer the user directly in their own conversations.
 
 Jev uses the shared local configuration in
-[Jev setup](../README.md#automatic-reply-classification-with-jev); without usable
+[Jev setup](reference.md#automatic-reply-classification-with-jev); without usable
 credentials, requests fall back to the LLM. Routing is separate from Jev's
 classification of completed replies in the Attention UI. The current routing
 policy uses `jev-1.13.0`, eight candidates, confidence at least `0.75`, winning
@@ -259,7 +259,7 @@ expiry. Consult the evaluation guide before exporting it.
 
 The running app must include the feature. Plugin refresh alone does not update a
 native app's backend or UI; use the documented
-[plugin refresh](../README.md#refresh-installed-plugins-after-changes) and
+[plugin refresh](reference.md#refresh-installed-plugins-after-changes) and
 [native app build/release](../desktop/macos/README.md) workflows as applicable.
 
 This is shipped, opt-in behavior. Default-entry/primary-product positioning remains
