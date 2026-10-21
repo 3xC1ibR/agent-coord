@@ -112,12 +112,27 @@ test("a pending rename cannot be submitted twice or overwrite another thread edi
   assert.equal(c.focused, "rename-name");
 });
 
-test("the header omits Your turn and Working while preserving requests for input", () => {
+test("the header omits Your turn, Working, and work phases while preserving actionable status", () => {
   const c = setup();
   c.renderStatus();
   assert.equal(c.$("status").textContent, "");
   assert.equal(c.$("status").hidden, true);
   assert.equal(grouping.awaitsUser(c.state.detail.work_thread), true);
+  for (const phase of ["new", "discussion", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"]) {
+    Object.assign(c.state.detail.work_thread, {response_state: "available", work_phase: phase, checkpoint: {phase}});
+    c.renderStatus();
+    assert.equal(c.$("status").textContent, "");
+    assert.equal(c.$("status").hidden, true);
+  }
+  Object.assign(c.state.detail.work_thread, {response_state: "action", attention_reason: "review"});
+  c.renderStatus();
+  assert.equal(c.$("status").textContent, "Review requested");
+  assert.equal(c.$("status").hidden, false);
+  Object.assign(c.state.detail.work_thread, {response_state: "interrupted"});
+  c.renderStatus();
+  assert.equal(c.$("status").textContent, "Stopped");
+  assert.equal(c.$("status").hidden, false);
+  Object.assign(c.state.detail.work_thread, {response_state: "available"});
   c.state.detail.requests = [{}];
   c.renderStatus();
   assert.equal(c.$("status").textContent, "Needs input");

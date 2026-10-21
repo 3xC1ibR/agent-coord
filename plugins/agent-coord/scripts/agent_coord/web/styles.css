@@ -283,7 +283,7 @@ kbd { font: 10px var(--mono); border: 1px solid var(--line); border-radius: 3px;
 /* Conversations retain the same calm surface and legible measure. */
 main:has(> .conversation:not([hidden])) > .views-bar { display: none; }
 main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; padding-inline: 24px; }
-.conversation { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; }
+.conversation { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, var(--context-panel-width, 340px)); grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; }
 .conversation.context-collapsed { grid-template-columns: minmax(0, 1fr); }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .conversation-content { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: auto; }

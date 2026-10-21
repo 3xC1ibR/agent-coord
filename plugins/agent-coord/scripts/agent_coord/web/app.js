@@ -1355,7 +1355,8 @@ function renderStatus() {
   const thread = session || work;
   const status = thread ? threadGrouping.status(thread) : null;
   const active = running || status?.key === "running";
-  $("status").textContent = state.detail?.requests?.length ? "Needs input" : active || status?.key === "completed" ? "" :
+  const phase = thread ? threadGrouping.phaseLabel?.(thread) : "";
+  $("status").textContent = state.detail?.requests?.length ? "Needs input" : active || status?.key === "completed" || phase && status?.label === phase ? "" :
     thread && thread.response_state !== "reply" ? status.label : "";
   $("status").hidden = !$("status").textContent;
   state.mobileChat?.status(state.detail?.requests?.length ? "Needs input" : active ? "Working" : status?.label || "Ready",
@@ -2164,6 +2165,7 @@ async function newSession() {
   $("welcome").hidden = true;
   $("conversation").hidden = false;
   $("conversation").classList.add("session-draft");
+  state.agentTreeController?.bind();
   $("page-location").textContent = "New session";
   state.timelineThread = null;
   $("timeline").replaceChildren(node("p", "Choose a model and send a message to start.", "empty"));
@@ -2311,6 +2313,7 @@ function goHome({restoreDispatcher = true, rememberTab = true, preserveRollUp = 
   state.selected = null; state.detail = null; state.titleEdit = null;
   state.scratchpad?.select(null);
   state.threadTabs?.overview({remember: rememberTab});
+  state.agentTreeController?.bind();
   state.detailRefreshing = false;
   if (navigation) navigation.remember();
   else history.replaceState(null, "", location.pathname + location.search);
@@ -2395,59 +2398,84 @@ function setupAgentTree() {
   const currentTab = () => state.threadTabs?.items.find(item => item.thread_id === state.threadTabs.selected);
   const controller = state.agentTreeController = {
     mode: "context", root: null, tree: AgentTree.graph([]),
+    hasAgents(root = this.root) {
+      if (!root || !this.tree.nodes.has(root)) return false;
+      return this.tree.family(root).some(id => id !== root && this.tree.nodes.get(id)?.browser_session !== false);
+    },
     inventory(open, closed) {
       openThreads = open;
       if (closed) closedThreads = closed;
       this.update();
-      if (this.mode === "agents" && state.selected) this.load().catch(showError);
+      if (this.mode === "agents" && state.selected && !isSessionDraft()) this.load().catch(showError);
     },
     async load() {
+      if (isSessionDraft() || state.selected === "new-session") return;
       const id = this.root || state.selected;
-      if (!id) return;
+      if (!id || id === "new-session") return;
       if (pending?.id === id) return pending.promise;
       const request = {id}; pending = request;
       request.promise = api(threadPath(id) + "/agent-tree").then(result => {
-        if (this.root !== id && state.selected !== id) return;
+        if (isSessionDraft() || !state.selected || (this.root !== id && state.selected !== id)) return;
         familyThreads = result.data;
-        if (result.data.length > 1 || currentTab()?.tree_root)
-          state.threadTabs?.setTree(result.root_thread_id, this.mode === "agents");
+        const hasAgents = result.data.some(t => t.thread_id !== result.root_thread_id && t.browser_session !== false);
+        if (hasAgents || currentTab()?.tree_root)
+          state.threadTabs?.setTree(hasAgents ? result.root_thread_id : null, hasAgents && this.mode === "agents");
         this.update(); state.listSignature = ""; renderList();
       }).finally(() => { if (pending === request) pending = null; });
       return request.promise;
     },
     update(work) {
-      if (work) records.set(work.thread_id, work);
+      if (work && work.thread_id !== "new-session") records.set(work.thread_id, work);
       // Inventory wins over old detail snapshots, except for the displayed agent.
       const family = new Map(familyThreads.map(t => [t.thread_id, t]));
       const all = [...records.values(), ...familyThreads, ...closedThreads, ...openThreads].map(t =>
         family.has(t.thread_id) ? {...t, agent_parent_id: family.get(t.thread_id).agent_parent_id} : t);
-      if (state.detail?.work_thread?.thread_id === state.selected) {
+      if (state.detail?.work_thread?.thread_id === state.selected && !isSessionDraft() && state.selected !== "new-session") {
         const work = state.detail.work_thread, relationship = family.get(work.thread_id);
         all.push(relationship ? {...work, agent_parent_id: relationship.agent_parent_id} : work);
       }
       this.tree = AgentTree.graph(all);
+      if (!state.selected || isSessionDraft() || state.selected === "new-session") {
+        this.root = null;
+        $("panel-agents").hidden = true;
+        $("conversation").classList.remove("has-agent-tree");
+        if (this.mode === "agents") this.setMode("context", false);
+        return;
+      }
       const tab = currentTab();
-      this.root = this.tree.root(tab?.tree_root || state.selected);
-      if (tab?.tree_root && this.root !== tab.tree_root) state.threadTabs.setTree(this.root, tab.tree_open);
+      const selectedRoot = this.tree.root(state.selected);
+      const tabRoot = tab?.tree_root && this.tree.family(this.tree.root(tab.tree_root)).includes(state.selected)
+        ? this.tree.root(tab.tree_root) : null;
+      this.root = tabRoot || selectedRoot;
+      const hasAgents = this.hasAgents(this.root);
+      if (tab?.tree_root && (!hasAgents || this.root !== tab.tree_root))
+        state.threadTabs.setTree(hasAgents ? this.root : null, hasAgents && tab.tree_open);
       if (this.root && this.tree.nodes.has(this.root)) panel.update([...this.tree.nodes.values()], this.root, state.selected);
-      $("conversation").classList.toggle("has-agent-tree", this.tree.family(this.root).length > 1);
+      $("panel-agents").hidden = !hasAgents;
+      $("conversation").classList.toggle("has-agent-tree", hasAgents);
+      if (!hasAgents && this.mode === "agents") {
+        if ($("panel-agents") === document.activeElement) $("panel-context").focus();
+        this.setMode("context", false);
+      }
       this.applyDefault();
     },
-    childCount(id) { return Math.max(0, this.tree.family(id).length - 1); },
+    childCount(id) { return Math.max(0, this.tree.family(id).filter(child => child !== id && this.tree.nodes.get(child)?.browser_session !== false).length); },
     recipient() {
       const tab = currentTab();
       if (!tab?.tree_root) return "";
       return (state.detail?.work_thread?.thread_id === state.selected ? state.detail.work_thread.title : this.tree.nodes.get(state.selected)?.title) || "selected agent";
     },
     bind({preservePanel = false, dock = false} = {}) {
-      defaultPending = !preservePanel && !dock && !state.paneMode;
-      if (!preservePanel) this.setMode("context", false);
+      if (!preservePanel) familyThreads = [];
+      const draft = !state.selected || isSessionDraft() || state.selected === "new-session";
+      defaultPending = !preservePanel && !dock && !state.paneMode && !draft;
+      if (!preservePanel || draft) this.setMode("context", false);
       this.update();
       // Discover closed ancestors and children even when overview filters hide them.
-      if (!dock && !state.paneMode) this.load().catch(showError);
+      if (!dock && !state.paneMode && !draft) this.load().catch(showError);
     },
     applyDefault() {
-      if (!defaultPending || !state.selected || isSessionDraft() || this.tree.family(this.root).length < 2) return;
+      if (!defaultPending || !state.selected || isSessionDraft() || !this.hasAgents(this.root)) return;
       defaultPending = false;
       this.setMode("agents");
       setContextCollapsed(false);
@@ -2456,6 +2484,7 @@ function setupAgentTree() {
     },
     cancelDefault() { defaultPending = false; },
     setMode(mode, remember = true) {
+      if (mode === "agents" && !this.hasAgents(this.root)) mode = "context";
       if (remember) this.cancelDefault();
       this.mode = mode;
       $("agent-tree-panel").hidden = mode !== "agents"; $("context-info").hidden = mode === "agents";
@@ -2465,7 +2494,8 @@ function setupAgentTree() {
         $("panel-" + key).setAttribute("aria-selected", String(mode === key));
         $("panel-" + key).tabIndex = mode === key ? 0 : -1;
       }
-      if (remember) state.threadTabs?.setTree(this.root, mode === "agents");
+      syncGrip?.();
+      if (remember) state.threadTabs?.setTree(this.hasAgents(this.root) ? this.root : null, mode === "agents");
       layoutContext();
     },
     async open(id = state.selected) {
@@ -2476,18 +2506,29 @@ function setupAgentTree() {
       if (state.selected !== id) return;
       this.update();
       this.root = currentTab()?.tree_root || this.tree.root(id);
-      state.threadTabs?.setTree(this.root, true);
-      this.setMode("agents");
-      setContextCollapsed(false);
-      if (state.mobileChat?.matches) state.mobileChat.open("context");
-      panel.fit(); renderStatus();
+      if (this.hasAgents(this.root)) {
+        state.threadTabs?.setTree(this.root, true);
+        this.setMode("agents");
+        setContextCollapsed(false);
+        if (state.mobileChat?.matches) state.mobileChat.open("context");
+        panel.fit(); renderStatus();
+      }
       try { await this.load(); }
       catch (error) {
         panel.empty.textContent = "Could not load the full tree. Open Agents again to retry.";
         if (!panel.tree?.nodes.size) panel.empty.hidden = false;
         throw error;
       }
-      if (state.selected === id && this.mode === "agents") { this.update(); panel.fit(); }
+      if (state.selected === id && this.hasAgents(this.root)) {
+        state.threadTabs?.setTree(this.root, true);
+        if (this.mode !== "agents") {
+          this.setMode("agents");
+          setContextCollapsed(false);
+          if (state.mobileChat?.matches) state.mobileChat.open("context");
+          renderStatus();
+        }
+        this.update(); panel.fit();
+      }
     },
   };
   const panel = new AgentTree.Panel({document, window, host: $("agent-tree-panel"), providerLogo: globalThis.providerLogo,
@@ -2509,28 +2550,53 @@ function setupAgentTree() {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     const next = event.key === "Home" ? "agents" : event.key === "End" ? "context" : key === "agents" ? "context" : "agents";
+    if ($("panel-" + next).hidden) return;
     $("panel-" + next).focus(); $("panel-" + next).click();
   };
   const grip = $("agent-panel-resize");
-  let resizing = false, width = 52;
+  let resizing = false, width = 52, contextWidth = 340;
   try { width = Number(localStorage.getItem("agent-coord.agent-panel-width")) || 52; } catch { /* Optional preference. */ }
-  const resize = value => {
-    width = Math.max(30, Math.min(70, value));
-    $("conversation").style.setProperty("--agent-panel-width", width + "%");
-    grip.setAttribute("aria-valuenow", Math.round(width));
+  try { contextWidth = Number(localStorage.getItem("agent-coord.context-panel-width")) || 340; } catch { /* Optional preference. */ }
+  var syncGrip = () => {
+    const agents = controller.mode === "agents";
+    grip.setAttribute("aria-label", agents ? "Resize agent tree panel" : "Resize thread context panel");
+    grip.setAttribute("aria-valuemin", agents ? "30" : "220");
+    grip.setAttribute("aria-valuemax", agents ? "70" : "560");
+    grip.setAttribute("aria-valuenow", String(Math.round(agents ? width : contextWidth)));
   };
-  resize(width);
-  const saveWidth = () => { try { localStorage.setItem("agent-coord.agent-panel-width", width); } catch { /* Optional preference. */ } };
+  const resize = value => {
+    if (controller.mode === "agents") {
+      width = Math.max(30, Math.min(70, value));
+      $("conversation").style.setProperty("--agent-panel-width", width + "%");
+    } else {
+      contextWidth = Math.max(220, Math.min(560, Math.round(value)));
+      $("conversation").style.setProperty("--context-panel-width", contextWidth + "px");
+    }
+    syncGrip();
+  };
+  $("conversation").style.setProperty("--agent-panel-width", Math.max(30, Math.min(70, width)) + "%");
+  $("conversation").style.setProperty("--context-panel-width", Math.max(220, Math.min(560, Math.round(contextWidth))) + "px");
+  syncGrip();
+  const saveWidth = () => {
+    try {
+      if (controller.mode === "agents") localStorage.setItem("agent-coord.agent-panel-width", width);
+      else localStorage.setItem("agent-coord.context-panel-width", contextWidth);
+    } catch { /* Optional preference. */ }
+  };
   grip.onpointerdown = event => { resizing = true; grip.setPointerCapture(event.pointerId); event.preventDefault(); };
   grip.onpointermove = event => {
     if (!resizing) return;
     const rect = $("conversation").getBoundingClientRect();
-    resize((rect.right - event.clientX) / rect.width * 100);
+    const px = rect.right - event.clientX;
+    resize(controller.mode === "agents" ? px / rect.width * 100 : Math.min(px, Math.max(220, rect.width - 300)));
   };
   grip.onpointerup = grip.onpointercancel = () => { resizing = false; saveWidth(); };
   grip.onkeydown = event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault(); resize(event.key === "Home" ? 30 : event.key === "End" ? 70 : width + (event.key === "ArrowLeft" ? 5 : -5)); saveWidth();
+    event.preventDefault();
+    if (controller.mode === "agents") resize(event.key === "Home" ? 30 : event.key === "End" ? 70 : width + (event.key === "ArrowLeft" ? 5 : -5));
+    else resize(event.key === "Home" ? 220 : event.key === "End" ? 560 : contextWidth + (event.key === "ArrowLeft" ? 24 : -24));
+    saveWidth();
   };
 }
 let contextCollapsed = null;

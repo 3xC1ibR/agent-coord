@@ -106,12 +106,25 @@ test("attention control reveals a folded failed descendant before selecting it",
 function setupController(records, selected = "root", response) {
   const fs = require("node:fs"), vm = require("node:vm");
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
-  const elements = new Map();
-  const c = {state: {selected, sessions: records}, collapsed: true, errors: [], requests: [],
-    document: {}, window: {}, localStorage: {getItem() {}, setItem() {}},
+  const elements = new Map(), storage = new Map();
+  const c = {state: {selected, sessions: records}, collapsed: true, errors: [], requests: [], storage,
+    document: {}, window: {}, localStorage: {getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, String(v))},
     $: id => {
-      if (!elements.has(id)) elements.set(id, {hidden: false, classList: {toggle() {}},
-        style: {setProperty() {}}, setAttribute() {}, focus() {}});
+      if (!elements.has(id)) {
+        const classes = new Set(), props = new Map(), attrs = new Map();
+        elements.set(id, {hidden: false, classes, props, attrs,
+          classList: {
+            toggle: (n, v) => { if (v ?? !classes.has(n)) classes.add(n); else classes.delete(n); },
+            remove: n => classes.delete(n),
+            contains: n => classes.has(n),
+          },
+          style: {setProperty: (k, v) => props.set(k, v), getPropertyValue: k => props.get(k)},
+          setAttribute: (k, v) => attrs.set(k, String(v)),
+          getAttribute: k => attrs.get(k),
+          setPointerCapture() {},
+          getBoundingClientRect: () => ({left: 0, right: 1200, width: 1200}),
+          focus() {}});
+      }
       return elements.get(id);
     },
     AgentTree: {...Tree, Panel: class { update() {} fit() {} }},
@@ -121,6 +134,7 @@ function setupController(records, selected = "root", response) {
     renderStatus() {}, renderList() {}, showError: error => c.errors.push(error), action: fn => fn(),
     api: path => {
       c.requests.push(path);
+      if (path.includes("new-session")) return Promise.reject(new Error("Work thread not found."));
       const loaded = response ? response(path) : Promise.resolve({root_thread_id: Tree.graph(records).root(selected), data: records});
       return loaded.then(result => {
         const tree = Tree.graph(result.data);
@@ -141,6 +155,7 @@ test("opening either a parent or leaf conversation defaults to its full tree and
   for (const selected of ["root", "child"]) {
     const c = setupController(records, selected);
     c.controller.bind(); await c.controller.load();
+    assert.equal(c.$("panel-agents").hidden, false);
     assert.equal(c.controller.mode, "agents");
     assert.equal(c.controller.root, "root");
     assert.equal(c.collapsed, false);
@@ -153,6 +168,7 @@ test("family discovery includes an archived ancestor missing from overview inven
   const c = setupController([child], "child", () => Promise.resolve({root_thread_id: "root",
     data: [thread("root", null, {attention: "archived"}), child]}));
   c.controller.bind(); await c.controller.load();
+  assert.equal(c.$("panel-agents").hidden, false);
   assert.equal(c.controller.mode, "agents");
   assert.equal(c.controller.root, "root");
   assert.equal(c.collapsed, false);
@@ -161,9 +177,53 @@ test("family discovery includes an archived ancestor missing from overview inven
 test("a standalone conversation keeps Context without forcing the panel open", async () => {
   const c = setupController([thread("root")]);
   c.controller.bind(); await c.controller.load();
+  assert.equal(c.$("panel-agents").hidden, true);
   assert.equal(c.controller.mode, "context");
   assert.equal(c.collapsed, true);
   assert.equal(c.state.threadTabs.items[0].tree_root, undefined);
+  await c.controller.open("root");
+  assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.controller.mode, "context");
+  let focused = 0, clicked = 0;
+  c.$("panel-agents").focus = () => { focused++; };
+  c.$("panel-agents").click = () => { clicked++; };
+  c.$("panel-context").onkeydown({key: "ArrowLeft", preventDefault() {}});
+  assert.equal(focused, 0);
+  assert.equal(clicked, 0);
+});
+
+test("switching conversations and changing child lists hides or restores the Agents tab without leaving a hidden tab selected", async () => {
+  const parent = thread("root"), child = thread("child", "root"), solo = thread("solo");
+  let family = [parent, child];
+  const c = setupController([parent, child, solo], "root", path => Promise.resolve(
+    path.includes("solo") ? {root_thread_id: "solo", data: [solo]} : {root_thread_id: "root", data: family}));
+  c.controller.bind(); await c.controller.load();
+  assert.equal(c.$("panel-agents").hidden, false);
+  assert.equal(c.controller.mode, "agents");
+
+  // Switching to a standalone conversation hides Agents and selects Context, even with preservePanel.
+  c.state.selected = "solo"; c.state.threadTabs.selected = "solo"; c.state.threadTabs.items.push({thread_id: "solo"});
+  c.controller.bind({preservePanel: true}); await c.controller.load();
+  assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.controller.mode, "context");
+
+  // Switching back to a conversation with app agents restores the Agents tab.
+  c.state.selected = "root"; c.state.threadTabs.selected = "root";
+  c.controller.bind(); await c.controller.load();
+  assert.equal(c.$("panel-agents").hidden, false);
+  assert.equal(c.controller.mode, "agents");
+
+  // If the child list changes so no app agents remain, Agents hides and cannot remain selected.
+  family = [parent];
+  c.controller.inventory([parent, solo], []);
+  await c.controller.load();
+  assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.controller.mode, "context");
+
+  // When a child app agent appears, the Agents tab is restored.
+  family = [parent, child];
+  c.controller.inventory([parent, child, solo], []);
+  assert.equal(c.$("panel-agents").hidden, false);
 });
 
 test("late family discovery respects explicit Context and close choices", async () => {
@@ -174,6 +234,7 @@ test("late family discovery respects explicit Context and close choices", async 
     c.$(choice).onclick();
     resolve({root_thread_id: "root", data: [thread("root"), thread("child", "root")]});
     await loaded;
+    assert.equal(c.$("panel-agents").hidden, false);
     assert.equal(c.controller.mode, "context");
     assert.equal(c.collapsed, true);
   }
@@ -203,7 +264,75 @@ test("late responses from a previous conversation cannot open its tree in a stan
   replies.get("threads/solo/agent-tree")({root_thread_id: "solo", data: [thread("solo")]}); await current;
   replies.get("threads/root/agent-tree")({root_thread_id: "root", data: [thread("root"), thread("child", "root")]}); await previous;
   assert.equal(c.controller.root, "solo");
+  assert.equal(c.$("panel-agents").hidden, true);
   assert.equal(c.controller.mode, "context");
   assert.equal(c.collapsed, true);
   assert.equal(c.state.threadTabs.items[1].tree_root, undefined);
+});
+
+test("creating a new draft session or switching conversations with an outstanding tree request immediately clears the tree and never requests new-session", async () => {
+  const replies = new Map();
+  const c = setupController([thread("root"), thread("child", "root")], "root", path => new Promise(resolve => replies.set(path, resolve)));
+  c.controller.bind();
+  assert.equal(c.controller.mode, "agents");
+  assert.equal(c.$("panel-agents").hidden, false);
+  const previous = c.controller.load();
+
+  // Switch to a new draft session while the previous conversation's tree request is still in flight.
+  c.state.selected = "new-session";
+  c.state.detail = {work_thread: {thread_id: "new-session", title: "New session", browser_session: true}};
+  c.state.threadTabs.selected = "new-session";
+  c.state.threadTabs.items.push(c.state.detail.work_thread);
+  c.controller.bind();
+  assert.equal(c.controller.mode, "context");
+  assert.equal(c.controller.root, null);
+  assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("conversation").classList.contains("has-agent-tree"), false);
+
+  // Inventory refreshes while on the draft must not keep the old tree or query threads/new-session/agent-tree.
+  c.controller.inventory([thread("root"), thread("child", "root")], []);
+  assert.equal(c.requests.some(path => path.includes("new-session")), false);
+  assert.deepEqual(c.errors, []);
+
+  // When the delayed response from the previous conversation arrives, the draft remains clean.
+  replies.get("threads/root/agent-tree")({root_thread_id: "root", data: [thread("root"), thread("child", "root")]});
+  await previous;
+  assert.equal(c.controller.mode, "context");
+  assert.equal(c.controller.root, null);
+  assert.equal(c.$("panel-agents").hidden, true);
+  assert.deepEqual(c.errors, []);
+});
+
+test("both Context and Agents side panel modes support pointer and keyboard resizing with persisted widths", async () => {
+  const c = setupController([thread("root"), thread("child", "root")]);
+  const grip = c.$("agent-panel-resize"), conv = c.$("conversation");
+  assert.equal(c.controller.mode, "context");
+  assert.equal(grip.getAttribute("aria-label"), "Resize thread context panel");
+  assert.equal(grip.getAttribute("aria-valuemin"), "220");
+  assert.equal(grip.getAttribute("aria-valuemax"), "560");
+  assert.equal(grip.getAttribute("aria-valuenow"), "340");
+
+  // Pointer drag in Context mode updates --context-panel-width and persists to localStorage.
+  grip.onpointerdown({pointerId: 1, preventDefault() {}});
+  grip.onpointermove({clientX: 780});
+  grip.onpointerup();
+  assert.equal(conv.style.getPropertyValue("--context-panel-width"), "420px");
+  assert.equal(grip.getAttribute("aria-valuenow"), "420");
+  assert.equal(c.storage.get("agent-coord.context-panel-width"), "420");
+
+  // Keyboard resize in Context mode clamps to sensible bounds.
+  grip.onkeydown({key: "Home", preventDefault() {}});
+  assert.equal(conv.style.getPropertyValue("--context-panel-width"), "220px");
+  grip.onkeydown({key: "End", preventDefault() {}});
+  assert.equal(conv.style.getPropertyValue("--context-panel-width"), "560px");
+
+  // Switching to Agents mode switches the grip's ARIA range and resizes --agent-panel-width independently.
+  c.controller.bind(); await c.controller.load();
+  assert.equal(c.controller.mode, "agents");
+  assert.equal(grip.getAttribute("aria-label"), "Resize agent tree panel");
+  assert.equal(grip.getAttribute("aria-valuemin"), "30");
+  assert.equal(grip.getAttribute("aria-valuemax"), "70");
+  grip.onkeydown({key: "ArrowLeft", preventDefault() {}});
+  assert.equal(conv.style.getPropertyValue("--agent-panel-width"), "57%");
+  assert.equal(c.storage.get("agent-coord.agent-panel-width"), "57");
 });
