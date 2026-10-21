@@ -328,8 +328,9 @@ Choose **Editor → Choose Application…** in the Files pane to set the editor 
 by both the pane and file links in chat. **System Default** uses the macOS file
 association. The choice is shared across windows and remembered between launches.
 Chat links open directly in that editor, even with the Files pane closed. Absolute
-and relative paths resolve within the originating conversation’s working folder;
-missing files and paths outside that folder show an error in the app. Line suffixes
+paths can point to files anywhere on your Mac; relative paths resolve from the
+originating conversation’s working folder, including links to other folders.
+Missing files and targets that are not regular files show an error in the app. Line suffixes
 such as `:12` and `#L12` are accepted, but opening at a particular line depends on
 editor integration and is not currently supported. This routing is native-app only.
 

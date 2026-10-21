@@ -12,9 +12,8 @@ enum WorkspaceFileLink {
         let root = URL(fileURLWithPath: workspace, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
         let file = (path.hasPrefix("/") ? URL(fileURLWithPath: path) : root.appendingPathComponent(path))
             .standardizedFileURL.resolvingSymlinksInPath()
-        guard file.path.hasPrefix(root.path == "/" ? "/" : root.path + "/") else {
-            throw failure("This file is outside the conversation’s working folder.")
-        }
+        // A clicked chat link may reference an artifact in another folder.
+        // The workspace anchors relative paths; it does not limit native opens.
         guard (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
             throw failure("The file is missing or is not a regular file: \(file.lastPathComponent)")
         }

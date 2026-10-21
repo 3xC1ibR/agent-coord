@@ -8,7 +8,7 @@ import unittest
 
 @unittest.skipUnless(sys.platform == "darwin" and shutil.which("swiftc"), "macOS Swift compiler required")
 class WorkspaceFileLinkTests(unittest.TestCase):
-    def test_native_resolution_checks_real_files_and_workspace_boundaries(self):
+    def test_native_resolution_opens_real_files_across_workspace_boundaries(self):
         source = Path(__file__).resolve().parents[1] / "desktop/macos/WorkspaceFiles.swift"
         with tempfile.TemporaryDirectory(prefix="file-links-") as directory:
             root = Path(directory)
@@ -18,9 +18,10 @@ class WorkspaceFileLinkTests(unittest.TestCase):
             file.write_text("hello\n")
             outside = root / "workspace-other"
             outside.mkdir()
-            (outside / "secret.txt").write_text("outside\n")
+            (outside / "RUNBOOK.md").write_text("outside\n")
             (workspace / "inside-link").symlink_to(file)
-            (workspace / "outside-link").symlink_to(outside / "secret.txt")
+            (workspace / "outside-link").symlink_to(outside / "RUNBOOK.md")
+            (workspace / "broken-link").symlink_to(outside / "missing.md")
             harness = root / "main.swift"
             harness.write_text('''
 import Foundation
@@ -29,7 +30,11 @@ let expected = URL(fileURLWithPath: root + "/notes with spaces.md").resolvingSym
 for path in ["notes with spaces.md", "./notes with spaces.md", root + "/notes with spaces.md", "inside-link"] {
     precondition(try! WorkspaceFileLink.resolve(path: path, workspace: root) == expected)
 }
-for path in ["missing.md", "..", ".", "../workspace-other/secret.txt", root + "-other/secret.txt", "outside-link", "bad\\0name"] {
+let outside = URL(fileURLWithPath: root + "-other/RUNBOOK.md").resolvingSymlinksInPath()
+for path in [root + "-other/RUNBOOK.md", "../workspace-other/RUNBOOK.md", "outside-link"] {
+    precondition(try! WorkspaceFileLink.resolve(path: path, workspace: root) == outside)
+}
+for path in ["", "missing.md", "..", ".", "../workspace-other", root + "-other/missing.md", "broken-link", "bad\\0name"] {
     do {
         _ = try WorkspaceFileLink.resolve(path: path, workspace: root)
         fatalError("Accepted invalid path: " + path)
