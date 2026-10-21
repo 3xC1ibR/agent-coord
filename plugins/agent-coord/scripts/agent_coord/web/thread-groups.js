@@ -19,6 +19,7 @@ const threadGrouping = (() => {
   }
   function phaseLabel(thread) { return phases.find(([key]) => key === phase(thread))[1]; }
   function reason(thread) {
+    if (thread.status === "stalled") return {key: "blocked", rank: 0, label: "Stalled"};
     const key = thread.attention_reason || ({input: "blocked", action: "review", failed: "blocked", update: "update"}[thread.response_state]) || "reply";
     return {key, ...(reasons[key] || reasons.reply)};
   }
@@ -41,6 +42,7 @@ const threadGrouping = (() => {
 
   function status(thread) {
     if (thread.attention === "archived") return {key: "idle", label: "Closed"};
+    if (thread.status === "stalled") return {key: "waiting", label: "Stalled"};
     if (thread.response_state === "working" || thread.status === "running" && thread.response_state !== "input")
       return {key: "running", label: "Working"};
     const acknowledged = acknowledgedRequest(thread);
