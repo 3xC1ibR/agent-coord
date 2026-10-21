@@ -37,6 +37,39 @@ class CheckpointMCPTests(unittest.TestCase):
                 update_checkpoint({"phase": "validation"}, store=self.store)
         self.assertEqual(self.store.threads.get("two")["checkpoint"]["summary"], "Other.")
 
+    def test_tool_accepts_minted_app_thread_links_and_rejects_unvalidated_routes(self):
+        from agent_coord.navigation import NavigationStore
+        child_id = "7d724292-3c97-422a-8e38-ea0ef3c1a687"
+        self.store.register(session_id=child_id, client="kimi", cwd=str(self.root), name="Hide empty Agents tab")
+        with self.store._connection() as db:
+            db.execute("CREATE TABLE browser_sessions (thread_id TEXT PRIMARY KEY)")
+            db.execute("INSERT INTO browser_sessions VALUES ('one')")
+        self.store.threads.start_turn("one", turn_id="turn-1")
+        target = NavigationStore(self.store).link(thread=child_id)["url"]
+        receipt = update_checkpoint({
+            "session_id": "one",
+            "phase": "orchestrating",
+            "summary": "Dispatched specialist.",
+            "next_step": None,
+            "links": [{"kind": "other", "label": "Hide empty Agents tab", "target": target}],
+            "context_lifecycle": {
+                "recommendation": "reuse",
+                "reason": "Dispatcher tracks active specialists.",
+                "reuse_for": ["Routing follow-ups"],
+                "fresh_for": ["Unrelated work"],
+                "handover": {"confirmed_facts": [], "constraints": [], "tried_and_failed": [], "open_questions": []},
+            },
+        }, store=self.store)
+        self.assertEqual(receipt["status"], "ok")
+        saved = self.store.threads.get("one")
+        self.assertEqual(saved["links"][0]["target"], target)
+        self.assertEqual(saved["links"][0]["label"], "Hide empty Agents tab")
+        with self.assertRaises(CoordinationError):
+            update_checkpoint({
+                "session_id": "one",
+                "links": [{"kind": "other", "label": "Missing", "target": "agentcoord://thread/missing"}],
+            }, store=self.store)
+
     def test_stdio_handshake_discovery_updates_and_errors(self):
         config = json.loads((PLUGIN / ".mcp.json").read_text())["mcpServers"]["agent-coord"]
         command = [config["command"], *[arg.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)) for arg in config["args"]]]

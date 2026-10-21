@@ -6,7 +6,7 @@ import math
 import shlex
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from .context import caller_session, command_prefix
 from .store import CoordinationError, derive_scope_cluster
@@ -667,9 +667,14 @@ class ThreadStore:
             parsed = urlsplit(target)
         except ValueError as exc:
             raise CoordinationError("Link URL is invalid.") from exc
-        if parsed.scheme and parsed.scheme not in {"http", "https"}:
+        if parsed.scheme == "agentcoord":
+            from .navigation import NavigationStore
+            if set(dict(parse_qsl(parsed.query, keep_blank_values=True))) & {"request", "window"}:
+                raise CoordinationError("Invalid Ribbon Field route.")
+            target = NavigationStore(self.store).resolve(target)["url"]
+        elif parsed.scheme and parsed.scheme not in {"http", "https"}:
             raise CoordinationError("Use an HTTP(S) URL, file path, or issue identifier.")
-        if parsed.scheme and not parsed.netloc:
+        elif parsed.scheme and not parsed.netloc:
             raise CoordinationError("Link URL must include a host.")
         if kind == "document" and not parsed.scheme:
             target = str((Path(thread["cwd"]) / target).resolve())

@@ -476,6 +476,49 @@ class WorkThreadTests(unittest.TestCase):
         self.threads.remove_link("conversation", links[0]["id"])
         self.assertEqual(len(self.threads.get("conversation")["links"]), 1)
 
+    def test_checkpoint_accepts_validated_app_links_and_rejects_invalid_routes_or_schemes(self):
+        from agent_coord.navigation import NavigationStore
+        child_id = "7d724292-3c97-422a-8e38-ea0ef3c1a687"
+        self.store.register(session_id=child_id, client="kimi", cwd=str(self.root), name="Hide empty Agents tab")
+        nav = NavigationStore(self.store)
+        minted = nav.link(thread=child_id)["url"]
+        message_link = nav.link(thread=child_id, turn="turn-1", item="item-1")["url"]
+        saved = self.threads.checkpoint("conversation", {
+            "phase": "orchestrating",
+            "summary": "Dispatched specialist for empty Agents tab.",
+            "next_step": None,
+            "links": [
+                {"kind": "other", "label": "Hide empty Agents tab", "target": minted},
+                {"kind": "other", "label": "Updated label", "target": f"agentcoord://thread/{child_id}"},
+                {"kind": "other", "label": "Matched message", "target": message_link},
+            ],
+        })
+        self.assertEqual([(link["label"], link["target"]) for link in saved["links"]], [
+            ("Updated label", minted),
+            ("Matched message", message_link),
+        ])
+        other_nav = NavigationStore(CoordinationStore(self.root / "other.sqlite3"))
+        before = self.threads.get("conversation", history=True)
+        for bad in (
+            "agentcoord://thread/missing",
+            other_nav.link()["url"],
+            "agentcoord://send?message=oops",
+            "agentcoord://attribution?download_token=7d724292-3c97-422a-8e38-ea0ef3c1a687",
+            f"{minted}&window=7d724292-3c97-422a-8e38-ea0ef3c1a687",
+            f"{minted}&request=7d724292-3c97-422a-8e38-ea0ef3c1a687",
+            f"agentcoord://thread/{child_id}?turn=only-turn",
+            f"agentcoord://thread/{child_id}#frag",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/plain,hello",
+        ):
+            with self.subTest(bad=bad), self.assertRaises(CoordinationError):
+                self.threads.checkpoint("conversation", {
+                    "summary": "Must not save.",
+                    "links": [{"kind": "other", "label": "Bad", "target": bad}],
+                })
+            self.assertEqual(self.threads.get("conversation", history=True), before)
+
     def test_repositories_disambiguate_equal_names_and_issue_identifiers(self):
         for session, root in [("one", self.root / "a/service"), ("two", self.root / "b/service")]:
             root.mkdir(parents=True)
