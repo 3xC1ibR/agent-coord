@@ -390,7 +390,8 @@ class BrowserSessions:
                 self.classifier.wake()
             else:
                 self.queue.pause(thread_id, "The turn stopped or failed. Resume queued messages when ready.")
-                self.inbox_wake.pause(thread_id, "The turn stopped or failed. Send a message to continue.")
+                self.inbox_wake.pause(thread_id, "The turn stopped or failed. Send a message to continue.",
+                                     kind="failure" if turn.get("status") == "failed" else "stop")
         for identity in disconnected:
             reason = ("Codex disconnected. Review queued messages before resuming."
                       if method == "bridge/disconnected" else "The thread closed. Reopen it to resume queued messages.")
@@ -1543,7 +1544,7 @@ class BrowserSessions:
                 turn_id = self.active.get(thread_id)
             if not turn_id:
                 raise CoordinationError("This session has no running turn to stop yet.")
-            self.inbox_wake.pause(thread_id, "You stopped the turn. Send a message to continue.")
+            self.inbox_wake.pause(thread_id, "You stopped the turn. Send a message to continue.", kind="stop")
             self.queue.pause(thread_id, "You stopped the turn. Resume queued messages when ready.")
             return self._rpc(thread_id).request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
 

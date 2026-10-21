@@ -644,6 +644,151 @@ class AppControlTests(unittest.TestCase):
         self.cli("create", "--name", "Invalid", "--wait", "nan", "question", expected=2)
         self.assertEqual(len(self.control.pending()), before)
 
+    def failed_agent(self, client="codex"):
+        thread = self.create(client)
+        self.sessions.inbox_wake.process_once()
+        self.deliver(thread)
+        if client == "claude":
+            self.sessions.claude.connections[thread].callback({"type": "result", "subtype": "error_during_execution",
+                "is_error": True, "errors": ["Provider quota exhausted"]})
+        else:
+            turn = self.sessions.rpc.threads[thread]["turns"][-1]
+            turn.update(status="failed", error={"message": "Provider quota exhausted"})
+            self.sessions._event({"method": "turn/completed", "params": {"threadId": thread, "turn": copy.deepcopy(turn)}})
+        detail = self.sessions.read(thread)
+        self.assertFalse(detail["running"])
+        self.assertEqual(detail["thread"]["turns"][-1]["status"], "failed")
+        return thread, detail["thread"]["turns"][-1]["id"]
+
+    def continuation(self, thread):
+        return self.store.send_message(sender_session_id="dispatcher", recipient_session_id=thread,
+            body="Inspect existing results and current state before continuing. Do not repeat completed side effects.",
+            reply_required=False)
+
+    def recover_request(self, thread, turn, **kwargs):
+        return self.control.request("resume", "dispatcher", {"expected_turn_id": turn}, thread_id=thread, **kwargs)
+
+    def test_creator_can_explicitly_recover_fresh_inbox_work_once_without_replaying_failure(self):
+        for client in ("codex", "claude"):
+            with self.subTest(client=client):
+                thread, turn = self.failed_agent(client)
+                continuation = self.continuation(thread)
+                self.sessions.inbox_wake.process_once()
+                self.assertFalse(self.sessions.read(thread)["running"])
+                request = self.cli("resume", "--session-id", thread, "--expected-turn-id", turn,
+                                   "--request-id", "recover-" + client, "--wait", "0")
+                self.worker.process_once()
+                receipt = self.control.status(request["request_id"])
+                self.assertEqual(receipt["status"], "completed", receipt)
+                self.assertEqual(receipt["result"]["resumed_after_turn_id"], turn)
+                self.assertEqual(receipt["result"]["state"], "ready")
+                self.sessions.inbox_wake.process_once()
+                detail = self.sessions.read(thread)
+                self.assertTrue(detail["running"])
+                self.assertEqual(len(detail["thread"]["turns"]), 2)
+                self.assertEqual(detail["thread"]["turns"][0]["status"], "failed")
+                self.assertNotEqual(detail["thread"]["turns"][-1]["id"], turn)
+                self.assertEqual(detail["work_thread"]["original_request"], "Explain the release process.")
+                self.assertIn("Inspect existing results", str(self.deliver(thread)))
+                with self.store._connection() as db:
+                    self.assertEqual(db.execute("SELECT outcome FROM message_wake_attempts WHERE message_id = ?",
+                                               (continuation["id"],)).fetchone()[0], "sent")
+                self.assertEqual(self.recover_request(thread, turn, request_id="recover-" + client)["status"], "completed")
+                self.worker.process_once()
+                self.assertEqual(len(self.sessions.read(thread)["thread"]["turns"]), 2)
+
+    def test_recovery_rejects_other_senders_and_stale_failed_turn(self):
+        thread, turn = self.failed_agent()
+        self.continuation(thread)
+        self.store.register(session_id="other", client="codex", cwd=str(self.root))
+        with self.assertRaisesRegex(CoordinationError, "creating orchestrator"):
+            self.control.request("resume", "other", {"expected_turn_id": turn}, thread_id=thread)
+        request = self.recover_request(thread, "old-failed-turn")
+        self.worker.process_once()
+        receipt = self.control.status(request["request_id"])
+        self.assertEqual(receipt["status"], "failed", receipt)
+        self.assertIn("expected failed turn changed", receipt["error"])
+        self.assertFalse(self.sessions.read(thread)["running"])
+
+    def test_recovery_waits_safely_for_updated_runtime_and_can_be_cancelled(self):
+        thread, turn = self.failed_agent()
+        self.continuation(thread)
+        request = self.recover_request(thread, turn, request_id="upgrade-safe-recovery")
+        self.assertEqual(request["status"], "queued")
+        with self.store._connection() as db:
+            # This is the exact scan used by a pre-recovery app worker. It must
+            # never see resume as a creation request during a plugin-only upgrade.
+            self.assertFalse(db.execute("SELECT 1 FROM app_control_requests WHERE status = 'queued'").fetchone())
+        self.assertEqual(self.control.pending()[0]["operation"], "resume")
+        self.assertEqual(self.control.cancel(request["request_id"])["status"], "cancelled")
+        self.worker.process_once()
+        self.assertFalse(self.sessions.read(thread)["running"])
+
+    def test_recovery_cannot_override_stop_or_uncertain_pause_even_with_latest_failure(self):
+        for kind in ("stop", "unknown"):
+            with self.subTest(kind=kind):
+                thread, turn = self.failed_agent()
+                self.continuation(thread)
+                self.sessions.inbox_wake.pause(thread, "Stopped or uncertain submission", kind=kind)
+                if kind == "stop":
+                    # A delayed failure callback must not overwrite user intent.
+                    self.sessions.inbox_wake.pause(thread, "Later failure", kind="failure")
+                request = self.recover_request(thread, turn)
+                self.worker.process_once()
+                receipt = self.control.status(request["request_id"])
+                self.assertEqual(receipt["status"], "failed", receipt)
+                self.assertIn("direct user input", receipt["error"])
+                self.sessions.inbox_wake.process_once()
+                self.assertFalse(self.sessions.read(thread)["running"])
+
+    def test_recovery_preserves_user_queue_and_close_guards(self):
+        for guard in ("queue", "close", "archived"):
+            with self.subTest(guard=guard):
+                thread, turn = self.failed_agent()
+                self.continuation(thread)
+                if guard == "queue":
+                    with patch.object(self.sessions.queue, "wake"):
+                        self.sessions.queue.enqueue(thread, {"message": "User revision first"})
+                        self.sessions.queue.pause(thread, "User review pending")
+                elif guard == "close":
+                    ThreadControl(self.store).request_close(thread)
+                else:
+                    self.sessions.close_work_thread(thread)
+                request = self.recover_request(thread, turn)
+                self.worker.process_once()
+                receipt = self.control.status(request["request_id"])
+                self.assertEqual(receipt["status"], "failed", receipt)
+                self.sessions.inbox_wake.process_once()
+                self.assertFalse(self.sessions.read(thread)["running"])
+
+    def test_recovery_requires_fresh_actionable_work_and_does_not_reset_uncertain_attempt(self):
+        thread, turn = self.failed_agent()
+        request = self.recover_request(thread, turn)
+        self.worker.process_once()
+        self.assertEqual(self.control.status(request["request_id"])["status"], "failed")
+        message = self.continuation(thread)
+        with self.store._connection() as db:
+            db.execute("""INSERT INTO message_wake_attempts (message_id, session_id, attempted_at, outcome, detail)
+                VALUES (?, ?, ?, 'failed', 'Acceptance uncertain')""", (message["id"], thread, self.store.clock()))
+        request = self.recover_request(thread, turn)
+        self.worker.process_once()
+        receipt = self.control.status(request["request_id"])
+        self.assertEqual(receipt["status"], "failed", receipt)
+        self.assertIn("uncertain submissions are never replayed", receipt["error"])
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT outcome FROM message_wake_attempts WHERE message_id = ?",
+                                       (message["id"],)).fetchone()[0], "failed")
+
+    def test_stop_after_recovery_before_dispatch_still_wins(self):
+        thread, turn = self.failed_agent()
+        self.continuation(thread)
+        request = self.recover_request(thread, turn)
+        self.worker.process_once()
+        self.assertEqual(self.control.status(request["request_id"])["status"], "completed")
+        self.sessions.inbox_wake.pause(thread, "User stopped before dispatch", kind="stop")
+        self.sessions.inbox_wake.process_once()
+        self.assertFalse(self.sessions.read(thread)["running"])
+
     def test_server_services_cli_without_browser_navigation(self):
         server = make_ui_server(self.store, port=0, cwd=str(self.root), browser_sessions=self.sessions)
         self.addCleanup(server.server_close)

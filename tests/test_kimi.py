@@ -88,6 +88,9 @@ class KimiTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
+        environment = patch.dict(os.environ, {"KIMI_CODE_HOME": str(self.root / "kimi")})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.store = CoordinationStore(self.root / "state.sqlite3")
         self.connections = []
         self.sessions = self.make_sessions()
@@ -381,7 +384,7 @@ class KimiTests(unittest.TestCase):
         turn = self.sessions.read(thread)["thread"]["turns"][-1]
         self.assertEqual(turn["status"], "failed")
         self.assertIn("without a response", turn["error"]["message"])
-        self.assertIn("hook", turn["error"]["message"])
+        self.assertNotIn("hook", turn["error"]["message"])
         self.assertFalse(self.sessions.read(thread)["running"])
         self.sessions.close()
         self.sessions = self.make_sessions()
@@ -406,6 +409,62 @@ class KimiTests(unittest.TestCase):
         self.update(thread, sessionUpdate="tool_call", toolCallId="tool", title="Read", status="completed")
         connection.future.set_result({"stopReason": "end_turn"})
         self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1]["status"], "completed")
+
+    def test_stop_and_new_turn_during_journal_read_cannot_finish_replacement(self):
+        thread = self.create()
+        original = self.start(thread)
+        journal = self.sessions.kimi.journals[thread]
+        def replace_turn():
+            self.sessions.interrupt(thread)
+            self.start(thread)
+            return {"message": "Old prompt failed"}
+        with patch.object(journal, "failure", side_effect=replace_turn):
+            original.future.set_result({"stopReason": "end_turn"})
+        turns = self.sessions.read(thread)["thread"]["turns"]
+        self.assertEqual([turn["status"] for turn in turns], ["interrupted", "inProgress"])
+        self.assertTrue(self.sessions.read(thread)["running"])
+
+    def test_native_quota_failure_overrides_end_turn_even_after_tool_output(self):
+        from agent_coord.app_control import AppControl
+        self.store.register(session_id="parent", client="codex", cwd=str(self.root))
+        for with_output in (False, True):
+            with self.subTest(with_output=with_output):
+                thread = self.create()
+                native = self.sessions.kimi.native[thread]
+                directory = self.root / "kimi/sessions/workspace" / native
+                directory.mkdir(parents=True)
+                (directory / "state.json").write_text(json.dumps({"id": native, "cwd": str(self.root)}))
+                path = directory / "agents/main/wire.jsonl"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({"type": "metadata", "protocol_version": "1.5"}) + "\n")
+                # Register creator provenance to exercise the real failure report.
+                control = AppControl(self.store)
+                with self.store._connection() as db:
+                    db.execute("""INSERT INTO app_control_requests (request_id, operation, sender_session_id,
+                        cwd, thread_id, payload_json, status, created_at, updated_at)
+                        VALUES (?, 'create', 'parent', ?, ?, '{}', 'completed', 0, 0)""", (thread, str(self.root), thread))
+                connection = self.start(thread)
+                if with_output:
+                    self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Working"})
+                    self.update(thread, sessionUpdate="tool_call", toolCallId="tool", status="completed")
+                records = [
+                    {"type": "turn.prompt", "agentId": "main", "turnId": 4, "promptId": "new"},
+                    {"type": "turn.ended", "agentId": "main", "turnId": 4, "reason": "failed", "error": {
+                        "code": "provider.api_error", "name": "APIProviderQuotaExhaustedError",
+                        "message": "429 You've reached your 5-hour usage limit.", "retryable": False,
+                        "details": {"statusCode": 429, "private": "not retained"}}}]
+                with path.open("a") as journal:
+                    for record in records:
+                        journal.write(json.dumps(record) + "\n")
+                connection.future.set_result({"stopReason": "end_turn"})
+                turn = self.sessions.read(thread)["thread"]["turns"][-1]
+                self.assertEqual(turn["status"], "failed")
+                self.assertEqual(turn["error"]["statusCode"], 429)
+                self.assertEqual(turn["error"]["code"], "provider.api_error")
+                self.assertNotIn("private", str(turn["error"]))
+                messages = self.store.inbox("parent", mark_delivered=False)
+                self.assertIn("5-hour usage limit", messages[-1]["body"])
+                self.assertNotIn("hook", messages[-1]["body"])
 
 
 class KimiTransportAndHookTests(unittest.TestCase):

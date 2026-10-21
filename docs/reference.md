@@ -447,6 +447,24 @@ settings change supersedes a pending agent settings change. Confirm the receipt
 before sending work that requires the new settings. Completing an assignment
 and releasing its file scopes leaves the conversation available.
 
+After inspecting a failed app agent you created, queue a fresh actionable
+continuation with `send`, including instructions to inspect existing results
+before repeating side effects. Then authorize a new inbox turn:
+
+```bash
+agent-coord thread resume --session-id <agent-id> \
+  --expected-turn-id <failed-turn-id> --request-id <unique-recovery-key> --wait 30
+```
+
+Recovery runs through the owning app runtime and only accepts the creating
+orchestrator. The expected turn must still be the latest failed turn, with a
+confirmed failure pause and fresh actionable inbox work. Stop, uncertain wake
+submissions, closed/pending-close threads, and queued user input remain blocked.
+Recovery never replays the failed prompt or resets uncertain wake attempts.
+A completed receipt's `result.state: ready` confirms authorization, not execution.
+Reuse the request ID for retries. Direct user input handles deliberate Stop and
+pause records saved by older runtimes without a confirmed failure cause.
+
 Direct user follow-ups steer Codex or queue for Claude; dispatcher messages may
 arrive through tool hooks during a turn. Automatic inbox wake waits for idle and
 prioritizes queued user prompts. Native history and settings survive restarts,
@@ -792,14 +810,12 @@ The probe uses the existing private provider profile. Use `--provider-dir` when
 that profile is stored at a different path. It does not test shell isolation.
 
 Antigravity receives actionable coordination messages in its native prompt.
-During an active turn, Ribbon Field checks the durable inbox every half second.
-It waits at least five seconds between delivery attempts. When a new message
-arrives, it cancels the native turn, waits for the prompt response, and reconnects
-to the same saved session. This is required because ACP 1.3.0 ignores hook
-`injectSteps` and cannot reliably continue in the same process after cancellation.
-The resumed agent must check interrupted tool results before it repeats an action.
-User Stop, pending Close, and queued user input prevent automatic continuation.
-A cancellation timeout stops the turn and leaves the messages unread.
+Peer messages arriving during work remain queued until the native prompt ends.
+ACP has no steering operation, and ACP 1.3.0 ignores hook `injectSteps`, so
+Ribbon Field does not cancel running tools or pending approvals for delivery.
+The shared inbox wake worker starts the next turn in the same conversation
+after natural completion. User Stop, failure, pending Close, and queued user
+input retain their normal wake guards.
 
 Each prompt contains at most eight messages and 16,000 characters of message data.
 Messages that do not fit remain queued. A large message includes a retrieval
@@ -810,6 +826,8 @@ state, pending age, delivery errors, wake blockers, and recipient activity.
 Reading a page does not acknowledge the message. A successful explicit reply
 acknowledges its original message; otherwise, the agent must acknowledge each
 read message by ID with `ack`. Submission is evidence of transport, not task completion.
+An accepted submission remains submitted even when a later provider turn fails;
+only attempts without receipt evidence become uncertain.
 Unacknowledged messages can be delivered again on a later user turn. Stable IDs
 prevent repeated delivery attempts within one app turn. Native output and tool
 events refresh the agent's activity timestamp.

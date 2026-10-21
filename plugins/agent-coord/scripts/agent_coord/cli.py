@@ -210,6 +210,10 @@ def _parser() -> argparse.ArgumentParser:
     move.add_argument("--session-id", help="Target conversation; defaults to the current caller.")
     move.add_argument("--from-session", help="Requester; defaults to the current caller.")
     move.add_argument("--cwd", required=True, help="Absolute destination project directory.")
+    resume = thread_commands.add_parser("resume", help="Let the creating orchestrator recover a failed app agent for fresh inbox work.")
+    resume.add_argument("--session-id", required=True, help="Target app agent.")
+    resume.add_argument("--from-session", help="Creating orchestrator; defaults to the current caller.")
+    resume.add_argument("--expected-turn-id", required=True, help="Failed turn inspected before requesting recovery.")
     permissions = settings.add_mutually_exclusive_group()
     permissions.add_argument("--yolo", dest="yolo", action="store_const", const=True, default=None)
     permissions.add_argument("--default-permissions", dest="yolo", action="store_const", const=False)
@@ -217,7 +221,7 @@ def _parser() -> argparse.ArgumentParser:
     models.add_argument("--from-session", help="Requester; defaults to the current caller.")
     models.add_argument("--cwd", default=os.getcwd())
     models.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
-    for control in (create_agent, settings, models, move):
+    for control in (create_agent, settings, models, move, resume):
         control.add_argument("--request-id", help="Stable idempotency key; reuse the same key when retrying this request.")
         control.add_argument("--wait", type=float, default=5, help="Wait up to 0–30 seconds for confirmation (default 5).")
     request_status = thread_commands.add_parser("request-status", help="Inspect an app request without repeating it.")
@@ -676,7 +680,7 @@ def run(arguments: argparse.Namespace) -> Any:
         if arguments.thread_command == "dispatch-history":
             from .dispatch_runtime import routing_history
             return routing_history(store, arguments.session_id, after=arguments.after, limit=arguments.limit)
-        if arguments.thread_command in {"create", "settings", "models", "move", "request-status", "cancel-request"}:
+        if arguments.thread_command in {"create", "settings", "models", "move", "resume", "request-status", "cancel-request"}:
             control = AppControl(store)
             operation = arguments.thread_command
             if operation == "cancel-request":
@@ -685,7 +689,9 @@ def run(arguments: argparse.Namespace) -> Any:
                 raise CoordinationError("Wait must be between 0 and 30 seconds.")
             if operation == "request-status":
                 return control.status(arguments.request_id, wait=arguments.wait)
-            if operation == "move":
+            if operation == "resume":
+                payload = {"expected_turn_id": arguments.expected_turn_id}
+            elif operation == "move":
                 payload = {"cwd": arguments.cwd}
             elif operation == "settings":
                 payload = {key: getattr(arguments, key) for key in ("model", "effort", "yolo") if getattr(arguments, key) is not None}

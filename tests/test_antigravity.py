@@ -372,19 +372,12 @@ class AntigravityDeliveryTests(unittest.TestCase):
     def setUp(self):
         AntigravityTests.setUp(self)
         self.store.register(session_id="sender", client="codex", cwd=str(self.root))
-        # Exercise the worker synchronously; lifecycle races are controlled below.
-        self.worker_patch = patch.object(AntigravityRPC, "_start_delivery_worker")
-        self.worker_patch.start()
-        self.addCleanup(self.worker_patch.stop)
 
     def send_correction(self, thread, body="Use the revised interface"):
         return self.store.send_message(sender_session_id="sender", recipient_session_id=thread, body=body)["id"]
 
     def deliver(self, thread):
-        state = self.sessions.antigravity.delivery_turns.get(thread)
-        if state:
-            state["next_check"] = 0
-        self.sessions.antigravity.deliver_pending()
+        self.sessions.inbox_wake.process_once()
 
     def test_initial_prompt_delivers_without_manual_inbox(self):
         thread = self.create()
@@ -399,34 +392,31 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.deliver(thread)
         self.assertFalse(connection.writes)
 
-    def test_cancel_waits_then_reconnects_same_session_with_correction(self):
+    def test_peer_delivery_waits_for_running_tool_and_natural_completion(self):
         thread = self.create()
         connection = self.start(thread)
         native = self.sessions.antigravity.native[thread]
-        app_turn = self.sessions.active[thread]
-        self.update(thread, sessionUpdate='tool_call', toolCallId='tool', title='command', status='in_progress')
+        first_turn = self.sessions.active[thread]
+        self.update(thread, sessionUpdate='tool_call', toolCallId='tool', title='gradlew test', status='in_progress')
         ident = self.send_correction(thread)
         self.deliver(thread)
-        self.assertEqual(connection.writes[-1]['method'], 'session/cancel')
+        self.assertFalse(connection.writes)
         self.assertFalse(connection.closed)
-        self.deliver(thread)
-        self.assertEqual(len(connection.writes), 1)
-        connection.future.set_result({'stopReason': 'cancelled'})
-        self.assertTrue(self.sessions.read(thread)['running'])
-        self.deliver(thread)
-        resumed = self.sessions.antigravity.connections[thread]
-        self.assertIsNot(resumed, connection)
-        self.assertTrue(connection.closed)
-        self.assertEqual(self.sessions.active[thread], app_turn)
-        self.assertIn(('session/resume', {'cwd': str(self.root), 'mcpServers': [], 'sessionId': native}), resumed.calls)
-        self.assertIn(f'"id": {ident}', resumed.calls[-1][1]['prompt'][-1]['text'])
-        tool = next(i for i in self.sessions.read(thread)['thread']['turns'][-1]['items'] if i['id'] == 'tool')
-        self.assertEqual(tool['status'], 'unknown')
-        self.assertIn('reconnected', tool['statusReason'])
-        self.deliver(thread)
-        self.assertFalse(resumed.writes)
-        resumed.future.set_result({'stopReason': 'end_turn'})
+        self.assertEqual(self.sessions.active[thread], first_turn)
+        self.assertEqual(self.sessions.antigravity.delivery.read('sender', ident)['delivery']['state'], 'queued')
+        tool = self.sessions.read(thread)['thread']['turns'][-1]['items'][-1]
+        self.assertEqual(tool['status'], 'inProgress')
+        self.update(thread, sessionUpdate='tool_call_update', toolCallId='tool', status='completed')
+        self.update(thread, sessionUpdate='agent_message_chunk', content={'type': 'text', 'text': 'Tests finished'})
+        connection.future.set_result({'stopReason': 'end_turn'})
         self.assertFalse(self.sessions.read(thread)['running'])
+        self.deliver(thread)
+        self.assertTrue(self.sessions.read(thread)['running'])
+        self.assertNotEqual(self.sessions.active[thread], first_turn)
+        self.assertEqual(self.sessions.antigravity.native[thread], native)
+        self.assertFalse(connection.closed)
+        self.assertFalse(connection.writes)
+        self.assertIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][-1]['text'])
 
     def test_user_stop_during_delivery_never_resumes(self):
         thread = self.create()
@@ -444,66 +434,59 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.assertIn('stopped', receipt['delivery']['blocked_reason'].lower())
         self.assertIn('Use the revised interface', self.start(thread).calls[-1][1]['prompt'][-1]['text'])
 
-    def test_stop_during_reconnect_does_not_submit_a_prompt(self):
-        thread = self.create()
-        original = self.start(thread)
-        self.send_correction(thread)
-        self.deliver(thread)
-        original.future.set_result({'stopReason': 'cancelled'})
-        provider = self.sessions.antigravity
-        factory = provider.connection_factory
-        def stopping_factory(*args):
-            connection = factory(*args)
-            request = connection.request
-            def stopping_request(method, params, **kwargs):
-                result = request(method, params, **kwargs)
-                if method == 'session/resume':
-                    self.sessions.interrupt(thread)
-                return result
-            connection.request = stopping_request
-            return connection
-        provider.connection_factory = stopping_factory
-        self.deliver(thread)
-        self.assertNotIn(thread, provider.connections)
-        self.assertFalse(self.sessions.read(thread)['running'])
-
-    def test_cancellation_timeout_is_visible_and_does_not_restart(self):
+    def test_pending_peer_does_not_resolve_user_permission(self):
         thread = self.create()
         connection = self.start(thread)
-        ident = self.send_correction(thread)
-        self.deliver(thread)
-        self.sessions.antigravity.delivery_turns[thread]['cancel_at'] -= 31
-        self.deliver(thread)
-        self.assertTrue(connection.closed)
-        receipt = self.sessions.antigravity.delivery.read('sender', ident)
-        self.assertEqual(receipt['delivery']['state'], 'uncertain')
-        self.assertIn('timed out', receipt['delivery']['error'])
-        self.assertIsNone(receipt['delivered_at'])
-        self.assertFalse(self.sessions.read(thread)['running'])
-
-    def test_old_continuation_cannot_close_a_new_user_turn(self):
-        thread = self.create()
-        original = self.start(thread)
+        permission = self.permission(thread)
         self.send_correction(thread)
         self.deliver(thread)
-        original.future.set_result({'stopReason': 'cancelled'})
-        provider = self.sessions.antigravity
-        stale = provider.delivery_turns[thread]
+        self.assertFalse(connection.writes)
+        self.assertEqual(self.sessions.pending_requests(thread), [permission])
+        self.assertTrue(self.sessions.read(thread)['running'])
+
+    def test_long_tool_is_not_timed_out_for_coordination_and_failure_preserves_receipt(self):
+        thread = self.create()
+        initial = self.send_correction(thread, 'Initial assignment')
+        connection = self.start(thread)
+        self.update(thread, sessionUpdate='tool_call', toolCallId='tool', status='in_progress')
+        later = self.send_correction(thread, 'Later correction')
+        with patch('agent_coord.antigravity.time.monotonic', return_value=10**12):
+            self.deliver(thread)
+        self.assertFalse(connection.closed)
+        self.assertFalse(connection.writes)
+        self.assertTrue(self.sessions.read(thread)['running'])
+        connection.future.set_exception(CoordinationError('Provider quota exhausted'))
+        self.assertFalse(self.sessions.read(thread)['running'])
+        self.assertEqual(self.sessions.antigravity.delivery.read('sender', initial)['delivery']['state'], 'submitted')
+        receipt = self.sessions.antigravity.delivery.read('sender', later)
+        self.assertEqual(receipt['delivery']['state'], 'queued')
+        self.assertIsNone(receipt['delivery']['attempted_at'])
+        self.assertIn('failed', receipt['delivery']['blocked_reason'].lower())
+
+    def test_late_old_prompt_completion_cannot_finish_new_user_turn(self):
+        thread = self.create()
+        self.start(thread)
+        old_turn = self.sessions.active[thread]
+        self.send_correction(thread)
         self.sessions.interrupt(thread)
         current = self.start(thread)
-        provider._resume_delivery(thread, stale)
-        self.assertIs(provider.connections[thread], current)
+        future = Future()
+        future.set_result({'stopReason': 'end_turn'})
+        self.sessions.antigravity._prompt_done(thread, old_turn, future)
+        self.assertIs(self.sessions.antigravity.connections[thread], current)
         self.assertFalse(current.closed)
         self.assertTrue(self.sessions.read(thread)['running'])
 
-    def test_pending_permissions_are_cancelled_before_continuation(self):
+    def test_close_with_pending_peer_does_not_wake(self):
+        from agent_coord.thread_control import ThreadControl
         thread = self.create()
         connection = self.start(thread)
-        self.permission(thread)
         self.send_correction(thread)
+        ThreadControl(self.store).request_close(thread, after_turn=True)
+        connection.future.set_result({'stopReason': 'end_turn'})
         self.deliver(thread)
-        self.assertEqual(connection.writes[-2]['result']['outcome']['outcome'], 'cancelled')
-        self.assertFalse(self.sessions.pending_requests(thread))
+        self.assertFalse(self.sessions.read(thread)['running'])
+        self.assertEqual(len([c for c in connection.calls if c[0] == 'session/prompt']), 1)
 
     def test_user_queue_takes_priority_over_inbox_interrupt(self):
         thread = self.create()
@@ -539,15 +522,16 @@ class AntigravityDeliveryTests(unittest.TestCase):
         connection = self.sessions.antigravity.connections[thread]
         self.assertIn('Use the revised interface', connection.calls[-1][1]['prompt'][-1]['text'])
 
-    def test_natural_completion_can_win_cancel_race(self):
+    def test_informational_peer_does_not_start_followup(self):
         thread = self.create()
         connection = self.start(thread)
-        self.send_correction(thread)
+        self.store.send_message(sender_session_id='sender', recipient_session_id=thread,
+                                body='Progress noted', classification='informational')
         self.deliver(thread)
+        self.assertFalse(connection.writes)
         connection.future.set_result({'stopReason': 'end_turn'})
         self.deliver(thread)
-        self.assertIsNot(self.sessions.antigravity.connections[thread], connection)
-        self.assertTrue(self.sessions.read(thread)['running'])
+        self.assertFalse(self.sessions.read(thread)['running'])
 
     def test_provider_activity_refreshes_liveness(self):
         thread = self.create()

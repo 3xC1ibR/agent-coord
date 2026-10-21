@@ -114,14 +114,16 @@ class DeliveryToolHistoryTests(unittest.TestCase):
     send_correction = support.AntigravityDeliveryTests.send_correction
     deliver = support.AntigravityDeliveryTests.deliver
 
-    def test_coordination_reconnect_keeps_confirmed_result_and_persists_unknown(self):
+    def test_coordination_waits_for_completion_and_preserves_tool_history(self):
         thread = self.create()
         connection = self.start(thread)
         self.update(thread, sessionUpdate='tool_call_update', toolCallId='confirmed', status='completed', rawOutput='already written')
         self.update(thread, sessionUpdate='tool_call', toolCallId='pending', status='in_progress')
         self.send_correction(thread)
         self.deliver(thread)
-        connection.future.set_result({'stopReason': 'cancelled'})
+        self.assertFalse(connection.writes)
+        self.assertEqual(self.tools(thread)['pending']['status'], 'inProgress')
+        connection.future.set_result({'stopReason': 'end_turn'})
         self.deliver(thread)
         self.assertEqual(self.tools(thread)['confirmed']['status'], 'completed')
         self.assertEqual(self.tools(thread)['pending']['status'], 'unknown')

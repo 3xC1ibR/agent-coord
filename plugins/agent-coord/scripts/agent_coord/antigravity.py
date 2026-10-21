@@ -159,8 +159,6 @@ class AntigravityRPC:
         self.catalog_lock = threading.Lock()
         self.delivery = MessageDelivery(store)
         self.delivery_turns = {}
-        self.delivery_stop = threading.Event()
-        self.delivery_worker = None
         self.last_activity = {}
         self.prompt_locks = {}
         with store._connection() as db:
@@ -287,8 +285,7 @@ class AntigravityRPC:
 
     def request(self, method, params=None):
         if method == "turn/start":
-            # A new user turn must not reuse a half-initialized connection from
-            # an interrupted inbox continuation. Stop itself never waits here.
+            # Serialize native prompt starts. Stop itself never waits here.
             with self._prompt_lock(params["threadId"]):
                 return self._request(method, params)
         return self._request(method, params)
@@ -345,13 +342,10 @@ class AntigravityRPC:
             turn = {"id": str(uuid.uuid4()), "status": "inProgress", "items": [
                 {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}]}
             self.turns[thread_id] = turn
-            self.delivery_turns[thread_id] = {"id": turn["id"], "batch": None, "accepted": False,
-                "cancel_at": None, "ready": False, "next_check": time.monotonic() + 5,
-                "reconnecting": False, "pending_batch": None}
+            self.delivery_turns[thread_id] = {"id": turn["id"], "batch": None, "accepted": False}
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
             try:
                 self._submit_prompt(thread_id, turn["id"], connection, prompt)
-                self._start_delivery_worker()
             except Exception as exc:
                 self._finish(thread_id, "failed", str(exc))
                 raise
@@ -380,13 +374,6 @@ class AntigravityRPC:
             if error:
                 self._finish(thread_id, "failed", error)
                 return
-            state = self.delivery_turns.get(thread_id)
-            if state and state["cancel_at"] is not None:
-                # The original prompt response is the cancellation barrier. A
-                # normal end_turn can win the race with our cancel notification.
-                if reason in {"cancelled", "canceled", "end_turn"}:
-                    state["ready"] = True
-                    return
             if reason not in {"cancelled", "canceled"}:
                 self._confirm_delivery(thread_id)
             self._finish(thread_id, "interrupted" if reason in {"cancelled", "canceled"} else "completed")
@@ -409,139 +396,29 @@ class AntigravityRPC:
             return text
         return None
 
-    def _submit_prompt(self, thread_id, turn_id, connection, prompt, *, batch=None):
-        prepared = batch is not None
-        batch = batch or self.delivery.prepare(thread_id, turn_id)
+    def _submit_prompt(self, thread_id, turn_id, connection, prompt):
+        batch = self.delivery.prepare(thread_id, turn_id)
         if batch:
             prompt = [*prompt, {"type": "text", "text": batch["text"]}]
         with self.lock:
             state = self.delivery_turns.get(thread_id)
             if self.closed or not state or state["id"] != turn_id:
-                return  # Stop won while the provider reconnected.
-            if not prepared:
-                self.delivery.attempted(turn_id, batch)
-            state.update(batch=batch, accepted=False, cancel_at=None, ready=False,
-                         reconnecting=False, next_check=time.monotonic() + 5, pending_batch=None)
+                return  # Stop won before submission.
+            self.delivery.attempted(turn_id, batch)
+            state.update(batch=batch, accepted=False)
             future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
         future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
 
     def _confirm_delivery(self, thread_id):
         state = self.delivery_turns.get(thread_id)
-        if state and not state["accepted"] and not state["reconnecting"]:
+        if state and not state["accepted"]:
             self.delivery.submitted(thread_id, state["id"], state["batch"])
             state["accepted"] = True
 
-    def _start_delivery_worker(self):
-        with self.lock:
-            if self.delivery_worker is None:
-                self.delivery_worker = threading.Thread(target=self._delivery_loop,
-                    name="antigravity-inbox", daemon=True)
-                self.delivery_worker.start()
-
-    def _delivery_loop(self):
-        while not self.delivery_stop.wait(.5):
-            try:
-                self.deliver_pending()
-            except Exception:
-                logging.getLogger(__name__).exception("Antigravity inbox delivery failed")
-
-    def deliver_pending(self):
-        """Interrupt only for new actionable IDs, at most once every five seconds.
-
-        No provider process is started for an idle/stopped conversation here.
-        The shared idle wake worker retains its Stop and user-queue guards.
-        """
-        with self.lock:
-            active = list(self.delivery_turns.items())
-        for thread_id, state in active:
-            if self.closed or self.delivery_turns.get(thread_id) is not state:
-                continue
-            try:
-                if state["cancel_at"] is not None:
-                    if state["ready"]:
-                        self._resume_delivery(thread_id, state)
-                    elif time.monotonic() - state["cancel_at"] >= 30:
-                        self._finish(thread_id, "failed", "Coordination delivery timed out waiting for Antigravity cancellation. Send a message to resume.")
-                        connection = self.connections.pop(thread_id, None)
-                        if connection:
-                            connection.close()
-                    continue
-                if time.monotonic() < state["next_check"] or not self._delivery_allowed(thread_id):
-                    continue
-                batch = self.delivery.prepare(thread_id, state["id"])
-                if not batch:
-                    continue
-                with self.lock:
-                    if self.delivery_turns.get(thread_id) is not state:
-                        continue
-                    self.delivery.attempted(state["id"], batch)
-                    state["pending_batch"] = batch
-                    state["cancel_at"] = time.monotonic()
-                    connection = self.connections[thread_id]
-                    pending = [(key, value) for key, value in self.requests.items() if value[0] == thread_id]
-                    for key, (_, request_id, _) in pending:
-                        connection.write({"id": request_id, "result": {"outcome": {"outcome": "cancelled"}}})
-                        self.requests.pop(key, None)
-                    connection.write({"method": "session/cancel", "params": {"sessionId": self.native[thread_id]}})
-                for key, _ in pending:
-                    self._emit("serverRequest/resolved", thread_id, requestId=key)
-            except Exception as exc:
-                if self.delivery_turns.get(thread_id) is state:
-                    self._finish(thread_id, "failed", str(exc))
-                    connection = self.connections.pop(thread_id, None)
-                    if connection:
-                        connection.close()
-
-    def _delivery_allowed(self, thread_id):
-        with self.store._connection() as db:
-            if db.execute("SELECT 1 FROM browser_message_queue WHERE thread_id = ?", (thread_id,)).fetchone():
-                return False
-            if db.execute("SELECT 1 FROM browser_inbox_wake WHERE thread_id = ? AND paused = 1", (thread_id,)).fetchone():
-                return False
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone():
-                if db.execute("SELECT 1 FROM thread_close_requests WHERE thread_id = ? AND status IN ('queued', 'closing')",
-                              (thread_id,)).fetchone():
-                    return False
-        return True
-
-    def _resume_delivery(self, thread_id, state):
-        with self._prompt_lock(thread_id):
-            self._resume_delivery_locked(thread_id, state)
-
-    def _resume_delivery_locked(self, thread_id, state):
-        # ACP 1.3.0 cannot reliably rebuild its agent in-process after cancel.
-        # Reconnect only after the prompt response, retaining the saved native ID.
-        with self.lock:
-            if self.delivery_turns.get(thread_id) is not state or self.closed:
-                return
-            state["reconnecting"] = True
-            connection = self.connections.pop(thread_id, None)
-        if connection:
-            connection.close()
-        if self.delivery_turns.get(thread_id) is not state or self.closed:
-            return
-        if not self._delivery_allowed(thread_id):
-            self.delivery.failed(state["id"], state["pending_batch"], "Continuation deferred to queued user input or Stop/Close.")
-            self._finish(thread_id, "completed")
-            return
-        connection = self._connection(thread_id, self.options[thread_id])
-        if self.delivery_turns.get(thread_id) is not state or self.closed:
-            self.connections.pop(thread_id, None)
-            connection.close()
-            return
-        with self.lock:
-            turn = self.turns.get(thread_id)
-            if not turn or turn["id"] != state["id"]:
-                return
-            unconfirmed = self._unconfirmed_tools(turn,
-                "Antigravity reconnected before reporting this tool's outcome.")
-        for item in unconfirmed:
-            self._emit("item/completed", thread_id, turnId=state["id"], item=item)
-        self._submit_prompt(thread_id, state["id"], connection, [{"type": "text", "text":
-            coordination_bootstrap(self.store, thread_id) + "\n\nRibbon Field paused the native turn to deliver coordination messages. Continue the existing user request "
-            "in this same conversation, taking the messages below into account. A tool may have been interrupted: "
-            "inspect its result and current state before retrying any side effect. User Stop did not cause this continuation."}],
-            batch=state["pending_batch"])
+    # ACP has no steering operation or safe in-prompt delivery boundary.
+    # Peer messages remain durable while native work runs. BrowserInboxWake
+    # delivers them on the next idle turn, with its user queue/Stop/Close guards.
+    # Never cancel a prompt (or a pending permission) merely to deliver peers.
 
     def _finish(self, thread_id, status, error=None):
         with self.lock:
@@ -551,7 +428,6 @@ class AntigravityRPC:
             state = self.delivery_turns.pop(thread_id, None)
             if state and status != "completed":
                 self.delivery.failed(turn["id"], state["batch"], error or "The turn was stopped; receipt is not acknowledgment.")
-                self.delivery.failed(turn["id"], state["pending_batch"], error or "Stopped before coordination delivery.")
             turn["status"] = status
             self._unconfirmed_tools(turn,
                 "The turn ended before Antigravity reported this tool's outcome.")
@@ -593,8 +469,6 @@ class AntigravityRPC:
             self._context_usage(thread_id, update)
             return
         state = self.delivery_turns.get(thread_id)
-        if state and state["reconnecting"]:
-            return  # Resuming the same native transcript must not replay display items.
         if state:
             self._confirm_delivery(thread_id)
             now = time.monotonic()
@@ -661,10 +535,6 @@ class AntigravityRPC:
         return value if len(encoded) <= 64000 else encoded[:64000] + "…"
 
     def _permission(self, thread_id, message):
-        state = self.delivery_turns.get(thread_id)
-        if state and state["cancel_at"] is not None:
-            self.connections[thread_id].write({"id": message["id"], "result": {"outcome": {"outcome": "cancelled"}}})
-            return
         request = message["params"]
         tool = request.get("toolCall", {})
         options = [o for o in request.get("options", []) if isinstance(o.get("optionId"), str) and o["optionId"]]
@@ -708,11 +578,8 @@ class AntigravityRPC:
 
     def close(self):
         self.closed = True
-        self.delivery_stop.set()
         for thread_id in list(self.turns):
             self._finish(thread_id, "interrupted")
         for thread_id, connection in list(self.connections.items()):
             connection.close()
         self.connections.clear()
-        if self.delivery_worker and self.delivery_worker is not threading.current_thread():
-            self.delivery_worker.join(timeout=5)

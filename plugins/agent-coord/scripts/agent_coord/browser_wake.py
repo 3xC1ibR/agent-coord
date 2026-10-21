@@ -10,6 +10,7 @@ import threading
 
 from .workspaces import matches_workspace
 from .app_agent_failures import notify_agent_failure
+from .store import CoordinationError
 from .zellij_wake import WAKE_PROMPT
 
 
@@ -24,18 +25,67 @@ class BrowserInboxWake:
                 thread_id TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0,
                 dispatching INTEGER NOT NULL DEFAULT 0, error TEXT
             )""")
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(browser_inbox_wake)")}
+            for column in ("pause_kind", "recovery_turn_id"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE browser_inbox_wake ADD COLUMN {column} TEXT")
 
-    def pause(self, thread_id, reason):
+    def pause(self, thread_id, reason, *, kind="unknown"):
         with self.store._connection() as db:
-            db.execute("""INSERT INTO browser_inbox_wake (thread_id, paused, error)
-                VALUES (?, 1, ?) ON CONFLICT(thread_id) DO UPDATE SET paused = 1, error = excluded.error""",
-                (thread_id, reason))
+            db.execute("""INSERT INTO browser_inbox_wake (thread_id, paused, error, pause_kind)
+                VALUES (?, 1, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET paused = 1,
+                error = CASE WHEN pause_kind = 'stop' THEN error ELSE excluded.error END,
+                pause_kind = CASE WHEN pause_kind = 'stop' THEN 'stop' ELSE excluded.pause_kind END,
+                recovery_turn_id = NULL""", (thread_id, reason, kind))
 
     def resume(self, thread_id):
-        """Only accepted user input re-enables wakes after Stop or a failure."""
+        """Accepted user input re-enables wakes, including after deliberate Stop."""
         with self.store._connection() as db:
-            db.execute("UPDATE browser_inbox_wake SET paused = 0, dispatching = 0, error = NULL WHERE thread_id = ?",
+            db.execute("""UPDATE browser_inbox_wake SET paused = 0, dispatching = 0,
+                error = NULL, pause_kind = NULL, recovery_turn_id = NULL WHERE thread_id = ?""",
                        (thread_id,))
+
+    def recover(self, thread_id, expected_turn_id, requester):
+        """Let the creating orchestrator authorize one continuation after failure.
+
+        This unpauses fresh inbox work; it never replays the failed provider
+        prompt or resets uncertain wake attempts. Stop/Close remain user gates.
+        """
+        if not self.sessions.persistence.flush():
+            raise CoordinationError("Conversation state is still being saved. Try again shortly.")
+        with self.sessions._thread_lock(thread_id):
+            detail = self.sessions.read(thread_id)
+            turns = detail["thread"].get("turns", [])
+            if (detail["running"] or not turns or turns[-1].get("id") != expected_turn_id
+                    or turns[-1].get("status") != "failed"):
+                raise CoordinationError("The expected failed turn changed or is running. Inspect the conversation before recovery.")
+            with self.store._connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                if not db.execute("""SELECT 1 FROM app_control_requests WHERE operation = 'create'
+                        AND thread_id = ? AND sender_session_id = ? AND status = 'completed'""",
+                        (thread_id, requester)).fetchone():
+                    raise CoordinationError("Only this app agent's creating orchestrator can recover it.")
+                if self.store.threads.get(thread_id)["attention"] == "archived":
+                    raise CoordinationError("Recovery cannot reopen a closed conversation.")
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone() and db.execute(
+                        "SELECT 1 FROM thread_close_requests WHERE thread_id = ? AND status IN ('queued', 'closing')",
+                        (thread_id,)).fetchone():
+                    raise CoordinationError("The conversation has a pending close request.")
+                if db.execute("SELECT 1 FROM browser_message_queue WHERE thread_id = ?", (thread_id,)).fetchone():
+                    raise CoordinationError("Queued user input takes priority. Review it in the app before recovery.")
+                wake = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id = ?", (thread_id,)).fetchone()
+                if not wake or not wake["paused"] or wake["pause_kind"] != "failure" or wake["dispatching"]:
+                    raise CoordinationError("Only a confirmed failure pause can be recovered. Stop or uncertain wake needs direct user input.")
+                if not db.execute("""SELECT 1 FROM messages m
+                        LEFT JOIN message_wake_attempts a ON a.message_id = m.id
+                        WHERE m.recipient_session_id = ? AND m.delivered_at IS NULL
+                        AND m.classification = 'action_required' AND m.suppressed_at IS NULL
+                        AND a.message_id IS NULL AND m.thread_id NOT LIKE 'event:%'""", (thread_id,)).fetchone():
+                    raise CoordinationError("Queue a fresh actionable continuation before recovery; uncertain submissions are never replayed.")
+                db.execute("""UPDATE browser_inbox_wake SET paused = 0, error = NULL,
+                    pause_kind = NULL, recovery_turn_id = ? WHERE thread_id = ?""", (expected_turn_id, thread_id))
+            return {"session_id": thread_id, "resumed_after_turn_id": expected_turn_id, "state": "ready"}
 
     def _eligible(self, db, thread_id, *, submitting=False):
         if self.stopped.is_set() or self.sessions.closed:
@@ -131,8 +181,13 @@ class BrowserInboxWake:
                     return
                 turns = detail["thread"].get("turns", [])
                 if turns and turns[-1].get("status") in {"interrupted", "failed"}:
-                    self.pause(thread_id, "The last turn stopped or failed. Send a message to continue.")
-                    return
+                    with self.store._connection() as db:
+                        recovery = db.execute("SELECT recovery_turn_id FROM browser_inbox_wake WHERE thread_id = ?",
+                                              (thread_id,)).fetchone()
+                    if not (turns[-1].get("status") == "failed" and recovery and recovery[0] == turns[-1].get("id")):
+                        self.pause(thread_id, "The last turn stopped or failed. Send a message to continue.",
+                                   kind="failure" if turns[-1].get("status") == "failed" else "stop")
+                        return
             except Exception as exc:
                 self.pause(thread_id, str(exc))
                 self._report_failure(thread_id, str(exc))

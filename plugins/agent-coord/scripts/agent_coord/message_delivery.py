@@ -94,7 +94,8 @@ class MessageDelivery:
     def failed(self, turn_id, batch, error):
         if batch:
             with self.store._connection() as db:
-                db.executemany("UPDATE message_delivery_attempts SET error = ? WHERE message_id = ? AND turn_id = ?",
+                db.executemany("""UPDATE message_delivery_attempts SET error = ?
+                    WHERE message_id = ? AND turn_id = ? AND submitted_at IS NULL""",
                                [(str(error)[:2000], i, turn_id) for i in batch["ids"]])
 
     def read(self, session_id, message_id, *, offset=0, limit=PAGE_CHARS):
@@ -117,10 +118,10 @@ class MessageDelivery:
                       next_offset=offset + limit if offset + limit < len(row["body"]) else None)
         status = "acknowledged" if row["acknowledged_at"] else "queued"
         if status != "acknowledged":
-            if attempt and attempt["error"]:
-                status = "uncertain"
-            elif attempt and attempt["submitted_at"]:
+            if attempt and attempt["submitted_at"] is not None:
                 status = "submitted" if attempt["full_body"] else "body_required"
+            elif attempt and attempt["error"]:
+                status = "uncertain"
             elif attempt:
                 status = "submitting"
             elif row["delivered_at"]:
@@ -129,7 +130,9 @@ class MessageDelivery:
             "pending_seconds": None if row["acknowledged_at"] else max(0, self.store.clock() - row["created_at"]),
             "attempted_at": _iso(attempt["attempted_at"]) if attempt else None,
             "submitted_at": _iso(attempt["submitted_at"]) if attempt else None,
-            "error": attempt["error"] if attempt else None,
+            # Older runtimes wrote later turn failures onto accepted batches.
+            # Provider outcome cannot undo evidence that a prompt was received.
+            "error": attempt["error"] if attempt and attempt["submitted_at"] is None else None,
             "blocked_reason": blocked[0] if blocked else None,
             "recipient_last_seen_at": _iso(recipient["last_seen_at"]),
             "recipient_turn_active": bool(recipient["turn_active"])}

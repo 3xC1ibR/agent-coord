@@ -590,6 +590,23 @@ and fail if settings changed after queueing. Confirm completion before sending
 work that requires those settings. A session active in another app runtime
 must be handled there.
 
+To recover an app agent you created after a confirmed failed turn, inspect the
+failure and current state, then send a fresh actionable continuation describing
+what to inspect before repeating side effects. Authorize that continuation with:
+
+```bash
+agent-coord thread resume --session-id <agent-id> \
+  --expected-turn-id <failed-turn-id> --request-id <unique-recovery-key> --wait 30
+```
+
+Only the creating orchestrator can do this. A `completed` receipt with
+`result.state: ready` confirms the failure gate was cleared for fresh inbox work;
+it does not confirm task execution. Recovery rejects stale turn IDs, deliberate
+Stop, uncertain wakes, closed/pending-close threads, and queued user input.
+It never replays the failed prompt or resets an uncertain submission. Direct
+user input remains the recovery path for Stop or older, untyped pause records.
+This command requires an updated running app backend.
+
 Route later requests with `send --session <agent-id> --classification
 action_required --no-reply-required`. Request a reply only when coordination
 requires one. Messages can reach busy agents through tool hooks; automatic
@@ -599,8 +616,10 @@ release scopes after assignments; completing work does not close the chat.
 Closing preserves identity, context, and settings. The same ordinary `send`
 wakes a closed app specialist and automatically returns it to Now, restoring
 its direct user composer. No reopen flag or separate reopen command is needed.
-Stop, failure, and uncertain wake attempts may also require direct user input
-to resume automatic wake. An updated running app services pending messages;
+Stop and uncertain wake attempts require direct user input to resume automatic
+wake; confirmed failures also support creator-authorized `thread resume` above.
+Antigravity delivers peer messages after the active prompt finishes, preserving
+running tools and pending approvals. An updated running app services pending messages;
 offline queueing does not launch the app. Terminal `delegate` behavior is unchanged.
 
 ## Delegate work to a managed terminal worker

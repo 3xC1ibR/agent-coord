@@ -54,6 +54,37 @@ class MessageDeliveryTests(unittest.TestCase):
         self.assertIsNone(reopened.prepare('recipient', 'turn2'))
         self.assertEqual(reopened.prepare('sender', 'turn2')['ids'], [reply['id']])
 
+    def test_later_failure_preserves_submitted_batch_but_marks_unconfirmed_batch(self):
+        accepted = self.send('Initial assignment')
+        first = self.delivery.prepare('recipient', 'turn')
+        self.delivery.attempted('turn', first)
+        self.delivery.submitted('recipient', 'turn', first)
+        submitted = self.delivery.read('sender', accepted)['delivery']['submitted_at']
+        pending = self.send('Later update')
+        second = self.delivery.prepare('recipient', 'turn')
+        self.delivery.attempted('turn', second)
+        self.delivery.failed('turn', first, 'Later prompt failed')
+        self.delivery.failed('turn', second, 'Later prompt failed')
+        reopened = MessageDelivery(CoordinationStore(self.store.database_path))
+        receipt = reopened.read('sender', accepted)
+        self.assertEqual(receipt['delivery']['state'], 'submitted')
+        self.assertEqual(receipt['delivery']['submitted_at'], submitted)
+        self.assertIsNone(receipt['delivery']['error'])
+        self.assertIsNone(receipt['acknowledged_at'])
+        self.assertEqual(reopened.read('sender', pending)['delivery']['state'], 'uncertain')
+
+    def test_legacy_error_on_submitted_body_is_not_delivery_uncertainty(self):
+        ident = self.send('x' * 20000)
+        batch = self.delivery.prepare('recipient', 'turn')
+        self.delivery.attempted('turn', batch)
+        self.delivery.submitted('recipient', 'turn', batch)
+        with self.store._connection() as db:
+            db.execute("UPDATE message_delivery_attempts SET error = 'Later timeout'")
+        receipt = self.delivery.read('sender', ident)
+        self.assertEqual(receipt['delivery']['state'], 'body_required')
+        self.assertIsNone(receipt['delivered_at'])
+        self.assertIsNone(receipt['delivery']['error'])
+
     def test_batches_preserve_complete_bodies_and_leave_excess_queued(self):
         ids = [self.send('line\n' * 600 + str(n)) for n in range(12)]
         batch = self.delivery.prepare('recipient', 'turn')

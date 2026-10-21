@@ -18,6 +18,7 @@ from .acp import ACPConnection
 from .context import client_environment, coordination_bootstrap
 from .kimi_setup import ensure_hooks, resolve_runtime
 from .kimi_usage import backfill_usage
+from .kimi_status import PromptJournal
 from .store import CoordinationError
 
 
@@ -73,6 +74,7 @@ class KimiRPC:
         self.store, self.on_event, self.connection_factory = store, on_event, connection_factory
         self.connections, self.options, self.native, self.generations = {}, {}, {}, {}
         self.turns, self.completed, self.requests, self.settings, self.capabilities = {}, {}, {}, {}, {}
+        self.journals = {}
         self.catalog = None
         self.lock, self.catalog_lock = threading.RLock(), threading.Lock()
         self.closed = False
@@ -266,6 +268,7 @@ class KimiRPC:
             self.turns[thread_id] = turn
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
             try:
+                self.journals[thread_id] = PromptJournal(self.native[thread_id], self.options[thread_id]["cwd"])
                 future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
                 future.add_done_callback(lambda result: self._prompt_done(thread_id, turn["id"], result))
             except Exception as exc:
@@ -287,37 +290,49 @@ class KimiRPC:
         raise CoordinationError(f"Kimi does not support {method}.")
 
     def _prompt_done(self, thread_id, turn_id, future):
-        if self.turns.get(thread_id, {}).get("id") != turn_id:
-            return
+        with self.lock:
+            if self.turns.get(thread_id, {}).get("id") != turn_id:
+                return
+            journal = self.journals.get(thread_id)
+
+        def finish(status, error=None):
+            self._finish(thread_id, status, error, expected_turn_id=turn_id)
+
         try:
             reason = future.result().get("stopReason", "end_turn")
-            if reason in {"max_tokens", "max_turn_requests"}:
-                self._finish(thread_id, "failed", "Kimi reached " + reason.replace("_", " ") + ". Send a message to continue.")
+            error = journal.failure() if journal else None
+            if error:
+                finish("failed", error)
+            elif reason in {"max_tokens", "max_turn_requests"}:
+                finish("failed", "Kimi reached " + reason.replace("_", " ") + ". Send a message to continue.")
             elif reason in {"cancelled", "canceled"}:
-                self._finish(thread_id, "interrupted")
+                finish("interrupted")
             elif reason != "end_turn":
-                self._finish(thread_id, "failed", f"Kimi stopped the prompt ({reason}). Check the response and Kimi Code CLI logs before retrying.")
+                finish("failed", f"Kimi stopped the prompt ({reason}). Check the response and Kimi Code CLI logs before retrying.")
             elif not any((item.get("type") == "agentMessage" and item.get("text", "").strip())
                          or item.get("type") == "mcpToolCall"
                          for item in self.turns.get(thread_id, {}).get("items", [])):
-                self._finish(thread_id, "failed", "Kimi ended the prompt without a response. A prompt hook may have blocked it. "
-                             "Check Kimi Code CLI hook configuration and logs, then send again.")
+                finish("failed", "Kimi ended the prompt without a response or a terminal error from ACP. "
+                       "Check Kimi Code CLI status and logs before continuing.")
             else:
-                self._finish(thread_id, "completed")
+                finish("completed")
         except Exception as exc:
-            self._finish(thread_id, "failed", str(exc))
+            finish("failed", (journal.failure() if journal else None) or str(exc))
 
-    def _finish(self, thread_id, status, error=None):
+    def _finish(self, thread_id, status, error=None, *, expected_turn_id=None):
         with self.lock:
+            if expected_turn_id is not None and self.turns.get(thread_id, {}).get("id") != expected_turn_id:
+                return
             turn = self.turns.pop(thread_id, None)
             if not turn:
                 return
+            self.journals.pop(thread_id, None)
             turn["status"] = status
             for item in turn["items"]:
                 if item.get("status") == "inProgress":
                     item["status"] = "completed" if status == "completed" else status
             if error:
-                turn["error"] = {"message": str(error)}
+                turn["error"] = copy.deepcopy(error) if isinstance(error, dict) else {"message": str(error)}
             # A concurrent read can arrive before the browser event handler
             # persists completion. Keep the last snapshot so disk lag never
             # changes a successful turn into an interrupted, incomplete one.

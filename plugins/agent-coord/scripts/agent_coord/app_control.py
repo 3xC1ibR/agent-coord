@@ -52,13 +52,22 @@ class AppControl:
 
     def request(self, operation, sender_session_id, payload, *, thread_id=None, request_id=None):
         self.store.get_session(sender_session_id)
-        if operation not in {"create", "settings", "models", "move"}:
+        if operation not in {"create", "settings", "models", "move", "resume"}:
             raise CoordinationError("Unknown app control operation.")
         payload = dict(payload)
-        if operation in {"settings", "move"}:
+        if operation in {"settings", "move", "resume"}:
             record = self.settings(thread_id)
             cwd = record["cwd"]
-            if operation == "move":
+            if operation == "resume":
+                expected = payload.get("expected_turn_id")
+                if set(payload) != {"expected_turn_id"} or not isinstance(expected, str) or not expected.strip() or len(expected) > 200:
+                    raise CoordinationError("Recovery requires the expected failed turn ID.")
+                with self.store._connection() as db:
+                    if not db.execute("""SELECT 1 FROM app_control_requests WHERE operation = 'create'
+                            AND thread_id = ? AND sender_session_id = ? AND status = 'completed'""",
+                            (thread_id, sender_session_id)).fetchone():
+                        raise CoordinationError("Only this app agent's creating orchestrator can recover it.")
+            elif operation == "move":
                 from .thread_move import destination_directory
                 if set(payload) != {"cwd"}:
                     raise CoordinationError("Moving a thread accepts its destination cwd only.")
@@ -108,16 +117,19 @@ class AppControl:
                 # thread_id on create is filled in as soon as the provider replies.
                 if (previous["operation"] != operation or previous["sender_session_id"] != sender_session_id
                         or old_payload != payload or (operation != "move" and previous["cwd"] != cwd)
-                        or (operation in {"settings", "move"} and previous["thread_id"] != thread_id)):
+                        or (operation in {"settings", "move", "resume"} and previous["thread_id"] != thread_id)):
                     raise CoordinationError("Request ID already belongs to a different app request.")
             else:
                 if operation in {"settings", "move"}:
                     payload["expected_settings"] = {key: record[key] for key in SETTINGS}
                 now = self.store.clock()
+                # Pre-recovery app workers treat unknown queued operations as
+                # creation. Keep recovery invisible to their queued-only scan.
+                queued = "queued_resume" if operation == "resume" else "queued"
                 db.execute("""INSERT INTO app_control_requests
                     (request_id, operation, sender_session_id, cwd, thread_id, payload_json,
-                     status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
-                    (identifier, operation, sender_session_id, cwd, thread_id, json.dumps(payload, sort_keys=True), now, now))
+                     status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (identifier, operation, sender_session_id, cwd, thread_id, json.dumps(payload, sort_keys=True), queued, now, now))
         return self.status(identifier)
 
     def _reconcile(self, db):
@@ -149,9 +161,13 @@ class AppControl:
             if not row:
                 raise CoordinationError("App request not found.")
             result = {key: row[key] for key in ("request_id", "operation", "status", "thread_id", "error")}
+            if result["status"] == "queued_resume":
+                result["status"] = "queued"
             result["result"] = json.loads(row["result_json"]) if row["result_json"] else None
-            if row["status"] == "queued":
+            if result["status"] == "queued":
                 result["message"] = "Queued for Ribbon Field. The app must be running in this workspace; settings and project moves wait for idle."
+                if row["operation"] == "resume":
+                    result["message"] = "Recovery queued for an updated Ribbon Field runtime in this workspace. No failed prompt has been replayed."
             if row["status"] in TERMINAL or time.monotonic() >= deadline:
                 return result
             time.sleep(min(.1, max(0, deadline - time.monotonic())))
@@ -164,18 +180,20 @@ class AppControl:
                 raise CoordinationError("App request not found.")
             if row[0] == "running":
                 raise CoordinationError("The app request is already executing. Inspect request-status before acting again.")
-            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status = 'queued'",
+            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume')",
                        (self.store.clock(), request_id))
         return self.status(request_id)
 
     def pending(self):
         with self.store._connection() as db:
             self._reconcile(db)
-            return [dict(row) for row in db.execute("SELECT * FROM app_control_requests WHERE status = 'queued' ORDER BY created_at, rowid")]
+            return [dict(row) for row in db.execute("""SELECT * FROM app_control_requests
+                WHERE status = 'queued' OR (operation = 'resume' AND status = 'queued_resume') ORDER BY created_at, rowid""")]
 
     def claim(self, request_id, owner):
         with self.store._connection() as db:
-            return bool(db.execute("UPDATE app_control_requests SET status = 'running', owner = ?, updated_at = ? WHERE request_id = ? AND status = 'queued'",
+            return bool(db.execute("""UPDATE app_control_requests SET status = 'running', owner = ?, updated_at = ?
+                WHERE request_id = ? AND (status = 'queued' OR (operation = 'resume' AND status = 'queued_resume'))""",
                                    (owner, self.store.clock(), request_id)).rowcount)
 
     def identified(self, request_id, thread_id):
@@ -234,7 +252,7 @@ class AppControlWorker:
             if not matches_workspace(request["cwd"], self.sessions.cwd):
                 continue
             thread_id = request["thread_id"]
-            if request["operation"] in {"settings", "move"}:
+            if request["operation"] in {"settings", "move", "resume"}:
                 with self.sessions._thread_lock(thread_id):
                     self.control.settings(thread_id)
                     closed = self.control.store.threads.get(thread_id)["attention"] == "archived"
@@ -245,7 +263,8 @@ class AppControlWorker:
                     # Do not resume a thread owned by another running app-server.
                     if not closed and not loaded and session["ended_at"] is None:
                         continue
-                    if not closed and (busy or session["turn_active"] or self.sessions.queue.list(thread_id)):
+                    if not closed and (busy or session["turn_active"] or
+                            (request["operation"] != "resume" and self.sessions.queue.list(thread_id))):
                         continue
                     self._execute(request)
             else:
@@ -259,6 +278,8 @@ class AppControlWorker:
         try:
             if request["operation"] == "models":
                 result = {"client": payload.get("client", "codex"), "models": self.sessions.models(payload.get("client", "codex"))}
+            elif request["operation"] == "resume":
+                result = self.sessions.inbox_wake.recover(request["thread_id"], payload["expected_turn_id"], request["sender_session_id"])
             elif request["operation"] == "move":
                 from .thread_move import move_work_thread
                 thread_id = request["thread_id"]
@@ -277,6 +298,8 @@ class AppControlWorker:
                 self.sessions.read(thread_id)  # Refresh native activity before permissions change.
                 self.sessions.update(thread_id, payload)
                 result = self.control.settings(thread_id)
+            elif request["operation"] != "create":
+                raise CoordinationError("Unknown app control operation.")
             else:
                 reply_required = payload.pop("reply_required", False)
                 subscribe = payload.pop("subscribe", True)
