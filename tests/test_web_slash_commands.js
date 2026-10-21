@@ -48,7 +48,7 @@ function setup({loadModels = async () => [], loadSkills = async () => [], onRepl
 test("slash opens supported commands with descriptions and filters case-insensitively", () => {
   const f = setup(); f.type("/");
   assert.equal(f.menu.hidden, false);
-  assert.deepEqual(f.names(), ["/cd", "/model", "/effort", "/permissions", "/fork", "/close", "/help"]);
+  assert.deepEqual(f.names(), ["/cd", "/model", "/effort", "/permissions", "/yolo", "/fork", "/close", "/help"]);
   assert.equal(f.input.attributes["aria-expanded"], "true");
   assert.equal(f.menu.children[0].attributes["aria-selected"], "true");
   assert.match(f.menu.children[0].children[2].textContent, /directory/);
@@ -408,7 +408,7 @@ test("Escape dismisses suggestions even while the catalog is loading", async () 
 test("arrows wrap, filtering resets selection, Enter and Tab insert without submitting", () => {
   const f = setup(); f.type("/");
   assert.equal(f.key("ArrowUp").defaultPrevented, true);
-  assert.equal(f.input.attributes["aria-activedescendant"], "slash-commands-6");
+  assert.equal(f.input.attributes["aria-activedescendant"], "slash-commands-7");
   f.key("ArrowDown"); f.key("ArrowDown");
   assert.equal(f.menu.children[1].attributes["aria-selected"], "true");
   assert.equal(f.menu.children[1].scrolled, true);
@@ -492,4 +492,11 @@ test("composer completion takes precedence over send and queue, then restores bo
   f.context.composerKeydown({key: "Enter", preventDefault() {}});
   f.context.composerKeydown({key: "Tab", preventDefault() {}});
   assert.equal(f.submits, 1); assert.equal(f.queues, 1);
+});
+
+test("/yolo completes without arguments and explains its permission effect", () => {
+  const f = setup(); f.type("/YO");
+  assert.deepEqual(f.names(), ["/yolo"]);
+  assert.match(f.menu.children[0].children[2].textContent, /without approval prompts/);
+  f.key("Tab"); assert.equal(f.input.value, "/yolo ");
 });

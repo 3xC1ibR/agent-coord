@@ -67,6 +67,7 @@ class BrowserCommandTests(unittest.TestCase):
             self.command("/cd .")
 
     def test_permissions_and_help_are_local_commands(self):
+        self.assertIn("/yolo", self.command("/help")["command"]["message"])
         self.assertIn("/cd", self.command("/help")["command"]["message"])
         self.assertIn("/permissions", self.command("/help")["command"]["message"])
         self.assertIn("/fork", self.command("/help")["command"]["message"])
@@ -81,14 +82,33 @@ class BrowserCommandTests(unittest.TestCase):
         with self.assertRaises(BrowserBusyError):
             self.command("/permissions yolo")
 
+    def test_yolo_enables_permissions_without_starting_a_turn(self):
+        for command in ("/yolo", "/YOLO", "/yolo"):
+            result = self.command(command)
+            self.assertEqual(result["session"]["yolo"], 1)
+            self.assertEqual(result["command"]["name"], "/yolo")
+        self.assertFalse(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))
+        self.assertEqual(self.command("/permissions default")["session"]["yolo"], 0)
+        for command in ("/yolo off", "/yolo extra"):
+            with self.assertRaisesRegex(CoordinationError, "without arguments"):
+                self.command(command)
+            self.assertEqual(self.sessions._record(self.thread)["yolo"], 0)
+        self.command("/yolo")
+        self.sessions.send(self.thread, {"message": "Work"})
+        params = next(params for method, params in reversed(self.sessions.rpc.calls) if method == "turn/start")
+        self.assertEqual(params["approvalPolicy"], "never")
+        self.assertEqual(params["sandboxPolicy"]["type"], "dangerFullAccess")
+        with self.assertRaises(BrowserBusyError):
+            self.command("/yolo")
+
     def test_settings_commands_reconcile_once_and_fetch_the_catalog_once(self):
-        for command in ("/model available-model high", "/effort medium", "/permissions default"):
+        for command in ("/model available-model high", "/effort medium", "/permissions default", "/yolo"):
             with self.subTest(command=command):
                 self.sessions.rpc.calls.clear()
                 result = self.command(command)
                 methods = [method for method, _ in self.sessions.rpc.calls]
                 self.assertEqual(methods.count("thread/read"), 1)
-                self.assertEqual(methods.count("model/list"), 0 if command.startswith("/permissions") else 1)
+                self.assertEqual(methods.count("model/list"), 0 if command.startswith(("/permissions", "/yolo")) else 1)
                 self.assertNotIn("turn/start", methods)
                 self.assertIn("command", result)
 
@@ -109,7 +129,7 @@ class BrowserCommandTests(unittest.TestCase):
 
     def test_configuration_with_images_is_rejected_instead_of_sent(self):
         image = {"name": "test.png", "url": "data:image/png;base64,iVBORw0KGgo="}
-        for command in ("/cd .", "/permissions yolo", "/model", "/effort", "/help"):
+        for command in ("/cd .", "/permissions yolo", "/yolo", "/model", "/effort", "/help"):
             with self.subTest(command=command), self.assertRaisesRegex(CoordinationError, "Remove attached images"):
                 self.sessions.send(self.thread, {"message": command, "images": [image]})
         self.assertFalse(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))

@@ -724,11 +724,15 @@ For Codex or Claude, install and authenticate the selected CLI first (`codex log
 workspace-write sandboxing and on-request approvals routed to the developer by
 default. **New session** and native **⌘N** open a draft conversation in the current
 workspace. You can change providers and models before sending the first message.
-Existing conversations offer models from their current provider. Use `/permissions yolo` or the
+Existing conversations offer models from their current provider. Use `/yolo`, `/permissions yolo`, or the
 conversation footer’s **Permissions** control to disable sandboxing and approval
 prompts for that session (full machine access). `/permissions default` restores
 workspace access and approval prompts. The choice is saved
 and preserved when the session resumes; other sessions keep their own settings.
+`/yolo` takes no arguments and enables full access; repeating it keeps full access
+enabled. In a new draft, `/yolo` and `/permissions [default|yolo]` update or show
+the draft's permissions immediately, just like the button, without creating a
+provider conversation. The chosen permissions apply when the first message is sent.
 
 Claude conversations use the installed `claude` CLI's bidirectional stream-json
 protocol, with one process per conversation and no extra runtime dependencies.

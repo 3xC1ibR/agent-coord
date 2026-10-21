@@ -1275,7 +1275,7 @@ class BrowserSessions:
     def _command(self, thread_id: str, message: str, *, reconciled_session: dict | None = None) -> dict | None:
         parts = message.split()
         command = parts[0].lower()
-        if command not in {"/cd", "/permissions", "/model", "/effort", "/help"}:
+        if command not in {"/cd", "/permissions", "/yolo", "/model", "/effort", "/help"}:
             return None
         client = self._record(thread_id)["client"]
         default_permissions = {"claude": "Claude Code configured permissions with tool approval prompts",
@@ -1285,7 +1285,7 @@ class BrowserSessions:
                                    client, "workspace access with approval prompts")
         if command == "/help":
             reply = ("Commands: /cd [directory], /model [model-id] [effort], /effort [level], "
-                     "/permissions [default|yolo], /help. Changes apply to your next message. "
+                     "/permissions [default|yolo], /yolo, /help. Changes apply to your next message. "
                      "Use /cd with a relative, absolute, or ~ path. "
                      "Permissions: default uses " + default_permissions + "; "
                      "yolo gives full machine access without approval prompts. "
@@ -1295,7 +1295,11 @@ class BrowserSessions:
             argument = message[len(parts[0]):].strip()
             record = self._change_directory(thread_id, argument) if argument else self._record(thread_id)
             reply = "Working directory: " + record["cwd"] + ". Use /cd <directory> to change it."
-        elif command == "/permissions":
+        elif command in {"/permissions", "/yolo"}:
+            if command == "/yolo":
+                if len(parts) != 1:
+                    raise CoordinationError("Use /yolo without arguments. Use /permissions default to turn it off.")
+                parts = ["/permissions", "yolo"]
             if len(parts) > 2 or (len(parts) == 2 and parts[1].lower() not in {"default", "yolo"}):
                 raise CoordinationError("Use /permissions default or /permissions yolo.")
             record = (self._change_settings(thread_id, {"yolo": parts[1].lower() == "yolo"},

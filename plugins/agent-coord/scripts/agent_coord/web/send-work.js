@@ -27,7 +27,7 @@ class SendWorkPalette {
       onSelectModel: choice => { this.modelChoice = choice; },
       onChange: () => this.changed(),
       onComplete: ({query, command}) => {
-        if (query.kind !== "command" || command.name === "/new") this.configure();
+        if (query.kind !== "command" || ["/new", "/yolo"].includes(command.name)) this.configure();
       }});
     this.$("open").onclick = () => this.toggle();
     this.$("close").onclick = () => this.close();
@@ -199,6 +199,7 @@ class SendWorkPalette {
         {name: "/model", arguments: "[model-id] [effort]", description: "Choose the new agent's model"},
         {name: "/effort", arguments: "[level]", description: "Choose reasoning effort"},
         {name: "/permissions", arguments: "[default|yolo]", description: "Choose the new agent's permissions"},
+        {name: "/yolo", arguments: "", description: "Enable full machine access without approval prompts"},
       ] : [])];
   }
   async loadModels(client) {
@@ -225,7 +226,10 @@ class SendWorkPalette {
         this.input.value = [argument, rest].filter(Boolean).join("\n");
       } else {
         if (this.locked?.kind !== "new") throw new Error("Use /new before configuring an agent.");
-        if (command === "permissions") {
+        if (command === "yolo") {
+          if (argument) throw new Error("Use /yolo without arguments. Use /permissions default to turn it off.");
+          this.draft.yolo = true;
+        } else if (command === "permissions") {
           if (!argument) { this.configuring = false; this.offerCommand("permissions"); return; }
           if (!["default", "yolo"].includes(argument.toLowerCase())) throw new Error("Use /permissions default or /permissions yolo.");
           this.draft.yolo = argument.toLowerCase() === "yolo";
@@ -254,7 +258,7 @@ class SendWorkPalette {
             throw new Error("Reasoning effort is not supported by this model.");
           }
           Object.assign(this.draft, {client, model, effort});
-        } else throw new Error("Use /new, /model, /effort, or /permissions in this popup.");
+        } else throw new Error("Use /new, /model, /effort, /permissions, or /yolo in this popup.");
         this.input.value = rest;
       }
       this.modelChoice = null; this.input.setSelectionRange(0, 0);

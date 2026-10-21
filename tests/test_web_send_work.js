@@ -213,7 +213,7 @@ test("/new prepares a local draft, exposes only configuration commands, and surv
   assert.equal(h.palette.settings.hidden, false); assert.equal(h.palette.list.hidden, true);
   assert.equal(h.calls.length, 0);
   h.type("/");
-  assert.deepEqual(h.palette.slash.matches.map(c => c.name), ["/new", "/model", "/effort", "/permissions"]);
+  assert.deepEqual(h.palette.slash.matches.map(c => c.name), ["/new", "/model", "/effort", "/permissions", "/yolo"]);
   h.key("Escape", h.document); assert.equal(h.palette.dialog.open, true); assert.equal(h.palette.menu.hidden, true);
   h.type("Fix the build"); h.key("Escape", h.document); h.palette.toggle();
   assert.equal(h.palette.locked.kind, "new"); assert.equal(h.palette.input.value, "Fix the build");
@@ -354,4 +354,15 @@ test("overview refresh does not reset keyboard destination selection", () => {
   const chosen = h.palette.locked;
   h.palette.syncOverview();
   assert.equal(h.palette.locked, chosen); assert.equal(h.palette.rows[h.palette.active], chosen);
+});
+
+test("/yolo enables new-agent permissions locally and rejects arguments", async () => {
+  const h = setup(); h.palette.toggle(); h.type("/new"); await h.palette.send();
+  h.type("/yolo extra"); await h.palette.send();
+  assert.equal(h.palette.error.hidden, false); assert.equal(h.palette.draft.yolo, false);
+  h.type("/yo"); h.key("Tab"); await settle();
+  assert.equal(h.palette.draft.yolo, true);
+  h.type("/YOLO\nFix the build"); await h.palette.send();
+  assert.equal(h.palette.draft.yolo, true); assert.equal(h.palette.input.value, "Fix the build");
+  assert.equal(h.calls.length, 0);
 });

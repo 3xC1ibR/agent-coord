@@ -117,7 +117,7 @@ test("failed commands keep the draft and running sessions cannot change settings
 });
 
 test("permission and settings commands restore composer focus after refreshing", async () => {
-  for (const command of ["/permissions yolo", "/permissions default", "/model", "/effort high", "/cd", "/help"]) {
+  for (const command of ["/yolo", "/permissions yolo", "/permissions default", "/model", "/effort high", "/cd", "/help"]) {
     const c = setup(), input = c.$("message");
     const doc = {body: {}, documentElement: {}, activeElement: input, hasFocus: () => true, querySelector: () => null};
     input.ownerDocument = doc; input.value = command;

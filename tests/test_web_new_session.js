@@ -36,7 +36,7 @@ function setup() {
 }
 
 test("configuration commands can be the first submission and display their feedback", async () => {
-  for (const command of ["/help", "/cd .", "/model gpt-test", "/effort high", "/permissions yolo"]) {
+  for (const command of ["/help", "/cd .", "/model gpt-test", "/effort high"]) {
     const c = setup(); await c.newSession();
     const api = c.api;
     c.api = async (path, body) => {
@@ -75,15 +75,15 @@ async function commandFocusSetup() {
 }
 
 test("first permission commands retain composer focus in standalone and pane conversations", async () => {
-  for (const paneMode of [false, true]) for (const mode of ["yolo", "default"]) {
+  for (const paneMode of [false, true]) for (const command of ["/yolo", "/permissions yolo", "/permissions default"]) {
     const c = await commandFocusSetup(), input = c.$("message"), doc = input.ownerDocument;
     c.state.paneMode = paneMode;
-    input.value = "/permissions " + mode;
+    input.value = command;
     await c.sendMessage();
-    assert.equal(c.state.selected, "created");
+    assert.equal(c.state.selected, "new-session");
+    assert.equal(c.calls.some(call => call.body), false);
     assert.equal(input.value, "");
-    assert.equal(doc.activeElement, input, `${mode}, pane=${paneMode}`);
-    assert.equal(input.focusOptions.preventScroll, true);
+    assert.equal(doc.activeElement, input, `${command}, pane=${paneMode}`);
   }
 });
 
@@ -100,7 +100,7 @@ test("a first command does not restore composer focus over user interaction", as
       if (interaction === "navigate") c.state.selected = "other";
       if (interaction === "navigate-back") c.state.navigationRevision += 2;
     };
-    input.value = "/permissions yolo";
+    input.value = "/model gpt-test";
     await c.sendMessage();
     assert.equal(doc.activeElement, interaction === "click" ? other : doc.body, interaction);
   }
@@ -113,7 +113,7 @@ test("a first command does not reclaim focus after navigation while sending", as
     if (path.endsWith("/messages")) c.state.navigationRevision += 2;
     return api(path, body);
   };
-  input.value = "/permissions default";
+  input.value = "/model gpt-test";
   await c.sendMessage();
   assert.equal(doc.activeElement, doc.body);
 });
@@ -606,4 +606,62 @@ test("an existing send and its refresh cannot block another project's send or cl
   refresh.resolve(); await first;
   assert.equal(c.state.drafts.has("a"), false);
   assert.equal(c.state.sending.size, 0);
+});
+
+test("draft permission commands stay local and configure the first real message", async () => {
+  for (const client of ["codex", "claude", "antigravity", "kimi", "muse"]) {
+    const c = setup(); await c.newSession(); c.state.newSessionDraft.session.client = client;
+    c.calls.length = 0;
+    for (const [command, expected] of [["/YOLO", true], ["/yolo", true], ["/permissions", true], ["/permissions default", false], ["/permissions YOLO", true]]) {
+      c.$("message").value = command; await c.sendMessage();
+      assert.equal(c.state.newSessionDraft.session.yolo, expected);
+      assert.match(c.state.newSessionDraft.commandFeedback, /Permissions:/);
+      assert.equal(c.state.selected, "new-session"); assert.equal(c.calls.length, 0);
+    }
+    c.$("message").value = "Hello"; await c.sendMessage();
+    assert.equal(c.calls.find(call => call.path === "sessions").body.yolo, true);
+    assert.equal(c.calls.find(call => call.path === "sessions").body.client, client);
+    assert.equal(c.calls.find(call => call.path.endsWith("/messages")).body.message, "Hello");
+  }
+});
+
+test("invalid draft permission commands and attached images never create sessions", async () => {
+  const c = setup(); await c.newSession(); c.calls.length = 0;
+  for (const command of ["/yolo extra", "/permissions unknown", "/permissions yolo extra"]) {
+    c.$("message").value = command;
+    await assert.rejects(c.sendMessage(), /Use/);
+    assert.equal(c.$("message").value, command);
+    assert.equal(c.state.newSessionDraft.session.yolo, false);
+  }
+  c.state.attachments = {snapshot: () => [{name: "image.png", url: "data:image/png;base64,iVBORw0KGgo="}], pending: () => false};
+  for (const command of ["/yolo", "/permissions yolo"]) {
+    c.$("message").value = command;
+    await assert.rejects(c.sendMessage(), /Remove attached images/);
+    assert.equal(c.$("message").value, command);
+    assert.equal(c.state.newSessionDraft.session.yolo, false);
+  }
+  assert.equal(c.calls.length, 0);
+});
+
+test("draft permission button and commands share the same setting", async () => {
+  const c = setup(); await c.newSession();
+  vm.runInContext(source.slice(source.indexOf("async function saveSessionPermissions()"), source.indexOf("function renderStatus()")), c);
+  const dialog = c.$("permissions-dialog"); dialog.dataset.threadId = "new-session"; dialog.close = () => {};
+  c.calls.length = 0;
+  c.$("message").value = "/yolo"; await c.sendMessage();
+  assert.equal(c.state.detail.session.yolo, true);
+  c.$("edit-yolo").checked = false; await c.saveSessionPermissions();
+  assert.equal(c.state.detail.session.yolo, false);
+  assert.equal(c.state.newSessionDraft.commandFeedback, null);
+  c.$("message").value = "/permissions"; await c.sendMessage();
+  assert.match(c.state.newSessionDraft.commandFeedback, /default/);
+  assert.equal(c.calls.length, 0);
+});
+
+test("a draft already created after a failed send applies permissions through its saved session", async () => {
+  const c = setup(); await c.newSession(); c.state.newSessionDraft.createdId = "saved";
+  c.calls.length = 0; c.$("message").value = "/yolo";
+  await c.sendMessage();
+  assert.equal(c.calls.some(call => call.path === "sessions"), false);
+  assert.equal(c.calls.find(call => call.path === "sessions/saved/messages").body.message, "/yolo");
 });

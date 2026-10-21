@@ -1270,8 +1270,9 @@ function renderSessionSettings() {
   $("session-effort").textContent = "Reasoning · " + (session?.effort || "Model default");
   $("session-yolo").hidden = !session?.yolo;
   $("edit-permissions").disabled = !browserSession || state.detailRefreshing || !!state.detail?.running || state.detail?.work_thread?.attention === "archived" || sessionBusy() || state.closing.has(state.selected);
-  $("command-feedback").textContent = state.commandFeedback.get(state.selected) || "";
-  $("command-feedback").hidden = !browserSession || !state.commandFeedback.has(state.selected);
+  const feedback = state.selected === "new-session" ? state.newSessionDraft?.commandFeedback : state.commandFeedback.get(state.selected);
+  $("command-feedback").textContent = feedback || "";
+  $("command-feedback").hidden = !browserSession || !feedback;
   renderModelPicker();
 }
 function openSessionPermissions() {
@@ -1299,7 +1300,7 @@ async function saveSessionPermissions() {
   const draft = id === "new-session" && state.newSessionDraft;
   const session = draft && !draft.createdId
     ? Object.assign(draft.session, body) : await api(sessionPath(draft?.createdId || id), body);
-  if (draft) Object.assign(draft.session, body);
+  if (draft) { Object.assign(draft.session, body); draft.commandFeedback = null; }
   if (id === state.selected && state.detail) { state.detail.session = session; renderStatus(); }
   dialog.close();
   await refreshList();
@@ -2164,6 +2165,23 @@ async function sendSessionDraft(text, images, mentions = []) {
   const navigationRevision = state.navigationRevision;
   let restoreFocus = false, focusRevision;
   const draft = state.newSessionDraft;
+  const parts = text.trim().split(/\s+/), command = parts[0].toLowerCase();
+  if (!draft.createdId && ["/permissions", "/yolo"].includes(command)) {
+    if (images.length) throw new Error("Remove attached images before using chat configuration commands.");
+    if (command === "/yolo" && parts.length !== 1)
+      throw new Error("Use /yolo without arguments. Use /permissions default to turn it off.");
+    if (command === "/permissions" && (parts.length > 2 || parts.length === 2 && !["default", "yolo"].includes(parts[1].toLowerCase())))
+      throw new Error("Use /permissions default or /permissions yolo.");
+    if (command === "/yolo" || parts.length === 2)
+      draft.session.yolo = command === "/yolo" || parts[1].toLowerCase() === "yolo";
+    draft.commandFeedback = draft.session.yolo
+      ? "Permissions: yolo — full machine access without approval prompts. Use /permissions default to turn it off."
+      : "Permissions: default — approval prompts enabled. Use /yolo to enable full machine access.";
+    input.value = ""; state.drafts.delete("new-session");
+    state.mentions?.sent(draft.draftId || "new-session", text, mentions);
+    renderStatus();
+    return;
+  }
   const cwd = state.projectCwd || draft.session.cwd, draftId = draft.draftId || "new-session";
   if (!draft.createdId) {
     const result = await api("sessions", {...draft.session});
