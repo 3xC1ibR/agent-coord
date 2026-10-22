@@ -90,6 +90,8 @@ class BrowserInboxWake:
     def _eligible(self, db, thread_id, *, submitting=False):
         if self.stopped.is_set() or self.sessions.closed:
             return False
+        from .sidecars import discard_stale_messages
+        discard_stale_messages(db, thread_id, self.store.clock())
         row = db.execute("""SELECT s.turn_active, t.attention,
                 w.paused, w.dispatching
             FROM browser_sessions b JOIN work_threads t ON t.thread_id = b.thread_id

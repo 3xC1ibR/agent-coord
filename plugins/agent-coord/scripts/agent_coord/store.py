@@ -2600,6 +2600,8 @@ class CoordinationStore:
         )
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            from .sidecars import guard_message
+            guard_message(connection, sender_session_id, recipient["session_id"])
             row, inserted = self._insert_message(
                 connection,
                 sender_session_id=sender_session_id,
@@ -2647,6 +2649,8 @@ class CoordinationStore:
             if not original["reply_required"]:
                 raise CoordinationError(f"Message {message_id} does not request a reply. Use send with an explicit reply choice for new work.")
             now = self.clock()
+            from .sidecars import guard_message
+            guard_message(connection, sender_session_id, original["sender_session_id"])
             row, _ = self._insert_message(
                 connection,
                 sender_session_id=sender_session_id,
@@ -2735,6 +2739,8 @@ class CoordinationStore:
         now = self.clock()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            from .sidecars import discard_stale_messages
+            discard_stale_messages(connection, session_id, now)
             rows = list(
                 connection.execute(
                     f"""

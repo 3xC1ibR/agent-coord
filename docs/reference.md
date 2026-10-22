@@ -1502,6 +1502,76 @@ Thread placement and checkpoint phases are independent of Beads. Linking an
 issue does not import the backlog or change issue status. Delegation and atomic
 handoff also work without an issue.
 
+## Attach a sidecar
+
+Use **Attach sidecar…** in an app conversation's actions or its overview menu.
+Describe the responsibility, choose **Notify me** or **Notify me and message the
+agent**, and select a provider/model or an existing idle agent in the same project.
+New sidecars use default provider permissions, never inherited full access.
+Attaching does not interrupt the working agent. The sidecar has its own conversation;
+the target shows its status and **Open**, **Pause**, and **Detach** controls.
+Detaching preserves both conversations and the review history.
+
+Agents can request the same attachment through the shared app runtime:
+
+```bash
+agent-coord sidecar attach --target <thread-id> \
+  --purpose 'Verify the current task meets its acceptance criteria and has test evidence.' \
+  --mode message --max-interventions 2 --max-reviews 20 \
+  --client codex --request-id <stable-request-key> --wait 30
+agent-coord thread request-status --request-id <stable-request-key>
+agent-coord sidecar list --target <thread-id>
+agent-coord sidecar show <watch-id>
+agent-coord sidecar pause <watch-id>
+agent-coord sidecar resume <watch-id>
+agent-coord sidecar detach <watch-id>
+```
+
+Add `--existing <idle-app-agent-id>` to reuse an agent. Otherwise `--client`,
+`--model`, and `--effort` select the new agent. The default mode is `notify`.
+A queued receipt is not attachment confirmation; the updated running app must
+complete it. Retry transport failures with the same request ID and arguments.
+An uncertain creation is never replayed automatically; inspect its returned
+agent identity before creating another. Older backends leave sidecar requests
+queued. No Beads issue is needed.
+
+Each watch captures the original request, current checkpoint, and latest saved
+user request. Its first review reads a bounded recent history; subsequent
+reviews follow new completed turns, coalescing events while the sidecar is busy.
+Waiting consumes no model turns, but requires the app backend to be running.
+Watches, evidence snapshots, budgets, and delivery receipts survive restarts.
+The sidecar receives a review ID and uses:
+
+```bash
+agent-coord sidecar evidence <watch-id> --review <review-id>
+agent-coord sidecar report <watch-id> --review <review-id> \
+  --verdict watching --finding 'The payment test result is missing.' \
+  --message 'Run the payment tests and report their result.'
+```
+
+Verdicts are `watching`, `complete`, and `attention`. Only the assigned sidecar
+can read evidence or report a review. Corrective messages require `message`
+authority, an unchanged idle target, and remaining intervention allowance.
+Direct Agent Coord messages from a sidecar to its watched target are rejected;
+the report command enforces these checks atomically and is idempotent per review.
+Queued corrections are discarded if the target changes assignment/turn or is
+stopped before delivery. Pause/detach invalidates outstanding reviews and
+suppresses their pending messages. Stop, Close, pending user input, provider
+failures, and uncertain wakes retain the existing app execution guards.
+
+By default a verified `complete` report ends the watch. `--continuous` keeps it
+attached across future assignments, within the same lifetime review budget.
+Defaults are 20 reviews and 2 corrective messages, with a ten-second minimum
+between reviews. Missing reports and exhausted review budgets require attention;
+they do not start an automatic retry loop. A new watch grants a new budget.
+
+Evidence is a bounded saved display history of messages and available tool
+results, not a complete native trace. It includes coverage/truncation indicators.
+No external files or hidden reasoning are imported. The selected sidecar model
+receives this evidence, so choose its provider accordingly. This feature is
+asynchronous supervision: coordination permissions are enforced, but it is not
+a sandbox and does not prevent information leaks or block arbitrary tool actions.
+
 ## Resume agents when work finishes
 
 Agents can save a durable subscription, end their turn, and resume the same

@@ -83,6 +83,36 @@ def _parser() -> argparse.ArgumentParser:
     antigravity = subcommands.add_parser("antigravity", help="Install or sign in to Google Antigravity.")
     antigravity.add_argument("antigravity_command", choices=["install", "login", "status"])
 
+    sidecar = subcommands.add_parser("sidecar", help="Attach and manage a dedicated app-agent watcher.")
+    sidecar_commands = sidecar.add_subparsers(dest="sidecar_command", required=True)
+    attach = sidecar_commands.add_parser("attach", help="Create a sidecar or attach an existing idle app agent.")
+    attach.add_argument("--from-session", help="Creator; defaults to the caller.")
+    attach.add_argument("--target", required=True, help="App conversation to watch.")
+    attach.add_argument("--purpose", required=True, help="What the sidecar should check.")
+    attach.add_argument("--mode", choices=["notify", "message"], default="notify")
+    attach.add_argument("--continuous", action="store_true", help="Continue across future assignments.")
+    attach.add_argument("--existing", dest="existing_id", help="Reuse an idle app agent in the same project.")
+    attach.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
+    attach.add_argument("--model")
+    attach.add_argument("--effort")
+    attach.add_argument("--max-reviews", type=int, default=20)
+    attach.add_argument("--max-interventions", type=int, default=2)
+    attach.add_argument("--request-id", help="Stable retry key.")
+    attach.add_argument("--wait", type=float, default=0)
+    for name in ("list", "show", "pause", "resume", "detach", "evidence", "report"):
+        operation = sidecar_commands.add_parser(name)
+        operation.add_argument("--session-id", help="Caller; defaults to the current agent.")
+        if name == "list":
+            operation.add_argument("--target", help="Target; defaults to the caller.")
+        else:
+            operation.add_argument("watch_id")
+        if name in {"evidence", "report"}:
+            operation.add_argument("--review", type=int, required=True)
+        if name == "report":
+            operation.add_argument("--verdict", choices=["watching", "complete", "attention"], required=True)
+            operation.add_argument("--finding", required=True)
+            operation.add_argument("--message", help="Optional corrective message; requires message authority.")
+
     subscribe = subcommands.add_parser("subscribe", help="Resume this conversation when watched turns or jobs finish.")
     subscribe.add_argument("--session-id", help="Subscriber; defaults to the current caller.")
     subscribe.add_argument("--session", dest="watched_sessions", action="append", default=[], help="Watch this session's current or most recent turn; repeat for several agents.")
@@ -605,6 +635,26 @@ def run(arguments: argparse.Namespace) -> Any:
         except (OSError, sqlite3.Error, ValueError) as exc:
             raise CoordinationError("Cannot evaluate routing records: " + str(exc)) from exc
     store = CoordinationStore(arguments.db)
+    if command == "sidecar":
+        from .sidecars import Sidecars
+        watches = Sidecars(store)
+        operation = arguments.sidecar_command
+        if operation == "attach":
+            payload = {key: getattr(arguments, key) for key in ("purpose", "mode", "continuous", "existing_id", "client", "model", "effort", "max_reviews", "max_interventions")}
+            payload["target_id"] = arguments.target
+            control = AppControl(store)
+            receipt = control.request("sidecar", arguments.from_session, payload, request_id=arguments.request_id)
+            return control.status(receipt["request_id"], wait=arguments.wait)
+        if operation == "list":
+            return watches.list(arguments.target or arguments.session_id)
+        if operation == "show":
+            return watches.get(arguments.watch_id, arguments.session_id)
+        if operation == "evidence":
+            return watches.evidence(arguments.watch_id, arguments.review, arguments.session_id)
+        if operation == "report":
+            return watches.report(arguments.watch_id, arguments.review, arguments.session_id,
+                                  verdict=arguments.verdict, finding=arguments.finding, message=arguments.message)
+        return watches.change(arguments.watch_id, operation, caller=arguments.session_id)
     if command in {"subscribe", "subscription"}:
         from .event_subscriptions import EventSubscriptions
         subscriptions = EventSubscriptions(store)

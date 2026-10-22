@@ -385,7 +385,7 @@ def _handler(
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
-            if parsed.path in {"/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
+            if parsed.path in {"/sidecars.js", "/sidecars.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -563,6 +563,16 @@ def _handler(
                 thread_id = unquote(route[8:-11])
                 browser_sessions.work_thread(thread_id, history=False)
                 self._json(HTTPStatus.OK, store.threads.scratchpad(thread_id))
+            elif route.startswith("threads/") and route.endswith("/sidecars"):
+                thread_id = unquote(route[8:-9])
+                browser_sessions.work_thread(thread_id, history=False)
+                from .app_control import AppControl
+                control = AppControl(store)
+                with store._connection() as db:
+                    pending = [r["request_id"] for r in db.execute("SELECT request_id,payload_json FROM app_control_requests WHERE operation='sidecar' AND status NOT IN ('completed','cancelled')")
+                               if json.loads(r["payload_json"]).get("target_id") == thread_id]
+                self._json(HTTPStatus.OK, {"watches": browser_sessions.sidecars.watches.list(thread_id),
+                                         "requests": [control.status(key) for key in pending]})
             elif route.startswith("threads/") and route.endswith("/preview"):
                 self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
             elif route.startswith("threads/") and route.endswith("/messages"):
@@ -872,6 +882,31 @@ def _handler(
                     thread_id = unquote(route[3])
                     if len(route) == 4:
                         result = browser_sessions.update_work_thread(thread_id, body)
+                    elif route[4] == "sidecars":
+                        browser_sessions.work_thread(thread_id, history=False)
+                        from .app_control import AppControl
+                        control = AppControl(store)
+                        if "action" in body:
+                            if set(body) != {"action", "id"}:
+                                raise CoordinationError("Sidecar controls require action and id.")
+                            watch = browser_sessions.sidecars.watches.get(body["id"])
+                            if thread_id != watch["target_id"]:
+                                raise CoordinationError("Open the watched conversation to change its sidecar.")
+                            result = browser_sessions.sidecars.watches.change(body["id"], body["action"])
+                        elif "cancel_request" in body:
+                            if set(body) != {"cancel_request"}:
+                                raise CoordinationError("Cancel accepts a request ID only.")
+                            with store._connection() as db:
+                                pending = db.execute("SELECT payload_json FROM app_control_requests WHERE request_id=? AND operation='sidecar'", (body["cancel_request"],)).fetchone()
+                            if not pending or json.loads(pending[0])["target_id"] != thread_id:
+                                raise CoordinationError("Sidecar request not found for this conversation.")
+                            result = control.cancel(body["cancel_request"])
+                        else:
+                            payload = dict(body)
+                            request_id = payload.pop("request_id", None)
+                            payload["target_id"] = thread_id
+                            result = control.request("sidecar", thread_id, payload, request_id=request_id)
+                        browser_sessions._publish("browser/changed", {"threadId": thread_id})
                     elif route[4] == "scratchpad":
                         browser_sessions.work_thread(thread_id, history=False)
                         if set(body) != {"text"}:
@@ -1032,6 +1067,7 @@ def make_ui_server(
     sessions.schedules.start()
     sessions.inbox_wake.start()
     sessions.event_subscriptions.start()
+    sessions.sidecars.start()
     sessions.watchdog.start()
     sessions.dispatch.wake()
     return server

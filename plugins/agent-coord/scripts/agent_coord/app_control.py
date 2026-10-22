@@ -52,10 +52,29 @@ class AppControl:
 
     def request(self, operation, sender_session_id, payload, *, thread_id=None, request_id=None):
         self.store.get_session(sender_session_id)
-        if operation not in {"create", "settings", "models", "move", "resume"}:
+        if operation not in {"create", "settings", "models", "move", "resume", "sidecar"}:
             raise CoordinationError("Unknown app control operation.")
         payload = dict(payload)
-        if operation in {"settings", "move", "resume"}:
+        if operation == "sidecar":
+            from .sidecars import Sidecars
+            # Exact retries remain readable after the selected agent becomes busy,
+            # the watch completes, or either conversation closes.
+            with self.store._connection() as db:
+                prior = db.execute("SELECT * FROM app_control_requests WHERE request_id=?", (request_id,)).fetchone()
+            if prior:
+                saved = json.loads(prior["payload_json"])
+                candidate = dict(payload)
+                for key, value in {"mode": "notify", "continuous": False, "max_reviews": 20, "max_interventions": 2}.items():
+                    candidate.setdefault(key, value)
+                candidate["purpose"] = Sidecars.text(candidate.get("purpose"), "Responsibility")
+                candidate["target_id"] = Sidecars.text(candidate.get("target_id"), "Target", 200)
+                candidate["cwd"] = saved.get("cwd")
+                if prior["operation"] != operation or prior["sender_session_id"] != sender_session_id or candidate != saved:
+                    raise CoordinationError("Request ID already belongs to a different app request.")
+                return self.status(request_id)
+            payload = Sidecars(self.store).validate(sender_session_id, payload)
+            cwd = payload["cwd"]
+        elif operation in {"settings", "move", "resume"}:
             record = self.settings(thread_id)
             cwd = record["cwd"]
             if operation == "resume":
@@ -125,7 +144,7 @@ class AppControl:
                 now = self.store.clock()
                 # Pre-recovery app workers treat unknown queued operations as
                 # creation. Keep recovery invisible to their queued-only scan.
-                queued = "queued_resume" if operation == "resume" else "queued"
+                queued = "queued_" + operation if operation in {"resume", "sidecar"} else "queued"
                 db.execute("""INSERT INTO app_control_requests
                     (request_id, operation, sender_session_id, cwd, thread_id, payload_json,
                      status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -161,7 +180,7 @@ class AppControl:
             if not row:
                 raise CoordinationError("App request not found.")
             result = {key: row[key] for key in ("request_id", "operation", "status", "thread_id", "error")}
-            if result["status"] == "queued_resume":
+            if result["status"] in {"queued_resume", "queued_sidecar"}:
                 result["status"] = "queued"
             result["result"] = json.loads(row["result_json"]) if row["result_json"] else None
             if result["status"] == "queued":
@@ -180,7 +199,7 @@ class AppControl:
                 raise CoordinationError("App request not found.")
             if row[0] == "running":
                 raise CoordinationError("The app request is already executing. Inspect request-status before acting again.")
-            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume')",
+            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume', 'queued_sidecar')",
                        (self.store.clock(), request_id))
         return self.status(request_id)
 
@@ -188,12 +207,14 @@ class AppControl:
         with self.store._connection() as db:
             self._reconcile(db)
             return [dict(row) for row in db.execute("""SELECT * FROM app_control_requests
-                WHERE status = 'queued' OR (operation = 'resume' AND status = 'queued_resume') ORDER BY created_at, rowid""")]
+                WHERE status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
+                OR (operation = 'sidecar' AND status = 'queued_sidecar') ORDER BY created_at, rowid""")]
 
     def claim(self, request_id, owner):
         with self.store._connection() as db:
             return bool(db.execute("""UPDATE app_control_requests SET status = 'running', owner = ?, updated_at = ?
-                WHERE request_id = ? AND (status = 'queued' OR (operation = 'resume' AND status = 'queued_resume'))""",
+                WHERE request_id = ? AND (status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
+                OR (operation = 'sidecar' AND status = 'queued_sidecar'))""",
                                    (owner, self.store.clock(), request_id)).rowcount)
 
     def identified(self, request_id, thread_id):
@@ -278,6 +299,13 @@ class AppControlWorker:
         try:
             if request["operation"] == "models":
                 result = {"client": payload.get("client", "codex"), "models": self.sessions.models(payload.get("client", "codex"))}
+            elif request["operation"] == "sidecar":
+                payload = self.sessions.sidecars.watches.validate(request["sender_session_id"], payload)
+                if not payload.get("existing_id"):
+                    self.sessions._creation_settings({key: payload[key] for key in ("cwd", "client", "model", "effort") if key in payload})
+                    provider_started = True
+                result = self.sessions.sidecars.watches.attach(self.sessions, request,
+                    on_created=lambda tid: self.control.identified(request["request_id"], tid))
             elif request["operation"] == "resume":
                 result = self.sessions.inbox_wake.recover(request["thread_id"], payload["expected_turn_id"], request["sender_session_id"])
             elif request["operation"] == "move":

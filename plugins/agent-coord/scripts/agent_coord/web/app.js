@@ -510,6 +510,7 @@ function threadCard(thread, compact = false, inAttention = false) {
       if (["codex", "claude"].includes(thread.client)) items.unshift({label: "Fork", disabled: !thread.can_fork || state.forking,
         run: () => action(() => forkThread(undefined, thread.thread_id))});
       if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.dispatcher ? "Stop using as dispatcher" : "Use as dispatcher", run: () => action(() => toggleDispatcher(thread))});
+      if (thread.browser_session && thread.attention !== "archived") items.push({label: "Attach sidecar…", run: () => action(() => state.sidecars.open(thread))});
       if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
       state.threadActions.showMenu(more, thread.title, items, event);
     };
@@ -1324,6 +1325,9 @@ async function saveSessionPermissions() {
   await refreshList();
 }
 function renderStatus() {
+  state.sidecars?.showThread(state.detail?.work_thread, $("thread-sidecars"));
+  const sidecarButton = $("attach-sidecar");
+  if (sidecarButton) sidecarButton.hidden = !state.detail?.work_thread?.browser_session || state.detail?.work_thread?.attention === "archived";
   state.schedules?.renderThread($("thread-schedules"), state.selected);
   globalThis.agentCoordSpeech?.update(state.selected, state.detail, state.config);
   state.rollUp?.changed();
@@ -2295,6 +2299,7 @@ function setChatExpanded(expanded) {
 }
 $("expand-chat").onclick = () => setChatExpanded(!document.body.classList.contains("chat-expanded"));
 function goHome({restoreDispatcher = true, rememberTab = true, preserveRollUp = false, render = true} = {}) {
+  state.sidecars?.showThread(null, $("thread-sidecars"));
   state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.dispatchRestore = restoreDispatcher;
@@ -3344,6 +3349,13 @@ async function boot() {
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
     onSwitch: async () => { goHome(); await refreshList(); window.agentCoordPanes?.restoreView(); }, onError: showError});
   state.projectCwd = state.folders.selected?.cwd || "";
+  state.sidecars = new SidecarsUI({document, api, getThreads: () => state.sessions, openThread: select, onError: showError});
+  window.addEventListener("pagehide", () => clearInterval(state.sidecars.timer), {once: true});
+  const sidecarButton = document.createElement("button");
+  sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet";
+  sidecarButton.textContent = "Attach sidecar…"; sidecarButton.hidden = true;
+  sidecarButton.onclick = () => action(() => state.sidecars.open(state.detail?.work_thread));
+  document.querySelector(".session-actions").append(sidecarButton);
   await savedViews.setProject(state.projectCwd);
   state.viewDrops = ViewDrops.create({document, api,
     getThread: id => state.closing.has(id) || state.updatingThreads.has(id) ? null

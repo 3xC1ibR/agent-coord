@@ -254,6 +254,8 @@ class BrowserSessions:
         self.inbox_wake = BrowserInboxWake(self)
         from .event_subscriptions import EventSubscriptions
         self.event_subscriptions = EventSubscriptions(store, cwd=self.cwd)
+        from .sidecars import SidecarRuntime
+        self.sidecars = SidecarRuntime(self)
         from .dispatch_runtime import DispatchRuntime
         self.dispatch = DispatchRuntime(self)
         from .turn_watchdog import TurnWatchdog
@@ -1685,6 +1687,7 @@ class BrowserSessions:
         self.watchdog.close()
         self.dispatch.close()
         self.event_subscriptions.close()
+        self.sidecars.close()
         self.inbox_wake.close()
         self.rpc.close()
         self.claude.close()
