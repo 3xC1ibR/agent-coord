@@ -1048,6 +1048,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   $("welcome").hidden = true;
   $("conversation").hidden = false;
   state.agentTreeController?.bind({preservePanel: !!tabId && tabId === previousTab, dock});
+  if (typeof layoutContext === "function") layoutContext();
   $("requests").replaceChildren();
   $("thread-context").hidden = true;
   renderTitle();
@@ -2166,6 +2167,7 @@ async function newSession() {
   $("conversation").hidden = false;
   $("conversation").classList.add("session-draft");
   state.agentTreeController?.bind();
+  if (typeof layoutContext === "function") layoutContext();
   $("page-location").textContent = "New session";
   state.timelineThread = null;
   $("timeline").replaceChildren(node("p", "Choose a model and send a message to start.", "empty"));
@@ -2469,7 +2471,10 @@ function setupAgentTree() {
       if (!preservePanel) familyThreads = [];
       const draft = !state.selected || isSessionDraft() || state.selected === "new-session";
       defaultPending = !preservePanel && !dock && !state.paneMode && !draft;
-      if (!preservePanel || draft) this.setMode("context", false);
+      if (!preservePanel || draft) {
+        if (typeof readSavedContextCollapsed === "function") contextCollapsed = readSavedContextCollapsed();
+        this.setMode("context", false);
+      } else layoutContext();
       this.update();
       // Discover closed ancestors and children even when overview filters hide them.
       if (!dock && !state.paneMode && !draft) this.load().catch(showError);
@@ -2478,7 +2483,7 @@ function setupAgentTree() {
       if (!defaultPending || !state.selected || isSessionDraft() || !this.hasAgents(this.root)) return;
       defaultPending = false;
       this.setMode("agents");
-      setContextCollapsed(false);
+      setContextCollapsed(false, {persist: false});
       if (state.mobileChat?.matches) state.mobileChat.open("context");
       renderStatus();
     },
@@ -2509,7 +2514,7 @@ function setupAgentTree() {
       if (this.hasAgents(this.root)) {
         state.threadTabs?.setTree(this.root, true);
         this.setMode("agents");
-        setContextCollapsed(false);
+        setContextCollapsed(false, {persist: false});
         if (state.mobileChat?.matches) state.mobileChat.open("context");
         panel.fit(); renderStatus();
       }
@@ -2523,7 +2528,7 @@ function setupAgentTree() {
         state.threadTabs?.setTree(this.root, true);
         if (this.mode !== "agents") {
           this.setMode("agents");
-          setContextCollapsed(false);
+          setContextCollapsed(false, {persist: false});
           if (state.mobileChat?.matches) state.mobileChat.open("context");
           renderStatus();
         }
@@ -2600,14 +2605,19 @@ function setupAgentTree() {
   };
 }
 let contextCollapsed = null;
-try {
-  const saved = localStorage.getItem("agent-coord.context-collapsed");
-  if (saved === "true" || saved === "false") contextCollapsed = saved === "true";
-} catch { /* The panel remains usable without preference storage. */ }
+function readSavedContextCollapsed() {
+  try {
+    const saved = localStorage.getItem("agent-coord.context-collapsed");
+    if (saved === "true" || saved === "false") return saved === "true";
+  } catch { /* The panel remains usable without preference storage. */ }
+  return null;
+}
+contextCollapsed = readSavedContextCollapsed();
 function layoutContext() {
   if (state.mobileChat?.matches) { state.mobileChat.layoutContext(); return; }
   const context = $("thread-context"), panel = $("context-panel"), button = $("toggle-context");
-  const collapsed = contextCollapsed ?? compactContext.matches;
+  const draft = isSessionDraft() || state.selected === "new-session" || $("conversation").classList.contains("session-draft");
+  const collapsed = draft || (contextCollapsed ?? compactContext.matches);
   const containsFocus = panel.contains(document.activeElement);
   panel.hidden = collapsed;
   context.open = !collapsed;
@@ -2619,10 +2629,12 @@ function layoutContext() {
   button.title = label;
   if (collapsed && containsFocus) button.focus({preventScroll: true});
 }
-function setContextCollapsed(collapsed) {
+function setContextCollapsed(collapsed, {persist = true} = {}) {
   state.agentTreeController?.cancelDefault();
   contextCollapsed = collapsed;
-  try { localStorage.setItem("agent-coord.context-collapsed", String(collapsed)); } catch { /* Preferences are optional. */ }
+  if (persist) {
+    try { localStorage.setItem("agent-coord.context-collapsed", String(collapsed)); } catch { /* Preferences are optional. */ }
+  }
   layoutContext();
 }
 $("toggle-context").onclick = () => setContextCollapsed(!$("context-panel").hidden);

@@ -55,10 +55,10 @@
 .agent-panel-resize:focus-visible, .agent-panel-resize:hover { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 .agent-recipient { margin: 0 0 7px; font-size: 12px; color: var(--muted); }
 @media (min-width: 1101px) {
-  .conversation:not(.context-collapsed) .context-panel { overflow: visible; }
-  .conversation:not(.context-collapsed) #context-info { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
-  .conversation:not(.context-collapsed) .context-panel:not(.agents-mode) { display: flex; flex-direction: column; }
-  .conversation:not(.context-collapsed) .agent-panel-resize { display: block; }
+  .conversation:not(.context-collapsed):not(.session-draft) .context-panel { overflow: visible; }
+  .conversation:not(.context-collapsed):not(.session-draft) #context-info { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
+  .conversation:not(.context-collapsed):not(.session-draft) .context-panel:not(.agents-mode) { display: flex; flex-direction: column; }
+  .conversation:not(.context-collapsed):not(.session-draft) .agent-panel-resize { display: block; }
 }
 @media (min-width: 721px) {
   .conversation.agents-visible { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, var(--agent-panel-width, 52%)); }

@@ -103,17 +103,19 @@ test("attention control reveals a folded failed descendant before selecting it",
   assert.equal(panel.root, "root");
 });
 
-function setupController(records, selected = "root", response) {
+function setupController(records, selected = "root", response, {compact = true} = {}) {
   const fs = require("node:fs"), vm = require("node:vm");
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const elements = new Map(), storage = new Map();
-  const c = {state: {selected, sessions: records}, collapsed: true, errors: [], requests: [], storage,
-    document: {}, window: {}, localStorage: {getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, String(v))},
+  const c = {state: {selected, sessions: records}, errors: [], requests: [], storage,
+    compactContext: {matches: compact, addEventListener() {}},
+    document: {activeElement: null}, window: {}, localStorage: {getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, String(v))},
     $: id => {
       if (!elements.has(id)) {
         const classes = new Set(), props = new Map(), attrs = new Map();
-        elements.set(id, {hidden: false, classes, props, attrs,
+        elements.set(id, {hidden: false, open: false, classes, props, attrs,
           classList: {
+            add: n => classes.add(n),
             toggle: (n, v) => { if (v ?? !classes.has(n)) classes.add(n); else classes.delete(n); },
             remove: n => classes.delete(n),
             contains: n => classes.has(n),
@@ -121,16 +123,17 @@ function setupController(records, selected = "root", response) {
           style: {setProperty: (k, v) => props.set(k, v), getPropertyValue: k => props.get(k)},
           setAttribute: (k, v) => attrs.set(k, String(v)),
           getAttribute: k => attrs.get(k),
+          addEventListener() {},
+          contains: () => false,
           setPointerCapture() {},
           getBoundingClientRect: () => ({left: 0, right: 1200, width: 1200}),
           focus() {}});
       }
       return elements.get(id);
     },
+    get collapsed() { return c.$("context-panel").hidden; },
     AgentTree: {...Tree, Panel: class { update() {} fit() {} }},
     isSessionDraft: () => c.state.selected === "new-session", threadPath: id => "threads/" + id,
-    layoutContext: () => { c.$("context-panel").hidden = c.collapsed; },
-    setContextCollapsed: value => { c.state.agentTreeController.cancelDefault(); c.collapsed = value; c.layoutContext(); },
     renderStatus() {}, renderList() {}, showError: error => c.errors.push(error), action: fn => fn(),
     api: path => {
       c.requests.push(path);
@@ -144,7 +147,7 @@ function setupController(records, selected = "root", response) {
   c.state.threadTabs = {selected, items: [{thread_id: selected}],
     setTree(root, open) { const item = this.items.find(t => t.thread_id === this.selected);
       if (item) Object.assign(item, {tree_root: root, tree_open: open}); }};
-  vm.runInNewContext(source.slice(source.indexOf("function setupAgentTree()"), source.indexOf("\nlet contextCollapsed")) + "\nsetupAgentTree();", c);
+  vm.runInNewContext(source.slice(source.indexOf("function setupAgentTree()"), source.indexOf("\nif (typeof AgentTree !== \"undefined\") setupAgentTree();")) + "\nsetupAgentTree();", c);
   c.controller = c.state.agentTreeController;
   c.controller.inventory(records);
   return c;
@@ -243,7 +246,7 @@ test("late family discovery respects explicit Context and close choices", async 
 test("same-tab child navigation keeps panel choices and does not reopen the mobile sheet", async () => {
   const c = setupController([thread("root"), thread("child", "root")]);
   let opened = 0;
-  c.state.mobileChat = {matches: true, open() { opened++; }};
+  c.state.mobileChat = {matches: true, open() { opened++; }, layoutContext() {}};
   c.controller.bind(); await c.controller.load();
   assert.equal(opened, 1);
   c.state.selected = "child";
@@ -283,11 +286,15 @@ test("creating a new draft session or switching conversations with an outstandin
   c.state.detail = {work_thread: {thread_id: "new-session", title: "New session", browser_session: true}};
   c.state.threadTabs.selected = "new-session";
   c.state.threadTabs.items.push(c.state.detail.work_thread);
+  c.$("conversation").classList.add("session-draft");
   c.controller.bind();
   assert.equal(c.controller.mode, "context");
   assert.equal(c.controller.root, null);
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("context-panel").hidden, true);
+  assert.equal(c.$("conversation").classList.contains("context-collapsed"), true);
   assert.equal(c.$("conversation").classList.contains("has-agent-tree"), false);
+  assert.equal(c.$("conversation").classList.contains("agents-visible"), false);
 
   // Inventory refreshes while on the draft must not keep the old tree or query threads/new-session/agent-tree.
   c.controller.inventory([thread("root"), thread("child", "root")], []);
@@ -300,7 +307,73 @@ test("creating a new draft session or switching conversations with an outstandin
   assert.equal(c.controller.mode, "context");
   assert.equal(c.controller.root, null);
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("context-panel").hidden, true);
   assert.deepEqual(c.errors, []);
+});
+
+test("new draft sessions hide and collapse the Context panel across desktop and compact layouts, then restore appropriate Context access after the first message", async () => {
+  const fs = require("node:fs");
+  const agentTreeCss = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/agent-tree.css"), "utf8");
+  // Desktop flex rules in agent-tree.css must exclude .session-draft so they never override .session-draft .context-panel { display: none }.
+  assert.match(agentTreeCss, /\.conversation:not\(\.context-collapsed\):not\(\.session-draft\)\s+\.context-panel:not\(\.agents-mode\)\s*\{\s*display:\s*flex;/);
+  assert.match(agentTreeCss, /\.conversation:not\(\.context-collapsed\):not\(\.session-draft\)\s+\.agent-panel-resize\s*\{\s*display:\s*block;/);
+
+  // 1. Desktop (compact = false): transitioning from an existing chat with Context or Agents open to a new draft hides and collapses Context, then sending the first message restores Context.
+  const desktop = setupController([thread("root"), thread("child", "root"), thread("created")], "root", undefined, {compact: false});
+  desktop.controller.bind(); await desktop.controller.load();
+  assert.equal(desktop.$("context-panel").hidden, false);
+  assert.equal(desktop.$("conversation").classList.contains("context-collapsed"), false);
+
+  // Enter new session draft.
+  desktop.state.selected = "new-session";
+  desktop.$("conversation").classList.add("session-draft");
+  desktop.controller.bind();
+  assert.equal(desktop.$("context-panel").hidden, true);
+  assert.equal(desktop.$("conversation").classList.contains("context-collapsed"), true);
+  assert.equal(desktop.$("conversation").classList.contains("agents-visible"), false);
+
+  // First message transitions draft -> created thread: Context panel becomes available on desktop.
+  desktop.state.selected = "created";
+  desktop.$("conversation").classList.remove("session-draft");
+  desktop.controller.bind();
+  assert.equal(desktop.$("context-panel").hidden, false);
+  assert.equal(desktop.$("conversation").classList.contains("context-collapsed"), false);
+
+  // 2. Compact layout (<= 1100px, compact = true): automatic Agents opening in a parent chat does not persist a false uncollapsed preference into a new draft or a standalone conversation.
+  const compact = setupController([thread("root"), thread("child", "root"), thread("solo")], "root", path => Promise.resolve(
+    path.includes("solo") ? {root_thread_id: "solo", data: [thread("solo")]} : {root_thread_id: "root", data: [thread("root"), thread("child", "root")]}), {compact: true});
+  compact.controller.bind(); await compact.controller.load();
+  assert.equal(compact.controller.mode, "agents");
+  assert.equal(compact.$("context-panel").hidden, false);
+  assert.equal(compact.storage.get("agent-coord.context-collapsed"), undefined);
+
+  // Opening a new draft from the Agents view hides the panel in compact layout too.
+  compact.state.selected = "new-session";
+  compact.$("conversation").classList.add("session-draft");
+  compact.controller.bind();
+  assert.equal(compact.$("context-panel").hidden, true);
+  assert.equal(compact.$("conversation").classList.contains("context-collapsed"), true);
+
+  // Navigating to a standalone conversation in compact layout keeps Context collapsed by default unless the user explicitly opened it.
+  compact.state.selected = "solo";
+  compact.$("conversation").classList.remove("session-draft");
+  compact.controller.bind(); await compact.controller.load();
+  assert.equal(compact.$("context-panel").hidden, true);
+  assert.equal(compact.$("conversation").classList.contains("context-collapsed"), true);
+
+  // Explicit user toggle persists across conversations, while still staying hidden on a new draft.
+  compact.$("toggle-context").onclick();
+  assert.equal(compact.storage.get("agent-coord.context-collapsed"), "false");
+  assert.equal(compact.$("context-panel").hidden, false);
+  compact.state.selected = "new-session";
+  compact.$("conversation").classList.add("session-draft");
+  compact.controller.bind();
+  assert.equal(compact.$("context-panel").hidden, true);
+  assert.equal(compact.$("conversation").classList.contains("context-collapsed"), true);
+  compact.state.selected = "solo";
+  compact.$("conversation").classList.remove("session-draft");
+  compact.controller.bind();
+  assert.equal(compact.$("context-panel").hidden, false);
 });
 
 test("both Context and Agents side panel modes support pointer and keyboard resizing with persisted widths", async () => {
