@@ -702,12 +702,34 @@ class BrowserSessions:
                                           "client": self._record(thread_id)["client"],
                                           "title": thread["title"], "project_name": thread["project_name"],
                                           "repository_name": thread["repository_name"]})
-            return notifications
+        # Open blocking asks share the approval alert path: one claim per ask,
+        # labelled "Answer needed", scoped to this app's workspace like approvals.
+        for ask in self.store.asks.list(status="open", blocking=True):
+            if ask["notification_claimed"] and not include_claimed:
+                continue
+            try:
+                thread = self.store.threads.get(ask["session_id"], history=False)
+            except CoordinationError:
+                continue
+            if thread["attention"] != "archived" and not thread["snoozed"] and matches_workspace(thread["cwd"], self.cwd):
+                notifications.append({"request_key": "ask:" + str(ask["id"]), "thread_id": ask["session_id"],
+                                      "status": "question", "client": thread["client"], "title": thread["title"],
+                                      "project_name": thread["project_name"], "repository_name": thread["repository_name"]})
+        return notifications
 
     def claim_approval_notification(self, key: str) -> bool:
         """Atomically claim a live approval across tabs without answering it."""
         if not isinstance(key, str) or not key.strip():
             raise CoordinationError("Choose a valid approval request key.")
+        if key.startswith("ask:"):
+            try:
+                ask = self.store.asks.get(int(key[4:]))
+                thread = self.store.threads.get(ask["session_id"], history=False)
+            except (ValueError, CoordinationError):
+                return False
+            if thread["attention"] == "archived" or thread["snoozed"]:
+                return False
+            return self.store.asks.claim_notification(ask["id"])
         with self.lock:
             request = self.requests.get(key)
             if not request or not self._input_request(request) or request.get("notification_claimed"):
@@ -816,9 +838,11 @@ class BrowserSessions:
         thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
         thread["orchestration_workspaces"] = thread["created_by"]["workspaces"] if thread["created_by"] else []
         if _inventory is None:
+            from .asks import AskStore
             with self.store._connection() as db:
                 thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
                 owners = notification_policy.available_owners(db, self.store)
+                open_ask = AskStore.open_blocking(db, [thread_id]).get(thread_id)
             thread["dispatcher"] = self.dispatch.settings(thread_id)["enabled"] if hasattr(self, "dispatch") else False
             session = self.store.get_session(thread_id)
         else:
@@ -826,6 +850,8 @@ class BrowserSessions:
             thread["browser_session"] = thread_id in _inventory.browser
             thread["dispatcher"] = thread_id in _inventory.dispatchers
             session = _inventory.sessions[thread_id]
+            open_ask = _inventory.blocking_asks.get(thread_id)
+        thread["open_ask"] = open_ask
         thread["last_tool"] = session.get("last_tool")
         with self.lock:
             waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
@@ -900,7 +926,15 @@ class BrowserSessions:
         thread["can_handle_response"] = (thread["attention"] != "archived" and pending_response
                                          and thread["status"] not in {"running", "needs input"}
                                          and thread["response_state"] in {"input", "action", "reply", "failed", "update"})
-        policy = notification_policy.decide(thread, waiting=bool(waiting), owners=owners)
+        # An open blocking ask is a saved user decision: it needs the user until
+        # answered or withdrawn, regardless of reply receipts or classification.
+        blocked_on_ask = bool(open_ask and thread["attention"] != "archived" and not thread["snoozed"])
+        if blocked_on_ask:
+            thread.update(needs_attention=True, attention_reason="blocked", attention_key=f"ask:{open_ask['id']}",
+                          attention_since=open_ask["created_at"])
+            if thread["status"] != "running":
+                thread["response_state"] = "input"
+        policy = notification_policy.decide(thread, waiting=bool(waiting) or blocked_on_ask, owners=owners)
         health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
         thread["turn_health"] = health
         if health and health["state"] == "stalled" and not waiting:
@@ -909,6 +943,7 @@ class BrowserSessions:
                           can_handle_response=False)
         thread["attention_owner_thread_id"] = policy["owner_thread_id"]
         thread["attention_action"] = ("Approval or answer needed" if waiting else
+                                      "Decision needed: " + open_ask["question"] if blocked_on_ask else
                                       "Review the stalled agent" if health and health["state"] == "stalled" else
                                       checkpoint["next_action"] if checkpoint_input else
                                       "Review the failed agent" if thread["response_state"] == "failed" else "")

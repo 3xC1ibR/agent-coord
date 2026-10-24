@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -356,6 +357,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     send.add_argument("--thread-id")
     send.add_argument("message", help="Message body; use - to read stdin.")
+
+    ask = subcommands.add_parser(
+        "ask", help="Ask the user a decision; the answer arrives as an inbox message.")
+    ask.add_argument("--from-session", help="Asking session; defaults to the current caller session.")
+    ask.add_argument("question", nargs="?", help="Question for the user; use - to read stdin.")
+    ask.add_argument("--option", action="append", dest="options", metavar="TEXT",
+                     help="Offer an answer choice; repeat for each option. Free text is always allowed.")
+    ask_mode = ask.add_mutually_exclusive_group()
+    ask_mode.add_argument("--blocking", action="store_true", default=None,
+                          help="You cannot make useful progress without the answer. End your turn after asking unless you --wait.")
+    ask_mode.add_argument("--non-blocking", dest="blocking", action="store_false",
+                          help="Keep working on a stated default; the answer arrives later as a normal message.")
+    ask.add_argument("--context", help="Why you ask and, for a non-blocking ask, the default you will proceed with.")
+    ask.add_argument("--supersedes", type=int, metavar="ASK_ID", help="Withdraw your earlier open ask when creating this one.")
+    ask.add_argument("--wait", type=float, nargs="?", const=0.0, metavar="SECONDS",
+                     help="Block a blocking ask until it is answered; omit SECONDS to wait indefinitely.")
+    ask.add_argument("--withdraw", type=int, metavar="ASK_ID", help="Withdraw your own open ask instead of creating one.")
+    ask.add_argument("--list", action="store_true", dest="list_asks", help="List your open asks instead of creating one.")
 
     reply = subcommands.add_parser("reply", help="Answer a message without requesting another reply.")
     reply.add_argument("--from-session", help="Sender; defaults to the current caller session.")
@@ -825,6 +844,8 @@ def run(arguments: argparse.Namespace) -> Any:
             thread_id=arguments.thread_id,
             reply_required=arguments.reply_required,
         )
+    if command == "ask":
+        return run_ask(store, arguments)
     if command == "reply":
         return store.reply_message(
             sender_session_id=arguments.from_session,
@@ -984,9 +1005,34 @@ def run(arguments: argparse.Namespace) -> Any:
     raise AssertionError(f"Unhandled command: {command}")
 
 
+def run_ask(store, arguments):
+    """Create, wait on, withdraw, or list the caller's asks to the user."""
+    session_id = arguments.from_session
+    modes = [name for name, chosen in (("--withdraw", arguments.withdraw is not None), ("--list", arguments.list_asks),
+                                       ("a question", arguments.question is not None)) if chosen]
+    if len(modes) != 1:
+        raise CoordinationError("Use exactly one of a question, --withdraw, or --list.")
+    if arguments.list_asks:
+        return store.asks.list(session_id=session_id)
+    if arguments.withdraw is not None:
+        return store.asks.withdraw(arguments.withdraw, session_id)
+    if arguments.blocking is None:
+        raise CoordinationError("Choose --blocking or --non-blocking explicitly.")
+    if arguments.wait is not None and not arguments.blocking:
+        raise CoordinationError("--wait applies to blocking asks; a non-blocking ask continues on its stated default.")
+    if arguments.wait is not None and (not math.isfinite(arguments.wait) or arguments.wait < 0):
+        raise CoordinationError("--wait must be a finite, non-negative number of seconds.")
+    question = sys.stdin.read() if arguments.question == "-" else arguments.question
+    ask = store.asks.create(session_id, question, options=arguments.options, blocking=arguments.blocking,
+                            context=arguments.context, supersedes=arguments.supersedes)
+    if arguments.wait is None:
+        return ask
+    return store.asks.wait(ask["id"], session_id, timeout_seconds=arguments.wait or None)
+
+
 def mutation_receipt(arguments, result):
     """Keep reads and rich workflow results intact; summarize routine writes."""
-    if not hasattr(arguments, "full") or arguments.full:
+    if not hasattr(arguments, "full") or arguments.full or arguments.command == "ask":
         return result
     if arguments.command == "checkpoint":
         return {"status": "ok", "checkpoint_id": result["checkpoint"]["id"]}

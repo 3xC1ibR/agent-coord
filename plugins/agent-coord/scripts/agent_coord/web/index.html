@@ -60,6 +60,8 @@
   <script src="/thread-actions.js" defer></script>
   <script src="/sidecars.js" defer></script>
   <link rel="stylesheet" href="/sidecars.css">
+  <script src="/asks.js" defer></script>
+  <link rel="stylesheet" href="/asks.css">
   <script src="/dispatch.js" defer></script>
   <script src="/send-work.js" defer></script>
   <link rel="stylesheet" href="/send-work.css">
@@ -91,6 +93,7 @@
     </div>
     <nav id="sessions" aria-label="Work threads"><p class="muted">Loading threads…</p></nav>
     <div class="sidebar-footer" role="group" aria-label="Workspace tools">
+      <button id="open-asks" class="sidebar-icon sidebar-asks" type="button" aria-label="Decisions" title="Decisions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7v.5"/><path d="M12 17h.01"/></svg><span id="asks-count" class="asks-count" hidden></span></button>
       <button id="scheduled-prompts" class="sidebar-icon" type="button" aria-label="Scheduled prompts" title="Scheduled prompts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button>
       <button id="roll-up-start" class="sidebar-icon" type="button" aria-label="Roll up waiting threads" aria-pressed="false" title="Roll up waiting threads · ⌥⌘R"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16 M4 11h11 M4 17h7 M16 14l4 4-4 4 M13 18h7"/></svg></button>
       <button id="open-project-scratchpad" class="sidebar-icon" type="button" aria-label="Open project scratchpad" title="Project scratchpad · ⌘⇧S" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h13a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6V3Z M3 7h5 M3 12h5 M3 17h5 M11 8h5 M11 12h5"/></svg></button>

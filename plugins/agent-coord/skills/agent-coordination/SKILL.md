@@ -330,6 +330,38 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
   `--all-unread`. Acknowledgement is a silent transport update and never sends
   a conversational receipt.
 
+## Ask the user a decision
+
+Use an ask for a decision only the user can make: product choices, tradeoffs
+with real cost, permission beyond your authorization, or ambiguity that would
+produce materially different work. Do not bury the question in a reply or a
+checkpoint; the user answers every open ask from one **Decisions** list in the
+app, and the answer reaches you as an ordinary inbox message that wakes an idle
+conversation. Use the `ask_human` tool when available, or the CLI:
+
+```bash
+agent-coord ask --non-blocking \
+  --context 'Default: keep the existing CSV export until you choose.' \
+  --option 'CSV' --option 'JSON' --option 'Both' \
+  'Which export format should the report use?'
+agent-coord ask --blocking --context 'Production credentials are required to continue.' \
+  'Which AWS account should the migration run against?'
+```
+
+- Choose `--non-blocking` whenever you can keep working. State the default
+  you will proceed with in `--context`; it is required. Continue the task and
+  handle the answer on a later turn like any other message.
+- Choose `--blocking` only when no useful progress is possible without the
+  answer. Save your checkpoint, then end your turn; the thread shows as
+  needing the user until the ask is answered or withdrawn. Add `--wait
+  [SECONDS]` (tool: `wait_seconds`) only when a short wait is acceptable.
+- Offer `--option` choices when the decision has a small set of answers; free
+  text is always allowed. Keep questions short and self-contained.
+- Withdraw an ask that no longer matters with `ask --withdraw <id>`, replace one
+  with `--supersedes <id>`, and review your own with `ask --list`.
+- Do not ask for routine judgment calls, confirmation of work you are
+  authorized to do, or questions you can answer from the code.
+
 ## Attach a sidecar to an app agent
 
 When the user asks for a dedicated observer or completion watcher, use the app's

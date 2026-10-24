@@ -65,6 +65,7 @@ async function openMentionFile(ref) {
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
 async function refreshList({background = false} = {}) {
   state.schedules?.refresh({background: true}).catch(showError);
+  state.asks?.refresh().catch(showError);
   if (state.paneMode) { window.parent.agentCoordPanes?.requestList({background}); return; }
   const view = $("view").value, pending = state.listRefresh;
   // Polls and streamed events must not keep superseding a slow inventory read.
@@ -3351,6 +3352,9 @@ async function boot() {
   state.projectCwd = state.folders.selected?.cwd || "";
   state.sidecars = new SidecarsUI({document, api, getThreads: () => state.sessions, openThread: select, onError: showError});
   window.addEventListener("pagehide", () => clearInterval(state.sidecars.timer), {once: true});
+  state.asks = new AsksUI({document, api, openThread: select, onError: showError});
+  state.asks.refresh().catch(showError);
+  window.addEventListener("pagehide", () => clearInterval(state.asks.timer), {once: true});
   const sidecarButton = document.createElement("button");
   sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet";
   sidecarButton.textContent = "Attach sidecar…"; sidecarButton.hidden = true;

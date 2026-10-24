@@ -75,6 +75,57 @@ MOVE_TOOL = {
 }
 
 
+ASK_TOOL = {
+    "name": "ask_human",
+    "description": (
+        "Ask the user a decision only they can make. The ask appears in Ribbon Field's Decisions list; "
+        "the answer arrives later as an ordinary inbox message. Choose blocking only when you cannot make "
+        "useful progress without the answer, then end your turn (or set wait_seconds). A non-blocking ask "
+        "must state in context the default you will proceed with. Returns the ask id and status."
+    ),
+    "inputSchema": {
+        "type": "object", "additionalProperties": False, "required": ["question", "blocking"],
+        "properties": {
+            "session_id": {"type": "string", "minLength": 1, "description": "Your registered session ID; omit when inherited from the environment."},
+            "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "options": {"type": "array", "maxItems": 8, "description": "Optional answer choices; free text is always allowed.",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+            "blocking": {"type": "boolean", "description": "True only when no useful progress is possible without the answer."},
+            "context": {"type": "string", "maxLength": 4000, "description": "Why you ask and, for non-blocking asks, the default you will use."},
+            "supersedes": {"type": "integer", "minimum": 1, "description": "Withdraw your earlier open ask with this ID."},
+            "wait_seconds": {"type": "number", "minimum": 1, "maximum": 300,
+                             "description": "Blocking only: wait up to this long for the answer before returning."},
+        },
+    },
+    "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+}
+
+
+def ask_human(arguments, *, store=None):
+    if not isinstance(arguments, dict) or set(arguments) - ASK_TOOL["inputSchema"]["properties"].keys():
+        raise CoordinationError("Use the ask_human input fields: question, blocking, options, context, supersedes, wait_seconds.")
+    session_id = arguments.get("session_id", caller_session())
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise CoordinationError("No caller session. Pass session_id from your hook context, or set AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
+    wait = arguments.get("wait_seconds")
+    if wait is not None and (isinstance(wait, bool) or not isinstance(wait, (int, float)) or not 1 <= wait <= 300):
+        raise CoordinationError("wait_seconds must be a number from 1 to 300.")
+    if wait is not None and arguments.get("blocking") is not True:
+        raise CoordinationError("wait_seconds applies to blocking asks only.")
+    asks = (store or CoordinationStore()).asks
+    ask = asks.create(session_id, arguments.get("question"), options=arguments.get("options"),
+                      blocking=arguments.get("blocking"), context=arguments.get("context"),
+                      supersedes=arguments.get("supersedes"))
+    if wait is not None:
+        ask = asks.wait(ask["id"], session_id, timeout_seconds=float(wait))
+    result = {"status": "ok", "ask_id": ask["id"], "state": ask["status"]}
+    if ask["status"] == "answered":
+        result["answer"] = ask["answer"]
+    elif wait is not None:
+        result["note"] = "Not answered yet. End your turn; the answer will arrive as an inbox message."
+    return result
+
+
 def move_thread(arguments, *, store=None):
     if not isinstance(arguments, dict) or set(arguments) - MOVE_TOOL["inputSchema"]["properties"].keys():
         raise CoordinationError("Use the move_thread input fields.")
@@ -116,11 +167,12 @@ def dispatch(message):
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": [TOOL, MOVE_TOOL]}
+        result = {"tools": [TOOL, MOVE_TOOL, ASK_TOOL]}
     elif method == "tools/call":
-        handler = {TOOL["name"]: update_checkpoint, MOVE_TOOL["name"]: move_thread}.get(params.get("name"))
+        handler = {TOOL["name"]: update_checkpoint, MOVE_TOOL["name"]: move_thread,
+                   ASK_TOOL["name"]: ask_human}.get(params.get("name"))
         if handler is None:
-            return {**response, "error": {"code": -32602, "message": "Unknown tool; use update_checkpoint or move_thread."}}
+            return {**response, "error": {"code": -32602, "message": "Unknown tool; use update_checkpoint, move_thread, or ask_human."}}
         try:
             receipt = handler(params.get("arguments", {}))
             result = {"content": [{"type": "text", "text": json.dumps(receipt, separators=(",", ":"))}]}

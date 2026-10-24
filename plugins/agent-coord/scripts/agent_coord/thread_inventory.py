@@ -111,6 +111,8 @@ class ThreadInventory:
         self.delegated = {row[0] for row in db.execute("""SELECT d.child_session_id FROM delegations d
             JOIN work_threads p ON p.thread_id = d.parent_session_id WHERE d.child_session_id IS NOT NULL""")}
         self.titles = {row[0]: row[1] for row in db.execute("SELECT thread_id, title FROM work_threads")}
+        from .asks import AskStore
+        self.blocking_asks = AskStore.open_blocking(db)
         self.forks = defaultdict(list)
         for row in db.execute("""SELECT thread_id, title, created_at, forked_from_turn_id, forked_from_thread_id
             FROM work_threads WHERE forked_from_thread_id IN (""" + self.selected +

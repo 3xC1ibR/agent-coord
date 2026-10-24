@@ -385,7 +385,7 @@ def _handler(
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
-            if parsed.path in {"/sidecars.js", "/sidecars.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
+            if parsed.path in {"/sidecars.js", "/sidecars.css", "/asks.js", "/asks.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -507,6 +507,8 @@ def _handler(
                 self._json(HTTPStatus.OK, {"data": browser_sessions.schedules.list()})
             elif route == "organization":
                 self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.list())
+            elif route == "asks":
+                self._json(HTTPStatus.OK, {"data": store.asks.overview()})
             elif route.startswith("projects/") and len(route.split("/")) == 2:
                 self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.get_project(unquote(route[9:])))
             elif route == "views":
@@ -864,6 +866,19 @@ def _handler(
                     if set(body) != {"path"}:
                         raise CoordinationError("Repository registration accepts a path.")
                     self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.add_repository(body["path"]))
+                    return
+                if route[:3] == ["api", "browser", "asks"]:
+                    if len(route) != 4:
+                        raise CoordinationError("Choose an ask to answer.")
+                    if set(body) not in ({"answer"}, {"option"}):
+                        raise CoordinationError("Answer an ask with either option or answer text.")
+                    try:
+                        ask_id = int(route[3])
+                    except ValueError as exc:
+                        raise CoordinationError("Ask ID must be a positive integer.") from exc
+                    result = store.asks.answer(ask_id, answer=body.get("answer"), option=body.get("option"))
+                    browser_sessions._publish("browser/changed", {"threadId": result["session_id"]})
+                    self._json(HTTPStatus.OK, result)
                     return
                 if route == ["api", "browser", "notifications", "claim"]:
                     if set(body) == {"completion_id"}:

@@ -1502,6 +1502,36 @@ Thread placement and checkpoint phases are independent of Beads. Linking an
 issue does not import the backlog or change issue status. Delegation and atomic
 handoff also work without an issue.
 
+## Ask the user a decision
+
+Agents escalate decisions only the user can make with `agent-coord ask` or the
+`ask_human` MCP tool. Each ask is a durable record tied to the asking session
+(question, optional options, blocking flag, context, status, answer). Open asks
+across every thread appear in the app's **Decisions** dialog, opened from the
+question-mark button in the sidebar; its badge counts open asks and turns red
+when any is blocking. Blocking asks sort first and mark their thread as needing
+the user. Answering picks an option or sends free text; the answer is delivered
+to the asking session as an ordinary `action_required` inbox message in thread
+`ask:<id>`, so idle app conversations resume through the existing inbox wake.
+
+```bash
+agent-coord ask --non-blocking --context 'Default: keep CSV.' --option CSV --option JSON 'Export format?'
+agent-coord ask --blocking --context 'Needs production credentials.' --wait 120 'Which account?'
+agent-coord ask --list
+agent-coord ask --withdraw <ask-id>
+```
+
+A non-blocking ask requires `--context` stating the default. `--wait` applies to
+blocking asks; on timeout the receipt includes `timed_out: true` and the ask
+stays open. A direct answer received while waiting is acknowledged automatically.
+`--supersedes <id>` withdraws an earlier open ask atomically.
+
+The UI reads `GET /api/browser/asks` and answers with
+`POST /api/browser/asks/<id>` carrying `{"option": "..."}` or
+`{"answer": "..."}`. Open blocking asks share the approval alert path (desktop
+and phone notifications labelled “Answer needed”), claimed once per ask and
+scoped to the app's workspace like approvals.
+
 ## Attach a sidecar
 
 Use **Attach sidecar…** in an app conversation's actions or its overview menu.
