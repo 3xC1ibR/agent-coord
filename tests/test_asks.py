@@ -284,9 +284,11 @@ class AskAttentionTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as rejected:
                     post("/api/browser/asks/" + path, body)
                 self.assertEqual(rejected.exception.code, 400)
+                rejected.exception.close()
             with self.assertRaises(urllib.error.HTTPError) as forbidden:
                 post("/api/browser/asks/" + str(blocking["id"]), {"answer": "x"}, auth="wrong")
             self.assertEqual(forbidden.exception.code, 403)
+            forbidden.exception.close()
         finally:
             server.shutdown()
             server.server_close()
