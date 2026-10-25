@@ -1893,3 +1893,45 @@ Any verification failure means the installed cache does not match the repository
 Stop and correct the selected marketplace or installation before live testing.
 After verification, start new Codex and Claude sessions. Existing sessions keep
 the skills and hooks that they loaded at startup.
+
+
+## Interactive session control
+
+Local applications such as Ramble can control a persistent Codex app conversation
+through the owning Ribbon Field runtime, without discovering a private HTTP port
+or attaching another app-server. The caller must be registered. By default it
+must be the thread's creating session. An explicit `watch --adopt` grants a local
+caller control of an existing open Codex thread; an existing interactive owner
+cannot be replaced. This is local coordination authority, not authentication
+against malicious processes sharing the user's account.
+
+```bash
+agent-coord session-control watch --thread THREAD --from-session CALLER --request-id WATCH
+agent-coord session-control snapshot --thread THREAD --from-session CALLER --after 0
+agent-coord session-control submit --thread THREAD --from-session CALLER --request-id INPUT --expected-turn-id TURN --message -
+agent-coord session-control interrupt --thread THREAD --from-session CALLER --request-id STOP --expected-turn-id TURN
+```
+
+Omit expected-turn-id only for an observed idle conversation. Submit then starts
+a turn; interrupt then pauses its queued/inbox work. An active turn requires its
+exact ID for both steering and Stop. A stale ID fails without redirecting input
+to a newer turn. Slash commands are not accepted through submit.
+
+Commands are durably claimed before native submission. Inspect or cancel through
+`thread request-status` / `thread cancel-request` using the same request ID.
+A completed command confirms native acceptance, not completion of the task or
+termination of an interrupted turn. A lost native response is uncertain and is
+never automatically replayed. A different payload cannot reuse the request ID.
+New queued operations are invisible to older runtimes, so both the plugin/CLI
+and the app backend must be updated.
+
+Snapshots are refreshed by the owning app while watched, include connected and
+refreshed_at indicators, and return at most 100 durable events with a cursor.
+Only completed public agent messages and turn outcomes are journaled; reasoning,
+partial deltas and tool output are excluded. Historical recovery is tagged
+recovered so clients can show it without replaying old speech. Approval details
+remain in the full conversation. The local journal survives runtime restarts.
+
+Use `thread create --interactive` for a new voice-controlled thread. It binds the
+creating controller before the initial inbox wake so its first update cannot
+precede the public-output journal.

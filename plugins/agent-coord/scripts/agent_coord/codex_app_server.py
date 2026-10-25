@@ -348,6 +348,12 @@ class BrowserSessions:
                 self.active = {t: v for t, v in self.active.items() if t not in disconnected}
                 self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") not in disconnected}
             self._publish(method, params)
+            if method == "turn/completed" or (method == "item/completed" and params.get("item", {}).get("type") == "agentMessage"):
+                public_params = copy.deepcopy(params)
+                def record_public_output():
+                    from .session_control import SessionControl
+                    SessionControl(self.store).observe(method, public_params)
+                self.persistence.submit(record_public_output)
             if method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected", "thread/tokenUsage/updated"}:
                 saved_params = copy.deepcopy(params)
                 saved_params["usage_observed_at"] = self.store.clock()

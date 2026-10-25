@@ -229,6 +229,7 @@ def _parser() -> argparse.ArgumentParser:
     create_agent.add_argument("--yolo", action="store_true", help="Explicitly authorize full machine access without approval prompts.")
     create_agent.add_argument("--reply-required", action=argparse.BooleanOptionalAction, default=False,
                               help="Require an explicit result reply in addition to any completion subscription (default: no explicit reply).")
+    create_agent.add_argument("--interactive", action="store_true", help="Bind public progress to the creating controller before the initial request wakes.")
     create_agent.add_argument("--subscribe", action=argparse.BooleanOptionalAction, default=True,
                               help="Resume the creator when the initial request's turn ends (default: enabled).")
     create_agent.add_argument("prompt", help="Exact initial user request; use - to read stdin.")
@@ -607,6 +608,16 @@ def _parser() -> argparse.ArgumentParser:
         if name == "open":
             target.add_argument("--from-session", help="Target the window that sent this session's latest message.")
             target.add_argument("--wait", type=float, default=5, metavar="SECONDS", help="Wait up to 0–30 seconds for display acknowledgement (default 5).")
+    interactive = subcommands.add_parser("session-control", help="Durable owner-routed interactive controls for an app agent you created.")
+    interactive.add_argument("action", choices=("watch", "snapshot", "submit", "interrupt"))
+    interactive.add_argument("--thread", required=True)
+    interactive.add_argument("--from-session")
+    interactive.add_argument("--expected-turn-id", help="Exact active turn; omit only when submitting to an idle conversation.")
+    interactive.add_argument("--message", help="User input; - reads stdin.")
+    interactive.add_argument("--adopt", action="store_true", help="Explicitly authorize this caller to control an existing app conversation; watch only.")
+    interactive.add_argument("--request-id")
+    interactive.add_argument("--after", type=int, default=0)
+    interactive.add_argument("--wait", type=float, default=0)
     for mutation in (register, activity, checkpoint, thread_update, begin, end_work, unregister, send, reply, acknowledge):
         mutation.add_argument("--full", action="store_true", help="Return the complete result instead of a compact receipt.")
     return parser
@@ -774,7 +785,7 @@ def run(arguments: argparse.Namespace) -> Any:
                 if operation == "create":
                     prompt = sys.stdin.read(100001) if arguments.prompt == "-" else arguments.prompt
                     payload.update(name=arguments.name, prompt=prompt, yolo=arguments.yolo,
-                                   reply_required=arguments.reply_required, subscribe=arguments.subscribe)
+                                   reply_required=arguments.reply_required, subscribe=arguments.subscribe, interactive=arguments.interactive)
                     payload.update({key: getattr(arguments, key) for key in ("model", "effort", "mode") if getattr(arguments, key) is not None})
             receipt = control.request(operation, arguments.from_session, payload,
                                       thread_id=getattr(arguments, "session_id", None), request_id=arguments.request_id)
@@ -799,6 +810,22 @@ def run(arguments: argparse.Namespace) -> Any:
             return control.status(arguments.session_id)
         return store.threads.update(arguments.session_id, title=arguments.title, attention=arguments.attention,
                                     **({"domain": arguments.domain} if hasattr(arguments, "domain") else {}), **associations)
+    if command == "session-control":
+        from .session_control import SessionControl
+        control = AppControl(store)
+        if arguments.action == "snapshot":
+            return SessionControl(store).snapshot(arguments.from_session, arguments.thread, arguments.after)
+        payload = {"action": arguments.action}
+        if arguments.adopt:
+            if arguments.action != "watch":
+                raise CoordinationError("--adopt is only valid for watch.")
+            payload["adopt"] = True
+        if arguments.action != "watch":
+            payload["expected_turn_id"] = arguments.expected_turn_id
+        if arguments.action == "submit":
+            payload["message"] = sys.stdin.read(100001) if arguments.message == "-" else arguments.message
+        receipt = control.request("session", arguments.from_session, payload, thread_id=arguments.thread, request_id=arguments.request_id)
+        return control.status(receipt["request_id"], wait=arguments.wait)
     if command == "project":
         if arguments.project_command == "create":
             return store.threads.organization.create_project(arguments.name, arguments.cwd)

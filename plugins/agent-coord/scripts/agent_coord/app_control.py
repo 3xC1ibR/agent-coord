@@ -52,10 +52,13 @@ class AppControl:
 
     def request(self, operation, sender_session_id, payload, *, thread_id=None, request_id=None):
         self.store.get_session(sender_session_id)
-        if operation not in {"create", "settings", "models", "move", "resume", "sidecar"}:
+        if operation not in {"create", "settings", "models", "move", "resume", "sidecar", "session"}:
             raise CoordinationError("Unknown app control operation.")
         payload = dict(payload)
-        if operation == "sidecar":
+        if operation == "session":
+            from .session_control import validate
+            cwd = validate(self, sender_session_id, thread_id, payload)
+        elif operation == "sidecar":
             from .sidecars import Sidecars
             # Exact retries remain readable after the selected agent becomes busy,
             # the watch completes, or either conversation closes.
@@ -103,6 +106,13 @@ class AppControl:
             if payload.get("client", "codex") not in {"codex", "claude", "antigravity", "kimi", "muse"}:
                 raise CoordinationError("Choose Codex, Claude Code, Google Antigravity, or Kimi Code as the session provider.")
         if operation == "create":
+            if not isinstance(payload.get("interactive", False), bool):
+                raise CoordinationError("Interactive creation must be a boolean.")
+            if payload.get("interactive"):
+                from .session_control import SessionControl
+                SessionControl(self.store)
+            else:
+                payload.pop("interactive", None)
             if payload.get("mode") not in (None, "orchestration"):
                 raise CoordinationError("Creation mode must be orchestration or omitted.")
             if payload.get("mode") is None:
@@ -136,7 +146,7 @@ class AppControl:
                 # thread_id on create is filled in as soon as the provider replies.
                 if (previous["operation"] != operation or previous["sender_session_id"] != sender_session_id
                         or old_payload != payload or (operation != "move" and previous["cwd"] != cwd)
-                        or (operation in {"settings", "move", "resume"} and previous["thread_id"] != thread_id)):
+                        or (operation in {"settings", "move", "resume", "session"} and previous["thread_id"] != thread_id)):
                     raise CoordinationError("Request ID already belongs to a different app request.")
             else:
                 if operation in {"settings", "move"}:
@@ -144,7 +154,7 @@ class AppControl:
                 now = self.store.clock()
                 # Pre-recovery app workers treat unknown queued operations as
                 # creation. Keep recovery invisible to their queued-only scan.
-                queued = "queued_" + operation if operation in {"resume", "sidecar"} else "queued"
+                queued = "queued_" + operation if operation in {"resume", "sidecar", "session"} else "queued"
                 db.execute("""INSERT INTO app_control_requests
                     (request_id, operation, sender_session_id, cwd, thread_id, payload_json,
                      status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -180,7 +190,7 @@ class AppControl:
             if not row:
                 raise CoordinationError("App request not found.")
             result = {key: row[key] for key in ("request_id", "operation", "status", "thread_id", "error")}
-            if result["status"] in {"queued_resume", "queued_sidecar"}:
+            if result["status"] in {"queued_resume", "queued_sidecar", "queued_session"}:
                 result["status"] = "queued"
             result["result"] = json.loads(row["result_json"]) if row["result_json"] else None
             if result["status"] == "queued":
@@ -199,7 +209,7 @@ class AppControl:
                 raise CoordinationError("App request not found.")
             if row[0] == "running":
                 raise CoordinationError("The app request is already executing. Inspect request-status before acting again.")
-            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume', 'queued_sidecar')",
+            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume', 'queued_sidecar', 'queued_session')",
                        (self.store.clock(), request_id))
         return self.status(request_id)
 
@@ -208,13 +218,13 @@ class AppControl:
             self._reconcile(db)
             return [dict(row) for row in db.execute("""SELECT * FROM app_control_requests
                 WHERE status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
-                OR (operation = 'sidecar' AND status = 'queued_sidecar') ORDER BY created_at, rowid""")]
+                OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar') ORDER BY created_at, rowid""")]
 
     def claim(self, request_id, owner):
         with self.store._connection() as db:
             return bool(db.execute("""UPDATE app_control_requests SET status = 'running', owner = ?, updated_at = ?
                 WHERE request_id = ? AND (status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
-                OR (operation = 'sidecar' AND status = 'queued_sidecar'))""",
+                OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar'))""",
                                    (owner, self.store.clock(), request_id)).rowcount)
 
     def identified(self, request_id, thread_id):
@@ -240,6 +250,13 @@ class AppControl:
             if changed.rowcount and status in {"failed", "uncertain"}:
                 notify_creation_failure(self.store, db, db.execute(
                     "SELECT * FROM app_control_requests WHERE request_id = ?", (request_id,)).fetchone())
+            if changed.rowcount and status == 'completed':
+                row = db.execute('SELECT * FROM app_control_requests WHERE request_id=?',(request_id,)).fetchone()
+                if row['operation'] == 'create' and json.loads(row['payload_json']).get('interactive'):
+                    # Commit binding and creation together. The inbox wake cannot
+                    # produce its first public message before the journal exists.
+                    db.execute('INSERT OR IGNORE INTO interactive_bindings(thread_id,sender_id,touched_at) VALUES (?,?,?)',
+                               (row['thread_id'],row['sender_session_id'],self.store.clock()))
             # The message can refresh the timeline before creation is confirmed.
             if changed.rowcount and status == "completed" and isinstance(result, dict) and type(result.get("message_id")) is int:
                 db.execute("""INSERT INTO message_changes(sender_session_id, recipient_session_id)
@@ -254,6 +271,8 @@ class AppControlWorker:
     def __init__(self, sessions):
         self.sessions = sessions
         self.control = AppControl(sessions.store)
+        from .session_control import SessionControl
+        self.interactive = SessionControl(sessions.store)
         from .event_subscriptions import EventSubscriptions
         self.subscriptions = EventSubscriptions(sessions.store)
         self.owner = str(uuid.uuid4())
@@ -273,7 +292,7 @@ class AppControlWorker:
             if not matches_workspace(request["cwd"], self.sessions.cwd):
                 continue
             thread_id = request["thread_id"]
-            if request["operation"] in {"settings", "move", "resume"}:
+            if request["operation"] in {"settings", "move", "resume", "session"}:
                 with self.sessions._thread_lock(thread_id):
                     self.control.settings(thread_id)
                     closed = self.control.store.threads.get(thread_id)["attention"] == "archived"
@@ -284,12 +303,14 @@ class AppControlWorker:
                     # Do not resume a thread owned by another running app-server.
                     if not closed and not loaded and session["ended_at"] is None:
                         continue
-                    if not closed and (busy or session["turn_active"] or
+                    if request["operation"] != "session" and not closed and (busy or session["turn_active"] or
                             (request["operation"] != "resume" and self.sessions.queue.list(thread_id))):
                         continue
                     self._execute(request)
             else:
                 self._execute(request)
+
+        self.interactive.refresh(self.sessions)
 
     def _execute(self, request):
         if not self.control.claim(request["request_id"], self.owner):
@@ -297,7 +318,10 @@ class AppControlWorker:
         payload = json.loads(request["payload_json"])
         provider_started = False
         try:
-            if request["operation"] == "models":
+            if request["operation"] == "session":
+                from .session_control import execute
+                result = execute(self, request, payload)
+            elif request["operation"] == "models":
                 result = {"client": payload.get("client", "codex"), "models": self.sessions.models(payload.get("client", "codex"))}
             elif request["operation"] == "sidecar":
                 payload = self.sessions.sidecars.watches.validate(request["sender_session_id"], payload)
@@ -332,6 +356,7 @@ class AppControlWorker:
                 reply_required = payload.pop("reply_required", False)
                 subscribe = payload.pop("subscribe", True)
                 mode = payload.pop("mode", None)
+                payload.pop("interactive", None)
                 # Fail invalid settings before entering the uncertain provider boundary.
                 self.sessions._creation_settings(payload)
                 provider_started = True
