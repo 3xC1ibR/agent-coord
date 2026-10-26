@@ -26,6 +26,43 @@ function setup(api, threads = []) {
 const watch = {id: "watch-1", target_id: "target", sidecar_id: "sidecar", sidecar_title: "Completion watcher", target_title: "Checkout", state: "active", status: "watching", finding: "<script>unsafe()</script>"};
 const target = {thread_id: "target", title: "Checkout", browser_session: true, client: "codex", cwd: "/project"};
 
+test("new conversation drafts never load, poll, or attach sidecars", async () => {
+  const calls = [];
+  const {ui, container, errors} = setup(async path => { calls.push(path); throw new Error("Work thread not found."); });
+  const draft = {...target, thread_id: "new-session"};
+  ui.showThread(draft, container);
+  await ui.refresh(); // Same refresh used by the five-second poll.
+  await ui.open(draft);
+  assert.equal(ui.thread, null);
+  assert.equal(container.hidden, true);
+  assert.equal(ui.dialog.open, undefined);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(errors, []);
+});
+
+test("switching to a draft cancels sidecar rendering and polling until a real thread opens", async () => {
+  let resolve;
+  const calls = [];
+  const {ui, container, errors} = setup(path => {
+    calls.push(path);
+    return new Promise(yes => { resolve = yes; });
+  });
+  ui.showThread(target, container);
+  ui.showThread({...target, thread_id: "new-session"}, container);
+  resolve({watches: [watch], requests: []});
+  await Promise.resolve();
+  await ui.refresh();
+  assert.equal(container.hidden, true);
+  assert.equal(container.children.length, 0);
+  assert.deepEqual(calls, ["threads/target/sidecars"]);
+  ui.showThread({...target, thread_id: "created"}, container);
+  resolve({watches: [], requests: []});
+  await Promise.resolve();
+  assert.equal(ui.thread, "created");
+  assert.deepEqual(calls, ["threads/target/sidecars", "threads/created/sidecars"]);
+  assert.deepEqual(errors, []);
+});
+
 test("sidecar strip renders text safely and controls the captured target", async () => {
   const calls = [];
   const {ui, opened, container} = setup(async (path, body) => { calls.push({path, body}); return {watches: [watch], requests: []}; });

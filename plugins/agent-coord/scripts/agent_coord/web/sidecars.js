@@ -29,7 +29,7 @@
       const option = this.node("option", label); option.value = value; return option;
     }
     showThread(thread, container) {
-      const id = thread?.browser_session ? thread.thread_id : null;
+      const id = thread?.browser_session && thread.thread_id !== "new-session" ? thread.thread_id : null;
       this.container = container;
       if (this.thread === id) return;
       this.thread = id; this.sequence++;
@@ -85,7 +85,7 @@
       container.hidden = !container.children.length;
     }
     async open(thread) {
-      if (!thread?.browser_session || thread.attention === "archived") return;
+      if (!thread?.browser_session || thread.thread_id === "new-session" || thread.attention === "archived") return;
       const dialog = this.dialog;
       this.target = thread; this.requestId = crypto.randomUUID(); this.submitted = null;
       const generation = ++this.catalogSequence;

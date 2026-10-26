@@ -1328,7 +1328,7 @@ async function saveSessionPermissions() {
 function renderStatus() {
   state.sidecars?.showThread(state.detail?.work_thread, $("thread-sidecars"));
   const sidecarButton = $("attach-sidecar");
-  if (sidecarButton) sidecarButton.hidden = !state.detail?.work_thread?.browser_session || state.detail?.work_thread?.attention === "archived";
+  if (sidecarButton) sidecarButton.hidden = isSessionDraft() || !state.detail?.work_thread?.browser_session || state.detail?.work_thread?.attention === "archived";
   state.schedules?.renderThread($("thread-schedules"), state.selected);
   globalThis.agentCoordSpeech?.update(state.selected, state.detail, state.config);
   state.rollUp?.changed();
