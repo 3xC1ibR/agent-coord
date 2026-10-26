@@ -34,7 +34,18 @@ escaped text. OpenUI source is limited to 256 Ki characters and action payloads
 to 32 Ki characters. Frames are retained across normal timeline refreshes;
 unsent form input survives those refreshes but is not persisted across reloads.
 
+The preview CSP names RF's validated server origin explicitly for scripts and
+styles. Do not change those directives to `'self'`: WebKit resolves that source
+to the sandbox's opaque origin and blocks the renderer. The preview retains
+`sandbox allow-scripts`, no same-origin access, and `connect-src 'none'`.
+
 After changing the integration, run the Python and JavaScript suites, refresh
 both installed plugins using `docs/reference.md`, and use a fresh runtime for
 browser testing. An already-running native RF app must load the updated backend
 and web assets to render OpenUI; refreshing plugins alone does not replace it.
+
+Run `python3 desktop/macos/openui_smoke.py` for the native WebKit regression
+check. It uses an isolated temporary database, serves the real frame policy and
+runtime assets, and verifies rendering, sandbox isolation, and a form round
+trip without starting a model or touching user conversations. Use `--scripts`
+to check a refreshed installed plugin's scripts directory.

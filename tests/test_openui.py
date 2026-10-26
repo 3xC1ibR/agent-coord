@@ -59,6 +59,9 @@ class OpenUITests(unittest.TestCase):
                 self.assertGreater(len(response.read()), 100)
                 policy = response.headers["Content-Security-Policy"]
                 if path == "/openui-frame.html":
+                    self.assertIn("script-src " + url + ";", policy)
+                    self.assertIn("style-src " + url + " 'unsafe-inline';", policy)
+                    self.assertNotIn("script-src 'self'", policy)
                     self.assertIn("connect-src 'none'", policy)
                     self.assertIn("form-action 'none'", policy)
                     self.assertIn("frame-ancestors 'self'", policy)
@@ -76,6 +79,8 @@ class OpenUITests(unittest.TestCase):
             request = urllib.request.Request(url + path, headers={"Host": "paired.example"})
             with urllib.request.urlopen(request) as response:
                 self.assertEqual(response.status, 200)
+                if path == "/openui-frame.html":
+                    self.assertIn("script-src https://paired.example;", response.headers["Content-Security-Policy"])
         for path in ("/api/browser/config", "/openui.js"):
             request = urllib.request.Request(url + path, headers={"Host": "paired.example"})
             with self.assertRaises(urllib.error.HTTPError) as error:

@@ -296,6 +296,12 @@ def _handler(
                 query = parse_qs(parsed.query)
                 openui_frame = (status == HTTPStatus.OK and content_type.startswith("text/html")
                                 and parsed.path == "/openui-frame.html")
+                # WebKit resolves 'self' to the sandbox's opaque origin and
+                # blocks even this document's own scripts/styles. Pin assets to
+                # the validated server origin instead; the frame stays opaque.
+                openui_origin = ((remote_access.origin if self._remote_request()
+                                  else "http://" + self.headers.get("Host", ""))
+                                 if openui_frame else "")
                 embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
                             and ((parsed.path == "/" and query.get("pane") == ["1"])
                                  or (parsed.path in {"/settings", "/usage"} and query.get("embedded") == ["1"]))
@@ -303,7 +309,7 @@ def _handler(
                 self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame else "DENY")
                 self.send_header(
                     "Content-Security-Policy",
-                    ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    (f"default-src 'none'; script-src {openui_origin}; style-src {openui_origin} 'unsafe-inline'; "
                      "img-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; "
                      "form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts"
                      if openui_frame else "default-src 'self'; style-src 'self' 'unsafe-inline'; "
