@@ -1,0 +1,12 @@
+.review-dialog { width: min(36rem, calc(100vw - 2rem)); max-height: 90vh; overflow: auto; }
+.review-dialog label { display: grid; gap: .4rem; margin-block: .9rem; }
+.review-dialog textarea { resize: vertical; }
+.review-dialog p { line-height: 1.5; }
+.review-controls { display: flex; gap: .6rem; justify-content: flex-end; }
+.review-card { padding: 1rem; border: 1px solid var(--border); border-radius: .7rem; margin-block: 1rem; overflow-wrap: anywhere; }
+.review-card p { white-space: pre-wrap; }
+.review-card > details { margin-top: 1rem; }
+.review-card summary { cursor: pointer; }
+.review-card h3 { font-size: 1rem; margin-block: 1rem .5rem; }
+.review-request { font-weight: 500; }
+.review-finding { border-left: 2px solid var(--border); padding-left: .75rem; }

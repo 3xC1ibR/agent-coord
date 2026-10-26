@@ -90,6 +90,8 @@ class BrowserInboxWake:
     def _eligible(self, db, thread_id, *, submitting=False):
         if self.stopped.is_set() or self.sessions.closed:
             return False
+        if hasattr(self.sessions, "reviews") and not self.sessions.reviews.wake_allowed(db, thread_id):
+            return False
         from .sidecars import discard_stale_messages
         discard_stale_messages(db, thread_id, self.store.clock())
         row = db.execute("""SELECT s.turn_active, t.attention,
@@ -138,6 +140,8 @@ class BrowserInboxWake:
                     SELECT 1 FROM work_threads t WHERE t.thread_id = m.recipient_session_id AND t.attention != 'archived'))
                 ORDER BY m.id""", (thread_id,)).fetchall()
             ids = [row[0] for row in rows]
+            if hasattr(self.sessions, "reviews"):
+                ids = self.sessions.reviews.message_ids(db, thread_id, ids)
             if ids:
                 db.execute("""INSERT INTO browser_inbox_wake (thread_id, dispatching)
                     VALUES (?, 1) ON CONFLICT(thread_id) DO UPDATE SET dispatching = 1""", (thread_id,))
@@ -198,12 +202,15 @@ class BrowserInboxWake:
             if not ids:
                 return
             try:
-                result = sessions.send(thread_id, {"message": WAKE_PROMPT}, start_only=True, automatic=True)
+                prompt = sessions.reviews.wake_prompt(thread_id, ids) if hasattr(sessions, "reviews") else None
+                result = sessions.send(thread_id, {"message": prompt or WAKE_PROMPT}, start_only=True, automatic=True)
                 turn_id = result.get("turn", {}).get("id")
                 if turn_id:
                     with self.store._connection() as db:
                         db.executemany("UPDATE messages SET wake_turn_id = ? WHERE id = ? AND recipient_session_id = ?",
                                        [(turn_id, message_id, thread_id) for message_id in ids])
+                        if hasattr(sessions, "reviews"):
+                            sessions.reviews.bind(db, thread_id, turn_id)
             except BrowserBusyError:
                 # Rejected before RPC: another turn, Stop, closure, or delivery
                 # won the race. Leave undelivered work eligible for a later tick.

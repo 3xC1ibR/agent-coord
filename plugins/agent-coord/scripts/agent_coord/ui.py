@@ -416,7 +416,7 @@ def _handler(
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
-            if parsed.path in {"/sidecars.js", "/sidecars.css", "/asks.js", "/asks.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
+            if parsed.path in {"/reviews.js", "/reviews.css", "/sidecars.js", "/sidecars.css", "/asks.js", "/asks.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -1026,6 +1026,11 @@ def _handler(
                               else browser_sessions.dispatch.configure(thread_id, body))
                 elif len(route) == 5 and route[4] == "interrupt":
                     result = browser_sessions.interrupt(thread_id)
+                elif len(route) == 5 and route[4] == "review":
+                    browser_sessions._record(thread_id)
+                    if body != {"action": "cancel"}:
+                        raise CoordinationError("Choose cancel to stop review.")
+                    result = {"cancelled": browser_sessions.reviews.cancel(thread_id)}
                 elif len(route) == 6 and route[4] == "requests":
                     result = browser_sessions.answer(thread_id, unquote(route[5]), body)
                 else:
@@ -1124,6 +1129,7 @@ def make_ui_server(
     sessions.inbox_wake.start()
     sessions.event_subscriptions.start()
     sessions.sidecars.start()
+    sessions.reviews.start()
     sessions.watchdog.start()
     sessions.dispatch.wake()
     return server

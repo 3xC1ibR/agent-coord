@@ -67,6 +67,8 @@ class BrowserMessageQueue:
             message = body["message"]  # Selected ranges refer to the untrimmed composer text.
         mentions = thread_mentions(message, body, self.sessions)
         source_window = window_id(body.get("windowId"))
+        if hasattr(self.sessions, "reviews") and self.sessions.reviews.active(thread_id):
+            raise CoordinationError("Send an update or stop the current review before queueing another request.")
         with self.sessions._thread_lock(thread_id):
             if dispatch_id is not None:
                 receipt = self.sessions.dispatch.get(dispatch_id)
@@ -151,6 +153,8 @@ class BrowserMessageQueue:
     def _dispatch(self, thread_id):
         sessions = self.sessions
         with sessions._thread_lock(thread_id):
+            if hasattr(sessions, "reviews") and sessions.reviews.active(thread_id):
+                return
             items = self.list(thread_id)
             if not items or items[0]["state"] != "queued":
                 return

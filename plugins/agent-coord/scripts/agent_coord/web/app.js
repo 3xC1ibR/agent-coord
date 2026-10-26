@@ -1001,8 +1001,8 @@ function retainConversation() {
 function sameConversation(first, second) {
   if (first && JSON.stringify([first.work_thread.forked_from, first.work_thread.forked_from_turn_id, first.work_thread.forked_sessions]) !==
     JSON.stringify([second.work_thread.forked_from, second.work_thread.forked_from_turn_id, second.work_thread.forked_sessions])) return false;
-  return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.work_thread.browser_session, first.work_thread.client]) ===
-    JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.work_thread.browser_session, second.work_thread.client]);
+  return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.reviews, first.work_thread.browser_session, first.work_thread.client]) ===
+    JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.reviews, second.work_thread.browser_session, second.work_thread.client]);
 }
 async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true, tabId = null} = {}) {
   const previousTab = state.threadTabs?.selected;
@@ -1399,6 +1399,7 @@ function renderStatus() {
   state.mentions?.render();
   state.resizeComposer?.();
   if (state.paneMode) globalThis.agentCoordPane?.updateStatus();
+  state.reviewUI?.render(state.detail, isSessionDraft() ? state.newSessionDraft?.draftId || state.selected : state.selected);
 }
 function renderCloseWhenDone() {
   const button = $("close-when-done"), detail = state.detail, work = detail?.work_thread;
@@ -1577,8 +1578,8 @@ function renderTimeline() {
     notice.setAttribute("role", "status");
     fragment.append(notice);
   }
-  const messages = state.detail?.coordinationMessages || [];
-  const sourceTurns = state.detail?.thread.turns || [];
+  const messages = (state.detail?.coordinationMessages || []).filter(message => !message.thread_id?.startsWith("event:review:"));
+  const sourceTurns = globalThis.ReviewUI ? ReviewUI.turns(state.detail?.thread.turns || [], state.detail?.reviews || [], state.selected) : state.detail?.thread.turns || [];
   const turns = globalThis.DispatchUI && (state.detail?.work_thread?.dispatcher || state.detail?.dispatchRequests?.length)
     ? DispatchUI.turns(sourceTurns, state.detail.dispatchRequests || []) : sourceTurns;
   const entries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
@@ -1600,6 +1601,11 @@ function renderTimeline() {
     }
     const turn = entry.turn;
     for (const item of entry.item ? [entry.item] : entry.end ? [] : turn.items || []) {
+      if (item.type === "reviewReceipt") {
+        fragment.append(ReviewUI.card(document, item.review, {render: text => messageMarkdown.render(text),
+          open: id => select(id).catch(showError), expanded: open.has("review:" + item.review.id)}));
+        continue;
+      }
       if (item.type === "dispatchReceipt") {
         fragment.append(DispatchUI.card(document, item.receipt, {open: id => select(id).catch(showError),
           dismiss: id => action(async () => { await api(sessionPath(state.selected) + "/dispatch", {id, action: "dismiss"}); await refreshDetail(); })}));
@@ -2288,7 +2294,9 @@ async function sendSessionDraft(text, images, mentions = []) {
   const body = {message: text, windowId: state.sourceWindowId};
   if (mentions.length) body.mentions = mentions;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
+  state.reviewUI?.decorate(body, draftId);
   const result = await api(sessionPath(draft.createdId) + "/messages", body);
+  state.reviewUI?.sent(draftId);
   state.attachments?.sent(draftId, images);
   state.mentions?.sent(draftId, text, mentions);
   state.mentions?.move(draftId, draft.createdId);
@@ -2771,7 +2779,9 @@ $("search").onkeydown = event => {
   if (event.key === "Escape") { $("search").value = ""; filtersChanged(); }
 };
 async function sendMessage(mode = "steer") {
-  if (state.detail?.running && ["antigravity", "kimi"].includes(state.detail?.work_thread?.client)) mode = "queue";
+  const reviewing = state.detail?.reviews?.some(run => run.active);
+  if (reviewing) mode = "steer";
+  else if (state.detail?.running && ["antigravity", "kimi"].includes(state.detail?.work_thread?.client)) mode = "queue";
   const detail = state.detail;
   const dispatcher = !!detail?.work_thread?.dispatcher;
   const id = state.selected, text = $("message").value;
@@ -2783,13 +2793,13 @@ async function sendMessage(mode = "steer") {
   const ticket = state.rollUp?.ticket(id);
   const images = state.attachments?.snapshot(draftId) || [];
   if (state.busy || state.sending?.has(sendKey) || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
-      (!dispatcher && detail.running && !detail.activeTurn) || state.attachments?.pending(draftId) || (!text.trim() && !images.length)) return;
+      (!dispatcher && !reviewing && detail.running && !detail.activeTurn) || state.attachments?.pending(draftId) || (!text.trim() && !images.length)) return;
   const mentions = state.mentions?.snapshot(draftId, text) || [];
   const body = {message: text};
   if (mentions.length) body.mentions = mentions;
   if (state.sourceWindowId) body.windowId = state.sourceWindowId;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
-  if (!dispatcher && detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
+  if (!dispatcher && !reviewing && detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
   (state.sending ||= new Set()).add(sendKey); renderStatus();
   let dispatchReceived = false;
   let commandCompleted = false;
@@ -2823,7 +2833,9 @@ async function sendMessage(mode = "steer") {
       body.askDispatcher = !!$("dispatch-direct")?.checked;
       body.requestId = DispatchUI.requestKey(sessionStorage, id, body);
     }
+    if (!reviewing && !detail.running && mode !== "queue") state.reviewUI?.decorate(body, id);
     const result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
+    state.reviewUI?.sent(id);
     dispatchReceived = !!result.dispatched;
     commandCompleted = !!result.command;
     if (result.dispatched) {
@@ -3431,6 +3443,7 @@ async function boot() {
     onSwitch: async () => { goHome(); await refreshList(); window.agentCoordPanes?.restoreView(); }, onError: showError});
   state.projectCwd = state.folders.selected?.cwd || "";
   state.sidecars = new SidecarsUI({document, api, getThreads: () => state.sessions, openThread: select, onError: showError});
+  if (globalThis.ReviewUI) state.reviewUI = new ReviewUI({document, api, onError: showError, changed: renderStatus});
   window.addEventListener("pagehide", () => clearInterval(state.sidecars.timer), {once: true});
   state.asks = new AsksUI({document, api, openThread: select, onError: showError});
   state.asks.refresh().catch(showError);

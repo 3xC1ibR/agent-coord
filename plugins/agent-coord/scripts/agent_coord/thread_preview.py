@@ -122,7 +122,10 @@ def thread_preview(sessions, thread_id):
     thread = sessions.work_thread(thread_id, history=False)  # Enforces workspace visibility.
     if thread["browser_session"]:
         with sessions.lock:
-            message = latest_history_message(sessions._history(thread_id))
+            history = sessions._history(thread_id)
+            if hasattr(sessions, "reviews"):
+                history = sessions.reviews.public_history(thread_id, history)
+            message = latest_history_message(history)
     else:
         message = latest_terminal_message(thread)
     return {"thread": thread, "latest_message": message,

@@ -258,6 +258,8 @@ class BrowserSessions:
         self.event_subscriptions = EventSubscriptions(store, cwd=self.cwd)
         from .sidecars import SidecarRuntime
         self.sidecars = SidecarRuntime(self)
+        from .reviews import ReviewRuntime
+        self.reviews = ReviewRuntime(self)
         from .dispatch_runtime import DispatchRuntime
         self.dispatch = DispatchRuntime(self)
         from .turn_watchdog import TurnWatchdog
@@ -297,6 +299,7 @@ class BrowserSessions:
     def _event(self, message: dict) -> None:
         method, params = message["method"], message.get("params") or {}
         thread_id = params.get("threadId")
+        public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
         with self.lock:
             # A late completion for an older turn must not end a newer turn.
             if (method == "turn/completed" and self.active.get(thread_id)
@@ -349,8 +352,8 @@ class BrowserSessions:
                     self.loaded_clients.pop(identity, None)
                 self.active = {t: v for t, v in self.active.items() if t not in disconnected}
                 self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") not in disconnected}
-            self._publish(method, params)
-            if method == "turn/completed" or (method == "item/completed" and params.get("item", {}).get("type") == "agentMessage"):
+            self._publish(method, public)
+            if not review_stage and (method == "turn/completed" or (method == "item/completed" and params.get("item", {}).get("type") == "agentMessage")):
                 public_params = copy.deepcopy(params)
                 def record_public_output():
                     from .session_control import SessionControl
@@ -394,6 +397,8 @@ class BrowserSessions:
                            for item in params["turn"].get("items", []) if item.get("type") == "userMessage"), None)
             self.store.threads.start_turn(thread_id, prompt=prompt, turn_id=params["turn"]["id"],
                                          notification_context=params.get("notification_context"))
+            with self.store._connection() as db:
+                self.reviews.bind(db, thread_id, params["turn"]["id"])
         if method == "turn/completed" and thread_id:
             turn = params.get("turn", {})
             self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=turn.get("status", "completed"))
@@ -643,6 +648,9 @@ class BrowserSessions:
         if row is None:
             raise CoordinationError("Turn completion not found.")
         thread = self.work_thread(row["thread_id"], history=False)
+        review_notification = self.reviews.notification(row)
+        if review_notification is not None:
+            return review_notification and thread["attention"] != "archived" and not thread["snoozed"]
         if (context and context["origin"] == "coordination" and checkpoint and checkpoint["next_actor"] == "user"
                 and (thread["turn_key"] != row["turn_key"] or
                      row["id"] <= thread["handled_completion_id"] and checkpoint["id"] <= thread["handled_checkpoint_id"])):
@@ -992,6 +1000,9 @@ class BrowserSessions:
             with self.store._connection() as db:
                 children = db.execute("SELECT DISTINCT d.child_session_id FROM delegations d JOIN work_threads t ON t.thread_id = d.child_session_id WHERE d.parent_session_id = ?", (thread_id,)).fetchall()
             thread["children"] = [self.store.threads.get(row["child_session_id"]) for row in children]
+        if hasattr(self, "reviews"):
+            self.reviews.project(thread, waiting=bool(waiting) or blocked_on_ask,
+                                 inventory=_inventory.reviews if _inventory is not None else None)
         return thread
 
     def list_work_threads(self, *, archived=False) -> list[dict]:
@@ -999,6 +1010,8 @@ class BrowserSessions:
         with self.store._connection() as db:
             inventory = ThreadInventory(self.store.threads, db, archived=archived)
             inventory.load_runtime(db)
+            if hasattr(self, "reviews"):
+                inventory.reviews = self.reviews.inventory(db)
             inventory.creators = self._app_agent_creators(db=db)
             inventory.projected = {row["thread_id"]: inventory.read(db, row) for row in inventory.rows
                                    if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)}
@@ -1052,6 +1065,7 @@ class BrowserSessions:
         The persisted `archived` value remains the compatibility representation
         of Closed. A closed thread is retained, not marked task-complete.
         """
+        self.reviews.cancel(thread_id, reason="The conversation was closed.")
         with self._thread_lock(thread_id):
             thread = self.work_thread(thread_id)
             external = False
@@ -1521,11 +1535,12 @@ class BrowserSessions:
                 running = thread_id in self.active
             # Read-side recovery may have changed the live turn. Project the card
             # after reconciliation so it agrees with the conversation status.
-            return {"session": record, "thread": thread, "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
+            return {"session": record, "thread": self.reviews.public_history(thread_id, thread), "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
                     "activeTurn": active_turn, "running": running,
                     "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                     "dispatchRequests": self.dispatch.receipts(thread_id),
                     "dispatchSettings": self.dispatch.settings(thread_id),
+                    "reviews": self.reviews.list(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
 
     def _reconcile_turn(self, thread_id, thread, revision):
@@ -1562,6 +1577,10 @@ class BrowserSessions:
     def submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
         message = body.get("message", "")
+        if body.get("review") is not None:
+            if queued:
+                raise CoordinationError("Send a reviewed request from an idle conversation; it cannot be queued.")
+            return self.reviews.submit(thread_id, body)
         if self.dispatch.settings(thread_id)["enabled"] and not (isinstance(message, str) and message.strip().startswith("/")):
             return self.dispatch.submit(thread_id, body)
         return self.queue.enqueue(thread_id, body) if queued else self.send(thread_id, body)
@@ -1588,6 +1607,8 @@ class BrowserSessions:
                     raise BrowserBusyError("Inbox wake paused or the conversation is no longer idle.")
             elif self.store.threads.get(thread_id)["attention"] == "archived":
                 raise CoordinationError("Reopen this thread before sending a message.")
+            if not automatic and self.reviews.cancel(thread_id, reason="New input superseded this review.", state="superseded"):
+                expected_turn = None
             self._resume_thread(thread_id, record)
             self.read(thread_id)
             record = self._record(thread_id)
@@ -1602,6 +1623,8 @@ class BrowserSessions:
                 return command
             with self.lock:
                 turn_id = self.active.get(thread_id)
+                if not automatic and turn_id and self.reviews.stage_for(thread_id, turn_id):
+                    raise BrowserBusyError("The previous review turn is still stopping. Wait for it to stop, then send your update again.")
                 if (start_only or automatic) and thread_id in self.active:
                     raise BrowserBusyError("A turn is already running. The queued message was not sent as steering.")
                 if expected_turn is not None and expected_turn != turn_id:
@@ -1684,6 +1707,8 @@ class BrowserSessions:
             return result
 
     def interrupt(self, thread_id: str) -> dict:
+        if self.reviews.cancel(thread_id):
+            return {"review_cancelled": True}
         with self._thread_lock(thread_id):
             self._record(thread_id)
             with self.lock:
@@ -1783,6 +1808,7 @@ class BrowserSessions:
             self.changed.notify_all()
         self.classifier.close()
         self.watchdog.close()
+        self.reviews.close()
         self.dispatch.close()
         self.event_subscriptions.close()
         self.sidecars.close()
