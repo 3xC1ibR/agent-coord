@@ -33,12 +33,15 @@ class FakeTailscale:
     def enable(self, port, target):
         self.calls.append(("enable", port, target))
         self.mapping.setdefault("TCP", {})[str(port)] = {"HTTPS": True}
-        self.mapping.setdefault("Web", {})[f"mac.test.ts.net:{port}"] = {"Handlers": {"/": {"Proxy": target}}}
+        self.mapping.setdefault("Web", {}).setdefault(f"mac.test.ts.net:{port}", {}).setdefault("Handlers", {})["/"] = {"Proxy": target}
 
     def disable(self, port):
         self.calls.append(("disable", port))
-        self.mapping.get("TCP", {}).pop(str(port), None)
-        self.mapping.get("Web", {}).pop(f"mac.test.ts.net:{port}", None)
+        handlers = self.mapping.get("Web", {}).get(f"mac.test.ts.net:{port}", {}).get("Handlers", {})
+        handlers.pop("/", None)
+        if not handlers:
+            self.mapping.get("TCP", {}).pop(str(port), None)
+            self.mapping.get("Web", {}).pop(f"mac.test.ts.net:{port}", None)
 
 
 class RemoteAccessTests(unittest.TestCase):
@@ -111,6 +114,46 @@ class RemoteAccessTests(unittest.TestCase):
         with self.assertRaises(CoordinationError):
             other.disable()
         self.assertTrue(self.remote.authenticated(cookie))
+
+    def test_shared_listener_survives_restart_and_disable(self):
+        cookie = self.pair()
+        siblings = {"/reader": {"Proxy": "http://127.0.0.1:8767"},
+                    "/ipad": {"Proxy": "http://127.0.0.1:8791"}}
+        handlers = self.ts.mapping["Web"]["mac.test.ts.net:443"]["Handlers"]
+        handlers.update(copy.deepcopy(siblings))
+        self.assertEqual(self.remote.status(probe=True)["error"], "")
+        self.remote.close()
+        self.assertEqual(handlers, siblings)
+        other = self.new_remote()
+        other.restore("http://127.0.0.1:9999")
+        self.assertTrue(other.authenticated(cookie))
+        self.assertEqual(handlers["/"], {"Proxy": "http://127.0.0.1:9999"})
+        self.assertEqual(other.disable()["error"], "")
+        self.assertEqual(handlers, siblings)
+        self.assertEqual(self.ts.mapping["TCP"]["443"], {"HTTPS": True})
+
+    def test_crash_recovery_preserves_shared_paths_and_grant(self):
+        cookie = self.pair()
+        handlers = self.ts.mapping["Web"]["mac.test.ts.net:443"]["Handlers"]
+        handlers["/reader"] = {"Proxy": "http://127.0.0.1:8767"}
+        self.remote._release()  # A crash releases the lock but leaves the old route.
+        self.remote.closed = True
+        other = self.new_remote()
+        other.restore("http://127.0.0.1:9999")
+        self.assertTrue(other.authenticated(cookie))
+        self.assertEqual(handlers, {"/": {"Proxy": "http://127.0.0.1:9999"},
+                                    "/reader": {"Proxy": "http://127.0.0.1:8767"}})
+
+    def test_failed_save_rolls_back_only_root_on_shared_listener(self):
+        self.ts.mapping = {"TCP": {"443": {"HTTPS": True}}, "Web": {
+            "mac.test.ts.net:443": {"Handlers": {
+                "/reader": {"Proxy": "http://127.0.0.1:8767"}}}}}
+        before = copy.deepcopy(self.ts.mapping)
+        with patch.object(self.remote, "_save", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                self.remote.enable()
+        self.assertEqual(self.ts.mapping, before)
+        self.assertFalse(self.remote.status()["enabled"])
 
     def test_disable_revokes_and_does_not_restore(self):
         cookie = self.pair()
@@ -194,8 +237,13 @@ class TailscaleTests(unittest.TestCase):
             with self.assertRaises(CoordinationError) as error:
                 ts.enable(443, "http://127.0.0.1:9876")
             self.assertNotIn("secret", str(error.exception))
-            self.assertEqual(run.call_args.args[0], ["/bin/tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:9876"])
+            self.assertEqual(run.call_args.args[0], ["/bin/tailscale", "serve", "--bg", "--https=443", "--set-path=/", "http://127.0.0.1:9876"])
             self.assertEqual(run.call_args.kwargs["timeout"], 15)
+
+    def test_disable_removes_only_root_path(self):
+        with patch.object(Tailscale, "run") as run:
+            Tailscale().disable(443)
+        run.assert_called_once_with("serve", "--https=443", "--set-path=/", "off", timeout=15)
 
     def test_timeout_and_malformed_json_are_actionable(self):
         ts = Tailscale()

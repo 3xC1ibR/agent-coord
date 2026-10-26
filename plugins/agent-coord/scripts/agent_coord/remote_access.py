@@ -91,10 +91,10 @@ class Tailscale:
         return self.json("serve", "status", "--json")
 
     def enable(self, port: int, target: str) -> None:
-        self.run("serve", "--bg", f"--https={port}", target, timeout=15)
+        self.run("serve", "--bg", f"--https={port}", "--set-path=/", target, timeout=15)
 
     def disable(self, port: int) -> None:
-        self.run("serve", f"--https={port}", "off", timeout=15)
+        self.run("serve", f"--https={port}", "--set-path=/", "off", timeout=15)
 
 
 def _occupied(config: dict, port: int) -> bool:
@@ -107,16 +107,21 @@ def _occupied(config: dict, port: int) -> bool:
     return any(_occupied(child, port) for child in (config.get("Foreground") or {}).values())
 
 
-def _owned(config: dict, authority: str, port: int, target: str) -> bool:
-    """Only remove/replace an exact root proxy; never reset another service."""
+def _owned(config: dict, authority: str, port: int, target: str | None) -> bool:
+    """Match the exact root proxy, or an unused root when target is None.
+
+    Other paths may share the HTTPS listener. Mutations must address only /.
+    """
     if any(value for key, value in (config.get("AllowFunnel") or {}).items()
            if str(key).endswith(f":{port}")):
         return False
     if any(_occupied(child, port) for child in (config.get("Foreground") or {}).values()):
         return False
     webs = {key: value for key, value in (config.get("Web") or {}).items() if key.endswith(f":{port}")}
-    return ((config.get("TCP") or {}).get(str(port)) == {"HTTPS": True}
-            and webs == {authority: {"Handlers": {"/": {"Proxy": target}}}})
+    if (config.get("TCP") or {}).get(str(port)) != {"HTTPS": True} or set(webs) != {authority}:
+        return False
+    handlers = webs[authority].get("Handlers") or {}
+    return "/" not in handlers if target is None else handlers.get("/") == {"Proxy": target}
 
 
 class RemoteAccess:
@@ -204,7 +209,7 @@ class RemoteAccess:
                 previous = self.data
                 replace_owned = (previous.get("hostname") == hostname and previous.get("port") == port
                                  and _owned(config, authority, port, previous.get("target", "")))
-                if _occupied(config, port) and not replace_owned:
+                if _occupied(config, port) and not (replace_owned or _owned(config, authority, port, None)):
                     raise CoordinationError("That Tailscale port is already used by another service or Funnel. Choose another HTTPS port.")
                 attempted = True
                 self.tailscale.enable(port, self.target)

@@ -223,6 +223,8 @@ class BrowserSessions:
                 connection.execute("ALTER TABLE browser_sessions ADD COLUMN client TEXT NOT NULL DEFAULT 'codex'")
             if "yolo" not in columns:
                 connection.execute("ALTER TABLE browser_sessions ADD COLUMN yolo INTEGER NOT NULL DEFAULT 0")
+            if "service_tier" not in columns:
+                connection.execute("ALTER TABLE browser_sessions ADD COLUMN service_tier TEXT")
             connection.execute("""CREATE TABLE IF NOT EXISTS browser_history (
                 thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL
             )""")
@@ -1163,7 +1165,7 @@ class BrowserSessions:
             record = {"cwd": source["cwd"], "name": name, "yolo": False}
             if source["browser_session"]:
                 settings = self._record(thread_id)
-                record.update({key: settings[key] for key in ("model", "effort", "yolo")})
+                record.update({key: settings[key] for key in ("model", "effort", "yolo", "service_tier")})
             params = {"threadId": thread_id, **self._options(record)}
             if latest.get("id"):
                 params["lastTurnId"] = latest["id"]
@@ -1203,10 +1205,12 @@ class BrowserSessions:
             with self.store._connection() as db:
                 now = self.store.clock()
                 db.execute("""INSERT INTO browser_sessions
-                              (thread_id, cwd, name, model, effort, yolo, created_at, updated_at, client)
-                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              (thread_id, cwd, name, model, effort, yolo, created_at, updated_at, client, service_tier)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                            (child_id, record["cwd"], name, result.get("model") or record.get("model"),
-                            result.get("reasoningEffort", record.get("effort")), int(record["yolo"]), now, now, source["client"]))
+                            result.get("reasoningEffort", record.get("effort")), int(record["yolo"]), now, now, source["client"],
+                            result.get("serviceTier") or record.get("service_tier")))
+            self._capture_settings(child_id, result)
             with self.lock:
                 self._remember_thread(result["thread"])
             self.store.end_session(child_id)
@@ -1237,6 +1241,8 @@ class BrowserSessions:
             options["model"] = record["model"]
         if record.get("effort"):
             options["config"]["model_reasoning_effort"] = record["effort"]
+        if record.get("service_tier") and record.get("client", "codex") == "codex":
+            options["serviceTier"] = record["service_tier"]
         return options
 
     def _capture_settings(self, thread_id: str, result: dict) -> None:
@@ -1247,8 +1253,33 @@ class BrowserSessions:
         if model and effort is None and record["client"] == "codex":
             selected = next((m for m in self.models(record["client"]) if m["model"] == model), {})
             effort = selected.get("defaultReasoningEffort")
+        tier = result.get("serviceTier") or record["service_tier"]
+        if tier == "priority":
+            tier = "fast"
         with self.store._connection() as db:
-            db.execute("UPDATE browser_sessions SET model = ?, effort = ? WHERE thread_id = ?", (model, effort, thread_id))
+            db.execute("UPDATE browser_sessions SET model = ?, effort = ?, service_tier = ? WHERE thread_id = ?",
+                       (model, effort, tier, thread_id))
+
+    def _validate_service_tier(self, tier, client: str, model: str | None = None) -> None:
+        if tier is not None and (not isinstance(tier, str) or tier not in {"default", "fast", "ultrafast"}):
+            raise CoordinationError("Service tier must be default, fast, or ultrafast.")
+        if tier is not None and client != "codex":
+            raise CoordinationError("Speed modes are only available for Codex sessions.")
+        if tier in {"fast", "ultrafast"}:
+            models = self.models(client)
+            selected = next((item for item in models if item["model"] == model), None)
+            if selected is None and model is None:
+                selected = next((item for item in models if item.get("isDefault")), None)
+            selected = selected or {}
+            tiers = selected.get("serviceTiers")
+            speeds = selected.get("additionalSpeedTiers")
+            # Older Codex catalogs predate tier metadata. Fast is compatible
+            # with those versions; Ultrafast requires explicit availability.
+            if tiers is not None or speeds is not None or tier == "ultrafast":
+                available = {item["id"] for item in tiers or []} | set(speeds or [])
+                if tier not in available and not (tier == "fast" and "priority" in available):
+                    raise CoordinationError(f"Codex does not advertise {tier} mode for this model and account. "
+                                            "Choose an eligible model/account or turn speed mode off.")
 
     def _validate_settings(self, model: str | None, effort: str | None, client: str = "codex") -> dict:
         def model_key(value):
@@ -1280,6 +1311,11 @@ class BrowserSessions:
         yolo = body.get("yolo", bool(record["yolo"]))
         if not isinstance(yolo, bool):
             raise CoordinationError("YOLO must be true or false.")
+        tier = record["service_tier"]
+        if "service_tier" in body:
+            tier = body["service_tier"]
+            # An explicit reset must override the provider's previous turn tier.
+            tier = tier or "default"
         model, effort = record["model"], record["effort"]
         if "model" in body or "effort" in body:
             model = self._text(body.get("model", model), "Model", 200)
@@ -1291,9 +1327,12 @@ class BrowserSessions:
             elif effort not in supported:
                 effort = selected.get("defaultReasoningEffort")
             self._validate_effort(selected, effort)
+        if "service_tier" in body or ("model" in body and tier in {"fast", "ultrafast"}):
+            self._validate_service_tier(body["service_tier"] if "service_tier" in body else tier,
+                                        record["client"], model)
         with self.store._connection() as db:
-            db.execute("UPDATE browser_sessions SET model = ?, effort = ?, yolo = ?, updated_at = ? WHERE thread_id = ?",
-                       (model, effort, int(yolo), time.time(), thread_id))
+            db.execute("UPDATE browser_sessions SET model = ?, effort = ?, yolo = ?, service_tier = ?, updated_at = ? WHERE thread_id = ?",
+                       (model, effort, int(yolo), tier, time.time(), thread_id))
         self._publish("browser/changed", {"threadId": thread_id})
         return self._record(thread_id)
 
@@ -1330,7 +1369,7 @@ class BrowserSessions:
     def _command(self, thread_id: str, message: str, *, reconciled_session: dict | None = None) -> dict | None:
         parts = message.split()
         command = parts[0].lower()
-        if command not in {"/cd", "/permissions", "/yolo", "/model", "/effort", "/help"}:
+        if command not in {"/cd", "/permissions", "/yolo", "/model", "/effort", "/help", "/fast", "/ultrafast", "/utrafast"}:
             return None
         client = self._record(thread_id)["client"]
         default_permissions = {"claude": "Claude Code configured permissions with tool approval prompts",
@@ -1346,6 +1385,20 @@ class BrowserSessions:
                      "yolo gives full machine access without approval prompts. "
                      "In the UI, /fork opens a new thread from an idle Codex or Claude conversation; "
                      "/close stops and closes the current thread, keeping its history.")
+            if client == "codex":
+                reply += " Speed: /fast [on|off|status], /ultrafast [on|off|status] (alias /utrafast). Without arguments, toggle the mode."
+        elif command in {"/fast", "/ultrafast", "/utrafast"}:
+            if client != "codex":
+                raise CoordinationError("Speed modes are only available for Codex sessions.")
+            if len(parts) > 2 or (len(parts) == 2 and parts[1].lower() not in {"on", "off", "status"}):
+                raise CoordinationError(f"Use {command} [on|off|status].")
+            record = self._record(thread_id)
+            target = "fast" if command == "/fast" else "ultrafast"
+            action = parts[1].lower() if len(parts) == 2 else "toggle"
+            if action != "status":
+                tier = "default" if action == "off" or (action == "toggle" and record["service_tier"] == target) else target
+                record = self._change_settings(thread_id, {"service_tier": tier}, reconciled_session=reconciled_session)
+            reply = "Codex speed: " + (record["service_tier"] or "configured default") + ". Changes apply to your next message."
         elif command == "/cd":
             argument = message[len(parts[0]):].strip()
             record = self._change_directory(thread_id, argument) if argument else self._record(thread_id)
@@ -1397,6 +1450,8 @@ class BrowserSessions:
         client = body.get("client", "codex")
         self._provider(client)
         record = {"client": client, "cwd": repository, "name": name, "model": body.get("model") or None, "effort": body.get("effort") or None, "yolo": yolo}
+        record["service_tier"] = body.get("service_tier")
+        self._validate_service_tier(record["service_tier"], client, record["model"])
         if record["model"] or record["effort"]:
             self._validate_settings(record["model"], record["effort"], client)
         return record, associations
@@ -1411,8 +1466,8 @@ class BrowserSessions:
             on_created(thread_id)
         now = time.time()
         with self.store._connection() as connection:
-            connection.execute("INSERT INTO browser_sessions (thread_id, cwd, name, model, effort, yolo, created_at, updated_at, client) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                               (thread_id, repository, name, record["model"], record["effort"], int(yolo), now, now, client))
+            connection.execute("INSERT INTO browser_sessions (thread_id, cwd, name, model, effort, yolo, created_at, updated_at, client, service_tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                               (thread_id, repository, name, record["model"], record["effort"], int(yolo), now, now, client, record["service_tier"]))
         self._capture_settings(thread_id, result)
         self.store.register(session_id=thread_id, client=client, cwd=repository, name=name)
         self.store.threads.update(thread_id, **associations)
@@ -1584,6 +1639,8 @@ class BrowserSessions:
             params["cwd"] = record["cwd"]
             if record["effort"]:
                 params["effort"] = record["effort"]
+            if record["client"] == "codex" and record["service_tier"]:
+                params["serviceTier"] = record["service_tier"]
             if record["yolo"]:
                 params.update(approvalPolicy="never", sandboxPolicy={"type": "dangerFullAccess"})
             else:
@@ -1640,7 +1697,7 @@ class BrowserSessions:
     def update(self, thread_id: str, body: dict) -> dict:
         with self._thread_lock(thread_id):
             record = self._record(thread_id)
-            if {"model", "effort", "yolo"}.intersection(body):
+            if {"model", "effort", "yolo", "service_tier"}.intersection(body):
                 record = self._change_settings(thread_id, body)
             if "name" in body:
                 name = self._text(body["name"], "Session name", 160)

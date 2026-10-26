@@ -1,4 +1,5 @@
-.conversation-tabs { display: flex; flex-shrink: 0; min-width: 0; overflow-x: auto; scrollbar-width: thin; background: var(--paper); border-bottom: 1px solid var(--line); padding: 0 12px; }
+.conversation-tabs { display: flex; flex-shrink: 0; min-width: 0; overflow-x: auto; scrollbar-width: none; background: var(--paper); border-bottom: 1px solid var(--line); padding: 0 12px; }
+.conversation-tabs::-webkit-scrollbar { display: none; }
 .conversation-tab { display: flex; align-items: stretch; flex: 0 0 auto; max-width: 250px; min-width: 90px; border-right: 1px solid var(--line); border-bottom: 2px solid transparent; }
 .conversation-tab[data-selected=true] { background: var(--surface); border-bottom-color: var(--accent); }
 .conversation-tab button { background: transparent; color: var(--muted); border: 0; border-radius: 0; box-shadow: none; }

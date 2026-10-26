@@ -958,6 +958,14 @@ lists these commands. Commands do not create model turns; changes apply to the
 next message and persist across server restarts. Wait for a running turn to
 finish before changing settings. When switching models, an unsupported effort
 falls back to the new model's advertised default.
+For Codex, `/fast` and `/ultrafast` toggle the corresponding speed mode;
+`/utrafast` is also accepted as an alias for `/ultrafast`. Add `on` to enable
+a mode, `off` to return to standard speed, or `status` to show the current
+selection without changing it. Speed selections persist across restarts and
+are inherited by forks. Availability depends on the selected Codex model and
+account. Unavailable modes report an error and preserve the previous selection.
+The slash menu completes these commands and their arguments only in
+Codex chats.
 The slash menu completes model names and supported effort levels. In Codex chats,
 type `$` anywhere in the message to browse enabled skills for the current working
 folder. Keep typing to filter skill names, use arrow keys to move, and Enter or

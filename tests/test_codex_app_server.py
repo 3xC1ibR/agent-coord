@@ -45,7 +45,7 @@ class FakeCodex:
         thread_id = params.get("threadId")
         if method == "model/list":
             return {"data": [
-                {"model": "available-model", "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [{"reasoningEffort": "medium"}, {"reasoningEffort": "high"}]},
+                {"model": "available-model", "isDefault": True, "serviceTiers": [{"id": "priority"}, {"id": "ultrafast"}], "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [{"reasoningEffort": "medium"}, {"reasoningEffort": "high"}]},
                 {"model": "other-model", "defaultReasoningEffort": "low", "supportedReasoningEfforts": [{"reasoningEffort": "low"}]},
             ]}
         if method == "thread/start":
@@ -72,6 +72,8 @@ class FakeCodex:
                 settings = self.settings.setdefault(thread_id, {"model": "available-model", "reasoningEffort": "medium"})
                 settings["model"] = params.get("model", settings["model"])
                 settings["reasoningEffort"] = params.get("config", {}).get("model_reasoning_effort", settings["reasoningEffort"])
+                if "serviceTier" in params:
+                    settings["serviceTier"] = "priority" if params["serviceTier"] == "fast" else params["serviceTier"]
                 return {"thread": thread, **settings}
             return {"thread": thread}
         if method == "turn/start":
@@ -459,6 +461,84 @@ class BrowserSessionTests(unittest.TestCase):
             reopened.update(thread_id, {"effort": "low"})
         self.assertEqual(reopened._record(thread_id)["model"], "other-model")
 
+    def test_speed_commands_toggle_without_prompt_and_apply_to_turns(self):
+        thread_id = self.create()
+        for command, tier in [("/fast", "fast"), ("/fast", "default"),
+                              ("/ultrafast on", "ultrafast"), ("/fast on", "fast"),
+                              ("/utrafast", "ultrafast"), ("/ultrafast off", "default")]:
+            result = self.sessions.send(thread_id, {"message": command})
+            self.assertEqual(result["session"]["service_tier"], tier)
+            self.assertIn(tier, result["command"]["message"])
+        self.assertFalse(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))
+        self.assertFalse(self.store.threads.get(thread_id)["original_request"])
+        self.sessions.send(thread_id, {"message": "/fast on"})
+        result = self.sessions.send(thread_id, {"message": "/ultrafast status"})
+        self.assertEqual(result["session"]["service_tier"], "fast")
+        self.sessions.update(thread_id, {"service_tier": None})
+        self.assertEqual(self.sessions._record(thread_id)["service_tier"], "default")
+        self.sessions.send(thread_id, {"message": "/fast on"})
+        self.sessions.send(thread_id, {"message": "Work"})
+        self.assertEqual(self.sessions.rpc.calls[-1][1]["serviceTier"], "fast")
+        with self.assertRaises(BrowserBusyError):
+            self.sessions.send(thread_id, {"message": "/ultrafast"})
+        self.assertEqual(self.sessions._record(thread_id)["service_tier"], "fast")
+
+    def test_speed_settings_survive_restart_fork_and_explicit_disable(self):
+        thread_id = self.create(service_tier="ultrafast")
+        self.assertEqual(self.sessions.rpc.calls[-1][1].get("serviceTier"), "ultrafast")
+        self.sessions.close()
+        reopened = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(reopened.close)
+        reopened.rpc.threads = self.sessions.rpc.threads
+        record = reopened.read(thread_id)["session"]
+        self.assertEqual(record["service_tier"], "ultrafast")
+        resume = next(params for method, params in reopened.rpc.calls if method == "thread/resume")
+        self.assertEqual(resume["serviceTier"], "ultrafast")
+        child = reopened.fork_work_thread(thread_id)["thread_id"]
+        self.assertEqual(reopened._record(child)["service_tier"], "ultrafast")
+        reopened.send(thread_id, {"message": "/fast on"})
+        fast_child = reopened.fork_work_thread(thread_id)["thread_id"]
+        self.assertEqual(reopened._record(fast_child)["service_tier"], "fast")
+        reopened.send(fast_child, {"message": "/fast"})
+        self.assertEqual(reopened._record(fast_child)["service_tier"], "default")
+        reopened.send(child, {"message": "/fast off"})
+        reopened.send(child, {"message": "Work"})
+        self.assertEqual(reopened.rpc.calls[-1][1]["serviceTier"], "default")
+        self.assertEqual(reopened._record(thread_id)["service_tier"], "fast")
+
+    def test_speed_modes_reject_invalid_values_and_other_providers(self):
+        thread_id = self.create()
+        for command in ("/fast yes", "/ultrafast on extra", "/utrafast invalid"):
+            with self.assertRaises(CoordinationError):
+                self.sessions.send(thread_id, {"message": command})
+        for tier in ("invalid", True, [], 5):
+            with self.assertRaisesRegex(CoordinationError, "Service tier"):
+                self.sessions.update(thread_id, {"service_tier": tier})
+            with self.assertRaises(CoordinationError):
+                self.create(service_tier=tier)
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_sessions SET client='claude' WHERE thread_id=?", (thread_id,))
+        for command in ("/fast", "/ultrafast", "/utrafast"):
+            with self.assertRaisesRegex(CoordinationError, "only available for Codex"):
+                self.sessions._command(thread_id, command)
+        with self.assertRaisesRegex(CoordinationError, "only available for Codex"):
+            self.sessions._creation_settings({"cwd": str(self.root), "client": "claude", "service_tier": "fast"})
+
+    def test_unavailable_speed_modes_never_confirm_or_save_a_silent_fallback(self):
+        thread_id = self.create()
+        catalog = [{"model": "available-model", "isDefault": True,
+                    "serviceTiers": [{"id": "priority"}], "additionalSpeedTiers": ["fast"],
+                    "supportedReasoningEfforts": [{"reasoningEffort": "medium"}]}]
+        with patch.object(self.sessions, "models", return_value=catalog):
+            self.sessions.send(thread_id, {"message": "/fast on"})
+            for command in ("/ultrafast", "/utrafast on"):
+                with self.assertRaisesRegex(CoordinationError, "does not advertise ultrafast"):
+                    self.sessions.send(thread_id, {"message": command})
+            self.assertEqual(self.sessions._record(thread_id)["service_tier"], "fast")
+            with self.assertRaisesRegex(CoordinationError, "does not advertise ultrafast"):
+                self.create(service_tier="ultrafast")
+        self.assertFalse(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))
+
     def test_yolo_is_explicit_persists_and_applies_to_start_resume_and_turn(self):
         for invalid in ("true", 1, None):
             with self.assertRaisesRegex(CoordinationError, "YOLO"):
@@ -524,6 +604,7 @@ class BrowserSessionTests(unittest.TestCase):
             try:
                 tid = reopened.create({"name": "Migrated"})["session"]["thread_id"]
                 self.assertFalse(reopened._record(tid)["yolo"])
+                self.assertIsNone(reopened._record(tid)["service_tier"])
             finally:
                 reopened.close()
             with self.store._connection() as db:

@@ -9,6 +9,8 @@
     {name: "/fork", arguments: "", description: "Fork this Codex or Claude conversation into a new thread"},
     {name: "/close", arguments: "", description: "Stop and close this thread, keeping its history"},
     {name: "/help", arguments: "", description: "Show available commands and usage"},
+    {name: "/fast", arguments: "[on|off|status]", description: "Toggle Codex Fast mode for subsequent messages", codexOnly: true},
+    {name: "/ultrafast", arguments: "[on|off|status]", description: "Toggle Codex Ultrafast mode for subsequent messages", codexOnly: true},
   ];
 
   class ChatSlashCommands {
@@ -54,7 +56,8 @@
         prefix: input.value.slice(command[1].length, caret).toLowerCase(), start: command[1].length, end: command[0].length};
       const name = command[2].toLowerCase();
       if (!this.getCommands().some(command => command.name === name)) return null;
-      if (!["/model", "/effort", "/permissions"].includes(name) || /[\r\n]/.test(input.value.slice(0, caret))) return null;
+      if (["/fast", "/ultrafast"].includes(name) && (this.getSession()?.client || "codex") !== "codex") return null;
+      if (!["/model", "/effort", "/permissions", "/fast", "/ultrafast"].includes(name) || /[\r\n]/.test(input.value.slice(0, caret))) return null;
       // Track token boundaries so editing an argument keeps its neighbors intact.
       const tokens = [...input.value.matchAll(/"[^"\r\n]*(?:"|$)|'[^'\r\n]*(?:'|$)|[^\s]+/g)];
       let index = tokens.findIndex(token => caret >= token.index && caret <= token.index + token[0].length);
@@ -62,7 +65,8 @@
       const token = tokens[index], start = token && token.index <= caret ? token.index : caret;
       const end = start === token?.index ? start + token[0].length : caret;
       const unquote = value => value.replace(/^["']|["']$/g, "");
-      const kind = name === "/permissions" && index === 1 ? "permissions" :
+      const kind = ["/fast", "/ultrafast"].includes(name) && index === 1 ? "speed" :
+        name === "/permissions" && index === 1 ? "permissions" :
         name === "/model" && index === 1 ? "model" :
         (name === "/effort" && index === 1) || (name === "/model" && index === 2) ? "effort" : null;
       if (!kind) return null;
@@ -89,7 +93,12 @@
     suggestions(query) {
       if (query.kind === "skill") return this.skills().map(skill => ({name: "$" + skill.name,
         arguments: skill.scope || "", description: skill.description || ""}));
-      if (query.kind === "command") return this.getCommands();
+      if (query.kind === "command") return this.getCommands().filter(command => !command.codexOnly || (this.getSession()?.client || "codex") === "codex");
+      if (query.kind === "speed") return [
+        {name: "on", arguments: "", description: "Enable this speed mode"},
+        {name: "off", arguments: "", description: "Use standard speed"},
+        {name: "status", arguments: "", description: "Show the current speed mode"},
+      ];
       if (query.kind === "permissions") return [
         {name: "default", arguments: "", description: "Configured permissions with approval prompts"},
         {name: "yolo", arguments: "", description: "Full machine access without approval prompts"},
@@ -146,7 +155,7 @@
       this.menu.hidden = false;
       this.input.setAttribute("aria-controls", this.menu.id);
       this.menu.setAttribute("aria-label", query.kind === "model" ? "Models" : query.kind === "effort" ? "Reasoning effort" :
-        query.kind === "permissions" ? "Permissions" : query.kind === "skill" ? "Skills" : "Slash commands");
+        query.kind === "permissions" ? "Permissions" : query.kind === "speed" ? "Codex speed" : query.kind === "skill" ? "Skills" : "Slash commands");
       this.input.setAttribute("aria-expanded", "true");
       this.menu.replaceChildren();
       const doc = this.input.ownerDocument;

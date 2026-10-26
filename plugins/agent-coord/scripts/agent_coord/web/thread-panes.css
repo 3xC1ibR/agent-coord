@@ -10,7 +10,8 @@
 .thread-pane.pane-focused { border-color: var(--hover-line); box-shadow: 0 0 0 1px var(--hover-line); }
 .pane-header { display: flex; align-items: center; gap: 3px; padding: 3px 5px; flex-shrink: 0; min-width: 0; height: 35px; background: var(--panel); }
 .pane-header > button { flex-shrink: 0; padding: 3px 7px; }
-.pane-tabs { display: flex; align-items: stretch; flex: 1; overflow-x: auto; min-width: 0; scrollbar-width: thin; }
+.pane-tabs { display: flex; align-items: stretch; flex: 1; overflow-x: auto; min-width: 0; scrollbar-width: none; }
+.pane-tabs::-webkit-scrollbar { display: none; }
 .pane-tabs:not(.conversation-tabs) button { max-width: 220px; min-width: 60px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; padding: 4px 8px; border-radius: 4px; }
 .pane-tabs:not(.conversation-tabs) button[aria-selected=true] { background: var(--surface); color: var(--ink); box-shadow: inset 0 -2px var(--ink); }
 .pane-tabs:not(.conversation-tabs) button[data-status=working]::before { content: "● "; color: var(--accent); animation: tab-working-blink 1.4s ease-in-out infinite; }

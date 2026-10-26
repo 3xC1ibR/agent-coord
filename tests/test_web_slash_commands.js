@@ -48,7 +48,7 @@ function setup({loadModels = async () => [], loadSkills = async () => [], onRepl
 test("slash opens supported commands with descriptions and filters case-insensitively", () => {
   const f = setup(); f.type("/");
   assert.equal(f.menu.hidden, false);
-  assert.deepEqual(f.names(), ["/cd", "/model", "/effort", "/permissions", "/yolo", "/fork", "/close", "/help"]);
+  assert.deepEqual(f.names(), ["/cd", "/model", "/effort", "/permissions", "/yolo", "/fork", "/close", "/help", "/fast", "/ultrafast"]);
   assert.equal(f.input.attributes["aria-expanded"], "true");
   assert.equal(f.menu.children[0].attributes["aria-selected"], "true");
   assert.match(f.menu.children[0].children[2].textContent, /directory/);
@@ -291,6 +291,24 @@ test("permissions command opens modes and completes without submitting or loadin
   assert.equal(loads, 0);
 });
 
+test("Codex speed commands complete modes and stay hidden for other providers", () => {
+  const f = setup({loadModels: () => assert.fail("Speed commands do not need a model catalog")});
+  for (const [prefix, name] of [["/fa", "/fast"], ["/ul", "/ultrafast"]]) {
+    f.type(prefix); assert.deepEqual(f.names(), [name]);
+    f.key("Tab"); assert.equal(f.input.value, name + " ");
+    assert.deepEqual(f.names(), ["on", "off", "status"]);
+    assert.equal(f.menu.attributes["aria-label"], "Codex speed");
+    f.key("ArrowDown"); f.key("Enter");
+    assert.equal(f.input.value, name + " off ");
+    assert.equal(f.key("Enter").defaultPrevented, undefined);
+  }
+  for (const client of ["claude", "kimi", "muse", "antigravity"]) {
+    f.session.client = client;
+    f.type("/"); assert.ok(!f.names().includes("/fast") && !f.names().includes("/ultrafast"));
+    f.type("/fa"); assert.equal(f.menu.hidden, true);
+  }
+});
+
 test("permissions mode prefixes filter, preserve surrounding text and respect dismissal", () => {
   const f = setup();
   f.type("  /PERMISSIONS DE");
@@ -408,7 +426,7 @@ test("Escape dismisses suggestions even while the catalog is loading", async () 
 test("arrows wrap, filtering resets selection, Enter and Tab insert without submitting", () => {
   const f = setup(); f.type("/");
   assert.equal(f.key("ArrowUp").defaultPrevented, true);
-  assert.equal(f.input.attributes["aria-activedescendant"], "slash-commands-7");
+  assert.equal(f.input.attributes["aria-activedescendant"], "slash-commands-9");
   f.key("ArrowDown"); f.key("ArrowDown");
   assert.equal(f.menu.children[1].attributes["aria-selected"], "true");
   assert.equal(f.menu.children[1].scrolled, true);
