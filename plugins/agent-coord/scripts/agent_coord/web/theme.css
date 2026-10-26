@@ -21,6 +21,8 @@
   --accent-hover: #9ab6ff;
   --on-accent: #0d0f13;
   --tint: #1c1c21;
+  --user-message-bg: #24344f;
+  --user-message-line: #3b5278;
   --panel: #1c1c21;
   --hover-bg: #232328;
   --hover-line: #3a3a41;
@@ -36,6 +38,7 @@
   color: var(--ink);
   background: var(--paper);
 }
+:root[data-theme="dark"] .message.user { --muted: #a8b7d0; }
 :root[data-theme="dark"] .thread-cards .session:hover { background: var(--hover-bg); }
 :root[data-theme="dark"] .error { color: var(--ink); }
 :root[data-theme="dark"] dialog::backdrop { background: #000000b3; }

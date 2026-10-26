@@ -1,4 +1,4 @@
-/* Neutral paper and ink. One cobalt accent, used only for primary actions, running work, and links.
+/* Neutral paper and ink. One cobalt accent for primary actions, running work, links, and user messages.
    Orange is reserved for attention. Green marks an unread response. Shared by the workspace and monitor; theme.css swaps the dark tokens. */
 :root {
   color-scheme: light;
@@ -17,6 +17,8 @@
   --accent-hover: #1d42b8;
   --on-accent: #ffffff;
   --tint: #ededee;
+  --user-message-bg: #e4edff;
+  --user-message-line: #c3d3f5;
   --panel: #efefef;
   --hover-bg: #ededee;
   --hover-line: #b3b3b9;
@@ -402,7 +404,7 @@ main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; pad
 }
 .markdown hr { margin: 1.25em 0; border: 0; border-top: 1px solid var(--line); }
 .message-meta { color: var(--muted); font: 11px/1.6 var(--mono); margin-bottom: 1em; overflow-wrap: anywhere; }
-.message.user { background: var(--tint); border: 1px solid var(--line); border-radius: 7px; padding: 18px 21px; }
+.message.user { background: var(--user-message-bg); border: 1px solid var(--user-message-line); border-radius: 7px; padding: 18px 21px; }
 .message.agent .speaker { color: var(--muted); }
 details.tool { border: 0; margin-bottom: 4px; color: var(--muted); font-size: 12px; min-width: 0; }
 details.tool > summary { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; list-style: none; }
