@@ -59,6 +59,14 @@ def coordination_bootstrap(store, session_id, *, caller_context=True, command=No
         "thread close --session-id <your-session-id> --after-turn. "
         "A queued receipt is not confirmation that the thread has closed."
     )
+    text += (
+        "\nRibbon Field renders complete fenced `openui` or `openui-lang` blocks in assistant messages "
+        "as interactive UI using the bundled OpenUI chat library. For charts, tables, cards, or forms, "
+        "read the authoring guide at "
+        f"{skill.parent / 'references/openui.md'}. "
+        "Button/form actions arrive as ordinary user messages prefixed 'OpenUI response'. "
+        "Use this for useful interactive answers; normal prose and code stay Markdown."
+    )
     text += "\nCurrent coordination state: " + json.dumps({
         key: session[key] for key in ("cwd", "write_scope", "lease_mode", "activity", "scope_required")
     }, sort_keys=True)

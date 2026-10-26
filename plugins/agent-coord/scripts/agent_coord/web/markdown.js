@@ -75,8 +75,15 @@
         const marker = match[1], code = [];
         i++;
         while (i < lines.length && !new RegExp("^\\s{0,3}" + marker[0] + "{" + marker.length + ",}\\s*$").test(lines[i])) code.push(lines[i++]);
-        if (i < lines.length) i++;
-        out += "<pre><code>" + escape(code.join("\n")) + "</code></pre>"; continue;
+        const closed = i < lines.length;
+        if (closed) i++;
+        const source = escape(code.join("\n"));
+        // Only explicit, complete OpenUI fences opt in. The escaped source stays
+        // readable if the renderer fails, and ordinary code never executes.
+        out += closed && /^(openui|openui-lang)$/i.test(match[2].trim())
+          ? '<section class="openui-block"><div class="openui-preview"></div><details class="openui-source"><summary>OpenUI source</summary><pre><code>' + source + '</code></pre></details></section>'
+          : "<pre><code>" + source + "</code></pre>";
+        continue;
       }
       if ((match = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line))) {
         const tag = "h" + match[1].length;

@@ -294,16 +294,21 @@ def _handler(
                     self.send_header("Set-Cookie", cookie)
                 parsed = urlparse(getattr(self, "path", ""))
                 query = parse_qs(parsed.query)
+                openui_frame = (status == HTTPStatus.OK and content_type.startswith("text/html")
+                                and parsed.path == "/openui-frame.html")
                 embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
                             and ((parsed.path == "/" and query.get("pane") == ["1"])
                                  or (parsed.path in {"/settings", "/usage"} and query.get("embedded") == ["1"]))
                             and self._authorized())
-                self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded else "DENY")
+                self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame else "DENY")
                 self.send_header(
                     "Content-Security-Policy",
-                    "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                     "img-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; "
+                     "form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts"
+                     if openui_frame else "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                     "script-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors "
-                    + ("'self'" if embedded else "'none'"),
+                    + ("'self'" if embedded else "'none'")),
                 )
                 self.end_headers()
                 self.wfile.write(body)
@@ -337,6 +342,13 @@ def _handler(
                 "/app-icons/icon-192.png": "image/png",
                 "/app-icons/icon-512.png": "image/png",
                 "/push-worker.js": "text/javascript; charset=utf-8",
+                # Opaque-origin OpenUI frames cannot send SameSite=Strict pairing
+                # cookies for their subresources. These fixed, non-sensitive
+                # runtime files are public; thread content still requires auth.
+                "/openui-frame.html": "text/html; charset=utf-8",
+                "/openui-frame.js": "text/javascript; charset=utf-8",
+                "/vendor/openui/openui-bundle.min.js": "text/javascript; charset=utf-8",
+                "/vendor/openui/openui-styles.css": "text/css; charset=utf-8",
             }
             if parsed.path in install_assets:
                 self._send(HTTPStatus.OK, install_assets[parsed.path],
@@ -368,6 +380,10 @@ def _handler(
                 return
             if parsed.path == "/push-notifications.js":
                 self._send(HTTPStatus.OK, "text/javascript; charset=utf-8", (_WEB_ROOT / "push-notifications.js").read_bytes())
+                return
+            if parsed.path in {"/openui.js", "/openui.css"}:
+                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
             if parsed.path == "/api/remote/status":
                 if not self._local_request():

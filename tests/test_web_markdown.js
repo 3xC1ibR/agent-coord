@@ -24,6 +24,20 @@ test("fenced code is literal and unfinished streamed fences remain readable", ()
   assert.equal(render("~~~~\n```\n~~~~"), "<pre><code>```</code></pre>");
 });
 
+test("only closed OpenUI fences opt into a preview and their source remains escaped", () => {
+  for (const language of ["openui", "openui-lang", "OPENUI"]) {
+    const html = render('Before\n\n```' + language + '\nroot = Card(["</code><script>bad()</script>"])\n```\n\nAfter');
+    assert.match(html, /class="openui-block"/);
+    assert.match(html, /OpenUI source/);
+    assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script/);
+    assert.ok(html.endsWith("<p>After</p>"));
+  }
+  assert.doesNotMatch(render("```openui\nroot = Card([])"), /openui-block/);
+  assert.doesNotMatch(render("```openui extra\nroot = Card([])\n```"), /openui-block/);
+  assert.equal((render("```openui\nroot = Card([])\n```\n\n~~~openui-lang\nroot = Card([])\n~~~").match(/openui-block/g) || []).length, 2);
+});
+
 test("lists retain ordering, nested items, and task state", () => {
   const html = render("3. First\n   - Nested\n   - More\n4. Second\n\n- [x] Checked\n- [ ] Pending");
   assert.match(html, /<ol start="3"><li><p>First<\/p><ul>/);
@@ -75,6 +89,7 @@ test("conversation renders and refreshes agent Markdown while user text stays li
     append(...children) { this.childNodes.push(...children); },
     replaceChildren(fragment) { this.childNodes = fragment.childNodes; },
     setAttribute(name, value) { this[name] = value; },
+    querySelector() { return this.innerHTML?.includes('class="openui-block"') ? {} : null; },
     querySelectorAll() { return []; }, scrollHeight: 100, scrollTop: 0, clientHeight: 100});
   const timeline = element("div"), user = {type: "userMessage", content: [{text: "**literal**"}]};
   const agent = {type: "agentMessage", text: "**Result**\n\n```js\nconst x = 1;"};
@@ -92,4 +107,7 @@ test("conversation renders and refreshes agent Markdown while user text stays li
   vm.runInContext("renderTimeline()", context);
   assert.match(timeline.childNodes[1].childNodes[0].innerHTML, /<\/pre><p>Finished\.<\/p>/);
   assert.equal(timeline.scrollTop, 100);
+  agent.text = "> ```openui\n> root = Card([])\n> ```";
+  vm.runInContext("renderTimeline()", context);
+  assert.ok(timeline.childNodes[1].dataset.openuiKey, "nested OpenUI blocks receive a renderer identity");
 });

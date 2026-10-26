@@ -990,6 +990,9 @@ function retainConversation() {
   // A streamed update may be waiting for its paint. Do not retain older DOM
   // beside the newer model and later mistake it for an up-to-date transcript.
   entry.nodes = state.timelineRender?.id === state.selected ? null : [...$("timeline").childNodes];
+  // Detached iframe documents reload. Rebuild interactive transcripts on a
+  // cached-tab restore rather than restoring disposed preview nodes.
+  if (entry.nodes?.some(item => item.dataset?.openuiKey)) entry.nodes = null;
   entry.scroll = state.timelineScroll?.position() ?? $("timeline").scrollTop;
   entry.following = state.timelineScroll?.following ?? true;
   // Keep lightweight reading positions even after the bounded transcript cache evicts a tab.
@@ -1326,6 +1329,8 @@ async function saveSessionPermissions() {
   await refreshList();
 }
 function renderStatus() {
+  globalThis.OpenUIThread?.availability(state.selected, !state.detail?.work_thread?.browser_session ||
+    state.detail.work_thread.attention === "archived" || state.closing?.has(state.selected));
   state.sidecars?.showThread(state.detail?.work_thread, $("thread-sidecars"));
   const sidecarButton = $("attach-sidecar");
   if (sidecarButton) sidecarButton.hidden = isSessionDraft() || !state.detail?.work_thread?.browser_session || state.detail?.work_thread?.attention === "archived";
@@ -1575,7 +1580,14 @@ function renderTimeline() {
         message.dataset.searchItem = item.id || "search-item-" + (turn.items || []).indexOf(item);
         message.tabIndex = -1;
         const body = node("div", null, item.type === "agentMessage" ? "text markdown" : "text");
-        if (item.type === "agentMessage") body.innerHTML = messageMarkdown.render(text);
+        if (item.type === "agentMessage") {
+          body.innerHTML = messageMarkdown.render(text);
+          if (body.querySelector?.(".openui-block")) {
+            message.dataset.openuiKey = JSON.stringify([state.selected, turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
+            message.dataset.openuiText = text;
+            message.dataset.openuiStreaming = String(!["completed", "failed", "interrupted"].includes(turn.status));
+          }
+        }
         else {
           const display = globalThis.ThreadMentions?.displayMessage(text) || {text, refs: []};
           body.textContent = display.text;
@@ -1664,7 +1676,15 @@ function renderTimeline() {
   }
   // Retain navigation even when the provider cannot return the boundary turn.
   appendForks(null, true);
-  el.replaceChildren(fragment);
+  if (globalThis.OpenUIThread) {
+    const thread = state.selected;
+    OpenUIThread.commit(el, fragment, {
+      thread,
+      theme: document.documentElement?.dataset.theme || "light",
+      disabled: !state.detail?.work_thread?.browser_session || state.detail.work_thread.attention === "archived" || state.closing?.has(thread),
+      onAction: text => sendOpenUIResponse(thread, text),
+    });
+  } else el.replaceChildren(fragment);
   conversation.toolNodes = toolNodes;
   const disclosureThread = state.selected;
   for (const detail of el.querySelectorAll("details[data-id]")) {
@@ -1678,6 +1698,23 @@ function renderTimeline() {
   else if (atBottom) el.scrollTop = el.scrollHeight;
   if (state.messageTarget && state.messageTarget.thread === state.selected) focusAgentMessage(state.messageTarget.id);
   if (state.searchTarget?.thread === state.selected) focusSearchMessage(state.searchTarget);
+}
+async function sendOpenUIResponse(thread, text) {
+  const detail = state.detail;
+  if (thread !== state.selected || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(thread)) {
+    throw new Error("Reopen this thread to send a response.");
+  }
+  const dispatcher = !!detail.work_thread.dispatcher;
+  const body = {message: text};
+  if (state.sourceWindowId) body.windowId = state.sourceWindowId;
+  if (dispatcher) {
+    body.askDispatcher = true;
+    body.requestId = DispatchUI.requestKey(sessionStorage, thread, body);
+  }
+  await api(sessionPath(thread) + (!dispatcher && detail.running ? "/queue" : "/messages"), body);
+  // A refresh failure must not invite resending an already accepted response.
+  try { if (thread === state.selected) await refreshDetail(); await refreshList(); }
+  catch (error) { console.warn("OpenUI response accepted before refresh failed", error); }
 }
 function focusSearchMessage(target) {
   if (target.thread !== state.selected) return false;
