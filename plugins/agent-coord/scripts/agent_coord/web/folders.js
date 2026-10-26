@@ -16,14 +16,14 @@ function inProject(thread, cwd) {
 }
 
 class WorkingFolders {
-  constructor({storage, preferences, key = "browser", scope = "", api, onChange}) {
+  constructor({storage, fallbackStorage, preferences, key = "browser", scope = "", api, onChange}) {
     this.storage = storage; this.preferences = preferences; this.api = api;
     this.onChange = onChange;
     this.key = "agent-coord.folder." + key + ":" + scope;
     this.recentKey = "agent-coord.folders.recent:" + scope;
     this.selected = null; this.projects = [];
     try {
-      const saved = JSON.parse(storage?.getItem(this.key) || "null");
+      const saved = JSON.parse(storage?.getItem(this.key) ?? fallbackStorage?.getItem(this.key) ?? "null");
       const projects = Array.isArray(saved?.projects) ? saved.projects : saved?.cwd ? [saved] : [];
       this.projects = projects.filter(item => typeof item?.cwd === "string" && item.cwd);
       this.selected = this.projects.find(item => item.cwd === saved?.active) || this.projects[0] || null;

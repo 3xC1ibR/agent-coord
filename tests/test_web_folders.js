@@ -93,6 +93,20 @@ test("window selections restore independently while recent folders are shared an
   assert.equal(one.selected.cwd, rig.root);
 });
 
+test("legacy session projects migrate without reviving a closed persistent project set", async () => {
+  const preferences = storage(), session = storage();
+  const legacy = new WorkingFolders({storage: session, api});
+  await legacy.open("/first"); await legacy.open("/second"); legacy.activate("/first");
+  const migrated = new WorkingFolders({storage: preferences, fallbackStorage: session, api});
+  await migrated.restore();
+  assert.deepEqual(migrated.snapshot(), {projects: ["/first", "/second"], active: "/first"});
+  const reopened = new WorkingFolders({storage: preferences, api});
+  assert.deepEqual(reopened.snapshot(), migrated.snapshot());
+  migrated.reset();
+  const closed = new WorkingFolders({storage: preferences, fallbackStorage: session, api});
+  assert.deepEqual(closed.snapshot(), {projects: [], active: ""});
+});
+
 test("first run has no process-directory default and rejected or missing folders cannot become defaults", async () => {
   const preferences = storage();
   const folders = new WorkingFolders({storage: preferences, preferences, api});

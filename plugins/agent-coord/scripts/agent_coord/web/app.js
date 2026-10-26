@@ -3385,17 +3385,22 @@ async function boot() {
   });
   if (state.config.remote) notifications.start().catch(showError);
   let windowStorage, preferences;
-  try { windowStorage = sessionStorage; preferences = localStorage; } catch { /* Views work without browser storage. */ }
+  try { windowStorage = sessionStorage; } catch { /* Session storage is optional. */ }
+  try { preferences = localStorage; } catch { /* Views work without persistent storage. */ }
   state.overviewPreferences = preferences;
   state.overviewLayout = new OverviewLayout({document, window, storage: preferences,
     canNavigate: () => !state.busy && !document.querySelector("dialog[open]"),
     onChange: (_mode, {navigate}) => { state.listSignature = ""; if (navigate) goHome({restoreDispatcher: false}); else renderList(); }});
   const desktop = window.agentCoordDesktop;
   state.conversationWindow = desktop?.conversationWindow === true;
+  // Web apps must survive a discarded browser session on iPad/iPhone. Only
+  // temporary native conversation windows keep their working set in session storage.
+  const workspaceStorage = state.conversationWindow ? windowStorage : preferences || windowStorage;
+  const legacyWorkspaceStorage = state.conversationWindow ? null : windowStorage;
   const publishDesktopProjects = snapshot => api("desktop-projects", {
     windowId: state.sourceWindowId, projects: snapshot.projects, active: snapshot.active,
   });
-  state.folders = new WorkingFolders({storage: desktop && !state.conversationWindow ? preferences : windowStorage, preferences,
+  state.folders = new WorkingFolders({storage: workspaceStorage, fallbackStorage: legacyWorkspaceStorage, preferences,
     key: (state.conversationWindow ? desktop.windowId : desktop?.folderSlot) || "browser", scope: state.config.workspaceRoot || "", api,
     onChange: desktop ? snapshot => publishDesktopProjects(snapshot).catch(showError) : null});
   const projectQuery = new URLSearchParams(location.search);
@@ -3449,7 +3454,7 @@ async function boot() {
     notify: (...args) => state.threadActions.notify(...args), onError: showError});
   state.threadTabs = new ThreadTabs({document, container: $("conversation-tabs"),
     onOverviewMenu: (anchor, event) => state.overviewLayout.open(anchor, event),
-    storage: desktop && !state.conversationWindow ? preferences : windowStorage, fallbackStorage: desktop && !state.conversationWindow ? windowStorage : null,
+    storage: workspaceStorage, fallbackStorage: legacyWorkspaceStorage,
     scope: (state.config.workspaceRoot || "") + ":" + ((state.conversationWindow ? desktop.windowId : desktop?.folderSlot) || "browser"),
     onError: showError, onScratchpad: openProjectScratchpad,
     onSelect: async id => {

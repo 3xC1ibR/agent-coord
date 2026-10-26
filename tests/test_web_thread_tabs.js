@@ -5,6 +5,73 @@ const fs = require("node:fs"), vm = require("node:vm");
 const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
 const thread = id => ({thread_id: id, title: "Thread " + id, attention: "now", response_state: "working"});
 
+// Exercise the actual startup wiring with a new session store on every launch,
+// as happens when iPadOS discards a home-screen app's browser session.
+function launchBrowser(preferences, session, desktop, remote = true) {
+  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+  const context = {state: {config: {workspaceRoot: "", remote}}, localStorage: preferences, sessionStorage: session,
+    window: {agentCoordDesktop: desktop}, document: undefined, $() {}, api: async (_route, body) => ({cwd: body.path}),
+    showError() {}, openProjectScratchpad() {}, ThreadTabs,
+    WorkingFolders: require("../plugins/agent-coord/scripts/agent_coord/web/folders.js").WorkingFolders};
+  const storageSetup = source.slice(source.indexOf("  let windowStorage, preferences;"), source.indexOf("  state.overviewPreferences ="));
+  const folderSetup = source.slice(source.indexOf("  const desktop = window.agentCoordDesktop;", source.indexOf("  let windowStorage, preferences;")), source.indexOf("  const projectQuery ="));
+  const tabSetup = source.slice(source.indexOf("  state.threadTabs = new ThreadTabs("), source.indexOf("  state.threadTabs.setProject("));
+  vm.runInNewContext(storageSetup + folderSetup + tabSetup, context);
+  return context.state;
+}
+
+const browserStorage = () => {
+  const values = new Map();
+  return {getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value)};
+};
+
+test("web app relaunch retains projects, ordered tabs, and selected conversation after session storage is lost", async () => {
+  for (const remote of [true, false]) {
+    const preferences = browserStorage();
+    const first = launchBrowser(preferences, browserStorage(), undefined, remote);
+    await first.folders.open("/work"); await first.folders.open("/other"); first.folders.activate("/work");
+    first.threadTabs.setProject("/work");
+    first.threadTabs.open(thread("a")); first.threadTabs.open(thread("b")); first.threadTabs.move("b", 0);
+    const reopened = launchBrowser(preferences, browserStorage(), undefined, remote);
+    await reopened.folders.restore(); reopened.threadTabs.setProject(reopened.folders.selected.cwd);
+    assert.deepEqual([...reopened.folders.snapshot().projects], ["/work", "/other"]);
+    assert.equal(reopened.folders.selected.cwd, "/work");
+    assert.deepEqual(reopened.threadTabs.items.map(item => item.thread_id), ["b", "a"]);
+    assert.equal(reopened.threadTabs.destination(), "b");
+    reopened.threadTabs.open(thread("a"));
+    await reopened.threadTabs.close("b");
+    const closed = launchBrowser(preferences, browserStorage(), undefined, remote);
+    closed.threadTabs.setProject("/work");
+    assert.deepEqual(closed.threadTabs.items.map(item => item.thread_id), ["a"]);
+    assert.equal(closed.threadTabs.destination(), "a");
+  }
+});
+
+test("web app migrates existing session tabs and projects before the next cold launch", async () => {
+  const preferences = browserStorage(), session = browserStorage();
+  session.setItem("agent-coord.folder.browser:", JSON.stringify({projects: [{cwd: "/work"}], active: "/work"}));
+  session.setItem("agent-coord.thread-tabs.:browser:/work", JSON.stringify({items: [thread("legacy")], selected: "legacy"}));
+  const migrated = launchBrowser(preferences, session);
+  await migrated.folders.restore(); migrated.threadTabs.setProject(migrated.folders.selected.cwd); migrated.threadTabs.update([]);
+  const reopened = launchBrowser(preferences, browserStorage());
+  reopened.threadTabs.setProject(reopened.folders.selected.cwd);
+  assert.deepEqual(reopened.threadTabs.items.map(item => item.thread_id), ["legacy"]);
+  assert.equal(reopened.threadTabs.destination(), "legacy");
+});
+
+test("native conversation windows keep temporary tabs isolated from persistent main windows", async () => {
+  const preferences = browserStorage(), session = browserStorage();
+  const desktop = {windowId: "conversation-1", conversationWindow: true};
+  const first = launchBrowser(preferences, session, desktop);
+  await first.folders.open("/work"); first.threadTabs.setProject("/work"); first.threadTabs.open(thread("temporary"));
+  const main = launchBrowser(preferences, session, {windowId: "main", folderSlot: "native-0"});
+  main.threadTabs.setProject("/work");
+  assert.deepEqual(main.threadTabs.items, []);
+  const reopened = launchBrowser(preferences, browserStorage(), desktop);
+  assert.equal(reopened.folders.selected, null);
+  reopened.threadTabs.setProject("/work"); assert.deepEqual(reopened.threadTabs.items, []);
+});
+
 function setup(storage = new Map()) {
   const visits = [], errors = [];
   const tabs = new ThreadTabs({storage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value)},
