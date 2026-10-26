@@ -35,23 +35,37 @@ async function api(path, body, requestOptions = {}) {
   if (viewMutation) ++listRequest;
   const options = {cache: "no-store", ...requestOptions};
   if (body !== undefined) Object.assign(options, {method: "POST", headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token}, body: JSON.stringify(body)});
-  const response = await fetch(base + path, options);
-  if (response.status === 401 && location.protocol === "https:") location.reload();
-  let result;
-  try { result = await response.json(); }
-  catch (error) {
-    console.warn("Unreadable API response", {path, status: response.status,
-      contentType: response.headers?.get("Content-Type")}, error);
-    const sending = body !== undefined && /^sessions\/[^/]+\/(messages|queue)$/.test(path) && !body.action;
-    throw new Error(sending
-      ? "Could not confirm whether the message was accepted. Your draft is still here; check the conversation before sending again."
-      : body !== undefined
-        ? "Could not confirm the change. Check the current state before trying again."
-        : "Could not refresh the workspace: the server returned an unreadable response. Try again shortly.");
+  const read = body === undefined && (options.method || "GET").toUpperCase() === "GET";
+  for (let attempt = 0; ; ++attempt) {
+    let response, unreadable = false;
+    try {
+      response = await fetch(base + path, options);
+      if (response.status === 401 && location.protocol === "https:") location.reload();
+      let result;
+      try { result = await response.json(); }
+      catch (error) {
+        unreadable = true;
+        console.warn("Unreadable API response", {path, status: response.status,
+          contentType: response.headers?.get("Content-Type")}, error);
+        const sending = body !== undefined && /^sessions\/[^/]+\/(messages|queue)$/.test(path) && !body.action;
+        throw new Error(sending
+          ? "Could not confirm whether the message was accepted. Your draft is still here; check the conversation before sending again."
+          : body !== undefined
+            ? "Could not confirm the change. Check the current state before trying again."
+            : "Could not refresh the workspace: the server returned an unreadable response. Try again shortly.");
+      }
+      if (viewMutation) ++listRequest;
+      if (!response.ok) throw Object.assign(new Error(result.error || "Request failed"), {status: response.status});
+      return result;
+    } catch (error) {
+      // A remote connection can briefly return a proxy page or an incomplete
+      // body. Retry a safe read once; writes may already have been accepted.
+      if (!read || attempt || options.signal?.aborted || error.name === "AbortError"
+          || response?.status === 401
+          || response && !unreadable && ![502, 503, 504].includes(response.status)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
   }
-  if (viewMutation) ++listRequest;
-  if (!response.ok) throw Object.assign(new Error(result.error || "Request failed"), {status: response.status});
-  return result;
 }
 async function openMentionFile(ref) {
   const result = await api("files/preview", {root: ref.root, path: ref.path});
