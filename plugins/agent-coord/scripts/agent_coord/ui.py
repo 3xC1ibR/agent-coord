@@ -35,6 +35,7 @@ from .workspace_files import workspace_files
 from .skill_catalog import skill_catalog
 from .speech import Speech, spoken_text
 from .jev_settings import JevSettings
+from .provider_limits import ProviderLimits
 from . import launch_metrics
 
 DEFAULT_UI_HOST = "127.0.0.1"
@@ -278,6 +279,7 @@ def _handler(
     navigation = NavigationStore(store)
     speech = Speech(store.database_path)
     jev = JevSettings(store.database_path)
+    provider_limits = ProviderLimits(browser_sessions) if browser_sessions is not None else None
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None) -> None:
@@ -294,7 +296,7 @@ def _handler(
                 query = parse_qs(parsed.query)
                 embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
                             and ((parsed.path == "/" and query.get("pane") == ["1"])
-                                 or (parsed.path == "/settings" and query.get("embedded") == ["1"]))
+                                 or (parsed.path in {"/settings", "/usage"} and query.get("embedded") == ["1"]))
                             and self._authorized())
                 self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded else "DENY")
                 self.send_header(
@@ -380,6 +382,13 @@ def _handler(
                 return
             if parsed.path == "/settings":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "settings.html").read_bytes())
+                return
+            if parsed.path == "/usage":
+                self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "provider-usage.html").read_bytes())
+                return
+            if parsed.path in {"/provider-usage.js", "/provider-usage.css"}:
+                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
             if parsed.path in {"/settings.js", "/settings.css", "/jev.js", "/jev.css", "/thread-usage.js", "/context-lifecycle.js", "/context-lifecycle.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
@@ -484,6 +493,8 @@ def _handler(
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "desktop-projects":
                 self._json(HTTPStatus.OK, browser_sessions.desktop_projects())
+            elif route == "provider-usage":
+                self._json(HTTPStatus.OK, provider_limits.snapshot())
             elif route == "workspaces":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
             elif route == "workspaces/scratchpad":
@@ -674,6 +685,11 @@ def _handler(
                 body = json.loads(raw_body)
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
+                if route == ["api", "browser", "provider-usage", "refresh"]:
+                    if set(body) != {"provider"}:
+                        raise ValueError("Expected a usage provider.")
+                    self._json(HTTPStatus.OK, provider_limits.refresh(body["provider"]))
+                    return
                 if route in (["api", "browser", "launch-metrics"], ["api", "browser", "launch-metrics", "attribution"]):
                     if not self._local_request():
                         self._json(HTTPStatus.FORBIDDEN, {"error": "Use Settings on your Mac."})

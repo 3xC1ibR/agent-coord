@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script src="/theme.js"></script>
+  <title>Usage — Ribbon Field</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/provider-usage.css">
+  <script src="/provider-usage.js" defer></script>
+</head>
+<body class="usage-page">
+  <header class="usage-header">
+    <div><h1>Usage</h1><p>Your account limits, across providers.</p></div>
+    <div class="usage-actions"><button id="refresh-usage" type="button">Refresh</button><button id="close-usage" type="button" class="quiet">Done</button></div>
+  </header>
+  <main class="usage-content">
+    <p id="usage-error" role="alert" hidden></p>
+    <div id="usage-providers" class="usage-grid" aria-label="Provider limits"><p role="status">Loading account limits…</p></div>
+    <p class="usage-note">Account limits are shared by conversations using the same sign-in. Context capacity and tokens consumed are shown in each conversation’s Token usage.</p>
+    <p class="usage-note">Usage refreshes every two minutes while this page is visible. Reset times use your device’s time zone.</p>
+  </main>
+</body>
+</html>
