@@ -1883,6 +1883,7 @@ function scheduleTimelineRender() {
   }, 50);
 }
 function applyEvent(event) {
+  if (event.method === "coordination/messageSent") { state.agentTreeController?.message(event.params); return; }
   if (event.method === "thread/closedWhenDone") { threadClosedWhenDone(event.params.threadId).catch(showError); return; }
   const cached = state.conversations?.get(event.params.threadId);
   if (cached) cached.revision++;
@@ -2476,6 +2477,9 @@ function setupAgentTree() {
   const currentTab = () => state.threadTabs?.items.find(item => item.thread_id === state.threadTabs.selected);
   const controller = state.agentTreeController = {
     mode: "context", root: null, tree: AgentTree.graph([]),
+    message(params) {
+      if (this.mode === "agents" && !contextCollapsed && !document.hidden && !isSessionDraft()) panel.message(params);
+    },
     hasAgents(root = this.root) {
       if (!root || !this.tree.nodes.has(root)) return false;
       return this.tree.family(root).some(id => id !== root && this.tree.nodes.get(id)?.browser_session !== false);
@@ -2568,6 +2572,7 @@ function setupAgentTree() {
       if (mode === "agents" && !this.hasAgents(this.root)) mode = "context";
       if (remember) this.cancelDefault();
       this.mode = mode;
+      if (mode !== "agents") panel.clearMessages();
       $("agent-tree-panel").hidden = mode !== "agents"; $("context-info").hidden = mode === "agents";
       $("context-panel").classList.toggle("agents-mode", mode === "agents");
       $("context-panel").setAttribute("aria-label", mode === "agents" ? "Agent tree" : "Thread context");

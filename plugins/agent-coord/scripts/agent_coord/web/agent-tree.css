@@ -13,6 +13,12 @@
 .agent-tree-scene { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .agent-tree-connectors { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
 .agent-tree-connectors path { fill: none; stroke: #6099cd; stroke-width: 1.4; stroke-linejoin: round; }
+.agent-tree-messages { position: absolute; inset: 0; overflow: visible; pointer-events: none; z-index: 1; }
+.agent-tree-message { animation: agent-tree-message-fade 1.5s ease-out both; }
+.agent-tree-message-route { fill: none; stroke: var(--accent, #6099cd); stroke-width: 2; stroke-dasharray: 4 5; opacity: .65; }
+.agent-tree-message-arrow { fill: none; stroke: var(--accent, #6099cd); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.agent-tree-message-dot { fill: var(--accent, #6099cd); stroke: var(--surface); stroke-width: 2; }
+@keyframes agent-tree-message-fade { 0% { opacity: 0; } 10%, 80% { opacity: 1; } 100% { opacity: 0; } }
 .agent-tree-card { box-sizing: border-box; position: absolute; width: 232px; height: 152px; padding: 13px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); display: flex; flex-direction: column; cursor: pointer; box-shadow: 0 2px 6px #00000005; }
 .agent-tree-card:hover { border-color: var(--muted); }
 .agent-tree-card.selected { border-color: #6099cd; box-shadow: 0 0 0 2px #6099cd26; }
@@ -87,6 +93,7 @@ body.mobile-chat .mobile-thread-sheet:has(.agents-mode:not([hidden])) { width: c
 body.mobile-chat .mobile-thread-sheet .context-panel.agents-mode { height: 75dvh; min-height: 340px; overflow: hidden; }
 .context-panel [hidden], .agent-tree-panel[hidden], .context-panel[hidden], .agent-recipient[hidden] { display: none !important; }
 @media (prefers-reduced-motion: reduce) {
+  .agent-tree-message { animation: none; }
   .agent-tree-card { transition: none; }
   .agent-tree-card[data-status="running"]::after { animation: none; background: #6099cd; }
 }

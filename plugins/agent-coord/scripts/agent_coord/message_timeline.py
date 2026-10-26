@@ -72,6 +72,23 @@ def message_cursor(store):
         return db.execute("SELECT COALESCE(MAX(seq), 0) FROM message_changes").fetchone()[0]
 
 
+def message_sends(store, after=None, cwd=None):
+    """Body-free live send events. Seed at the current ID on each connection."""
+    with store._connection() as db:
+        latest = db.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+        if after is None or after >= latest:
+            return latest, []
+        rows = db.execute("""SELECT m.id, m.sender_session_id, m.recipient_session_id,
+            sender.cwd AS sender_cwd, recipient.cwd AS recipient_cwd
+            FROM messages m JOIN sessions sender ON sender.session_id = m.sender_session_id
+            JOIN sessions recipient ON recipient.session_id = m.recipient_session_id
+            WHERE m.id > ? AND m.id <= ? ORDER BY m.id""", (after, latest)).fetchall()
+    return latest, [{"method": "coordination/messageSent", "params": {
+        "threadId": row["sender_session_id"], "recipientId": row["recipient_session_id"],
+        "messageId": row["id"]}} for row in rows
+        if matches_workspace(row["sender_cwd"], cwd) and matches_workspace(row["recipient_cwd"], cwd)]
+
+
 def message_changes(store, after, cwd=None):
     with store._connection() as db:
         latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM message_changes").fetchone()[0]

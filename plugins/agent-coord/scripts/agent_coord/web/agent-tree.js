@@ -101,6 +101,7 @@ const AgentTree = (() => {
     constructor({document, window, host, onSelect, onMode, providerLogo}) {
       Object.assign(this, {document, window, host, onSelect, onMode, providerLogo});
       this.views = new Map(); this.cardEls = new Map(); this.mode = "context";
+      this.messages = new Map(); this.lastMessageId = 0;
       const el = this.el = (tag, cls, text) => {
         const n = document.createElement(tag); if (cls) n.className = cls;
         if (text != null) n.textContent = text; return n;
@@ -118,7 +119,11 @@ const AgentTree = (() => {
       this.scene.setAttribute("aria-label", "Agent conversations");
       this.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       this.svg.classList.add("agent-tree-connectors"); this.svg.setAttribute("aria-hidden", "true");
-      this.scene.append(this.svg); this.viewport.append(this.scene);
+      this.messageSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      this.messageSvg.classList.add("agent-tree-messages"); this.messageSvg.setAttribute("aria-hidden", "true");
+      this.messageStatus = el("span", "sr-only"); this.messageStatus.setAttribute("role", "status");
+      this.toolbar.append(this.messageStatus);
+      this.scene.append(this.svg, this.messageSvg); this.viewport.append(this.scene);
       this.controls = el("div", "agent-tree-controls");
       this.zoomLabel = el("span", "agent-tree-zoom");
       this.controls.append(button("−", "Zoom out", () => this.zoom(.8)), this.zoomLabel,
@@ -171,9 +176,11 @@ const AgentTree = (() => {
       this.positioned = positioned;
       const signature = JSON.stringify([this.root, positioned.nodes, positioned.edges]);
       if (signature !== this.signature) {
+        this.clearMessages();
         this.signature = signature;
         this.svg.replaceChildren();
         this.svg.setAttribute("width", positioned.width); this.svg.setAttribute("height", positioned.height);
+        this.messageSvg.setAttribute("width", positioned.width); this.messageSvg.setAttribute("height", positioned.height);
         for (const edge of positioned.edges) {
           const path = this.document.createElementNS("http://www.w3.org/2000/svg", "path");
           path.setAttribute("d", edge.path); this.svg.append(path);
@@ -198,6 +205,55 @@ const AgentTree = (() => {
       }
       for (const {id} of positioned.nodes) this.renderCard(id);
       this.transform();
+    }
+    clearMessages() {
+      for (const {timer} of this.messages.values()) this.window.clearTimeout(timer);
+      this.messages.clear(); this.messageSvg.replaceChildren();
+    }
+    message({messageId, threadId, recipientId}) {
+      if (!Number.isSafeInteger(messageId) || messageId <= this.lastMessageId) return;
+      this.lastMessageId = messageId;
+      if (!this.positioned || !this.tree.nodes.has(threadId) || !this.tree.nodes.has(recipientId)) return;
+      const visible = id => {
+        while (id && !this.cardEls.has(id)) id = this.tree.parents.get(id);
+        return this.positioned.nodes.find(n => n.id === id);
+      };
+      const from = visible(threadId), to = visible(recipientId);
+      if (!from || !to || from.id === to.id) return;
+      const dx = to.x - from.x, dy = to.y - from.y, horizontal = Math.abs(dx) > Math.abs(dy);
+      const direction = Math.sign(horizontal ? dx : dy);
+      const x1 = from.x + CARD_W / 2 + (horizontal ? direction * CARD_W / 2 : 0);
+      const y1 = from.y + CARD_H / 2 + (horizontal ? 0 : direction * CARD_H / 2);
+      const x2 = to.x + CARD_W / 2 - (horizontal ? direction * CARD_W / 2 : 0);
+      const y2 = to.y + CARD_H / 2 - (horizontal ? 0 : direction * CARD_H / 2);
+      const bend = Math.max(24, Math.abs(horizontal ? x2 - x1 : y2 - y1) / 2);
+      const cx = horizontal ? direction * bend : 0, cy = horizontal ? 0 : direction * bend;
+      const d = `M${x1},${y1} C${x1 + cx},${y1 + cy} ${x2 - cx},${y2 - cy} ${x2},${y2}`;
+      const svg = (tag, attrs) => {
+        const element = this.document.createElementNS("http://www.w3.org/2000/svg", tag);
+        for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, value);
+        return element;
+      };
+      const group = svg("g", {class: "agent-tree-message"});
+      group.append(svg("path", {d, class: "agent-tree-message-route"}), svg("path", {
+        d: "M-8,-4 L0,0 L-8,4", class: "agent-tree-message-arrow",
+        transform: `translate(${x2},${y2}) rotate(${horizontal ? direction > 0 ? 0 : 180 : direction > 0 ? 90 : -90})`}));
+      if (!this.window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+        const dot = svg("circle", {r: 4, cx: x1, cy: y1, class: "agent-tree-message-dot"});
+        // animateMotion uses its own origin; the fallback coordinates stay at the sender.
+        const motion = svg("animateMotion", {path: d, dur: "1.2s", begin: "indefinite", fill: "freeze"});
+        dot.append(motion); group.append(dot); this.messageSvg.append(group);
+        if (motion.beginElement) { dot.setAttribute("cx", 0); dot.setAttribute("cy", 0); motion.beginElement(); }
+      } else this.messageSvg.append(group);
+      const remove = id => {
+        const item = this.messages.get(id); if (!item) return;
+        this.window.clearTimeout(item.timer); item.group.remove(); this.messages.delete(id);
+      };
+      if (this.messages.size >= 16) remove(this.messages.keys().next().value);
+      const timer = this.window.setTimeout(() => remove(messageId), 1500);
+      this.messages.set(messageId, {group, timer});
+      this.messageStatus.textContent = (this.tree.nodes.get(threadId).title || "Agent") + " → " +
+        (this.tree.nodes.get(recipientId).title || "Agent") + ": message sent";
     }
     renderCard(id) {
       const card = this.cardEls.get(id), t = this.tree.nodes.get(id), value = status(t), kids = this.tree.children.get(id) || [];

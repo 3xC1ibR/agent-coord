@@ -72,8 +72,10 @@ function setup() {
     focus() { doc.activeElement = this; }
   }
   doc.createElement = tag => new Element(tag); doc.createElementNS = (_, tag) => new Element(tag);
-  const selected = [], panel = new Tree.Panel({document: doc, window: {}, host: doc.createElement("div"), onSelect: id => selected.push(id)});
-  return {panel, selected, doc};
+  const timers = new Map(); let timerId = 0;
+  const window = {setTimeout(fn) { timers.set(++timerId, fn); return timerId; }, clearTimeout(id) { timers.delete(id); }};
+  const selected = [], panel = new Tree.Panel({document: doc, window, host: doc.createElement("div"), onSelect: id => selected.push(id)});
+  return {panel, selected, doc, timers, window};
 }
 test("selection updates reuse card elements and camera; folding and keyboard navigation preserve the full root", () => {
   const {panel, selected, doc} = setup();
@@ -101,6 +103,52 @@ test("attention control reveals a folded failed descendant before selecting it",
   panel.update(records, "root", "root"); panel.fold("child"); panel.findAttention();
   assert.equal(panel.cardEls.has("failed"), true); assert.equal(selected.at(-1), "failed");
   assert.equal(panel.root, "root");
+});
+
+test("live messages travel in both directions and between siblings without changing selection or camera", () => {
+  const {panel, timers} = setup();
+  panel.update([thread("root"), thread("left", "root"), thread("right", "root")], "root", "left");
+  panel.zoom(1.25); const camera = {...panel.view};
+  panel.message({messageId: 1, threadId: "root", recipientId: "left"});
+  const route = panel.messages.get(1).group.children[0].attrs.d;
+  assert.match(route, /^M[\d.]+,180 C/); // Starts at the parent's bottom edge.
+  panel.message({messageId: 2, threadId: "left", recipientId: "root"});
+  assert.match(panel.messages.get(2).group.children[0].attrs.d, /^M[\d.]+,244 C/); // Child's top edge.
+  panel.message({messageId: 3, threadId: "left", recipientId: "right"});
+  assert.match(panel.messages.get(3).group.children[0].attrs.d, /^M260,320 C/);
+  assert.equal(panel.messageStatus.textContent, "left → right: message sent");
+  assert.equal(panel.selected, "left"); assert.deepEqual(panel.view, camera);
+  panel.message({messageId: 3, threadId: "left", recipientId: "right"});
+  assert.equal(panel.messages.size, 3);
+  for (const finish of [...timers.values()]) finish();
+  assert.equal(panel.messages.size, 0); assert.equal(panel.messageSvg.children.length, 0); assert.equal(timers.size, 0);
+});
+
+test("collapsed branches receive messages at the visible ancestor and unrelated families do not animate", () => {
+  const {panel, timers} = setup();
+  panel.update([thread("root"), thread("left", "root"), thread("leaf", "left"), thread("right", "root"), thread("other")], "root", "root");
+  panel.fold("left");
+  const camera = {...panel.view};
+  panel.message({messageId: 1, threadId: "leaf", recipientId: "right"});
+  assert.equal(panel.messages.size, 1); assert.equal(panel.cardEls.has("leaf"), false);
+  assert.deepEqual(panel.view, camera);
+  panel.message({messageId: 2, threadId: "leaf", recipientId: "left"});
+  panel.message({messageId: 3, threadId: "root", recipientId: "other"});
+  panel.message({messageId: 4, threadId: "missing", recipientId: "right"});
+  assert.equal(panel.messages.size, 1);
+  panel.fold("left"); // Layout changes invalidate paths and release timers.
+  assert.equal(panel.messages.size, 0); assert.equal(timers.size, 0);
+});
+
+test("reduced motion shows a static directional cue and bursts keep a bounded overlay", () => {
+  const {panel, window, timers} = setup();
+  window.matchMedia = () => ({matches: true});
+  panel.update([thread("root"), thread("child", "root")], "root", "root");
+  for (let messageId = 1; messageId <= 30; messageId++) panel.message({messageId, threadId: "root", recipientId: "child"});
+  assert.equal(panel.messages.size, 16); assert.equal(timers.size, 16);
+  assert.equal(panel.messageSvg.children.length, 16);
+  assert.equal(panel.messages.get(30).group.children.some(el => el.tagName === "circle"), false);
+  panel.clearMessages(); assert.equal(timers.size, 0); assert.equal(panel.messageSvg.children.length, 0);
 });
 
 function setupController(records, selected = "root", response, {compact = true} = {}) {
@@ -132,7 +180,7 @@ function setupController(records, selected = "root", response, {compact = true} 
       return elements.get(id);
     },
     get collapsed() { return c.$("context-panel").hidden; },
-    AgentTree: {...Tree, Panel: class { update() {} fit() {} }},
+    AgentTree: {...Tree, Panel: class { update() {} fit() {} clearMessages() {} message(params) { c.messages.push(params); } }}, messages: [],
     isSessionDraft: () => c.state.selected === "new-session", threadPath: id => "threads/" + id,
     renderStatus() {}, renderList() {}, showError: error => c.errors.push(error), action: fn => fn(),
     api: path => {
@@ -152,6 +200,17 @@ function setupController(records, selected = "root", response, {compact = true} 
   c.controller.inventory(records);
   return c;
 }
+
+test("only a visible Agents panel handles live send events", async () => {
+  const c = setupController([thread("root"), thread("child", "root")]);
+  const send = {messageId: 1, threadId: "root", recipientId: "child"};
+  c.controller.message(send); assert.equal(c.messages.length, 0);
+  c.controller.bind(); await c.controller.load();
+  c.controller.message(send); assert.equal(c.messages.length, 1);
+  c.document.hidden = true; c.controller.message(send); assert.equal(c.messages.length, 1);
+  c.document.hidden = false; c.controller.setMode("context");
+  c.controller.message(send); assert.equal(c.messages.length, 1);
+});
 
 test("opening either a parent or leaf conversation defaults to its full tree and opens the panel", async () => {
   const records = [thread("root"), thread("child", "root")];

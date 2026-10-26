@@ -24,7 +24,7 @@ from .navigation import NavigationStore
 from .store import CoordinationError, CoordinationStore
 from .thread_control import ThreadControlWorker
 from .app_control import AppControlWorker
-from .message_timeline import message_timeline, message_cursor, message_changes
+from .message_timeline import message_timeline, message_cursor, message_changes, message_sends
 from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
@@ -641,6 +641,7 @@ def _handler(
                     self.wfile.write(b"retry: 1500\n\n")
                     self.wfile.flush()
                     message_sequence = message_cursor(store)
+                    send_sequence, _ = message_sends(store)
                     while not browser_sessions.closed:
                         # Terminal hooks run in separate processes. Read their durable
                         # events even when no app-server event wakes this connection.
@@ -652,6 +653,8 @@ def _handler(
                         completion_sequence = completions["seq"]
                         message_sequence, coordination_events = message_changes(store, message_sequence, browser_sessions.cwd)
                         batch["events"].extend(coordination_events)
+                        send_sequence, send_events = message_sends(store, send_sequence, browser_sessions.cwd)
+                        batch["events"].extend(send_events)
                         batch.update(completions=completions["events"], completionSeq=completion_sequence,
                                      snoozes=browser_sessions.snooze_notifications(),
                                      approvals=browser_sessions.approval_notifications())

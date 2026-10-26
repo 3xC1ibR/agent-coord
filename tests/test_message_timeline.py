@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
-from agent_coord.message_timeline import message_changes, message_cursor, message_timeline
+from agent_coord.message_timeline import message_changes, message_cursor, message_timeline, message_sends
 from agent_coord.store import CoordinationError
 from agent_coord.ui import make_ui_server
 from agent_coord.app_control import AppControl
@@ -116,6 +116,33 @@ class MessageTimelineTests(unittest.TestCase):
         other.inbox('recipient')
         self.assertEqual(len(message_changes(self.store, latest)[1]), 2)
         self.assertEqual(message_changes(self.store, cursor, str(self.root.with_name(self.root.name + '-elsewhere')))[1], [])
+
+    def test_live_sends_skip_history_and_status_changes_and_preserve_direction(self):
+        self.send()
+        cursor, events = message_sends(self.store)
+        self.assertEqual(events, [])
+        other = CoordinationStore(self.store.database_path)
+        first = other.send_message(sender_session_id='sender', recipient_session_id='recipient', body='Private body')
+        second = other.send_message(sender_session_id='recipient', recipient_session_id='sender', body='Reply')
+        latest, events = message_sends(self.store, cursor, str(self.root))
+        self.assertEqual(events, [
+            {'method': 'coordination/messageSent', 'params': {
+                'messageId': first['id'], 'threadId': 'sender', 'recipientId': 'recipient'}},
+            {'method': 'coordination/messageSent', 'params': {
+                'messageId': second['id'], 'threadId': 'recipient', 'recipientId': 'sender'}}])
+        other.inbox('recipient')
+        other.acknowledge('recipient', message_id=first['id'])
+        self.assertEqual(message_sends(self.store, latest), (latest, []))
+        self.assertEqual(message_sends(self.store, cursor, str(self.root.with_name(self.root.name + '-elsewhere')))[1], [])
+
+    def test_live_sends_do_not_expose_cross_workspace_endpoints(self):
+        cursor, _ = message_sends(self.store)
+        self.store.register(session_id='elsewhere', client='claude', cwd=str(self.root.with_name(self.root.name + '-elsewhere')))
+        self.store.send_message(sender_session_id='elsewhere', recipient_session_id='recipient', body='Incoming')
+        self.store.send_message(sender_session_id='sender', recipient_session_id='elsewhere', body='Outgoing')
+        latest, events = message_sends(self.store, cursor, str(self.root))
+        self.assertGreater(latest, cursor)
+        self.assertEqual(events, [])
 
     def test_unconfirmed_or_mismatched_creation_receipts_do_not_relabel_messages(self):
         message = self.send()
