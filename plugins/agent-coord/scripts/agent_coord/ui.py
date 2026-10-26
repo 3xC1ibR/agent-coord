@@ -522,13 +522,13 @@ def _handler(
             elif route == "search":
                 from .thread_search import search_threads
                 scope = query.get("scope", ["all"])[0]
-                if scope not in {"all", "current"}:
-                    raise CoordinationError("Search scope must be all or current.")
+                if scope not in {"all", "all_projects", "current"}:
+                    raise CoordinationError("Search scope must be all, all_projects, or current.")
                 show = query.get("show", ["active"])[0]
                 # Reuse the app inventory boundary (workspace and managed-worker
                 # exclusions). No detail reads, provider resumes, or seen marks.
                 threads = browser_sessions.list_work_threads(archived=show == "archived" if scope == "current" else False)
-                if scope == "all":
+                if scope != "current":
                     threads += browser_sessions.list_work_threads(archived=True)
                 else:
                     placement = "archived" if show == "archived" else "later" if show == "later" else "now"
@@ -542,7 +542,7 @@ def _handler(
                     phase = query.get("phase", [""])[0]
                     if phase:
                         threads = [t for t in threads if (t["work_phase"] or "new") == phase]
-                if "project_cwd" in query:
+                if scope != "all_projects" and "project_cwd" in query:
                     directory = query["project_cwd"][0]
                     directory = str(Path(directory).expanduser().resolve()) if directory else ""
                     threads = [t for t in threads if t["project_cwd"] == directory]

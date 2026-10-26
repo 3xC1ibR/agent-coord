@@ -31,8 +31,8 @@
   `;
 
   class DesktopCommandPalette {
-    constructor({document, actions, loadThreads, selectThread, onError}) {
-      Object.assign(this, {document, actions, loadThreads, selectThread, onError});
+    constructor({document, actions, loadThreads, selectThread, searchConversations, onError}) {
+      Object.assign(this, {document, actions, loadThreads, selectThread, searchConversations, onError});
       this.entries = []; this.results = []; this.active = 0; this.generation = 0;
       const element = (tag, id, text) => {
         const node = document.createElement(tag);
@@ -128,6 +128,11 @@
         normalize(entry.label + " " + (entry.detail || "") + " " + (entry.keywords || "")).includes(word)));
       if (query) matches.sort((a, b) => Number(!normalize(a.label).startsWith(query)) - Number(!normalize(b.label).startsWith(query)));
       this.results = matches.slice(0, 60);
+      if (query && this.searchConversations) {
+        const text = this.input.value.trim();
+        this.results.push({id: "search-conversations", kind: "Search", label: "Search conversations for “" + text + "”",
+          detail: "Messages across all projects, including closed conversations", run: () => this.searchConversations(text)});
+      }
       this.list.replaceChildren();
       for (const [index, entry] of this.results.entries()) {
         const row = this.document.createElement("li"); row.id = "desktop-command-option-" + index;
@@ -146,7 +151,8 @@
       }
       this.setActive(Math.max(0, this.results.findIndex(entry => entry.id === selected)), false);
       const count = matches.length > 60 ? "Showing 60 matches — keep typing to narrow the list." :
-        matches.length ? matches.length + " match" + (matches.length === 1 ? "" : "es") : "No matching commands or threads.";
+        matches.length ? matches.length + " match" + (matches.length === 1 ? "" : "es") :
+          query && this.searchConversations ? "Search saved messages across all projects." : "No matching commands or threads.";
       this.status.textContent = this.loading ? "Loading threads…" : this.failure ? "Threads could not load. Commands are still available; reopen to retry." : count;
     }
 

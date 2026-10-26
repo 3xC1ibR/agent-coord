@@ -117,3 +117,28 @@ test("duplicate thread IDs are removed and untrusted titles remain literal text"
   assert.match(f.palette.list.textContent, /<img src=x onerror=alert\(1\)>/);
   assert.equal(f.palette.list.children[0].children[0].children[0].tagName, "span");
 });
+
+test("message search carries the original query and remains available without title matches", async () => {
+  const f = fixture(), queries = [];
+  f.palette.searchConversations = query => queries.push(query);
+  f.palette.toggle(); await settle();
+  f.search("  Café & <radio> alarm  ");
+  assert.equal(f.palette.results.length, 1);
+  assert.match(f.palette.list.textContent, /Café & <radio> alarm/);
+  f.key("Enter"); await settle();
+  assert.deepEqual(queries, ["Café & <radio> alarm"]);
+  assert.equal(f.palette.dialog.open, false);
+  assert.deepEqual(f.runs, []);
+});
+
+test("message search preserves quick thread selection and follows title matches", async () => {
+  const f = fixture(), queries = [];
+  f.palette.searchConversations = query => queries.push(query);
+  f.palette.toggle(); await settle();
+  assert.equal(f.palette.results.some(r => r.id === "search-conversations"), false);
+  f.search("native"); f.key("Enter"); await settle();
+  assert.deepEqual(f.runs, ["one"]);
+  f.palette.toggle(); await settle();
+  f.search("native"); f.key("ArrowDown"); f.key("Enter"); await settle();
+  assert.deepEqual(queries, ["native"]);
+});

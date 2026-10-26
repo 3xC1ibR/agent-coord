@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import heapq
 import json
 import math
 from urllib.parse import urlencode
@@ -33,19 +34,59 @@ def _cursor(value, fingerprint):
         raise CoordinationError("Invalid search cursor or changed query/filters. Start a new search.") from None
 
 
-def _snippet(value, terms, limit):
+def _match_span(folded, terms, phrase):
+    """Find the phrase or tightest span containing every literal keyword."""
+    if phrase and (position := folded.find(phrase)) >= 0:
+        return position, position + len(phrase)
+    positions = [(folded.find(term), i) for i, term in enumerate(terms)]
+    if not positions or any(position < 0 for position, _ in positions):
+        return None
+    heapq.heapify(positions)
+    right = max(position + len(terms[i]) for position, i in positions)
+    best = (positions[0][0], right)
+    while positions:
+        left, i = heapq.heappop(positions)
+        if right - left < best[1] - best[0]:
+            best = (left, right)
+        following = folded.find(terms[i], left + 1)
+        if following < 0:
+            break
+        heapq.heappush(positions, (following, i))
+        right = max(right, following + len(terms[i]))
+    return best
+
+
+def _relevance(value, terms, phrase):
+    folded = " ".join((value or "").casefold().split())
+    span = _match_span(folded, terms, phrase)
+    if span is None:
+        return 0
+    gap = max(0, span[1] - span[0] - sum(map(len, terms)))
+    return 1 + max(0, 24 - gap // 8) + 32 * (phrase in folded) + 16 * (folded == phrase)
+
+
+def _snippet(value, terms, limit, phrase=None):
     value = " ".join((value or "").split())
     folded = value.casefold()
-    positions = [folded.find(term) for term in terms if term in folded]
-    position = min(positions, default=0)
+    span = _match_span(folded, terms, phrase or " ".join(terms))
+    position = min((folded.find(term) for term in terms if term in folded), default=0)
+    position, end = span or (position, position)
     if len(folded) != len(value):
         offset = 0
+        original_position = None
         for index, char in enumerate(value):
-            if offset >= position:
-                position = index
+            if original_position is None and offset + len(char.casefold()) > position:
+                original_position = index
+            if offset >= end:
+                end = index
                 break
             offset += len(char.casefold())
+        else:
+            end = len(value)
+        position = original_position if original_position is not None else position
     start = max(0, position - limit // 4)
+    if end - position <= limit:
+        start = max(start, end - limit)
     return ("…" if start else "") + value[start:start + limit] + ("…" if len(value) > start + limit else "")
 
 
@@ -55,6 +96,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     if not isinstance(query, str) or not query.strip() or len(query) > 500:
         raise CoordinationError("Search query must contain 1–500 characters.")
     terms = list(dict.fromkeys(query.casefold().split()))
+    phrase = " ".join(query.casefold().split())
     if len(terms) > 10:
         raise CoordinationError("Search with at most 10 keywords.")
     if type(limit) is not int or not 1 <= limit <= 50:
@@ -64,7 +106,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     if my_messages:
         source = "messages"
     workspace = project_root(cwd) if cwd is not None else None
-    filters = {"terms": terms, "cwd": workspace, "app_only": bool(app_only),
+    filters = {"ranking": 2, "terms": terms, "phrase": phrase, "cwd": workspace, "app_only": bool(app_only),
                "source": source, "my_messages": bool(my_messages),
                "thread_ids": sorted(thread_ids) if thread_ids is not None else None}
     filters.update({key: value for key, value in (("repository", repository_id), ("project", project_id))
@@ -98,14 +140,20 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
         context_matches.append("(" + " OR ".join(matches.values()) + ")")
         scores.extend(f"({matches[name]}) * {weight}" for name, weight in
                       (("title", 8), ("summary", 4), ("request", 2), ("artifact", 1)))
+    scores.extend(f"search_relevance({fields[name]}) * {weight}" for name, weight in
+                  (("title", 3), ("summary", 1), ("request", 1)))
+    if source == "messages":
+        scores = []
     with store._connection() as db:
         db.create_function("search_fold", 1, lambda value: (value or "").casefold(), deterministic=True)
+        db.create_function("search_relevance", 1, lambda value: _relevance(value, terms, phrase), deterministic=True)
         sync_messages(db)
         message_where = message_condition(terms, "user" if my_messages else None)
         message_match = ("EXISTS (SELECT 1 FROM conversation_search_messages m "
                          f"WHERE m.thread_id=t.thread_id AND {message_where})")
         context_match = "(" + " AND ".join(context_matches) + ")"
-        scores.append(f"({message_match}) * 6" if source != "context" else "0")
+        scores.append("COALESCE((SELECT MAX(search_relevance(m.text)) FROM conversation_search_messages m "
+                      f"WHERE m.thread_id=t.thread_id AND {message_where}), 0)" if source != "context" else "0")
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         app = "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)" if "browser_sessions" in tables else "0"
         if app_only:
@@ -168,9 +216,9 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     WHERE m.thread_id=:thread AND {message_where}""", values).fetchone()[0]
                 for match in db.execute(f"""SELECT turn_id, item_id, role, timestamp, text
                     FROM conversation_search_messages m WHERE m.thread_id=:thread AND {message_where}
-                    ORDER BY position DESC LIMIT 3""", values):
+                    ORDER BY search_relevance(text) DESC, position DESC LIMIT 3""", values):
                     result = dict(match)
-                    result["excerpt"] = _snippet(result.pop("text"), terms, 320)
+                    result["excerpt"] = _snippet(result.pop("text"), terms, 320, phrase)
                     item["matches"].append(result)
             item["original_request"] = _snippet(item["original_request"], terms, 240)
             item["summary"] = _snippet(item["summary"], terms, 320)

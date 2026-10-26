@@ -389,6 +389,12 @@
       },
       selectThread: id => typeof window.select === "function" ? window.select(id) :
         location.assign("/" + location.search + "#" + encodeURIComponent(id)),
+      searchConversations: byID("search") ? query => {
+        window.agentCoordFindThreads();
+        byID("search-scope").value = "all_projects";
+        byID("search").value = query;
+        byID("search").dispatchEvent(new Event("input", {bubbles: true}));
+      } : null,
     });
     if (!byID("back-home")) {
       // The monitor can use the palette, too, without workspace-only controls.

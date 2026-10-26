@@ -3,7 +3,7 @@
   "use strict";
   function parameters(query, scope, mine, filters) {
     const params = new URLSearchParams({q: query.trim(), scope, my_messages: String(mine)});
-    if (Object.hasOwn(filters, "project_cwd")) params.set("project_cwd", filters.project_cwd);
+    if (scope !== "all_projects" && Object.hasOwn(filters, "project_cwd")) params.set("project_cwd", filters.project_cwd);
     if (scope === "current") for (const key of ["show", "phase", "repository", "project"]) {
       if (filters[key]) params.set(key, filters[key]);
     }
@@ -74,7 +74,7 @@
       }
     }
     render(coverage) {
-      const scope = this.$("search-scope").value === "all" ? "This project, including closed" : "Current view";
+      const scope = {all: "This project, including closed", all_projects: "All projects, including closed", current: "Current view"}[this.$("search-scope").value];
       let text = scope + " · " + coverage.saved_histories + " of " + coverage.threads + " conversations have saved history.";
       if (coverage.partial_histories) text += " " + coverage.partial_histories + (coverage.partial_histories === 1 ? " has" : " have") + " partial history.";
       if (coverage.missing_histories) text += " " + coverage.missing_histories + (coverage.missing_histories === 1 ? " has" : " have") + " no searchable saved history.";
@@ -82,10 +82,18 @@
       this.$("search-status").textContent = text;
       this.$("results-count").textContent = this.items.length + (this.cursor ? "+" : "") + " matching conversations";
       const area = this.$("search-hits"); area.replaceChildren();
-      if (!this.items.length) area.append(this.node("p", "No matching conversations in this scope. Try fewer words or search all conversations.", "empty"));
+      if (!this.items.length) {
+        area.append(this.node("p", "No matching conversations in this scope. Try fewer words.", "empty"));
+        if (this.$("search-scope").value !== "all_projects") {
+          const expand = this.node("button", "Search all projects", "quiet"); expand.type = "button";
+          expand.onclick = () => { this.$("search-scope").value = "all_projects"; this.update(); };
+          area.append(expand);
+        }
+      }
       for (const item of this.items) {
         const card = this.node("article", null, "search-hit");
-        const title = this.node("a", item.title, "search-title"); title.href = item.url;
+        const title = this.node("a", null, "search-title"); title.href = item.url;
+        highlight(this.document, title, item.title, this.query);
         const heading = this.node("h2"); heading.append(title); card.append(heading);
         const location = this.node("p", [item.cwd?.split("/").filter(Boolean).pop(), item.client === "muse" ? "Muse Code" : item.client === "kimi" ? "Kimi" : item.client === "antigravity" ? "Antigravity" : item.client === "claude" ? "Claude" : "Codex",
           {now: "Now", later: "Later", archived: "Closed"}[item.attention]].filter(Boolean).join(" · "), "search-meta");
@@ -97,9 +105,12 @@
           const excerpt = this.node("span"); highlight(this.document, excerpt, match.excerpt, this.query); link.append(excerpt);
           card.append(link);
         }
-        if (!item.matches.length) card.append(this.node("p", item.summary || item.original_request, "search-context"));
+        if (!item.matches.length) {
+          const context = this.node("p", null, "search-context");
+          highlight(this.document, context, item.summary || item.original_request, this.query); card.append(context);
+        }
         if (item.context_match) card.append(this.node("small", (item.matches.length ? "Also matches" : "Matches") + " saved thread information.", "search-meta"));
-        if (item.message_count > item.matches.length) card.append(this.node("small", item.message_count + " matching messages · showing the latest " + item.matches.length, "search-meta"));
+        if (item.message_count > item.matches.length) card.append(this.node("small", item.message_count + " matching messages · showing the best " + item.matches.length, "search-meta"));
         area.append(card);
       }
       this.$("search-more").hidden = !this.cursor;

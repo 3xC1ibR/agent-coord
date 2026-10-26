@@ -60,7 +60,7 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
       return super.dispatchEvent(event);
     }
   }
-  for (const id of ["back-home", "sidebar-search", "new-session", "message", "composer", "conversation", "search", "send", "menu-toggle",
+  for (const id of ["back-home", "sidebar-search", "new-session", "message", "composer", "conversation", "search", "search-scope", "send", "menu-toggle",
     "expand-chat", "session-name", "image-drop-hint", "attach-image", "image-picker", "error", "new-cwd", "workspace-choice", "workspace-path-label",
     "create-dialog", "permissions-dialog"]) nodes.set(id, new Element(id));
   nodes.get("error").hidden = true;
@@ -519,6 +519,20 @@ test("menu commands route to controls, respect disabled send, and do not escape 
   for (const name of ["workspace", "findThread", "newSession", "focusMessage", "toggleSidebar", "sendMessage"]) {
     assert.equal(command(name), false, name);
   }
+});
+
+test("palette conversation search opens full search with the query and all-project scope", () => {
+  const f = fixture();
+  let opened = 0, searches = 0;
+  f.env.agentCoordFindThreads = () => { opened++; f.nodes.get("search").focus(); };
+  f.nodes.get("search").addEventListener("input", () => searches++);
+  f.env.document.dispatchEvent(new Event("DOMContentLoaded"));
+  f.palettes[0].searchConversations("radio & alarm");
+  assert.equal(opened, 1);
+  assert.equal(searches, 1);
+  assert.equal(f.nodes.get("search").value, "radio & alarm");
+  assert.equal(f.nodes.get("search-scope").value, "all_projects");
+  assert.equal(f.env.document.activeElement.id, "search");
 });
 
 test("desktop controls publish window state and request a new window without navigating the original", async () => {

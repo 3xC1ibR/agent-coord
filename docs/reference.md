@@ -1181,6 +1181,12 @@ Typing in **Search conversations** searches the active project's conversations,
 including Later and Closed. **Current view** also applies its placement, group
 and phase filters; **My messages** restricts matches to your messages. Click a
 matching excerpt to open that message. Search reports saved-history coverage.
+Choose **All projects, including closed** to search across the app's available
+projects, or use **Search all projects** when the current scope has no matches.
+Exact phrases, nearby keywords, and strong title matches rank ahead of weaker
+matches; recent activity breaks ties. Results show the best matching messages
+and excerpts around the strongest passage. The desktop command palette offers
+**Search conversations for…** to carry its query into this all-project search.
 The separate repository selector and editable repo association are no longer
 part of the UI. Legacy repository metadata and CLI links remain compatible.
 

@@ -128,6 +128,59 @@ class ConversationSearchTests(unittest.TestCase):
         self.assertEqual(len(page["items"]), 1)
         self.assertEqual(search_threads(self.store, "jev", thread_ids=[])["items"], [])
 
+    def test_phrase_then_proximity_rank_ahead_of_newer_scattered_matches(self):
+        self.create("a-phrase", "We fixed the radio alarm yesterday.")
+        self.create("b-nearby", "We fixed the alarm for the radio yesterday.")
+        self.create("z-scattered", "The radio " + "other work " * 80 + " alarm is ready.")
+        self.store.threads.checkpoint("z-scattered", {"phase": "finished", "summary": "Recent work."})
+        page = search_threads(self.store, "radio alarm", source="messages", limit=1)
+        self.assertEqual(page["items"][0]["thread_id"], "a-phrase")
+        page = search_threads(self.store, "radio alarm", source="messages", limit=1, cursor=page["next_cursor"])
+        self.assertEqual(page["items"][0]["thread_id"], "b-nearby")
+        page = search_threads(self.store, "radio alarm", source="messages", limit=1, cursor=page["next_cursor"])
+        self.assertEqual(page["items"][0]["thread_id"], "z-scattered")
+        self.assertIsNone(page["next_cursor"])
+
+    def test_best_message_and_passage_are_visible_even_when_older(self):
+        self.create("thread")
+        history = {"turns": [{"id": "turn", "items": [
+            {"id": "best", "type": "agentMessage", "text": "radio " + "unrelated " * 150 + "The radio alarm is scheduled."},
+            *[{"id": f"new-{i}", "type": "agentMessage", "text": "radio " + "unrelated " * 80 + "alarm"} for i in range(4)]
+        ]}]}
+        with self.store._connection() as db:
+            db.execute("INSERT INTO browser_history VALUES (?, ?)", ("thread", json.dumps(history)))
+        hit = search_threads(self.store, "radio alarm")["items"][0]
+        self.assertEqual(hit["message_count"], 5)
+        self.assertEqual(hit["matches"][0]["item_id"], "best")
+        self.assertIn("The radio alarm is scheduled.", hit["matches"][0]["excerpt"])
+        self.assertLessEqual(len(hit["matches"][0]["excerpt"]), 322)
+
+    def test_my_messages_ranks_only_user_evidence(self):
+        self.create("strong", "We fixed the radio alarm.")
+        self.create("weak", "radio " + "unrelated " * 80 + " alarm", title="Radio alarm")
+        self.store.threads.checkpoint("weak", {"phase": "finished", "summary": "Radio alarm"})
+        self.assertEqual(search_threads(self.store, "radio alarm", my_messages=True)["items"][0]["thread_id"], "strong")
+
+    def test_ranked_excerpts_preserve_unicode_and_literal_keywords(self):
+        self.create("thread", "Straße " + "ß " * 400 + "Straße & a+b works.")
+        hit = search_threads(self.store, "STRASSE a+b")["items"][0]
+        self.assertIn("Straße & a+b works.", hit["matches"][0]["excerpt"])
+
+    def test_relevance_examples_retrieve_expected_thread_in_first_three(self):
+        queries = ["radio alarm", "plugin refresh", "thread search", "native app", "release validation",
+                   "database latency", "message queue", "mobile layout", "dark mode", "file preview",
+                   "saved filters", "permission settings", "context lifecycle", "project tabs",
+                   "usage limits", "browser history"]
+        for i, query in enumerate(queries):
+            first, second = query.split()
+            self.create(f"expected-{i}", "We completed the " + query + " work.", attention="archived")
+            self.create(f"noise-{i}", first + " " + "other work " * 60 + second)
+        for i, query in enumerate(queries):
+            with self.subTest(query=query):
+                hits = search_threads(self.store, query)["items"]
+                self.assertIn(f"expected-{i}", [hit["thread_id"] for hit in hits[:3]])
+                self.assertEqual(hits[0]["thread_id"], f"expected-{i}")
+
     def test_corrupt_or_partial_history_does_not_hide_other_results(self):
         for identity, value in (("broken", "{oops"), ("partial", '{"historyUnavailable":true,"turns":[]}')):
             self.create(identity)

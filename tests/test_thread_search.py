@@ -63,6 +63,14 @@ class ThreadSearchTests(unittest.TestCase):
         self.assertEqual([(r["thread_id"], r["last_work_at"]) for r in page["items"]], [("new", 4000), ("old", 2000)])
         self.assertEqual(page["items"][0]["last_turn_status"], "completed")
 
+    def test_phrase_and_exact_title_rank_before_scattered_title_keywords(self):
+        self.create("a-exact", title="Radio alarm", request="Schedule audio")
+        self.create("b-phrase", title="Repair radio alarm scheduling", request="Schedule audio")
+        self.now = 5000
+        self.create("z-scattered", title="Radio playback and alarm scheduling", request="Schedule audio")
+        self.assertEqual([r["thread_id"] for r in search_threads(self.store, "radio alarm")["items"]],
+                         ["a-exact", "b-phrase", "z-scattered"])
+
     def test_pagination_has_no_duplicates_or_gaps_across_ties_and_restart(self):
         for index in range(13):
             self.create(f"thread-{index:02}", attention="archived" if index % 2 else "now")

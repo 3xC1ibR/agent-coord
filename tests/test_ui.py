@@ -438,6 +438,28 @@ class BrowserHTTPTests(unittest.TestCase):
         for asset in ("/conversation-search.js", "/conversation-search.css"):
             self.assertEqual(self.request(asset)[0], 200)
 
+    def test_search_all_projects_ignores_view_filters_but_preserves_server_boundary(self):
+        from urllib.parse import urlencode
+        for identity, directory, placement in (("selected", self.root, "now"),
+                ("nested", self.root / "nested", "archived"),
+                ("outside", self.root.parent / "outside", "now")):
+            self.store.register(session_id=identity, client="codex", cwd=str(directory), name="Search target")
+            self.store.threads.update(identity, attention=placement)
+        filters = {"q": "search target", "project_cwd": str(self.root),
+                   "phase": "planning", "show": "later", "project": "unrelated"}
+        with patch.object(self.sessions, "read", side_effect=AssertionError("Search resumed a provider")):
+            status, selected = self.request("/api/browser/search?" + urlencode({**filters, "scope": "all"}))
+            self.assertEqual(status, 200)
+            self.assertEqual([t["thread_id"] for t in selected["items"]], ["selected"])
+            status, expanded = self.request("/api/browser/search?" + urlencode({**filters, "scope": "all_projects"}))
+            self.assertEqual(status, 200)
+            self.assertEqual({t["thread_id"] for t in expanded["items"]}, {"selected", "nested"})
+            self.assertEqual(expanded["coverage"]["threads"], 2)
+            with patch.object(self.sessions, "cwd", None):
+                status, unrestricted = self.request("/api/browser/search?" + urlencode({**filters, "scope": "all_projects"}))
+                self.assertEqual(status, 200)
+                self.assertEqual({t["thread_id"] for t in unrestricted["items"]}, {"selected", "nested", "outside"})
+
     def test_session_model_commands_and_yolo_over_http(self):
         status, created = self.request("/api/browser/sessions", {"name": "Settings", "yolo": True})
         self.assertEqual(status, 201)
