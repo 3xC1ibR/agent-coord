@@ -61,6 +61,21 @@ test("identical messages survive polling while streaming state changes", () => {
   assert.equal(timeline.firstChild, third);
 });
 
+test("late timestamp metadata updates without detaching the cached interactive message", () => {
+  const timeline = new Element("timeline"), first = new Element("card"), next = new Element("card");
+  for (const card of [first, next]) card.dataset = {openuiKey: "timestamp-thread/item", openuiText: "same"};
+  const newTime = {outerHTML: '<time datetime="2026-10-26T16:00:00Z">Oct 26, 11:00 AM</time>'};
+  first.time = {outerHTML: '<span>Time unavailable</span>', replaceWith(value) { first.time = value; }};
+  first.querySelector = () => first.time;
+  next.querySelector = () => newTime;
+  commit(timeline, {childNodes: [first]}, {});
+  first.moves = 0;
+  commit(timeline, {childNodes: [next]}, {});
+  assert.equal(timeline.firstChild, first);
+  assert.equal(first.time, newTime);
+  assert.equal(first.moves, 0);
+});
+
 function sender({running = false, archived = false, dispatcher = false, refreshFails = false} = {}) {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const calls = [];

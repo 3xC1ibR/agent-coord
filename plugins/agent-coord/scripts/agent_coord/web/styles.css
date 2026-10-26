@@ -343,6 +343,7 @@ main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; pad
 .message { margin-bottom: 27px; line-height: 1.8; font-size: 13px; overflow-wrap: anywhere; }
 .message .speaker { display: block; color: var(--muted); font: 9px var(--mono); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 11px; }
 .message .text { white-space: pre-wrap; }
+.message-time { display: block; margin-top: 6px; color: var(--muted); font: 10px/1.5 var(--mono); }
 .session-statusbar { grid-column: 1 / -1; display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 5px 24px; min-width: 0; min-height: 34px; padding: 8px 22px; border-top: 1px solid var(--line); color: var(--muted); background: var(--panel); font: 10px/1.5 var(--mono); }
 .session-statusbar { position: relative; }
 .thread-usage { margin-left: auto; }

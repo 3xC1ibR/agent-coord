@@ -28,6 +28,10 @@
       if (!key) return child;
       const old = cards.get(key);
       const card = old?.dataset.openuiText === child.dataset.openuiText ? old : child;
+      if (card !== child) {
+        const previousTime = card.querySelector?.(".message-time"), nextTime = child.querySelector?.(".message-time");
+        if (previousTime && nextTime && previousTime.outerHTML !== nextTime.outerHTML) previousTime.replaceWith(nextTime);
+      }
       card.dataset.openuiStreaming = child.dataset.openuiStreaming;
       nextCards.set(key, card);
       [...card.querySelectorAll(".openui-block")].forEach((block, index) => {

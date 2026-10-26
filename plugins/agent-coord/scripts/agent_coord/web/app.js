@@ -1484,6 +1484,39 @@ function itemText(item) {
   if (item.type === "plan") return item.text || "";
   return JSON.stringify(item, null, 2);
 }
+function messageTimestamp(item, turn) {
+  const date = value => {
+    if (value == null || value === "" || typeof value === "boolean") return null;
+    const result = new Date(typeof value === "number" ? (value > 1e12 ? value : value * 1000) : value);
+    return Number.isFinite(result.getTime()) ? result : null;
+  };
+  for (const value of [item.timelineAt, item.createdAt, item.created_at, item.timestamp]) {
+    const recorded = date(value);
+    if (recorded) return {date: recorded, label: "Message recorded"};
+  }
+  // Legacy transcripts may retain only turn boundaries. Do not assign a
+  // turn's start to later steering messages or its end to earlier commentary.
+  const messages = (turn.items || []).filter(entry => entry.type === "userMessage" || entry.type === "agentMessage");
+  if (item.type === "userMessage" && messages[0] === item) {
+    const started = date(turn.startedAt ?? turn.started_at);
+    if (started) return {date: started, label: "Turn started"};
+  }
+  if (item.type === "agentMessage" && messages.at(-1) === item && ["completed", "failed", "interrupted"].includes(turn.status)) {
+    const ended = date(turn.completedAt ?? turn.completed_at);
+    if (ended) return {date: ended, label: "Turn ended"};
+  }
+  return null;
+}
+function messageTimeLabel(item, turn) {
+  const timing = messageTimestamp(item, turn);
+  if (!timing) return node("span", "Time unavailable", "message-time");
+  const label = node("time", timing.date.toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"}), "message-time");
+  label.dateTime = timing.date.toISOString();
+  label.title = timing.label + " · " + timing.date.toLocaleString([], {
+    year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short",
+  });
+  return label;
+}
 function forkRelations(work) {
   const relations = [];
   if (work?.forked_from) relations.push({label: "Forked from", thread: work.forked_from, turnId: work.forked_from_turn_id});
@@ -1614,7 +1647,7 @@ function renderTimeline() {
           if (images.length) ChatImageAttachments.appendPreviews(document, body, images);
         }
         message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "muse" ? "Muse Code" : state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
-        message.append(body);
+        message.append(body, messageTimeLabel(item, turn));
         fragment.append(message);
       } else {
         // Streaming changes one item at a time. Reuse unchanged tool rows,

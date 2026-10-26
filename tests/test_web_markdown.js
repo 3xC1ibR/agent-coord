@@ -91,8 +91,8 @@ test("conversation renders and refreshes agent Markdown while user text stays li
     setAttribute(name, value) { this[name] = value; },
     querySelector() { return this.innerHTML?.includes('class="openui-block"') ? {} : null; },
     querySelectorAll() { return []; }, scrollHeight: 100, scrollTop: 0, clientHeight: 100});
-  const timeline = element("div"), user = {type: "userMessage", content: [{text: "**literal**"}]};
-  const agent = {type: "agentMessage", text: "**Result**\n\n```js\nconst x = 1;"};
+  const timeline = element("div"), user = {type: "userMessage", timelineAt: 1793030400, content: [{text: "**literal**"}]};
+  const agent = {type: "agentMessage", timelineAt: 1793030460, text: "**Result**\n\n```js\nconst x = 1;"};
   const context = {state: {selected: "test-thread", detail: {thread: {turns: [{items: [user, agent]}]}}},
     $: () => timeline, node: element, document: {createDocumentFragment: () => element("fragment")}, messageMarkdown: {render}};
   const disclosureEntry = {};
@@ -103,6 +103,8 @@ test("conversation renders and refreshes agent Markdown while user text stays li
   assert.equal(timeline.childNodes[0].childNodes[0].textContent, "**literal**");
   assert.equal(timeline.childNodes[0].childNodes[0].innerHTML, undefined);
   assert.match(timeline.childNodes[1].childNodes[0].innerHTML, /<strong>Result<\/strong>/);
+  assert.equal(timeline.childNodes[0].childNodes[1].dateTime, "2026-10-26T16:00:00.000Z");
+  assert.equal(timeline.childNodes[1].childNodes[1].dateTime, "2026-10-26T16:01:00.000Z");
   agent.text += "\n```\n\nFinished.";
   vm.runInContext("renderTimeline()", context);
   assert.match(timeline.childNodes[1].childNodes[0].innerHTML, /<\/pre><p>Finished\.<\/p>/);
