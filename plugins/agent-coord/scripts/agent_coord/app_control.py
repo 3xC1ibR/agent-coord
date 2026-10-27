@@ -52,7 +52,7 @@ class AppControl:
 
     def request(self, operation, sender_session_id, payload, *, thread_id=None, request_id=None):
         self.store.get_session(sender_session_id)
-        if operation not in {"create", "settings", "models", "provider-limits", "move", "resume", "sidecar", "session"}:
+        if operation not in {"create", "settings", "models", "provider-limits", "schedule", "move", "resume", "sidecar", "session"}:
             raise CoordinationError("Unknown app control operation.")
         payload = dict(payload)
         if operation == "session":
@@ -77,6 +77,23 @@ class AppControl:
                 return self.status(request_id)
             payload = Sidecars(self.store).validate(sender_session_id, payload)
             cwd = payload["cwd"]
+        elif operation == "schedule":
+            if (set(payload) - {"mode", "message", "run_at", "timezone", "settings"}
+                    or not isinstance(payload.get("mode"), str) or payload["mode"] not in {"self", "new"}):
+                raise CoordinationError("Choose a self or new-agent schedule with valid fields.")
+            if payload["mode"] == "self":
+                if "settings" in payload:
+                    raise CoordinationError("A self schedule uses the conversation's current settings.")
+                record = self.settings(sender_session_id)
+                cwd = record["cwd"]
+            else:
+                settings = payload.get("settings")
+                if not isinstance(settings, dict) or not isinstance(settings.get("cwd"), str):
+                    raise CoordinationError("A new-agent schedule needs provider settings and a workspace.")
+                cwd = str(Path(settings["cwd"]).expanduser().resolve())
+                if not Path(cwd).is_dir():
+                    raise CoordinationError("Choose an existing workspace directory.")
+                payload["settings"] = {**settings, "cwd": cwd}
         elif operation in {"settings", "move", "resume"}:
             record = self.settings(thread_id)
             cwd = record["cwd"]
@@ -154,7 +171,7 @@ class AppControl:
                 now = self.store.clock()
                 # Pre-recovery app workers treat unknown queued operations as
                 # creation. Keep recovery invisible to their queued-only scan.
-                queued = "queued_" + operation if operation in {"resume", "sidecar", "session"} else "queued"
+                queued = "queued_" + operation if operation in {"resume", "sidecar", "session", "schedule"} else "queued"
                 db.execute("""INSERT INTO app_control_requests
                     (request_id, operation, sender_session_id, cwd, thread_id, payload_json,
                      status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -190,7 +207,7 @@ class AppControl:
             if not row:
                 raise CoordinationError("App request not found.")
             result = {key: row[key] for key in ("request_id", "operation", "status", "thread_id", "error")}
-            if result["status"] in {"queued_resume", "queued_sidecar", "queued_session"}:
+            if result["status"] in {"queued_resume", "queued_sidecar", "queued_session", "queued_schedule"}:
                 result["status"] = "queued"
             result["result"] = json.loads(row["result_json"]) if row["result_json"] else None
             if result["status"] == "queued":
@@ -209,7 +226,7 @@ class AppControl:
                 raise CoordinationError("App request not found.")
             if row[0] == "running":
                 raise CoordinationError("The app request is already executing. Inspect request-status before acting again.")
-            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume', 'queued_sidecar', 'queued_session')",
+            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume', 'queued_sidecar', 'queued_session', 'queued_schedule')",
                        (self.store.clock(), request_id))
         return self.status(request_id)
 
@@ -218,13 +235,15 @@ class AppControl:
             self._reconcile(db)
             return [dict(row) for row in db.execute("""SELECT * FROM app_control_requests
                 WHERE status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
-                OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar') ORDER BY created_at, rowid""")]
+                OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar')
+                OR (operation = 'schedule' AND status = 'queued_schedule') ORDER BY created_at, rowid""")]
 
     def claim(self, request_id, owner):
         with self.store._connection() as db:
             return bool(db.execute("""UPDATE app_control_requests SET status = 'running', owner = ?, updated_at = ?
                 WHERE request_id = ? AND (status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
-                OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar'))""",
+                OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar')
+                OR (operation = 'schedule' AND status = 'queued_schedule'))""",
                                    (owner, self.store.clock(), request_id)).rowcount)
 
     def identified(self, request_id, thread_id):
@@ -334,6 +353,15 @@ class AppControlWorker:
                 # Request receipts are durable; do not persist account identity.
                 row.pop("account", None)
                 result = {"provider": row, "refresh_seconds": snapshot["refresh_seconds"]}
+            elif request["operation"] == "schedule":
+                schedule_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:schedule:" + request["request_id"]))
+                body = {"id": schedule_id, "message": payload.get("message"), "run_at": payload.get("run_at"),
+                        "timezone": payload.get("timezone")}
+                if payload["mode"] == "self":
+                    body["target_thread_id"] = request["sender_session_id"]
+                else:
+                    body["settings"] = payload["settings"]
+                result = self.sessions.schedules.create(body)
             elif request["operation"] == "sidecar":
                 payload = self.sessions.sidecars.watches.validate(request["sender_session_id"], payload)
                 if not payload.get("existing_id"):

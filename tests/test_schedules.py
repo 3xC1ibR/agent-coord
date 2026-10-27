@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coor
 from agent_coord.codex_app_server import BrowserSessions
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import make_ui_server
+from agent_coord.app_control import AppControlWorker
+from agent_coord.checkpoint_mcp import schedule_prompt, dispatch
 from test_codex_app_server import FakeCodex
 from test_browser_providers import claude_factory
 
@@ -89,6 +91,87 @@ class ScheduledPromptTests(unittest.TestCase):
         self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 2)
         self.schedules.process_once()
         self.assertEqual(len(self.starts()), 2)
+
+    def test_agent_tool_schedules_own_thread_while_busy_and_retries_idempotently(self):
+        thread_id = self.existing_thread()
+        self.sessions.send(thread_id, {"message": "Current work"})
+        worker = AppControlWorker(self.sessions)
+        self.addCleanup(worker.close)
+        args = {"session_id": thread_id, "mode": "self", "message": "Follow up",
+                "run_at": self.now + 60, "timezone": "UTC", "request_id": "self-schedule", "wait_seconds": 0}
+        receipt = schedule_prompt(args, store=self.store)
+        self.assertEqual(receipt["status"], "queued")
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT status FROM app_control_requests WHERE request_id = ?", ("self-schedule",)).fetchone()[0], "queued_schedule")
+        worker.process_once()
+        saved = schedule_prompt(args, store=self.store)
+        self.assertEqual(saved["status"], "completed")
+        self.assertEqual(saved["result"]["id"], receipt["schedule_id"])
+        self.assertEqual(saved["result"]["target_thread_id"], thread_id)
+        self.assertEqual(len(self.schedules.list()), 1)
+        self.now += 60
+        self.schedules.process_once()
+        self.assertEqual(self.item(saved["result"])["state"], "waiting")
+        self.complete_turn(thread_id)
+        self.schedules.process_once()
+        self.assertEqual(self.item(saved["result"])["state"], "running")
+        self.assertEqual(self.starts()[-1]["input"][0]["text"], "Follow up")
+        with self.assertRaisesRegex(CoordinationError, "different app request"):
+            schedule_prompt({**args, "message": "Different"}, store=self.store)
+
+    def test_agent_tool_schedules_configured_new_agent(self):
+        self.store.register(session_id="caller", client="codex", cwd=str(self.root))
+        worker = AppControlWorker(self.sessions)
+        self.addCleanup(worker.close)
+        args = {"session_id": "caller", "mode": "new", "message": "Do the work", "run_at": self.now + 60,
+                "timezone": "UTC", "request_id": "new-schedule", "wait_seconds": 0,
+                "settings": {"cwd": str(self.root), "client": "claude", "model": "sonnet", "effort": "high", "yolo": True}}
+        receipt = schedule_prompt(args, store=self.store)
+        worker.process_once()
+        saved = worker.control.status(receipt["request_id"])
+        self.assertEqual(saved["status"], "completed", saved)
+        self.assertEqual(saved["result"]["settings"]["client"], "claude")
+        self.assertEqual(saved["result"]["settings"]["model"], "sonnet")
+        self.assertEqual(saved["result"]["settings"]["effort"], "high")
+        self.assertTrue(saved["result"]["settings"]["yolo"])
+        self.assertFalse(self.sessions.rpc.threads)
+        self.now += 60
+        self.schedules.process_once()
+        item = self.item(saved["result"])
+        self.assertEqual(item["state"], "running")
+        connection = self.sessions.claude.connections[item["thread_id"]]
+        self.assertEqual(connection.options["model"], "sonnet")
+        self.assertEqual(connection.options["effort"], "high")
+
+    def test_agent_tool_rejects_terminal_self_and_invalid_inputs(self):
+        self.store.register(session_id="terminal", client="codex", cwd=str(self.root))
+        base = {"session_id": "terminal", "mode": "self", "message": "Hello", "run_at": self.now + 60,
+                "timezone": "UTC", "wait_seconds": 0}
+        with self.assertRaisesRegex(CoordinationError, "terminal session"):
+            schedule_prompt(base, store=self.store)
+        for change in ({"mode": "new"}, {"mode": []}, {"settings": {}}, {"run_at": float("nan")},
+                       {"run_at": 10**1000}, {"wait_seconds": True}, {"request_id": ""}, {"other": 1}):
+            with self.subTest(change=change), self.assertRaises(CoordinationError):
+                schedule_prompt({**base, **change}, store=self.store)
+        catalog = dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+        self.assertIn("schedule_prompt", [tool["name"] for tool in catalog])
+
+    def test_agent_mcp_stdio_schedules_using_caller_identity(self):
+        import os
+        thread_id = self.existing_thread()
+        worker = AppControlWorker(self.sessions)
+        self.addCleanup(worker.close)
+        command = [sys.executable, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts/agent-coord-mcp")]
+        call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "schedule_prompt", "arguments": {
+            "mode": "self", "message": "Later", "run_at": self.now + 60, "timezone": "UTC", "wait_seconds": 0}}}
+        env = {**os.environ, "AGENT_COORD_DB": str(self.store.database_path), "AGENT_COORD_SESSION_ID": thread_id}
+        completed = subprocess.run(command, input=json.dumps(call) + "\n", text=True, capture_output=True, env=env, timeout=10, check=True)
+        receipt = json.loads(json.loads(completed.stdout)["result"]["content"][0]["text"])
+        self.assertEqual(receipt["status"], "queued")
+        worker.process_once()
+        saved = worker.control.status(receipt["request_id"])
+        self.assertEqual(saved["status"], "completed", saved)
+        self.assertEqual(saved["result"]["target_thread_id"], thread_id)
 
     def test_busy_target_waits_without_steering_or_becoming_missed(self):
         thread_id = self.existing_thread()

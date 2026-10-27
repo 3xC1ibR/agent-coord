@@ -638,6 +638,15 @@ A busy thread shows **Waiting for thread** until its current turn and queued
 messages finish; waiting schedules can still be edited or cancelled. A closed
 or unavailable destination fails visibly instead of creating another thread.
 
+Agents can use the `schedule_prompt` Agent Coord MCP tool when the user asks
+them to schedule a prompt. `mode: self` targets the calling Ribbon Field app
+conversation; `mode: new` accepts workspace, client, model, effort, and
+permissions for a new agent. Provide `run_at` as Unix seconds, an IANA `timezone`,
+and a stable `request_id` for safe retries. A queued receipt is not confirmation:
+check `agent-coord thread request-status --request-id ID` or Scheduled prompts.
+Self schedules require an app conversation; terminal sessions cannot target
+themselves. Full access (`yolo`) requires explicit authorization.
+
 Scheduling from a new-conversation draft creates a new thread. Set its workspace,
 date and time (with your browser's time zone shown), model, reasoning effort,
 and permissions, and include the context the agent needs. **Full access** uses the same unrestricted,

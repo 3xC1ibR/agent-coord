@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import sys
+import uuid
 
 from .context import caller_session
 from .store import CoordinationError, CoordinationStore
@@ -100,6 +102,77 @@ ASK_TOOL = {
     "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
 }
 
+SCHEDULE_TOOL = {
+    "name": "schedule_prompt",
+    "description": (
+        "Schedule a one-time prompt through the running Ribbon Field app. Use only when the user authorizes scheduling. "
+        "Choose self for your own app conversation, or new for a new agent with explicit provider settings. "
+        "Self uses the conversation's settings at delivery. A queued receipt is not a saved schedule; inspect "
+        "agent-coord thread request-status --request-id <id>. Reuse request_id on retry. "
+        "The Mac must be awake and Ribbon Field running at the scheduled time; missed runs need review. "
+        "Terminal sessions cannot schedule a prompt to themselves. Only set yolo with explicit authorization."
+    ),
+    "inputSchema": {
+        "type": "object", "additionalProperties": False, "required": ["mode", "message", "run_at", "timezone"],
+        "properties": {
+            "session_id": {"type": "string", "minLength": 1, "description": "Your registered caller ID if not inherited."},
+            "mode": {"type": "string", "enum": ["self", "new"]},
+            "message": {"type": "string", "minLength": 1, "maxLength": 100000},
+            "run_at": {"type": "number", "description": "Future execution time as Unix epoch seconds (UTC)."},
+            "timezone": {"type": "string", "minLength": 1, "description": "IANA time zone, e.g. America/Chicago."},
+            "settings": {"type": "object", "additionalProperties": False,
+                         "required": ["cwd", "client", "model"], "description": "Required for new; forbidden for self.",
+                         "properties": {"cwd": {"type": "string", "minLength": 1},
+                                        "client": {"type": "string", "enum": ["codex", "claude", "antigravity", "kimi", "muse"]},
+                                        "model": {"type": "string", "minLength": 1},
+                                        "effort": {"type": "string"}, "yolo": {"type": "boolean"},
+                                        "project_id": {"type": "string"}, "repository_id": {"type": "string"}}},
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 160, "description": "Stable idempotency key; reuse on retry."},
+            "wait_seconds": {"type": "number", "minimum": 0, "maximum": 30, "description": "Wait for the app to save the schedule; defaults to 5."},
+        },
+    },
+    "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+}
+
+
+def schedule_prompt(arguments, *, store=None):
+    if not isinstance(arguments, dict) or set(arguments) - SCHEDULE_TOOL["inputSchema"]["properties"].keys():
+        raise CoordinationError("Use the schedule_prompt input fields.")
+    sender = arguments.get("session_id") or caller_session()
+    if not isinstance(sender, str) or not sender.strip():
+        raise CoordinationError("No caller session. Pass session_id from your hook context.")
+    mode = arguments.get("mode")
+    message = arguments.get("message")
+    run_at = arguments.get("run_at")
+    timezone = arguments.get("timezone")
+    wait = arguments.get("wait_seconds", 5)
+    if not isinstance(mode, str) or mode not in {"self", "new"} or not isinstance(message, str) or not message.strip() or len(message) > 100000:
+        raise CoordinationError("Choose self or new and supply a prompt of 1–100000 characters.")
+    if (type(run_at) not in (int, float) or not 0 < run_at < 253402300800 or not math.isfinite(run_at)
+            or not isinstance(timezone, str) or not timezone.strip()):
+        raise CoordinationError("Provide a future Unix time and an IANA time zone.")
+    if type(wait) not in (int, float) or not 0 <= wait <= 30 or not math.isfinite(wait):
+        raise CoordinationError("wait_seconds must be between 0 and 30.")
+    if "request_id" in arguments and (not isinstance(arguments["request_id"], str)
+                                      or not arguments["request_id"].strip() or len(arguments["request_id"]) > 160):
+        raise CoordinationError("request_id must contain 1–160 characters.")
+    payload = {"mode": mode, "message": message, "run_at": run_at, "timezone": timezone}
+    if mode == "new":
+        settings = arguments.get("settings")
+        allowed = {"cwd", "client", "model", "effort", "yolo", "project_id", "repository_id"}
+        if (not isinstance(settings, dict) or set(settings) - allowed or
+                any(not isinstance(settings.get(key), str) or not settings[key].strip() for key in ("cwd", "client", "model"))):
+            raise CoordinationError("New-agent schedules require workspace, client, and model settings.")
+        payload["settings"] = settings
+    elif "settings" in arguments:
+        raise CoordinationError("Self schedules use the conversation's current settings.")
+    from .app_control import AppControl
+    control = AppControl(store or CoordinationStore())
+    receipt = control.request("schedule", sender, payload, request_id=arguments.get("request_id"))
+    result = control.status(receipt["request_id"], wait=wait)
+    result["schedule_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:schedule:" + receipt["request_id"]))
+    return result
+
 
 def ask_human(arguments, *, store=None):
     if not isinstance(arguments, dict) or set(arguments) - ASK_TOOL["inputSchema"]["properties"].keys():
@@ -167,12 +240,12 @@ def dispatch(message):
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": [TOOL, MOVE_TOOL, ASK_TOOL]}
+        result = {"tools": [TOOL, MOVE_TOOL, ASK_TOOL, SCHEDULE_TOOL]}
     elif method == "tools/call":
         handler = {TOOL["name"]: update_checkpoint, MOVE_TOOL["name"]: move_thread,
-                   ASK_TOOL["name"]: ask_human}.get(params.get("name"))
+                   ASK_TOOL["name"]: ask_human, SCHEDULE_TOOL["name"]: schedule_prompt}.get(params.get("name"))
         if handler is None:
-            return {**response, "error": {"code": -32602, "message": "Unknown tool; use update_checkpoint, move_thread, or ask_human."}}
+            return {**response, "error": {"code": -32602, "message": "Unknown tool."}}
         try:
             receipt = handler(params.get("arguments", {}))
             result = {"content": [{"type": "text", "text": json.dumps(receipt, separators=(",", ":"))}]}

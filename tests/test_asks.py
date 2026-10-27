@@ -177,7 +177,7 @@ class AskStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(CoordinationError, "No caller session"):
                 ask_human({"question": "Which?", "blocking": True}, store=self.store)
         catalog = dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
-        self.assertEqual([tool["name"] for tool in catalog], ["update_checkpoint", "move_thread", "ask_human"])
+        self.assertEqual([tool["name"] for tool in catalog], ["update_checkpoint", "move_thread", "ask_human", "schedule_prompt"])
         self.assertEqual(catalog[2]["inputSchema"]["required"], ["question", "blocking"])
 
     def test_mcp_stdio_call_uses_inherited_identity(self):

@@ -604,6 +604,18 @@ advertised model and remaining quota do not guarantee a successful request.
 These commands require a running Ribbon Field app; inspect a queued request with
 `thread request-status` if it does not complete within the wait.
 
+When the user asks to schedule a prompt, use the `schedule_prompt` MCP tool.
+Set `mode` to `self` to send a later message to your own Ribbon Field app
+conversation, or `new` with workspace, client, model, and optional effort and
+permissions for a new agent. Supply the future Unix time in seconds and an IANA
+time zone; use a stable `request_id` to make retries safe. Set `yolo` only with
+explicit authorization. The tool returns a request and schedule ID; `queued` is
+not a saved schedule. Check `agent-coord thread request-status --request-id ID`
+until confirmed, or inspect Scheduled prompts in the app. Self scheduling is
+available for app conversations, not terminal sessions. The Mac must be awake
+and Ribbon Field running at the scheduled time; missed runs need user action.
+Schedules are one-time, without attachments or recurrence.
+
 Use `--client claude` for Claude Code, `--client antigravity` for Google
 Antigravity, `--client kimi` for Kimi Code, or `--client muse` for Muse Code
 (including Muse Wonder when available to the account). Model and effort are optional; select
