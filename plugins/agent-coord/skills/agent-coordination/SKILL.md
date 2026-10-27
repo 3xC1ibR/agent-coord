@@ -8,7 +8,8 @@ description: Create and reuse persistent Ribbon Field app agents for direct user
 ## Choose the agent mechanism
 
 - **App agents** are persistent, independently addressable Ribbon Field
-  conversations. For a conversation the user can address directly and return to
+  conversations across supported providers (`codex`, `claude`, `antigravity`,
+  `kimi`, `muse`). For a conversation the user can address directly and return to
   later, search existing app agents with `thread search --app-only`, reuse one
   with `send`, or create one with `thread create`.
 - **Provider-native subagents** use the provider's tools and follow its context
@@ -21,6 +22,30 @@ description: Create and reuse persistent Ribbon Field app agents for direct user
 Use [dispatch](../dispatch/SKILL.md) for ongoing routing with direct specialist
 follow-ups, or [orchestrate](../orchestrate/SKILL.md) to coordinate and deliver
 the integrated result in the initiating conversation. Both use the same app agents.
+
+### When to orchestrate vs. work solo
+
+Do not default to doing everything in a single polluted context window, and do
+not spawn theatrical roleplay agents for trivial edits. Escalate to multi-agent
+orchestration ([orchestrate](../orchestrate/SKILL.md)) when at least one of
+these holds:
+
+1. **Context isolation (high-noise / compact-output):** Broad exploration, log
+   triage, or subsystem debugging would flood your context with intermediate
+   noise before implementation starts.
+2. **True parallelism across disjoint write scopes:** Independent modules or
+   workstreams have a clear contract and non-overlapping `--scope` paths.
+3. **Epistemic independence (blind verification or NGT search):** You need an
+   unbiased code review, security audit, or parallel root-cause investigation
+   from a fresh agent (often a different `--client` provider) that has not
+   absorbed your chain-of-thought rationalizations.
+4. **Long-lived domain ownership:** Work touches a recurring domain (such as
+   release/deployment, UI, or database migrations) where reusing a persistent
+   specialist preserves negative memory (`tried_and_failed`) and direct user
+   follow-up.
+5. **Cross-provider arbitrage:** A task benefits from pairing distinct provider
+   strengths (`--client codex | claude | antigravity | kimi | muse`) or running
+   a `sidecar attach` acceptance monitor alongside implementation.
 
 ## Use the coordination CLI
 
