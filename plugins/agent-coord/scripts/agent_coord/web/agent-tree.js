@@ -45,9 +45,17 @@ const AgentTree = (() => {
       if (parent) edges.push({from: parent, to: id});
     };
     const first = collapsed.has(root) ? [] : tree.children.get(root) || [];
-    let left = 28, bottom = 28 + CARD_H;
-    for (const id of first) {
-      let y = 28 + CARD_H + 64, maxDepth = 0;
+    // Keep wide sibling groups from becoming a single, endlessly wide row.
+    // Each branch retains its own column, with rows sized by the tallest branch.
+    const columns = first.length > 3 ? 3 : Math.max(1, first.length);
+    let left = 28, rowTop = 28 + CARD_H + 64, bottom = 28 + CARD_H, width = CARD_W + 56;
+    for (let index = 0; index < first.length; index++) {
+      const id = first[index];
+      if (index && index % columns === 0) {
+        width = Math.max(width, left - COLUMN_GAP + 28);
+        left = 28; rowTop = bottom + 64;
+      }
+      let y = rowTop, maxDepth = 0;
       const pending = [{id, depth: 0, parent: root}];
       while (pending.length) {
         const item = pending.pop();
@@ -60,14 +68,16 @@ const AgentTree = (() => {
       bottom = Math.max(bottom, y - ROW_GAP);
       left += CARD_W + maxDepth * INDENT + COLUMN_GAP;
     }
-    const width = first.length ? left - COLUMN_GAP + 28 : CARD_W + 56;
+    if (first.length) width = Math.max(width, left - COLUMN_GAP + 28);
     add(root, (width - CARD_W) / 2, 28, 1);
     nodes.sort((a, b) => a.level === 1 ? -1 : b.level === 1 ? 1 : a.x - b.x || a.y - b.y);
     for (const edge of edges) {
       const a = positions.get(edge.from), b = positions.get(edge.to);
       if (edge.from === root) {
         const x1 = a.x + CARD_W / 2, y1 = a.y + CARD_H, x2 = b.x + CARD_W / 2, y2 = b.y;
-        edge.path = `M${x1},${y1} V${y1 + 32} H${x2} V${y2}`;
+        edge.path = first.length > columns
+          ? `M${x1},${y1} V${y1 + 16} H14 V${y2 - 32} H${x2} V${y2}`
+          : `M${x1},${y1} V${y1 + 32} H${x2} V${y2}`;
       } else {
         const x = b.x - 14, y = b.y + 24;
         edge.path = `M${a.x + 14},${a.y + CARD_H} V${y} H${b.x}`;
@@ -151,7 +161,7 @@ const AgentTree = (() => {
       }, {passive: false});
       this.viewport.addEventListener("keydown", e => this.keydown(e));
       if (window.ResizeObserver) {
-        this.observer = new window.ResizeObserver(() => { if (this.view?.fitted) this.fit(); });
+        this.observer = new window.ResizeObserver(() => { if (this.view?.fitted) this.fit(this.view.fullFit); });
         this.observer.observe(this.viewport);
       }
     }
@@ -159,11 +169,12 @@ const AgentTree = (() => {
     update(threads, root, selected) {
       const changedSelection = this.selected !== selected || this.root !== root;
       this.tree = graph(threads); this.root = root; this.selected = selected;
-      if (!this.views.has(root)) this.views.set(root, {x: 0, y: 0, scale: 1, collapsed: new Set(), fitted: true});
+      if (!this.views.has(root)) this.views.set(root, {x: 0, y: 0, scale: 1, collapsed: new Set(), fitted: true, fullFit: false});
       this.view = this.views.get(root);
       // A selected agent must stay visible, even when selected outside the tree.
       if (changedSelection) for (let parent = this.tree.parents.get(selected); parent; parent = this.tree.parents.get(parent)) this.view.collapsed.delete(parent);
       this.render();
+      if (changedSelection && this.view.fitted && !this.view.fullFit) this.fit(false);
     }
     render() {
       if (!this.tree || !this.view) return;
@@ -201,7 +212,7 @@ const AgentTree = (() => {
           this.scene.append(card);
         }
         this.scene.style.width = positioned.width + "px"; this.scene.style.height = positioned.height + "px";
-        if (this.view.fitted) this.fit();
+        if (this.view.fitted) this.fit(this.view.fullFit);
       }
       for (const {id} of positioned.nodes) this.renderCard(id);
       this.transform();
@@ -292,12 +303,18 @@ const AgentTree = (() => {
       if (this.view.collapsed.has(id)) this.view.collapsed.delete(id); else this.view.collapsed.add(id);
       this.render();
     }
-    fit() {
+    fit(fullFit = true) {
       if (!this.positioned?.width || !this.viewport.clientWidth || !this.viewport.clientHeight) return;
       const {width, height} = this.positioned, w = this.viewport.clientWidth, h = this.viewport.clientHeight;
-      this.view.scale = Math.max(.15, Math.min(1, (w - 24) / width, (h - 24) / height));
+      this.view.scale = Math.max(fullFit ? .15 : .7, Math.min(1, (w - 24) / width, (h - 24) / height));
       this.view.x = (w - width * this.view.scale) / 2; this.view.y = Math.max(12, (h - height * this.view.scale) / 2);
-      this.view.fitted = true; this.transform();
+      const selected = this.positioned.nodes.find(item => item.id === this.selected);
+      if (!fullFit && selected) {
+        const s = this.view.scale, left = this.view.x + selected.x * s, top = this.view.y + selected.y * s;
+        if (left < 0 || left + CARD_W * s > w) this.view.x = w / 2 - (selected.x + CARD_W / 2) * s;
+        if (top < 0 || top + CARD_H * s > h) this.view.y = h / 2 - (selected.y + CARD_H / 2) * s;
+      }
+      this.view.fitted = true; this.view.fullFit = fullFit; this.transform();
     }
     zoom(factor) {
       if (!this.view) return;

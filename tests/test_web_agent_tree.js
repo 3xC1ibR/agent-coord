@@ -37,6 +37,19 @@ test("full cards have non-overlapping positions, first-level columns and connect
   const collapsed = Tree.layout(tree, "root", new Set(["coder"]));
   assert.deepEqual(collapsed.nodes.map(n => n.id).sort(), ["coder", "research", "root", "writer"]);
 });
+test("large sibling groups wrap without overlapping nested branches or losing edges", () => {
+  const records = [thread("root"), ...Array.from({length: 9}, (_, i) => thread("agent" + i, "root")),
+    thread("nested", "agent0"), thread("deep", "nested"), thread("other", "agent4")];
+  const layout = Tree.layout(Tree.graph(records), "root");
+  const children = layout.nodes.filter(n => n.parent === "root");
+  assert.equal(new Set(children.map(n => n.y)).size, 3);
+  assert.equal(layout.edges.length, records.length - 1);
+  for (const a of layout.nodes) for (const b of layout.nodes) if (a !== b) {
+    assert.ok(a.x + Tree.CARD_W <= b.x || b.x + Tree.CARD_W <= a.x || a.y + Tree.CARD_H <= b.y || b.y + Tree.CARD_H <= a.y,
+      a.id + " overlaps " + b.id);
+  }
+  for (const edge of layout.edges) assert.ok(!/NaN|undefined/.test(edge.path));
+});
 test("current running state supersedes a historical failure; stale asks do not require intervention", () => {
   assert.equal(Tree.status(thread("running", null, {response_state: "working", turn_completion: {status: "failed"}})).key, "running");
   assert.equal(Tree.status(thread("ask", null, {checkpoint: {next_actor: "user", next_action: "Approve"}})).key, "waiting");
@@ -77,6 +90,27 @@ function setup() {
   const selected = [], panel = new Tree.Panel({document: doc, window, host: doc.createElement("div"), onSelect: id => selected.push(id)});
   return {panel, selected, doc, timers, window};
 }
+test("large trees start readable and explicit fit still shows the full tree", () => {
+  const {panel} = setup();
+  panel.viewport.clientWidth = 600; panel.viewport.clientHeight = 400;
+  const records = [thread("root"), ...Array.from({length: 12}, (_, i) => thread("agent" + i, "root"))];
+  panel.update(records, "root", "root");
+  assert.equal(panel.view.scale, .7);
+  assert.ok(panel.view.y + panel.positioned.nodes.find(n => n.id === "root").y * panel.view.scale >= 0);
+  panel.fit();
+  assert.ok(panel.view.scale < .7);
+  assert.ok(panel.positioned.width * panel.view.scale <= panel.viewport.clientWidth);
+  assert.ok(panel.positioned.height * panel.view.scale <= panel.viewport.clientHeight);
+  panel.update(records, "root", "root");
+  assert.equal(panel.view.fullFit, true);
+  const another = setup().panel;
+  another.viewport.clientWidth = 600; another.viewport.clientHeight = 400;
+  another.update(records, "root", "root");
+  another.update(records, "root", "agent9");
+  const selected = another.positioned.nodes.find(n => n.id === "agent9");
+  assert.ok(another.view.y + selected.y * another.view.scale >= 0);
+  assert.ok(another.view.y + (selected.y + Tree.CARD_H) * another.view.scale <= 400);
+});
 test("selection updates reuse card elements and camera; folding and keyboard navigation preserve the full root", () => {
   const {panel, selected, doc} = setup();
   const records = [thread("root"), thread("child", "root"), thread("grandchild", "child")];
