@@ -263,6 +263,22 @@ test("status refreshes retain the dragged DOM tab until drop or cancellation", (
   assert.equal(prevented, true); assert.equal(tabs.dragging, null);
 });
 
+test("Shift-click closes a conversation tab without selecting it", async () => {
+  const element = () => ({children: [], dataset: {}, scrollLeft: 0, classList: {add() {}},
+    append(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
+    setAttribute() {}, contains: () => false, querySelectorAll: () => []});
+  const container = element(), visits = [], closed = [];
+  const tabs = new ThreadTabs({container, document: {createElement: element}, onSelect: id => visits.push(id)});
+  tabs.onClose = id => closed.push(id);
+  tabs.setProject("/work"); tabs.open(thread("a")); tabs.open(thread("b"));
+  await container.children[1].children[0].onclick({shiftKey: true});
+  assert.deepEqual(tabs.items.map(item => item.thread_id), ["b"]);
+  assert.equal(tabs.selected, "b");
+  assert.deepEqual(closed, ["a"]); assert.deepEqual(visits, []);
+  await container.children[1].children[0].onclick({shiftKey: false});
+  assert.deepEqual(tabs.items.map(item => item.thread_id), ["b"]);
+});
+
 test("conversation tabs keep action dots through reading and refresh when blockers are handled", () => {
   const element = () => ({children: [], dataset: {}, attributes: {}, scrollLeft: 0, classList: {add() {}},
     append(child) { this.children.push(child); }, replaceChildren() { this.children = []; },

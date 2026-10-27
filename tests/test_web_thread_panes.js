@@ -395,6 +395,22 @@ test("group tab controls focus and close the requested tab without touching neig
   assert.equal(state.threadTabs.items.some(item => item.thread_id === "b"), false);
 });
 
+test("Shift-click closes a split conversation tab without focusing it", async () => {
+  const {shell, state} = shellFixture();
+  for (const id of ["a", "b", "c", "d"]) state.threadTabs.open(thread(id));
+  state.selected = "a";
+  shell.onDrop(thread("d"), 0, "right");
+  shell.slots = [];
+  const strip = shell.renderPane(0).children[0].children[0];
+  const b = strip.children.find(wrapper => wrapper.children[0].dataset.paneThread === "b");
+  const selected = shell.selected;
+  b.children[0].onclick({shiftKey: true});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(Array.from(shell.layout.groups[0]), ["a", "c"]);
+  assert.equal(shell.selected, selected);
+  assert.equal(state.threadTabs.items.some(item => item.thread_id === "b"), false);
+});
+
 test("pane tabs expose status and unread-response indicators that follow thread updates", () => {
   const {shell, state} = shellFixture();
   state.threadTabs.open({...thread("run"), response_state: "working", unread_result: true});

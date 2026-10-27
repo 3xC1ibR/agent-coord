@@ -400,7 +400,8 @@ class ThreadPanes {
     }
     for (const id of layout.groups[slot]) {
       const thread = this.records.get(id).thread;
-      const tab = this.button(thread.title, thread.title, () => this.focus(id));
+      const tab = this.button(thread.title, thread.title, event =>
+        this.tabLayout && event?.shiftKey ? this.closeConversation?.(id) : this.focus(id));
       const wrapper = this.tabLayout ? this.el("div", "conversation-tab") : tab;
       if (this.tabLayout) {
         tab.className = "conversation-tab-select";

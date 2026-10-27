@@ -175,7 +175,8 @@ class ThreadTabs {
       tab.dataset.needsAction = String(needsAction);
       tab.dataset.status = item.response_state || "";
       tab.dataset.unread = item.unread_result ? "true" : "false";
-      tab.onclick = () => this.activate(id); tab.onkeydown = event => this.keydown(event, id);
+      tab.onclick = event => id && !scratchpad && event.shiftKey ? this.close(id) : this.activate(id);
+      tab.onkeydown = event => this.keydown(event, id);
       wrapper.dataset.selected = String(this.selected === id);
       wrapper.append(tab);
       if (id) {
