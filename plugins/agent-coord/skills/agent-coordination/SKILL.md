@@ -585,12 +585,24 @@ repository's work rules. Model discovery and creation use the app's provider:
 
 ```bash
 agent-coord thread models --client codex --cwd /absolute/workspace --wait 30
+agent-coord thread provider-limits --client codex --cwd /absolute/workspace --wait 30
 agent-coord thread create \
   --cwd /absolute/workspace --client codex --name 'Release specialist' \
   --model <advertised-model> --effort <supported-level> \
   --request-id <unique-request-key> --wait 30 \
   'The exact user request, including its scope and constraints.'
 ```
+
+Before choosing among providers or models for delegated work, use `thread models`
+to discover advertised models and `thread provider-limits` for account quota
+windows, percentages, reset times, observation time, and freshness. Repeat for
+each relevant client. Quotas can be shared across models or scoped to a named
+pool; do not infer a model-specific allowance where none is reported. A stale,
+missing, unsupported, or failed reading means availability is unknown, not
+unlimited or exhausted. A past reset time does not prove quota has reset. An
+advertised model and remaining quota do not guarantee a successful request.
+These commands require a running Ribbon Field app; inspect a queued request with
+`thread request-status` if it does not complete within the wait.
 
 Use `--client claude` for Claude Code, `--client antigravity` for Google
 Antigravity, `--client kimi` for Kimi Code, or `--client muse` for Muse Code

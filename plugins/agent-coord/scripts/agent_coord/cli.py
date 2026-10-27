@@ -253,7 +253,11 @@ def _parser() -> argparse.ArgumentParser:
     models.add_argument("--from-session", help="Requester; defaults to the current caller.")
     models.add_argument("--cwd", default=os.getcwd())
     models.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
-    for control in (create_agent, settings, models, move, resume):
+    limits = thread_commands.add_parser("provider-limits", help="Read provider quota windows through the running app.")
+    limits.add_argument("--from-session", help="Requester; defaults to the current caller.")
+    limits.add_argument("--cwd", default=os.getcwd())
+    limits.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
+    for control in (create_agent, settings, models, limits, move, resume):
         control.add_argument("--request-id", help="Stable idempotency key; reuse the same key when retrying this request.")
         control.add_argument("--wait", type=float, default=5, help="Wait up to 0–30 seconds for confirmation (default 5).")
     request_status = thread_commands.add_parser("request-status", help="Inspect an app request without repeating it.")
@@ -763,7 +767,7 @@ def run(arguments: argparse.Namespace) -> Any:
         if arguments.thread_command == "dispatch-history":
             from .dispatch_runtime import routing_history
             return routing_history(store, arguments.session_id, after=arguments.after, limit=arguments.limit)
-        if arguments.thread_command in {"create", "settings", "models", "move", "resume", "request-status", "cancel-request"}:
+        if arguments.thread_command in {"create", "settings", "models", "provider-limits", "move", "resume", "request-status", "cancel-request"}:
             control = AppControl(store)
             operation = arguments.thread_command
             if operation == "cancel-request":

@@ -345,6 +345,7 @@ A registered dispatcher can ask the running app to create an agent:
 
 ```bash
 agent-coord thread models --client codex --cwd /absolute/workspace --wait 30
+agent-coord thread provider-limits --client codex --cwd /absolute/workspace --wait 30
 agent-coord thread create \
   --cwd /absolute/workspace --client codex --name 'Release specialist' \
   --model <advertised-model> --effort <supported-level> \

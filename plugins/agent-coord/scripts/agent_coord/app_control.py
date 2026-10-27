@@ -52,7 +52,7 @@ class AppControl:
 
     def request(self, operation, sender_session_id, payload, *, thread_id=None, request_id=None):
         self.store.get_session(sender_session_id)
-        if operation not in {"create", "settings", "models", "move", "resume", "sidecar", "session"}:
+        if operation not in {"create", "settings", "models", "provider-limits", "move", "resume", "sidecar", "session"}:
             raise CoordinationError("Unknown app control operation.")
         payload = dict(payload)
         if operation == "session":
@@ -268,8 +268,12 @@ class AppControl:
 
 
 class AppControlWorker:
-    def __init__(self, sessions):
+    def __init__(self, sessions, provider_limits=None):
         self.sessions = sessions
+        if provider_limits is None:
+            from .provider_limits import ProviderLimits
+            provider_limits = ProviderLimits(sessions)
+        self.provider_limits = provider_limits
         self.control = AppControl(sessions.store)
         from .session_control import SessionControl
         self.interactive = SessionControl(sessions.store)
@@ -323,6 +327,13 @@ class AppControlWorker:
                 result = execute(self, request, payload)
             elif request["operation"] == "models":
                 result = {"client": payload.get("client", "codex"), "models": self.sessions.models(payload.get("client", "codex"))}
+            elif request["operation"] == "provider-limits":
+                client = payload.get("client", "codex")
+                snapshot = self.provider_limits.refresh(client)
+                row = next(row for row in snapshot["providers"] if row["provider"] == client)
+                # Request receipts are durable; do not persist account identity.
+                row.pop("account", None)
+                result = {"provider": row, "refresh_seconds": snapshot["refresh_seconds"]}
             elif request["operation"] == "sidecar":
                 payload = self.sessions.sidecars.watches.validate(request["sender_session_id"], payload)
                 if not payload.get("existing_id"):

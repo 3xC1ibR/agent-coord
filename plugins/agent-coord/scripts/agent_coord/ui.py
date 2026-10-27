@@ -274,12 +274,13 @@ def _handler(
     remote_access: RemoteAccess | None = None,
     web_push: WebPush | None = None,
     native_push: NativePush | None = None,
+    provider_limits: ProviderLimits | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     views = ViewStore(store)
     navigation = NavigationStore(store)
     speech = Speech(store.database_path)
     jev = JevSettings(store.database_path)
-    provider_limits = ProviderLimits(browser_sessions) if browser_sessions is not None else None
+    provider_limits = provider_limits or (ProviderLimits(browser_sessions) if browser_sessions is not None else None)
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None) -> None:
@@ -1105,8 +1106,9 @@ def make_ui_server(
     remote = remote_access or RemoteAccess(store.database_path)
     push = WebPush(store, sessions, remote)
     native = NativePush(store, sessions, remote)
+    provider_limits = ProviderLimits(sessions)
     try:
-        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native))
+        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native, provider_limits))
     except Exception:
         push.close()
         native.close()
@@ -1117,7 +1119,7 @@ def make_ui_server(
     server.web_push = push
     server.native_push = native
     server.thread_control = ThreadControlWorker(sessions)
-    server.app_control = AppControlWorker(sessions)
+    server.app_control = AppControlWorker(sessions, provider_limits)
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
     remote.restore(f"http://{target_host}:{bound_port}")

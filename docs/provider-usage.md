@@ -10,6 +10,15 @@ show unavailable account limits. A provider can omit a window or its percentage;
 missing values never become zero or an unlimited allowance. A passed reset time
 does not imply the account has reset until the provider reports a new reading.
 
+Agents can query the same runtime cache with `agent-coord thread provider-limits
+--client codex --wait 30` (also `claude`, `antigravity`, `kimi`, and `muse`).
+The command refreshes subject to the same minimum interval and returns the
+provider's state, windows, observation time, and stale flag. Use `thread models`
+to discover advertised models separately: shared quota windows are not proof
+of individual model availability. Unknown or stale readings and passed reset
+times do not establish availability. The running app executes the request; queued
+receipts can be checked with `thread request-status`.
+
 ## Collection
 
 - **Codex:** existing app-server connection, `account/read` followed by
@@ -46,6 +55,9 @@ Transient failures retain the last successful reading, visibly marked as old.
 Sign-out, unsupported connections, and changed credential identities clear old
 readings to avoid presenting another account's usage. Cached snapshots and
 access tokens are process-local and disappear when the app backend restarts.
+Agent command receipts persist their returned quota snapshot in the local request
+journal, without the account identity; their timestamps describe the original
+reading and must not be interpreted as a fresh query later.
 
 ## References and validation
 

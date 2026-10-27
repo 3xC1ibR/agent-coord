@@ -496,6 +496,48 @@ class AppControlTests(unittest.TestCase):
             self.assertTrue(result["result"]["models"][0]["supportedReasoningEfforts"])
         self.assertEqual(self.sessions.list_sessions(), [])
 
+    def test_provider_limits_refresh_uses_runtime_cache_and_excludes_account_identity(self):
+        from agent_coord.provider_limits import ProviderLimits
+        from unittest.mock import Mock
+        collector = Mock(return_value={"windows": [{"id": "weekly", "label": "Weekly", "used_percent": 100,
+                                                    "resets_at": 2000}], "account": "private@example.com"})
+        self.worker.provider_limits = ProviderLimits(self.sessions, clock=lambda: 1000, collectors={"claude": collector})
+        receipt = self.cli("provider-limits", "--client", "claude", "--wait", "0")
+        self.worker.process_once()
+        result = self.control.status(receipt["request_id"])["result"]["provider"]
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["windows"][0]["used_percent"], 100)
+        self.assertEqual(result["windows"][0]["resets_at"], 2000)
+        self.assertNotIn("account", result)
+        self.assertFalse(result["stale"])
+        receipt = self.cli("provider-limits", "--client", "claude", "--wait", "0")
+        self.worker.process_once()
+        self.assertEqual(self.control.status(receipt["request_id"])["status"], "completed")
+        collector.assert_called_once()
+        receipt = self.cli("provider-limits", "--client", "kimi", "--wait", "0")
+        self.worker.process_once()
+        self.assertEqual(self.control.status(receipt["request_id"])["result"]["provider"]["state"], "unsupported")
+        self.assertEqual(self.sessions.list_sessions(), [])
+
+    def test_provider_limits_reports_stale_previous_reading_after_refresh_failure(self):
+        from agent_coord.provider_limits import ProviderLimits, QuotaError
+        from unittest.mock import Mock
+        now = [1000]
+        collector = Mock(side_effect=[{"windows": [{"id": "weekly", "label": "Weekly", "used_percent": 30,
+                                                    "resets_at": 1100}]}, QuotaError("Try again shortly.")])
+        self.worker.provider_limits = ProviderLimits(self.sessions, clock=lambda: now[0], collectors={"claude": collector})
+        first = self.cli("provider-limits", "--client", "claude", "--wait", "0")
+        self.worker.process_once()
+        self.assertEqual(self.control.status(first["request_id"])["result"]["provider"]["state"], "ready")
+        now[0] = 1120
+        second = self.cli("provider-limits", "--client", "claude", "--wait", "0")
+        self.worker.process_once()
+        row = self.control.status(second["request_id"])["result"]["provider"]
+        self.assertEqual(row["state"], "error")
+        self.assertTrue(row["stale"])
+        self.assertEqual(row["observed_at"], 1000)
+        self.assertEqual(row["windows"][0]["resets_at"], 1100)
+
     def test_settings_wait_for_idle_and_user_queue_then_apply_together(self):
         thread = self.create()
         self.sessions.inbox_wake.process_once()
