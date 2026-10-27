@@ -30,7 +30,8 @@ const threadViews = (() => {
   }
   function badges(threads, values) {
     const visible = threads.filter(thread => matches(thread, values));
-    return {attention: visible.filter(needsYou).length,
+    const visibleIds = new Set(visible.map(thread => thread.thread_id));
+    return {attention: visible.filter(thread => needsYou(thread) && !visibleIds.has(thread.attention_grouped_under)).length,
       action: visible.some(needsAction),
       active: visible.some(t => t.attention !== "archived" && t.response_state === "working"),
       completed: visible.some(t => t.attention === "now" && t.unhandled_response && (t.unread_result || t.unread))};

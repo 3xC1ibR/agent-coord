@@ -132,7 +132,8 @@ function shellFixture() {
   const state = {selected: null, drafts: new Map(), attachments: {drafts: new Map(), pending: () => false,
     items(id) { return this.drafts.get(id) || []; }}};
   const window = {addEventListener() {}, dispatchEvent() {}};
-  const context = vm.createContext({window, document: doc, location: {search: ""}, Event, URLSearchParams, setTimeout});
+  const threadViews = require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews;
+  const context = vm.createContext({window, document: doc, location: {search: ""}, Event, URLSearchParams, setTimeout, threadViews});
   vm.runInContext(fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/thread-panes.js"), "utf8"), context);
   vm.runInContext("ThreadPanes.prototype.render = function() {}; ThreadPanes.prototype.position = function() {};", context);
   const visits = [], errors = [];
@@ -408,6 +409,7 @@ test("pane tabs expose status and unread-response indicators that follow thread 
   const indicator = id => { const tab = tabOf(id); return tab && {status: tab.dataset.status, unread: tab.dataset.unread}; };
   assert.deepEqual(indicator("run"), {status: "working", unread: "true"});
   assert.deepEqual(indicator("blocked"), {status: "input", unread: "false"});
+  assert.equal(tabOf("blocked").dataset.needsAction, "true");
   assert.deepEqual(indicator("answered"), {status: "reply", unread: "true"});
   // A later read marks the response seen without touching the other tabs.
   const record = shell.records.get("answered"), source = {};
@@ -416,6 +418,10 @@ test("pane tabs expose status and unread-response indicators that follow thread 
   shell.changed(source, {...record.thread, unread_result: false});
   assert.deepEqual(indicator("answered"), {status: "reply", unread: "false"});
   assert.deepEqual(indicator("run"), {status: "working", unread: "true"});
+  const blocked = shell.records.get("blocked"), blockedSource = {};
+  blocked.frame = {contentWindow: blockedSource}; shell.chrome = {querySelectorAll: () => [tabOf("blocked")]};
+  shell.changed(blockedSource, {...blocked.thread, needs_attention: false, unhandled_response: false, can_handle_response: false});
+  assert.equal(tabOf("blocked").dataset.needsAction, "false");
 });
 
 test("moving and merging groups preserves their edited order in the remaining normal strip", async () => {
@@ -612,7 +618,8 @@ test("background conversations keep unread results until actual focus and consum
   const document = {body: {classList: {add() {}}}, hasFocus: () => focused,
     getElementById: id => controls[id], querySelector: () => null,
     addEventListener: (type, callback) => { listeners[type] = callback; }};
-  const c = vm.createContext({window, document, location: {hash: "#a"}, Event,
+  const threadViews = require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews;
+  const c = vm.createContext({window, document, location: {hash: "#a"}, Event, threadViews,
     setTimeout, console, EventSource: class { constructor() { throw new Error("Pane opened a duplicate event stream"); } }});
   vm.runInContext(source, c);
   await c.setupPaneConversation({state, document, api: async (path, body) => requests.push({path, body}),

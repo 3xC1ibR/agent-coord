@@ -182,6 +182,16 @@ test("dismissed saved requests leave Focus attention and its map until new input
     assert.equal(WorkingSet.columnOf({...dismissed, status: "running", response_state: "working"}), "working");
   }
 });
+test("due reminders and new Later activity remain visible in Attention", () => {
+  const c = setup();
+  const reminder = thread("reminder", {snooze_due: true, needs_attention: true, unhandled_response: false});
+  const later = thread("later", {attention: "later", needs_attention: true, response_state: "reply", unhandled_response: true, can_handle_response: true});
+  const stalled = thread("stalled", {status: "stalled", response_state: "action", needs_attention: true, unhandled_response: false});
+  c.render([reminder, later, stalled]);
+  assert.deepEqual(c.ids().sort(), ["later", "reminder", "stalled"]);
+  assert.equal(WorkingSet.levelOf({...later, needs_attention: false}), 2);
+  assert.equal(WorkingSet.levelOf({...reminder, snooze_due: false, needs_attention: false}), 2);
+});
 test("a response remains in Attention when read and leaves when handled", () => {
   const c = setup(), answer = thread("question", {unread_result: true, unhandled_response: true, response_classification: classified("findings")});
   c.render([{...answer, status: "running", response_state: "working"}]); assert.deepEqual(c.ids(), ["question"]);
@@ -448,7 +458,8 @@ test("production integration shares cards and uses seen receipt IDs without mark
   const c = {state, document: {}, window: {}, savedViews: {activeId: "all", openGroup: id => calls.push(["group", id])}, $: id => nodes[id],
     WorkingSet: {create(value) { config = value; return {render(t, host, opts) { options = opts; rendered = t; }}; }},
     threadCard: (...args) => calls.push(args), action: f => f(), select: id => calls.push(["open", id]),
-    threadPath: id => "threads/" + id, api: async (...args) => calls.push(args), refreshList: async () => calls.push(["refresh"])};
+    threadPath: id => "threads/" + id, api: async (...args) => calls.push(args), refreshList: async () => calls.push(["refresh"]),
+    markThreadHandled: async item => calls.push(["dismiss", item])};
   vm.createContext(c); vm.runInContext(source.slice(source.indexOf("function renderOverviewLayout("), source.indexOf("function upcomingSchedules(")), c);
   c.renderOverviewLayout([]); assert.equal(nodes["atlas-overview"].hidden, true); assert.equal(nodes["working-set-overview"].hidden, false); assert.equal(nodes.overview.hidden, true);
   assert.equal(options.workspace, "/work");
@@ -466,7 +477,5 @@ test("production integration shares cards and uses seen receipt IDs without mark
   assert.equal(JSON.stringify(calls[1][1]), JSON.stringify({seen: true, seen_checkpoint_id: 8, seen_completion_id: 12}));
   assert(!Object.hasOwn(calls[1][1], "handled"));
   calls.length = 0; await config.onDismiss(t);
-  assert.equal(calls[0][0], "threads/a");
-  assert.equal(JSON.stringify(calls[0][1]), JSON.stringify({handled: true, handled_checkpoint_id: 8, handled_completion_id: 12}));
-  assert.deepEqual(calls[1], ["refresh"]);
+  assert.deepEqual(calls[0], ["dismiss", t]);
 });

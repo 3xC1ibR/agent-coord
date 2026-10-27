@@ -342,6 +342,7 @@ async function markThreadHandled(thread) {
   state.threadActions?.notify("dismiss:" + thread.thread_id,
     "Update dismissed · Thread remains in " + (thread.attention === "later" ? "Later" : "Now"));
   await state.rollUp?.responded(ticket);
+  await refreshList();
 }
 async function toggleThreadLater(thread) {
   await updateThreadAttention(thread, {attention: thread.attention === "later" ? "now" : "later"});
@@ -385,8 +386,9 @@ async function snoozeThread(thread, deadline) {
 }
 async function resumeThreadSnooze(thread) {
   const ticket = state.rollUp?.ticket(thread.thread_id);
-  await updateThreadAttention(thread, {resume_snooze: thread.snoozed_until});
+  if (await updateThreadAttention(thread, {resume_snooze: thread.snoozed_until}) === false) return;
   await state.rollUp?.responded(ticket);
+  await refreshList();
 }
 function threadCard(thread, compact = false, inAttention = false) {
   const reason = threadGrouping.reason(thread);
@@ -828,11 +830,7 @@ function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) 
       renderCard: (thread, needsReply) => threadCard({...thread, attention_target_thread_id: null, can_handle_response: false}, false, needsReply),
       onOpen: id => action(() => select(id)),
       onGroupChange: id => action(() => savedViews.openGroup(id)),
-      onDismiss: thread => action(async () => {
-        await api(threadPath(thread.thread_id), {handled: true, handled_checkpoint_id: thread.checkpoint?.id || 0,
-          handled_completion_id: thread.turn_completion?.id || 0});
-        await refreshList();
-      }),
+      onDismiss: thread => action(() => markThreadHandled(thread)),
       onRead: thread => action(async () => {
         await api(threadPath(thread.thread_id), {seen: true, seen_checkpoint_id: thread.checkpoint?.id || 0,
           seen_completion_id: thread.turn_completion?.id || 0});

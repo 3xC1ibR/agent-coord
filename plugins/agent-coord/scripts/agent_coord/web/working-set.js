@@ -7,7 +7,7 @@ const WorkingSet = (() => {
   const LEVELS = ["Attention", "Replies to read", "Idle"];
   const PHASES = ["new", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"];
   const GROUPINGS = ["group", "domain", "workspace"], ALL = "overview:all", CAP = 12;
-  const parked = t => t.attention === "later" || t.attention === "archived" || t.snoozed;
+  const parked = t => t.attention === "archived" || t.snoozed || t.attention === "later" && !grouping.awaitsUser(t);
   const running = t => t.attention !== "archived" && grouping.status(t).key === "running";
   function needsReply(t) {
     return !parked(t) && !grouping.acknowledgedRequest(t) && (t.status === "needs input" || t.response_state === "input" ||
@@ -16,6 +16,7 @@ const WorkingSet = (() => {
   const handoff = t => t.response_classification?.status === "classified" ? t.response_classification.choice : null;
   function columnOf(t) {
     if (running(t)) return "working";
+    if (grouping.awaitsUser(t) && (t.snooze_due || t.attention_items?.length)) return "attention";
     if (parked(t) || grouping.acknowledgedRequest(t)) return null;
     const choice = handoff(t), pending = t.unhandled_response ?? t.unread_result;
     if (t.status === "needs input" || t.response_state === "failed") return "blocked";
@@ -25,6 +26,7 @@ const WorkingSet = (() => {
     if (t.unhandled_response === true) return "working";
     // Older snapshots may have only an unread marker.
     if (t.unhandled_response == null && t.unread_result === true) return choice === "update" ? "working" : "replies";
+    if (grouping.awaitsUser(t)) return "attention";
     return null;
   }
   function levelOf(t) { const column = columnOf(t); return column === "replies" ? 1 : column ? 0 : 2; }

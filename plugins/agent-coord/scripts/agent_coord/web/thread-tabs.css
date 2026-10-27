@@ -10,10 +10,7 @@
 .conversation-tab[data-selected=false]:not(:hover) .conversation-tab-close { visibility: hidden; }
 .conversation-tab-select[data-status=working]::before { content: "● "; color: var(--accent); animation: tab-working-blink 1.4s ease-in-out infinite; }
 @keyframes tab-working-blink { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
-.conversation-tab-select[data-status=input]::before,
-.conversation-tab-select[data-status=action]::before,
-.conversation-tab-select[data-status=failed]::before { content: "● "; color: var(--warm); }
-.conversation-tab-select[data-unread=true]:not([data-needs-action=true]):not([data-status=working]):not([data-status=input]):not([data-status=action]):not([data-status=failed])::before { content: "● "; color: var(--responded); }
+.conversation-tab-select[data-unread=true]:not([data-needs-action=true]):not([data-status=working])::before { content: "● "; color: var(--responded); }
 .conversation-tab-select[data-needs-action=true]::before { content: "● "; color: var(--warm); animation: tab-working-blink 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
   .conversation-tab-select[data-status=working]::before,

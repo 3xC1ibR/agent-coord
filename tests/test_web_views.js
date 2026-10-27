@@ -42,6 +42,13 @@ test("tab badges share handled attention, include pins, and exclude Later", () =
   }
 });
 
+test("badges count grouped attention once, while filtered children remain visible", () => {
+  const owner = thread("owner", {needs_attention: true, response_state: "input"});
+  const child = thread("child", {needs_attention: true, response_state: "input", attention_grouped_under: "owner", repository_id: "other"});
+  assert.equal(threadViews.badges([owner, child], {}).attention, 1);
+  assert.equal(threadViews.badges([owner, child], {repository: "other"}).attention, 1);
+});
+
 test("active-work badges follow the view's filters and ignore waiting or closed work", () => {
   const input = [thread("running", {attention: "later"}), thread("waiting", {repository_id: "stoic", response_state: "input"}),
     thread("closed", {repository_id: "stoic", attention: "archived"})];
