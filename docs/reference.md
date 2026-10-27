@@ -1683,6 +1683,13 @@ without creating duplicate work. Ownership follows the caller identity, with
 explicit `--session-id` available as for other coordination commands. Managed
 jobs and their logs are visible only through their owner's commands.
 
+Temporary database write contention does not stop a running job. Supervisors
+continue draining output and enforcing timeouts while retrying bookkeeping,
+then retain a finished command's result until it can be saved. A fresh local
+heartbeat on the held supervisor lock prevents a delayed database heartbeat
+from being mistaken for a dead supervisor. Completion subscriptions fire after
+the result is saved; retrying persistence never reruns the command.
+
 Events arriving during a turn wait for an eligible idle turn. Stop pauses
 automatic wakes; Closed conversations retain events until explicitly reopened.
 Cancellation suppresses an event that has not yet been delivered. Delivery

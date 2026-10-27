@@ -16,11 +16,13 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import logging
 import math
 import os
 import re
 import select
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -31,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from .store import CoordinationError, CoordinationStore
+from .browser_persistence import database_busy
 
 JOB_STATES = ("queued", "starting", "running", "completed", "failed", "cancelled", "timed_out", "unknown")
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "timed_out", "unknown"})
@@ -489,7 +492,8 @@ class ManagedJobs:
         else:
             if not _pid_is_running(pid):
                 new_state, error = "unknown", f"Job supervisor {pid} exited without recording a result."
-            elif row["heartbeat_at"] is not None and now - row["heartbeat_at"] > self.heartbeat_stale_seconds:
+            elif (row["heartbeat_at"] is not None and now - row["heartbeat_at"] > self.heartbeat_stale_seconds
+                  and not _supervisor_heartbeat_is_fresh(self.store, row["id"], self.heartbeat_stale_seconds)):
                 new_state, error = "unknown", "Job supervisor heartbeat is stale; the command result is unknown."
         if new_state is None:
             return row
@@ -503,6 +507,51 @@ class ManagedJobs:
 
 
 # -- supervisor --------------------------------------------------------------
+
+
+def _touch_supervisor(store: CoordinationStore, job_id: str) -> None:
+    # The held lock doubles as a local heartbeat while SQLite is unavailable.
+    # It is never inherited by the command (Popen closes file descriptors).
+    now = store.clock()
+    os.utime(job_directory(store, job_id) / "supervisor.lock", (now, now))
+
+
+def _supervisor_heartbeat_is_fresh(store: CoordinationStore, job_id: str, stale_seconds: float) -> bool:
+    path = job_directory(store, job_id) / "supervisor.lock"
+    try:
+        with path.open("r") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return store.clock() - os.fstat(lock_file.fileno()).st_mtime <= stale_seconds
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except FileNotFoundError:
+        pass
+    return False
+
+
+@contextmanager
+def _supervisor_connection(store: CoordinationStore):
+    with store._connection() as db:
+        # Never spend the store's five-second busy wait in the child control
+        # loop: keep draining output and enforcing timeouts during contention.
+        db.execute("PRAGMA busy_timeout = 0")
+        yield db
+
+
+def _save_progress(store, job_id, token, child_pid, discarded) -> bool:
+    _touch_supervisor(store, job_id)
+    try:
+        with _supervisor_connection(store) as db:
+            now = store.clock()
+            db.execute("""UPDATE jobs SET child_pid = ?, heartbeat_at = ?, updated_at = ?, output_discarded = ?
+                          WHERE id = ? AND supervisor_token = ? AND state = 'running'""",
+                       (child_pid, now, now, discarded, job_id, token))
+        return True
+    except sqlite3.OperationalError as exc:
+        if not database_busy(exc):
+            raise
+        return False  # Coalesce bookkeeping and retry on the next poll.
 
 
 @contextmanager
@@ -565,12 +614,24 @@ def supervise(store: CoordinationStore, job_id: str, token: str, *,
 def _finish(store: CoordinationStore, job_id: str, token: str, *, state: str, exit_code: int | None,
             error: str | None, discarded: int) -> dict[str, Any]:
     now = store.clock()
-    with store._connection() as db:
-        db.execute("""UPDATE jobs SET state = ?, exit_code = ?, error = ?, finished_at = ?, updated_at = ?,
-                      heartbeat_at = ?, output_discarded = ?
-                      WHERE id = ? AND supervisor_token = ? AND state = 'running'""",
-                   (state, exit_code, error, now, now, now, discarded, job_id, token))
-        return ManagedJobs._record(db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
+    warned = False
+    while True:
+        _touch_supervisor(store, job_id)
+        try:
+            with _supervisor_connection(store) as db:
+                db.execute("""UPDATE jobs SET state = ?, exit_code = ?, error = ?, finished_at = ?, updated_at = ?,
+                              heartbeat_at = ?, output_discarded = ?
+                              WHERE id = ? AND supervisor_token = ? AND state = 'running'""",
+                           (state, exit_code, error, now, now, now, discarded, job_id, token))
+                return ManagedJobs._record(db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
+        except sqlite3.OperationalError as exc:
+            if not database_busy(exc):
+                raise
+            if not warned:
+                logging.getLogger(__name__).warning("Database busy; retaining result for job %s until it can be saved", job_id)
+                warned = True
+            # Only retry publishing the result, never executing the command.
+            time.sleep(DEFAULT_POLL_SECONDS)
 
 
 def _run_claimed(store, jobs, row, token, *, poll_seconds, heartbeat_seconds, grace_seconds,
@@ -585,9 +646,6 @@ def _run_claimed(store, jobs, row, token, *, poll_seconds, heartbeat_seconds, gr
         return _finish(store, job_id, token, state="failed", exit_code=None,
                        error=f"Cannot start command: {exc}", discarded=0)
     monitor = ChildExit(child)
-    with store._connection() as db:
-        db.execute("UPDATE jobs SET child_pid = ?, updated_at = ? WHERE id = ? AND supervisor_token = ?",
-                   (child.pid, store.clock(), job_id, token))
     pipe = child.stdout
     fd = pipe.fileno()
     os.set_blocking(fd, False)
@@ -598,6 +656,7 @@ def _run_claimed(store, jobs, row, token, *, poll_seconds, heartbeat_seconds, gr
     term_sent_at: float | None = None
     killed = False
     last_heartbeat = started
+    progress_pending = True
     last_cancel_check = started - poll_seconds
     cancel_requested = False
     eof = False
@@ -612,9 +671,7 @@ def _run_claimed(store, jobs, row, token, *, poll_seconds, heartbeat_seconds, gr
                     data = None
                 if data:
                     if log.append(data):
-                        with store._connection() as db:
-                            db.execute("UPDATE jobs SET output_discarded = ? WHERE id = ? AND supervisor_token = ?",
-                                       (log.discarded, job_id, token))
+                        progress_pending = True
                 if data == b"":
                     eof = True
             now = monotonic()
@@ -637,9 +694,13 @@ def _run_claimed(store, jobs, row, token, *, poll_seconds, heartbeat_seconds, gr
             if outcome is None:
                 if now - last_cancel_check >= poll_seconds:
                     last_cancel_check = now
-                    with store._connection() as db:
-                        flag = db.execute("SELECT cancel_requested_at FROM jobs WHERE id = ?", (job_id,)).fetchone()
-                    cancel_requested = bool(flag and flag["cancel_requested_at"] is not None)
+                    try:
+                        with _supervisor_connection(store) as db:
+                            flag = db.execute("SELECT cancel_requested_at FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                        cancel_requested = bool(flag and flag["cancel_requested_at"] is not None)
+                    except sqlite3.OperationalError as exc:
+                        if not database_busy(exc):
+                            raise
                 if cancel_requested:
                     outcome = "cancelled"
                 elif deadline is not None and now >= deadline:
@@ -654,11 +715,9 @@ def _run_claimed(store, jobs, row, token, *, poll_seconds, heartbeat_seconds, gr
                 killed = True
             if outcome is not None and killed and exited:
                 break
-            if now - last_heartbeat >= heartbeat_seconds:
+            if progress_pending or now - last_heartbeat >= heartbeat_seconds:
                 last_heartbeat = now
-                with store._connection() as db:
-                    db.execute("UPDATE jobs SET heartbeat_at = ?, updated_at = ? WHERE id = ? AND supervisor_token = ?",
-                               (store.clock(), store.clock(), job_id, token))
+                progress_pending = not _save_progress(store, job_id, token, child.pid, log.discarded)
         if not eof:
             # Final non-blocking drain of whatever is already buffered.
             for _ in range(16):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -13,8 +14,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
-from agent_coord.jobs import ManagedJobs, TERMINAL_STATES, DEFAULT_LOG_LIMIT_BYTES, supervise
+from agent_coord.jobs import (ManagedJobs, TERMINAL_STATES, DEFAULT_LOG_LIMIT_BYTES, supervise,
+                              _supervisor_lock, _touch_supervisor)
 from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.event_subscriptions import EventSubscriptions
 
 
 class ManagedJobTests(unittest.TestCase):
@@ -167,6 +170,91 @@ jobs.launch('owner',job['id'])
             db.execute("UPDATE jobs SET state='running',supervisor_pid=NULL,supervisor_token='old',heartbeat_at=0 WHERE id=?", (job["id"],))
         self.assertEqual(self.jobs.get("owner", job["id"])["state"], "unknown")
         self.assertFalse(self.jobs.launch("owner", job["id"])["launched"])
+
+    @contextmanager
+    def contended_supervisor(self, code, **kwargs):
+        # Exercise real SQLite contention, with a short busy wait so this also
+        # reproduces the old five-second timeout without slowing every test.
+        connect = self.store._connect
+
+        def impatient_connect():
+            db = connect()
+            db.execute("PRAGMA busy_timeout = 20")
+            return db
+
+        job = self.command(code, **kwargs)
+        with self.store._connection() as db:
+            db.execute("UPDATE jobs SET state='starting',supervisor_token='contention',launched_at=? WHERE id=?",
+                       (time.time(), job["id"]))
+        with patch.object(self.store, "_connect", impatient_connect), ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(supervise, self.store, job["id"], "contention",
+                                 poll_seconds=0.01, heartbeat_seconds=0.02, grace_seconds=0.05,
+                                 log_limit_bytes=8192, log_retain_bytes=4096)
+            try:
+                self.wait(job["id"], lambda row: row["child_pid"] is not None)
+                yield job, future
+            finally:
+                self.jobs.cancel("owner", job["id"])
+                # Always observe exceptions and finish the supervisor before
+                # temporary paths disappear, even if an assertion fails.
+                future.result(timeout=12)
+
+    def test_writer_lock_preserves_command_and_delivers_completion_once(self):
+        marker, finish = self.root / "alive", self.root / "finish"
+        code = (f"from pathlib import Path; import time,os; p=Path({str(marker)!r}); "
+                f"finish=Path({str(finish)!r})\n"
+                "while not finish.exists():\n p.write_text(str(time.time())); os.write(1,b'x'*4096); time.sleep(.01)\n"
+                "print('completed after contention')")
+        events = EventSubscriptions(self.store)
+        with self.contended_supervisor(code) as (job, future):
+            subscription = events.create("owner", jobs=[job["id"]], continuation="continue")
+            with self.store._connection() as writer:
+                writer.execute("BEGIN IMMEDIATE")
+                time.sleep(0.2)
+                before = marker.read_text()
+                time.sleep(0.15)
+                self.assertNotEqual(marker.read_text(), before, "A busy heartbeat must not kill the command")
+                finish.touch()
+                time.sleep(0.15)
+                self.assertFalse(future.done(), "The supervisor must retain the result until it can be saved")
+            self.assertEqual(future.result(timeout=5)["state"], "completed")
+        self.assertTrue(self.jobs.logs("owner", job["id"])["gap"])
+        self.assertIn("completed after contention", self.jobs.logs("owner", job["id"])["text"])
+        restarted = EventSubscriptions(CoordinationStore(self.store.database_path))
+        self.assertEqual(len(restarted.process_once()), 1)
+        self.assertEqual(restarted.process_once(), [])
+        self.assertEqual(restarted.get("owner", subscription["id"])["items"][0]["outcome"]["state"], "completed")
+
+    def test_writer_lock_does_not_delay_command_timeout(self):
+        marker = self.root / "progress"
+        code = (f"from pathlib import Path; import time; p=Path({str(marker)!r})\n"
+                "while True:\n p.write_text(str(time.time())); time.sleep(.01)")
+        with self.contended_supervisor(code, timeout=0.3) as (job, future):
+            with self.store._connection() as writer:
+                writer.execute("BEGIN IMMEDIATE")
+                time.sleep(0.55)
+                before = marker.read_text()
+                time.sleep(0.1)
+                self.assertEqual(marker.read_text(), before, "The timeout must stop the child while SQLite is busy")
+                self.assertFalse(future.done(), "Terminal persistence should wait for the writer")
+            self.assertEqual(future.result(timeout=5)["state"], "timed_out")
+
+    def test_local_heartbeat_protects_busy_supervisor_but_not_abandoned_or_stuck_one(self):
+        for lost in ("lock", "heartbeat"):
+            with self.subTest(lost=lost):
+                job = self.command("pass")
+                with self.store._connection() as db:
+                    db.execute("UPDATE jobs SET state='running',supervisor_pid=?,supervisor_token='busy',heartbeat_at=0 WHERE id=?",
+                               (os.getpid(), job["id"]))
+                with _supervisor_lock(self.store, job["id"]):
+                    _touch_supervisor(self.store, job["id"])
+                    self.assertEqual(self.jobs.get("owner", job["id"])["state"], "running")
+                    if lost == "heartbeat":
+                        path = Path(job["output_path"]).parent / "supervisor.lock"
+                        os.utime(path, (0, 0))
+                        self.assertEqual(self.jobs.get("owner", job["id"])["state"], "unknown")
+                self.assertEqual(self.jobs.get("owner", job["id"])["state"], "unknown")
+                self.assertFalse(self.jobs.launch("owner", job["id"])["launched"])
 
     def test_stale_sample_cannot_override_a_fresh_supervisor_heartbeat(self):
         job = self.command("pass")
