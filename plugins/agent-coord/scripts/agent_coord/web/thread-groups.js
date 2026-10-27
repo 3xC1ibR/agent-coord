@@ -37,8 +37,9 @@ const threadGrouping = (() => {
   const activityAt = thread => thread.updated_at || thread.created_at || 0;
   const stageOrder = (a, b) => Number(status(b).key === "running") - Number(status(a).key === "running") ||
     activityAt(b) - activityAt(a) || stable(a, b);
-  const attentionOrder = (a, b) => reason(a).rank - reason(b).rank ||
-    (b.attention_since || b.created_at || 0) - (a.attention_since || a.created_at || 0) || stable(a, b);
+  const attentionOrder = (a, b) =>
+    (b.attention_since || b.created_at || 0) - (a.attention_since || a.created_at || 0) ||
+    reason(a).rank - reason(b).rank || stable(a, b);
 
   function status(thread) {
     if (thread.attention === "archived") return {key: "idle", label: "Closed"};

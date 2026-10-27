@@ -742,9 +742,7 @@ function renderList() {
     const board = node("div", null, "organization-board");
     board.setAttribute("aria-label", "Work domains");
     for (const group of threadOrganization.groupThreads(agentTree.roots, "domain")) {
-      // Urgent responses lead their domain, preserving their attention styling.
-      const ordered = [...group.threads].sort((a, b) => Number(threadGrouping.awaitsUser(b)) - Number(threadGrouping.awaitsUser(a)) ||
-        (threadGrouping.awaitsUser(a) ? threadGrouping.attentionOrder(a, b) : 0));
+      const ordered = [...group.threads].sort((a, b) => threadGrouping.activityAt(b) - threadGrouping.activityAt(a) || a.thread_id.localeCompare(b.thread_id));
       const unpinned = ordered.filter(thread => !pinnedIds.has(thread.thread_id));
       addGroup(group.key, group.label, unpinned, board, "", ordered);
       if (!unpinned.length) board.lastElementChild?.remove();

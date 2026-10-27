@@ -1,7 +1,7 @@
 "use strict";
 
-// Live version of mockup 30. Every thread owns one state, independently of its
-// parent's phase, read receipt, or position. Placement is never mutated here.
+// Focus keeps unhandled work in Attention; Replies to read is also a shortcut
+// to unread responses. Placement is never mutated here.
 const WorkingSet = (() => {
   const grouping = typeof module !== "undefined" ? require("./thread-groups.js") : threadGrouping;
   const LEVELS = ["Attention", "Replies to read", "Idle"];
@@ -14,7 +14,6 @@ const WorkingSet = (() => {
       !t.checkpoint_stale && t.checkpoint?.next_actor === "user" && !!t.checkpoint.next_action);
   }
   const handoff = t => t.response_classification?.status === "classified" ? t.response_classification.choice : null;
-  const completed = t => handoff(t) ? handoff(t) === "done" : !t.checkpoint_stale && grouping.phase(t) === "finished";
   function columnOf(t) {
     if (running(t)) return "working";
     if (parked(t) || grouping.acknowledgedRequest(t)) return null;
@@ -23,11 +22,10 @@ const WorkingSet = (() => {
     if (needsReply(t)) return choice === "review" || t.attention_reason === "review" ? "attention" : "blocked";
     if (pending && (choice === "blocked" || t.attention_reason === "blocked")) return "blocked";
     if (pending && (choice === "review" || t.attention_reason === "review")) return "attention";
-    if (completed(t)) return pending ? "working" : null;
-    if (t.unread_result !== true) return null;
-    // Execution updates stay beside running work; ordinary answers and unknown
-    // classifications can be read separately without implying a delivery.
-    return choice === "update" ? "working" : "replies";
+    if (t.unhandled_response === true) return "working";
+    // Older snapshots may have only an unread marker.
+    if (t.unhandled_response == null && t.unread_result === true) return choice === "update" ? "working" : "replies";
+    return null;
   }
   function levelOf(t) { const column = columnOf(t); return column === "replies" ? 1 : column ? 0 : 2; }
   const workspaceOf = t => t.project_cwd || t.cwd || "unknown";
@@ -56,12 +54,16 @@ const WorkingSet = (() => {
     for (const t of threads) {
       const descriptor = groupFor(t, byId, dimension, workspace);
       if (!map.has(descriptor.key)) map.set(descriptor.key, {...descriptor, levels: LEVELS.map(() => [])});
-      map.get(descriptor.key).levels[levelOf(t)].push(t); all.levels[levelOf(t)].push(t);
+      const level = levelOf(t);
+      map.get(descriptor.key).levels[level].push(t); all.levels[level].push(t);
+      if (level === 0 && t.unhandled_response === true && t.unread_result === true && !running(t) && !parked(t)) {
+        map.get(descriptor.key).levels[1].push(t); all.levels[1].push(t);
+      }
     }
     for (const g of [all, ...map.values()]) {
       g.touch = 0;
       for (const list of g.levels) {
-        list.sort((a, b) => Number(!!parked(a)) - Number(!!parked(b)) || Number(!!b.pinned) - Number(!!a.pinned) || touchOf(b) - touchOf(a) || a.thread_id.localeCompare(b.thread_id));
+        list.sort((a, b) => (b.attention_since || touchOf(b)) - (a.attention_since || touchOf(a)) || a.thread_id.localeCompare(b.thread_id));
         for (const t of list) g.touch = Math.max(g.touch, touchOf(t));
       }
     }
@@ -119,13 +121,14 @@ const WorkingSet = (() => {
         wrap.append(card);
         const links = el("div", "ws-card-links");
         if (t.pinned) links.append(el("span", "ws-pin", "Pinned"));
-        if (onDismiss && completed(t) && columnOf(t) === "working" && !running(t)) {
-          const dismiss = button("Dismiss", "quiet ws-dismiss", event => { event?.stopPropagation(); onDismiss(t); }, "Dismiss completed response · " + t.title);
+        if (onDismiss && (t.can_handle_response ?? t.unhandled_response) && !running(t)) {
+          const dismiss = button("Dismiss", "quiet ws-dismiss", event => { event?.stopPropagation(); onDismiss(t); }, "Dismiss response · " + t.title);
           dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss";
           const actions = card.querySelector(".card-actions") || el("div", "card-actions");
           const end = el("div", "card-end-actions"); end.append(dismiss); actions.append(end);
           if (!card.contains(actions)) card.append(actions);
-        } else if (onRead && t.unread_result && !running(t) && t.attention !== "archived") {
+        }
+        if (onRead && t.unread_result && !running(t) && t.attention !== "archived") {
           const read = button("Mark read", "quiet ws-read", () => onRead(t), "Mark response read · " + t.title);
           read.dataset.thread = t.thread_id; read.dataset.action = "read"; links.append(read);
         }
@@ -150,12 +153,7 @@ const WorkingSet = (() => {
         g.levels.forEach((list, other) => { if (other !== n && list.length) links.append(button(LEVELS[other], "quiet", () => go(i, other))); }); page.append(links);
       }
       if (n === 0) {
-        const board = el("div", "ws-attention-board"); board.setAttribute("aria-label", "Increasing attention from left to right");
-        for (const [key, title, empty] of [["working", "Working / Completed", "No running agents or completed work."],
-          ["attention", "Needs your attention", "No reviews or decisions requested."], ["blocked", "Blocked", "No agents waiting for your input."]]) {
-          section(board, g, items.filter(t => columnOf(t) === key), title, key, empty);
-        }
-        page.append(board);
+        section(page, g, items, "", "attention");
       } else if (n === 1) {
         section(page, g, items, "", "replies");
       } else {
@@ -277,10 +275,6 @@ const WorkingSet = (() => {
       const now = window.performance.now(), unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
       window.clearTimeout(wheelTimer); wheelTimer = window.setTimeout(() => { horizontal = vertical = 0; }, 220);
       if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
-        const board = event.target.closest?.(".ws-attention-board");
-        if (board && (event.deltaX > 0 ? board.scrollLeft + board.clientWidth < board.scrollWidth - 1 : board.scrollLeft > 0)) {
-          horizontal = 0; return;
-        }
         event.preventDefault(); if (now < cooldown) return; horizontal += event.deltaX * unit;
         if (Math.abs(horizontal) > 70) { go(pageIdx + Math.sign(horizontal), level); horizontal = 0; cooldown = now + 420; } return;
       }
@@ -299,14 +293,14 @@ const WorkingSet = (() => {
       viewport.addEventListener("wheel", wheel, {passive: false});
       viewport.addEventListener("touchstart", event => {
         const t = event.touches[0], page = event.target.closest?.(".ws-page");
-        touch = event.touches.length === 1 ? {x: t.clientX, y: t.clientY, page, board: event.target.closest?.(".ws-attention-board"), top: !page || page.scrollTop <= 0,
+        touch = event.touches.length === 1 ? {x: t.clientX, y: t.clientY, page, top: !page || page.scrollTop <= 0,
           bottom: !page || page.scrollTop + page.clientHeight >= page.scrollHeight - 1, scroll: page?.scrollTop || 0} : null;
       }, {passive: true});
       viewport.addEventListener("touchend", event => {
         if (!touch || !active()) return;
         const t = event.changedTouches[0], dx = t.clientX - touch.x, dy = t.clientY - touch.y;
         if (Math.abs(dx) > 60 && Math.abs(dx) > 1.4 * Math.abs(dy)) {
-          if (!touch.board || touch.board.scrollWidth <= touch.board.clientWidth) go(pageIdx - Math.sign(dx), level);
+          go(pageIdx - Math.sign(dx), level);
         }
         else if (Math.abs(dy) > 80 && Math.abs(dy) > 1.4 * Math.abs(dx) && (dy > 0 ? touch.top : touch.bottom) && (!touch.page || Math.abs(touch.page.scrollTop - touch.scroll) < 2)) go(pageIdx, level - Math.sign(dy));
         touch = null;

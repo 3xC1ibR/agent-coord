@@ -894,7 +894,7 @@ class BrowserSessions:
             else "input" if checkpoint_input
             else "interrupted" if completion and completion["status"] == "interrupted"
             else "failed" if completion and completion["status"] == "failed" and thread["unhandled_response"]
-            else "update" if thread["unhandled_response"] and handoff in {"update", "findings", "done"} and thread["unread_result"]
+            else "update" if thread["unhandled_response"] and handoff in {"update", "findings", "done"}
             else "available" if thread["unhandled_response"] and handoff in {"update", "findings", "done"}
             else "action" if handoff == "blocked" or thread["unhandled_response"] and handoff == "review"
             else "reply" if thread["unhandled_response"]

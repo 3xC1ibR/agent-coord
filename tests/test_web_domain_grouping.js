@@ -53,13 +53,13 @@ test("overview button toggles domain grouping, persists it, and reflects selecte
   assert.equal(values.get("agent-coord-group-by"), "phase");
 });
 
-test("domain grouping keeps pins visible once, leads with urgent cards, and retains unassigned work", () => {
-  const input = [thread("ordinary", {domain: "web"}), thread("urgent", {domain: "web", response_state: "input"}),
+test("domain grouping keeps pins visible once, sorts by recency, and retains unassigned work", () => {
+  const input = [thread("ordinary", {domain: "web", updated_at: 200}), thread("urgent", {domain: "web", response_state: "input", updated_at: 100}),
     thread("pin", {domain: "backend", pinned: true}), thread("fallback", {scope_cluster: "backend"}), thread("unassigned")];
   const before = JSON.stringify(input), {$, c} = setup(input, "domain");
   c.renderList();
   const cards = descendants($("overview")).filter(el => el.dataset.cardThread);
-  assert.deepEqual(cards.map(el => el.dataset.cardThread), ["pin", "fallback", "urgent", "ordinary", "unassigned"]);
+  assert.deepEqual(cards.map(el => el.dataset.cardThread), ["pin", "fallback", "ordinary", "urgent", "unassigned"]);
   assert.equal(cards.find(el => el.dataset.cardThread === "urgent").urgent, true);
   assert.equal(cards.filter(el => el.dataset.cardThread === "pin").length, 1);
   assert.equal(descendants($("overview")).find(el => el.dataset.group === "domain-missing").attributes["aria-label"], "No domain");

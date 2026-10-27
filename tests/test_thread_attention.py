@@ -56,7 +56,9 @@ class ThreadAttentionTests(unittest.TestCase):
         self.assertEqual(delivered["attention_reason"], "done")
         self.assertTrue(delivered["needs_attention"])
         read = self.sessions.update_work_thread("terminal", {"seen": True})
-        self.assertFalse(read["needs_attention"])
+        self.assertTrue(read["needs_attention"])
+        self.assertFalse(read["unread_result"])
+        self.assertTrue(read["can_handle_response"])
         self.assertEqual(read["work_phase"], "finished")
         self.assertEqual(read["attention"], "now")
 

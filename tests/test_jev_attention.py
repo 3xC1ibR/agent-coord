@@ -153,7 +153,7 @@ class JevAttentionTests(unittest.TestCase):
                  json.dumps(decision(choice)["probabilities"]), "legacy" if status == "pending" else None,
                  self.now + 45 if status == "pending" else 0, self.now))
 
-    def test_information_enters_attention_and_reading_returns_to_its_stage(self):
+    def test_information_stays_in_attention_after_reading(self):
         self.finish()
         self.worker.scan()
         item = self.thread()
@@ -162,13 +162,15 @@ class JevAttentionTests(unittest.TestCase):
         self.assertEqual(item["attention_reason"], "update")
         self.assertTrue(item["can_handle_response"])
         item = self.sessions.update_work_thread("terminal", {"seen": True})
-        self.assertEqual(item["response_state"], "available")
+        self.assertEqual(item["response_state"], "update")
+        self.assertTrue(item["needs_attention"])
+        self.assertFalse(item["unread_result"])
         self.assertEqual(item["attention"], "now")
         self.assertTrue(item["unhandled_response"])
         self.assertNotIn("PRIVATE", json.dumps(self.request.call_args.args[0]))
         self.assertEqual(self.sessions.rpc.calls, [])
 
-    def test_review_and_blocker_survive_reading_but_optional_results_recede(self):
+    def test_all_classifications_survive_reading_until_dismissed(self):
         for i, choice in enumerate(("blocked", "review", "update", "findings", "done")):
             with self.subTest(choice=choice):
                 self.finish(str(i))
@@ -177,18 +179,16 @@ class JevAttentionTests(unittest.TestCase):
                 self.assertTrue(self.thread()["needs_attention"])
                 self.assertEqual(self.thread()["attention_reason"], choice)
                 item = self.sessions.update_work_thread("terminal", {"seen": True})
-                self.assertEqual(item["needs_attention"], choice in {"blocked", "review"})
-                self.assertEqual(item["can_handle_response"], choice in {"blocked", "review"})
-                if choice in {"blocked", "review"}:
-                    handled = self.handle()
-                    self.assertFalse(handled["needs_attention"])
-                    self.assertFalse(handled["can_handle_response"])
-                    self.assertEqual(handled["response_classification"], item["response_classification"])
-                    self.assertEqual(handled["response_state"], "action" if choice == "blocked" else "available")
-                    if choice == "blocked":
-                        self.assertEqual(handled["attention_reason"], "blocked")
-                else:
-                    self.assertEqual(item["response_state"], "available")
+                self.assertTrue(item["needs_attention"])
+                self.assertTrue(item["can_handle_response"])
+                self.assertFalse(item["unread_result"])
+                handled = self.handle()
+                self.assertFalse(handled["needs_attention"])
+                self.assertFalse(handled["can_handle_response"])
+                self.assertEqual(handled["response_classification"], item["response_classification"])
+                self.assertEqual(handled["response_state"], "action" if choice == "blocked" else "available")
+                if choice == "blocked":
+                    self.assertEqual(handled["attention_reason"], "blocked")
                 self.assertEqual(item["attention"], "now")
 
     def test_dismissed_blocker_survives_restart_and_new_reply_resurfaces(self):
@@ -228,7 +228,7 @@ class JevAttentionTests(unittest.TestCase):
                 self.assertEqual(self.thread()["work_phase"], expected)
                 self.sessions.update_work_thread("terminal", {"seen": True})
                 self.assertEqual(self.thread()["work_phase"], expected)
-                self.assertFalse(self.thread()["needs_attention"])
+                self.assertTrue(self.thread()["needs_attention"])
 
     def test_policy_upgrade_reclassifies_without_changing_receipts_or_placement(self):
         self.finish()
@@ -242,7 +242,7 @@ class JevAttentionTests(unittest.TestCase):
         for key in ("attention", "pinned", "seen_completion_id", "handled_completion_id"):
             self.assertEqual(self.thread()[key], before[key])
 
-    def test_legacy_writes_cannot_change_reason_stage_or_revive_a_read_reply(self):
+    def test_legacy_writes_cannot_change_reason_or_stage_of_read_reply(self):
         item = self.finish()
         self.request.return_value = decision("done")
         self.worker.scan()
@@ -258,8 +258,8 @@ class JevAttentionTests(unittest.TestCase):
                     current = self.thread()
                     self.assertEqual(current["response_classification"]["choice"], "done")
                     self.assertEqual(current["work_phase"], "finished")
-                    self.assertEqual(current["needs_attention"], not seen)
-                    self.assertEqual(current["attention_reason"], None if seen else "done")
+                    self.assertTrue(current["needs_attention"])
+                    self.assertEqual(current["attention_reason"], "done")
         self.request.assert_called_once()
 
     def test_policy_workers_keep_independent_leases_and_results(self):

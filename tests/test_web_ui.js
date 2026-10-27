@@ -48,7 +48,14 @@ test("blocked deployment outranks requested review, healthy rollout, findings, a
   assert.equal(reason(items[0]).label, "✓ Done");
 });
 
-test("reading findings and success restores the same stage while required actions remain", () => {
+test("attention uses newest event before classification, with priority only breaking ties", () => {
+  const items = [thread("old-blocker", "deployment", {needs_attention: true, attention_reason: "blocked", attention_since: 10}),
+    thread("new-findings", "investigation", {needs_attention: true, attention_reason: "findings", attention_since: 30}),
+    thread("new-review", "validation", {needs_attention: true, attention_reason: "review", attention_since: 30})];
+  assert.deepEqual(ids(groupThreads(items).priority), ["new-review", "new-findings", "old-blocker"]);
+});
+
+test("dismissing findings and success restores the same stage while required actions remain", () => {
   const items = [thread("findings", "investigation", {response_state: "update", needs_attention: true}),
     thread("success", "finished", {response_state: "update", needs_attention: true}),
     thread("blocker", "deployment", {response_state: "input", needs_attention: true})];

@@ -88,84 +88,60 @@ test("group IDs distinguish equal names, children inherit root groups, missing p
   assert.equal(groups.find(g => g.key === "group:two").levels.flat().length, 1);
   assert.equal(groups.slice(1).flatMap(g => g.levels.flat()).length, list.length);
 });
-test("unread child findings render in Replies to read independently of an idle creator", () => {
-  const c = setup(), parent = thread("parent", {project_id: "evaluations", project_name: "Evaluations",
-    needs_attention: false, work_phase: "finished", unhandled_response: false});
-  const child = thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent",
-    response_state: "update", attention_reason: "findings", needs_attention: true, unread_result: true, unhandled_response: true});
-  const records = [parent, child], before = JSON.stringify(records);
-  c.render(records); c.selectLevel(1);
-  for (const group of ["All groups", "Evaluations"]) {
-    c.selectGroup(group);
-    assert.deepEqual(c.ids(), ["child"]);
-    const replies = c.page().querySelector('[data-section="replies"]');
-    assert.equal(replies.querySelector(".ws-card").dataset.cardThread, "child");
-    replies.querySelector('[data-thread="child"]').onclick();
-    assert.equal(c.opened.at(-1), "child");
-    const cell = c.host.querySelectorAll(".ws-cell").find(n => n.dataset.group === (group === "All groups" ? "overview:all" : "group:evaluations") && n.dataset.level === "1");
-    assert.equal(cell.querySelector(".ws-cell-count").textContent, "1");
-  }
-  assert.equal(JSON.stringify(records), before);
-  c.render([parent, {...child, unread_result: false, needs_attention: false}]);
-  assert.deepEqual(c.ids(), []);
-  c.selectLevel(2);
-  assert.deepEqual(c.ids().sort(), ["child", "parent"]);
+test("child findings stay in Attention after reading until dismissed", () => {
+  const c = setup(), parent = thread("parent", {project_id: "evaluations", project_name: "Evaluations"});
+  const child = thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent", response_state: "update",
+    attention_reason: "findings", needs_attention: true, unread_result: true, unhandled_response: true});
+  c.render([parent, child]);
+  assert.deepEqual(c.ids(), ["child"]);
+  c.selectLevel(1); assert.deepEqual(c.ids(), ["child"]); c.selectLevel(0);
+  c.selectGroup("Evaluations"); assert.deepEqual(c.ids(), ["child"]);
+  c.render([parent, {...child, unread_result: false}]); assert.deepEqual(c.ids(), ["child"]);
+  c.selectLevel(1); assert.deepEqual(c.ids(), []); c.selectLevel(0);
+  c.page().querySelector('[data-action="dismiss"]').onclick({stopPropagation() {}}); assert.deepEqual(c.dismissed, ["child"]);
+  c.render([parent, {...child, unread_result: false, unhandled_response: false, needs_attention: false}]);
+  assert.deepEqual(c.ids(), []); c.selectLevel(2); assert.deepEqual(c.ids().sort(), ["child", "parent"]);
 });
-test("attention columns increase left to right and keep completed work until explicit dismissal", () => {
-  const c = setup(), completed = thread("done", {work_phase: "finished", unhandled_response: true, unread_result: true});
-  const list = [thread("run", {response_state: "working", unread_result: true}), completed,
-    thread("answer", {unread_result: true}), thread("ask", {checkpoint: {next_actor: "user", next_action: "Pick one"}}),
-    thread("failed", {response_state: "failed"}), thread("classified-blocker", {response_classification: classified("blocked"), unhandled_response: true}),
-    thread("review", {response_classification: classified("review"), unhandled_response: true})];
-  c.render(list);
-  const board = c.page().querySelector(".ws-attention-board");
-  assert.deepEqual(board.children.map(n => n.dataset.section), ["working", "attention", "blocked"]);
-  assert.deepEqual(list.map(WorkingSet.columnOf), ["working", "working", "replies", "blocked", "blocked", "blocked", "attention"]);
-  assert.equal(c.ids().length, 6);
-  assert.equal(board.children[0].querySelectorAll(".ws-card").length, 2);
-  assert.equal(board.children[1].querySelectorAll(".ws-card").length, 1);
-  assert.equal(board.children[2].querySelectorAll(".ws-card").length, 3);
-  const dismiss = c.page().querySelector('[data-action="dismiss"]');
-  assert.ok(dismiss.closest(".thread-card"), "Dismiss stays inside the card");
-  assert.ok(dismiss.closest(".card-end-actions"), "Dismiss uses the trailing card controls");
-  assert.equal(dismiss.closest(".ws-card-links"), null);
-  assert.equal(dismiss.parent.parent.parent.querySelector("button").contains(dismiss), false, "Dismiss is not nested in the card's open button");
-  let stopped = false;
-  dismiss.onclick({stopPropagation() { stopped = true; }}); assert.deepEqual(c.dismissed, ["done"]);
-  assert.equal(stopped, true); assert.deepEqual(c.opened, []);
-  c.render([{...completed, unread_result: false}]); assert.deepEqual(c.ids(), ["done"]);
-  assert(c.page().querySelector('[data-action="dismiss"]'));
-  c.render([{...completed, unhandled_response: false}]); assert.deepEqual(c.ids(), []);
-  c.selectLevel(2); assert.deepEqual(c.ids(), ["done"]);
+test("attention sorts all classifications by recent activity and keeps read responses until dismissal", () => {
+  const c = setup(), items = [
+    thread("old-blocker", {status: "needs input", turn_started_at: 100}),
+    thread("new-findings", {unhandled_response: true, unread_result: true, response_classification: classified("findings"), turn_completion: {completed_at: 300}}),
+    thread("middle-review", {unhandled_response: true, response_classification: classified("review"), turn_completion: {completed_at: 200}}),
+    thread("pinned-old", {pinned: true, unhandled_response: true, response_classification: classified("done"), turn_completion: {completed_at: 150}})];
+  c.render(items); assert.deepEqual(c.ids(), ["new-findings", "middle-review", "pinned-old", "old-blocker"]);
+  c.page().querySelector('[data-action="read"]').onclick(); assert.deepEqual(c.read, ["new-findings"]);
+  c.render(items.map(t => t.thread_id === "new-findings" ? {...t, unread_result: false} : t));
+  assert.deepEqual(c.ids(), ["new-findings", "middle-review", "pinned-old", "old-blocker"]);
+  c.page().querySelector('[data-action="dismiss"]').onclick({stopPropagation() {}}); assert.deepEqual(c.dismissed, ["new-findings"]);
 });
 test("empty attention columns remain visible, and running work takes precedence over prior input", () => {
   const c = setup(); c.render([]);
-  assert.equal(c.page().querySelector(".ws-attention-board").children.length, 3);
+  assert(c.page().querySelector(".ws-empty"));
   assert.equal(WorkingSet.columnOf(thread("resumed", {response_state: "working", checkpoint: {next_actor: "user", next_action: "Old question"}})), "working");
   assert.equal(WorkingSet.columnOf(thread("handled", {work_phase: "finished", unhandled_response: false, unread_result: true})), null);
   assert.equal(WorkingSet.columnOf(thread("classified-done", {response_classification: classified("done"), unhandled_response: true, unread_result: false})), "working");
 });
-test("classification distinguishes answers from delivery and execution updates, with checkpoint fallbacks", () => {
+test("unhandled responses stay in Attention across classifications and phases", () => {
   const unread = {unread_result: true, unhandled_response: true};
   for (const phase of ["investigation", "planning", "implementation", "deployment", "finished"]) {
     const answer = thread("answer", {...unread, work_phase: phase, response_classification: classified("findings")});
-    assert.equal(WorkingSet.levelOf(answer), 1, phase);
-    assert.equal(WorkingSet.levelOf({...answer, unread_result: false}), 2, phase);
+    assert.equal(WorkingSet.levelOf(answer), 0, phase);
+    assert.equal(WorkingSet.levelOf({...answer, unread_result: false}), 0, phase);
     const delivery = {...answer, response_classification: classified("done")};
     assert.equal(WorkingSet.levelOf(delivery), 0, phase);
     assert.equal(WorkingSet.levelOf({...delivery, unread_result: false}), 0, phase);
     assert.equal(WorkingSet.levelOf({...delivery, unhandled_response: false}), 2, phase);
     const update = {...answer, response_classification: classified("update")};
     assert.equal(WorkingSet.columnOf(update), "working", phase);
-    assert.equal(WorkingSet.levelOf({...update, unread_result: false}), 2, phase);
+    assert.equal(WorkingSet.levelOf({...update, unread_result: false}), 0, phase);
   }
   for (const status of ["pending", "uncertain", "unavailable"]) {
     const unknown = thread("unknown", {...unread, response_classification: {status, choice: "done"}});
-    assert.equal(WorkingSet.levelOf(unknown), 1, status);
+    assert.equal(WorkingSet.levelOf(unknown), 0, status);
     assert.equal(WorkingSet.levelOf({...unknown, work_phase: "finished"}), 0, status);
-    assert.equal(WorkingSet.levelOf({...unknown, work_phase: "finished", checkpoint_stale: true}), 1, status);
+    assert.equal(WorkingSet.levelOf({...unknown, work_phase: "finished", checkpoint_stale: true}), 0, status);
   }
-  assert.equal(WorkingSet.levelOf(thread("missing", unread)), 1);
+  assert.equal(WorkingSet.levelOf(thread("missing", unread)), 0);
 });
 test("classified blockers and required reviews stay above ordinary replies until handled", () => {
   const c = setup();
@@ -173,7 +149,7 @@ test("classified blockers and required reviews stay above ordinary replies until
     const t = thread(choice, {unread_result: true, unhandled_response: true, response_classification: classified(choice)});
     c.render([t]); c.selectLevel(0);
     assert.deepEqual(c.ids(), [choice]);
-    assert.equal(c.page().querySelector('[data-section="' + (choice === "blocked" ? "blocked" : "attention") + '"]').querySelector(".ws-card").dataset.cardThread, choice);
+    assert.equal(c.page().querySelector('[data-section="attention"]').querySelector(".ws-card").dataset.cardThread, choice);
     c.render([{...t, unread_result: false}]); assert.deepEqual(c.ids(), [choice]);
     c.render([{...t, unread_result: false, unhandled_response: false}]); assert.deepEqual(c.ids(), []);
     c.selectLevel(2); assert.deepEqual(c.ids(), [choice]);
@@ -206,18 +182,14 @@ test("dismissed saved requests leave Focus attention and its map until new input
     assert.equal(WorkingSet.columnOf({...dismissed, status: "running", response_state: "working"}), "working");
   }
 });
-test("a question moves from running to unread reply to idle, while execution updates use Mark read", () => {
+test("a response remains in Attention when read and leaves when handled", () => {
   const c = setup(), answer = thread("question", {unread_result: true, unhandled_response: true, response_classification: classified("findings")});
   c.render([{...answer, status: "running", response_state: "working"}]); assert.deepEqual(c.ids(), ["question"]);
-  c.render([answer]); assert.deepEqual(c.ids(), []);
-  c.selectLevel(1); assert.deepEqual(c.ids(), ["question"]);
+  c.render([answer]); assert.deepEqual(c.ids(), ["question"]);
   c.page().querySelector('[data-action="read"]').onclick(); assert.deepEqual(c.read, ["question"]);
-  c.render([{...answer, unread_result: false}]); assert.deepEqual(c.ids(), []);
+  c.render([{...answer, unread_result: false}]); assert.deepEqual(c.ids(), ["question"]);
+  c.render([{...answer, unread_result: false, unhandled_response: false}]); assert.deepEqual(c.ids(), []);
   c.selectLevel(2); assert.deepEqual(c.ids(), ["question"]);
-  c.render([{...answer, response_classification: classified("update")}]); c.selectLevel(0);
-  assert.deepEqual(c.ids(), ["question"]);
-  assert(c.page().querySelector('[data-action="read"]'));
-  assert.equal(c.page().querySelector('[data-action="dismiss"]'), null);
 });
 test("saved positions preserve all original levels and migrate two-level Idle to level three", () => {
   for (const [version, oldLevel, newLevel] of [[1, 0, 0], [1, 1, 1], [1, 2, 2], [2, 0, 0], [2, 1, 2]]) {
@@ -236,10 +208,10 @@ test("groups initially sort by user work recency and keep position through compl
   const restarted = WorkingSet.derive([{...a, turn_started_at: 4000, turn_completion: {completed_at: 500}}, b]);
   assert.equal(restarted[1].key, "group:a");
 });
-test("pins stay visible at the front of their state without duplicating a thread", () => {
+test("pins follow recency without duplicating a thread", () => {
   const c = setup(), list = Array.from({length: 14}, (_, n) => thread(String(n), {created_at: 200 + n}));
   list[0].pinned = true; c.render(list); c.selectLevel(2);
-  assert.equal(c.ids()[0], "0"); assert.equal(c.page().querySelectorAll(".ws-pin").length, 1);
+  assert.equal(c.ids()[0], "13"); c.page().querySelector(".ws-more").onclick(); assert.equal(c.page().querySelectorAll(".ws-pin").length, 1);
 });
 test("fresh visits start at All groups / Attention; each child appears independently in its own state", () => {
   const c = setup(); c.render([thread("parent"), thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent", unread_result: true}), thread("run", {response_state: "working"})]);
@@ -455,15 +427,12 @@ test("touch scroll does not unexpectedly change levels; an edge swipe does", () 
   start(); c.page().scrollTop = 100; end(); assert.equal(c.page().dataset.level, "1");
   c.page().scrollTop = 0; start(); end(); assert.equal(c.page().dataset.level, "0");
 });
-test("horizontal gestures scroll narrow attention columns without navigating groups", () => {
-  const c = setup(); c.render([thread("a", {unread_result: true})]);
-  const viewport = c.host.querySelector(".ws-viewport"), board = c.page().querySelector(".ws-attention-board");
-  board.clientWidth = 300; board.scrollWidth = 760;
-  const event = c.event({target: board, deltaX: 180}); viewport.emit("wheel", event);
-  assert(!event.prevented); assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
-  viewport.emit("touchstart", {target: board, touches: [{clientX: 300, clientY: 100}]});
+test("horizontal gestures navigate groups from the attention list", () => {
+  const c = setup(); c.render([thread("a", {project_id: "a", project_name: "A", unhandled_response: true})]);
+  const viewport = c.host.querySelector(".ws-viewport");
+  viewport.emit("touchstart", {target: c.page(), touches: [{clientX: 300, clientY: 100}]});
   viewport.emit("touchend", {changedTouches: [{clientX: 100, clientY: 100}]});
-  assert.equal(c.page().querySelector(".ws-page-title").textContent, "All groups");
+  assert.equal(c.page().querySelector(".ws-page-title").textContent, "A");
 });
 test("grouping changes reset to the aggregate and restore on reload; large inventories build only neighbors", () => {
   const c = setup(), list = Array.from({length: 40}, (_, n) => thread("t" + n, {project_id: String(n), project_name: "G" + n, domain: "d" + n}));
