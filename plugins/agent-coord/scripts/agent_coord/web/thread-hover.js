@@ -12,7 +12,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   panel.id = "thread-hover"; panel.className = "thread-hover"; panel.hidden = true;
   panel.setAttribute("role", "tooltip"); panel.dataset.pinned = "false";
   document.body.append(panel);
-  let anchor = null, current = null, openTimer, closeTimer, request = 0, pointerInside = false, pinned = false, trail = [];
+  let anchor = null, current = null, openTimer, closeTimer, request = 0, pointerInside = false, pinned = false, trail = [], pointer = null;
   const cache = new Map();
   const PROVIDERS = {muse: "Muse Code", codex: "Codex", claude: "Claude", kimi: "Kimi", antigravity: "Antigravity"};
   const VERBS = {run: "Running", edit: "Editing", read: "Reading", tool: "Using"};
@@ -47,8 +47,23 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     anchor = null; current = null; pointerInside = false; pinned = false; trail = [];
     panel.hidden = true; panel.dataset.pinned = "false"; panel.setAttribute("role", "tooltip");
   }
+  function restoreAnchor() {
+    if (!anchor || anchor.isConnected) return !!anchor;
+    const id = anchor.dataset.thread;
+    const candidates = [...overview.querySelectorAll(".session[data-thread], .agent-row[data-thread]")]
+      .filter(el => el.dataset.thread === id && !el.closest('[hidden], [aria-hidden="true"]'));
+    // :hover can still refer to the detached element until the next paint.
+    const underPointer = pointer && document.elementFromPoint?.(pointer.x, pointer.y);
+    const replacement = candidates.find(el => el.contains(underPointer) || el.matches(":hover") || el.contains(document.activeElement)) ||
+      ((pinned || pointerInside) ? candidates[0] : null);
+    if (!replacement) { hide(); return false; }
+    anchor.removeAttribute("aria-describedby");
+    anchor = replacement;
+    if (!panel.hidden) anchor.setAttribute("aria-describedby", panel.id);
+    return true;
+  }
   function position() {
-    if (!anchor?.isConnected) { hide(); return; }
+    if (!restoreAnchor()) return;
     const rect = anchor.getBoundingClientRect(), gap = 10, margin = 12;
     const width = panel.offsetWidth, height = panel.offsetHeight;
     let left = rect.right + gap, top = rect.top;
@@ -158,12 +173,12 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
       const data = saved && saved.expires > Date.now() ? saved.data : await loadPreview(thread.thread_id);
       cache.set(thread.thread_id, {data, expires: Date.now() + cacheMs});
       if (cache.size > 30) cache.delete(cache.keys().next().value);
-      if (token !== request || anchor !== button || !button.isConnected) return;
+      if (token !== request || !restoreAnchor()) return;
       // The preview's record is fresher, but the list record carries the id and runtime fields.
       current = {thread_id: thread.thread_id, thread: {...thread, ...(data.thread || {}), thread_id: thread.thread_id}};
       render(current.thread, data);
     } catch (_) {
-      if (token === request && anchor === button) render(thread, saved?.data || null, {failed: true});
+      if (token === request && restoreAnchor()) render(thread, saved?.data || null, {failed: true});
     }
   }
   function open(button, id, {thread} = {}) {
@@ -192,6 +207,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   }
   function enter(event) {
     if (event.pointerType === "touch") return;
+    if (Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) pointer = {x: event.clientX, y: event.clientY};
     const button = target(event);
     if (!button) return;
     cancel(closeTimer);
@@ -201,7 +217,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     // Avoid native tooltips covering the richer preview.
     button.removeAttribute("title");
     for (const el of button.querySelectorAll("[title]")) el.removeAttribute("title");
-    openTimer = schedule(() => show(button, button.dataset.thread), event.type === "focusin" ? 0 : 300);
+    openTimer = schedule(() => { if (restoreAnchor()) show(anchor, anchor.dataset.thread); }, event.type === "focusin" ? 0 : 300);
   }
   function leave(event) {
     if (pinned) return;
@@ -218,6 +234,9 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   overview.addEventListener("focusin", enter);
   overview.addEventListener("focusout", leave);
   overview.addEventListener("click", event => { if (event.target?.closest?.('[data-action="peek"]')) return; hide(); });
+  document.addEventListener("pointermove", event => {
+    if (event.pointerType !== "touch") pointer = {x: event.clientX, y: event.clientY};
+  });
   panel.addEventListener("pointerenter", () => { pointerInside = true; cancel(closeTimer); });
   panel.addEventListener("pointerleave", () => { pointerInside = false; leave({relatedTarget: null}); });
   panel.addEventListener("pointerdown", () => pin());
@@ -226,12 +245,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   document.addEventListener("scroll", event => { if (panel.contains(event.target)) return; if (pinned && !panel.hidden) position(); else hide(); }, true);
   const observer = new window.MutationObserver(() => {
     if (!anchor || anchor.isConnected) return;
-    if (pinned && current) {
-      const again = [...overview.querySelectorAll('[data-thread="' + current.thread_id + '"]')]
-        .find(element => !element.closest('[hidden], [aria-hidden="true"]'));
-      if (again) { anchor = again; anchor.setAttribute("aria-describedby", panel.id); position(); return; }
-    }
-    hide();
+    if (restoreAnchor() && !panel.hidden) position();
   });
   observer.observe(overview, {childList: true, subtree: true});
   return {hide, panel, open, pin, refresh, isPinned: () => pinned};

@@ -11,7 +11,8 @@ class Element {
   removeAttribute(key) { delete this.attributes[key]; }
   addEventListener(name, fn) { this.handlers[name] = fn; }
   contains(el) { return el === this || this.children.some(child => child.contains(el)); }
-  closest() { return this.dataset.thread ? this : this.parent?.closest(); }
+  closest(selector) { if (selector === '[hidden], [aria-hidden="true"]') return null; return this.dataset.thread ? this : this.parent?.closest(selector); }
+  matches(selector) { return selector === ":hover" && !!this.hovered; }
   querySelectorAll() { return []; }
   getBoundingClientRect() { return {top: 600, right: 950, bottom: 720, left: 600}; }
   get text() { return (this.textContent || "") + this.children.map(c => c.text).join("\n"); }
@@ -21,9 +22,10 @@ function setup() {
   const overview = new Element(), document = new Element(), window = new Element();
   document.body = new Element(); document.createElement = () => new Element();
   window.innerWidth = 1000; window.innerHeight = 800;
-  window.MutationObserver = class { observe() {} };
+  window.MutationObserver = class { constructor(callback) { window.mutation = callback; } observe() {} };
   const first = new Element(), second = new Element(); first.dataset.thread = "first"; second.dataset.thread = "second";
   overview.append(first, second);
+  overview.querySelectorAll = () => overview.children;
   let tasks = new Map(), sequence = 0, requests = [], opened = [];
   const threads = {};
   const result = createThreadHover({overview, document, window,
@@ -128,6 +130,31 @@ test("preview stays open while moving onto it and closes after leaving", async (
   s.leave(s.first); s.panel.handlers.pointerenter(); await s.flush();
   assert.equal(s.panel.hidden, false);
   s.panel.handlers.pointerleave(); await s.flush(); assert.equal(s.panel.hidden, true);
+});
+
+test("overview refresh keeps the preview anchored to the hovered replacement card", async () => {
+  const s = setup(); s.enter(s.first); await s.flush();
+  const replacement = new Element(); replacement.dataset.thread = "first";
+  // A newly inserted card may not match :hover until the next browser paint.
+  s.document.handlers.pointermove({clientX: 50, clientY: 60, pointerType: "mouse"});
+  s.document.elementFromPoint = () => replacement;
+  s.first.isConnected = false; s.overview.children[0] = replacement;
+  s.refresh(); s.window.mutation();
+  assert.equal(s.panel.hidden, false);
+  assert.equal(replacement.attributes["aria-describedby"], "thread-hover");
+  s.requests[0].resolve(response("updated")); await Promise.resolve();
+  assert.match(s.panel.text, /updated/);
+  s.leave(replacement); await s.flush(); assert.equal(s.panel.hidden, true);
+});
+
+test("replacement before the hover delay opens only if the same card remains hovered", async () => {
+  const s = setup(); s.enter(s.first);
+  const replacement = new Element(); replacement.dataset.thread = "first"; replacement.hovered = true;
+  s.first.isConnected = false; s.overview.children[0] = replacement; s.window.mutation();
+  await s.flush(); assert.equal(s.panel.hidden, false); assert.equal(s.requests[0].id, "first");
+  replacement.isConnected = false;
+  const unhovered = new Element(); unhovered.dataset.thread = "first"; s.overview.children[0] = unhovered;
+  s.window.mutation(); assert.equal(s.panel.hidden, true);
 });
 
 test("failed requests retain useful context without global errors; click dismisses", async () => {
