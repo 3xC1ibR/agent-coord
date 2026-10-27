@@ -38,6 +38,20 @@ test('Attention preserves a current required next action',()=>{
  assert.equal(result.nodes.find(n=>n.className==='next-action').title,'Approve the staged installer.');
  assert.equal(result.nodes.find(n=>n.className==='stale-checkpoint'),undefined);
 });
+test('completed results explicitly say no action is needed only with a current finished checkpoint',()=>{
+ const done={response_state:'update',attention_reason:'done',work_phase:'finished',checkpoint_stale:false,
+  turn_completion:{status:'completed'},checkpoint:{phase:'finished',summary:'Fixed and tested.',next_actor:'nobody',next_action:''}};
+ const label=extra=>card({...done,...extra}).nodes.find(n=>n.className.split(' ').includes('card-state')).textContent;
+ assert.equal(label({}),'Done · No action needed');
+ for(const extra of [
+  {checkpoint_stale:true}, {checkpoint:null}, {checkpoint:{...done.checkpoint,next_actor:'user',next_action:'Approve it.'}},
+  {open_ask:{id:1}}, {turn_completion:{status:'failed'}}, {status:'needs input'},
+ ]) assert.notEqual(label(extra),'Done · No action needed');
+ const review=card({...done,response_state:'input',attention_reason:'review',work_phase:'validation',
+  checkpoint:{phase:'validation',summary:'Ready for review.',next_actor:'user',next_action:'Approve it.'}});
+ assert.equal(review.nodes.find(n=>n.className.split(' ').includes('card-state')).textContent,'Review requested');
+ assert.equal(review.nodes.find(n=>n.className==='next-action').title,'Approve it.');
+});
 test('dismissed saved requests show their phase without prompting the user again',()=>{
  for(const response_state of ['input','action']) {
   const checkpoint={phase:'validation',summary:'Phone views are ready.',next_actor:'user',next_action:'Check the Phone board.'};

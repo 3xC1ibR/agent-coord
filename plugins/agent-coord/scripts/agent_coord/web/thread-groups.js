@@ -21,6 +21,11 @@ const threadGrouping = (() => {
   function reason(thread) {
     if (thread.status === "stalled") return {key: "blocked", rank: 0, label: "Stalled"};
     const key = thread.attention_reason || ({input: "blocked", action: "review", failed: "blocked", update: "update"}[thread.response_state]) || "reply";
+    if (key === "done" && thread.response_state === "update" && !thread.checkpoint_stale &&
+        thread.checkpoint?.phase === "finished" && thread.checkpoint.next_actor === "nobody" &&
+        thread.work_phase === "finished" && thread.turn_completion?.status === "completed" &&
+        !thread.open_ask && !["running", "needs input"].includes(thread.status))
+      return {key, rank: reasons.done.rank, label: "✓ Done · No action needed"};
     return {key, ...(reasons[key] || reasons.reply)};
   }
   function awaitsUser(thread) {
