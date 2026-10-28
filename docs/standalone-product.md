@@ -64,6 +64,8 @@ Bring-your-own-subscription remains the intended model. If it is unsupported for
 
 For a pilot, use one persistent Linux VM per customer and a separate shared service for accounts, billing, provisioning, and authenticated routing. AWS is a candidate, not a requirement.
 
+The first step is to prove this on the owner's own machine before inviting anyone else. That proposal, with measured Linux readiness, credentials, browser use and costs, is in [Hosted machine plan](hosted-machine-plan.md).
+
 Each customer VM would contain Ribbon Field, the official agent client, repositories, development tools, and persistent state. Multiple repositories and conversations could share that machine's resources. The shared service would manage the workspace lifecycle without giving customer code access to infrastructure provisioning credentials.
 
 The browser would connect through authenticated HTTPS to the assigned workspace. Terminal access would support setup and CLI login. Closing a browser or laptop would leave work running. Process supervision, backups, and explicit recovery behavior would be part of the service. Resuming saved conversations after a restart is not the same as preserving every running shell process or an in-progress turn.
