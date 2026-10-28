@@ -208,11 +208,31 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.discover(self.database)["instance"], record["instance"])
 
     def test_busy_update_swaps_web_assets_then_activates_at_idle(self):
+        # Hold the automatic idle probe while an approval is pending. The
+        # accepted turn must remain answerable throughout this busy check.
+        runtime_source = self.resources / "backend/agent_coord/desktop_runtime.py"
+        runtime_source.write_text(runtime_source.read_text() + '''
+_readiness_without_test_barrier = readiness
+def readiness(sessions):
+    result = _readiness_without_test_barrier(sessions)
+    root = Path(os.environ["RIBBON_FAKE_ROOT"])
+    if (threading.current_thread() is threading.main_thread()
+            and (root / "hold-idle-probe").exists()
+            and not (root / "idle-probe-entered").exists()):
+        atomic_json(root / "idle-probe-entered", result)
+        deadline = time.monotonic() + 10
+        while not (root / "release-idle-probe").exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Test did not release the idle probe")
+            time.sleep(.01)
+    return result
+''')
         first = self.launch()
         record = runtime.discover(self.database)
         thread = self.api(first["url"], "api/browser/sessions", {"cwd":str(self.root)})["session"]["thread_id"]
         self.api(first["url"], f"api/browser/sessions/{thread}/messages", {"message":"one"})
         self.wait(lambda: "pending approvals or questions" in runtime.control(record, "status")["busy"])
+        key = self.api(first["url"], f"api/browser/sessions/{thread}")["requests"][0]["key"]
         new = self.root / "New/Contents/Resources"
         shutil.copytree(self.resources, new)
         page = new / "backend/agent_coord/web/index.html"
@@ -223,8 +243,14 @@ class RuntimeTests(unittest.TestCase):
         with urllib.request.urlopen(first["url"]) as response:
             self.assertIn(b"new-interface-marker", response.read())
         self.assertTrue(runtime.control(record, "decision", target=runtime.compatibility_metadata("2"))["busy"])
-        key = self.api(first["url"], f"api/browser/sessions/{thread}")["requests"][0]["key"]
-        self.api(first["url"], f"api/browser/sessions/{thread}/requests/{key}", {"decision":"accept"})
+        (self.root / "hold-idle-probe").touch()
+        try:
+            entered = self.root / "idle-probe-entered"
+            self.wait(entered.exists)
+            self.assertIn("pending approvals or questions", json.loads(entered.read_text()))
+            self.api(first["url"], f"api/browser/sessions/{thread}/requests/{key}", {"decision":"accept"})
+        finally:
+            (self.root / "release-idle-probe").touch()
         def changed():
             try:
                 value = runtime.discover(self.database)

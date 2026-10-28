@@ -510,6 +510,11 @@ class Runtime:
                 with self.mutex:
                     if not self.pending or self.maintenance:
                         continue
+                    # Busy work must remain answerable while an update waits.
+                    # Only close admission after an initial idle observation;
+                    # the closed-gate check below still catches newly admitted work.
+                    if readiness(sessions):
+                        continue
                     # Close admissions atomically before checking all accepted
                     # operations and provider activity. A busy check reopens it.
                     sessions.admission.pause()
