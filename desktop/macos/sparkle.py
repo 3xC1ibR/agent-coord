@@ -232,7 +232,8 @@ def package_update(app: Path, output: Path, *, tools: Path, key_file: Path | Non
     runtime = bundle_runtime_metadata(app)
     output.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
-    subprocess.run(["xcrun", "stapler", "validate", str(app)], check=True)
+    from distribution import run_stapler
+    run_stapler("validate", app)
     subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app), str(output)], check=True)
     tool = tools / "bin/sign_update"
     signature = sign_file(tool, output, key_file)

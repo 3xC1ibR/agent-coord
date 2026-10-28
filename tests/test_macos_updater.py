@@ -131,6 +131,58 @@ class UpdaterTests(unittest.TestCase):
                     sparkle.sign_file(Path("tool"), Path("archive"), key)
             self.assertNotIn("TEST-ONLY-SECRET", str(error.exception))
 
+    def test_update_packaging_retries_ticket_connection_loss_and_fails_closed(self):
+        for code, diagnostic, failures, attempts, succeeds in (
+            (68, "NSURLErrorDomain Code=-1005", 1, 2, True),
+            (68, "NSURLErrorDomain Code=-1005", 5, 5, False),
+            (65, "invalid ticket", 1, 1, False),
+            (68, "other ticket error", 1, 1, False),
+        ):
+            with self.subTest(code=code, diagnostic=diagnostic, failures=failures), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                app = root / "Test.app"
+                resources = app / "Contents/Resources"
+                resources.mkdir(parents=True)
+                runtime = sparkle.runtime_metadata("1.2.3", "42")
+                info = {"CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "42",
+                        "SUFeedURL": "https://downloads.ribbonfield.com/updates/alpha/x86_64.xml",
+                        "SUPublicEDKey": PUBLIC, **runtime}
+                (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+                (resources / "backend.json").write_text(json.dumps(runtime))
+                archive = root / "update.zip"
+                tickets = []
+                def run(command, **kwargs):
+                    result = subprocess.CompletedProcess(command, 0, "", "")
+                    if command[:3] == ["xcrun", "stapler", "validate"]:
+                        tickets.append(command)
+                        if len(tickets) <= failures:
+                            result = subprocess.CompletedProcess(command, code, diagnostic, "")
+                    elif command[0] == "ditto":
+                        archive.write_bytes(b"test update archive")
+                    if kwargs.get("check"):
+                        result.check_returncode()
+                    return result
+                with (mock.patch.object(sparkle.subprocess, "run", side_effect=run),
+                      mock.patch.object(distribution.time, "sleep") as sleep,
+                      mock.patch.object(sparkle, "sign_file", return_value=SIGNATURE) as sign,
+                      mock.patch.object(sparkle, "verify_signature"),
+                      mock.patch.object(sparkle, "verify_appcast")):
+                    if succeeds:
+                        result = sparkle.package_update(app, archive, tools=root / "tools", key_file=None,
+                                                        architecture="x86_64", channel="alpha")
+                        self.assertEqual(result["size"], len(b"test update archive"))
+                        self.assertEqual(sign.call_count, 2)
+                        self.assertTrue(archive.with_suffix(".zip.json").is_file())
+                    else:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            sparkle.package_update(app, archive, tools=root / "tools", key_file=None,
+                                                   architecture="x86_64", channel="alpha")
+                        self.assertFalse(archive.exists())
+                        self.assertFalse(archive.with_suffix(".xml").exists())
+                        sign.assert_not_called()
+                    self.assertEqual(len(tickets), attempts)
+                    self.assertEqual(sleep.call_args_list, [mock.call(10 * 2 ** n) for n in range(attempts - 1)])
+
     def test_signed_feed_parser_rejects_unsigned_tampered_and_trailing_content(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "feed.xml"
