@@ -556,3 +556,43 @@ test("cold skills consume Enter without sending and reuse the completed catalog 
   f.input.emit("blur"); f.input.emit("focus"); f.type("$sk");
   assert.deepEqual(f.names(), ["$skill-creator"]); assert.equal(loads, 1);
 });
+
+test("model search ranks Terra and comparable name tokens above family, version, and display qualifiers", async () => {
+  const catalog = [
+    {model: "gpt-6.1-astra", displayName: "GPT-6.1 Astra (Thinking)"},
+    {model: "gpt-6.1-terra-mini", displayName: "GPT-6.1 Terra Mini"},
+    {model: "gpt-6.1-terra", displayName: "GPT-6.1 Terra"},
+    {model: "claude-opus-5-5", displayName: "Opus 5.5"},
+    {model: "gemini-3.1-pro", displayName: "Gemini 3.1 Pro"},
+    {model: "internal-model-42", displayName: "Luna"},
+    {model: "gpt-6.1-sol", displayName: "GPT-6.1 Sol"},
+  ];
+  const f = setup({loadModels: async () => catalog});
+  f.type("/model "); await settle();
+  assert.deepEqual(f.names(), catalog.map(item => item.model), "Keep catalog order for an empty query");
+  for (const [query, expected] of [["t", "gpt-6.1-terra"], ["TERRA", "gpt-6.1-terra"],
+    ["ast", "gpt-6.1-astra"], ["op", "claude-opus-5-5"], ["pro", "gemini-3.1-pro"], ["lu", "internal-model-42"]]) {
+    f.type("/model " + query); assert.equal(f.names()[0], expected, query);
+  }
+  f.type("/model t"); assert(!f.names().includes("gpt-6.1-sol"), "The t inside gpt is not a name match");
+  f.type("/model gpt-6.1-terra"); assert.equal(f.names()[0], "gpt-6.1-terra", "An exact canonical ID wins over variants");
+  f.type("/model 6.1"); assert.deepEqual(f.names(), catalog.filter(item => item.model.startsWith("gpt-6.1")).map(item => item.model));
+  f.type("/model absent"); assert.equal(f.menu.hidden, true);
+  f.type("/model terra"); f.key("Enter"); assert.equal(f.input.value, "/model gpt-6.1-terra ");
+});
+
+test("Enter applies a name-matched model using its canonical ID and selected provider", () => {
+  const f = setup(), applied = [];
+  const elements = {message: f.input, "slash-commands": f.menu, composer: {hidden: false}};
+  const state = {selected: "new-session", drafts: new Map(), closing: new Set(),
+    modelCatalogs: new Map([["codex", [{model: "gpt-6.1-terra", displayName: "Terra"}]],
+      ...["claude", "antigravity", "kimi", "muse"].map(client => [client, []])]),
+    detail: {session: {client: "codex"}, work_thread: {browser_session: true, attention: "now"}}};
+  Object.assign(f.context, {state, $: id => elements[id], loadModelCatalog: async () => [],
+    api: async () => ({data: []}), action: fn => fn(), sendMessage: () => applied.push(f.input.value.trim())});
+  bindAppSlash(f, fs.readFileSync(path.join(web, "app.js"), "utf8"), state);
+  f.type("/model t"); f.key("Enter");
+  assert.deepEqual(applied, ["/model gpt-6.1-terra"]);
+  assert.equal(state.detail.session.model, "gpt-6.1-terra");
+  assert.equal(state.detail.session.client, "codex");
+});

@@ -13,6 +13,21 @@
     {name: "/ultrafast", arguments: "[on|off|status]", description: "Toggle Codex Ultrafast mode for subsequent messages", codexOnly: true},
   ];
 
+  function modelMatch(command, prefix) {
+    if (!prefix) return [0, 0];
+    const names = [command.name, command.displayName || ""].map(name => name.toLowerCase());
+    const tokens = [...new Set(names.flatMap(name => name.split(/[^a-z0-9.]+/)).filter(Boolean))];
+    // Family/version prefixes and UI qualifiers should not outrank the name
+    // someone types, such as Terra in gpt-6.1-terra.
+    const meaningful = tokens.filter(token => /^[a-z]/.test(token) &&
+      !["gpt", "model", "default", "recommended", "thinking", "reasoning"].includes(token));
+    const rank = names.includes(prefix) ? 0 : meaningful.includes(prefix) ? 1 :
+      meaningful.some(token => token.startsWith(prefix)) ? 2 :
+      names.some(name => name.startsWith(prefix)) ? 3 :
+      tokens.some(token => token.startsWith(prefix)) ? 4 : Infinity;
+    return [rank, rank === 1 || rank === 2 ? meaningful.length : 0];
+  }
+
   class ChatSlashCommands {
     constructor({input, menu, getThread, getSession = () => ({}), loadModels = async () => [], loadSkills = async () => [],
       catalogs = new Map(), getModelClients = () => [getSession()?.client || "codex"],
@@ -112,7 +127,7 @@
       if (query.kind === "model") {
         const clients = this.getModelClients();
         const labels = {codex: "Codex", claude: "Claude Code", antigravity: "Google Antigravity", kimi: "Kimi Code", muse: "Muse Code"};
-        return clients.flatMap(client => this.models(client).map(model => ({name: model.model, client,
+        return clients.flatMap(client => this.models(client).map(model => ({name: model.model, displayName: model.displayName, client,
           group: clients.length > 1 ? labels[client] || client : null,
           arguments: [clients.length > 1 ? labels[client] || client : "", model.displayName || ""].filter(Boolean).join(" · "),
           description: model.description || ""})));
@@ -163,8 +178,12 @@
       const query = this.query();
       const key = JSON.stringify([this.getThread(), this.input.value, this.input.selectionStart]);
       if (!query || this.dismissed === key) { this.close(); return; }
-      const matches = this.suggestions(query).filter(command => query.kind === "skill" ?
-        command.name.slice(1).toLowerCase().includes(query.prefix.slice(1)) : command.name.toLowerCase().startsWith(query.prefix));
+      const suggestions = this.suggestions(query);
+      const matches = query.kind === "model" ? suggestions.map(command => ({command, rank: modelMatch(command, query.prefix)}))
+        .filter(item => Number.isFinite(item.rank[0]))
+        .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1]).map(item => item.command) :
+        suggestions.filter(command => query.kind === "skill" ? command.name.slice(1).toLowerCase().includes(query.prefix.slice(1)) :
+          command.name.toLowerCase().startsWith(query.prefix));
       if (!matches.length) {
         this.matches = []; this.options = [];
         const status = this.pending(query) ? (query.kind === "skill" ? "Loading skills…" : "Loading models…") :
