@@ -20,14 +20,15 @@ class SendWorkPalette {
     this.menu.className = "slash-commands"; this.menu.hidden = true; this.menu.setAttribute("role", "listbox");
     this.content.insertBefore(this.settings, this.list); this.content.insertBefore(this.menu, this.list);
     this.slash = new ChatSlashCommands({input: this.input, menu: this.menu,
-      getThread: () => "send-work:" + this.cwd, getSession: () => this.draft,
+      getThread: () => "send-work:" + this.cwd, getSession: () => ({...this.draft, cwd: this.cwd}),
       catalogs: this.catalogs, loadModels: client => this.loadModels(client),
+      loadSkills: async session => (await this.api("skills", {client: session.client, cwd: session.cwd})).data,
       getModelClients: () => ["codex", "claude", "antigravity", "kimi", "muse"],
       getCommands: () => this.commands(), canComplete: () => this.visible && !this.sending && !this.configuring,
       onSelectModel: choice => { this.modelChoice = choice; },
       onChange: () => this.changed(),
       onComplete: ({query, command}) => {
-        if (query.kind !== "command" || ["/new", "/yolo"].includes(command.name)) this.configure();
+        if (query.kind !== "skill" && (query.kind !== "command" || ["/new", "/yolo"].includes(command.name))) this.configure();
       }});
     this.$("open").onclick = () => this.toggle();
     this.$("close").onclick = () => this.close();
@@ -41,7 +42,7 @@ class SendWorkPalette {
     this.$("profile-model").onchange = () => this.profileEfforts();
     this.input.addEventListener("input", () => this.changed());
     this.input.addEventListener("keydown", event => {
-      if (event.isComposing || this.sending || this.configuring) return;
+      if (event.isComposing || event.keyCode === 229 || this.slash.composing || this.sending || this.configuring) return;
       if (this.slash.keydown(event)) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         if (this.locked?.kind === "new" || !this.rows.length) return;
@@ -50,7 +51,7 @@ class SendWorkPalette {
         this.locked = this.rows[this.active]; this.render();
       } else if (event.key === "Tab" && !event.shiftKey && !this.locked && this.rows.length) {
         event.preventDefault(); this.locked = this.rows[this.active]; this.render();
-      } else if (event.key === "Enter" && !event.shiftKey) {
+      } else if (event.key === "Enter" && !event.shiftKey && !this.view.matchMedia?.("(hover: none) and (pointer: coarse)").matches) {
         event.preventDefault(); this.send();
       }
     });

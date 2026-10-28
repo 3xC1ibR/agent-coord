@@ -14,7 +14,11 @@ def skill_catalog(sessions, body: dict) -> list[dict]:
     client = body.get("client", "codex")
     if not isinstance(client, str) or client not in {"codex", "claude", "antigravity", "kimi", "muse"}:
         raise CoordinationError("Choose a supported client.")
-    # Dollar-sign invocation and skills/list belong to the native Codex protocol.
+    if client == "claude":
+        # Claude advertises its installed skills/custom commands at initialize.
+        # Never substitute another provider's catalog for the selected session.
+        return sorted(sessions._provider(client).request("skills/list", {"cwd": cwd})["data"],
+                      key=lambda skill: skill["name"].casefold())
     if client != "codex":
         return []
     result = sessions.rpc.request("skills/list", {"cwds": [cwd], "forceReload": True})

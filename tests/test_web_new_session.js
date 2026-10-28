@@ -19,6 +19,7 @@ function setup() {
     threadOrganization: {NONE: "__none__"}, action: fn => fn(), sessionPath: id => "sessions/" + id,
     api: async (path, body) => {
       calls.push({path, body});
+      if (path === "session-defaults") return {model: body.model || "gpt-test", modelLabel: body.model || "GPT Test", effort: "high", supportsEffort: true};
       if (path.startsWith("models?")) return {data: [{model: path.endsWith("claude") ? "sonnet" : "gpt-test", displayName: path.endsWith("claude") ? "Sonnet" : "GPT Test"}]};
       return {session: {thread_id: "created"}};
     },
@@ -81,7 +82,7 @@ test("first permission commands retain composer focus in standalone and pane con
     input.value = command;
     await c.sendMessage();
     assert.equal(c.state.selected, "new-session");
-    assert.equal(c.calls.some(call => call.body), false);
+    assert.equal(c.calls.some(call => call.body && call.path !== "session-defaults"), false);
     assert.equal(input.value, "");
     assert.equal(doc.activeElement, input, `${command}, pane=${paneMode}`);
   }
@@ -137,7 +138,7 @@ test("draft thread commands never create a provider session or become prompts", 
   for (const command of ["/fork", "/close extra", "/fork extra"]) {
     const c = setup(); await c.newSession(); c.$("message").value = command;
     await assert.rejects(c.sendMessage(), /before forking|without arguments/);
-    assert.equal(c.calls.filter(call => call.body).length, 0, command);
+    assert.equal(c.calls.filter(call => call.body && call.path !== "session-defaults").length, 0, command);
     assert.equal(c.$("message").value, command);
     assert.equal(c.state.busy, false);
   }
@@ -145,7 +146,7 @@ test("draft thread commands never create a provider session or become prompts", 
   await c.sendMessage();
   assert.equal(c.state.newSessionDraft, null);
   assert.equal(c.state.selected, null);
-  assert.equal(c.calls.filter(call => call.body).length, 0);
+  assert.equal(c.calls.filter(call => call.body && call.path !== "session-defaults").length, 0);
 });
 
 test("New session opens a draft with all provider groups before creating any provider session", async () => {
@@ -159,7 +160,7 @@ test("New session opens a draft with all provider groups before creating any pro
   c.$("model-picker").value = c.modelValue("claude", "sonnet");
   await c.changeSessionModel();
   assert.equal(c.state.detail.session.client, "claude");
-  assert.equal(c.calls.filter(call => call.body).length, 0);
+  assert.equal(c.calls.filter(call => call.body && call.path !== "session-defaults").length, 0);
   c.$("message").value = "Hello";
   await c.sendSessionDraft("Hello", [{name: "proof.png", url: "data:image/png;base64,YQ=="}]);
   const create = c.calls.find(call => call.path === "sessions");
@@ -182,7 +183,7 @@ test("slash selection updates draft settings and creates the selected provider o
   assert.equal(c.state.detail.session.model, "sonnet");
   assert.equal(c.state.detail.session.effort, null);
   assert.equal(c.$("model-picker").value, c.modelValue("claude", "sonnet"));
-  assert.equal(c.calls.filter(call => call.body).length, 0);
+  assert.equal(c.calls.filter(call => call.body && call.path !== "session-defaults").length, 0);
   await c.sendSessionDraft("/model sonnet", []);
   const create = c.calls.find(call => call.path === "sessions");
   assert.equal(create.body.client, "claude");
@@ -374,8 +375,8 @@ test("established conversations keep their provider and save model changes", asy
   assert.deepEqual(c.$("model-picker").children.map(group => group.label), ["Claude Code"]);
   c.$("model-picker").value = c.modelValue("claude", "sonnet");
   await c.changeSessionModel();
-  assert.equal(c.calls.at(-1).path, "sessions/existing");
-  assert.equal(c.calls.at(-1).body.model, "sonnet");
+  const update = c.calls.find(call => call.path === "sessions/existing");
+  assert.equal(update.body.model, "sonnet");
 });
 
 async function effortSetup(client = "codex") {
@@ -616,7 +617,7 @@ test("draft permission commands stay local and configure the first real message"
       c.$("message").value = command; await c.sendMessage();
       assert.equal(c.state.newSessionDraft.session.yolo, expected);
       assert.match(c.state.newSessionDraft.commandFeedback, /Permissions:/);
-      assert.equal(c.state.selected, "new-session"); assert.equal(c.calls.length, 0);
+      assert.equal(c.state.selected, "new-session"); assert.equal(c.calls.filter(call => call.path !== "session-defaults").length, 0);
     }
     c.$("message").value = "Hello"; await c.sendMessage();
     assert.equal(c.calls.find(call => call.path === "sessions").body.yolo, true);
@@ -664,4 +665,53 @@ test("a draft already created after a failed send applies permissions through it
   await c.sendMessage();
   assert.equal(c.calls.some(call => call.path === "sessions"), false);
   assert.equal(c.calls.find(call => call.path === "sessions/saved/messages").body.message, "/yolo");
+});
+
+test("new draft displays effective configured settings without creating a provider conversation", async () => {
+  const c = setup(), api = c.api;
+  c.api = async (path, body) => {
+    if (path === "session-defaults") return {model: "configured", modelLabel: "Configured model", effort: "xhigh", supportsEffort: true};
+    if (path === "models?client=codex") return {data: [{model: "configured", displayName: "Configured model",
+      supportedReasoningEfforts: [{reasoningEffort: "low"}, {reasoningEffort: "xhigh"}]}]};
+    return api(path, body);
+  };
+  await c.newSession();
+  assert.equal(c.$("model-picker").children[0].children[0].text, "Configured model");
+  assert.equal(c.$("effort-picker").children[0].text, "xhigh (configured)");
+  assert.equal(c.$("effort-picker").disabled, false);
+  assert.equal(c.state.detail.session.model, null, "Keep inheriting the provider configuration");
+  assert.equal(c.calls.some(call => call.path === "sessions"), false);
+});
+
+test("defaults are scoped by folder, provider and model and late replies do not change the active choice", async () => {
+  const c = setup(); await c.newSession(); const pending = [];
+  c.state.sessionDefaults.clear();
+  c.api = (path, body) => new Promise(resolve => pending.push({path, body, resolve}));
+  const first = c.loadSessionDefaults({client: "codex", cwd: "/one"});
+  c.loadSessionDefaults({client: "codex", cwd: "/one"});
+  const session = {client: "claude", cwd: "/two", model: "alias"};
+  c.state.detail.session = session;
+  const second = c.loadSessionDefaults(session);
+  assert.equal(pending.length, 2, "Deduplicate in-flight reads");
+  pending[1].resolve({model: "concrete", modelLabel: "Claude configured", effort: "high"}); await second;
+  pending[0].resolve({model: "other", modelLabel: "Old folder", effort: "low"}); await first;
+  assert.equal(c.effectiveSessionSettings(session).model, "concrete");
+  assert.equal(c.effectiveSessionSettings(session).effort, "high");
+  session.effort = "low";
+  assert.equal(c.effectiveSessionSettings(session).effort, "low", "An explicit effort overrides inheritance");
+});
+
+test("failed defaults show unavailable and a fresh draft retries changed native configuration", async () => {
+  const c = setup(), api = c.api; let reads = 0;
+  c.api = async (path, body) => {
+    if (path !== "session-defaults") return api(path, body);
+    if (++reads === 1) throw new Error("CLI unavailable");
+    return {model: "new-config", effort: "medium"};
+  };
+  await c.newSession();
+  assert.equal(c.$("model-picker").children[0].children[0].text, "Model unavailable");
+  c.renderModelPicker(); assert.equal(reads, 1, "Do not retry on every render");
+  c.state.newSessionDraft = null; await c.newSession();
+  assert.equal(c.$("model-picker").children[0].children[0].text, "new-config");
+  assert.equal(reads, 2);
 });

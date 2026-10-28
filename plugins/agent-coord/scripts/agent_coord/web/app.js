@@ -1299,12 +1299,13 @@ async function saveTitleEdit() {
 }
 function renderSessionSettings() {
   const session = state.detail?.session, browserSession = !!state.detail?.work_thread?.browser_session;
+  const effective = session ? effectiveSessionSettings(session) : {};
   $("workspace").textContent = session?.cwd || state.detail?.work_thread?.cwd || "";
   $("workspace").title = $("workspace").textContent;
   $("session-settings").hidden = !browserSession;
   const providerName = session?.client === "muse" ? "Muse Code" : session?.client === "kimi" ? "Kimi" : session?.client === "antigravity" ? "Antigravity" : session?.client === "claude" ? "Claude Code" : "Codex";
-  $("session-model").textContent = "Model · " + providerName + " · " + (session?.model || "Default");
-  $("session-effort").textContent = "Reasoning · " + (session?.effort || "Model default");
+  $("session-model").textContent = "Model · " + providerName + " · " + (effective.modelLabel || (effective.unavailable ? "Unavailable" : "Loading…"));
+  $("session-effort").textContent = "Reasoning · " + (effective.effort || (effective.unavailable ? "Unavailable" : effective.model && !effective.supportsEffort ? "Not configurable" : "Loading…"));
   $("session-yolo").hidden = !session?.yolo;
   $("edit-permissions").disabled = !browserSession || state.detailRefreshing || !!state.detail?.running || state.detail?.work_thread?.attention === "archived" || sessionBusy() || state.closing.has(state.selected);
   const feedback = state.selected === "new-session" ? state.newSessionDraft?.commandFeedback : state.commandFeedback.get(state.selected);
@@ -2129,6 +2130,30 @@ function sessionBusy() {
   return !!state.busy || !!state.transferLocks?.has(state.selected) || !!state.sending?.has(isSessionDraft() ? state.newSessionDraft : state.selected);
 }
 function modelValue(client, model) { return JSON.stringify([client, model || ""]); }
+function defaultsKey(session) {
+  return JSON.stringify([session.client || "codex", session.cwd || state.detail?.work_thread?.cwd || state.config?.cwd, session.model || null]);
+}
+function effectiveSessionSettings(session) {
+  const inherited = state.sessionDefaults?.get(defaultsKey(session)) || {};
+  const models = state.modelCatalogs?.get(session.client || "codex") || [];
+  const model = models.find(item => item.model === (inherited.model || session.model) || item.resolvedModel === inherited.model && inherited.model);
+  return {...inherited, model: inherited.model || session.model, modelLabel: inherited.modelLabel || model?.displayName || inherited.model || session.model,
+    effort: session.effort || inherited.effort, supportsEffort: inherited.supportsEffort ?? !!model?.supportedReasoningEfforts?.length};
+}
+async function loadSessionDefaults(session = state.detail?.session) {
+  if (!session) return;
+  const key = defaultsKey(session), cache = state.sessionDefaults ||= new Map(), loading = state.defaultsLoading ||= new Map();
+  if (cache.has(key)) return cache.get(key);
+  if (!loading.has(key)) {
+    const [client, cwd, model] = JSON.parse(key);
+    loading.set(key, api("session-defaults", {client, cwd, model}).then(result => {
+      cache.set(key, {...result, unavailable: !result.model}); return result;
+    }).catch(() => { cache.set(key, {unavailable: true}); }).finally(() => {
+      loading.delete(key); renderStatus();
+    }));
+  }
+  return loading.get(key);
+}
 function sessionModelClients() {
   return isSessionDraft() && !state.newSessionDraft.createdId ?
     ["codex", "claude", "antigravity", "kimi", "muse"] : [state.detail?.session?.client || "codex"];
@@ -2143,15 +2168,17 @@ function renderModelPicker() {
   const session = state.detail?.session, picker = $("model-picker");
   if (!session) { picker.disabled = true; globalThis.modelPicker?.sync(); renderEffortPicker(); return; }
   const draft = isSessionDraft(), client = session.client || "codex";
+  const effective = effectiveSessionSettings(session);
   const clients = sessionModelClients();
   const catalogs = state.modelCatalogs ||= new Map();
-  const signature = JSON.stringify([clients, session.model, [...catalogs]]);
+  const signature = JSON.stringify([clients, session.model, [...catalogs], effective]);
   if (picker.dataset.signature !== signature) {
     picker.dataset.signature = signature;
     picker.replaceChildren();
     for (const provider of clients) {
       const group = node("optgroup"); group.label = provider === "muse" ? "Muse Code" : provider === "kimi" ? "Kimi Code" : provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude Code" : "Codex";
-      if (draft || !session.model) group.append(new Option(group.label + " default", modelValue(provider, "")));
+      if (draft || !session.model || session.model === "default") group.append(new Option(provider === client ?
+        effective.modelLabel || (effective.unavailable ? "Model unavailable" : "Loading model…") : group.label + " configured model", modelValue(provider, "")));
       const models = catalogs.get(provider) || [];
       for (const model of models) group.append(new Option(model.displayName || model.model, modelValue(provider, model.model)));
       if (provider === client && session.model && !models.some(model => model.model === session.model)) {
@@ -2160,23 +2187,27 @@ function renderModelPicker() {
       picker.append(group);
     }
   }
-  picker.value = modelValue(client, session.model);
+  picker.value = modelValue(client, session.model === "default" ? "" : session.model);
   picker.disabled = sessionBusy() || state.detailRefreshing || !!state.detail.running || state.detail.work_thread?.attention === "archived" || !!state.newSessionDraft?.createdId && draft;
   const errors = clients.filter(provider => state.modelErrors?.has(provider));
   $("model-picker-status").textContent = errors.length ? errors.map(provider => (provider === "muse" ? "Muse Code" : provider === "kimi" ? "Kimi" : provider === "antigravity" ? "Antigravity" : provider === "claude" ? "Claude Code" : "Codex") + " models unavailable").join(" · ") : "";
   if (["antigravity", "kimi", "muse"].includes(client) && state.modelErrors?.has(client)) $("model-picker-status").textContent = state.modelErrors.get(client);
   globalThis.modelPicker?.sync();
   renderEffortPicker();
+  loadSessionDefaults(session);
 }
 function renderEffortPicker() {
   const session = state.detail?.session, picker = $("effort-picker");
+  const effective = session ? effectiveSessionSettings(session) : {};
   const models = state.modelCatalogs?.get(session?.client || "codex") || [];
-  const model = models.find(item => item.model === session?.model);
+  const model = models.find(item => item.model === session?.model || item.model === effective.model || item.resolvedModel === effective.model && effective.model);
   const efforts = model?.supportedReasoningEfforts || [];
-  const signature = JSON.stringify([session?.effort, efforts]);
+  const inheritedEffort = session && state.sessionDefaults?.get(defaultsKey(session))?.effort;
+  const signature = JSON.stringify([session?.effort, efforts, effective, inheritedEffort]);
   if (picker.dataset.signature !== signature) {
     picker.dataset.signature = signature;
-    picker.replaceChildren(new Option("Model default", ""));
+    picker.replaceChildren(new Option(inheritedEffort ? inheritedEffort + " (configured)" :
+      effective.unavailable ? "Effort unavailable" : effective.model && !effective.supportsEffort ? "Not configurable" : "Loading effort…", ""));
     for (const effort of efforts) picker.append(new Option(effort.reasoningEffort, effort.reasoningEffort));
     if (session?.effort && !efforts.some(item => item.reasoningEffort === session.effort)) {
       picker.append(new Option(session.effort, session.effort));
@@ -2184,7 +2215,7 @@ function renderEffortPicker() {
   }
   picker.value = session?.effort || "";
   picker.disabled = $("model-picker").disabled || !efforts.length;
-  $("effort-trigger").title = !session?.model ? "Choose a model to set reasoning effort" : "Reasoning effort for the next message";
+  $("effort-trigger").title = efforts.length ? "Reasoning effort for the next message" : "This model has no configurable reasoning effort";
   globalThis.effortPicker?.sync();
 }
 async function changeSessionEffort() {
@@ -2218,13 +2249,13 @@ async function loadModelCatalog(client) {
 async function loadSessionModels() {
   const clients = sessionModelClients();
   // Share completed and in-flight requests with slash autocomplete.
-  await Promise.all(clients.map(client => loadModelCatalog(client).catch(() => {})));
+  await Promise.all([loadSessionDefaults(), ...clients.map(client => loadModelCatalog(client).catch(() => {}))]);
 }
 async function changeSessionModel() {
   const id = state.selected, [client, model] = JSON.parse($("model-picker").value);
   const draft = isSessionDraft();
   if (sessionBusy() || state.detailRefreshing || state.detail?.running || draft && state.newSessionDraft.createdId) return;
-  if (draft) { selectDraftModel({client, model}); return; }
+  if (draft) { selectDraftModel({client, model}); await loadSessionDefaults(); return; }
   state.busy = true;
   try {
     const session = await api(sessionPath(id), {model});
@@ -2249,6 +2280,8 @@ async function newSession() {
     }
   }
   goHome({restoreDispatcher: false});
+  // A fresh draft re-reads configuration changed outside the app.
+  if (!state.newSessionDraft) state.sessionDefaults?.clear();
   state.newSessionDraft ||= {
     draftId: "new-session:" + (state.draftSequence = (state.draftSequence || 0) + 1),
     session: {...body, client: "codex", model: null, effort: null, yolo: false},
@@ -2900,10 +2933,11 @@ async function toggleDispatcher(thread = state.detail?.work_thread) {
   await refreshList();
 }
 function composerKeydown(event) {
-  if (event.isComposing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+  if (event.isComposing || event.keyCode === 229 || state.slashCommands?.composing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
   if (state.slashCommands?.keydown(event)) return;
   if (state.mentions?.keydown(event)) return;
   if (event.key === "Enter") {
+    if (globalThis.matchMedia?.("(hover: none) and (pointer: coarse)").matches) return;
     event.preventDefault();
     if (!$("send").disabled) $("composer").requestSubmit();
   } else if (event.key === "Tab" && state.detail?.running && ($("message").value.trim() || state.attachments?.snapshot().length)) {
@@ -3383,12 +3417,19 @@ async function boot() {
     onChange: () => { state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
   state.slashCommands = new ChatSlashCommands({input: $("message"), menu: $("slash-commands"),
     getThread: () => state.selected,
-    getSession: () => ({...state.detail?.session, cwd: state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config?.cwd}),
+    getSession: () => ({...state.detail?.session,
+      model: state.detail?.session?.model || (state.detail?.session && effectiveSessionSettings(state.detail.session).model),
+      cwd: state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config?.cwd}),
     catalogs: (state.modelCatalogs ||= new Map()),
     getModelClients: sessionModelClients,
     onSelectModel: selectDraftModel,
     loadModels: loadModelCatalog,
     loadSkills: async session => (await api("skills", {client: session.client || "codex", cwd: session.cwd})).data,
+    onComplete: ({apply}) => {
+      // Only a complete single-line local command can be applied here. Skill
+      // insertion and Tab completion must never submit a model prompt.
+      if (apply && !/[\r\n]/.test($("message").value.trim())) action(sendMessage);
+    },
     canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !sessionBusy() &&
       state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
     onReplace: (start, end, text) => state.mentions?.draft().edit(start, end, text),

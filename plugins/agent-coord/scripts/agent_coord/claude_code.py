@@ -169,6 +169,7 @@ class ClaudeRPC:
         models = result.get("models")
         if models:
             self.catalog = [{"model": m["value"], "displayName": m.get("displayName", m["value"]),
+                             "resolvedModel": m.get("resolvedModel"), "isDefault": m["value"] == "default",
                              "supportedReasoningEfforts": [{"reasoningEffort": e} for e in m.get("supportedEffortLevels", [])],
                              "defaultReasoningEffort": None} for m in models]
 
@@ -288,6 +289,24 @@ class ClaudeRPC:
             raise CoordinationError("Claude connection is closed. Restart the UI.")
         params = params or {}
         thread_id = params.get("threadId")
+        if method in {"config/read", "skills/list"}:
+            # Read native configuration/capabilities for this workspace without
+            # creating a persisted conversation or sending a model prompt.
+            probe = self.connection_factory(self.store, lambda m: None,
+                {"threadId": str(uuid.uuid4()), "cwd": params["cwd"], "model": params.get("model"), "probe": True})
+            try:
+                initialized = probe.control("initialize")
+                self._catalog(initialized)
+                if method == "skills/list":
+                    return {"data": [{"name": command["name"], "description": command.get("description", ""),
+                                      "scope": "claude"} for command in initialized.get("commands", [])
+                                     if isinstance(command.get("name"), str) and command["name"]]}
+                applied = probe.control("get_settings").get("applied", {})
+                if not applied.get("model"):
+                    raise CoordinationError("Claude Code did not report its effective model. Update Claude Code and retry.")
+                return {"config": {"model": applied["model"], "model_reasoning_effort": applied.get("effort")}}
+            finally:
+                probe.close()
         if method == "model/list":
             if self.catalog is None:
                 probe = self.connection_factory(self.store, lambda m: None,

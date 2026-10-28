@@ -122,3 +122,45 @@ class ClaudeTransportTests(unittest.TestCase):
         args = self.connection(probe=True).control("initialize")["args"]
         self.assertIn("--no-session-persistence", args)
         self.assertEqual(json.loads(args[args.index("--settings") + 1]), {"disableAllHooks": True})
+
+
+class ClaudeDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        from agent_coord.claude_code import ClaudeRPC
+        from unittest.mock import Mock
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.store = CoordinationStore(self.root / "state.sqlite3")
+        self.probe = Mock()
+        self.initialized = {"models": [{"value": "default", "resolvedModel": "concrete", "supportedEffortLevels": ["high"]}],
+                            "commands": [{"name": "plugin:skill", "description": "Workspace skill"}]}
+        self.probe.control.side_effect = lambda method: self.initialized if method == "initialize" else {
+            "effective": {"model": "alias", "effortLevel": "medium"}, "applied": {"model": "concrete", "effort": "high"}}
+        self.factory = Mock(return_value=self.probe)
+        self.rpc = ClaudeRPC(self.store, lambda message: None, connection_factory=self.factory)
+        self.addCleanup(self.rpc.close)
+
+    def test_effective_settings_use_native_applied_values_without_persistence_or_prompt(self):
+        result = self.rpc.request("config/read", {"cwd": str(self.root), "model": "alias"})
+        self.assertEqual(result, {"config": {"model": "concrete", "model_reasoning_effort": "high"}})
+        options = self.factory.call_args.args[2]
+        self.assertEqual((options["cwd"], options["model"], options["probe"]), (str(self.root), "alias", True))
+        self.probe.write.assert_not_called()
+        self.probe.close.assert_called_once()
+        self.assertEqual(self.rpc.catalog[0]["resolvedModel"], "concrete")
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM claude_sessions").fetchone()[0], 0)
+
+    def test_skill_inventory_comes_from_initialize_and_always_closes_probe(self):
+        result = self.rpc.request("skills/list", {"cwd": str(self.root)})
+        self.assertEqual(result["data"], [{"name": "plugin:skill", "description": "Workspace skill", "scope": "claude"}])
+        self.probe.control.assert_called_once_with("initialize")
+        self.probe.write.assert_not_called()
+        self.probe.close.assert_called_once()
+
+    def test_failed_native_settings_close_probe_without_guessing(self):
+        self.probe.control.side_effect = [self.initialized, {"effective": {"model": "alias"}}]
+        with self.assertRaisesRegex(CoordinationError, "effective model"):
+            self.rpc.request("config/read", {"cwd": str(self.root)})
+        self.probe.close.assert_called_once()

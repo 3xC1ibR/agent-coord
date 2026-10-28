@@ -225,3 +225,17 @@ test("an image read failure after draft promotion removes only that image from i
   assert.equal(c.attachments.items("created").length, 0);
   assert.equal(c.attachments.snapshot()[0].name, "other.png");
 });
+
+test("mobile Enter keeps native newline editing, desktop Enter submits, and IME never submits", () => {
+  const c = appSetup(); let submitted = 0;
+  c.$("composer").requestSubmit = () => submitted++;
+  c.$("send").disabled = false;
+  const enter = extra => { const event = {key: "Enter", preventDefault() { this.prevented = true; }, ...extra}; c.composerKeydown(event); return event; };
+  c.matchMedia = query => ({matches: query === "(hover: none) and (pointer: coarse)"});
+  assert.equal(enter().prevented, undefined); assert.equal(submitted, 0);
+  c.matchMedia = () => ({matches: false});
+  assert.equal(enter().prevented, true); assert.equal(submitted, 1);
+  for (const extra of [{shiftKey: true}, {isComposing: true}, {keyCode: 229}]) assert.equal(enter(extra).prevented, undefined);
+  c.state.slashCommands = {composing: true}; assert.equal(enter().prevented, undefined);
+  assert.equal(submitted, 1);
+});

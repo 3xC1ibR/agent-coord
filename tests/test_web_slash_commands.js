@@ -17,7 +17,7 @@ function setup({loadModels = async () => [], loadSkills = async () => [], onRepl
     getAttribute(name) { return this.attributes[name]; }
     removeAttribute(name) { delete this.attributes[name]; }
     append(...items) { this.children.push(...items); }
-    replaceChildren() { this.children = []; }
+    replaceChildren(...items) { this.children = items; }
     scrollIntoView() { this.scrolled = true; }
     setRangeText(value, start, end) {
       this.value = this.value.slice(0, start) + value + this.value.slice(end);
@@ -151,17 +151,17 @@ test("skill catalogs follow cwd and provider, ignore late responses, and retry a
   f.type("$"); await settle();
   f.session = {client: "codex", cwd: "/two"};
   f.complete.render(); await settle();
-  requests[0].resolve(skills); await settle(); assert.equal(f.menu.hidden, true);
+  requests[0].resolve(skills); await settle(); assert.equal(f.menu.children[0].textContent, "Loading skills…");
   requests[1].resolve([{name: "two"}]); await settle(); assert.deepEqual(f.names(), ["$two"]);
   f.session = {client: "claude", cwd: "/two"};
   f.complete.render(); await settle(); requests[2].reject(new Error("unavailable")); await settle();
-  assert.equal(f.menu.hidden, true);
+  assert.match(f.menu.children[0].textContent, /Skills unavailable/);
   f.type("$"); await settle(); assert.equal(requests.length, 4);
   requests[3].resolve([]); await settle();
   assert.equal(f.key("Enter").defaultPrevented, undefined);
 });
 
-test("skill completion preserves native editing, dismisses with Escape, and refreshes on focus", async () => {
+test("skill completion preserves native editing, dismisses with Escape, and retains its catalog on focus", async () => {
   let loads = 0;
   const f = setup({loadSkills: async () => { loads++; return skills; }});
   f.type("$"); await settle();
@@ -171,7 +171,7 @@ test("skill completion preserves native editing, dismisses with Escape, and refr
   f.key("Escape"); f.complete.render(); assert.equal(f.menu.hidden, true);
   f.type("$skill"); assert.equal(f.menu.hidden, false);
   f.input.emit("blur"); assert.equal(f.menu.hidden, true);
-  f.input.emit("focus"); await settle(); assert.equal(loads, 2);
+  f.input.emit("focus"); await settle(); assert.equal(loads, 1);
   f.input.emit("compositionstart"); assert.equal(f.menu.hidden, true);
   f.input.emit("compositionend"); assert.equal(f.menu.hidden, false);
   for (const text of ["cost$skill", "\\$skill", "${skill}", "$skill with ordinary text"]) {
@@ -383,7 +383,7 @@ test("late model results respect provider switches and Escape dismissal", async 
   assert.deepEqual(clients, ["codex"]);
   f.thread = "two"; f.session = {client: "claude", model: "sonnet"}; f.complete.render(); await settle();
   pending.codex(models); await settle();
-  assert.equal(f.menu.hidden, true);
+  assert.equal(f.menu.children[0].textContent, "Loading models…");
   pending.claude([{model: "sonnet", supportedReasoningEfforts: [{reasoningEffort: "high"}]}]); await settle();
   assert.deepEqual(f.names(), ["sonnet"]);
   f.key("Escape"); f.complete.render(); assert.equal(f.menu.hidden, true);
@@ -432,8 +432,8 @@ test("arrows wrap, filtering resets selection, Enter and Tab insert without subm
   assert.equal(f.menu.children[1].scrolled, true);
   assert.equal(f.key("Enter").defaultPrevented, true);
   assert.equal(f.input.value, "/model "); assert.equal(f.changes, 1);
-  assert.equal(f.menu.hidden, true);
-  assert.equal(f.key("Enter").defaultPrevented, undefined);
+  assert.equal(f.menu.children[0].textContent, "Loading models…");
+  assert.equal(f.key("Enter").defaultPrevented, true);
   f.type("/"); f.key("ArrowUp"); f.type("/e");
   assert.equal(f.input.attributes["aria-activedescendant"], "slash-commands-0");
   f.key("Tab"); assert.equal(f.input.value, "/effort ");
@@ -462,7 +462,7 @@ test("Escape stays dismissed through renders until the draft changes", () => {
 
 test("ordinary text, paths, arguments, selections and unfocused composers do not complete", () => {
   const f = setup();
-  for (const value of ["", "Discuss /model", "https://example.com", "/tmp/file", "/cd /tmp", "/model ", "hello\n/"]) {
+  for (const value of ["", "Discuss /model", "https://example.com", "/tmp/file", "/cd /tmp", "hello\n/"]) {
     f.type(value); assert.equal(f.menu.hidden, true, value);
     assert.equal(f.key("Tab").defaultPrevented, undefined, value);
   }
@@ -517,4 +517,42 @@ test("/yolo completes without arguments and explains its permission effect", () 
   assert.deepEqual(f.names(), ["/yolo"]);
   assert.match(f.menu.children[0].children[2].textContent, /without approval prompts/);
   f.key("Tab"); assert.equal(f.input.value, "/yolo ");
+});
+
+test("Enter and pointer selection apply complete commands once while Tab, skills and argument prefixes only complete", async () => {
+  const f = setup(), applied = [];
+  const elements = {message: f.input, "slash-commands": f.menu, composer: {hidden: false}};
+  const state = {selected: "new-session", drafts: new Map(), closing: new Set(),
+    modelCatalogs: new Map([["codex", models], ...["claude", "antigravity", "kimi", "muse"].map(client => [client, []])]),
+    detail: {session: {client: "codex", model: "first-model"}, work_thread: {browser_session: true, attention: "now"}}};
+  Object.assign(f.context, {state, $: id => elements[id], loadModelCatalog: async () => models,
+    api: async () => ({data: skills}), action: fn => fn(), sendMessage: () => {
+      applied.push(f.input.value.trim()); f.input.value = "";
+    }});
+  const app = fs.readFileSync(path.join(web, "app.js"), "utf8"); bindAppSlash(f, app, state);
+  for (const [text, expected] of [["/yo", "/yolo"], ["/permissions yo", "/permissions yolo"],
+    ["/model fi", "/model first-model"], ["/effort hi", "/effort high"], ["/fast on", "/fast on"]]) {
+    f.type(text); f.key("Enter"); assert.equal(applied.at(-1), expected);
+  }
+  f.type("/permissions de"); f.complete.options[0].emit("click");
+  assert.equal(applied.at(-1), "/permissions default");
+  const count = applied.length;
+  for (const text of ["/mo", "/permissions", "/effort", "/cd"]) { f.type(text); f.key("Enter"); }
+  f.type("/yo"); f.key("Tab");
+  f.type("Use $skill"); await settle(); f.key("Enter");
+  f.type("/yolo\nKeep this draft", 5); f.key("Enter");
+  assert.equal(applied.length, count);
+});
+
+test("cold skills consume Enter without sending and reuse the completed catalog after refocus", async () => {
+  let finish, loads = 0;
+  const f = setup({loadSkills: () => { loads++; return new Promise(resolve => { finish = resolve; }); }});
+  f.type("$sk"); await settle();
+  assert.equal(f.menu.children[0].textContent, "Loading skills…");
+  assert.equal(f.key("Enter").defaultPrevented, true);
+  assert.equal(f.input.value, "$sk");
+  finish(skills); await settle(); f.key("Enter");
+  assert.equal(f.input.value, "$skill-creator ");
+  f.input.emit("blur"); f.input.emit("focus"); f.type("$sk");
+  assert.deepEqual(f.names(), ["$skill-creator"]); assert.equal(loads, 1);
 });

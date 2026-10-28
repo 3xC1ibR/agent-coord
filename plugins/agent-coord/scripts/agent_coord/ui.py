@@ -33,6 +33,7 @@ from .workspaces import matches_workspace, resolve_workspace
 from .organization import repository_root
 from .workspace_files import workspace_files
 from .skill_catalog import skill_catalog
+from .session_defaults import session_defaults
 from .speech import Speech, spoken_text
 from .jev_settings import JevSettings
 from .provider_limits import ProviderLimits
@@ -815,6 +816,9 @@ def _handler(
                     return
                 if route == ["api", "browser", "skills"]:
                     self._json(HTTPStatus.OK, {"data": skill_catalog(browser_sessions, body)})
+                    return
+                if route == ["api", "browser", "session-defaults"]:
+                    self._json(HTTPStatus.OK, session_defaults(browser_sessions, body))
                     return
                 if route == ["api", "browser", "desktop-projects"]:
                     if not self._local_request():

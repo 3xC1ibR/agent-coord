@@ -366,3 +366,27 @@ test("/yolo enables new-agent permissions locally and rejects arguments", async 
   assert.equal(h.palette.draft.yolo, true); assert.equal(h.palette.input.value, "Fix the build");
   assert.equal(h.calls.length, 0);
 });
+
+test("dispatcher loads skills for its current provider and folder without configuring or sending on insertion", async () => {
+  const h = setup((path, body) => {
+    assert.equal(path, "skills");
+    return {data: [{name: body.client + ":workspace-skill", description: body.cwd}]};
+  });
+  h.palette.toggle(); h.type("Use $workspace"); await settle(); h.key("Enter"); await settle();
+  assert.equal(h.palette.input.value, "Use $codex:workspace-skill ");
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.calls[0].body, {client: "codex", cwd: "/work"});
+  h.workspace("/other"); h.palette.draft.client = "claude";
+  h.type("$"); await settle(); h.key("Enter"); await settle();
+  assert.equal(h.palette.input.value, "$claude:workspace-skill ");
+  assert.deepEqual(h.calls[1].body, {client: "claude", cwd: "/other"});
+  assert.equal(h.calls.length, 2);
+});
+
+test("mobile dispatcher Enter edits a newline while explicit Send still submits", async () => {
+  const h = setup(); h.palette.toggle(); h.type("Fix this");
+  h.palette.view.matchMedia = () => ({matches: true});
+  assert.equal(h.key("Enter").defaultPrevented, false); assert.equal(h.calls.length, 0);
+  h.$("send-work-submit").onclick(); await settle();
+  assert.equal(h.calls.filter(call => call.path === "send-work/send").length, 1);
+});

@@ -22,17 +22,21 @@
       this.catalogs = catalogs;
       this.skillCatalogs = new Map();
       this.skillLoading = new Set();
+      this.skillErrors = new Map();
       this.loading = new Set();
+      this.modelErrors = new Set();
       this.matches = [];
       this.index = 0;
       input.addEventListener("input", event => {
         this.dismissed = null;
+        this.skillErrors.clear();
+        this.modelErrors.clear();
         if (event.isComposing) this.close();
         else this.render();
       });
       input.addEventListener("compositionstart", () => { this.composing = true; this.close(); });
       input.addEventListener("compositionend", () => { this.composing = false; this.render(); });
-      input.addEventListener("focus", () => { this.dismissed = null; this.skillCatalogs.clear(); this.render(); });
+      input.addEventListener("focus", () => { this.dismissed = null; this.skillErrors.clear(); this.modelErrors.clear(); this.render(); });
       input.addEventListener("blur", () => this.close());
       input.addEventListener("click", () => this.render());
       input.addEventListener("keyup", () => this.render());
@@ -75,7 +79,7 @@
     }
 
     models(client = this.getSession()?.client || "codex") {
-      if (!this.catalogs.has(client) && !this.loading.has(client)) {
+      if (!this.catalogs.has(client) && !this.loading.has(client) && !this.modelErrors.has(client)) {
         this.loading.add(client);
         Promise.resolve().then(() => this.loadModels(client)).then(models => {
           this.loading.delete(client);
@@ -85,6 +89,8 @@
         }, () => {
           // Leave manual commands usable; another input/focus can retry the request.
           this.loading.delete(client);
+          this.modelErrors.add(client);
+          this.render();
         });
       }
       return this.catalogs.get(client) || [];
@@ -113,22 +119,36 @@
       }
       if (!query.model) return [];
       const models = this.models();
-      const model = models.find(model => model.model === query.model);
+      const model = models.find(model => model.model === query.model || model.resolvedModel === query.model);
       return (model?.supportedReasoningEfforts || []).map(effort => ({name: effort.reasoningEffort,
         arguments: "", description: effort.description || ""}));
     }
 
     skills() {
-      const session = this.getSession() || {}, key = JSON.stringify([session.client || "codex", session.cwd || ""]);
-      if (!this.skillCatalogs.has(key) && !this.skillLoading.has(key)) {
+      const session = {...this.getSession()}, key = this.skillKey(session);
+      if (!this.skillCatalogs.has(key) && !this.skillLoading.has(key) && !this.skillErrors.has(key)) {
         this.skillLoading.add(key);
         Promise.resolve().then(() => this.loadSkills(session)).then(skills => {
           this.skillLoading.delete(key);
           this.skillCatalogs.set(key, skills);
           this.render();
-        }, () => { this.skillLoading.delete(key); });
+        }, () => {
+          this.skillLoading.delete(key);
+          this.skillErrors.set(key, "Skills unavailable. Type to retry.");
+          this.render();
+        });
       }
       return this.skillCatalogs.get(key) || [];
+    }
+
+    skillKey(session = this.getSession() || {}) {
+      return JSON.stringify([session.client || "codex", session.cwd || ""]);
+    }
+
+    pending(query) {
+      return query?.kind === "skill" ? this.skillLoading.has(this.skillKey()) :
+        query?.kind === "model" ? this.getModelClients().some(client => this.loading.has(client)) :
+        query?.kind === "effort" && this.loading.has(this.getSession()?.client || "codex");
     }
 
     close() {
@@ -145,7 +165,20 @@
       if (!query || this.dismissed === key) { this.close(); return; }
       const matches = this.suggestions(query).filter(command => query.kind === "skill" ?
         command.name.slice(1).toLowerCase().includes(query.prefix.slice(1)) : command.name.toLowerCase().startsWith(query.prefix));
-      if (!matches.length) { this.close(); return; }
+      if (!matches.length) {
+        this.matches = []; this.options = [];
+        const status = this.pending(query) ? (query.kind === "skill" ? "Loading skills…" : "Loading models…") :
+          query.kind === "skill" ? this.skillErrors.get(this.skillKey()) : null;
+        if (!status) { this.close(); return; }
+        const message = this.input.ownerDocument.createElement("div");
+        message.className = "slash-command"; message.setAttribute("role", "status"); message.textContent = status;
+        this.menu.replaceChildren(message); this.menu.hidden = false;
+        this.input.setAttribute("aria-controls", this.menu.id);
+        this.input.setAttribute("aria-expanded", "true");
+        this.input.removeAttribute("aria-activedescendant");
+        this.signature = null;
+        return;
+      }
       const signature = JSON.stringify(matches);
       if (!force && !this.menu.hidden && key === this.key && signature === this.signature) return;
       if (key !== this.key || signature !== this.signature) this.index = 0;
@@ -178,14 +211,14 @@
         const usage = doc.createElement("span"); usage.textContent = command.arguments;
         const description = doc.createElement("small"); description.textContent = command.description;
         option.append(name, usage, description);
-        option.addEventListener("click", () => this.choose(index));
+        option.addEventListener("click", () => this.choose(index, true));
         (command.group ? group : this.menu).append(option);
         this.options.push(option);
       }
       this.input.setAttribute("aria-activedescendant", this.menu.id + "-" + this.index);
     }
 
-    choose(index) {
+    choose(index, apply = false) {
       const query = this.query(), command = this.matches[index];
       if (!query || !command || this.menu.hidden) return;
       const suffix = this.input.value.slice(query.end);
@@ -199,12 +232,13 @@
       this.close();
       if (query.kind === "model") this.onSelectModel({client: command.client, model: command.name});
       this.onChange();
-      this.onComplete({query, command});
+      const complete = query.kind !== "skill" && (query.kind !== "command" || !command.arguments);
+      this.onComplete({query, command, apply: apply && complete});
       this.render();
     }
 
     keydown(event) {
-      if (event.isComposing || this.composing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return false;
+      if (event.isComposing || event.keyCode === 229 || this.composing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return false;
       this.render();
       if (event.key === "Escape" && this.query()) {
         this.dismissed = JSON.stringify([this.getThread(), this.input.value, this.input.selectionStart]);
@@ -215,7 +249,9 @@
       if (this.menu.hidden) return false;
       if (!["ArrowDown", "ArrowUp", "Enter", "Tab"].includes(event.key)) return false;
       event.preventDefault();
-      if (event.key === "Enter" || event.key === "Tab") this.choose(this.index);
+      // A cold catalog must not let Enter submit the unfinished token as a prompt.
+      if (!this.matches.length) return true;
+      if (event.key === "Enter" || event.key === "Tab") this.choose(this.index, event.key === "Enter");
       else {
         this.index = (this.index + (event.key === "ArrowDown" ? 1 : -1) + this.matches.length) % this.matches.length;
         this.render(true);

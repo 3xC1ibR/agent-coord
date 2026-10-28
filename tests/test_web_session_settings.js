@@ -14,7 +14,7 @@ function setup() {
     select: async id => { context.state.selected = id; },
     goHome: () => { context.state.selected = null; context.state.detail = null; }};
   vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), context);
+  vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function sessionModelClients(")), context);
   vm.runInContext(source.slice(source.indexOf("function renderSessionSettings("), source.indexOf("function renderStatus(")), context);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), context);
   vm.runInContext(source.slice(source.indexOf("async function toggleThreadClosed("), source.indexOf('$("close-thread").onclick')), context);

@@ -139,4 +139,5 @@ def model_catalog(session):
     for entry in option.get("options", []):
         values.extend([entry] if "value" in entry else entry.get("options", []))
     return [{"model": entry["value"], "displayName": entry.get("name", entry["value"]),
+             "isDefault": entry["value"] == option.get("currentValue"),
              "supportedReasoningEfforts": [], "defaultReasoningEffort": None} for entry in values]

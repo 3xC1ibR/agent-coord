@@ -15,7 +15,7 @@ class SkillCatalogTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.sessions = SimpleNamespace(cwd=str(self.root), rpc=Mock())
+        self.sessions = SimpleNamespace(cwd=str(self.root), rpc=Mock(), _provider=Mock())
 
     def test_enabled_native_inventory_scoped_to_cwd_without_starting_a_thread(self):
         self.sessions.rpc.request.return_value = {"data": [{"cwd": str(self.root), "skills": [
@@ -38,6 +38,15 @@ class SkillCatalogTests(unittest.TestCase):
         self.sessions.rpc.request.assert_not_called()
 
     def test_other_providers_do_not_advertise_codex_skills(self):
-        for client in ("claude", "antigravity", "kimi", "muse"):
+        for client in ("antigravity", "kimi", "muse"):
             self.assertEqual(skill_catalog(self.sessions, {"client": client}), [])
+        self.sessions.rpc.request.assert_not_called()
+
+    def test_claude_uses_its_native_workspace_inventory(self):
+        provider = self.sessions._provider.return_value
+        provider.request.return_value = {"data": [{"name": "zebra"}, {"name": "plugin:alpha"}]}
+        result = skill_catalog(self.sessions, {"client": "claude"})
+        self.assertEqual([item["name"] for item in result], ["plugin:alpha", "zebra"])
+        self.sessions._provider.assert_called_once_with("claude")
+        provider.request.assert_called_once_with("skills/list", {"cwd": str(self.root)})
         self.sessions.rpc.request.assert_not_called()
