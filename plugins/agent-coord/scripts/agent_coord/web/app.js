@@ -1056,9 +1056,11 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   }
   $("message").value = state.drafts.get(id) || "";
   const cached = conversationEntry(id);
+  cached.refreshFailures = 0;
+  cached.refreshError = null;
   notifications?.syncFocus();
   state.detail = cached.detail;
-  state.detailRefreshing = !!cached.detail;
+  state.detailRefreshing = true;
   state.titleEdit = null;
   state.attachments?.highlight(false);
   renderStatus();
@@ -1126,12 +1128,35 @@ async function refreshDetail({markSeen = true} = {}) {
   if (!id || isSessionDraft()) return;
   const entry = conversationEntry(id);
   if (entry.pending) return entry.pending;
+  clearTimeout(entry.retryTimer);
+  entry.retryTimer = null;
   entry.pending = (async () => {
     const revision = entry.revision;
     const attentionRevision = state.attentionMutations?.get(id)?.revision || 0;
-    const work = await api(threadPath(id));
-    const detail = work.browser_session ? await api(sessionPath(id)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
-      coordinationMessages: (await api(threadPath(id) + "/messages")).data};
+    // A hung read must not hold the shared refresh promise (and Send) forever.
+    // Only reads use this deadline; a submitted message must never be retried.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const options = {signal: controller.signal};
+    let work, detail;
+    try {
+      work = await api(threadPath(id), undefined, options);
+      detail = work.browser_session ? await api(sessionPath(id), undefined, options) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
+        coordinationMessages: (await api(threadPath(id) + "/messages", undefined, options)).data};
+    } catch (error) {
+      if (controller.signal.aborted) error = new Error("Refreshing this conversation timed out.");
+      entry.refreshError = error.message || String(error);
+      entry.refreshFailures = (entry.refreshFailures || 0) + 1;
+      const delay = [1000, 2000, 4000][entry.refreshFailures - 1];
+      if (delay && id === state.selected && state.conversations.get(id) === entry) {
+        entry.retryTimer = setTimeout(() => {
+          entry.retryTimer = null;
+          if (id !== state.selected || state.conversations.get(id) !== entry) return;
+          return refreshDetail({markSeen}).catch(() => {}); // Persistent inline recovery state.
+        }, delay);
+      }
+      throw error;
+    } finally { clearTimeout(timeout); }
     detail.work_thread ||= work;
     detail.close_when_done = work.close_when_done;
     detail.work_thread = reconcileAttentionSnapshot(detail.work_thread, attentionRevision);
@@ -1141,7 +1166,10 @@ async function refreshDetail({markSeen = true} = {}) {
       if (id === state.selected) scheduleDetail();
       return false;
     }
+    const recovering = !!entry.refreshError;
     const same = sameConversation(entry.detail, detail);
+    entry.refreshError = null;
+    entry.refreshFailures = 0;
     entry.detail = detail;
     if (!same) entry.nodes = null;
     if (id !== state.selected || state.conversations.get(id) !== entry) return true;
@@ -1154,6 +1182,7 @@ async function refreshDetail({markSeen = true} = {}) {
     renderThread();
     if (!same || state.timelineThread !== id) renderTimeline();
     renderRequests(); renderQueuedMessages(); renderStatus();
+    if (recovering && detail.work_thread.browser_session) loadSessionModels();
     // Opening a tab sends its own receipt. Also acknowledge replies rendered
     // while the user stays in the conversation, using only this snapshot's IDs.
     if (markSeen && !state.paneMode && detail.work_thread.unread_result && !document.hidden && document.hasFocus() &&
@@ -1164,7 +1193,11 @@ async function refreshDetail({markSeen = true} = {}) {
     }
     if (revision !== entry.revision) scheduleDetail();
     return !changed;
-  })().finally(() => { entry.pending = null; });
+  })().finally(() => {
+    entry.pending = null;
+    if (id === state.selected && state.conversations.get(id) === entry) renderStatus();
+  });
+  if (id === state.selected) renderStatus();
   return entry.pending;
 }
 async function refreshThread() {
@@ -1390,7 +1423,8 @@ function renderStatus() {
   $("status").hidden = !$("status").textContent;
   state.mobileChat?.status(state.detail?.requests?.length ? "Needs input" : active ? "Working" : status?.label || "Ready",
     state.detail?.requests?.length ? "input" : active ? "running" : status?.key || "idle");
-  $("composer").hidden = !work?.browser_session;
+  $("composer").hidden = !work?.browser_session && !(!state.detail && state.detailRefreshing);
+  renderDetailRefresh();
   $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (!dispatcher && running && !state.detail.activeTurn) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
   $("send").textContent = dispatcher ? "Send ↑" : running ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue ↑" : "Steer ↑") : "Send ↑";
   $("queue").hidden = dispatcher || !running || !["codex", "claude", "muse"].includes(work?.client);
@@ -1412,12 +1446,30 @@ function renderStatus() {
   $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (!["codex", "claude", "muse"].includes(work?.client) ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
   if (!archived && !running && work?.client === "codex") $("composer-hint").textContent += " · $ skills";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
+  if (state.detailRefreshing) $("composer-hint").textContent = "";
   state.attachments?.render();
   state.slashCommands?.render();
   state.mentions?.render();
   state.resizeComposer?.();
   if (state.paneMode) globalThis.agentCoordPane?.updateStatus();
   state.reviewUI?.render(state.detail, isSessionDraft() ? state.newSessionDraft?.draftId || state.selected : state.selected);
+}
+function renderDetailRefresh() {
+  const entry = state.conversations?.get(state.selected);
+  const visible = !!state.selected && !isSessionDraft() && !!(state.detailRefreshing || entry?.refreshError);
+  $("conversation-refresh").hidden = !visible;
+  if (!visible) return;
+  const failed = !!entry?.refreshError;
+  $("conversation-refresh-message").textContent = failed
+    ? "Couldn’t refresh this conversation." + (entry.retryTimer || entry.pending ? " Retrying…" : "")
+    : "Refreshing conversation…";
+  const retry = $("retry-conversation");
+  retry.hidden = !failed;
+  retry.disabled = !!entry?.pending;
+  retry.onclick = () => {
+    entry.refreshFailures = 0;
+    return action(() => refreshDetail());
+  };
 }
 function renderCloseWhenDone() {
   const button = $("close-when-done"), detail = state.detail, work = detail?.work_thread;

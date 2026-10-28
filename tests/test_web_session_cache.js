@@ -18,12 +18,18 @@ function fixture(id, text = "Saved answer", checkpoint = 1) {
     thread: {turns: [{id: "turn", status: "completed", items: [{id: "answer", type: "agentMessage", text}]}]}};
 }
 function setup() {
-  const elements = new Map(), replies = new Map(), calls = [];
+  const elements = new Map(), replies = new Map(), calls = [], timers = new Map();
   const element = (tag = "div", text = "") => ({tag, textContent: text, value: "", dataset: {}, hidden: false,
     childNodes: [], scrollTop: 0, classList: {add() {}, remove() {}, toggle() {}},
     replaceChildren(...nodes) { this.childNodes = nodes; }, append(...nodes) { this.childNodes.push(...nodes); },
     focus() {}, setAttribute() {}});
-  const c = {state: {selected: null, detail: null, drafts: new Map(), sessions: [], config: {}, closing: new Set()}, calls, replies, base: "/api/browser/",
+  const c = {state: {selected: null, detail: null, drafts: new Map(), sessions: [], config: {}, closing: new Set()}, calls, replies, timers, base: "/api/browser/",
+    AbortController, setTimeout(fn, delay) { const timer = {fn, delay}; timers.set(timer, timer); return timer; },
+    clearTimeout(timer) { timers.delete(timer); },
+    async runTimer(delay) {
+      const timer = [...timers.values()].find(timer => timer.delay === delay);
+      assert.ok(timer, "Expected a timer at " + delay + "ms"); timers.delete(timer); return timer.fn();
+    },
     $: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, node: element,
     notifications: {syncFocus() {}, receive() {}}, savedViews: {remember() {}, restoreScroll() {}}, navigation: {remember() {}},
     setNavigation() {}, setChatExpanded() {}, isSessionDraft: () => c.state.selected === "new-session",
@@ -54,6 +60,19 @@ function setup() {
   vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function renderThread(")), c);
   vm.runInContext(source.slice(source.indexOf("function goHome("), source.indexOf('$("back-home").onclick')), c);
   vm.runInContext(source.slice(source.indexOf("function applyEvent("), source.indexOf("let listTimer")), c);
+  return c;
+}
+
+function recoverySetup() {
+  const c = setup();
+  c.action = fn => fn();
+  c.sessionBusy = () => false;
+  vm.runInContext(source.slice(source.indexOf("function renderDetailRefresh("), source.indexOf("function renderCloseWhenDone(")), c);
+  const predicate = source.split("\n").find(line => line.includes('$("send").disabled ='));
+  c.renderStatus = () => {
+    vm.runInContext('var running = !!state.detail?.running, work = state.detail?.work_thread, dispatcher = !!work?.dispatcher, archived = work?.attention === "archived";' + predicate, c);
+    c.renderDetailRefresh();
+  };
   return c;
 }
 async function startRefresh(c, id) {
@@ -224,6 +243,96 @@ test("overlapping refreshes share a request, and failures keep the cached transc
   assert.equal(c.calls.filter(call => call.path === "sessions/one").length, 2);
   assert.equal(c.state.detailRefreshing, true);
   c.gate = null; await c.refreshDetail(); assert.equal(c.state.detailRefreshing, false);
+});
+
+test("a failed cached refresh recovers automatically without losing the draft or stale-state guard", async () => {
+  const c = recoverySetup(); await c.select("one");
+  c.$("message").value = "Keep this follow-up"; c.goHome();
+  const {opening, gate} = await startRefresh(c, "one");
+  const failed = assert.rejects(opening, /offline/);
+  gate.reject(new Error("offline")); await failed;
+  assert.equal(c.$("send").disabled, true);
+  assert.equal(c.$("conversation-refresh").hidden, false);
+  assert.match(c.$("conversation-refresh-message").textContent, /Retrying/);
+  assert.equal(c.state.conversations.get("one").pending, null);
+  c.gate = null; await c.runTimer(1000);
+  assert.equal(c.$("send").disabled, false);
+  assert.equal(c.$("conversation-refresh").hidden, true);
+  assert.equal(c.$("message").value, "Keep this follow-up");
+  assert.equal(c.timers.size, 0);
+  assert.equal(c.calls.filter(call => /\/(messages|queue)$/.test(call.path)).length, 0);
+});
+
+test("persistent refresh failure stops retrying and an explicit Retry recovers in place", async () => {
+  const c = recoverySetup(); await c.select("one"); c.goHome();
+  const api = c.api;
+  c.api = async (path, ...args) => {
+    if (path === "sessions/one") throw new Error("offline");
+    return api(path, ...args);
+  };
+  await assert.rejects(c.select("one"), /offline/);
+  for (const delay of [1000, 2000, 4000]) await c.runTimer(delay);
+  assert.equal(c.timers.size, 0);
+  assert.equal(c.state.conversations.get("one").refreshFailures, 4);
+  assert.equal(c.$("send").disabled, true);
+  assert.equal(c.$("retry-conversation").hidden, false);
+  assert.equal(c.$("retry-conversation").disabled, false);
+  assert.doesNotMatch(c.$("conversation-refresh-message").textContent, /Retrying/);
+  c.api = api; await c.$("retry-conversation").onclick();
+  assert.equal(c.$("send").disabled, false);
+  assert.equal(c.$("conversation-refresh").hidden, true);
+  assert.equal(c.state.conversations.get("one").refreshFailures, 0);
+});
+
+test("a hanging detail read times out and frees the shared request for recovery", async () => {
+  const c = recoverySetup(); await c.select("one"); c.goHome();
+  const api = c.api;
+  let signal;
+  c.api = (path, body, options) => {
+    if (path !== "sessions/one") return api(path, body, options);
+    signal = options.signal;
+    return new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), {name: "AbortError"}))));
+  };
+  const opening = c.select("one");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(signal);
+  const failed = assert.rejects(opening, /timed out/);
+  await c.runTimer(15000); await failed;
+  assert.equal(signal.aborted, true);
+  assert.equal(c.state.conversations.get("one").pending, null);
+  assert.equal(c.$("send").disabled, true);
+  c.api = api; await c.runTimer(1000);
+  assert.equal(c.$("send").disabled, false);
+});
+
+test("a recovery timer does not refresh or change a different selected conversation", async () => {
+  const c = recoverySetup(); await c.select("one"); c.goHome();
+  const {opening, gate} = await startRefresh(c, "one");
+  const failed = assert.rejects(opening, /offline/);
+  gate.reject(new Error("offline")); await failed;
+  c.gate = null; await c.select("two");
+  const before = c.calls.length;
+  await c.runTimer(1000);
+  assert.equal(c.calls.length, before);
+  assert.equal(c.state.selected, "two");
+  assert.equal(c.$("send").disabled, false);
+  assert.equal(c.$("conversation-refresh").hidden, true);
+});
+
+test("initial-load failures offer recovery without a cached transcript", async () => {
+  const c = recoverySetup();
+  let catalogs = 0;
+  c.loadSessionModels = () => { catalogs++; };
+  const {opening, gate} = await startRefresh(c, "one");
+  const failed = assert.rejects(opening, /offline/);
+  gate.reject(new Error("offline")); await failed;
+  assert.equal(c.state.detail, null);
+  assert.equal(c.$("conversation-refresh").hidden, false);
+  c.gate = null; await c.$("retry-conversation").onclick();
+  assert.equal(c.state.detail.work_thread.thread_id, "one");
+  assert.equal(c.$("send").disabled, false);
+  assert.equal(c.timers.size, 0);
+  assert.equal(catalogs, 1, "Recovery must load controls skipped by the failed initial selection");
 });
 
 test("cached approvals and sending remain unavailable until authoritative refresh", async () => {
