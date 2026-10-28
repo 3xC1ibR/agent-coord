@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import tarfile
@@ -50,7 +51,7 @@ def verify_hash(path: Path, expected: str) -> None:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     if digest.hexdigest() != expected:
-        raise ValueError(f"Python runtime checksum mismatch: {path}")
+        raise ValueError(f"Distribution checksum mismatch: {path}")
 
 
 def extract_runtime(archive: Path, destination: Path) -> None:
@@ -74,6 +75,52 @@ def extract_runtime(archive: Path, destination: Path) -> None:
         shutil.copytree(root / "python", destination, symlinks=True)
 
 
+def extract_runtime_licenses(archive: Path, destination: Path) -> None:
+    # macOS tar's external zstd filter can fail even on a verified archive.
+    # Decode completely before opening tar, so decoder failures cannot publish
+    # partial licenses. Resolve the same zstd CLI through PATH, not a brew path.
+    decoder = shutil.which("zstd")
+    if decoder is None:
+        raise RuntimeError("Runtime license extraction requires zstd on PATH")
+    with tempfile.TemporaryDirectory(prefix="ribbon-licenses-") as scratch:
+        root = Path(scratch)
+        expanded = root / "full.tar"
+        with expanded.open("wb") as output:
+            subprocess.run([decoder, "--decompress", "--stdout", "--", str(archive)],
+                           stdout=output, check=True)
+        licenses = root / "licenses"
+        licenses.mkdir()
+        with tarfile.open(expanded, "r:") as source:
+            selected = []
+            seen = set()
+            for member in source:
+                name = member.name
+                if name != "python/PYTHON.json" and name != "python/licenses" and not name.startswith("python/licenses/"):
+                    continue
+                parts = PurePosixPath(name).parts
+                if ".." in parts or not (member.isfile() or member.isdir()):
+                    raise ValueError(f"Unsafe runtime license archive entry: {name}")
+                relative = PurePosixPath("PYTHON.json") if name == "python/PYTHON.json" else PurePosixPath(*parts[2:])
+                if (relative in seen or (relative == PurePosixPath("PYTHON.json") and not member.isfile())
+                        or (relative == PurePosixPath(".") and not member.isdir())):
+                    raise ValueError(f"Invalid runtime license archive entry: {name}")
+                seen.add(relative)
+                selected.append((member, licenses / relative))
+            if not any(member.name == "python/PYTHON.json" for member, _ in selected) or not any(
+                    member.isfile() and member.name.startswith("python/licenses/") for member, _ in selected):
+                raise ValueError("Runtime archive is missing licenses or PYTHON.json")
+            # Never extract links, devices, ownership, or paths from the full
+            # archive. Only the validated license subset reaches the bundle.
+            for member, target in selected:
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with source.extractfile(member) as content, target.open("xb") as output:
+                        shutil.copyfileobj(content, output)
+        shutil.copytree(licenses, destination)
+
+
 def bundle_runtime(resources: Path, architecture: str, cache: Path) -> dict:
     spec = runtime_spec(architecture)
     extract_runtime(verified_archive(spec, cache), resources / "runtime")
@@ -83,11 +130,7 @@ def bundle_runtime(resources: Path, architecture: str, cache: Path) -> dict:
             "filename": spec["filename"].replace("install_only_stripped.tar.gz", "pgo+lto-full.tar.zst"),
             "url": spec["url"].replace("install_only_stripped.tar.gz", "pgo+lto-full.tar.zst")}
     archive = verified_archive(full, cache)
-    with tempfile.TemporaryDirectory(prefix="ribbon-licenses-") as scratch:
-        subprocess.run(["/usr/bin/tar", "-xf", str(archive), "-C", scratch,
-                        "python/licenses", "python/PYTHON.json"], check=True)
-        shutil.copytree(Path(scratch) / "python/licenses", resources / "runtime-licenses")
-        shutil.copyfile(Path(scratch) / "python/PYTHON.json", resources / "runtime-licenses/PYTHON.json")
+    extract_runtime_licenses(archive, resources / "runtime-licenses")
     (resources / "python-runtime.json").write_text(json.dumps(spec, indent=2) + "\n")
     return spec
 
@@ -104,13 +147,30 @@ def signing_command(identity: str) -> list[str]:
 def sign_app(app: Path, identity: str) -> None:
     # Sign nested native code before sealing the app. --deep is for verification,
     # not signing: Python and wheel dylibs must each have our team identity.
-    for path in sorted(app.rglob("*"), key=lambda p: (-len(p.parts), str(p))):
-        if path.is_symlink() or not path.is_file():
+    # Do not traverse Versions/Current (or any other directory symlink).
+    # This keeps signing order and identity consistent across Python versions.
+    paths = [Path(root) / name for root, dirs, files in os.walk(app, followlinks=False)
+             for name in dirs + files]
+    for path in sorted(paths, key=lambda p: (-len(p.parts), str(p))):
+        command = signing_command(identity)
+        if path.is_relative_to(app / "Contents/Frameworks/Sparkle.framework"):
+            # Sparkle ships sandboxed XPC services. Keep their entitlements when
+            # replacing the upstream signature with our Developer ID identity.
+            command += ["--preserve-metadata=identifier,entitlements"]
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            # Seal Sparkle helper app/XPC bundles and then its framework after
+            # their nested executables. Signing only Mach-O files breaks seals.
+            if path.suffix in {".app", ".xpc", ".framework"}:
+                subprocess.run(command + [str(path)], check=True, capture_output=True)
+            continue
+        if not path.is_file():
             continue
         with path.open("rb") as stream:
             native = stream.read(4) in MACHO_MAGIC
         if native:
-            subprocess.run(signing_command(identity) + [str(path)], check=True, capture_output=True)
+            subprocess.run(command + [str(path)], check=True, capture_output=True)
     subprocess.run(signing_command(identity) + [str(app)], check=True)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
 

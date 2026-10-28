@@ -1,4 +1,4 @@
-"""Lifetime adapter for the macOS app's private, loopback-only UI server.
+"""Entry point for the macOS desktop runtime and disposable legacy test server.
 
 All UI and coordination behavior stays in agent_coord. The parent keeps stdin
 open; EOF also shuts down the server after a native-app crash or forced quit.
@@ -20,12 +20,13 @@ push_libraries = Path(__file__).resolve().parent / "push-libs"
 if push_libraries.is_dir():
     sys.path.insert(0, str(push_libraries))
 
-from agent_coord.store import CoordinationError, CoordinationStore
-from agent_coord.ui import make_ui_server
-from agent_coord import launch_metrics
-
-
 def main() -> int:
+    if any(arg.startswith("--runtime-") for arg in sys.argv[1:]):
+        from agent_coord.desktop_runtime import main as runtime_main
+        return runtime_main()
+    from agent_coord.store import CoordinationStore
+    from agent_coord.ui import make_ui_server
+    from agent_coord import launch_metrics
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db")
     parser.add_argument("--no-launch-metrics", action="store_true", help=argparse.SUPPRESS)
@@ -66,6 +67,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (CoordinationError, OSError) as exc:
+    except (ValueError, RuntimeError, OSError) as exc:
         print(f"Ribbon Field could not start: {exc}", file=sys.stderr)
         raise SystemExit(1)

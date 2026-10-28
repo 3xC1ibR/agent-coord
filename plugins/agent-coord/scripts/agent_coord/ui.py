@@ -697,6 +697,13 @@ def _handler(
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def do_POST(self) -> None:
+            with browser_sessions.admission.enter() as admitted:
+                if not admitted:
+                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Runtime maintenance is pausing new work. Try again shortly."})
+                    return
+                self._admitted_POST()
+
+        def _admitted_POST(self) -> None:
             path = urlparse(self.path).path
             origin = self.headers.get("Origin")
             pairing = path == "/api/remote/pair" and self._remote_request()
@@ -1150,12 +1157,15 @@ def make_ui_server(
     cwd: str | None = None,
     browser_sessions: BrowserSessions | None = None,
     remote_access: RemoteAccess | None = None,
+    admission_paused: bool = False,
 ) -> ThreadingHTTPServer:
     _validate_loopback(host)
     if not 0 <= port <= 65535:
         raise CoordinationError("Ribbon Field UI port must be between 0 and 65535.")
     server_type = LoopbackIPv6HTTPServer if ":" in host else LoopbackHTTPServer
     sessions = browser_sessions or BrowserSessions(store, cwd)
+    if admission_paused:
+        sessions.admission.pause()
     remote = remote_access or RemoteAccess(store.database_path)
     push = WebPush(store, sessions, remote)
     native = NativePush(store, sessions, remote)
@@ -1173,6 +1183,9 @@ def make_ui_server(
     server.native_push = native
     server.thread_control = ThreadControlWorker(sessions)
     server.app_control = AppControlWorker(sessions, provider_limits)
+    sessions.admission.wrap(server.thread_control, "process_once", automatic=True)
+    sessions.admission.wrap(server.app_control, "process_once", automatic=True)
+    server.runtime_admission_ready = True
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
     remote.restore(f"http://{target_host}:{bound_port}")

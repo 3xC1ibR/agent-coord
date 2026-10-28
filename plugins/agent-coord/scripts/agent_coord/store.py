@@ -235,7 +235,12 @@ class CoordinationStore:
         )
         self.clock = clock
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        from .desktop_runtime import schema_access
+        try:
+            with schema_access(self.database_path):
+                self._initialize()
+        except RuntimeError as exc:
+            raise CoordinationError(str(exc)) from exc
         from .threads import ThreadStore
         self.threads = ThreadStore(self)
         from .thread_usage import ThreadUsageStore

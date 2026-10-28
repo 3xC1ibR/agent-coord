@@ -267,6 +267,8 @@ class BrowserSessions:
         self.dispatch = DispatchRuntime(self)
         from .turn_watchdog import TurnWatchdog
         self.watchdog = TurnWatchdog(self)
+        from .desktop_runtime import install_session_admission
+        install_session_admission(self)
 
     def _thread_lock(self, thread_id: str):
         with self.lock:
@@ -421,7 +423,10 @@ class BrowserSessions:
         for identity in disconnected:
             reason = ("Codex disconnected. Review queued messages before resuming."
                       if method == "bridge/disconnected" else "The thread closed. Reopen it to resume queued messages.")
-            self.queue.pause(identity, reason)
+            # A proven idle runtime handover preserves accepted, unsent work.
+            # Unexpected provider disconnects retain the existing review guard.
+            if not getattr(self, "runtime_handover", False):
+                self.queue.pause(identity, reason)
             if identity in (disconnected_turns or {}):
                 turn_id = disconnected_turns[identity]
                 self.store.threads.finish_turn(identity, turn_id=turn_id, status="failed")

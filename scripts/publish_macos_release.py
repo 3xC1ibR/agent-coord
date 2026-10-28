@@ -9,10 +9,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import plistlib
+import zipfile
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+import xml.etree.ElementTree as ET
 import tempfile
 import urllib.request
 
@@ -22,6 +26,8 @@ BUCKET = "ribbon-field-downloads"
 DOWNLOAD_URL = "https://downloads.ribbonfield.com"
 ACCOUNT_ID = "af320d6747244dea99edc8895d3d00f4"
 CURRENT_KEY = "releases/current.json"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "desktop/macos"))
+import sparkle
 
 
 def digest(stream) -> str:
@@ -36,7 +42,8 @@ def file_digest(path: Path) -> str:
         return digest(stream)
 
 
-def release_files(directory: Path, version: str, commit: str, channel: str = "alpha") -> tuple[list[Path], dict]:
+def release_files(directory: Path, version: str, commit: str, channel: str = "alpha", *,
+                  require_updates: bool = False, update_public_key: str | None = None) -> tuple[list[Path], dict]:
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("Version must be numeric X.Y.Z")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -88,6 +95,69 @@ def release_files(directory: Path, version: str, commit: str, channel: str = "al
             "sha256": sha256,
             "size": image.stat().st_size,
         }
+    has_updates = any(directory.glob(f"Ribbon-Field-{version}-*.zip*"))
+    if require_updates or has_updates:
+        if not update_public_key:
+            raise ValueError("Signed updates require the trusted --update-public-key")
+        release["updates"] = {}
+        for arch in ARCHITECTURES:
+            archive = directory / f"Ribbon-Field-{version}-{arch}.zip"
+            feed, metadata = archive.with_suffix(".xml"), archive.with_suffix(".zip.json")
+            for path in (archive, feed, metadata):
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError(f"Missing or unsafe update artifact: {path.name}")
+            update = json.loads(metadata.read_text())
+            expected = {"version": version, "build_number": str(release["build_number"]),
+                        "architecture": arch, "channel": channel, "public_key": update_public_key,
+                        "feed_url": f"{DOWNLOAD_URL}/updates/{channel}/{arch}.xml",
+                        "sha256": file_digest(archive), "appcast_sha256": file_digest(feed),
+                        "size": archive.stat().st_size}
+            if any(update.get(key) != value for key, value in expected.items()):
+                raise ValueError(f"Update metadata mismatch: {archive.name}")
+            sparkle.validate_runtime(update.get("runtime"))
+            sparkle.verify_signature(archive, update.get("signature", ""), update_public_key)
+            with zipfile.ZipFile(archive) as bundle:
+                prefix = "Ribbon Field.app/Contents/"
+                def read_config(name):
+                    member = bundle.getinfo(prefix + name)
+                    if member.file_size > 1024 * 1024:
+                        raise ValueError("Oversized update configuration")
+                    return bundle.read(member)
+                info = plistlib.loads(read_config("Info.plist"))
+                backend = json.loads(read_config("Resources/backend.json"))
+                python = json.loads(read_config("Resources/python-runtime.json"))
+            if (info.get("CFBundleIdentifier") != "com.agentcoord.desktop"
+                    or info.get("CFBundleVersion") != str(release["build_number"])
+                    or info.get("CFBundleShortVersionString") != version
+                    or info.get("SUPublicEDKey") != update_public_key
+                    or info.get("SUFeedURL") != expected["feed_url"]
+                    or info.get("SURequireSignedFeed") is not True
+                    or info.get("SUVerifyUpdateBeforeExtraction") is not True
+                    or info.get("SUSignedFeedFailureExpirationInterval") != 0
+                    or {key: info.get(key) for key in sparkle.RUNTIME_KEYS} != update["runtime"]
+                    or {key: backend.get(key) for key in sparkle.RUNTIME_KEYS} != update["runtime"]
+                    or backend.get("python") != "runtime/bin/python3"
+                    or python.get("triple") != ("aarch64" if arch == "arm64" else "x86_64") + "-apple-darwin"):
+                raise ValueError(f"Update archive metadata mismatch: {archive.name}")
+            root = sparkle.verify_appcast(feed, update_public_key)
+            items = root.findall("./channel/item")
+            if len(items) != 1:
+                raise ValueError("Update feed must have one release item")
+            item = items[0]
+            enclosure = item.find("enclosure")
+            ns = "{" + sparkle.SPARKLE_NS + "}"
+            expected_item = {ns + "version": str(release["build_number"]),
+                             ns + "shortVersionString": version, ns + "minimumSystemVersion": "12.0",
+                             "ribbonArchitecture": arch}
+            if (any(item.findtext(key) != value for key, value in expected_item.items())
+                    or json.loads(item.findtext("ribbonRuntime", "null")) != update["runtime"]
+                    or enclosure is None
+                    or enclosure.attrib != {"url": f"{DOWNLOAD_URL}/releases/{version}/{archive.name}",
+                        "length": str(archive.stat().st_size), "type": "application/zip",
+                        ns + "edSignature": update["signature"]}):
+                raise ValueError(f"Update feed metadata mismatch: {feed.name}")
+            files.extend((archive, feed, metadata))
+            release["updates"][arch] = {**expected, "appcast": feed.name, "archive": archive.name}
     return files, release
 
 
@@ -118,7 +188,9 @@ class R2:
 
     def put(self, key: str, path: Path) -> None:
         content_type = ("application/x-apple-diskimage" if path.suffix == ".dmg" else
-                        "application/json" if path.suffix == ".json" else "text/plain")
+                        "application/json" if path.suffix == ".json" else
+                        "application/xml" if path.suffix == ".xml" else
+                        "application/zip" if path.suffix == ".zip" else "text/plain")
         result = self.run("put-object", "--bucket", BUCKET, "--key", key, "--body", str(path),
                           "--if-none-match", "*", "--content-type", content_type,
                           "--cache-control", "public, max-age=31536000, immutable")
@@ -151,6 +223,34 @@ class R2:
             if result.returncode:
                 raise RuntimeError(f"Current release promotion failed: {result.stderr}")
 
+    def promote_feed(self, key: str, path: Path) -> None:
+        """CAS promotion of an already signed feed; do not modify its bytes."""
+        ns = "{" + sparkle.SPARKLE_NS + "}"
+        build = int(ET.parse(path).findtext("./channel/item/" + ns + "version", "0"))
+        version = tuple(map(int, ET.parse(path).findtext("./channel/item/" + ns + "shortVersionString", "").split(".")))
+        if build <= 0 or len(version) != 3:
+            raise ValueError("Invalid appcast version or build number")
+        with tempfile.TemporaryDirectory(prefix="ribbon-feed-") as directory:
+            previous = Path(directory) / "feed.xml"
+            result = self.run("get-object", "--bucket", BUCKET, "--key", key, str(previous))
+            condition = ["--if-none-match", "*"]
+            if result.returncode == 0:
+                old_build = int(ET.parse(previous).findtext("./channel/item/" + ns + "version", "0"))
+                old_version = tuple(map(int, ET.parse(previous).findtext("./channel/item/" + ns + "shortVersionString", "").split(".")))
+                if old_build > build or old_version > version:
+                    raise ValueError("Refusing to downgrade the update feed")
+                if old_build == build:
+                    if previous.read_bytes() != path.read_bytes():
+                        raise ValueError("Update build already refers to different feed bytes")
+                    return
+                condition = ["--if-match", json.loads(result.stdout)["ETag"]]
+            elif "(404)" not in result.stderr and "(NoSuchKey)" not in result.stderr:
+                raise RuntimeError("Cannot inspect update feed")
+            result = self.run("put-object", "--bucket", BUCKET, "--key", key, "--body", str(path),
+                              *condition, "--content-type", "application/xml", "--cache-control", "no-store")
+            if result.returncode:
+                raise RuntimeError("Update feed promotion failed")
+
 
 def verify_download(key: str, path: Path) -> None:
     with urllib.request.urlopen(f"{DOWNLOAD_URL}/{key}", timeout=120) as response:
@@ -174,6 +274,11 @@ def publish(files: list[Path], release: dict, r2: R2, *, promote_current: bool =
                 r2.put(key, path)
             verify_download(key, path)
         if promote_current:
+            for arch, update in release.get("updates", {}).items():
+                feed = next(path for path in files if path.name == update["appcast"])
+                key = f"updates/{release['channel']}/{arch}.xml"
+                r2.promote_feed(key, feed)
+                verify_download(key, feed)
             r2.promote(manifest)
             verify_download(CURRENT_KEY, manifest)
 
@@ -186,10 +291,13 @@ def main() -> None:
     parser.add_argument("--channel", choices=("alpha", "beta", "stable"), default="alpha")
     parser.add_argument("--publish", action="store_true", help="Upload verified files to the public R2 bucket")
     parser.add_argument("--promote-current", action="store_true", help="Advance the website release after every artifact verifies")
+    parser.add_argument("--require-updates", action="store_true", help="Reject releases without signed Sparkle artifacts")
+    parser.add_argument("--update-public-key", help="Trusted public key for archive and feed verification")
     args = parser.parse_args()
     if args.promote_current and not args.publish:
         parser.error("--promote-current requires --publish")
-    files, release = release_files(args.directory, args.version, args.commit, args.channel)
+    files, release = release_files(args.directory, args.version, args.commit, args.channel,
+                                   require_updates=args.require_updates, update_public_key=args.update_public_key)
     if args.publish:
         publish(files, release, R2(), promote_current=args.promote_current)
     print(json.dumps({"published": args.publish, **release}, indent=2))

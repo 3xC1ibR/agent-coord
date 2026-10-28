@@ -1,8 +1,9 @@
 # Ribbon Field for macOS
 
 The native app displays the Ribbon Field UI in a Swift AppKit/WKWebView
-window. It starts a private local backend automatically and uses the same
-coordination database as the CLI and plugins.
+window. It starts or reconnects to a private local runtime and uses the same
+coordination database as the CLI and plugins. The runtime keeps agent work alive
+when the desktop interface quits or is replaced by a compatible update.
 
 ## Install a distributed app
 
@@ -145,11 +146,15 @@ In `macos-signing`, configure:
 | Secret | `APPLE_APP_PASSWORD` | An Apple app-specific password for that account. |
 | Variable | `APPLE_TEAM_ID` | Developer team ID (currently `R6Z7YTP6YG`). |
 | Variable | `MACOS_SIGN_IDENTITY` | Full Developer ID identity (currently `Developer ID Application: Roni Quinonez (R6Z7YTP6YG)`). |
+| Secret | `SPARKLE_PRIVATE_KEY` | Ed25519 archive/appcast signing key exported securely from Sparkle's key generator. |
+| Variable | `SPARKLE_PUBLIC_KEY` | Matching public key embedded in release builds. |
 
 In `macos-release`, set `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` from an
 [R2 API token](https://developers.cloudflare.com/r2/api/tokens/) with **Object
 Read & Write** permission limited to `ribbon-field-downloads`. These are S3
 credentials, not the Cloudflare OAuth connection or a general API bearer token.
+Also set `SPARKLE_PUBLIC_KEY` in `macos-release` to the identical public key for
+independent artifact verification. See the [key setup procedure](../../docs/runtime-updates.md#signing-configuration).
 Use GitHub's secret UI or pipe local files into `gh secret set --env <name>`;
 do not put secrets in source, chat, workflow inputs, or shell history.
 
@@ -190,6 +195,9 @@ metadata for the same version. Publish a new version for a corrective release;
 never replace an installer users already have.
 Individual uploaded files may be visible before completion; `release.json` is
 the marker that the whole release passed public-download verification.
+Signed update feeds are promoted separately for each architecture before the
+website manifest. A partial promotion can briefly offer different versions to
+Apple Silicon and Intel users; retry the same verified artifacts to finish it.
 
 The publisher can validate downloaded artifacts locally without credentials or
 network access:
@@ -253,18 +261,41 @@ Local builds are ad hoc signed by the build command.
   and releases its web view. Closing the final window keeps it and the app's
   work running. Click the Dock icon to reopen it. Window restoration after a
   full quit is not yet implemented.
-- Command-Q quits. When this app has running turns or unanswered requests, a
-  confirmation offers **Keep Working** or **Quit and Stop**. Saved conversations
-  remain available on the next launch.
-- Each app instance owns a server on an automatically allocated loopback port.
-  It does not attach to or shut down servers started in other terminals.
-- If the native app crashes or is force-quit, closing its parent pipe asks the
-  backend to clean up its server and Codex connection.
+- Command-Q quits the interface and leaves agents, tools, approvals, and queued
+  work running. Opening the app reconnects to the runtime for its database.
+  **Ribbon Field → Stop Work and Quit…** explicitly stops that work and exits;
+  saved conversations remain available on the next launch.
+- One authenticated runtime owns each database and serves its interface on an
+  automatically allocated loopback port. Native launches share that owner;
+  unrelated terminal servers are not attached to or stopped.
+- A native crash or force-quit leaves the runtime running. Runtime crashes,
+  logout, and restarting the Mac are not covered by this lifetime separation.
 - Native launches are single-instance. Additional windows belong to that same
   app; normal Finder/Dock launches reopen its current window.
 - UI preferences persist across launches even though the local port changes.
 - External web links open in the default browser. File selection uses the
   native macOS file picker.
+
+## Updates while agents work
+
+Update-enabled release builds offer **Ribbon Field → Check for Updates…** and
+Sparkle's update notifications and preferences. Signed updates can be discovered
+and downloaded while agents run. A compatible interface update can install and
+relaunch while the existing runtime continues its work. Runtime replacement waits
+for a safe idle transition, preserving accepted queued work. An incompatible
+update or an unavailable runtime check defers installation.
+
+The runtime retains its Python, backend, dependencies, and resources outside the
+app bundle. Replacing the bundle therefore does not remove files still needed by
+running agents. Normal local builds leave the updater disabled unless a feed and
+public key are configured. Customer updates require the production Sparkle key,
+signed archives and appcasts, and hosted feeds; adding the code alone does not
+activate those services. See the [runtime update and first-rollout guide](../../docs/runtime-updates.md)
+for the trust configuration and validation status.
+
+An installation made before this lifetime change still stops its agents on quit.
+Its first upgrade requires one coordinated interruption. Subsequent compatible
+interface updates use the independent runtime.
 
 ## Open an app destination
 
@@ -421,8 +452,11 @@ or Skip when a response cannot be sent from this window.
 
 ## Update and validate
 
-Quit the native app, then rerun the build/install command to pick up backend or
-UI changes. The installer refuses to replace a running executable, an unrelated
+Build without `--install` while the app and agents run. To install the local
+build, quit the native interface and rerun the build/install command. On versions
+with the independent runtime, ordinary Quit leaves agents running; backend
+changes activate when that runtime can safely become idle. The installer refuses
+to replace a running executable, an unrelated
 application, or a symbolic link. The repository's plugin refresh workflow still
 applies whenever plugin sources change; the native app build is separate from
 installing the Codex and Claude plugins.
@@ -432,6 +466,8 @@ python3 -W error::ResourceWarning -m unittest discover -s tests -v
 node --test tests/test_desktop_bridge.js tests/test_desktop_palette.js
 python3 desktop/macos/build.py
 python3 desktop/macos/smoke_test.py
+# Verify native quit/reconnect preserves the same runtime, then clean it up:
+python3 desktop/macos/smoke_test.py --runtime-only
 # Focused native session-switching check:
 python3 desktop/macos/smoke_test.py --sessions-only
 # Focused project scratchpad, shortcut, autosave, and focus checks:
@@ -446,7 +482,8 @@ command-palette filtering, execution, focus restoration and modal behavior,
 Roll up shortcut routing, oldest-waiting order, handled/skip controls and window isolation,
 window disposal and Dock reopening, the notification bridge, and quitting. It
 writes `build/macos/smoke.json` with `.json.png`, `.json.palette.png`, and
-`.json.roll-up.png` screenshots beside it, then verifies the owned backend exited.
+`.json.roll-up.png` screenshots beside it, then explicitly stops the test runtime
+and verifies it exited.
 The Roll up screenshot captures an active attention queue. The command fails
 if any check fails. Successful reports
 have `error: null` and all behavior checks set to `true`. The backend tests also
@@ -454,4 +491,5 @@ exercise EOF, SIGTERM, an open event stream, independent server ownership, and
 cleanup of a fake Codex subprocess.
 
 [macOS capabilities](CAPABILITIES.md) records the design, implementation boundary,
-and further distribution and integration options. Beads owns task status.
+and further distribution and integration options. Work-thread checkpoints record
+current task status; Beads is optional.

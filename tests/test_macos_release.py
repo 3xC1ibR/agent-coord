@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import hashlib
+import plistlib
+import zipfile
 import io
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +48,126 @@ class MacOSReleaseTests(unittest.TestCase):
 
     def files(self):
         return release.release_files(self.directory, "1.2.3", COMMIT)
+
+    def add_updates(self):
+        public = base64.b64encode(b"p" * 32).decode()
+        signature = base64.b64encode(b"s" * 64).decode()
+        for arch in release.ARCHITECTURES:
+            archive = self.directory / f"Ribbon-Field-1.2.3-{arch}.zip"
+            runtime = release.sparkle.runtime_metadata("1.2.3", "1")
+            url = f"{release.DOWNLOAD_URL}/updates/alpha/{arch}.xml"
+            info = {"CFBundleIdentifier": "com.agentcoord.desktop", "CFBundleVersion": "1",
+                    "CFBundleShortVersionString": "1.2.3", "SUPublicEDKey": public,
+                    "SUFeedURL": url, "SURequireSignedFeed": True, "SUVerifyUpdateBeforeExtraction": True,
+                    "SUSignedFeedFailureExpirationInterval": 0, **runtime}
+            with zipfile.ZipFile(archive, "w") as bundle:
+                prefix = "Ribbon Field.app/Contents/"
+                bundle.writestr(prefix + "Info.plist", plistlib.dumps(info))
+                bundle.writestr(prefix + "Resources/backend.json", json.dumps({"python": "runtime/bin/python3", **runtime}))
+                bundle.writestr(prefix + "Resources/python-runtime.json", json.dumps({
+                    "triple": ("aarch64" if arch == "arm64" else "x86_64") + "-apple-darwin"}))
+            feed = archive.with_suffix(".xml")
+            release.sparkle.create_appcast(feed, version="1.2.3", build="1", architecture=arch,
+                                          url=f"{release.DOWNLOAD_URL}/releases/1.2.3/{archive.name}",
+                                          size=archive.stat().st_size, signature=signature, runtime=runtime)
+            self.write(archive.name + ".json", {"version": "1.2.3", "build_number": "1", "architecture": arch,
+                "channel": "alpha", "feed_url": url, "public_key": public, "runtime": runtime,
+                "signature": signature, "size": archive.stat().st_size, "sha256": release.file_digest(archive),
+                "appcast_sha256": release.file_digest(feed)})
+        return public
+
+    def update_files(self, public):
+        # Signature mechanics use real RFC vectors in test_macos_updater; these
+        # tests isolate packaging consistency without network or private keys.
+        with mock.patch.object(release.sparkle, "verify_signature"), mock.patch.object(
+                release.sparkle, "verify_appcast", side_effect=lambda path, key: release.ET.parse(path).getroot()):
+            return release.release_files(self.directory, "1.2.3", COMMIT,
+                                         require_updates=True, update_public_key=public)
+
+    def test_updates_require_both_architectures_and_trusted_key(self):
+        with self.assertRaisesRegex(ValueError, "trusted"):
+            release.release_files(self.directory, "1.2.3", COMMIT, require_updates=True)
+        key = self.add_updates()
+        files, manifest = self.update_files(key)
+        self.assertEqual(len(files), 14)
+        self.assertEqual(set(manifest["updates"]), set(release.ARCHITECTURES))
+        (self.directory / "Ribbon-Field-1.2.3-x86_64.zip").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing or unsafe update"):
+            self.update_files(key)
+
+    def test_update_metadata_and_signed_bundle_must_agree(self):
+        key = self.add_updates()
+        metadata = self.directory / "Ribbon-Field-1.2.3-arm64.zip.json"
+        original = metadata.read_text()
+        for field, value in (("architecture", "x86_64"), ("build_number", "2"), ("channel", "stable"),
+                             ("public_key", "other"), ("size", 0), ("sha256", "0" * 64)):
+            metadata.write_text(json.dumps({**json.loads(original), field: value}))
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "metadata mismatch"):
+                self.update_files(key)
+        metadata.write_text(original)
+        changed = json.loads(original)
+        changed["runtime"]["ui_protocol_max"] = 2
+        metadata.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(ValueError, "archive metadata mismatch"):
+            self.update_files(key)
+
+    def test_archive_signature_failure_stops_release_validation(self):
+        key = self.add_updates()
+        with mock.patch.object(release.sparkle, "verify_signature", side_effect=ValueError("signature invalid")):
+            with self.assertRaisesRegex(ValueError, "signature invalid"):
+                release.release_files(self.directory, "1.2.3", COMMIT, require_updates=True, update_public_key=key)
+
+    def test_signed_feed_wrong_enclosure_length_is_rejected_before_publication(self):
+        key = self.add_updates()
+        feed = self.directory / "Ribbon-Field-1.2.3-arm64.xml"
+        root = ET.parse(feed)
+        enclosure = root.find("./channel/item/enclosure")
+        enclosure.set("length", str(int(enclosure.get("length")) + 1))
+        root.write(feed, encoding="utf-8", xml_declaration=True)
+        metadata = feed.with_suffix(".zip.json")
+        values = json.loads(metadata.read_text())
+        values["appcast_sha256"] = hashlib.sha256(feed.read_bytes()).hexdigest()
+        metadata.write_text(json.dumps(values))
+        with self.assertRaisesRegex(ValueError, "feed metadata mismatch"):
+            self.update_files(key)
+
+    def test_signed_feeds_promote_after_immutable_artifacts_and_before_website(self):
+        key = self.add_updates()
+        files, manifest = self.update_files(key)
+        r2, events = mock.Mock(), []
+        r2.exists_identical.return_value = False
+        r2.promote_feed.side_effect = lambda key, path: events.append(("feed", key))
+        r2.promote.side_effect = lambda path: events.append(("website", ""))
+        with mock.patch.object(release, "verify_download", side_effect=lambda key, path: events.append(("verify", key))):
+            release.publish(files, manifest, r2, promote_current=True)
+        marker = events.index(("verify", "releases/1.2.3/release.json"))
+        self.assertGreater(events.index(("feed", "updates/alpha/arm64.xml")), marker)
+        self.assertGreater(events.index(("website", "")), events.index(("feed", "updates/alpha/x86_64.xml")))
+        r2.reset_mock()
+        with mock.patch.object(release, "verify_download", side_effect=ValueError("bad download")):
+            with self.assertRaises(ValueError):
+                release.publish(files, manifest, r2, promote_current=True)
+        r2.promote_feed.assert_not_called()
+
+    def test_feed_promotion_rejects_downgrade_and_compares_etag(self):
+        self.add_updates()
+        path = self.directory / "Ribbon-Field-1.2.3-arm64.xml"
+        r2 = release.R2()
+        for previous_build in ("0", "2"):
+            def run(*args):
+                if args[0] == "get-object":
+                    data = path.read_text().replace("<sparkle:version>1<", f"<sparkle:version>{previous_build}<")
+                    Path(args[-1]).write_text(data)
+                return subprocess.CompletedProcess([], 0, '{"ETag": "old-etag"}', "")
+            with mock.patch.object(r2, "run", side_effect=run) as call:
+                if previous_build == "2":
+                    with self.assertRaisesRegex(ValueError, "downgrade"):
+                        r2.promote_feed("updates/alpha/arm64.xml", path)
+                else:
+                    r2.promote_feed("updates/alpha/arm64.xml", path)
+                    self.assertIn("--if-match", call.call_args.args)
+                    self.assertIn("old-etag", call.call_args.args)
+                    self.assertIn("no-store", call.call_args.args)
 
     def test_valid_release_contains_both_architectures_and_exact_urls(self):
         files, manifest = self.files()

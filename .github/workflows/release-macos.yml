@@ -89,6 +89,8 @@ jobs:
       RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
       RELEASE_ARCH: ${{ matrix.arch }}
       SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+      RELEASE_CHANNEL: ${{ inputs.channel || 'alpha' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -129,12 +131,26 @@ jobs:
           xcrun notarytool store-credentials ribbon-field-ci --keychain "$keychain" \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
           rm -f "$RUNNER_TEMP/certificate.p12"
-      - name: Build signed and notarized DMG
+      - name: Build signed and notarized DMG and update
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
+          set -euo pipefail
+          for name in SPARKLE_PUBLIC_KEY SPARKLE_PRIVATE_KEY; do
+            [[ -n "${!name}" ]] || { echo "Missing update signing setting: $name"; exit 1; }
+          done
+          umask 077
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle-private-key"
+          unset SPARKLE_PRIVATE_KEY
+          trap 'rm -f "$RUNNER_TEMP/sparkle-private-key"' EXIT
           python3 desktop/macos/build.py --standalone --arch "$RELEASE_ARCH" \
             --version "$RELEASE_VERSION" --build-number "$GITHUB_RUN_NUMBER" \
             --sign-identity "$SIGN_IDENTITY" --notary-profile ribbon-field-ci \
             --output "build/release-app/Ribbon Field.app" \
+            --update-feed "https://downloads.ribbonfield.com/updates/$RELEASE_CHANNEL/$RELEASE_ARCH.xml" \
+            --update-public-key "$SPARKLE_PUBLIC_KEY" --update-channel "$RELEASE_CHANNEL" \
+            --update-private-key-file "$RUNNER_TEMP/sparkle-private-key" \
+            --update-archive "build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.zip" \
             --dmg "build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.dmg"
       - name: Verify the packaged distribution
         run: |
@@ -163,7 +179,7 @@ jobs:
       - name: Remove signing material
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/certificate.p12"
+          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/sparkle-private-key"
           if [[ -f "$RUNNER_TEMP/release-signing.keychain-db" ]]; then
             security delete-keychain "$RUNNER_TEMP/release-signing.keychain-db"
           fi
@@ -196,12 +212,14 @@ jobs:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
           RELEASE_CHANNEL: ${{ inputs.channel || 'alpha' }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           test -n "$AWS_ACCESS_KEY_ID" && test -n "$AWS_SECRET_ACCESS_KEY"
           aws --version
           python3 scripts/publish_macos_release.py --directory build/release \
             --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --channel "$RELEASE_CHANNEL" \
+            --require-updates --update-public-key "$SPARKLE_PUBLIC_KEY" \
             --publish --promote-current | tee release-result.json
           {
             echo '### Published macOS downloads'

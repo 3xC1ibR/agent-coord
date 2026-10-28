@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,12 +32,15 @@ def main() -> int:
     parser.add_argument("--detach-only", action="store_true", help="Run focused native conversation-detachment checks.")
     parser.add_argument("--scratchpad-only", action="store_true", help="Run focused project scratchpad checks.")
     parser.add_argument("--attribution-only", action="store_true", help="Verify the native download-token handoff without sending telemetry.")
+    parser.add_argument("--runtime-only", action="store_true", help="Quit and reconnect two native interfaces to the same detached runtime.")
     args = parser.parse_args()
     executable = args.app.expanduser().resolve() / "Contents/MacOS/Agent Coord"
     report = args.report.expanduser().resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     report.unlink(missing_ok=True)
-    command = [str(executable), "--smoke-test", str(report)]
+    temporary = tempfile.TemporaryDirectory(prefix="ribbon-native-smoke-")
+    smoke_directory = Path(temporary.name)
+    command = [str(executable), "--smoke-test", str(report), "--smoke-directory", str(smoke_directory)]
     if args.files_only:
         command.append("--smoke-files-only")
     if args.sessions_only:
@@ -46,18 +51,55 @@ def main() -> int:
         command.append("--smoke-scratchpad-only")
     if args.attribution_only:
         command.append("--smoke-attribution-only")
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as app:
-        try:
-            _, errors = app.communicate(timeout=110)
-        except subprocess.TimeoutExpired:
-            app.kill()
-            _, errors = app.communicate(timeout=5)
-            raise RuntimeError("Native smoke test timed out: " + errors[-4000:])
-        if app.returncode != 0 or not report.exists():
-            raise RuntimeError(f"Native app failed (exit {app.returncode}): {errors[-4000:]}")
+    if args.runtime_only:
+        command += ["--smoke-runtime-only", "--smoke-preserve-runtime"]
+    first = None
+    try:
+        for attempt in range(2 if args.runtime_only else 1):
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as app:
+                try:
+                    _, errors = app.communicate(timeout=110)
+                except subprocess.TimeoutExpired:
+                    app.kill()
+                    _, errors = app.communicate(timeout=5)
+                    raise RuntimeError("Native smoke test timed out: " + errors[-4000:])
+                if app.returncode != 0 or not report.exists():
+                    raise RuntimeError(f"Native app failed (exit {app.returncode}): {errors[-4000:]}")
+            if args.runtime_only:
+                current = json.loads(report.read_text())
+                if current.get("error") or not current.get("runtime_attached"):
+                    raise RuntimeError(str(current))
+                if attempt == 0:
+                    first = current
+                    if stopped(first["backend_pid"]):
+                        raise RuntimeError("Ordinary native Quit stopped the detached runtime")
+                    command.remove("--smoke-preserve-runtime")
+                elif current["backend_pid"] != first["backend_pid"] or current["url"] != first["url"]:
+                    raise RuntimeError("Native relaunch did not reconnect to the same runtime")
+    finally:
+        # A timed-out native process no longer owns the runtime lifetime. Clean
+        # up only this test's authenticated discovery, never a live app or PID.
+        sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
+        from agent_coord import desktop_runtime
+        discovery = smoke_directory / ".state.sqlite3.runtime/discovery.json"
+        if discovery.exists():
+            record = json.loads(discovery.read_text())
+            desktop_runtime.control(record, "stop")
+            for _ in range(150):
+                if stopped(record["pid"]):
+                    break
+                time.sleep(.1)
+        temporary.cleanup()
     result = json.loads(report.read_text())
     if result.get("error"):
         raise RuntimeError(result["error"])
+    if args.runtime_only:
+        if not stopped(result["backend_pid"]):
+            raise RuntimeError("Explicit native Stop and Quit left the test runtime alive")
+        result.update(runtime_survived_native_quit=True, native_reconnected_same_runtime=True, backend_exited_on_quit=True)
+        report.write_text(json.dumps(result, indent=2) + "\n")
+        print(json.dumps(result, indent=2))
+        return 0
     required = ("detach_normal_tab_click", "detach_escape_cancelled", "detach_reorder_preserved", "detach_window_created", "detach_state_restored", "detach_history_and_reading", "detach_window_focused", "detach_remaining_tabs",
                 "detach_inside_window_ignored", "detach_last_tab_overview", "detach_shared_backend", "detach_compact_host",
                 "detach_singleton_moves_window", "detach_drop_into_existing", "detach_repeat_moves_tab",

@@ -11,6 +11,19 @@ import subprocess
 import tempfile
 import urllib.request
 
+from sparkle import bundle_runtime_metadata
+
+
+def portable_configuration(app: Path) -> dict:
+    config = json.loads((app / "Contents/Resources/backend.json").read_text())
+    if not isinstance(config, dict):
+        raise ValueError("Not a portable app configuration")
+    expected = {"python": "runtime/bin/python3", "database": None, "path": None,
+                **bundle_runtime_metadata(app)}
+    if config != expected:
+        raise ValueError("Not a portable app configuration")
+    return config
+
 
 def verify(app: Path, *, native_smoke: bool = False, report: Path | None = None) -> dict:
     result = {"source": str(app), "relocated": False, "backend": False, "cli": False}
@@ -19,9 +32,7 @@ def verify(app: Path, *, native_smoke: bool = False, report: Path | None = None)
         relocated = root / "Applications/Ribbon Field.app"
         shutil.copytree(app, relocated, symlinks=True)
         resources = relocated / "Contents/Resources"
-        config = json.loads((resources / "backend.json").read_text())
-        if config != {"python": "runtime/bin/python3", "database": None, "path": None}:
-            raise ValueError("Not a portable app configuration")
+        config = portable_configuration(relocated)
         home = root / "new-user"
         home.mkdir()
         environment = {"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",

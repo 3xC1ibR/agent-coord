@@ -4,160 +4,6 @@ import UserNotifications
 import UniformTypeIdentifiers
 import Darwin
 
-private struct BackendConfiguration: Decodable {
-    let python: String
-    let database: String?
-    let path: String?
-
-    func pythonURL(resources: URL) -> URL {
-        python.hasPrefix("/") ? URL(fileURLWithPath: python) : resources.appendingPathComponent(python)
-    }
-
-    var databasePath: String {
-        if let database = database { return database }
-        let environment = ProcessInfo.processInfo.environment
-        if let configured = environment["AGENT_COORD_DB"], !configured.isEmpty {
-            return (configured as NSString).expandingTildeInPath
-        }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let state = environment["XDG_STATE_HOME"] ?? home + "/.local/state"
-        return (state as NSString).expandingTildeInPath + "/agent-coord/state.sqlite3"
-    }
-
-    var toolPath: String {
-        if let path = path { return path }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return ([home + "/.local/bin", home + "/.npm-global/bin", "/opt/homebrew/bin",
-                 "/usr/local/bin", ProcessInfo.processInfo.environment["PATH"] ?? "",
-                 "/usr/bin", "/bin", "/usr/sbin", "/sbin"]).filter { !$0.isEmpty }.joined(separator: ":")
-    }
-}
-
-// Only this Process is owned by the app. Never attach to or stop a server found
-// on a well-known port: it may belong to a terminal or another installation.
-private final class Backend {
-    var process: Process?
-    var ready: ((URL) -> Void)?
-    var exited: ((String) -> Void)?
-    var stopped: (() -> Void)?
-    private var input: Pipe?
-    private var output: Pipe?
-    private var log: FileHandle?
-    private var buffer = Data()
-    private var generation = UUID()
-    private var stopping = false
-    private var receivedURL = false
-    let logURL: URL
-
-    init(directory: URL) { logURL = directory.appendingPathComponent("backend.log") }
-
-    func start(resources: URL, configuration: BackendConfiguration, database: String?) throws {
-        guard process == nil else { return }
-        generation = UUID()
-        let current = generation
-        stopping = false
-        receivedURL = false
-        buffer.removeAll()
-        let manager = FileManager.default
-        if (try? manager.attributesOfItem(atPath: logURL.path)[.size] as? NSNumber)?.intValue ?? 0 > 1_000_000 {
-            let previous = logURL.appendingPathExtension("previous")
-            try? manager.removeItem(at: previous)
-            try? manager.moveItem(at: logURL, to: previous)
-        }
-        if !manager.fileExists(atPath: logURL.path) { manager.createFile(atPath: logURL.path, contents: nil) }
-        log = try FileHandle(forWritingTo: logURL)
-        try log?.seekToEnd()
-        let child = Process(), input = Pipe(), output = Pipe()
-        child.executableURL = configuration.pythonURL(resources: resources)
-        child.arguments = ["-u", resources.appendingPathComponent("backend.py").path,
-                           "--db", database ?? configuration.databasePath]
-        if database != nil { child.arguments?.append("--no-launch-metrics") }
-        var environment = ProcessInfo.processInfo.environment
-        // Finder has a minimal PATH. Portable builds use this user's tool locations.
-        // Avoid inheriting the session identity of a terminal that opens the app.
-        for key in Array(environment.keys) where key.hasPrefix("AGENT_COORD_") || key.hasPrefix("ZELLIJ") || key == "CODEX_THREAD_ID" {
-            environment.removeValue(forKey: key)
-        }
-        environment.removeValue(forKey: "PYTHONHOME")
-        environment["PATH"] = configuration.toolPath
-        environment["PYTHONPATH"] = resources.appendingPathComponent("backend").path
-        environment["PYTHONNOUSERSITE"] = "1"
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        child.environment = environment
-        child.currentDirectoryURL = manager.homeDirectoryForCurrentUser
-        child.standardInput = input
-        child.standardOutput = output
-        child.standardError = log
-        child.terminationHandler = { [weak self] child in
-            DispatchQueue.main.async {
-                guard let self = self, self.generation == current else { return }
-                self.process = nil
-                self.output?.fileHandleForReading.readabilityHandler = nil
-                try? self.output?.fileHandleForReading.close()
-                try? self.input?.fileHandleForWriting.close()
-                try? self.log?.close()
-                self.input = nil
-                self.output = nil
-                self.log = nil
-                if self.stopping { self.stopped?(); self.stopped = nil }
-                else { self.exited?("The local server stopped (exit \(child.terminationStatus)). Open the log for details, then try again.") }
-            }
-        }
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil; return }
-            DispatchQueue.main.async {
-                guard let self = self, self.generation == current, !self.stopping else { return }
-                self.buffer.append(data)
-                while let newline = self.buffer.firstIndex(of: 10) {
-                    let line = self.buffer.prefix(upTo: newline)
-                    self.buffer.removeSubrange(...newline)
-                    if let object = try? JSONSerialization.jsonObject(with: line) as? [String: String],
-                       object["status"] == "serving", let value = object["url"], let url = URL(string: value),
-                       url.scheme == "http", url.host == "127.0.0.1", let port = url.port, (1...65535).contains(port),
-                       url.path == "/", url.user == nil, url.password == nil {
-                        self.receivedURL = true
-                        self.ready?(url)
-                    }
-                }
-                if self.buffer.count > 65536 { self.buffer.removeAll() }
-            }
-        }
-        self.input = input
-        self.output = output
-        process = child
-        do { try child.run() }
-        catch {
-            process = nil
-            output.fileHandleForReading.readabilityHandler = nil
-            try? input.fileHandleForWriting.close()
-            try? output.fileHandleForReading.close()
-            try? log?.close()
-            throw error
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-            guard let self = self, self.generation == current, self.process != nil,
-                  !self.receivedURL, !self.stopping else { return }
-            self.stop { self.exited?("The local server did not start within 20 seconds. Open the log for details, then try again.") }
-        }
-    }
-
-    func stop(completion: @escaping () -> Void) {
-        guard let child = process else { completion(); return }
-        stopping = true
-        stopped = completion
-        // EOF asks the adapter to close its server and Codex connection cleanly.
-        try? input?.fileHandleForWriting.close()
-        input = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-            if child.isRunning { child.terminate() }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
-            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
-        }
-    }
-}
-
 private final class SessionWindow: NSWindow {
     var cycleSession: ((Bool) -> Bool)?
 
@@ -232,6 +78,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var window: NSWindow! { current?.window }
     private var webView: WKWebView! { current?.webView }
     private var backend: Backend!
+    private var updater: RibbonUpdater!
+    private var explicitStop = false
     private var serverURL: URL?
     private var pendingAppLinks: [URL] = []
     private var configuration: BackendConfiguration!
@@ -259,6 +107,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             if let flag = CommandLine.arguments.firstIndex(of: "--smoke-test"), flag + 1 < CommandLine.arguments.count {
                 smokeReport = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
                 directory = FileManager.default.temporaryDirectory.appendingPathComponent("agent-coord-smoke-" + UUID().uuidString)
+                if let flag = CommandLine.arguments.firstIndex(of: "--smoke-directory"), flag + 1 < CommandLine.arguments.count {
+                    directory = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
+                }
                 smokeDirectory = directory
                 smokePreferences = "com.agentcoord.desktop.smoke." + UUID().uuidString
                 preferences = UserDefaults(suiteName: smokePreferences!)!
@@ -276,6 +127,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 return
             }
             backend = Backend(directory: directory)
+            updater = RibbonUpdater(compatibility: { [weak self] target in
+                guard let backend = self?.backend else { throw Backend.failure("Runtime unavailable.") }
+                try backend.validateCompatibility(target)
+            }, preflight: { [weak self] target, completion in
+                guard let backend = self?.backend else { completion(Backend.failure("Runtime unavailable.")); return }
+                backend.preflight(target, completion: completion)
+            })
             makeMenu()
             sessionKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 let target = (event.window ?? NSApp.keyWindow) as? SessionWindow
@@ -304,6 +162,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 if self.smokeReport != nil { self.finishSmoke(error: message) }
             }
             startBackend()
+            if smokeReport == nil { updater.start() }
             let links = pendingAppLinks
             pendingAppLinks.removeAll()
             for link in links { openAppLink(link) }
@@ -332,10 +191,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         let app = menu("Ribbon Field")
         app.addItem(withTitle: "About Ribbon Field", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(updater.makeMenuItem())
         app.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
         app.addItem(.separator())
         app.addItem(withTitle: "Hide Ribbon Field", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         app.addItem(.separator())
+        app.addItem(withTitle: "Stop Work and Quit…", action: #selector(confirmStopAndQuit), keyEquivalent: "").target = self
         app.addItem(withTitle: "Quit Ribbon Field", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = menu("File")
         file.addItem(withTitle: "New Session", action: #selector(webCommand(_:)), keyEquivalent: "n").representedObject = "newSession"
@@ -1076,39 +937,50 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if quitting { return .terminateLater }
-        guard backend?.process != nil else { return .terminateNow }
+        if quitting { return .terminateNow }
+        guard backend != nil, updater != nil else { return .terminateNow }
         if checkingQuit { return .terminateCancel }
         checkingQuit = true
-        guard let url = serverURL?.appendingPathComponent("api/browser/sessions") else {
-            stopAndQuit(); return .terminateLater
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 3
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            let object = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-            let sessions = object?["data"] as? [[String: Any]]
-            let count = sessions?.filter { ["running", "needs input"].contains($0["status"] as? String ?? "") }.count
-            DispatchQueue.main.async {
-                if count == 0 || self.smokeReport != nil { self.stopAndQuit(); return }
-                let alert = NSAlert()
-                alert.messageText = count == nil ? "Quit Ribbon Field?" : "Stop running work and quit?"
-                alert.informativeText = count == nil ?
-                    "The app could not check for active turns. Quitting stops this app’s local server. Close the window to keep work running." :
-                    "\(count!) session(s) in this app are working or waiting for input. Quitting stops them. Close the window to keep work running; saved conversations remain available after a restart."
-                alert.addButton(withTitle: "Keep Working")
-                alert.addButton(withTitle: "Quit and Stop")
-                self.showWindow()
-                if alert.runModal() == .alertSecondButtonReturn { self.stopAndQuit() }
-                else { self.checkingQuit = false; NSApp.reply(toApplicationShouldTerminate: false) }
+        let authorize = {
+            self.updater.canTerminateForUpdate { allowed in
+                self.checkingQuit = false
+                if allowed {
+                    self.quitting = true
+                    self.backend.detach()
+                    // Release before Sparkle launches the replacement desktop.
+                    if self.lockFile >= 0 { flock(self.lockFile, LOCK_UN); close(self.lockFile); self.lockFile = -1 }
+                } else {
+                    self.explicitStop = false
+                    let prefix = self.backend.process == nil ? "Work has stopped. Restart the local runtime to continue.\n\n" : ""
+                    let reason = self.updater.lastDeferral?.localizedDescription ?? "The update decision changed. Try quitting again."
+                    self.showStatus(prefix + reason, failed: true)
+                }
+                NSApp.reply(toApplicationShouldTerminate: allowed)
             }
-        }.resume()
+        }
+        if explicitStop || (smokeReport != nil && !CommandLine.arguments.contains("--smoke-preserve-runtime")) {
+            backend.stop { error in
+                if let error = error {
+                    self.checkingQuit = false
+                    self.explicitStop = false
+                    self.showStatus(error.localizedDescription, failed: true)
+                    NSApp.reply(toApplicationShouldTerminate: false)
+                } else { authorize() }
+            }
+        } else { authorize() }
         return .terminateLater
     }
 
-    private func stopAndQuit() {
-        quitting = true
-        backend.stop { NSApp.reply(toApplicationShouldTerminate: true) }
+    @objc private func confirmStopAndQuit() {
+        let alert = NSAlert()
+        alert.messageText = "Stop work and quit?"
+        alert.informativeText = "This stops active agents and tools. Saved conversations remain available. Quit Ribbon Field leaves work running."
+        alert.addButton(withTitle: "Keep Working")
+        alert.addButton(withTitle: "Stop Work and Quit")
+        if alert.runModal() == .alertSecondButtonReturn {
+            explicitStop = true
+            NSApp.terminate(nil)
+        }
     }
     func applicationWillTerminate(_ notification: Notification) {
         if let monitor = sessionKeyMonitor { NSEvent.removeMonitor(monitor) }
@@ -1116,7 +988,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if lockFile >= 0 { flock(lockFile, LOCK_UN); close(lockFile) }
         if let name = smokePreferences { preferences.removePersistentDomain(forName: name) }
         smokePasteboard?.releaseGlobally()
-        if let directory = smokeDirectory { try? FileManager.default.removeItem(at: directory) }
+        if let directory = smokeDirectory, !CommandLine.arguments.contains("--smoke-preserve-runtime") {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     // Native smoke mode uses a disposable database and preference domain. It
@@ -1210,6 +1084,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try await smokeReady(first)
         smokeResults["backend_pid"] = backend.process?.processIdentifier
         smokeResults["url"] = serverURL?.absoluteString
+        if CommandLine.arguments.contains("--smoke-runtime-only") {
+            smokeResults["runtime_attached"] = backend.process?.isRunning == true
+            let image: NSImage = try await withCheckedThrowingContinuation { continuation in
+                first.webView.takeSnapshot(with: nil) { image, error in
+                    if let image = image { continuation.resume(returning: image) }
+                    else { continuation.resume(throwing: error ?? Backend.failure("Screenshot unavailable.")) }
+                }
+            }
+            if let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+               let png = bitmap.representation(using: .png, properties: [:]) {
+                try png.write(to: URL(fileURLWithPath: smokeReport!.path + ".png"))
+            }
+            finishSmoke(error: nil)
+            return
+        }
         if CommandLine.arguments.contains("--smoke-attribution-only") {
             try await smokeAttribution()
             finishSmoke(error: nil)
@@ -2398,16 +2287,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     @MainActor private func smokeSessionCycling(_ item: DesktopWindow) async throws {
-        _ = try smokePython("""
-            import sys
+        let fixture = try smokePython("""
+            import json, sys
             from agent_coord.store import CoordinationStore
             store = CoordinationStore(sys.argv[1])
             for name in ['cycling-one', 'cycling-two', 'cycling-three']:
                 store.register(session_id=name, client='codex', cwd=str(store.database_path.parent))
                 store.threads.update(name, title=name)
-            print('{}')
+            print(json.dumps({'cwd': str(store.database_path.parent.resolve())}))
             """)
         _ = try await smokeJS("""
+            await openProjectDirectory(cyclingDirectory);
             goHome();
             document.querySelector('#search').value = 'cycling-';
             await refreshList();
@@ -2425,7 +2315,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             document.querySelector('#message').disabled = false;
             document.querySelector('#message').focus();
             return true;
-            """, in: item.webView)
+            """, in: item.webView, arguments: ["cyclingDirectory": fixture["cwd"]!])
         try await smokeFocus(item)
         try smokeCheck("next_session_shortcut", smokeWebKey("\t", flags: [.control], code: 48, throughApplication: true))
         let next = try await smokeJS("""

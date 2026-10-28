@@ -3,14 +3,15 @@
 Ribbon Field keeps its Swift/AppKit shell, WKWebView interface, and local Python
 backend. Desktop improvements can build on that architecture while preserving
 the shared browser UI. This document records the behavior and design direction;
-Beads remains the source of task status.
+work-thread checkpoints record task status, with Beads available optionally.
 
 ## Current foundation
 
-The app owns its local backend, presents native menus and file panels, delivers
-Notification Center alerts, and persists UI preferences across launches. Closing
-the final window keeps work running; quitting stops the backend after checking
-for active turns. The [build and usage guide](README.md) covers installation.
+The app connects to an independent local runtime, presents native menus and file
+panels, delivers Notification Center alerts, and persists UI preferences across
+launches. Closing the final window or quitting the interface keeps work running.
+**Stop Work and Quit…** explicitly stops the runtime and its agents. The
+[build and usage guide](README.md) covers installation.
 
 ## Desktop interaction pass
 
@@ -24,7 +25,7 @@ The first pass was implemented and validated on October 7, 2026, under
 | File selection | A native file and folder panel inserts path references into the draft, including directory paths for `/cd`. |
 | Keyboard commands | Expose session creation, search, composer focus, sidebar and conversation layout, sending, zoom, and window creation in the native menus. Keep normal text editing and modal dialogs working. |
 | Additional windows | Open separate workspace or thread windows with independent navigation and drafts, sharing one backend and database. Route commands, panels, and notification clicks to the appropriate window. |
-| Window lifecycle | Closing a secondary window releases its web view. Retain the final closed window for Dock reopening and background notifications. Quit stops the shared backend once. |
+| Window lifecycle | Closing a secondary window releases its web view. Retain the final closed window for Dock reopening and background notifications. Ordinary Quit detaches from the runtime; Stop Work and Quit stops it. |
 
 The native layer resolves paths only from the drag pasteboard or a user-selected
 file panel. Non-image files and folders are references, not uploaded copies;
@@ -60,13 +61,31 @@ the [distribution guide](README.md#build-a-standalone-disk-image) for commands.
 Provider CLIs and authentication remain separate setup requirements. Ad hoc
 test builds are not public, notarized releases.
 
+## Updates and runtime lifetime
+
+The implemented updater uses pinned Sparkle with signed archives and appcasts,
+separate feeds per architecture and channel, and a fresh compatibility decision
+before installation or relaunch. A compatible desktop update preserves the
+active runtime, tools, approvals, output, and queued work. The runtime retains
+its executable resources outside the replaced bundle and activates its own
+replacement only after closing admissions and proving it is idle.
+
+Focused runtime tests, independent updater review, and final assembled validation
+have passed (1,671 Python tests with seven optional skips, and 1,018 JavaScript
+tests without skips). Independent signed replacement acceptance passed all 38
+checks, preserving a pending approval and queued work through the update and
+upgrading the runtime only when idle. Final notarized packaging and the initial
+rollout remain pending. Production feeds and signing configuration must be provisioned before
+customer update notifications are operational. See the
+[update contract and rollout guide](../../docs/runtime-updates.md) for evidence
+and the one-time transition from the old app-owned backend.
+
 ## Further capability direction
 
 These are design options, not additional committed implementation:
 
 | Capability | Implementation direction |
 | --- | --- |
-| Automatic updates | Integrate an updater such as [Sparkle](https://sparkle-project.org/documentation/) with signed releases and a hosted update feed. |
 | Background access | Menu bar controls, Dock badges, launch at login, and configurable system-wide shortcuts. |
 | Native screens | Add AppKit or SwiftUI panels where native controls improve settings, accessibility, or workflow. |
 

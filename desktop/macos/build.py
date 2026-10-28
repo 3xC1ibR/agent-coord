@@ -142,7 +142,23 @@ def main() -> int:
     parser.add_argument("--notary-profile", help="Notarytool keychain profile; sign, notarize, and staple the app and DMG.")
     parser.add_argument("--version", default="0.1.0")
     parser.add_argument("--build-number", default="1")
+    parser.add_argument("--update-feed", help="HTTPS signed Sparkle appcast URL (explicit opt-in)")
+    parser.add_argument("--update-public-key", help="Base64 Sparkle Ed25519 public key")
+    parser.add_argument("--update-private-key-file", type=Path, help="Private mode-600 Sparkle signing key; otherwise use Keychain")
+    parser.add_argument("--update-archive", type=Path, help="Create a signed update ZIP and appcast; requires notarization")
+    parser.add_argument("--update-channel", choices=("alpha", "beta", "stable"), default="alpha")
     args = parser.parse_args()
+    from sparkle import configuration, runtime_metadata
+    try:
+        updater_info = configuration(args.update_feed, args.update_public_key,
+                                     standalone=args.standalone, identity=args.sign_identity)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.update_archive and (not updater_info or not args.notary_profile):
+        parser.error("--update-archive requires configured Sparkle and --notary-profile")
+    if args.update_private_key_file and not args.update_archive:
+        parser.error("--update-private-key-file requires --update-archive")
+    compatibility = runtime_metadata(args.version, args.build_number)
     if sys.platform != "darwin":
         parser.error("Building the native app requires macOS and Xcode Command Line Tools.")
     if args.dmg and not args.standalone:
@@ -211,6 +227,7 @@ def main() -> int:
         }
         if args.standalone:
             config = {"python": "runtime/bin/python3", "database": None, "path": None}
+        config.update(compatibility)
         (resources / "backend.json").write_text(json.dumps(config, indent=2) + "\n")
         (resources / "backend-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
         shutil.copyfile(ROOT / "LICENSE", resources / "LICENSE")
@@ -225,12 +242,24 @@ def main() -> int:
                                       "CFBundleTypeRole": "Viewer"}],
                 "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
             }
+        info.update(compatibility)
+        info.update(updater_info)
+        sparkle_tools = None
+        linker_flags = []
+        if updater_info:
+            from sparkle import embed
+            sparkle_tools = embed(app, args.arch, ROOT / "build/macos/sparkle-cache")
+            linker_flags = ["-F", str(contents / "Frameworks"), "-framework", "Sparkle",
+                            "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]
         (contents / "Info.plist").write_text(json.dumps(info))
         subprocess.run(["/usr/bin/plutil", "-convert", "xml1", str(contents / "Info.plist")], check=True)
+        from sparkle import bundle_runtime_metadata
+        bundle_runtime_metadata(app)
         environment = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="12.0")
         subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-O",
                         "-target", f"{args.arch}-apple-macosx12.0", str(HERE / "App.swift"),
                         str(HERE / "WorkspaceFiles.swift"), str(HERE / "FileBrowser.swift"),
+                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), *linker_flags,
                         "-o", str(binaries / EXECUTABLE_NAME)], check=True, env=environment)
         subprocess.run(["xcrun", "swift", str(HERE / "Icon.swift"), str(scratch / "AppIcon.iconset")], check=True)
         subprocess.run(["iconutil", "-c", "icns", str(scratch / "AppIcon.iconset"),
@@ -243,6 +272,10 @@ def main() -> int:
             notarize(archive, args.notary_profile)
             staple(app)
             subprocess.run(["spctl", "--assess", "--type", "execute", "--verbose=2", str(app)], check=True)
+        if args.update_archive:
+            from sparkle import package_update
+            package_update(app, args.update_archive.expanduser().absolute(), tools=sparkle_tools,
+                           key_file=args.update_private_key_file, architecture=args.arch, channel=args.update_channel)
         replace_app(app, output, legacy=legacy if args.install and output == destination else None)
     if args.install and destination != output:
         replace_app(output, destination, legacy=legacy)
@@ -255,6 +288,8 @@ def main() -> int:
     print(json.dumps({"built": str(output), "installed": str(destination) if args.install else None,
                       "standalone": args.standalone, "architecture": args.arch,
                       "dmg": str(args.dmg) if args.dmg else None,
+                      "updates_enabled": bool(updater_info),
+                      "update_archive": str(args.update_archive) if args.update_archive else None,
                       "notarized": bool(args.notary_profile)}, indent=2))
     return 0
 

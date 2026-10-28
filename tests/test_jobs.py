@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
-from agent_coord.jobs import (ManagedJobs, TERMINAL_STATES, DEFAULT_LOG_LIMIT_BYTES, supervise,
+from agent_coord.jobs import (ManagedJobs, TERMINAL_STATES, DEFAULT_LOG_LIMIT_BYTES, TRUNCATION_MARKER, supervise,
                               _supervisor_lock, _touch_supervisor)
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.event_subscriptions import EventSubscriptions
@@ -96,11 +96,32 @@ jobs.launch('owner',job['id'])
 
     def test_noisy_command_still_honors_timeout_and_bounds_disk_output(self):
         job = self.command("import os; data=b'x'*65536\nwhile True: os.write(1,data)", timeout=0.3)
+        started = time.monotonic()
         self.jobs.launch("owner", job["id"])
         result = self.wait(job["id"])
         self.assertEqual(result["state"], "timed_out")
+        self.assertLess(time.monotonic() - started, 3)
         self.assertLessEqual(Path(result["output_path"]).stat().st_size, DEFAULT_LOG_LIMIT_BYTES)
-        self.assertTrue(self.jobs.logs("owner", job["id"])["gap"])
+        logs = self.jobs.logs("owner", job["id"])
+        self.assertGreater(logs["size"], 0)
+        # The deadline need not allow enough output to fill the default cap.
+        self.assertEqual(logs["gap"], logs["size"] > DEFAULT_LOG_LIMIT_BYTES)
+
+    def test_output_exceeding_disk_limit_reports_truncation(self):
+        # Force truncation by byte count, independently of machine throughput.
+        output_bytes = 2 * DEFAULT_LOG_LIMIT_BYTES + 73
+        job = self.command(f"import sys; sys.stdout.buffer.write(b'x'*{output_bytes})")
+        self.jobs.launch("owner", job["id"])
+        result = self.wait(job["id"])
+        self.assertEqual(result["state"], "completed")
+        output = Path(result["output_path"]).read_bytes()
+        self.assertLessEqual(len(output), DEFAULT_LOG_LIMIT_BYTES)
+        self.assertTrue(output.startswith(TRUNCATION_MARKER))
+        self.assertEqual(output[len(TRUNCATION_MARKER):], b"x" * (len(output) - len(TRUNCATION_MARKER)))
+        logs = self.jobs.logs("owner", job["id"])
+        self.assertTrue(logs["gap"])
+        self.assertEqual(logs["size"], output_bytes)
+        self.assertEqual(logs["offset"], output_bytes - len(output))
 
     def test_timeout_kills_descendant_that_ignores_termination_after_leader_exits(self):
         marker = self.root / "descendant-progress"

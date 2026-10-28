@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord import provider_limits as limits
+from agent_coord.desktop_runtime import AdmissionGate
 from agent_coord.store import CoordinationStore, CoordinationError
 from agent_coord.ui import _handler
 
@@ -199,7 +200,7 @@ class UsageHTTPTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.store = CoordinationStore(Path(temp.name) / "state.sqlite3")
-        self.sessions = SimpleNamespace(store=self.store, cwd=temp.name)
+        self.sessions = SimpleNamespace(store=self.store, cwd=temp.name, admission=AdmissionGate())
         self.collect = Mock(return_value={"windows": [{"id": "5h", "label": "5-hour", "used_percent": 20, "resets_at": None}]})
         self.limits = limits.ProviderLimits(self.sessions, collectors={"claude": self.collect})
         with patch("agent_coord.ui.ProviderLimits", return_value=self.limits):
