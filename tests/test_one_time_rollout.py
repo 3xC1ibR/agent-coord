@@ -138,6 +138,9 @@ class FakeOperations:
     def open_app(self):
         self.event("open")
 
+    def verify_bundle(self, path):
+        self.event("verify_bundle")
+
     def confirm_continuation(self, receipt):
         self.event("confirm")
         return not receipt.get("dispatched")
@@ -180,6 +183,23 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(body["requestId"], "test:agent")
         self.assertIn("Do not blindly repeat", body["message"])
         self.assertFalse(any("/queue" in path for path, _ in self.ops.posts))
+
+    def test_leave_stopped_verifies_install_without_starting_runtime_or_agents(self):
+        self.plan["leave_stopped"] = True
+        self.controller.execute()
+        self.assertIn("verify_bundle", self.ops.events)
+        self.assertFalse({"bootstrap", "open", "resume", "continue"}.intersection(self.ops.events))
+        result = rollout.read_json(self.directory / "state.json")
+        self.assertEqual(result["status"], "installed_stopped")
+        self.assertEqual(result["attempts"]["agent"]["resume"], "disabled_by_user")
+
+    def test_leave_stopped_verification_failure_never_starts_work(self):
+        self.plan["leave_stopped"] = True
+        self.ops.fail_at = "verify_bundle"
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            self.controller.execute()
+        self.assertFalse({"bootstrap", "open", "resume", "continue"}.intersection(self.ops.events))
+        self.assertEqual(rollout.read_json(self.directory / "state.json")["status"], "failed")
 
     def test_turn_admitted_during_initial_snapshot_is_reconciled(self):
         admitted = None

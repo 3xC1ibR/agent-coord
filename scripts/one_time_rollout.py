@@ -421,6 +421,17 @@ class Controller:
             self.state["roster"] = roster
             self.save("installing")
             self.operations.install(candidate, self.directory)
+            if self.plan.get("leave_stopped"):
+                installed = Path(self.plan["installed"])
+                if tree_hash(installed) != self.plan["candidate_sha256"]:
+                    raise RuntimeError("Installed content differs from the approved candidate")
+                self.operations.verify_bundle(installed)
+                for tid in roster:
+                    self.state["attempts"].setdefault(tid, {})["resume"] = "disabled_by_user"
+                self.state["status"] = "installed_stopped"
+                self.state["installed_info"] = self.plan.get("candidate_info")
+                self.save("finished")
+                return
             self.save("bootstrapping")
             runtime = self.operations.runtime("bootstrap")
             self.verify_runtime(runtime)
@@ -507,7 +518,9 @@ def prepare(args):
             "installed_info": bundle_info(installed), "candidate_info": bundle_info(candidate),
             "installed_sha256": tree_hash(installed), "candidate_sha256": tree_hash(candidate),
             "readiness_message_id": args.readiness_message,
-            "authorization": "User authorized one-time tool interruption and stop/update/resume in thread 01a183d8-8395-7633-8e1c-d34aaf5310d8."}
+            "leave_stopped": args.leave_stopped,
+            "authorization": ("User authorized stop/update with app and agents left stopped before laptop reboot; do not resume."
+                              if args.leave_stopped else "User authorized one-time tool interruption and stop/update/resume in thread 01a183d8-8395-7633-8e1c-d34aaf5310d8.")}
     write_json(directory / "plan.json", plan)
     shutil.copyfile(Path(__file__), directory / "controller.py")
     Controller(plan).preflight()
@@ -544,6 +557,8 @@ def main(argv=None):
     for key in ("installed", "candidate", "database", "directory"):
         preparation.add_argument("--" + key, required=True)
     preparation.add_argument("--readiness-message", required=True, type=int)
+    preparation.add_argument("--leave-stopped", action="store_true",
+                             help="Install and verify the bundle, leaving the app and all conversations stopped")
     for command in ("preflight", "arm", "execute"):
         commands.add_parser(command).add_argument("plan")
     args = parser.parse_args(argv)
