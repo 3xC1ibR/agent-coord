@@ -102,6 +102,28 @@ test("slash command feedback appears without fabricating conversation items", as
   assert.equal(c.$("command-feedback").hidden, true);
 });
 
+test("permissions feedback stays compact while retaining the full explanation", () => {
+  const c = setup();
+  for (const [mode, expected] of [["yolo", "YOLO · Full access, no approvals"], ["default", "Permissions · Approval prompts enabled"]]) {
+    const message = `Permissions: ${mode} — full explanation and command instructions.`;
+    c.state.commandFeedback.set("one", message);
+    c.renderSessionSettings();
+    assert.equal(c.$("command-feedback").textContent, expected);
+    assert.equal(c.$("command-feedback").title, message);
+  }
+  c.state.selected = "new-session";
+  c.state.newSessionDraft = {commandFeedback: "Permissions: yolo — full machine access without approval prompts."};
+  c.renderSessionSettings();
+  assert.equal(c.$("command-feedback").textContent, "YOLO · Full access, no approvals");
+  c.state.newSessionDraft.commandFeedback = "Available models: first, second";
+  c.renderSessionSettings();
+  assert.equal(c.$("command-feedback").textContent, "Available models: first, second");
+  assert.equal(c.$("command-feedback").title, "");
+  c.state.newSessionDraft.commandFeedback = null;
+  c.renderSessionSettings();
+  assert.equal(c.$("command-feedback").hidden, true);
+});
+
 test("failed commands keep the draft and running sessions cannot change settings", async () => {
   const c = setup();
   c.$("message").value = "/effort invalid";

@@ -1304,7 +1304,10 @@ function renderSessionSettings() {
   $("session-yolo").hidden = !session?.yolo;
   $("edit-permissions").disabled = !browserSession || state.detailRefreshing || !!state.detail?.running || state.detail?.work_thread?.attention === "archived" || sessionBusy() || state.closing.has(state.selected);
   const feedback = state.selected === "new-session" ? state.newSessionDraft?.commandFeedback : state.commandFeedback.get(state.selected);
-  $("command-feedback").textContent = feedback || "";
+  const permissions = /^Permissions: (yolo|default)\b/.exec(feedback || "")?.[1];
+  $("command-feedback").textContent = permissions === "yolo" ? "YOLO · Full access, no approvals"
+    : permissions === "default" ? "Permissions · Approval prompts enabled" : feedback || "";
+  $("command-feedback").title = permissions ? feedback : "";
   $("command-feedback").hidden = !browserSession || !feedback;
   renderModelPicker();
 }

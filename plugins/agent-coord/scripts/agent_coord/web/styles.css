@@ -37,6 +37,9 @@
   --sb-primary-bg: #8fb0ff;
   --sb-primary-ink: #0f1217;
   --mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --mobile-chat-header-height: 56px;
+  --mobile-draft-max-height: 320px;
+  --mobile-input-max-height: 240px;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -727,8 +730,8 @@ body.mobile-chat:has(#conversation:not([hidden])) .sidebar,
 body.mobile-chat:has(#conversation:not([hidden])) .workspace-bar { display: none; }
 body.mobile-chat .conversation { display: flex; flex-direction: column; }
 body.mobile-chat .conversation-main { flex: 1; overflow: hidden; }
-body.mobile-chat .conversation-content { display: flex; overflow: hidden; }
-body.mobile-chat .conversation-head { flex-shrink: 0; flex-wrap: nowrap; gap: 8px; padding: 6px 12px; min-height: 56px; }
+body.mobile-chat .conversation-content { display: flex; min-height: var(--mobile-chat-header-height); overflow: hidden; }
+body.mobile-chat .conversation-head { flex-shrink: 0; flex-wrap: nowrap; gap: 8px; padding: 6px 12px; min-height: var(--mobile-chat-header-height); }
 body.mobile-chat .conversation-heading { flex: 1; min-width: 0; }
 body.mobile-chat .conversation-head h1 { font: 550 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
 body.mobile-chat .thread-title { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-block: 8px; }
@@ -744,8 +747,15 @@ body.mobile-chat #toggle-context, body.mobile-chat #expand-chat { display: none;
 body.mobile-chat .timeline { min-height: 0; overflow: auto; overscroll-behavior-y: contain; padding: 16px; }
 body.mobile-chat .requests { margin: 0 12px; max-height: 35%; overflow: auto; }
 body.mobile-chat .composer { margin: 0 12px max(8px, env(safe-area-inset-bottom)); }
-body.mobile-chat .composer-draft { max-height: min(160px, calc(var(--mobile-viewport-height, 100dvh) * .35)); overflow-y: auto; }
-body.mobile-chat .composer textarea { font-size: 16px; max-height: 96px; resize: none; }
+body.mobile-chat:not(.dispatcher-workspace) .composer { display: flex; flex-direction: column; flex-shrink: 1; min-height: 0; }
+body.mobile-chat .composer > :not(.composer-draft) { flex-shrink: 0; }
+/* Give the editor its own scroll area. Feedback and attachments must never
+   scroll the textarea itself out of the visible draft. */
+body.mobile-chat .composer-draft { display: flex; flex-direction: column; min-height: 0; max-height: min(var(--mobile-draft-max-height), calc(var(--mobile-viewport-height, 100dvh) * .55)); }
+body.mobile-chat .composer-draft > :not(textarea) { flex-shrink: 1; min-height: 0; overflow-y: auto; }
+body.mobile-chat .composer textarea { font-size: 16px; max-height: min(var(--mobile-input-max-height), calc(var(--mobile-viewport-height, 100dvh) * .45)); overflow-y: auto; resize: none; }
+body.mobile-chat .composer-draft > .command-feedback { flex-shrink: 0; }
+body.mobile-chat .command-feedback { padding: 0; border: 0; background: transparent; color: var(--muted); }
 body.mobile-chat .composer-model { margin-top: 6px; gap: 6px; }
 body.mobile-chat .composer-footer > span { display: none; }
 body.mobile-chat .composer-footer { justify-content: flex-end; }
