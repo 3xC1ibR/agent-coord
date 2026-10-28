@@ -81,6 +81,22 @@ def _parser() -> argparse.ArgumentParser:
     installer = subcommands.add_parser("install-cli", help="Install or refresh the stable agent-coord launcher.")
     installer.add_argument("--bin-dir", help="Executable directory; defaults to ~/.local/bin.")
 
+    activity = subcommands.add_parser("activity", help="Inspect local human activity and saved conversation evidence.")
+    activity_commands = activity.add_subparsers(dest="activity_command", required=True)
+    activity_query = activity_commands.add_parser("query", help="Read activity totals, groups, and paginated raw events.")
+    activity_history = activity_commands.add_parser("history", help="Read saved conversation prose without waking agents.")
+    activity_history.add_argument("--thread-id", required=True)
+    for target in (activity_query, activity_history):
+        target.add_argument("--workspace", help="Limit evidence to this workspace and its linked worktrees.")
+        target.add_argument("--start", type=float, help="Inclusive Unix timestamp.")
+        target.add_argument("--end", type=float, help="Exclusive Unix timestamp.")
+        target.add_argument("--limit", type=int, default=100)
+        target.add_argument("--cursor", help="Continuation cursor from the previous page.")
+    for field in ("project", "domain", "group", "thread_id"):
+        activity_query.add_argument("--" + field.replace("_", "-"))
+    activity_query.add_argument("--group-by", choices=["thread", "project", "domain", "group"], default="thread")
+    activity_commands.add_parser("settings", help="Show recording status and coverage start.")
+
     antigravity = subcommands.add_parser("antigravity", help="Install or sign in to Google Antigravity.")
     antigravity.add_argument("antigravity_command", choices=["install", "login", "status"])
 
@@ -669,6 +685,16 @@ def run(arguments: argparse.Namespace) -> Any:
         except (OSError, sqlite3.Error, ValueError) as exc:
             raise CoordinationError("Cannot evaluate routing records: " + str(exc)) from exc
     store = CoordinationStore(arguments.db)
+    if command == "activity":
+        from .activity import ActivityStore
+        from .activity_api import read_activity_history, QUERY_FIELDS
+        if arguments.activity_command == "settings":
+            return ActivityStore(store).settings()
+        if arguments.activity_command == "history":
+            return read_activity_history(store, arguments.thread_id, start=arguments.start, end=arguments.end,
+                                         limit=arguments.limit, cursor=arguments.cursor, allowed_cwd=arguments.workspace)
+        values = {key: getattr(arguments, key) for key in QUERY_FIELDS if getattr(arguments, key, None) is not None}
+        return ActivityStore(store).query(**values, allowed_cwd=arguments.workspace)
     if command == "sidecar":
         from .sidecars import Sidecars
         watches = Sidecars(store)

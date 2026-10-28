@@ -41,6 +41,8 @@ from .organization import app_agent_creators
 from . import notification_policy
 from .session_close import is_external_codex_session, stop_terminal_session
 from .workspaces import matches_workspace, workspace_choices
+from .activity import ActivityStore
+from .activity_api import activity_context, record_accepted
 
 
 class BrowserBusyError(CoordinationError):
@@ -212,6 +214,7 @@ class BrowserSessions:
         self.history_rpc = None
         self.rpc_factory = rpc_factory
         self.closed = False
+        self.activity = ActivityStore(store)
         with store._connection() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS browser_sessions (
                 thread_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, name TEXT NOT NULL,
@@ -1021,7 +1024,17 @@ class BrowserSessions:
 
     def update_work_thread(self, thread_id: str, body: dict) -> dict:
         with self._thread_lock(thread_id):
-            return self._update_work_thread(thread_id, body)
+            before = self.store.threads.get(thread_id)
+            result = self._update_work_thread(thread_id, body)
+            changed = {key: {"before": before.get(key), "after": result.get(key)}
+                       for key in ("domain", "project_id", "repository_id")
+                       if key in body and before.get(key) != result.get(key)}
+            if changed:
+                record_accepted(self.store, "organization_changed", thread_id, details={"changes": changed})
+            if body.get("handled") or ("attention" in body and before["attention"] != result["attention"]):
+                record_accepted(self.store, "decision_submitted", thread_id,
+                    details={"action": "handled" if body.get("handled") else "placement", "attention": result["attention"]})
+            return result
 
     def _update_work_thread(self, thread_id: str, body: dict) -> dict:
         thread = self.work_thread(thread_id)
@@ -1576,6 +1589,22 @@ class BrowserSessions:
 
     def submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
+        context = activity_context(body)
+        result = self._submit(thread_id, body, queued=queued)
+        command = result.get("command")
+        turn_id = result.get("turnId") or (result.get("turn") or {}).get("id")
+        # Dispatcher and reviewed requests have their own durable acceptance
+        # IDs. Older clients may retry them without browser activity metadata.
+        request_id = body.get("requestId") if result.get("dispatched") or result.get("review") else None
+        event_id = ("request:" + str(uuid.uuid5(uuid.NAMESPACE_URL, thread_id + ":" + request_id))
+                    if request_id else None)
+        record_accepted(self.store, "decision_submitted" if command else "message_submitted", thread_id,
+            context=context, turn_id=turn_id, event_id=event_id,
+            details={"action": command.get("name") if isinstance(command, dict) else "message",
+                     "queued": bool(result.get("queued")), "request_id": result.get("id")})
+        return result
+
+    def _submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
         message = body.get("message", "")
         if body.get("review") is not None:
             if queued:

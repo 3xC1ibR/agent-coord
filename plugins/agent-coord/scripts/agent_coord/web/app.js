@@ -31,6 +31,8 @@ function showError(error) {
 }
 $("error").querySelector("button").onclick = () => errorNotice.dismiss();
 async function api(path, body, requestOptions = {}) {
+  const submission = body !== undefined && /^sessions\/([^/]+)\/(messages|queue)$/.exec(path);
+  if (submission && !body.action) state.activity?.submission(decodeURIComponent(submission[1]), body);
   const viewMutation = body !== undefined && (path === "views" || path.startsWith("views/"));
   if (viewMutation) ++listRequest;
   const options = {cache: "no-store", ...requestOptions};
@@ -1015,6 +1017,7 @@ function sameConversation(first, second) {
     JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.reviews, second.work_thread.browser_session, second.work_thread.client]);
 }
 async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true, tabId = null} = {}) {
+  const activitySource = state.paneMode || globalThis.agentCoordPanes?.active ? "programmatic" : state.activity?.source();
   const previousTab = state.threadTabs?.selected;
   state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
@@ -1038,6 +1041,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   if (state.selected) state.drafts.set(state.selected, $("message").value);
   retainConversation();
   state.selected = id;
+  if (!state.paneMode) state.activity?.select(id, activitySource);
   state.scratchpad?.select(id);
   if (dock) state.threadTabs?.suspend();
   else if (!tabId || !state.threadTabs?.selectConversation?.(tabId, id))
@@ -2252,6 +2256,7 @@ async function newSession() {
     thread: {turns: []}, requests: [], queuedMessages: [], running: false,
   };
   state.selected = "new-session";
+  if (!state.paneMode) state.activity?.select(null);
   state.scratchpad?.select(null);
   state.detail = state.newSessionDraft;
   state.threadTabs?.open(state.newSessionDraft.work_thread);
@@ -2411,6 +2416,7 @@ function goHome({restoreDispatcher = true, rememberTab = true, preserveRollUp = 
   retainConversation();
   state.dispatchDock?.hide();
   state.selected = null; state.detail = null; state.titleEdit = null;
+  state.activity?.select(null);
   state.scratchpad?.select(null);
   state.threadTabs?.overview({remember: rememberTab});
   state.agentTreeController?.bind();
@@ -3341,6 +3347,7 @@ async function boot() {
     history.replaceState(history.state, "", clean.pathname + clean.search + clean.hash);
   }
   state.config = await api("config");
+  state.activity = globalThis.ActivityCollector?.bind({window, document, state, api});
   state.schedules = new ScheduledPromptsUI({document, api, openThread: select, onError: showError,
     onChange: () => renderList(),
     getThread: id => state.sessions.find(thread => thread.thread_id === id) ||

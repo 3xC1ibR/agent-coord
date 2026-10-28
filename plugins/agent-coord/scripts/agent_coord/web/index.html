@@ -28,6 +28,9 @@
   <link rel="stylesheet" href="/theme.css">
   <link rel="stylesheet" href="/provider-usage.css">
   <script src="/provider-usage.js" defer></script>
+  <link rel="stylesheet" href="/activity.css">
+  <script src="/activity.js" defer></script>
+  <script src="/activity-collector.js" defer></script>
   <link rel="stylesheet" href="/conversation-search.css">
   <link rel="stylesheet" href="/speech.css">
   <script src="/speech.js" defer></script>
@@ -99,6 +102,7 @@
     </div>
     <nav id="sessions" aria-label="Work threads"><p class="muted">Loading threads…</p></nav>
     <a id="open-usage" class="usage-nav" href="/usage" aria-label="Usage" title="Usage and limits"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10 M12 20V4 M20 20v-7"/></svg><span>Usage</span></a>
+    <a id="open-activity" class="usage-nav" href="/activity" aria-label="Activity" title="Your recorded activity"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Activity</span></a>
     <div class="sidebar-footer" role="group" aria-label="Workspace tools">
       <button id="open-asks" class="sidebar-icon sidebar-asks" type="button" aria-label="Decisions" title="Decisions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7v.5"/><path d="M12 17h.01"/></svg><span id="asks-count" class="asks-count" hidden></span></button>
       <button id="scheduled-prompts" class="sidebar-icon" type="button" aria-label="Scheduled prompts" title="Scheduled prompts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button>
@@ -291,6 +295,7 @@
   </main>
   <dialog id="settings-dialog" class="settings-dialog" aria-label="Settings"><iframe id="settings-frame" title="Settings"></iframe></dialog>
   <dialog id="usage-dialog" aria-label="Usage"><iframe id="usage-frame" title="Provider usage and limits"></iframe></dialog>
+  <dialog id="activity-dialog" aria-label="Activity"><iframe id="activity-frame" title="Activity history"></iframe></dialog>
   <dialog id="project-scratchpad-dialog" class="project-scratchpad-dialog" aria-labelledby="project-scratchpad-title" aria-describedby="scratchpad-project-name"></dialog>
   <dialog id="mobile-thread-sheet" class="mobile-thread-sheet" aria-labelledby="mobile-sheet-title">
     <div class="mobile-sheet-heading"><button id="mobile-sheet-back" class="quiet" type="button" aria-label="Back to thread actions" hidden>←</button><h2 id="mobile-sheet-title">Thread actions</h2><button class="icon-button" type="button" data-close="mobile-thread-sheet" aria-label="Close thread actions">×</button></div>

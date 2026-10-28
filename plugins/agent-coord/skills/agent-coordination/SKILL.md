@@ -80,6 +80,12 @@ For a session dedicated to reviewing or organizing the user's open threads,
 use the [Thread Manager skill](../manage-threads/SKILL.md). It discovers threads
 across workspaces from any directory and uses the same installed CLI and database.
 
+For retrospective questions about where the user's attention went or how to
+improve assignments, use `query_activity` and `read_activity_history`, or
+`agent-coord activity`. See [activity evidence](references/activity.md) for
+coverage, pagination, and interpretation. Load this evidence when relevant to
+the user's request; ordinary workers do not need it routinely.
+
 ## Keep a work-thread checkpoint
 
 Threads preserve the user's open conversations across stopped processes and

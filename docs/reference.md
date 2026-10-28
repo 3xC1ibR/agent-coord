@@ -1854,6 +1854,29 @@ shared hooks, skill entry points, and runtime files; client installation and
 Claude's strict validator remain separate checks. The skill validator path is a
 local Codex development helper; use its installed equivalent on another machine.
 
+## Retrospective activity
+
+Open **Activity** in Ribbon Field to inspect visits, return visits, visits without
+a message, accepted messages, and decisions for a local calendar period. Group
+the results by project, domain, group, or thread and inspect the raw events.
+These observations describe app interactions, not mental attention or time spent.
+Recording starts with this feature; historical visits are not reconstructed.
+Coverage identifies recording pauses, cleared history, and incomplete visits.
+Pause and clear controls affect local activity, without deleting conversations.
+
+**Review this with an agent** creates a normal app conversation with the selected
+period and filters. The agent can query raw events, page saved conversation
+prose without waking workers, and follow checkpoint/artifact links. It can then
+investigate patterns and propose changes to assignments or orchestration.
+Launching a review sends the evidence the agent reads to its configured provider.
+
+The dependency-free CLI exposes `activity query`, `activity history --thread-id`,
+and `activity settings`. MCP exposes the read-only `query_activity` and
+`read_activity_history` tools. The dashboard uses the same query implementation;
+counts remain consistent across these interfaces. See
+[the activity evidence guide](../plugins/agent-coord/skills/agent-coordination/references/activity.md)
+for filters, pagination, provenance, and interpretation.
+
 ## Refresh installed plugins after changes
 
 Run this workflow after a change under `plugins/agent-coord/`, including a

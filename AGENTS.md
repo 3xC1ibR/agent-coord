@@ -193,4 +193,5 @@ bd prime                # Refresh Beads context
 <!-- END BEADS CODEX SETUP -->
 
 # UI
+Before any UI change, read DESIGN.md and follow the interface-design skill (contract, tokens, screenshots).
 NEVER use ui eyebrow labels

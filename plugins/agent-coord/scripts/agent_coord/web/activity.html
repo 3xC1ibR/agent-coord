@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script src="/theme.js"></script>
+  <title>Activity — Ribbon Field</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/activity.css">
+  <script src="/activity.js" defer></script>
+</head>
+<body class="activity-page">
+  <header class="activity-header">
+    <div><h1>Activity</h1><p>Look back at the threads you visited and the conversations you moved forward.</p></div>
+    <button id="close-activity" class="quiet" type="button">Done</button>
+  </header>
+  <main class="activity-content">
+    <form id="activity-filters" class="activity-filters">
+      <label>From<input id="activity-start" type="date" required></label>
+      <label>Through<input id="activity-end" type="date" required></label>
+      <label>Project<select id="activity-project"><option value="">All projects</option></select></label>
+      <label>Domain<select id="activity-domain"><option value="">All domains</option></select></label>
+      <label>Group<select id="activity-group"><option value="">All groups</option></select></label>
+      <button id="activity-apply" type="submit">Apply</button>
+    </form>
+    <p class="activity-note" id="activity-zone"></p>
+    <p id="activity-error" role="alert" hidden></p>
+    <p id="activity-status" role="status">Loading activity…</p>
+    <div id="activity-results" hidden>
+      <dl id="activity-totals" class="activity-totals" aria-label="Activity totals"></dl>
+      <p id="activity-coverage" class="activity-note"></p>
+      <p id="activity-empty" class="activity-empty" hidden>No activity recorded for this period. Try a different date range or fewer filters.</p>
+      <section class="activity-section" aria-labelledby="activity-breakdown-title">
+        <div class="activity-section-heading"><h2 id="activity-breakdown-title">By thread</h2><label class="activity-grouping">Group by<select id="activity-group-by"><option value="thread">Thread</option><option value="project">Project</option><option value="domain">Domain</option><option value="group">Group</option></select></label></div>
+        <div id="activity-drilldown" class="activity-drilldown" hidden><span></span><button type="button" class="quiet">Clear drilldown</button></div>
+        <p class="activity-note activity-scroll-hint">Scroll horizontally to see all columns.</p>
+        <div class="activity-table-scroll" role="region" aria-label="Grouped activity" tabindex="0">
+          <table class="activity-table"><thead><tr><th id="activity-group-column" scope="col">Thread</th><th scope="col">Messages</th><th scope="col">Visits</th><th scope="col">Returns</th><th scope="col">No message</th><th scope="col">Decisions</th></tr></thead><tbody id="activity-groups"></tbody></table>
+        </div>
+      </section>
+      <section class="activity-review" aria-labelledby="activity-review-title">
+        <div><h2 id="activity-review-title">Review this period</h2><p class="activity-note">Start a conversation using this filtered snapshot.</p></div>
+        <form id="activity-review-form"><label for="activity-question" class="sr-only">Optional question for the review</label><input id="activity-question" maxlength="4000" placeholder="Ask a question (optional)"><button id="activity-review" type="submit" class="primary" disabled>Review with an agent</button></form>
+        <p id="activity-review-result" role="status" hidden></p>
+      </section>
+      <section class="activity-section" aria-labelledby="activity-events-title">
+        <div class="activity-section-heading"><h2 id="activity-events-title">Recorded events</h2><span id="activity-cutoff" class="activity-note"></span></div>
+        <p class="activity-note activity-scroll-hint">Scroll horizontally to see all columns.</p>
+        <div class="activity-table-scroll" role="region" aria-label="Recorded events in chronological order" tabindex="0">
+          <table class="activity-table activity-events"><thead><tr><th scope="col">When</th><th scope="col">Event</th><th scope="col">Thread</th><th scope="col">Source</th></tr></thead><tbody id="activity-events"></tbody></table>
+        </div>
+        <button id="activity-more" type="button" class="quiet" hidden>Load more events</button>
+      </section>
+    </div>
+    <details class="activity-settings">
+      <summary>Recording and coverage</summary>
+      <p class="activity-note">Activity stays in this app’s local history. Visits record foreground interactions, not time spent or keystrokes. Restored foreground views appear as system events only. Agent output and restored background tabs do not count as human visits.</p>
+      <p class="activity-note">Returns are repeat visits to a thread. “No message” counts completed visits without an accepted message. Missing visit endings remain incomplete. Recording starts here; earlier activity is not reconstructed.</p>
+      <div class="activity-setting-actions"><span id="activity-recording" role="status">Checking recording…</span><button id="activity-toggle" type="button" disabled>Pause recording</button><button id="activity-clear" type="button" class="quiet" disabled>Clear local history…</button></div>
+    </details>
+  </main>
+  <dialog id="activity-clear-dialog" aria-labelledby="activity-clear-title">
+    <h2 id="activity-clear-title">Clear local activity history?</h2>
+    <p>This permanently removes recorded visits, messages and decision events from Activity. Your conversations stay intact.</p>
+    <p id="activity-clear-error" role="alert" hidden></p>
+    <div class="activity-dialog-actions"><button id="activity-clear-cancel" type="button" autofocus>Cancel</button><button id="activity-clear-confirm" type="button">Clear history</button></div>
+  </dialog>
+</body>
+</html>

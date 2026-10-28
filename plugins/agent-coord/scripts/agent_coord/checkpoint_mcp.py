@@ -13,6 +13,59 @@ from .threads import LINK_KINDS, PHASES
 from .context_lifecycle import CHECKPOINT_SCHEMA
 
 
+ACTIVITY_TOOL = {
+    "name": "query_activity",
+    "description": "Read Ribbon Field activity totals and paginated raw interaction events for retrospective analysis. "
+                   "Use when the user asks to review their work or attention. Does not wake workers. "
+                   "Counts describe observed human interactions, not mental attention or productivity. "
+                   "Project means a directory; group means the user's named thread group. Follow next_cursor with the same filters.",
+    "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
+        "start": {"type": "number", "description": "Inclusive Unix seconds; defaults to 24 hours ago."},
+        "end": {"type": "number", "description": "Exclusive Unix seconds; defaults to now. Preserve this cutoff when paging."},
+        "project": {"type": "string"}, "domain": {"type": "string"}, "group": {"type": "string"},
+        "thread_id": {"type": "string"},
+        "workspace": {"type": "string", "description": "Limit evidence to this workspace and its linked worktrees."},
+        "group_by": {"type": "string", "enum": ["thread", "project", "domain", "group"]},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "cursor": {"type": "string"},
+    }},
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+}
+
+ACTIVITY_HISTORY_TOOL = {
+    "name": "read_activity_history",
+    "description": "Read saved Ribbon Field conversation prose, checkpoints and artifact links without waking a provider. "
+                   "Use to investigate activity findings. Follow next_cursor to retrieve all messages and long-message chunks. "
+                   "Provider user roles do not establish human origin; use activity events for counts. Unknown timestamps are included as context.",
+    "inputSchema": {"type": "object", "additionalProperties": False, "required": ["thread_id"], "properties": {
+        "thread_id": {"type": "string", "minLength": 1},
+        "workspace": {"type": "string"},
+        "start": {"type": "number"}, "end": {"type": "number"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "cursor": {"type": "string"},
+    }},
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+}
+
+
+def query_activity(arguments, *, store=None):
+    from .activity import ActivityStore
+    from .activity_api import query_arguments
+    if not isinstance(arguments, dict):
+        raise CoordinationError("Choose activity query fields.")
+    fields = dict(arguments)
+    workspace = fields.pop("workspace", None)
+    return ActivityStore(store or CoordinationStore()).query(**query_arguments(fields), allowed_cwd=workspace)
+
+
+def read_activity_history(arguments, *, store=None):
+    from .activity_api import read_activity_history as read
+    if (not isinstance(arguments, dict) or "thread_id" not in arguments or
+            set(arguments) - ACTIVITY_HISTORY_TOOL["inputSchema"]["properties"].keys()):
+        raise CoordinationError("Choose a thread ID, optional time range, limit, and cursor.")
+    fields = dict(arguments)
+    workspace = fields.pop("workspace", None)
+    return read(store or CoordinationStore(), **fields, allowed_cwd=workspace)
+
+
 TOOL = {
     "name": "update_checkpoint",
     "description": (
@@ -240,10 +293,12 @@ def dispatch(message):
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": [TOOL, MOVE_TOOL, ASK_TOOL, SCHEDULE_TOOL]}
+        result = {"tools": [TOOL, MOVE_TOOL, ASK_TOOL, SCHEDULE_TOOL, ACTIVITY_TOOL, ACTIVITY_HISTORY_TOOL]}
     elif method == "tools/call":
         handler = {TOOL["name"]: update_checkpoint, MOVE_TOOL["name"]: move_thread,
-                   ASK_TOOL["name"]: ask_human, SCHEDULE_TOOL["name"]: schedule_prompt}.get(params.get("name"))
+                   ASK_TOOL["name"]: ask_human, SCHEDULE_TOOL["name"]: schedule_prompt,
+                   ACTIVITY_TOOL["name"]: query_activity,
+                   ACTIVITY_HISTORY_TOOL["name"]: read_activity_history}.get(params.get("name"))
         if handler is None:
             return {**response, "error": {"code": -32602, "message": "Unknown tool."}}
         try:

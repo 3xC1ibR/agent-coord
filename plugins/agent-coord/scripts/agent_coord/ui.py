@@ -305,7 +305,7 @@ def _handler(
                                  if openui_frame else "")
                 embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
                             and ((parsed.path == "/" and query.get("pane") == ["1"])
-                                 or (parsed.path in {"/settings", "/usage"} and query.get("embedded") == ["1"]))
+                                 or (parsed.path in {"/settings", "/usage", "/activity"} and query.get("embedded") == ["1"]))
                             and self._authorized())
                 self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame else "DENY")
                 self.send_header(
@@ -408,6 +408,13 @@ def _handler(
                 return
             if parsed.path == "/usage":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "provider-usage.html").read_bytes())
+                return
+            if parsed.path == "/activity":
+                self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "activity.html").read_bytes())
+                return
+            if parsed.path in {"/activity.js", "/activity.css", "/activity-collector.js"}:
+                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
             if parsed.path in {"/provider-usage.js", "/provider-usage.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
@@ -520,6 +527,22 @@ def _handler(
                 self._json(HTTPStatus.OK, provider_limits.snapshot())
             elif route == "workspaces":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
+            elif route in {"activity", "activity/settings", "activity/history"}:
+                from .activity_api import query_arguments, read_activity_history
+                if any(len(value) != 1 for value in query.values()):
+                    raise CoordinationError("Activity query fields must occur once.")
+                fields = {key: value[0] for key, value in query.items()}
+                if route == "activity/settings":
+                    if fields:
+                        raise CoordinationError("Activity settings do not accept query fields.")
+                    result = browser_sessions.activity.settings()
+                elif route == "activity/history":
+                    if set(fields) - {"thread_id", "start", "end", "limit", "cursor"}:
+                        raise CoordinationError("Choose a thread, optional history period, limit, and cursor.")
+                    result = read_activity_history(store, fields.pop("thread_id", None), allowed_cwd=browser_sessions.cwd, **fields)
+                else:
+                    result = browser_sessions.activity.query(allowed_cwd=browser_sessions.cwd, **query_arguments(fields))
+                self._json(HTTPStatus.OK, result)
             elif route == "workspaces/scratchpad":
                 directory = resolve_workspace(query.get("path", [None])[0], workspace=browser_sessions.cwd)
                 self._json(HTTPStatus.OK, store.threads.project_scratchpad(directory))
@@ -711,6 +734,24 @@ def _handler(
                 body = json.loads(raw_body)
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
+                if route[:3] == ["api", "browser", "activity"]:
+                    from .activity_api import record_browser_events, create_activity_review
+                    if route == ["api", "browser", "activity", "events"]:
+                        result = record_browser_events(browser_sessions, body)
+                    elif route == ["api", "browser", "activity", "review"]:
+                        result = create_activity_review(browser_sessions, body)
+                    elif route == ["api", "browser", "activity", "settings"]:
+                        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+                            raise CoordinationError("Choose enabled: true or false.")
+                        result = browser_sessions.activity.configure(body["enabled"])
+                    elif route == ["api", "browser", "activity", "clear"]:
+                        if set(body) - {"before"}:
+                            raise CoordinationError("Clearing activity accepts an optional before timestamp.")
+                        result = browser_sessions.activity.clear(**body)
+                    else:
+                        raise CoordinationError("Unknown activity action.")
+                    self._json(HTTPStatus.OK, result)
+                    return
                 if route == ["api", "browser", "provider-usage", "refresh"]:
                     if set(body) != {"provider"}:
                         raise ValueError("Expected a usage provider.")
@@ -1026,14 +1067,22 @@ def _handler(
                     result = (browser_sessions.dispatch.resolve(thread_id, body) if "action" in body
                               else browser_sessions.dispatch.configure(thread_id, body))
                 elif len(route) == 5 and route[4] == "interrupt":
+                    from .activity_api import activity_context, record_accepted
+                    context = activity_context(body)
                     result = browser_sessions.interrupt(thread_id)
+                    record_accepted(store, "decision_submitted", thread_id, context=context, details={"action": "stop"})
                 elif len(route) == 5 and route[4] == "review":
                     browser_sessions._record(thread_id)
                     if body != {"action": "cancel"}:
                         raise CoordinationError("Choose cancel to stop review.")
                     result = {"cancelled": browser_sessions.reviews.cancel(thread_id)}
                 elif len(route) == 6 and route[4] == "requests":
+                    from .activity_api import activity_context, record_accepted
+                    context = activity_context(body)
                     result = browser_sessions.answer(thread_id, unquote(route[5]), body)
+                    record_accepted(store, "decision_submitted", thread_id, context=context,
+                                    event_id="decision:" + unquote(route[5]),
+                                    details={"action": "answer", "request_key": unquote(route[5])})
                 else:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return

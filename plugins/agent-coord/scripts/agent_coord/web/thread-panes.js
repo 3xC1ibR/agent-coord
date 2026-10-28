@@ -142,12 +142,12 @@ class ThreadPanes {
     layout.tabs[layout.groups.findIndex(group => group.includes(layout.selected))] = layout.selected;
     layout.maximized = null;
     this.layouts.set(viewId, layout); this.render();
-    this.onFocus?.(layout.selected); return true;
+    this.onFocus?.(layout.selected, {restored: true}); return true;
   }
   show(viewId) {
     if (!this.layouts.get(viewId)?.groups.length) return false;
     this.viewId = viewId; this.active = true; this.container.hidden = false;
-    this.render(); this.onFocus?.(this.selected); return true;
+    this.render(); this.onFocus?.(this.selected, {restored: true}); return true;
   }
   hide() {
     this.endDrag();
@@ -503,7 +503,10 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
       if (shell.active && state.selected === id) $("message").value = draft.text;
       state.mentions?.restore(id, draft.text, draft.mentions || []);
     },
-    onFocus: id => {
+    onFocus: (id, {restored = false} = {}) => {
+      const source = state.activity?.source();
+      if (restored) state.activity?.end();
+      state.activity?.select(id, restored ? "restore" : source);
       if (shell.tabLayout) {
         state.threadTabs?.open(shell.records.get(id)?.thread);
         $("page-location").textContent = "Conversation";
@@ -514,8 +517,11 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
   window.agentCoordPanes = shell;
   shell.requestList = options => refreshList(options).catch(showError);
   shell.openThread = async (id, {messageId} = {}) => {
+    if (!shell.active && !state.dispatchWorkspace?.active) return select(id);
+    const activitySource = state.activity?.source();
     if (state.dispatchWorkspace?.active) {
       await state.dispatchWorkspace.open(id);
+      state.activity?.select(id, activitySource);
       if (messageId != null) {
         const record = shell.records.get(id);
         if (record?.api) record.api.focusMessage?.(messageId);
@@ -523,9 +529,9 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
       }
       return;
     }
-    if (!shell.active) return select(id);
     try {
       shell.open(await api("threads/" + encodeURIComponent(id)));
+      state.activity?.select(id, activitySource);
       if (messageId != null) {
         const record = shell.records.get(id);
         if (record.api) record.api.focusMessage?.(messageId);
@@ -661,6 +667,7 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     if (shell.show(getView())) { shell.layout.returnTarget = previous; show(); shell.position(); }
   };
   shell.leave = () => {
+    state.activity?.select(null);
     shell.hide(); document.body.classList.remove("panes-visible", "conversation-split");
     $("leave-tiles").hidden = true; $("tile-threads").textContent = "Tile threads";
   };
@@ -769,8 +776,19 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
     refresh: () => refreshThread().then(markSeen).catch(showError),
   };
   state.attachments.onChange = () => { renderStatus(); pane.saveDraft(); };
+  // A window with a focused iframe dispatches OS focus changes to that child.
+  // Let the shell distinguish those from ordinary focus moves between panes.
+  if (state.activity) {
+    window.addEventListener("focus", () => state.activity.windowFocused?.());
+    window.addEventListener("blur", () => state.activity.windowBlurred?.());
+  }
   document.addEventListener("focusin", () => host.focused(window));
-  document.addEventListener("pointerdown", () => host.focused(window), true);
+  document.addEventListener("pointerdown", event => {
+    host.focused(window);
+    if (event.isTrusted && active && !document.hidden && document.hasFocus()) {
+      state.activity?.setForeground(true); state.activity?.interact(state.selected, "navigation");
+    }
+  }, true);
   document.addEventListener("input", () => pane.saveDraft());
   document.addEventListener("click", event => {
     const link = event.target.closest("a[href]");
@@ -778,6 +796,9 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
     event.preventDefault(); window.parent.agentCoordNavigate?.(link.getAttribute("href"));
   });
   document.addEventListener("keydown", event => {
+    if (event.isTrusted && active && !document.hidden && document.hasFocus()) {
+      state.activity?.setForeground(true); state.activity?.interact(state.selected, "focus");
+    }
     if (!document.querySelector("dialog[open]")) host.keydown(event);
   }, true);
   const id = decodeURIComponent(location.hash.slice(1));
