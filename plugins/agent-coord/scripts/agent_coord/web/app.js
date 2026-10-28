@@ -80,18 +80,24 @@ async function openMentionFile(ref) {
 }
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
 async function refreshList({background = false} = {}) {
-  state.schedules?.refresh({background: true}).catch(showError);
-  state.asks?.refresh().catch(showError);
-  if (state.paneMode) { window.parent.agentCoordPanes?.requestList({background}); return; }
+  if (state.paneMode) { refreshDecisionsAndSchedules(); window.parent.agentCoordPanes?.requestList({background}); return; }
   const view = $("view").value, pending = state.listRefresh;
   // Polls and streamed events must not keep superseding a slow inventory read.
   // Explicit refreshes after user actions still invalidate earlier snapshots.
   if (background && pending?.view === view && pending.request === listRequest) return pending.promise;
+  // Coalesce decisions and schedules with the inventory read. Every WebKit
+  // fetch retains memory in the Networking process, so skipped refreshes
+  // must not still issue their companion requests.
+  refreshDecisionsAndSchedules();
   const refresh = {view, request: ++listRequest};
   state.listRefresh = refresh;
   refresh.promise = loadThreadList(view, refresh.request);
   try { return await refresh.promise; }
   finally { if (state.listRefresh === refresh) state.listRefresh = null; }
+}
+function refreshDecisionsAndSchedules() {
+  state.schedules?.refresh({background: true}).catch(showError);
+  state.asks?.refresh().catch(showError);
 }
 async function loadThreadList(view, request) {
   // Open threads feed every tab's badges, including while browsing a Closed view.
@@ -2043,10 +2049,22 @@ function connect() {
     for (const event of batch.events) {
       if (event.method === "bridge/disconnected") { for (const entry of state.conversations?.values() || []) entry.revision++; showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail?.work_thread?.client === "codex" && state.detail) { state.detail.running = false; state.detailRefreshing = true; renderRequests(); } renderStatus(); }
       else applyEvent(event);
-      if (!["thread/usage/updated", "thread/tokenUsage/updated"].includes(event.method) && !event.method.endsWith("/delta") && !event.method.endsWith("/outputDelta")) scheduleList();
+      if (changesThreadList(event)) scheduleList();
     }
   };
   window.addEventListener("pagehide", () => events.close(), {once: true});
+}
+// Per-item provider events change the open conversation, not the inventory.
+// They arrive several times a second; the five-second metadata refresh still
+// picks up their side effects, such as the last tool on a card. Provider
+// requests keep refreshing because they change attention.
+const conversationOnlyEvents = new Set(["thread/usage/updated", "thread/tokenUsage/updated", "turn/diff/updated",
+  "turn/plan/updated", "account/rateLimits/updated", "deprecationNotice"]);
+function changesThreadList(event) {
+  if (event.requestKey) return true;
+  const method = event.method || "";
+  return !conversationOnlyEvents.has(method) && !method.startsWith("item/") && !method.startsWith("hook/")
+    && !method.endsWith("/delta") && !method.endsWith("/outputDelta");
 }
 function newProject() {
   $("project-form").reset();

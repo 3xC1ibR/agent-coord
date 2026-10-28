@@ -149,3 +149,56 @@ test("pane refreshes preserve background polling and explicit action semantics",
   assert.deepEqual(requests, [true, false]);
   assert.equal(reads.length, 0);
 });
+
+function countCompanions(c) {
+  const counts = {asks: 0, schedules: 0};
+  c.showError = error => { throw error; };
+  c.state.asks = {refresh: async () => { counts.asks += 1; }};
+  c.state.schedules = {refresh: async () => { counts.schedules += 1; }};
+  return counts;
+}
+
+test("per-item provider events do not refresh the thread list", () => {
+  const {c} = setup();
+  vm.runInContext(source.slice(source.indexOf("// Per-item provider events change"), source.indexOf("function newProject(")), c);
+  for (const method of ["item/started", "item/completed", "item/reasoning/summaryTextDelta", "item/agentMessage/delta",
+    "item/commandExecution/outputDelta", "hook/started", "hook/completed", "turn/diff/updated", "turn/plan/updated",
+    "thread/usage/updated", "thread/tokenUsage/updated", "account/rateLimits/updated", "deprecationNotice"]) {
+    assert.equal(c.changesThreadList({method}), false, method);
+  }
+  for (const method of ["turn/started", "turn/completed", "thread/started", "thread/name/updated", "thread/closed",
+    "thread/classified", "browser/changed", "coordination/messages", "coordination/messageSent", "serverRequest/resolved"]) {
+    assert.equal(c.changesThreadList({method}), true, method);
+  }
+  assert.equal(c.changesThreadList({method: "item/commandExecution/requestApproval", requestKey: "request"}), true,
+    "provider requests change attention");
+});
+
+test("refreshes joined to a pending inventory read issue no decision or schedule requests", async () => {
+  const {c, reads} = setup();
+  const counts = countCompanions(c);
+  const first = c.refreshList({background: true});
+  c.refreshList({background: true});
+  c.refreshList({background: true});
+  assert.equal(reads.length, 1);
+  assert.deepEqual(counts, {asks: 1, schedules: 1});
+  reads[0].resolve({data: []});
+  await first;
+  const next = c.refreshList({background: true});
+  assert.deepEqual(counts, {asks: 2, schedules: 2});
+  reads[1].resolve({data: []});
+  await next;
+});
+
+test("explicit refreshes and pane refreshes still update decisions and schedules", async () => {
+  const {c, reads} = setup();
+  const counts = countCompanions(c);
+  c.refreshList({background: true});
+  c.refreshList();
+  assert.equal(reads.length, 2);
+  assert.deepEqual(counts, {asks: 2, schedules: 2});
+  c.state.paneMode = true;
+  c.window = {parent: {agentCoordPanes: {requestList() {}}}};
+  await c.refreshList({background: true});
+  assert.deepEqual(counts, {asks: 3, schedules: 3});
+});
