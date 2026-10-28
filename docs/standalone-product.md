@@ -68,7 +68,7 @@ Each customer VM would contain Ribbon Field, the official agent client, reposito
 
 The browser would connect through authenticated HTTPS to the assigned workspace. Terminal access would support setup and CLI login. Closing a browser or laptop would leave work running. Process supervision, backups, and explicit recovery behavior would be part of the service. Resuming saved conversations after a restart is not the same as preserving every running shell process or an in-progress turn.
 
-No GPU is needed to host the agent client while model inference remains with the provider. Machine sizing instead depends on builds, tests, browsers, local databases, and concurrent agent activity.
+No GPU is needed to host the agent client while model inference remains with the provider. Machine sizing instead depends on builds, tests, browsers, local databases, and concurrent agent activity. Ribbon Field's own measured memory, CPU, disk, and transfer use, and the fixes required before a fixed-size VM is safe, are in [Capacity planning](capacity-planning.md).
 
 AWS Lightsail offers a simple starting cost model. The reviewed general-purpose Linux bundles with public IPv4 list:
 
