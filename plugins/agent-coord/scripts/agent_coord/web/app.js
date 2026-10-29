@@ -1116,6 +1116,13 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   const displayed = state.detail.work_thread;
   if ((!tabId || tabId === id) && !state.conversationWindow && !displayed.orchestration_workspaces?.includes(state.projectCwd)
       && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
+    // A tab opened before the thread's project was known belongs only to that project.
+    const tabs = state.threadTabs, misplaced = tabs?.items.findIndex(item => item.thread_id === id) ?? -1;
+    if (misplaced >= 0) {
+      tabs.items.splice(misplaced, 1);
+      if (tabs.selected === id) tabs.selected = null;
+      tabs.save(true); tabs.render();
+    }
     if (stayInProject) { goHome({restoreDispatcher: false}); return; }
     await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp});
     return select(id, {rollUp});
