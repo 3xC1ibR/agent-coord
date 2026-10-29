@@ -118,6 +118,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 preferences = UserDefaults(suiteName: smokePreferences!)!
                 application(NSApp, open: [URL(string: "agentcoord://overview")!])
                 smokeResults["cold_start_link_queued"] = pendingAppLinks.count == 1
+                smokeResults["launch_working_directory_matches_environment"] =
+                    ProcessInfo.processInfo.environment["PWD"] == FileManager.default.currentDirectoryPath
             }
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             lockFile = open(directory.appendingPathComponent("app.lock").path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
@@ -2626,6 +2628,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
 @main private struct AgentCoordApplication {
     static func main() {
+        // Launch Services can preserve a shell's PWD after its temporary build
+        // directory disappears. Editors such as JetBrains use it instead of
+        // their actual working directory, so do not propagate that stale path.
+        setenv("PWD", FileManager.default.currentDirectoryPath, 1)
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.setActivationPolicy(.regular)
