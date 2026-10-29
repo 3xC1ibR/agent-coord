@@ -113,6 +113,12 @@ The running backend serves only the web files its own `ui.py` lists, so a new
 script file stays unavailable until a backend handover. Keep interface changes
 that must ship without one inside files the running backend already serves.
 
+Budget gate on the committed code (realistic profile, `--check`): send
+acceptance p50 23 ms / p95 230 ms, delivery to other windows p50 7 ms, list
+p50 3 ms, conversation read p50 35 ms, thread detail p50 8 ms, search p50
+93 ms. Only search p95 failed, from the first search on a fresh database
+building its context cache once (1.17 s); later searches took 77–131 ms.
+
 ## Remaining bottlenecks
 
 - **One Python process runs every agent and every request.** Provider stream
