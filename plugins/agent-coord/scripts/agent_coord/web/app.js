@@ -527,23 +527,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     more.setAttribute("aria-label", "Thread options · " + thread.title);
     more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
     more.disabled = state.closing.has(thread.thread_id) || state.updatingThreads.has(thread.thread_id);
-    more.onclick = event => {
-      const items = [
-        ...(thread.orchestration_workspaces?.includes(state.projectCwd)
-          && (thread.project_cwd || thread.cwd) !== state.projectCwd
-          ? [{label: "Open agent’s project", run: () => action(() => openProjectDirectory(thread.project_cwd || thread.cwd))}] : []),
-        {label: thread.project_id ? "Change group" : "Add to group", run: () => action(() => organizeThread(thread))},
-        {label: "Move to project…", disabled: !!threadMoveUnavailable(thread), run: () => openThreadMove(thread)},
-        {label: thread.pinned ? "Unpin" : "Pin", run: () => action(() => toggleThreadPinned(thread))},
-        {label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)},
-      ];
-      if (["codex", "claude"].includes(thread.client)) items.unshift({label: "Fork", disabled: !thread.can_fork || state.forking,
-        run: () => action(() => forkThread(undefined, thread.thread_id))});
-      if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.dispatcher ? "Stop using as dispatcher" : "Use as dispatcher", run: () => action(() => toggleDispatcher(thread))});
-      if (thread.browser_session && thread.attention !== "archived") items.push({label: "Attach sidecar…", run: () => action(() => state.sidecars.open(thread))});
-      if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
-      state.threadActions.showMenu(more, thread.title, items, event);
-    };
+    more.onclick = event => state.threadActions.showMenu(more, thread.title, threadMenuItems(thread), event);
     titleActions.append(more, close);
     card.append(titleActions);
     if (actions.children.length) card.append(actions);
@@ -555,6 +539,23 @@ function threadCard(thread, compact = false, inAttention = false) {
     return card;
   }
   return button;
+}
+function threadMenuItems(thread) {
+  const items = [
+    ...(thread.orchestration_workspaces?.includes(state.projectCwd)
+      && (thread.project_cwd || thread.cwd) !== state.projectCwd
+      ? [{label: "Open agent’s project", run: () => action(() => openProjectDirectory(thread.project_cwd || thread.cwd))}] : []),
+    {label: thread.project_id ? "Change group" : "Add to group", run: () => action(() => organizeThread(thread))},
+    {label: "Move to project…", disabled: !!threadMoveUnavailable(thread), run: () => openThreadMove(thread)},
+    {label: thread.pinned ? "Unpin" : "Pin", run: () => action(() => toggleThreadPinned(thread))},
+    {label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)},
+  ];
+  if (["codex", "claude"].includes(thread.client)) items.unshift({label: "Fork", disabled: !thread.can_fork || state.forking,
+    run: () => action(() => forkThread(undefined, thread.thread_id))});
+  if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.dispatcher ? "Stop using as dispatcher" : "Use as dispatcher", run: () => action(() => toggleDispatcher(thread))});
+  if (thread.browser_session && thread.attention !== "archived") items.push({label: "Attach sidecar…", run: () => action(() => state.sidecars.open(thread))});
+  if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
+  return items;
 }
 function appAgentIndicator(thread) {
   const creator = thread.created_by || state.sessions.find(t => t.thread_id === thread.created_by_thread_id);
@@ -689,6 +690,7 @@ function renderList() {
   if (conversationSearch?.update()) {
     if ($("atlas-overview")) $("atlas-overview").hidden = true;
     if ($("working-set-overview")) $("working-set-overview").hidden = true;
+    if ($("thread-list-overview")) $("thread-list-overview").hidden = true;
     renderStatus(); return;
   }
   const query = $("search").value.trim().toLocaleLowerCase();
@@ -699,7 +701,8 @@ function renderList() {
     {show: $("view").value, phase: $("phase-filter").value, search: query});
   const threads = projectThreads.filter(matchesView);
   // The map keeps neighboring groups available while the tabs own selection.
-  const workingThreads = workingSet && savedViews?.activeId.startsWith("group-") ? workspaceThreads.filter(matchesView) : threads;
+  const groupPages = workingSet || state.overviewLayout?.mode === "list";
+  const workingThreads = groupPages && savedViews?.activeId.startsWith("group-") ? workspaceThreads.filter(matchesView) : threads;
   const upcoming = upcomingSchedules(query);
   const archived = $("view").value === "archived";
   const groupBy = $("group-by").value;
@@ -832,9 +835,27 @@ function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) 
   if (!host) return;
   const atlas = state.overviewLayout?.mode === "atlas";
   const workingSet = state.overviewLayout?.mode === "working-set", workingHost = $("working-set-overview");
-  // Scheduled prompts remain available above either overview representation.
-  $("overview").hidden = (atlas || workingSet) && !upcoming.length;
-  $("overview").classList.toggle("atlas-schedules-only", atlas || workingSet);
+  const list = state.overviewLayout?.mode === "list", listHost = $("thread-list-overview");
+  // Scheduled prompts remain available above every overview representation.
+  $("overview").hidden = (atlas || workingSet || list) && !upcoming.length;
+  $("overview").classList.toggle("atlas-schedules-only", atlas || workingSet || list);
+  if (listHost) listHost.hidden = !list;
+  if (list && listHost && !$("welcome").hidden) {
+    state.threadList ||= WorkingSet.createList({document, storage: state.overviewPreferences,
+      onOpen: id => action(() => select(id)),
+      onRead: thread => action(async () => {
+        await api(threadPath(thread.thread_id), {seen: true, seen_checkpoint_id: thread.checkpoint?.id || 0,
+          seen_completion_id: thread.turn_completion?.id || 0});
+        await refreshList();
+      }),
+      onClose: thread => action(() => toggleThreadClosed(thread)),
+      onMenu: (thread, anchor, event) => state.threadActions.showMenu(anchor, thread.title, threadMenuItems(thread), event),
+      onGroupChange: id => action(() => savedViews.openGroup(id))});
+    const view = savedViews?.activeId || "all";
+    state.threadList.render(workingThreads, listHost, {workspace: state.projectCwd || "all", view,
+      selectedGroup: view.startsWith("group-") ? view.slice(6) : view === "all" ? null : undefined,
+      placement: $("view").value, revision: state.listSignature});
+  }
   host.hidden = !atlas;
   if (workingHost) workingHost.hidden = !workingSet;
   if (workingSet && workingHost && !$("welcome").hidden) {

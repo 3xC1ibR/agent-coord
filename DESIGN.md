@@ -62,6 +62,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Inline status/error | Loading, coverage, retry feedback |
 | HTML output viewer | Existing file-link action opens a full-height preview using the auxiliary-page dialog pattern; closing preserves the conversation and draft underneath |
 | Native confirmation dialog | Clear local Activity history |
+| Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover |
 
 ## Do's and Don'ts
 Never use UI eyebrow labels. Do not invent percentages or time-spent estimates
@@ -97,3 +98,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-28 | Document existing tokens and standalone page grammar | Preserve the current design while adding user-approved Activity. |
 | 2026-10-28 | Activity uses shared queries and a shell-owned visit recorder | Comparable reports without duplicated pane counts or inferred attention time. |
 | 2026-10-29 | Browser HTML links open an auxiliary output viewer | Let paired phones read agent output using existing typography, colors, and quiet controls. |
+| 2026-10-29 | Add a List overview with Attention, Working and Idle rows | Re-entry: replies leave Attention once read, requests stay until resolved, and rows follow the user's own last message. |

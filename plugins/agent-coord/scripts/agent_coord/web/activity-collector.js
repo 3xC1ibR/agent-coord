@@ -5,7 +5,7 @@
   const SURFACES = [
     ["#thread-hover", "hover-card"], [".asks-dialog", "decisions"], ["#roll-up-bar", "roll-up"],
     ["#sessions, #sidebar", "sidebar"], ["#conversation-results", "search"],
-    ["#working-set-overview", "working-set"], ["#atlas-overview", "atlas"], ["#overview", "cards"],
+    ["#working-set-overview", "working-set"], ["#thread-list-overview", "list"], ["#atlas-overview", "atlas"], ["#overview", "cards"],
     ["#conversation-tabs", "tabs"], ["#dispatcher-workspace, #dispatcher-dock, #dispatcher-empty, #send-work-dock", "dispatcher"],
     ["#agent-tree-panel", "agent-tree"], ["#thread-panes", "panes"], ["#conversation", "conversation"],
     ["#project-navigation, .views-bar", "projects"],

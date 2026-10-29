@@ -67,3 +67,9 @@ test('Focus is a remembered third layout available on desktop and phones', () =>
   phone.ui.choose('cards'); assert.equal(phone.ui.mode, 'cards');
   phone.ui.choose('working-set'); assert.equal(phone.ui.mode, 'working-set');
 });
+test('List is a remembered fourth layout available on desktop and phones', () => {
+  const c = setup(); c.ui.open(c.trigger);
+  assert.equal(c.ui.menu.children[3].dataset.layout, 'list'); assert.equal(c.ui.menu.children[3].disabled, false);
+  c.ui.menu.children[3].onclick(); assert.equal(c.ui.mode, 'list'); assert.equal(c.values.get(c.ui.key), 'list');
+  assert.equal(setup({saved:'list', narrow:true}).ui.mode, 'list');
+});

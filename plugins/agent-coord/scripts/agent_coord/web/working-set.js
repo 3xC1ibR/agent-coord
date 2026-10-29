@@ -336,6 +336,254 @@ const WorkingSet = (() => {
       destroy() { document.removeEventListener("keydown", keydown); window.clearTimeout(wheelTimer); observer?.disconnect(); host?.replaceChildren(); },
     };
   }
-  return {create, derive, levelOf, columnOf, needsReply, groupFor};
+  // List: one row per thread in Attention, Working and Idle, grouped like Focus.
+  // Opening a reply reads it, and reading moves it out of Attention; requests stay
+  // until they are resolved. Rows are ordered by the user's own last message.
+  const DAY = 86400, IDLE_CAP = 50;
+  const SECTIONS = [["attention", "Attention"], ["working", "Working"], ["idle", "Idle"]];
+  const REQUEST_LABELS = {approval: "Approval needed", question: "Question", reminder: "Reminder", failed: "Failed", "needs-you": "Needs you"};
+  const PROVIDERS = {codex: "OpenAI · Codex", claude: "Anthropic · Claude Code", muse: "Meta · Muse Code", kimi: "Moonshot · Kimi Code", antigravity: "Google · Antigravity"};
+  // Until the payload carries the user's last message, the latest turn start stands in for it.
+  const engagedAt = t => t.last_user_message_at || t.turn_started_at || t.created_at || 0;
+  const arrivedAt = t => t.attention_since || t.turn_completion?.completed_at || t.checkpoint?.created_at || t.updated_at || t.created_at || 0;
+  const creatorOf = (t, byId) => t.creation_mode === "orchestration" && byId.get(t.created_by_thread_id) || null;
+  function rootOf(t, byId) {
+    const seen = new Set([t.thread_id]);
+    for (let creator = creatorOf(t, byId); creator && !seen.has(creator.thread_id); creator = creatorOf(t, byId)) { seen.add(creator.thread_id); t = creator; }
+    return t;
+  }
+  function requestOf(t) {
+    if (t.status === "needs input") return "approval";
+    if (t.open_ask) return "question";
+    if (t.snooze_due) return "reminder";
+    if (t.response_state === "failed" && !running(t)) return "failed";
+    const checkpoint = t.checkpoint;
+    if (!t.checkpoint_stale && checkpoint?.next_actor === "user" && checkpoint.next_action && (checkpoint.id || 0) > (t.handled_checkpoint_id || 0)) return "needs-you";
+    return null;
+  }
+  const interrupts = request => ["approval", "question", "reminder", "failed"].includes(request);
+  function unreadNow(t, request, now) {
+    // Unread replies and agent requests leave Attention once read, or after a day.
+    const unread = request === "needs-you" ? t.unread || t.unread_result : !request && t.unread_result;
+    return !!unread && now - arrivedAt(t) < DAY;
+  }
+  function placementOf(t, byId, now, workingRoots = new Set()) {
+    if (t.attention === "archived") return null;
+    const request = requestOf(t);
+    if (request === "approval" || request === "question") return "attention";
+    // An orchestrator owns its agents' replies and failures; only their requests reach you.
+    if (creatorOf(t, byId)) return request === "needs-you" && unreadNow(t, request, now) ? "attention" : "nested";
+    if (request === "reminder") return "attention";
+    if (t.attention === "later" || t.snoozed) return "later";
+    if (request === "failed") return "attention";
+    if (running(t)) return "working";
+    if (unreadNow(t, request, now)) return "attention";
+    return workingRoots.has(t.thread_id) ? "working" : "idle";
+  }
+  function listSections(threads, {dimension = "group", workspace = "all", pageKey = ALL, view = "active", now = Date.now() / 1000} = {}) {
+    const byId = new Map(threads.map(t => [t.thread_id, t])), agents = new Map(), workingRoots = new Set();
+    for (const t of threads) {
+      if (!creatorOf(t, byId)) continue;
+      const root = rootOf(t, byId);
+      if (!agents.has(root.thread_id)) agents.set(root.thread_id, []);
+      agents.get(root.thread_id).push(t);
+      if (running(t)) workingRoots.add(root.thread_id);
+    }
+    const parked = ["later", "archived"].includes(view);
+    const rows = [];
+    for (const t of threads) {
+      const place = parked ? (creatorOf(t, byId) ? "nested" : "idle") : placementOf(t, byId, now, workingRoots);
+      if (place && place !== "nested" && place !== "later") rows.push({thread: t, place, group: groupFor(t, byId, dimension, workspace)});
+    }
+    const groups = new Map();
+    for (const {thread, place, group} of rows) {
+      if (!groups.has(group.key)) groups.set(group.key, {...group, attention: 0, touch: 0});
+      const entry = groups.get(group.key);
+      entry.attention += place === "attention"; entry.touch = Math.max(entry.touch, engagedAt(thread));
+    }
+    const ordered = [...groups.values()].sort((a, b) => b.touch - a.touch || a.name.localeCompare(b.name));
+    const all = {key: ALL, name: "All groups", attention: rows.filter(r => r.place === "attention").length};
+    const selected = pageKey === ALL || groups.has(pageKey) ? pageKey : ALL;
+    const sections = {attention: [], working: [], idle: [], empty: []};
+    for (const {thread, place, group} of rows) {
+      if (selected !== ALL && group.key !== selected) continue;
+      const empty = place === "idle" && !thread.checkpoint && !thread.turn_completion && !agents.has(thread.thread_id);
+      sections[empty ? "empty" : place].push(thread);
+    }
+    const urgency = t => Number(interrupts(requestOf(t)));
+    sections.attention.sort((a, b) => urgency(b) - urgency(a) || arrivedAt(b) - arrivedAt(a) || a.thread_id.localeCompare(b.thread_id));
+    for (const key of ["working", "idle", "empty"])
+      sections[key].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id));
+    // Agents waiting on you lead their orchestrator's list, then the ones still working.
+    const agentOrder = t => ["approval", "question", "needs-you"].includes(requestOf(t)) ? 2 : running(t) ? 1 : 0;
+    for (const list of agents.values()) list.sort((a, b) => agentOrder(b) - agentOrder(a) || arrivedAt(b) - arrivedAt(a) || a.thread_id.localeCompare(b.thread_id));
+    return {groups: [all, ...ordered], selected, sections, agents, byId, workingRoots};
+  }
+  function ago(at, now) {
+    const s = Math.max(0, now - at);
+    return !at ? "" : s < 3600 ? Math.max(1, Math.round(s / 60)) + "m" : s < DAY ? Math.round(s / 3600) + "h" : Math.round(s / DAY) + "d";
+  }
+  function createList({document, storage, onOpen, onRead, onClose, onMenu, onGroupChange, now = () => Date.now() / 1000}) {
+    const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+    const button = (text, cls, fn, label) => {
+      const b = el("button", cls, text); b.type = "button";
+      b.onclick = event => { event?.stopPropagation?.(); fn(event); };
+      if (label) { b.setAttribute("aria-label", label); b.title = label; }
+      return b;
+    };
+    let host, source = [], options = {}, context = "", key = "", dimension = "group", pageKey = ALL, selectedGroup, signature = "";
+    const expanded = new Set(), shown = new Set();
+    function restore(nextKey) {
+      key = nextKey; expanded.clear(); shown.clear();
+      let saved = null;
+      try { saved = JSON.parse(storage?.getItem(key) || "null"); } catch { /* Optional preference. */ }
+      dimension = GROUPINGS.includes(saved?.dimension) ? saved.dimension : "group";
+      pageKey = typeof saved?.pageKey === "string" ? saved.pageKey : ALL;
+    }
+    function save() {
+      try { storage?.setItem(key, JSON.stringify({dimension, pageKey})); } catch { /* Selection also works without storage. */ }
+    }
+    function choose(next) {
+      if (next === pageKey) return;
+      pageKey = next; save(); paint();
+      if (dimension === "group") onGroupChange?.(next.startsWith("group:") ? next.slice(6) : null);
+    }
+    function row(t, data, {agent = false} = {}) {
+      const time = now(), request = requestOf(t), place = agent ? "nested" : placementOf(t, data.byId, time, data.workingRoots);
+      const unread = !!(t.unread_result || request === "needs-you" && t.unread);
+      const li = el("li", "tl-row");
+      li.dataset.thread = t.thread_id;
+      li.classList.toggle("tl-unread", unread);
+      li.classList.toggle("tl-request", !!request && (interrupts(request) || unread));
+      li.classList.toggle("tl-reply", unread && !request);
+      li.classList.toggle("tl-working", running(t) || !agent && place === "working");
+      li.classList.toggle("tl-agent", agent);
+      li.classList.toggle("tl-failed", request === "failed");
+      li.append(el("span", "tl-mark"));
+      const logo = globalThis.providerLogo?.(t.client, PROVIDERS[t.client]) || el("span", "provider-logo");
+      const mark = el("span", "tl-logo"); mark.append(logo); li.append(mark);
+      const root = creatorOf(t, data.byId) && !agent ? rootOf(t, data.byId) : null;
+      const open = button("", "tl-open", () => onOpen?.(t.thread_id));
+      open.dataset.thread = t.thread_id; open.dataset.action = "open";
+      if (root) open.append(el("span", "tl-crumb", root.title + " › "));
+      open.append(document.createTextNode(t.title));
+      open.title = (root ? root.title + " › " : "") + t.title;
+      li.append(open);
+      const summary = el("span", "tl-summary");
+      const children = agent ? [] : data.agents.get(t.thread_id) || [];
+      if (children.length) {
+        const working = children.filter(running).length, waiting = children.filter(c => ["approval", "question", "needs-you"].includes(requestOf(c))).length;
+        const failed = children.filter(c => requestOf(c) === "failed").length, isOpen = expanded.has(t.thread_id);
+        const toggle = button("", "tl-agents", () => { isOpen ? expanded.delete(t.thread_id) : expanded.add(t.thread_id); paint(); });
+        toggle.dataset.thread = t.thread_id; toggle.dataset.action = "agents";
+        toggle.setAttribute("aria-expanded", String(isOpen));
+        toggle.append(children.length + (children.length === 1 ? " agent" : " agents"));
+        if (working) toggle.append(" · " + working + " working");
+        if (waiting) toggle.append(" · ", el("span", "tl-warm", waiting + " need you"));
+        if (failed) toggle.append(" · ", el("span", "tl-warm", failed + " failed"));
+        toggle.setAttribute("aria-label", "Agents created by " + t.title + ": " + toggle.textContent);
+        summary.append(toggle);
+      }
+      if (request) summary.append(el("span", "tl-inline-label", REQUEST_LABELS[request]));
+      const asked = ["approval", "question", "needs-you"].includes(request) ? t.open_ask?.question || t.checkpoint?.next_action : "";
+      const text = asked || t.checkpoint?.summary || t.original_request || "";
+      // An automatic title is often the opening request; repeating it adds nothing.
+      const plain = value => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      if (text && !plain(text).startsWith(plain(t.title).slice(0, 40))) summary.append(el("span", "tl-text", text));
+      li.append(summary);
+      li.append(el("span", "tl-label", request ? REQUEST_LABELS[request] : ""));
+      li.append(el("span", "tl-phase", grouping.phaseLabel(t)));
+      const at = place === "attention" ? arrivedAt(t) : engagedAt(t), stamp = el("time", "tl-time", ago(at, time));
+      if (at) stamp.title = (place === "attention" ? "Arrived " : "Last active ") + new Date(at * 1000).toLocaleString();
+      li.append(stamp);
+      const actions = el("span", "tl-actions");
+      if (unread && onRead) {
+        const read = button("Mark read", "tl-action", () => onRead(t), "Mark read · " + t.title);
+        read.dataset.thread = t.thread_id; read.dataset.action = "read"; actions.append(read);
+      }
+      if (onMenu) {
+        const more = button("…", "tl-action tl-icon", event => onMenu(t, more, event), "Thread options · " + t.title);
+        more.dataset.thread = t.thread_id; more.dataset.action = "more"; more.setAttribute("aria-haspopup", "menu"); actions.append(more);
+      }
+      if (onClose && t.attention !== "archived") {
+        const close = button("×", "tl-action tl-icon", () => onClose(t), (["running", "needs input"].includes(t.status) ? "Stop and close " : "Close ") + t.title);
+        close.dataset.thread = t.thread_id; close.dataset.action = "close"; actions.append(close);
+      }
+      li.append(actions);
+      li.onclick = event => { if (!event.target?.closest?.("button:not(.tl-open)")) onOpen?.(t.thread_id); };
+      return li;
+    }
+    function section(data, name, label, items, empty) {
+      const node = el("section", "tl-section"); node.dataset.section = name; node.setAttribute("aria-label", label);
+      const heading = el("h3", "tl-heading", label); heading.append(el("span", "tl-count", String(items.length))); node.append(heading);
+      if (!items.length) { node.append(el("p", "tl-empty", empty)); return node; }
+      const list = el("ul", "tl-rows"), all = name !== "idle" || shown.has(name);
+      for (const t of all ? items : items.slice(0, IDLE_CAP)) {
+        list.append(row(t, data));
+        if (expanded.has(t.thread_id)) for (const agent of data.agents.get(t.thread_id) || []) list.append(row(agent, data, {agent: true}));
+      }
+      node.append(list);
+      if (items.length > IDLE_CAP && name === "idle")
+        node.append(button(all ? "Show recent" : "Show all " + items.length, "quiet tl-more", () => { all ? shown.delete(name) : shown.add(name); paint(); }));
+      return node;
+    }
+    function paint() {
+      if (!host) return;
+      const focused = host.contains(document.activeElement) ? document.activeElement : null;
+      const focusThread = focused?.dataset?.thread, focusAction = focused?.dataset?.action;
+      const parked = ["later", "archived"].includes(options.placement);
+      const data = listSections(source, {dimension, workspace: options.workspace || "all", pageKey, view: options.placement, now: now()});
+      if (data.selected !== pageKey) pageKey = data.selected;
+      const bar = el("div", "tl-bar"), tabs = el("div", "tl-groups"); tabs.setAttribute("aria-label", "Groups");
+      for (const g of data.groups) {
+        const tab = button(g.name, "tl-group", () => choose(g.key));
+        tab.setAttribute("aria-pressed", String(g.key === data.selected));
+        tab.dataset.group = g.key;
+        if (g.attention) tab.append(el("span", "tl-count", String(g.attention)));
+        tabs.append(tab);
+      }
+      const label = el("label", "tl-grouping", "Group by "), select = el("select");
+      for (const value of GROUPINGS) { const o = el("option", "", value); o.value = value; o.selected = value === dimension; select.append(o); }
+      select.onchange = () => {
+        dimension = select.value; pageKey = ALL; save(); paint();
+        if (selectedGroup != null) onGroupChange?.(null);
+      };
+      label.append(select); bar.append(tabs, label);
+      const parts = [bar];
+      if (parked) {
+        const title = options.placement === "later" ? "Later" : "Closed";
+        parts.push(section(data, "parked", title, [...data.sections.idle, ...data.sections.empty], options.placement === "later" ? "Nothing set aside." : "No closed threads."));
+      } else {
+        const empty = {attention: "Nothing needs you right now.", working: "No agents are working.", idle: "No idle threads."};
+        for (const [name, title] of SECTIONS) parts.push(section(data, name, title, data.sections[name], empty[name]));
+        const blank = data.sections.empty;
+        if (blank.length) {
+          if (shown.has("empty")) parts.push(section(data, "empty", "Empty", blank, ""));
+          parts.push(button(shown.has("empty") ? "Hide empty threads" : blank.length + (blank.length === 1 ? " empty thread" : " empty threads"), "quiet tl-more",
+            () => { shown.has("empty") ? shown.delete("empty") : shown.add("empty"); paint(); }));
+        }
+      }
+      host.replaceChildren(...parts);
+      if (focusThread) [...host.querySelectorAll("[data-thread]")].find(n => n.dataset.thread === focusThread && n.dataset.action === focusAction)?.focus({preventScroll: true});
+    }
+    return {
+      render(threads, target, next = {}) {
+        if (host !== target) { host = target; host.classList.add("thread-list"); }
+        const controlled = next.selectedGroup !== undefined;
+        const nextContext = JSON.stringify([next.workspace || "all", controlled ? "groups" : next.view || "all", next.placement || "active"]);
+        const nextSignature = JSON.stringify([nextContext, next.selectedGroup, next.revision]);
+        // The app's list revision changes whenever thread data changes, and once a minute for relative times.
+        if (signature === nextSignature && next.revision !== undefined) return;
+        if (context !== nextContext) { context = nextContext; restore("agent-coord.thread-list:v1:" + context); }
+        if (controlled && selectedGroup !== next.selectedGroup) {
+          if (next.selectedGroup != null) dimension = "group";
+          if (dimension === "group") pageKey = next.selectedGroup == null ? ALL : "group:" + next.selectedGroup;
+        }
+        selectedGroup = next.selectedGroup; source = threads; options = next; signature = nextSignature;
+        paint();
+      },
+    };
+  }
+  return {create, derive, levelOf, columnOf, needsReply, groupFor, createList, listSections, placementOf, requestOf};
 })();
 if (typeof module !== "undefined") module.exports = WorkingSet;

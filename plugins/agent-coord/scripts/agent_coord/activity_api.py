@@ -18,7 +18,7 @@ from .workspaces import matches_workspace
 QUERY_FIELDS = {"start", "end", "project", "domain", "group", "thread_id", "group_by", "limit", "cursor"}
 # Where a deliberate navigation began; web/activity-collector.js emits these names.
 NAVIGATION_SURFACES = frozenset({
-    "sidebar", "cards", "working-set", "atlas", "search", "tabs", "panes", "conversation",
+    "sidebar", "cards", "working-set", "list", "atlas", "search", "tabs", "panes", "conversation",
     "agent-tree", "hover-card", "decisions", "roll-up", "dispatcher", "projects",
     "notification", "shortcut", "other",
 })

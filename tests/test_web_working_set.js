@@ -479,3 +479,167 @@ test("production integration shares cards and uses seen receipt IDs without mark
   calls.length = 0; await config.onDismiss(t);
   assert.deepEqual(calls[0], ["dismiss", t]);
 });
+
+// List overview: Attention, Working and Idle rows over the same grouping as Focus.
+const NOW = 1_000_000;
+const listThread = (id, extra = {}) => thread(id, {created_at: NOW - 5000, updated_at: NOW - 4000, ...extra});
+const placed = (threads, id) => WorkingSet.placementOf(threads.find(t => t.thread_id === id), new Map(threads.map(t => [t.thread_id, t])), NOW);
+test("list placement keeps requests, drains read replies, and leaves agent replies to their orchestrator", () => {
+  const parent = listThread("parent");
+  const agent = (id, extra) => listThread(id, {creation_mode: "orchestration", created_by_thread_id: "parent", ...extra});
+  const threads = [parent,
+    listThread("approval", {status: "needs input", attention: "later"}), listThread("question", {open_ask: {id: 1, question: "Which?"}}),
+    listThread("failed", {response_state: "failed", unread_result: false}),
+    listThread("reply", {unread_result: true, attention_since: NOW - 60}), listThread("read", {unread_result: false, attention_since: NOW - 60}),
+    listThread("aged", {unread_result: true, attention_since: NOW - 90000}),
+    listThread("asks", {unread: true, checkpoint: {id: 4, next_actor: "user", next_action: "Choose", created_at: NOW - 30}, attention_since: NOW - 30}),
+    listThread("asked", {unread: false, checkpoint: {id: 4, next_actor: "user", next_action: "Choose"}, attention_since: NOW - 30}),
+    listThread("handled", {unread: true, handled_checkpoint_id: 4, checkpoint: {id: 4, next_actor: "user", next_action: "Choose"}}),
+    listThread("running", {status: "running", response_state: "working", unread_result: true}),
+    listThread("later", {attention: "later", unread_result: true}), listThread("closed", {attention: "archived"}),
+    agent("agent-reply", {unread_result: true, attention_since: NOW - 10}), agent("agent-failed", {response_state: "failed"}),
+    agent("agent-approval", {status: "needs input"}), agent("agent-asks", {unread: true, attention_since: NOW - 10,
+      checkpoint: {id: 2, next_actor: "user", next_action: "Approve the plan"}})];
+  const expected = {approval: "attention", question: "attention", failed: "attention", reply: "attention", read: "idle", aged: "idle",
+    asks: "attention", asked: "idle", handled: "idle", running: "working", later: "later", closed: null,
+    "agent-reply": "nested", "agent-failed": "nested", "agent-approval": "attention", "agent-asks": "attention"};
+  for (const [id, place] of Object.entries(expected)) assert.equal(placed(threads, id), place, id);
+  assert.equal(WorkingSet.requestOf(threads.find(t => t.thread_id === "asks")), "needs-you");
+  assert.equal(WorkingSet.requestOf(threads.find(t => t.thread_id === "stale") || listThread("stale", {checkpoint_stale: true,
+    checkpoint: {id: 9, next_actor: "user", next_action: "Old"}})), null);
+});
+test("an orchestrator works while its agents run, but its own unread reply still reaches Attention", () => {
+  const agent = listThread("agent", {creation_mode: "orchestration", created_by_thread_id: "lead", status: "running", response_state: "working"});
+  const quiet = WorkingSet.listSections([listThread("lead"), agent], {now: NOW, workspace: "/work"});
+  assert.deepEqual(quiet.sections.working.map(t => t.thread_id), ["lead"]);
+  assert.deepEqual(quiet.agents.get("lead").map(t => t.thread_id), ["agent"]);
+  const replied = WorkingSet.listSections([listThread("lead", {unread_result: true, attention_since: NOW - 5}), agent], {now: NOW, workspace: "/work"});
+  assert.deepEqual(replied.sections.attention.map(t => t.thread_id), ["lead"]);
+});
+test("list order puts requests first, then follows the user's own last message, with pins first and empty threads apart", () => {
+  const threads = [
+    listThread("new-reply", {unread_result: true, attention_since: NOW - 10}), listThread("old-reply", {unread_result: true, attention_since: NOW - 900}),
+    listThread("failed", {response_state: "failed", attention_since: NOW - 5000, checkpoint: {id: 1}}),
+    listThread("mine-recent", {last_user_message_at: NOW - 20, turn_started_at: NOW - 3000, checkpoint: {id: 2}}),
+    listThread("agent-woke", {last_user_message_at: NOW - 2000, turn_started_at: NOW - 5, checkpoint: {id: 3}}),
+    listThread("turn-only", {turn_started_at: NOW - 100, checkpoint: {id: 4}}),
+    listThread("pinned", {pinned: true, last_user_message_at: NOW - 4000, checkpoint: {id: 5}}),
+    listThread("blank", {created_at: NOW - 1})];
+  const {sections} = WorkingSet.listSections(threads, {now: NOW, workspace: "/work"});
+  assert.deepEqual(sections.attention.map(t => t.thread_id), ["failed", "new-reply", "old-reply"]);
+  assert.deepEqual(sections.idle.map(t => t.thread_id), ["pinned", "mine-recent", "turn-only", "agent-woke"]);
+  assert.deepEqual(sections.empty.map(t => t.thread_id), ["blank"]);
+});
+test("list groups count Attention per group, filter by the chosen group, and show parked threads as one list", () => {
+  const threads = [listThread("a", {project_id: "g1", project_name: "One", unread_result: true, attention_since: NOW - 1}),
+    listThread("b", {project_id: "g2", project_name: "Two", checkpoint: {id: 1}}), listThread("c", {checkpoint: {id: 2}})];
+  const all = WorkingSet.listSections(threads, {now: NOW, workspace: "/work"});
+  assert.deepEqual(all.groups.map(g => [g.key, g.attention]), [["overview:all", 1], ["group:g1", 1], ["group:g2", 0], ["ungrouped:/work", 0]]);
+  const one = WorkingSet.listSections(threads, {now: NOW, workspace: "/work", pageKey: "group:g2"});
+  assert.equal(one.selected, "group:g2"); assert.deepEqual(one.sections.idle.map(t => t.thread_id), ["b"]); assert.equal(one.sections.attention.length, 0);
+  assert.equal(WorkingSet.listSections(threads, {now: NOW, pageKey: "group:missing"}).selected, "overview:all");
+  const later = WorkingSet.listSections([listThread("l", {attention: "later", checkpoint: {id: 3}})], {now: NOW, view: "later"});
+  assert.deepEqual(later.sections.idle.map(t => t.thread_id), ["l"]);
+  const domains = WorkingSet.listSections(threads.map(t => ({...t, domain: t.thread_id === "c" ? "ui" : null})), {now: NOW, dimension: "domain"});
+  assert.deepEqual(domains.groups.map(g => g.name).sort(), ["All groups", "No domain", "ui"]);
+});
+
+function listSetup({data = new Map()} = {}) {
+  const doc = {activeElement: null};
+  class Node {
+    constructor(tag) { Object.assign(this, {tagName: tag, children: [], attrs: {}, dataset: {}, className: "", textContent: ""}); }
+    get classList() { const read = () => new Set(this.className.split(/\s+/).filter(Boolean)); return {
+      add: n => { const s = read(); s.add(n); this.className = [...s].join(" "); },
+      toggle: (n, on) => { const s = read(); if (on ?? !s.has(n)) s.add(n); else s.delete(n); this.className = [...s].join(" "); },
+      contains: n => read().has(n)}; }
+    append(...items) { for (const item of items) { this.children.push(item); if (typeof item === "object") item.parent = this; } }
+    replaceChildren(...items) { this.children = []; this.append(...items); }
+    setAttribute(k, v) { this.attrs[k] = String(v); }
+    matches(s) {
+      if (s.startsWith("[data-")) { const [, k, v] = s.match(/\[data-([a-z]+)(?:="([^"]*)")?\]/); return this.dataset[k] != null && (v == null || this.dataset[k] === v); }
+      if (s.startsWith("button:not(")) return this.tagName === "button" && !this.classList.contains(s.slice(12, -1));
+      return s.startsWith(".") ? this.classList.contains(s.slice(1)) : this.tagName === s;
+    }
+    querySelectorAll(s) { return this.children.filter(n => typeof n === "object").flatMap(n => [...(n.matches(s) ? [n] : []), ...n.querySelectorAll(s)]); }
+    closest(s) { return this.matches(s) ? this : this.parent?.closest?.(s) || null; }
+    contains(n) { return this === n || this.children.some(c => typeof c === "object" && c.contains(n)); }
+    focus() { doc.activeElement = this; }
+    get text() { return this.children.map(c => typeof c === "object" ? c.text : String(c)).join("") || this.textContent; }
+  }
+  doc.createElement = tag => new Node(tag); doc.createTextNode = text => text;
+  const calls = [], host = new Node("section");
+  const ui = WorkingSet.createList({document: doc, now: () => NOW,
+    storage: {getItem: k => data.get(k), setItem: (k, v) => data.set(k, v)},
+    onOpen: id => calls.push(["open", id]), onRead: t => calls.push(["read", t.thread_id]), onClose: t => calls.push(["close", t.thread_id]),
+    onMenu: (t, anchor) => calls.push(["menu", t.thread_id, anchor.dataset.action]), onGroupChange: id => calls.push(["group", id])});
+  const rows = name => host.querySelectorAll(".tl-section").find(s => s.dataset.section === name)?.querySelectorAll(".tl-row").map(r => r.dataset.thread) || [];
+  const control = (id, action) => host.querySelectorAll("[data-thread]").find(n => n.dataset.thread === id && n.dataset.action === action);
+  return {ui, host, calls, rows, control, data, render: (threads, options = {}) => ui.render(threads, host, {workspace: "/work", revision: Math.random(), ...options})};
+}
+test("list rows open, read, close and open the thread menu without opening the row", () => {
+  const c = listSetup();
+  c.render([listThread("reply", {unread_result: true, attention_since: NOW - 60, checkpoint: {id: 1, summary: "Done"}}),
+    listThread("quiet", {checkpoint: {id: 2, summary: "Earlier"}}), listThread("busy", {status: "running", response_state: "working"})]);
+  assert.deepEqual([c.rows("attention"), c.rows("working"), c.rows("idle")], [["reply"], ["busy"], ["quiet"]]);
+  assert.equal(c.control("quiet", "read"), undefined);
+  for (const action of ["read", "more", "close"]) c.control("reply", action).onclick({stopPropagation() {}});
+  c.control("reply", "open").onclick({stopPropagation() {}});
+  const row = c.host.querySelectorAll(".tl-row").find(r => r.dataset.thread === "quiet");
+  row.onclick({target: row.children[0]}); row.onclick({target: c.control("quiet", "more")});
+  assert.deepEqual(c.calls, [["read", "reply"], ["menu", "reply", "more"], ["close", "reply"], ["open", "reply"], ["open", "quiet"]]);
+});
+test("list agents expand under their orchestrator, and a waiting agent names its orchestrator in Attention", () => {
+  const c = listSetup();
+  const agent = (id, extra) => listThread(id, {creation_mode: "orchestration", created_by_thread_id: "lead", ...extra});
+  c.render([listThread("lead", {title: "Lead", checkpoint: {id: 1}}), agent("worker", {unread_result: true, checkpoint: {id: 2}}),
+    agent("blocked", {status: "needs input", title: "Blocked agent"})]);
+  assert.deepEqual(c.rows("attention"), ["blocked"]); assert.deepEqual(c.rows("idle"), ["lead"]);
+  assert.equal(c.control("blocked", "open").text, "Lead › Blocked agent");
+  const toggle = c.control("lead", "agents"); assert.equal(toggle.attrs["aria-expanded"], "false");
+  toggle.onclick({stopPropagation() {}});
+  assert.deepEqual(c.rows("idle"), ["lead", "blocked", "worker"]);
+  assert.equal(c.control("lead", "agents").attrs["aria-expanded"], "true");
+});
+test("list group tabs filter rows, remember the choice, and report saved-view group changes", () => {
+  const c = listSetup();
+  const threads = [listThread("a", {project_id: "g1", project_name: "One", checkpoint: {id: 1}}), listThread("b", {checkpoint: {id: 2}})];
+  c.render(threads);
+  const tab = c.host.querySelectorAll(".tl-group").find(n => n.dataset.group === "group:g1");
+  tab.onclick({stopPropagation() {}});
+  assert.deepEqual(c.rows("idle"), ["a"]); assert.deepEqual(c.calls, [["group", "g1"]]);
+  assert.match([...c.data.values()][0], /"pageKey":"group:g1"/);
+  const again = listSetup({data: c.data}); again.render(threads); assert.deepEqual(again.rows("idle"), ["a"]);
+  const controlled = listSetup(); controlled.render(threads, {selectedGroup: "g1", view: "group-g1"});
+  assert.deepEqual(controlled.rows("idle"), ["a"]);
+});
+test("Idle shows fifty rows until asked, and empty threads collapse into one control", () => {
+  const c = listSetup();
+  const many = Array.from({length: 55}, (_, i) => listThread("t" + i, {last_user_message_at: NOW - i, checkpoint: {id: i + 1}}));
+  c.render([...many, listThread("blank")]);
+  assert.equal(c.rows("idle").length, 50); assert.equal(c.rows("empty").length, 0);
+  const more = c.host.querySelectorAll(".tl-more"); assert.equal(more[0].textContent, "Show all 55"); assert.equal(more[1].textContent, "1 empty thread");
+  more[0].onclick({stopPropagation() {}}); more[1].onclick({stopPropagation() {}});
+  c.render([...many, listThread("blank")]);
+  assert.equal(c.rows("idle").length, 55); assert.deepEqual(c.rows("empty"), ["blank"]);
+});
+test("production integration renders the list beside Focus with the shared thread menu", async () => {
+  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+  const nodes = {"atlas-overview": {hidden: false}, "working-set-overview": {hidden: false}, "thread-list-overview": {hidden: true},
+    overview: {classList: {toggle() {}}}, welcome: {hidden: false}, view: {value: "active"}};
+  let config, options; const calls = [];
+  const c = {state: {overviewLayout: {mode: "list"}, projectCwd: "/work", listSignature: "rev",
+      threadActions: {showMenu: (...args) => calls.push(["menu", ...args])}},
+    document: {}, window: {}, savedViews: {activeId: "all", openGroup: id => calls.push(["group", id])}, $: id => nodes[id],
+    WorkingSet: {createList(value) { config = value; return {render(t, host, opts) { options = opts; }}; }},
+    threadMenuItems: t => [{label: "Pin " + t.thread_id}], action: f => f(), select: id => calls.push(["open", id]),
+    toggleThreadClosed: t => calls.push(["close", t.thread_id]), threadPath: id => "threads/" + id,
+    api: async (...args) => calls.push(args), refreshList: async () => calls.push(["refresh"])};
+  vm.createContext(c); vm.runInContext(source.slice(source.indexOf("function renderOverviewLayout("), source.indexOf("function upcomingSchedules(")), c);
+  c.renderOverviewLayout([]);
+  assert.equal(nodes["thread-list-overview"].hidden, false); assert.equal(nodes["working-set-overview"].hidden, true); assert.equal(nodes.overview.hidden, true);
+  assert.equal(options.selectedGroup, null); assert.equal(options.placement, "active"); assert.equal(options.revision, "rev");
+  const t = thread("a", {checkpoint: {id: 8}, turn_completion: {id: 12}});
+  config.onOpen("a"); config.onClose(t); config.onMenu(t, "anchor", "event"); await config.onRead(t);
+  assert.deepEqual(calls.slice(0, 3), [["open", "a"], ["close", "a"], ["menu", "anchor", "Thread a", [{label: "Pin a"}], "event"]]);
+  assert.equal(JSON.stringify(calls[3]), JSON.stringify(["threads/a", {seen: true, seen_checkpoint_id: 8, seen_completion_id: 12}]));
+});
