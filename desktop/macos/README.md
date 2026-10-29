@@ -216,16 +216,53 @@ Requirements: macOS 12 or later, Xcode Command Line Tools (`xcode-select --insta
 Python 3.10 or later, and an installed, authenticated Codex CLI. Trust the Agent
 Coord hooks through the existing plugin setup before starting agent sessions.
 
-From the repository root:
+For an installation with the independent runtime, ordinary **Command-Q** closes
+only the native interface; agents, tools, approvals and queued work continue.
+Use ordinary Quit before installing. **Stop Work and Quit** explicitly stops
+that work and is not needed for a compatible interface replacement. The legacy
+one-time migration procedure is only for an installation that still owns its
+agents inside the app process.
+
+Inspect the installed app's version/build and the running runtime's metadata
+before choosing a release identity. Pass explicit `--version` and
+`--build-number`: the defaults are `0.1.0` and `1`. Use a newer numeric
+version/build than the running payload, and increment it for subsequent local
+changes. A lower version does not activate over a newer running backend.
+
+After testing the changes, run from the repository root. These version/build
+values are an example, not permanently reserved numbers:
 
 ```bash
-python3 desktop/macos/build.py --install
+python3 desktop/macos/build.py --version 0.1.3 --build-number 7 --install
 open "$HOME/Applications/Ribbon Field.app"
 ```
 
 The build creates `build/macos/Ribbon Field.app` and installs it into
 `~/Applications`. Drag it to the Dock if desired. `--install-dir /Applications`
-selects a different installation directory. Omit `--install` to build only.
+selects a different installation directory. Omit `--install` to build and test a
+candidate while the app and agents run; after ordinary Quit, rerun with
+`--install` to rebuild and install it. The command refuses a running native app.
+Use a working Python with `plistlib` and `sqlite3`; on the current development
+Mac, `/Users/walle/.pyenv/versions/3.12.7/bin/python3` is the verified builder.
+
+On reopening, a compatible interface attaches to the retained runtime and can
+serve the new web assets while agents continue. Backend code changes remain
+pending until the runtime is safely idle. Use the matching installed helper's
+[`--runtime-command status`](../../docs/runtime-updates.md#runtime-maintenance-controls)
+to check ownership, pending payload and busy reasons; while work continues,
+verify that its runtime instance remains unchanged. After the idle transition,
+verify that the selected backend payload is active before calling the backend
+change deployed. An incompatible update is deferred; do not force it by killing
+agents or deleting retained runtime state.
+
+This default local build is ad hoc signed and has automatic updates disabled.
+To preserve the signed, notarized, update-enabled distribution, use
+[Release macOS CI](#automated-releases-to-cloudflare-r2), download and verify its
+artifact, then replace the app after ordinary Quit and reopen it. CI already
+has the Apple and Sparkle signing settings; local notarization credentials are
+not a prerequisite. Leave Publish unchecked when only a private candidate is
+needed. A successful build or local installation does not publish the signed
+feeds that enable customer update notifications.
 
 When upgrading from Agent Coord, quit the old app first. Installation replaces
 an identified `Agent Coord.app` in the selected installation directory with

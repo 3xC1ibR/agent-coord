@@ -62,6 +62,33 @@ before live testing. Use the documented cachebuster helper and reinstall command
 or reuse a session that loaded the previous plugin version.
 Commit your changes once you are done.
 
+## Ribbon Field rebuilds and rollouts
+
+Before building or installing Ribbon Field, read
+[Build and install locally](desktop/macos/README.md#build-and-install-locally)
+and the [runtime update contract](docs/runtime-updates.md).
+
+- For an installation with the independent runtime, ordinary **Command-Q**
+  closes the interface and keeps agents running. Use that for a compatible
+  replacement; **Stop Work and Quit** stops the work. Do not repeat the legacy
+  one-time stop-all rollout for an already migrated installation.
+- Build and test before replacing the installed app. Inspect the installed and
+  running runtime versions; explicitly choose a suitable newer version/build.
+  The builder defaults to `0.1.0`/`1`, which is not an upgrade of newer installs.
+- Reopen the interface after installation. Compatible interface/web changes can
+  appear immediately; backend changes wait for a safe idle runtime handover.
+  Check runtime status before claiming that backend changes are active. Do not
+  stop agents just to force a pending backend update through.
+- Ordinary local development builds are ad hoc signed and disable automatic
+  updates. Use the existing release CI for signed, notarized, update-enabled
+  builds; its Apple credentials and updater signing identity are already
+  configured. Do not require local notarization setup or regenerate signing keys
+  for that CI workflow.
+- Local installation, successful CI, and public publication are separate
+  outcomes. Customer update notifications require published signed feeds and
+  archives. Preserve existing authorization and report which outcome occurred.
+- App installation does not replace the plugin refresh procedure above.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 

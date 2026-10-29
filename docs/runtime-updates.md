@@ -4,13 +4,20 @@ Ribbon Field updates must preserve active agent work whenever the new desktop
 interface is compatible with the running runtime. This removes a barrier to
 receiving fixes and continuing to use the installed app.
 
-This document records the implementation contract and initial rollout procedure.
+This document records the implementation contract and rollout procedures.
 The runtime and updater are implemented, with focused checks, the full regression
-suite, and independent signed replacement acceptance complete. Final notarized
-packaging and rollout are still pending; the existing installed app still shuts
-down its backend on quit.
-Do not use this document as evidence that the installed version already supports
-uninterrupted updates.
+suite, and independent signed replacement acceptance complete. On October 28,
+2026, the development laptop's installation was verified as version `0.1.3`,
+build `5`, with an independent runtime serving active agents. Release CI
+[build 6](https://github.com/3xC1ibR/agent-coord/actions/runs/40789015760) also
+completed for both architectures. That installation is already migrated; future
+local changes use the [normal local rebuild workflow](../desktop/macos/README.md#build-and-install-locally),
+not the legacy one-time interruption below.
+
+Public release is a separate step: at that verification, the public download
+still advertised `0.1.2` and the alpha arm64 feed returned 404. Check current
+published manifests and feeds before claiming customer updates are operational;
+an installed app or a passing CI run alone does not establish publication.
 
 ## Product contract
 
@@ -191,8 +198,10 @@ remove it. Do not print the private key or save it in source or build artifacts.
 | `macos-release` | Variable `SPARKLE_PUBLIC_KEY` | Independently verify artifacts before publishing |
 
 Both public-key variables must be identical. The existing Apple signing and
-notarization secrets remain separate. As of the initial implementation preflight,
-the Apple configuration exists and the Sparkle configuration has not been added.
+notarization secrets remain separate. The Apple configuration and all three
+Sparkle settings above were configured and verified on October 28, 2026, and
+used by the successful release builds. Normal CI releases reuse them; they do
+not require a local `notarytool` profile or a new signing identity.
 
 The builder accepts `--update-feed`, `--update-public-key`, `--update-channel`,
 `--update-archive`, and `--update-private-key-file`. Update archives require a
