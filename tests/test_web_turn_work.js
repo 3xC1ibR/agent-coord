@@ -32,6 +32,18 @@ const command = {id:'command',type:'commandExecution',command:'run test',aggrega
 const answer = {id:'answer',type:'agentMessage',text:'Result',timelineAt:150};
 const turn = (status='completed',id='first') => ({id,status,startedAt:100,completedAt:160,items:[user,thinking,command,answer]});
 const groups = h => h.timeline.children.filter(n=>n.className==='turn-work');
+test('capacity wait shows a status with bounded retry count instead of a terminal failure',()=>{
+  const rejected={id:'capacity',status:'failed',items:[user],error:{message:'Selected model is at capacity.'}};
+  const h=harness([rejected]);
+  h.state.detail.capacityRetry={state:'waiting',turn_id:'capacity',attempt:2,max_attempts:4,next_at:1700000000};
+  h.render();
+  const notice=h.timeline.children.find(n=>n.role==='status');
+  assert.match(notice.textContent,/Model at capacity\. Retry 2 of 4 at/);
+  assert.equal(h.timeline.children.filter(n=>n.textContent==='Selected model is at capacity.').length,0);
+  h.state.detail.capacityRetry={...h.state.detail.capacityRetry,state:'exhausted'};
+  h.render();
+  assert.equal(h.timeline.children.filter(n=>n.textContent==='Selected model is at capacity.').length,1);
+});
 test('live work and commentary stay visible until the actual turn ends; accessible speaker names remain',()=>{
   const h=harness([turn('inProgress')]); h.render();
   assert.equal(groups(h).length,0);

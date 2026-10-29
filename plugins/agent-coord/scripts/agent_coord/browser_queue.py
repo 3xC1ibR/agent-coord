@@ -95,6 +95,8 @@ class BrowserMessageQueue:
                            (item_id, thread_id, message, self.owner, time.time(), json.dumps(images), source_window, json.dumps(mentions), dispatch_id))
                 if dispatch_id is not None:
                     self.sessions.dispatch.transition(db, dispatch_id, "queued", target_id=thread_id, error=None)
+                cancelled = self.sessions.capacity_retries.cancel_in(db, thread_id, "Accepted queued input superseded the capacity retry.")
+            self.sessions.persistence.submit(lambda: self.sessions.capacity_retries.finish_cancelled(cancelled))
             self.sessions._publish("browser/changed", {"threadId": thread_id})
             self.wake()
             return {"queued": True, "id": item_id}

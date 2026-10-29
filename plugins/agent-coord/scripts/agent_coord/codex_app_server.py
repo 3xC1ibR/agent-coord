@@ -308,6 +308,8 @@ class BrowserSessions:
         from .turn_watchdog import TurnWatchdog
         self.watchdog = TurnWatchdog(self)
         from .desktop_runtime import install_session_admission
+        from .capacity_retries import CapacityRetries
+        self.capacity_retries = CapacityRetries(self)
         install_session_admission(self)
 
     def _thread_lock(self, thread_id: str):
@@ -556,6 +558,10 @@ class BrowserSessions:
             # controlled shutdown is not an unexpected provider interruption.
             params = {**params, "controlledShutdown": True}
         thread_id = params.get("threadId")
+        if method == "turn/started" and hasattr(self, "capacity_retries"):
+            prepared = self.capacity_retries.starting(thread_id)
+            if prepared and prepared.get("replace"):
+                params = {**params, "retryOfTurnId": prepared["replace"]}
         public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
         with self.lock:
             # A late completion for an older turn must not end a newer turn.
@@ -625,7 +631,7 @@ class BrowserSessions:
                     self.execution.capture(identity, state="unknown", source="provider_disconnect",
                                            turn_id=disconnected_turns.get(identity))
             self._publish(method, public)
-            if not review_stage and (method == "turn/completed" or (method == "item/completed" and params.get("item", {}).get("type") == "agentMessage")):
+            if not review_stage and method == "item/completed" and params.get("item", {}).get("type") == "agentMessage":
                 public_params = copy.deepcopy(params)
                 def record_public_output():
                     from .session_control import SessionControl
@@ -636,6 +642,7 @@ class BrowserSessions:
                 saved_params["usage_observed_at"] = self.store.clock()
                 if method == "turn/started":
                     saved_params["notification_context"] = self.starting_notification_context.get(thread_id)
+                    saved_params["capacity_request"] = self.capacity_retries.starting(thread_id)
                 self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected, disconnected_turns))
 
     def _persist_event(self, method, params, disconnected, disconnected_turns=None):
@@ -669,6 +676,7 @@ class BrowserSessions:
                            for item in params["turn"].get("items", []) if item.get("type") == "userMessage"), None)
             self.store.threads.start_turn(thread_id, prompt=prompt, turn_id=params["turn"]["id"],
                                          notification_context=params.get("notification_context"))
+            self.capacity_retries.started(thread_id, params["turn"]["id"], params.get("capacity_request"))
             with self.store._connection() as db:
                 self.reviews.bind(db, thread_id, params["turn"]["id"])
         if method == "turn/completed" and thread_id:
@@ -677,6 +685,10 @@ class BrowserSessions:
                 self.store.threads.request_stop(thread_id, turn["id"])
             user_stop = self.store.threads.stop_requested(thread_id, turn.get("id"))
             deliberate = params.get("controlledShutdown", False) or user_stop
+            if self.capacity_retries.completed(thread_id, turn, deliberate=deliberate):
+                return
+            from .session_control import SessionControl
+            SessionControl(self.store).observe(method, params)
             unsuccessful = turn.get("status") in {"failed", "interrupted", "cancelled", "canceled"}
             status = turn.get("status", "completed")
             if (unsuccessful and user_stop) or status in {"cancelled", "canceled"}:
@@ -784,6 +796,8 @@ class BrowserSessions:
             return
         self._dirty_history(params["threadId"])
         turns = thread.setdefault("turns", [])
+        if method == "turn/started" and params.get("retryOfTurnId"):
+            turns[:] = [t for t in turns if t.get("id") != params["retryOfTurnId"]]
         turn = next((t for t in turns if t["id"] == turn_id), None)
         if turn is None:
             turn = {"id": turn_id, "items": [], "status": "inProgress"}
@@ -1277,6 +1291,15 @@ class BrowserSessions:
         if policy["quiet"] and not thread["snooze_due"]:
             thread.update(needs_attention=False, attention_reason=None, attention_key=None, attention_since=None,
                           can_handle_response=False)
+        capacity = self.capacity_retries.snapshot(thread_id) if hasattr(self, "capacity_retries") else None
+        thread["capacity_retry"] = capacity
+        if capacity and capacity["state"] in {"waiting", "reverting", "submitting"}:
+            thread.update(status="retrying", response_state="working", needs_attention=False,
+                          attention_reason=None, attention_key=None, can_handle_response=False)
+        elif capacity and capacity["state"] == "uncertain" and thread["attention"] != "archived":
+            thread.update(response_state="action", needs_attention=True, attention_reason="blocked",
+                          attention_key="capacity:" + capacity["root_turn_id"],
+                          attention_action=capacity["detail"], can_handle_response=False)
         thread["can_resume"] = bool(not thread["browser_session"] and thread["client"] == "codex" and session["presence"] == "offline")
         fork_supported = thread["client"] == "codex" or (thread["client"] == "claude" and thread["browser_session"])
         thread["can_fork"] = bool(fork_supported and thread["attention"] != "archived"
@@ -1388,6 +1411,7 @@ class BrowserSessions:
         """
         self.reviews.cancel(thread_id, reason="The conversation was closed.")
         with self._thread_lock(thread_id):
+            self.capacity_retries.cancel(thread_id, "The conversation was closed.")
             thread = self.work_thread(thread_id)
             external = False
             if thread["browser_session"]:
@@ -1898,7 +1922,7 @@ class BrowserSessions:
                 thread = recent_view(thread, live_turn=active_turn)
             # Read-side recovery may have changed the live turn. Project the card
             # after reconciliation so it agrees with the conversation status.
-            return {"session": record, "thread": self.reviews.public_history(thread_id, thread), "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
+            return {"session": record, "capacityRetry": self.capacity_retries.snapshot(thread_id), "thread": self.reviews.public_history(thread_id, thread), "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
                     "activeTurn": active_turn, "running": running,
                     "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                     "dispatchRequests": self.dispatch.receipts(thread_id),
@@ -1921,6 +1945,11 @@ class BrowserSessions:
             current = self.store.threads.get(thread_id, history=False)
             expected = known or current["turn_id"]
             if (latest.get("id") == expected and latest.get("status") in {"completed", "failed", "interrupted"}):
+                retry = self.capacity_retries.snapshot(thread_id)
+                if retry and retry["state"] == "waiting" and retry["turn_id"] == latest.get("id"):
+                    from .capacity_retries import safe_capacity_failure
+                    if safe_capacity_failure(latest):
+                        return  # A deferred failure is already reconciled.
                 # Use normal completion bookkeeping, including wake gates and
                 # failure notifications. Replaying persistence is idempotent.
                 if known or self.store.get_session(thread_id)["turn_active"] or not current["turn_completion"]:
@@ -1973,13 +2002,12 @@ class BrowserSessions:
             try:
                 return self._send(thread_id, body, start_only=start_only, automatic=automatic,
                                   preserve_text=preserve_text, submission=submission)
-            except BrowserBusyError:
-                raise
             except Exception as exc:
-                if automatic and not submission["started"]:
+                if not submission["started"]:
                     with self.lock:
                         if self.active.get(thread_id) is None:
                             self.active.pop(thread_id, None)
+                if automatic and not submission["started"] and not isinstance(exc, BrowserBusyError):
                     raise BrowserNotSubmittedError(str(exc)) from exc
                 raise
 
@@ -2028,6 +2056,8 @@ class BrowserSessions:
                 self.store.threads.update(thread_id, attention="now")
             command = self._command(thread_id, message, reconciled_session=record) if message and not images else None
             if command is not None:
+                if not automatic:
+                    self.capacity_retries.cancel(thread_id, "An accepted command superseded the capacity retry.")
                 return command
             with self.lock:
                 turn_id = self.active.get(thread_id)
@@ -2053,10 +2083,13 @@ class BrowserSessions:
                     self.starting_notification_context[thread_id] = {"origin": "user", "owner_thread_id": thread_id}
                 try:
                     with self.navigation.sending(thread_id, source_window):
-                        result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                        rpc = self._rpc(thread_id)
+                        self.capacity_retries.cancel(thread_id, "Accepted user input superseded the capacity retry.")
+                        result = rpc.request("turn/steer", {**params, "expectedTurnId": turn_id})
                 finally:
                     with self.lock:
                         self.starting_notification_context.pop(thread_id, None)
+                        self.capacity_retries.preparing.pop(thread_id, None)
                 self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, turn_id))
                 self.dispatch.confirm_context(thread_id, dispatch_context)
                 self.store.threads.user_message(thread_id)
@@ -2078,8 +2111,11 @@ class BrowserSessions:
                            {"origin": "user", "owner_thread_id": thread_id})
                 with self.lock:
                     self.starting_notification_context[thread_id] = context
+                self.capacity_retries.prepare(thread_id, params, context)
                 with self.navigation.sending(thread_id, source_window):
                     rpc = self._rpc(thread_id)
+                    if not automatic:
+                        self.capacity_retries.cancel(thread_id, "Accepted user input superseded the capacity retry.")
                     submission["started"] = True
                     result = rpc.request("turn/start", params)
                 if record["client"] == "codex":
@@ -2088,6 +2124,9 @@ class BrowserSessions:
                     self.permission_effective[thread_id] = record["permission_mode"]
                     self.execution.observe_permissions(thread_id, {**record, "permission_mode_effective": record["permission_mode"]})
                     self.execution.capture(thread_id, turn_id=result["turn"]["id"])
+                captured_request = self.capacity_retries.starting(thread_id)
+                self.persistence.submit(lambda: self.capacity_retries.started(
+                    thread_id, result["turn"]["id"], captured_request))
                 # Some providers reply before emitting turn/started. Save by
                 # the accepted ID too; the callback path covers fast completion.
                 self.persistence.submit(lambda: self.store.threads.remember_notification_context(
@@ -2099,6 +2138,7 @@ class BrowserSessions:
             finally:
                 with self.lock:
                     self.starting_notification_context.pop(thread_id, None)
+                    self.capacity_retries.preparing.pop(thread_id, None)
             if result.get("model"):
                 self._capture_settings(thread_id, result)
             self.dispatch.confirm_context(thread_id, dispatch_context)
@@ -2106,7 +2146,8 @@ class BrowserSessions:
             if not automatic:
                 self.store.threads.user_message(thread_id)
                 self.store.threads.capture_request(thread_id, message or "\n".join("[Image]" for _ in images))
-                self.inbox_wake.resume(thread_id)
+                # Do not clear a guard installed by a fast capacity rejection.
+                self.inbox_wake.resume(thread_id, preserve_capacity=True)
             with self.lock:
                 # A fast completed event may arrive before the request response.
                 if thread_id in self.active:
@@ -2117,6 +2158,12 @@ class BrowserSessions:
             return result
 
     def interrupt(self, thread_id: str) -> dict:
+        with self._thread_lock(thread_id):
+            cancelled = self.capacity_retries.cancel(thread_id, "You stopped the capacity retry.")
+            if cancelled:
+                self.inbox_wake.pause(thread_id, "You stopped the capacity retry.", kind="stop")
+                self._publish("browser/changed", {"threadId": thread_id})
+                return {"stopped": True}
         if self.reviews.cancel(thread_id):
             return {"review_cancelled": True}
         with self._thread_lock(thread_id):
@@ -2147,6 +2194,8 @@ class BrowserSessions:
                 archived = body["archived"]
                 if not isinstance(archived, bool):
                     raise CoordinationError("Archived must be true or false.")
+                if archived:
+                    self.capacity_retries.cancel(thread_id, "The conversation was archived.")
                 with self.lock:
                     if thread_id in self.active:
                         raise BrowserBusyError("Stop the running turn before archiving this session.")
@@ -2222,6 +2271,7 @@ class BrowserSessions:
         self.residency_stopped.set()
         if self.residency_worker is not None:
             self.residency_worker.join(timeout=6)
+        self.capacity_retries.close()
         self.classifier.close()
         self.watchdog.close()
         self.reviews.close()

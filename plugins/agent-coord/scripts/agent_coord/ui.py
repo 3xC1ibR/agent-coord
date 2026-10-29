@@ -1237,6 +1237,7 @@ def make_ui_server(
     server.app_control.start()
     sessions.schedules.start()
     sessions.inbox_wake.start()
+    sessions.capacity_retries.start()
     sessions.event_subscriptions.start()
     sessions.sidecars.start()
     sessions.reviews.start()

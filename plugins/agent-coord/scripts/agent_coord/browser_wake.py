@@ -68,15 +68,16 @@ class BrowserInboxWake:
             db.execute("UPDATE browser_inbox_wake SET paused_at = COALESCE(paused_at, ?), retry_at = NULL WHERE thread_id = ?",
                        (self.store.clock(), thread_id))
 
-    def resume(self, thread_id):
+    def resume(self, thread_id, *, preserve_capacity=False):
         """Accepted user input re-enables wakes, including after deliberate Stop."""
         self.checked_pauses.pop(thread_id, None)
         with self.store._connection() as db:
             db.execute("""UPDATE browser_inbox_wake SET paused = 0, dispatching = 0,
                 error = NULL, pause_kind = NULL, recovery_turn_id = NULL,
                 retry_count = 0, retry_at = NULL, paused_at = NULL,
-                reconciled_turn_id = NULL, recovery_after_message_id = 0 WHERE thread_id = ?""",
-                       (thread_id,))
+                reconciled_turn_id = NULL, recovery_after_message_id = 0 WHERE thread_id = ?
+                AND (? = 0 OR pause_kind IS NOT 'capacity_retry')""",
+                       (thread_id, int(preserve_capacity)))
 
     def _not_submitted(self, thread_id, error):
         """Retry only transient contention proven to precede turn submission."""

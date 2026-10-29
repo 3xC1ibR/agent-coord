@@ -195,6 +195,7 @@ def install_session_admission(sessions):
     for name in ("create", "send", "submit", "read", "resume_work_thread", "fork_work_thread", "answer", "update"):
         gate.wrap(sessions, name)
     gate.wrap(sessions.queue, "enqueue")
+    gate.wrap(sessions.capacity_retries, "process_once", automatic=True)
     gate.wrap(sessions.queue, "change")
     for worker, name in ((sessions.queue, "_dispatch"), (sessions.schedules, "process_once"),
                          (sessions.inbox_wake, "process_once"), (sessions.dispatch, "process_once"),

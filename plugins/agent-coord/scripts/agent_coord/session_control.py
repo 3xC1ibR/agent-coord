@@ -206,18 +206,24 @@ class SessionControl:
                 value = sessions.read(tid)
                 turns = value.get("thread", {}).get("turns", [])
                 latest = turns[-1] if turns else {}
+                retry = value.get("capacityRetry") or {}
+                retry_pending = retry.get("state") in {"waiting", "reverting", "submitting"}
                 snapshot = {
                     "active_turn_id": value.get("activeTurn"),
                     "status": "waiting_user"
                     if value.get("requests")
                     else "running"
                     if value.get("running")
+                    else "retrying"
+                    if retry_pending
                     else latest.get("status", "idle"),
                     "pending_questions": len(value.get("requests") or []),
                     "last_turn_id": latest.get("id"),
                     "error": None,
                 }
                 for turn in turns[-10:]:
+                    if retry_pending and turn.get("id") == retry.get("turn_id"):
+                        continue
                     if turn.get("status") in {"completed", "interrupted", "failed"}:
                         self.observe(
                             "turn/completed",

@@ -1547,6 +1547,7 @@ function renderStatus() {
   globalThis.agentCoordThreadUsage?.render($("thread-usage"), state.detail?.work_thread?.usage,
     state.detail?.work_thread?.thread_id === state.selected ? state.selected : null);
   const running = !!state.detail?.running;
+  const retryPending = state.detail?.capacityRetry?.state === "waiting";
   const work = state.detail?.work_thread;
   const dispatcher = !!work?.dispatcher;
   const docked = !!state.dispatchDock?.active;
@@ -1586,7 +1587,7 @@ function renderStatus() {
   $("queue").hidden = dispatcher || !running || !["codex", "claude", "muse"].includes(work?.client);
   $("queue").disabled = $("send").disabled;
   $("message").disabled = archived || !!state.transferLocks?.has(state.selected);
-  $("stop").hidden = !running;
+  $("stop").hidden = !running && !retryPending;
   $("close-thread").textContent = archived ? "Reopen" : running || ["running", "needs input"].includes(work?.status) ? "Stop and close" : "Close thread";
   $("close-thread").disabled = !state.detail || state.closing.has(state.selected);
   renderCloseWhenDone();
@@ -2100,7 +2101,16 @@ function renderTimeline() {
         } else fragment.append(detail);
       }
     }
-    if (!entry.item && turn.error) fragment.append(node("p", turn.error.message || "This turn failed.", "empty"));
+    if (!entry.item && turn.error) {
+      const retry = state.detail?.capacityRetry;
+      const waiting = retry?.turn_id === turn.id && ["waiting", "reverting", "submitting"].includes(retry.state);
+      const copy = waiting ? "Model at capacity. Retry " + retry.attempt + " of " + retry.max_attempts +
+        (retry.state === "waiting" ? " at " + new Date(retry.next_at * 1000).toLocaleTimeString([], {hour: "numeric", minute: "2-digit", second: "2-digit"}) + "." : " is starting…") :
+        turn.error.message || "This turn failed.";
+      const notice = node("p", copy, "empty");
+      if (waiting) notice.setAttribute("role", "status");
+      fragment.append(notice);
+    }
     if (!entry.item && turn.status === "interrupted") fragment.append(node("p",
       turn !== turns.at(-1) || state.detail?.running ? "Earlier turn stopped." : "Turn stopped.", "empty"));
     if (!entry.item) appendForks(turn.id);
@@ -2350,6 +2360,10 @@ function applyEvent(event) {
   if (method === "turn/started") {
     state.detail.running = true; state.detail.activeTurn = params.turn.id;
     const turns = state.detail.thread.turns ||= [];
+    if (params.retryOfTurnId) {
+      const rejected = turns.findIndex(t => t.id === params.retryOfTurnId);
+      if (rejected >= 0) turns.splice(rejected, 1);
+    }
     const turn = turns.find(t => t.id === params.turn.id);
     if (turn) Object.assign(turn, {...params.turn, items: turn.items});
     else turns.push({...params.turn, items: params.turn.items || []});

@@ -93,9 +93,11 @@ def _actionable_context(store: CoordinationStore, session_id: str, event: str = 
     # enforce denials or send notifications, but ignore appended messages.
     if _client() == "kimi" and event != "UserPromptSubmit":
         return ""
-    return _format_messages(
-        store.inbox(session_id, classifications={"action_required", "deferred"})
-    )
+    messages = store.inbox(session_id, classifications={"action_required", "deferred"})
+    from .capacity_retries import retained_context
+    seen = {message["id"] for message in messages}
+    messages.extend(m for m in retained_context(store, session_id) if m["id"] not in seen)
+    return _format_messages(sorted(messages, key=lambda m: m["id"]))
 
 
 def _extract_paths(payload: dict[str, Any], cwd: str) -> tuple[list[str], bool]:
