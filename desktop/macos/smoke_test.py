@@ -31,7 +31,7 @@ def main() -> int:
     parser.add_argument("--sessions-only", action="store_true", help="Run focused native session-switching checks.")
     parser.add_argument("--detach-only", action="store_true", help="Run focused native conversation-detachment checks.")
     parser.add_argument("--scratchpad-only", action="store_true", help="Run focused project scratchpad checks.")
-    parser.add_argument("--notifications-only", action="store_true", help="Run focused multi-window notification routing checks.")
+    parser.add_argument("--notifications-only", action="store_true", help="Run focused notification and conversation link routing checks.")
     parser.add_argument("--attribution-only", action="store_true", help="Verify the native download-token handoff without sending telemetry.")
     parser.add_argument("--runtime-only", action="store_true", help="Quit and reconnect two native interfaces to the same detached runtime.")
     args = parser.parse_args()
@@ -114,6 +114,7 @@ def main() -> int:
                 "app_link_closed_window_fallback",
                 "notification_reveals_existing_tab", "notification_preserves_draft",
                 "notification_restores_minimized_owner", "notification_recent_window_fallback",
+                "project_link_tab_in_own_project", "project_link_misplaced_tab_removed",
                 "next_session_shortcut", "previous_session_shortcut",
                 "next_session_wraps_in_filtered_view", "previous_session_wraps_and_preserves_draft",
                 "next_session_tiled_shortcut", "next_session_selects_stacked_tab",
@@ -147,7 +148,7 @@ def main() -> int:
             continue
         if args.scratchpad_only and not (key.startswith("project_scratchpad_") or key == "ui_loaded"):
             continue
-        if args.notifications_only and not (key.startswith("notification_") or key in {"ui_loaded", "multiple_windows"}):
+        if args.notifications_only and not (key.startswith(("notification_", "project_link_")) or key in {"ui_loaded", "multiple_windows"}):
             continue
         if result.get(key) is not True:
             raise RuntimeError(f"Native behavior check failed: {key}")

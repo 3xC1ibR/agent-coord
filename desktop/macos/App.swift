@@ -1195,6 +1195,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try await smokeWorkingFolders(first, second)
         if CommandLine.arguments.contains("--smoke-notifications-only") {
             try await smokeNotificationRouting(first, second)
+            try await smokeProjectLinkTabs(first)
             finishSmoke(error: nil)
             return
         }
@@ -1450,6 +1451,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try await smokeRollUp(first)
         try await smokeNavigation(first, second)
         try await smokeNotificationRouting(first, second)
+        try await smokeProjectLinkTabs(first)
 
         second.window.close()
         try smokeCheck("secondary_window_closed", windows.count == 1 && second.window.contentView == nil)
@@ -1672,6 +1674,70 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         smokeResults["notification_fallback_debug"] = fresh ?? [:]
         try smokeCheck("notification_recent_window_fallback", fallback === first && current === first &&
             fresh?["selected"] as? String == "notify-fresh" && fresh?["tabs"] as? Int == 1 && elsewhere as? Bool == true)
+    }
+
+    @MainActor private func smokeProjectLinkTabs(_ item: DesktopWindow) async throws {
+        let root = smokeDirectory!.resolvingSymlinksInPath()
+        let folder = root.appendingPathComponent("Working folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // A closed conversation is absent from the open list, so its project is
+        // unknown until its detail loads: the route that left misplaced tabs.
+        _ = try smokePython("""
+            import sys
+            from agent_coord.store import CoordinationStore
+            store = CoordinationStore(sys.argv[1])
+            store.register(session_id='link-elsewhere', client='codex', cwd=sys.argv[2])
+            store.threads.update('link-elsewhere', title='link-elsewhere')
+            print('{}')
+            """, arguments: [root.path])
+        let data = try JSONSerialization.data(withJSONObject: [folder.path, root.path])
+        let paths = String(data: data, encoding: .utf8)!
+        // Use the backend's canonical directories; Foundation strips /private.
+        let directories = "const cwd = await Promise.all(\(paths).map(async path => (await api('workspaces/open', {path})).cwd));"
+        let placement = """
+            {
+            \(directories)
+            const tabs = state.threadTabs;
+            for (let i = 0; i < 120; i++) {
+              if (state.selected === 'link-elsewhere' && state.projectCwd === cwd[1] && !navigation.applying) break;
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            const saved = JSON.parse(localStorage.getItem(tabs.baseKey + ':' + cwd[0]) || '{}');
+            const result = {selected: state.selected, project: state.projectCwd, expected: cwd[1],
+              own: tabs.items.filter(item => item.thread_id === 'link-elsewhere').length,
+              other: (tabs.projects.get(cwd[0]) || []).filter(item => item.thread_id === 'link-elsewhere').length,
+              saved: (saved.items || []).filter(item => item.thread_id === 'link-elsewhere').length};
+            result.ok = result.selected === 'link-elsewhere' && result.project === cwd[1] &&
+              result.own === 1 && result.other === 0 && result.saved === 0;
+            return result;
+            }
+            """
+        let unknown = try await smokeJS("""
+            \(directories)
+            await api('threads/link-elsewhere', {attention: 'archived'});
+            await refreshList(); await openProjectDirectory(cwd[1]); goHome();
+            state.threadTabs.items.splice(0, state.threadTabs.items.length); state.threadTabs.save(true); state.threadTabs.render();
+            await openProjectDirectory(cwd[0]); goHome();
+            return !state.sessions.some(thread => thread.thread_id === 'link-elsewhere');
+            """, in: item.webView)
+        try await smokeFocus(item)
+        application(NSApp, open: [URL(string: "agentcoord://thread/link-elsewhere")!])
+        let linked = try await smokeJS(placement, in: item.webView) as? [String: Any]
+        smokeResults["project_link_debug"] = linked ?? [:]
+        try smokeCheck("project_link_tab_in_own_project", unknown as? Bool == true && linked?["ok"] as? Bool == true)
+        // A tab saved in the wrong project by an earlier version moves when clicked.
+        let misplaced = try await smokeJS("""
+            {
+            \(directories)
+            const tabs = state.threadTabs;
+            tabs.items.splice(0, tabs.items.length); tabs.save(true); tabs.render();
+            await openProjectDirectory(cwd[0]); goHome();
+            tabs.items.push({thread_id: 'link-elsewhere', title: 'link-elsewhere'}); tabs.save(); tabs.render();
+            await tabs.activate('link-elsewhere', {force: true});
+            }
+            """ + placement, in: item.webView) as? [String: Any]
+        smokeResults["project_link_misplaced_debug"] = misplaced ?? [:]
+        try smokeCheck("project_link_misplaced_tab_removed", misplaced?["ok"] as? Bool == true)
     }
 
     @MainActor private func smokeSettings(_ first: DesktopWindow, _ second: DesktopWindow) async throws {

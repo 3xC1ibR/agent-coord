@@ -509,7 +509,7 @@ python3 desktop/macos/smoke_test.py --runtime-only
 python3 desktop/macos/smoke_test.py --sessions-only
 # Focused project scratchpad, shortcut, autosave, and focus checks:
 python3 desktop/macos/smoke_test.py --scratchpad-only
-# Focused multi-window notification routing checks:
+# Focused notification and conversation link routing checks:
 python3 desktop/macos/smoke_test.py --notifications-only
 ```
 
@@ -521,7 +521,8 @@ command-palette filtering, execution, focus restoration and modal behavior,
 Roll up shortcut routing, oldest-waiting order, handled/skip controls and window isolation,
 window disposal and Dock reopening, the notification bridge, notification routing
 to the window that already has the thread's tab (including a minimized window and
-another project) or else the most recently used main window, and quitting. It
+another project) or else the most recently used main window, conversation links that
+keep each tab in its own project's tab bar, and quitting. It
 writes `build/macos/smoke.json` with `.json.png`, `.json.palette.png`, and
 `.json.roll-up.png` screenshots beside it, then explicitly stops the test runtime
 and verifies it exited.
