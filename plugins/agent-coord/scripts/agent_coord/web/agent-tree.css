@@ -86,10 +86,11 @@
   html.conversation-window .conversation.has-agent-tree #toggle-context,
   body.chat-expanded .conversation.has-agent-tree #toggle-context { display: inline-flex; }
 }
-/* Thread actions such as Dismiss stay beside a wide tree; the narrow column reaches them through Context. */
+/* Thread actions stay beside a wide tree. The narrow column keeps only Dismiss
+   for a pending request; the other actions remain in Context. */
 @media (min-width: 721px) and (max-width: 1100px) {
   .conversation.agents-visible .conversation-controls { flex-wrap: wrap; }
-  .conversation.agents-visible .session-actions { display: none; }
+  .conversation.agents-visible .session-actions > :not(#handle-response) { display: none; }
 }
 body.mobile-chat .mobile-thread-sheet .agent-panel-resize { display: none !important; }
 body.mobile-chat .mobile-thread-sheet:has(.agents-mode:not([hidden])) { width: calc(100vw - 16px); max-width: none; }
