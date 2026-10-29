@@ -187,7 +187,7 @@ function sessionContext() {
   return newThreadContext(state.organization, {project: $("project").value}, state.folders?.selected);
 }
 function threadsInProject(threads) { return threads.filter(thread => inProject(thread, state.folders?.selected?.cwd)); }
-async function switchProject({restoreConversation = true, preserveRollUp = false, awaitInventory = true} = {}) {
+async function switchProject({restoreConversation = true, preserveRollUp = false, awaitInventory = true, renderOverview = true} = {}) {
   const cwd = state.folders.selected?.cwd || "";
   if (state.projectCwd === cwd) { renderFolders(); return; }
   // Keep in-memory drafts and tiled destinations as well as the saved tab.
@@ -207,7 +207,7 @@ async function switchProject({restoreConversation = true, preserveRollUp = false
   // Restore the visible destination before any network request. Cached history,
   // drafts and reading positions are already available in this window.
   const viewsReady = savedViews.setProject(cwd).then(() => {
-    if (state.projectCwd === cwd) renderList();
+    if (state.projectCwd === cwd && renderOverview) renderList();
   });
   let opening;
   if (restoreConversation) {
@@ -246,14 +246,14 @@ async function restoreProjectTab(id = state.threadTabs?.destination(), {refreshI
     if (error.status !== 404) throw error;
   }
 }
-async function openProjectDirectory(cwd, {preserveRollUp = false} = {}) {
+async function openProjectDirectory(cwd, {preserveRollUp = false, forConversation = false} = {}) {
   if (!cwd || state.folders.selected?.cwd === cwd) return;
   // A saved conversation remains accessible if its directory was moved/deleted.
   // New session creation still validates the directory on the server.
   state.folders.adopt({cwd});
   // Opening a conversation in another project must not wait for that
-  // project's whole thread list; the cached conversation paints first.
-  await switchProject({restoreConversation: false, preserveRollUp, awaitInventory: false});
+  // project's thread list or draw its overview first; the conversation does.
+  await switchProject({restoreConversation: false, preserveRollUp, awaitInventory: !forConversation, renderOverview: !forConversation});
 }
 function renderFolders() {
   const cwd = state.folders?.selected?.cwd || "";
@@ -1048,7 +1048,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
     if (!related && known?.project_cwd && known.project_cwd !== state.folders?.selected?.cwd) removeMisplacedTab();
     if (stayInProject && !related && (known?.project_cwd || known?.cwd) && (known.project_cwd || known.cwd) !== state.projectCwd) return;
     const cwd = known?.project_cwd || known?.cwd;
-    if (!related && cwd && cwd !== state.folders?.selected?.cwd) await openProjectDirectory(cwd, {preserveRollUp: rollUp});
+    if (!related && cwd && cwd !== state.folders?.selected?.cwd) await openProjectDirectory(cwd, {preserveRollUp: rollUp, forConversation: true});
   }
   $("conversation").classList.remove("session-draft");
   if (!rollUp) state.rollUp?.stop();
@@ -1116,7 +1116,9 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
     state.timelineScroll?.reset();
   }
   const restorePosition = !cached.detail && state.conversationPositions?.get(id);
-  renderList();
+  // Draw the opened conversation before redrawing the overview beside it.
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(renderList, 0));
+  else renderList();
   const fresh = await refreshDetail({markSeen: false});
   if (state.selected !== id) return;
   if (restorePosition && !restorePosition.following) {
@@ -1133,7 +1135,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
       && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
     removeMisplacedTab();
     if (stayInProject) { goHome({restoreDispatcher: false}); return; }
-    await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp});
+    await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp, forConversation: true});
     return select(id, {rollUp});
   }
   if (!dock) await api(threadPath(id), {seen: true, seen_checkpoint_id: displayed.checkpoint?.id || 0,

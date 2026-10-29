@@ -340,16 +340,22 @@ test("opening a cached conversation in another project paints before that projec
     listed.push(path);
     return new Promise(resolve => { finishList = () => resolve({data: c.items.slice()}); });
   };
-  const painted = [];
+  const painted = [], order = [], frames = [];
   c.conversationEntry = id => ({detail: id === "second" ? {work_thread: c.items.find(item => item.thread_id === id)} : null,
     nodes: id === "second" ? [] : null});
-  c.renderThread = () => painted.push(c.state.selected);
+  c.renderThread = () => { painted.push(c.state.selected); order.push("conversation"); };
+  c.renderList = () => order.push("overview");
+  c.requestAnimationFrame = callback => frames.push(callback);
+  c.setTimeout = callback => callback();
   c.renderQueuedMessages = () => {};
   c.$("timeline").replaceChildren = () => {};
   c.refreshDetail = async () => true;
   const opening = c.select("second", {refreshInventory: false});
   for (let turn = 0; turn < 5 && !painted.length; turn++) await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(painted, ["second"], "the cached conversation is shown while the list read is still pending");
+  assert.deepEqual(order, ["conversation"], "the overview is not redrawn before the conversation's frame");
+  frames.splice(0).forEach(callback => callback());
+  assert.deepEqual(order, ["conversation", "overview"]);
   assert.equal(c.state.projectCwd, "/second");
   assert.equal(listed.length, 1);
   finishList();

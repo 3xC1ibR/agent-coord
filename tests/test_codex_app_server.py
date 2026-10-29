@@ -130,6 +130,24 @@ class BrowserSessionTests(unittest.TestCase):
             "outputTokens": 10, "totalTokens": total}, "last": {"totalTokens": 20},
             "modelContextWindow": 1000}, **kwargs}})
 
+    def test_startup_skips_a_browser_session_whose_creation_was_interrupted(self):
+        # Observed live: a create hit "database is locked" after saving the
+        # conversation row, and every later runtime start would have failed.
+        with self.store._connection() as db:
+            db.execute("""INSERT INTO browser_sessions (thread_id, cwd, name, created_at, updated_at, client)
+                VALUES ('interrupted', ?, 'Interrupted', 1, 1, 'codex')""", (str(self.root),))
+        with self.assertLogs("agent_coord.codex_app_server", "WARNING"):
+            restarted = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.list_sessions(), [])
+
+    def test_interrupted_creation_does_not_leave_an_unregistered_conversation(self):
+        with patch.object(self.store, "register", side_effect=sqlite3.OperationalError("database is locked")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.create()
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM browser_sessions").fetchone()[0], 0)
+
     def test_idle_send_does_not_read_the_transcript(self):
         # Acceptance must not wait for a whole-history read: an idle loaded
         # conversation has no missed turn to reconcile.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import copy
+import logging
 import os
 import shlex
 import sqlite3
@@ -252,9 +253,16 @@ class BrowserSessions:
         # Upgrade browser conversations created before work threads existed.
         threads = self.store.threads
         with self.store._connection() as connection:
-            previous = connection.execute("""SELECT b.*, t.thread_id AS existing_work_thread
+            previous = connection.execute("""SELECT b.*, t.thread_id AS existing_work_thread,
+                EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = b.thread_id) AS registered
                 FROM browser_sessions b LEFT JOIN work_threads t ON t.thread_id = b.thread_id""").fetchall()
         for row in previous:
+            if not row["registered"]:
+                # A creation interrupted before its session was registered
+                # (for example by a locked database) cannot be opened. It
+                # must not prevent the runtime, and every agent, from starting.
+                logging.getLogger(__name__).warning("Skipping unregistered browser session %s", row["thread_id"])
+                continue
             thread = threads.ensure(row["thread_id"])
             # A routed message can reopen UI placement while the provider is
             # still archived. Only migrate placement for a newly created row.
@@ -1574,8 +1582,17 @@ class BrowserSessions:
         with self.store._connection() as connection:
             connection.execute("INSERT INTO browser_sessions (thread_id, cwd, name, model, effort, yolo, created_at, updated_at, client, service_tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                (thread_id, repository, name, record["model"], record["effort"], int(yolo), now, now, client, record["service_tier"]))
-        self._capture_settings(thread_id, result)
-        self.store.register(session_id=thread_id, client=client, cwd=repository, name=name)
+        try:
+            self._capture_settings(thread_id, result)
+            self.store.register(session_id=thread_id, client=client, cwd=repository, name=name)
+        except Exception:
+            # Do not leave a conversation that has no registered session.
+            try:
+                with self.store._connection() as connection:
+                    connection.execute("DELETE FROM browser_sessions WHERE thread_id = ?", (thread_id,))
+            except sqlite3.Error:
+                logging.getLogger(__name__).warning("Could not remove incomplete browser session %s", thread_id)
+            raise
         self.store.threads.update(thread_id, **associations)
         with self.lock:
             self._remember_thread(result["thread"])
