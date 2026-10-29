@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -88,6 +89,7 @@ class ACPConnection:
                 self.errors.append(line.rstrip()[-1000:])
 
     def _read(self):
+        failure = None
         try:
             for line in self.process.stdout:
                 if self._consume_line(line):
@@ -112,10 +114,14 @@ class ACPConnection:
                             future.set_exception(ACPError(f"{self.label}: {detail}", error.get("code")))
                         else:
                             future.set_result(message.get("result") or {})
-        except (OSError, ValueError, TypeError, KeyError, CoordinationError) as exc:
-            self.errors.append(str(exc)[-1000:])
+        except Exception as exc:
+            # Adapter callbacks can fail independently of the provider
+            # process. Preserve the actual cause instead of reporting its
+            # unrelated stderr tail as if the process had disconnected.
+            failure = f"{self.label} stream processing failed: {type(exc).__name__}: {str(exc)[-1000:]}"
+            logging.getLogger(__name__).exception("%s stream processing failed", self.label)
         finally:
-            error = CoordinationError(f"{self.label} disconnected. " + "\n".join(self.errors))
+            error = CoordinationError(failure or (f"{self.label} disconnected. " + "\n".join(self.errors)))
             self._fail(error)
             if not self.closed:
                 self.callback({"method": "disconnected", "params": {"error": str(error)}})

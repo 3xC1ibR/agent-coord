@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -630,6 +631,34 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.update(thread, sessionUpdate='tool_call', toolCallId='tool', status='in_progress')
         self.assertEqual(self.store.get_session(thread)['presence'], 'online')
 
+    def test_database_lock_during_activity_preserves_response_and_retries(self):
+        thread = self.create()
+        connection = self.start(thread)
+        original_touch = self.store.touch
+        attempts = []
+
+        def touch(session_id, *args, **kwargs):
+            if not args and not kwargs:
+                attempts.append(session_id)
+                if len(attempts) == 1:
+                    raise sqlite3.OperationalError('database is locked')
+            return original_touch(session_id, *args, **kwargs)
+
+        with patch.object(self.store, 'touch', side_effect=touch), \
+                patch('agent_coord.antigravity.time.monotonic', return_value=100) as clock:
+            with self.assertLogs('agent_coord.antigravity', level='WARNING'):
+                self.update(thread, sessionUpdate='agent_message_chunk', content={'type': 'text', 'text': 'First '})
+            self.update(thread, sessionUpdate='agent_message_chunk', content={'type': 'text', 'text': 'second '})
+            self.assertEqual(len(attempts), 1, 'Do not retry a locked heartbeat for every stream chunk')
+            clock.return_value = 116
+            self.update(thread, sessionUpdate='agent_message_chunk', content={'type': 'text', 'text': 'third'})
+            self.assertEqual(len(attempts), 2)
+        connection.future.set_result({'stopReason': 'end_turn'})
+        turn = self.sessions.read(thread)['thread']['turns'][-1]
+        self.assertEqual(turn['status'], 'completed')
+        self.assertEqual(turn['items'][-1]['text'], 'First second third')
+        self.assertFalse(connection.closed)
+
 
 class AntigravityTransportTests(unittest.TestCase):
     def setUp(self):
@@ -705,6 +734,21 @@ for line in sys.stdin:
         connection = self.connection("import sys\nsys.stdin.readline()\n")
         with self.assertRaisesRegex(CoordinationError, "disconnected"):
             connection.request("initialize", {}, timeout=2)
+
+    def test_callback_failure_reports_actual_error_to_pending_request(self):
+        connection = self.connection('''import sys,json
+for line in sys.stdin:
+ print(json.dumps({'method':'session/update','params':{}}),flush=True)
+''')
+
+        def callback(message):
+            if message['method'] == 'session/update':
+                raise sqlite3.OperationalError('database is locked')
+
+        connection.callback = callback
+        with self.assertLogs('agent_coord.acp', level='ERROR'):
+            with self.assertRaisesRegex(CoordinationError, 'OperationalError: database is locked'):
+                connection.request('initialize', {}, timeout=2)
 
     def test_installer_checks_hash_and_extracts_only_expected_pair(self):
         archive = io.BytesIO()

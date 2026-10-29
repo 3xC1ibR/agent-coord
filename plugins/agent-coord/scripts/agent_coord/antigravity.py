@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shlex
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -503,8 +504,16 @@ class AntigravityRPC:
             self._confirm_delivery(thread_id)
             now = time.monotonic()
             if now - self.last_activity.get(thread_id, -30) >= 15:
-                self.store.touch(thread_id)
+                # Liveness is best-effort bookkeeping, not part of receiving
+                # provider output. Throttle failed attempts too, so contention
+                # cannot make every streamed chunk wait on the same DB lock.
                 self.last_activity[thread_id] = now
+                try:
+                    self.store.touch(thread_id)
+                except (sqlite3.Error, CoordinationError):
+                    logging.getLogger(__name__).warning(
+                        "Could not refresh Antigravity activity for %s; continuing provider stream",
+                        thread_id, exc_info=True)
         if kind == "config_option_update":
             self.catalog = model_catalog(update)
         with self.lock:
