@@ -448,7 +448,7 @@ settings change supersedes a pending agent settings change. Confirm the receipt
 before sending work that requires the new settings. Completing an assignment
 and releasing its file scopes leaves the conversation available.
 
-After inspecting a failed app agent you created, queue a fresh actionable
+After inspecting a failed or unexpectedly interrupted app agent you created, queue a fresh actionable
 continuation with `send`, including instructions to inspect existing results
 before repeating side effects. Then authorize a new inbox turn:
 
@@ -458,13 +458,28 @@ agent-coord thread resume --session-id <agent-id> \
 ```
 
 Recovery runs through the owning app runtime and only accepts the creating
-orchestrator. The expected turn must still be the latest failed turn, with a
+orchestrator. The expected turn must still be the latest failed or interrupted turn, with a
 confirmed failure pause and fresh actionable inbox work. Stop, uncertain wake
 submissions, closed/pending-close threads, and queued user input remain blocked.
 Recovery never replays the failed prompt or resets uncertain wake attempts.
 A completed receipt's `result.state: ready` confirms authorization, not execution.
 Reuse the request ID for retries. Direct user input handles deliberate Stop and
 pause records saved by older runtimes without a confirmed failure cause.
+
+An interrupted provider can keep executing after the app receives its terminal
+event. For an interruption or unknown tool outcome, inspect the native agent and
+existing job results first, then add `--confirm-stopped --reason 'Evidence that
+native execution stopped; existing results checked'`. This is an explicit caller
+attestation, not an automatic liveness check. The runtime records the requester,
+turn, reason and previous pause atomically with recovery. It never lets an agent
+override a deliberate user Stop, even with this confirmation.
+
+Unexpected interruptions and failures notify the creating orchestrator. If ten
+minutes pass without a newer turn, recorded scope handoff, user Stop or closure,
+the runtime sends one durable escalation. Acknowledging the alert does not count
+as recovery. Escalation does not restart agents, replay prompts or release scopes.
+For quota exhaustion, choose an available replacement or an authorized continuation
+after reset; repeated nudges to the exhausted provider do not recover the work.
 
 Direct user follow-ups steer Codex or queue for Claude; dispatcher messages may
 arrive through tool hooks during a turn. Automatic inbox wake waits for idle and

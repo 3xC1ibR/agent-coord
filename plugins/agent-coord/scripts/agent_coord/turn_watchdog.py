@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 
-from .app_agent_failures import notify_agent_stall
+from .app_agent_failures import notify_agent_stall, process_failure_followups
 
 
 TERMINAL = {"completed", "failed", "interrupted", "cancelled", "canceled"}
@@ -223,6 +223,10 @@ class TurnWatchdog:
         s = self.sessions
         if s.closed or not s.persistence.flush(timeout=0):
             return
+        try:
+            process_failure_followups(self.store, s.cwd)
+        except Exception:
+            logging.getLogger(__name__).exception("Agent recovery deadline scan failed")
         with s.lock:
             candidates = set(s.active)
             loaded = set(s.loaded)

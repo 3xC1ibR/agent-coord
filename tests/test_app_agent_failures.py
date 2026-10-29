@@ -11,7 +11,7 @@ from unittest.mock import patch
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
 from test_browser_providers import claude_factory
 from agent_coord.app_control import AppControl, AppControlWorker
-from agent_coord.app_agent_failures import notify_agent_failure
+from agent_coord.app_agent_failures import notify_agent_failure, process_failure_followups
 
 
 class AppAgentFailureTests(unittest.TestCase):
@@ -82,11 +82,123 @@ class AppAgentFailureTests(unittest.TestCase):
         for status in ("completed", "interrupted"):
             child = self.create()
             self.sessions.send(child, {"message": "Start"})
-            self.finish(child, status=status)
+            if status == "interrupted":
+                self.sessions.interrupt(child)
+            else:
+                self.finish(child, status=status)
         ordinary = self.sessions.create({})["session"]["thread_id"]
         self.sessions.send(ordinary, {"message": "Start"})
         self.finish(ordinary)
         self.assertEqual(self.reports(), [])
+
+    def test_unsolicited_interruption_after_initial_result_alerts_and_does_not_resume(self):
+        child = self.create()
+        self.sessions.inbox_wake._dispatch(child)
+        self.finish(child, status="completed")
+        self.sessions.event_subscriptions.process_once()
+        before = len(self.reports())
+        self.sessions.send(child, {"message": "Continue the assignment"})
+        event = self.finish(child, status="interrupted")
+        self.sessions._event(event)
+        self.assertEqual(len(self.reports()), before + 1)
+        self.assertEqual(json.loads(self.reports()[-1]["body"])["stage"], "turn")
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT pause_kind FROM browser_inbox_wake WHERE thread_id=?", (child,)).fetchone()[0], "failure")
+        self.sessions.inbox_wake.process_once()
+        self.assertNotIn(child, self.sessions.active)
+
+    def test_native_user_cancellation_remains_stop_without_failure_alert(self):
+        child = self.create()
+        self.sessions.send(child, {"message": "Start"})
+        turn = self.sessions.rpc.threads[child]["turns"][-1]
+        turn["termination"] = {"origin": "user", "reason": "cancelled", "execution": "unknown"}
+        self.finish(child, status="interrupted")
+        self.assertEqual(self.reports(), [])
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT pause_kind FROM browser_inbox_wake WHERE thread_id=?", (child,)).fetchone()[0], "stop")
+
+    def overdue_child(self):
+        self.wall = 2000000000.0
+        self.store.clock = lambda: self.wall
+        child = self.create()
+        self.sessions.inbox_wake._dispatch(child)
+        self.store.inbox(child)
+        self.finish(child, status="interrupted")
+        return child
+
+    def test_unresolved_failure_escalates_once_after_ten_minutes_even_when_acknowledged(self):
+        child = self.overdue_child()
+        self.store.acknowledge(self.parent, self.reports()[0]["id"])
+        self.wall += 599
+        process_failure_followups(self.store)
+        self.assertEqual(len(self.reports()), 0)  # Acknowledged reports leave the unread inbox.
+        self.wall += 1
+        self.sessions.watchdog.process_once()
+        self.assertEqual(len(self.reports()), 1)
+        self.assertEqual(json.loads(self.reports()[-1]["body"])["event"], "app_agent_recovery_overdue")
+        process_failure_followups(CoordinationStore(self.store.database_path, clock=lambda: self.wall + 1000))
+        self.assertEqual(len(self.reports()), 1)
+        self.assertEqual(len(self.sessions.rpc.threads[child]["turns"]), 1)
+        self.assertNotIn(child, self.sessions.active)
+
+    def test_resumed_stopped_or_closed_work_cancels_deadline(self):
+        for resolution in ("new_turn", "user_stop", "closed"):
+            child = self.overdue_child()
+            before = len(self.reports())
+            if resolution == "new_turn":
+                self.sessions.send(child, {"message": "Checked prior native results; continue"})
+            elif resolution == "user_stop":
+                self.sessions.inbox_wake.pause(child, "User stopped", kind="stop")
+            else:
+                self.store.threads.update(child, attention="archived")
+            self.wall += 600
+            process_failure_followups(self.store)
+            self.assertEqual(len(self.reports()), before)
+            with self.store._connection() as db:
+                self.assertEqual(db.execute("SELECT resolution FROM app_agent_followups WHERE thread_id=?", (child,)).fetchone()[0], resolution)
+
+    def test_deadline_insert_and_marker_roll_back_together(self):
+        self.overdue_child()
+        self.wall += 600
+        with patch.object(self.store, "_insert_message", side_effect=sqlite3.OperationalError("locked")):
+            with self.assertRaises(sqlite3.OperationalError):
+                process_failure_followups(self.store)
+        with self.store._connection() as db:
+            self.assertIsNone(db.execute("SELECT escalated_at FROM app_agent_followups").fetchone()[0])
+        process_failure_followups(self.store)
+        self.assertEqual(len(self.reports()), 2)
+
+    def test_recorded_scope_handoff_cancels_escalation(self):
+        child = self.overdue_child()
+        self.store.begin_work(session_id=child, scopes=["owned.py"])
+        replacement = self.create()
+        self.store.handoff_work(sender_session_id=child, recipient_session_id=replacement,
+            patch_label="Saved work", validation_boundary="Native agent and job results inspected",
+            validation_responsibility="Replacement owns remaining checks", mode="write")
+        before = len(self.reports())
+        self.wall += 600
+        process_failure_followups(self.store)
+        self.assertEqual(len(self.reports()), before)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT resolution FROM app_agent_followups WHERE thread_id=?", (child,)).fetchone()[0], "handoff")
+
+    def test_escalation_keeps_paused_owner_paused_and_persists_message(self):
+        self.overdue_child()
+        self.sessions.inbox_wake.pause(self.parent, "User stopped", kind="stop")
+        self.wall += 600
+        process_failure_followups(self.store)
+        self.sessions.inbox_wake._dispatch(self.parent)
+        self.assertNotIn(self.parent, self.sessions.active)
+        self.assertEqual(len(self.reports()), 2)
+        self.assertIsNone(self.reports()[-1]["delivered_at"])
+
+    def test_initial_interruption_subscription_and_failure_share_notice_and_deadline(self):
+        child = self.overdue_child()
+        self.sessions.event_subscriptions.process_once()
+        self.assertEqual(len(self.reports()), 1)
+        self.wall += 600
+        process_failure_followups(self.store)
+        self.assertEqual(len(self.reports()), 2)
 
     def test_later_failure_reports_again_and_busy_parent_keeps_message(self):
         child = self.create()
@@ -110,10 +222,13 @@ class AppAgentFailureTests(unittest.TestCase):
         self.assertEqual(self.store.threads.get(child)["turn_completion"]["status"], "failed")
 
     def test_normal_runtime_shutdown_does_not_report_disconnect_failure(self):
-        child = self.create()
-        self.sessions.send(child, {"message": "Start"})
+        for client in ("codex", "claude"):
+            child = self.create(client=client)
+            self.sessions.send(child, {"message": "Start"})
         self.sessions.close()
         self.assertEqual(self.reports(), [])
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT pause_kind FROM browser_inbox_wake WHERE thread_id=?", (child,)).fetchone()[0], "stop")
 
     def test_wake_start_and_resume_failures_report_and_do_not_retry(self):
         child = self.create()

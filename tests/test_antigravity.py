@@ -84,6 +84,10 @@ class AntigravityTests(unittest.TestCase):
         self.sessions.antigravity.connections[thread].callback({"method": "session/update", "params": {
             "sessionId": self.sessions.antigravity.native[thread], "update": update}})
 
+    def complete(self, thread):
+        self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Finished"})
+        self.sessions.antigravity.connections[thread].future.set_result({"stopReason": "end_turn"})
+
     def permission(self, thread, *, question=False, request_id="same-id"):
         connection = self.sessions.antigravity.connections[thread]
         connection.callback({"id": request_id, "method": "session/request_permission", "params": {
@@ -163,7 +167,7 @@ class AntigravityTests(unittest.TestCase):
     def test_context_outside_display_turn_keeps_consumption_unsupported(self):
         thread = self.create()
         connection = self.start(thread)
-        connection.future.set_result({"stopReason": "end_turn"})
+        self.complete(thread)
         self.update(thread, sessionUpdate="usage_update", used=13759, size=1000000)
         summary = self.store.usage.summary(thread)
         self.assertEqual(summary["context"], {"used_tokens": 13759, "limit_tokens": 1000000})
@@ -213,6 +217,8 @@ class AntigravityTests(unittest.TestCase):
         self.assertTrue(one.closed)
         self.assertEqual(one.writes[-1]["method"], "session/cancel")
         self.assertEqual(self.sessions.read(first)["thread"]["turns"][-1]["status"], "interrupted")
+        self.assertEqual(self.sessions.read(first)["thread"]["turns"][-1]["termination"],
+                         {"origin": "user", "reason": "turn_interrupt", "execution": "unknown"})
         self.assertFalse(self.sessions.pending_requests(first))
         self.assertTrue(self.sessions.read(second)["running"])
         self.sessions.rpc.close()
@@ -268,8 +274,89 @@ class AntigravityTests(unittest.TestCase):
         selections = [p for m, p in resumed.calls if m == "session/set_config_option"]
         self.assertIn({"sessionId": native, "configId": "model", "value": "gemini-test"}, selections)
         self.assertIn({"sessionId": native, "configId": "mode", "value": "yolo"}, selections)
-        resumed.future.set_result({"stopReason": "end_turn"})
+        self.complete(thread)
         self.assertIs(self.start(thread), resumed)  # Healthy processes remain reusable.
+
+    def test_native_cancellation_retains_provider_origin_and_unknown_execution(self):
+        for reason in ("cancelled", "canceled"):
+            with self.subTest(reason=reason):
+                thread = self.create()
+                connection = self.start(thread)
+                self.update(thread, sessionUpdate="tool_call", toolCallId="native-tool", status="in_progress")
+                connection.future.set_result({"stopReason": reason})
+                turn = self.sessions.read(thread)["thread"]["turns"][-1]
+                self.assertEqual(turn["status"], "interrupted")
+                self.assertEqual(turn["termination"], {"origin": "provider", "reason": reason, "execution": "unknown"})
+                self.assertEqual(turn["items"][-1]["status"], "unknown")
+                self.assertFalse(connection.closed)
+                self.assertFalse(connection.writes)  # No speculative native cancellation or replay.
+
+    def test_permission_cancel_retains_user_origin_on_native_cancellation(self):
+        thread = self.create()
+        connection = self.start(thread)
+        request = self.permission(thread)
+        self.sessions.answer(thread, request["key"], {"decision": "cancel"})
+        connection.future.set_result({"stopReason": "cancelled"})
+        turn = self.sessions.read(thread)["thread"]["turns"][-1]
+        self.assertEqual(turn["termination"], {"origin": "user", "reason": "cancelled", "execution": "unknown"})
+
+    def test_native_limits_and_refusals_are_failures_even_with_partial_output(self):
+        for reason in ("max_tokens", "max_turn_requests", "refusal", "blocked"):
+            with self.subTest(reason=reason):
+                thread = self.create()
+                connection = self.start(thread)
+                self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Partial work"})
+                connection.future.set_result({"stopReason": reason})
+                turn = self.sessions.read(thread)["thread"]["turns"][-1]
+                self.assertEqual(turn["status"], "failed")
+                self.assertEqual(turn["termination"], {"origin": "provider", "reason": reason, "execution": "ended"})
+                self.assertIn("before continuing", turn["error"]["message"])
+                self.assertTrue(connection.closed)
+
+    def test_empty_completion_is_a_failure_and_survives_restart(self):
+        thread = self.create()
+        connection = self.start(thread)
+        self.update(thread, sessionUpdate="agent_thought_chunk", content={"type": "text", "text": "Thinking"})
+        connection.future.set_result({"stopReason": "end_turn"})
+        turn = self.sessions.read(thread)["thread"]["turns"][-1]
+        self.assertEqual(turn["status"], "failed")
+        self.assertIn("without a response", turn["error"]["message"])
+        self.assertEqual(turn["termination"], {"origin": "provider", "reason": "end_turn", "execution": "unknown"})
+        self.sessions.close()
+        self.sessions = self.make_sessions()
+        self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1], turn)
+
+    def test_tool_only_completion_distinguishes_known_and_unknown_outcomes(self):
+        for output, execution in (("saved result", "ended"), (None, "unknown")):
+            with self.subTest(execution=execution):
+                thread = self.create()
+                connection = self.start(thread)
+                self.update(thread, sessionUpdate="tool_call", toolCallId="tool", status="completed", rawOutput=output)
+                connection.future.set_result({"stopReason": "end_turn"})
+                turn = self.sessions.read(thread)["thread"]["turns"][-1]
+                self.assertEqual(turn["status"], "completed")
+                self.assertEqual(turn["termination"], {"origin": "provider", "reason": "end_turn", "execution": execution})
+                self.assertFalse(connection.closed)
+
+    def test_lost_runtime_history_is_not_user_cancellation(self):
+        thread = self.create()
+        self.start(thread)
+        self.update(thread, sessionUpdate="tool_call", toolCallId="tool", status="in_progress")
+        self.sessions.read(thread)
+        self.sessions.persistence.flush()
+        self.sessions.antigravity.turns.pop(thread)
+        turn = self.sessions.antigravity.request("thread/read", {"threadId": thread})["thread"]["turns"][-1]
+        self.assertEqual(turn["status"], "interrupted")
+        self.assertEqual(turn["termination"], {"origin": "runtime", "reason": "runtime_state_lost", "execution": "unknown"})
+        self.assertEqual(turn["items"][-1]["status"], "unknown")
+
+    def test_runtime_shutdown_is_not_user_cancellation(self):
+        thread = self.create()
+        self.start(thread)
+        self.sessions.antigravity.close()
+        self.sessions.persistence.flush()
+        turn = self.sessions.antigravity._history(thread)["turns"][-1]
+        self.assertEqual(turn["termination"], {"origin": "runtime", "reason": "runtime_closed", "execution": "unknown"})
 
     def test_runtime_failure_text_is_failed_even_with_end_turn(self):
         diagnostics = [
@@ -367,6 +454,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
     create = AntigravityTests.create
     start = AntigravityTests.start
     update = AntigravityTests.update
+    complete = AntigravityTests.complete
     permission = AntigravityTests.permission
 
     def setUp(self):
@@ -483,7 +571,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         connection = self.start(thread)
         self.send_correction(thread)
         ThreadControl(self.store).request_close(thread, after_turn=True)
-        connection.future.set_result({'stopReason': 'end_turn'})
+        self.complete(thread)
         self.deliver(thread)
         self.assertFalse(self.sessions.read(thread)['running'])
         self.assertEqual(len([c for c in connection.calls if c[0] == 'session/prompt']), 1)
@@ -512,7 +600,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.assertEqual(self.sessions.antigravity.native[thread], native)
         self.assertIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][-1]['text'])
         self.store.acknowledge(thread, ident)
-        connection.future.set_result({'stopReason': 'end_turn'})
+        self.complete(thread)
         self.assertNotIn('Coordination messages from other agents', str(self.start(thread).calls[-1]))
 
     def test_idle_wake_includes_message_body(self):
@@ -529,7 +617,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
                                 body='Progress noted', classification='informational')
         self.deliver(thread)
         self.assertFalse(connection.writes)
-        connection.future.set_result({'stopReason': 'end_turn'})
+        self.complete(thread)
         self.deliver(thread)
         self.assertFalse(self.sessions.read(thread)['running'])
 

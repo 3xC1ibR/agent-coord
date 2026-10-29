@@ -749,7 +749,7 @@ class AppControlTests(unittest.TestCase):
         self.worker.process_once()
         receipt = self.control.status(request["request_id"])
         self.assertEqual(receipt["status"], "failed", receipt)
-        self.assertIn("expected failed turn changed", receipt["error"])
+        self.assertIn("expected turn 'old-failed-turn'", receipt["error"])
         self.assertFalse(self.sessions.read(thread)["running"])
 
     def test_recovery_waits_safely_for_updated_runtime_and_can_be_cancelled(self):
@@ -765,6 +765,61 @@ class AppControlTests(unittest.TestCase):
         self.assertEqual(self.control.cancel(request["request_id"])["status"], "cancelled")
         self.worker.process_once()
         self.assertFalse(self.sessions.read(thread)["running"])
+
+    def test_provider_interruption_requires_native_confirmation_and_audits_recovery(self):
+        thread = self.create()
+        self.sessions.inbox_wake.process_once()
+        self.deliver(thread)
+        turn = self.sessions.rpc.threads[thread]["turns"][-1]
+        turn.update(status="interrupted", termination={"origin": "provider", "reason": "cancelled", "execution": "unknown"})
+        self.sessions._event({"method": "turn/completed", "params": {"threadId": thread, "turn": copy.deepcopy(turn)}})
+        self.continuation(thread)
+        request = self.recover_request(thread, turn["id"])
+        self.worker.process_once()
+        self.assertIn("--confirm-stopped", self.control.status(request["request_id"])["error"])
+        reason = "Native cancellation confirmed; checked job receipts and retained completed outputs."
+        request = self.cli("resume", "--session-id", thread, "--expected-turn-id", turn["id"],
+                           "--confirm-stopped", "--reason", reason, "--wait", "0")
+        self.worker.process_once()
+        self.assertEqual(self.control.status(request["request_id"])["status"], "completed")
+        with self.store._connection() as db:
+            audit = db.execute("SELECT requester, reason, pause_kind FROM browser_wake_recoveries WHERE thread_id=?", (thread,)).fetchone()
+            self.assertEqual(tuple(audit), ("dispatcher", reason, "failure"))
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(len(self.sessions.read(thread)["thread"]["turns"]), 2)
+        self.assertIn("Inspect existing results", str(self.deliver(thread)))
+
+    def test_creator_confirmation_cannot_override_actual_user_stop(self):
+        thread = self.create()
+        self.sessions.inbox_wake.process_once()
+        self.deliver(thread)
+        self.sessions.interrupt(thread)
+        turn = self.sessions.read(thread)["thread"]["turns"][-1]
+        self.continuation(thread)
+        request = self.control.request("resume", "dispatcher", {"expected_turn_id": turn["id"],
+            "execution_confirmed": True, "reason": "Provider stopped"}, thread_id=thread)
+        self.worker.process_once()
+        self.assertIn("direct user input", self.control.status(request["request_id"])["error"])
+        self.assertFalse(self.sessions.read(thread)["running"])
+
+    def test_recovery_audit_failure_rolls_back_unpause(self):
+        thread, turn = self.failed_agent()
+        self.continuation(thread)
+        with self.store._connection() as db:
+            db.execute("""CREATE TRIGGER reject_audit BEFORE INSERT ON browser_wake_recoveries
+                BEGIN SELECT RAISE(ABORT, 'Audit unavailable'); END""")
+        request = self.recover_request(thread, turn)
+        self.worker.process_once()
+        self.assertIn("Audit unavailable", self.control.status(request["request_id"])["error"])
+        with self.store._connection() as db:
+            wake = db.execute("SELECT paused, recovery_turn_id FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()
+            self.assertEqual(tuple(wake), (1, None))
+
+    def test_recovery_native_evidence_validation(self):
+        thread, turn = self.failed_agent()
+        for extra in ({"reason": ""}, {"reason": "x" * 1001}, {"execution_confirmed": "yes"}, {"execution_confirmed": True}):
+            with self.subTest(extra=extra), self.assertRaises(CoordinationError):
+                self.control.request("resume", "dispatcher", {"expected_turn_id": turn, **extra}, thread_id=thread)
 
     def test_recovery_cannot_override_stop_or_uncertain_pause_even_with_latest_failure(self):
         for kind in ("stop", "unknown"):

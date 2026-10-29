@@ -99,8 +99,17 @@ class AppControl:
             cwd = record["cwd"]
             if operation == "resume":
                 expected = payload.get("expected_turn_id")
-                if set(payload) != {"expected_turn_id"} or not isinstance(expected, str) or not expected.strip() or len(expected) > 200:
-                    raise CoordinationError("Recovery requires the expected failed turn ID.")
+                if set(payload) - {"expected_turn_id", "reason", "execution_confirmed"} or not isinstance(expected, str) or not expected.strip() or len(expected) > 200:
+                    raise CoordinationError("Recovery requires the expected failed or interrupted turn ID.")
+                if "reason" in payload:
+                    reason = payload["reason"]
+                    if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+                        raise CoordinationError("Recovery reason must contain 1–1000 characters.")
+                    payload["reason"] = reason.strip()
+                if "execution_confirmed" in payload and type(payload["execution_confirmed"]) is not bool:
+                    raise CoordinationError("Execution confirmation must be a boolean.")
+                if payload.get("execution_confirmed") and not payload.get("reason"):
+                    raise CoordinationError("Execution confirmation requires a reason describing the native-state evidence.")
                 with self.store._connection() as db:
                     if not db.execute("""SELECT 1 FROM app_control_requests WHERE operation = 'create'
                             AND thread_id = ? AND sender_session_id = ? AND status = 'completed'""",
@@ -370,7 +379,9 @@ class AppControlWorker:
                 result = self.sessions.sidecars.watches.attach(self.sessions, request,
                     on_created=lambda tid: self.control.identified(request["request_id"], tid))
             elif request["operation"] == "resume":
-                result = self.sessions.inbox_wake.recover(request["thread_id"], payload["expected_turn_id"], request["sender_session_id"])
+                result = self.sessions.inbox_wake.recover(request["thread_id"], payload["expected_turn_id"],
+                    request["sender_session_id"], reason=payload.get("reason"),
+                    execution_confirmed=payload.get("execution_confirmed", False))
             elif request["operation"] == "move":
                 from .thread_move import move_work_thread
                 thread_id = request["thread_id"]

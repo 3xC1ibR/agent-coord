@@ -258,10 +258,12 @@ def _parser() -> argparse.ArgumentParser:
     move.add_argument("--session-id", help="Target conversation; defaults to the current caller.")
     move.add_argument("--from-session", help="Requester; defaults to the current caller.")
     move.add_argument("--cwd", required=True, help="Absolute destination project directory.")
-    resume = thread_commands.add_parser("resume", help="Let the creating orchestrator recover a failed app agent for fresh inbox work.")
+    resume = thread_commands.add_parser("resume", help="Let the creating orchestrator recover a failed or interrupted app agent for fresh inbox work.")
     resume.add_argument("--session-id", required=True, help="Target app agent.")
     resume.add_argument("--from-session", help="Creating orchestrator; defaults to the current caller.")
-    resume.add_argument("--expected-turn-id", required=True, help="Failed turn inspected before requesting recovery.")
+    resume.add_argument("--expected-turn-id", required=True, help="Failed or interrupted turn inspected before requesting recovery.")
+    resume.add_argument("--reason", help="Why this explicit recovery is safe; saved in the recovery audit.")
+    resume.add_argument("--confirm-stopped", action="store_true", help="Attest that native execution stopped after inspecting agent and tool outcomes; requires --reason.")
     permissions = settings.add_mutually_exclusive_group()
     permissions.add_argument("--yolo", dest="yolo", action="store_const", const=True, default=None)
     permissions.add_argument("--default-permissions", dest="yolo", action="store_const", const=False)
@@ -804,6 +806,10 @@ def run(arguments: argparse.Namespace) -> Any:
                 return control.status(arguments.request_id, wait=arguments.wait)
             if operation == "resume":
                 payload = {"expected_turn_id": arguments.expected_turn_id}
+                if arguments.reason is not None:
+                    payload["reason"] = arguments.reason
+                if arguments.confirm_stopped:
+                    payload["execution_confirmed"] = True
             elif operation == "move":
                 payload = {"cwd": arguments.cwd}
             elif operation == "settings":

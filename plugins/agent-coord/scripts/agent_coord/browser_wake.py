@@ -31,6 +31,14 @@ class BrowserInboxWake:
                 if column not in columns:
                     db.execute(f"ALTER TABLE browser_inbox_wake ADD COLUMN {column} TEXT")
 
+            db.execute("""CREATE TABLE IF NOT EXISTS browser_wake_recoveries (
+                id INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                requester TEXT NOT NULL, reason TEXT NOT NULL, pause_kind TEXT NOT NULL,
+                recovered_at REAL NOT NULL, execution_confirmed INTEGER NOT NULL DEFAULT 0
+            )""")
+            if "execution_confirmed" not in {row[1] for row in db.execute("PRAGMA table_info(browser_wake_recoveries)")}:
+                db.execute("ALTER TABLE browser_wake_recoveries ADD COLUMN execution_confirmed INTEGER NOT NULL DEFAULT 0")
+
     def pause(self, thread_id, reason, *, kind="unknown"):
         with self.store._connection() as db:
             db.execute("""INSERT INTO browser_inbox_wake (thread_id, paused, error, pause_kind)
@@ -46,20 +54,30 @@ class BrowserInboxWake:
                 error = NULL, pause_kind = NULL, recovery_turn_id = NULL WHERE thread_id = ?""",
                        (thread_id,))
 
-    def recover(self, thread_id, expected_turn_id, requester):
-        """Let the creating orchestrator authorize one continuation after failure.
+    def recover(self, thread_id, expected_turn_id, requester, *, reason=None, execution_confirmed=False):
+        """Explicit creator authorization for fresh work after a terminal turn.
 
-        This unpauses fresh inbox work; it never replays the failed provider
-        prompt or resets uncertain wake attempts. Stop/Close remain user gates.
+        Never replay the previous prompt or reset uncertain wake attempts.
+        The authorization and its reason are audited with the pause change.
         """
+        supplied_reason = reason
+        reason = reason or "Creating orchestrator authorized fresh inbox work after inspecting the terminal turn."
         if not self.sessions.persistence.flush():
             raise CoordinationError("Conversation state is still being saved. Try again shortly.")
         with self.sessions._thread_lock(thread_id):
             detail = self.sessions.read(thread_id)
             turns = detail["thread"].get("turns", [])
-            if (detail["running"] or not turns or turns[-1].get("id") != expected_turn_id
-                    or turns[-1].get("status") != "failed"):
-                raise CoordinationError("The expected failed turn changed or is running. Inspect the conversation before recovery.")
+            if detail["running"]:
+                raise CoordinationError("Recovery refused: the conversation is running.")
+            if not turns:
+                raise CoordinationError("Recovery refused: the conversation has no recorded turn.")
+            latest = turns[-1]
+            if latest.get("id") != expected_turn_id:
+                raise CoordinationError(f"Recovery refused: expected turn {expected_turn_id!r}, "
+                                        f"but the latest turn is {latest.get('id')!r}.")
+            if latest.get("status") not in {"failed", "interrupted"}:
+                raise CoordinationError(f"Recovery refused: latest turn status is {latest.get('status')!r}; "
+                                        "expected failed or interrupted.")
             with self.store._connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 if not db.execute("""SELECT 1 FROM app_control_requests WHERE operation = 'create'
@@ -75,8 +93,23 @@ class BrowserInboxWake:
                 if db.execute("SELECT 1 FROM browser_message_queue WHERE thread_id = ?", (thread_id,)).fetchone():
                     raise CoordinationError("Queued user input takes priority. Review it in the app before recovery.")
                 wake = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id = ?", (thread_id,)).fetchone()
-                if not wake or not wake["paused"] or wake["pause_kind"] != "failure" or wake["dispatching"]:
-                    raise CoordinationError("Only a confirmed failure pause can be recovered. Stop or uncertain wake needs direct user input.")
+                if not wake or not wake["paused"]:
+                    raise CoordinationError("Recovery refused: inbox wake is not paused.")
+                if wake["dispatching"]:
+                    raise CoordinationError("Recovery refused: an inbox wake is still dispatching; inspect its outcome first.")
+                if wake["pause_kind"] != "failure":
+                    raise CoordinationError(f"Recovery refused: pause kind {wake['pause_kind']!r} is uncertain; "
+                                            "Stop or uncertain wake needs direct user input.")
+                termination = latest.get("termination") or {}
+                uncertain = (latest.get("status") == "interrupted"
+                             or termination.get("execution") == "unknown"
+                             or any(i.get("type") not in {"userMessage", "agentMessage", "reasoning", "plan"}
+                                    and i.get("status") in {"inProgress", "unknown"}
+                                    for i in latest.get("items", [])))
+                if uncertain and not (execution_confirmed and supplied_reason):
+                    raise CoordinationError("Native execution may continue after a terminal event. Inspect the native agent "
+                                            "and tool outcomes, then use --confirm-stopped with --reason describing "
+                                            "the evidence. Do not replay operations with unknown outcomes.")
                 if not db.execute("""SELECT 1 FROM messages m
                         LEFT JOIN message_wake_attempts a ON a.message_id = m.id
                         WHERE m.recipient_session_id = ? AND m.delivered_at IS NULL
@@ -85,7 +118,12 @@ class BrowserInboxWake:
                     raise CoordinationError("Queue a fresh actionable continuation before recovery; uncertain submissions are never replayed.")
                 db.execute("""UPDATE browser_inbox_wake SET paused = 0, error = NULL,
                     pause_kind = NULL, recovery_turn_id = ? WHERE thread_id = ?""", (expected_turn_id, thread_id))
-            return {"session_id": thread_id, "resumed_after_turn_id": expected_turn_id, "state": "ready"}
+                db.execute("""INSERT INTO browser_wake_recoveries
+                    (thread_id, turn_id, requester, reason, pause_kind, recovered_at, execution_confirmed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (thread_id, expected_turn_id, requester, reason, wake["pause_kind"], self.store.clock(), int(execution_confirmed)))
+            return {"session_id": thread_id, "resumed_after_turn_id": expected_turn_id, "state": "ready",
+                    "resumed_by": requester, "reason": reason}
 
     def _eligible(self, db, thread_id, *, submitting=False):
         if self.stopped.is_set() or self.sessions.closed:
@@ -190,9 +228,15 @@ class BrowserInboxWake:
                     with self.store._connection() as db:
                         recovery = db.execute("SELECT recovery_turn_id FROM browser_inbox_wake WHERE thread_id = ?",
                                               (thread_id,)).fetchone()
-                    if not (turns[-1].get("status") == "failed" and recovery and recovery[0] == turns[-1].get("id")):
+                    if not (recovery and recovery[0] == turns[-1].get("id")):
+                        latest = turns[-1]
+                        deliberate = (latest.get("termination") or {}).get("origin") == "user"
                         self.pause(thread_id, "The last turn stopped or failed. Send a message to continue.",
-                                   kind="failure" if turns[-1].get("status") == "failed" else "stop")
+                                   kind="stop" if deliberate else "failure")
+                        if not deliberate:
+                            notify_agent_failure(self.store, thread_id, event_key=["turn", latest.get("id")],
+                                                 stage="turn", turn_id=latest.get("id"), error=latest.get("error") or
+                                                 "The provider interrupted this turn. Native execution and tool outcomes must be inspected.")
                         return
             except Exception as exc:
                 self.pause(thread_id, str(exc))

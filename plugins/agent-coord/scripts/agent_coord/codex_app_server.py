@@ -303,6 +303,10 @@ class BrowserSessions:
 
     def _event(self, message: dict) -> None:
         method, params = message["method"], message.get("params") or {}
+        if method == "turn/completed" and self.closed:
+            # Capture intent at receipt, before asynchronous persistence. A
+            # controlled shutdown is not an unexpected provider interruption.
+            params = {**params, "controlledShutdown": True}
         thread_id = params.get("threadId")
         public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
         with self.lock:
@@ -407,9 +411,18 @@ class BrowserSessions:
         if method == "turn/completed" and thread_id:
             turn = params.get("turn", {})
             self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=turn.get("status", "completed"))
-            if turn.get("status") == "failed":
+            with self.store._connection() as db:
+                pause = db.execute("SELECT paused, pause_kind FROM browser_inbox_wake WHERE thread_id = ?",
+                                   (thread_id,)).fetchone()
+            deliberate = (params.get("controlledShutdown", False)
+                          or (pause and pause["paused"] and pause["pause_kind"] == "stop")
+                          or (turn.get("termination") or {}).get("origin") == "user")
+            unsuccessful = turn.get("status") in {"failed", "interrupted", "cancelled", "canceled"}
+            if unsuccessful and not deliberate:
                 notify_agent_failure(self.store, thread_id, event_key=["turn", turn.get("id")],
-                                     stage="turn", error=turn.get("error"), turn_id=turn.get("id"))
+                                     stage="turn", error=turn.get("error") or
+                                     "The provider interrupted this turn. Inspect native execution and tool outcomes before recovery.",
+                                     turn_id=turn.get("id"))
             session = self.store.get_session(thread_id)
             unfinished = session["write_scope"] or session["scope_required"] or session["activity"] in {"implementing", "validating", "planning", "waiting"}
             self.store.touch(thread_id, "waiting" if unfinished else "idle", turn_active=False)
@@ -419,7 +432,7 @@ class BrowserSessions:
             else:
                 self.queue.pause(thread_id, "The turn stopped or failed. Resume queued messages when ready.")
                 self.inbox_wake.pause(thread_id, "The turn stopped or failed. Send a message to continue.",
-                                     kind="failure" if turn.get("status") == "failed" else "stop")
+                                     kind="stop" if deliberate else "failure")
         for identity in disconnected:
             reason = ("Codex disconnected. Review queued messages before resuming."
                       if method == "bridge/disconnected" else "The thread closed. Reopen it to resume queued messages.")

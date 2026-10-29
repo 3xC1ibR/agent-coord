@@ -107,6 +107,13 @@ class TurnWatchdogTests(unittest.TestCase):
         self.sessions.inbox_wake._dispatch(self.parent)
         self.assertIn(self.parent, self.sessions.active)
 
+    def test_recovery_deadline_error_does_not_disable_active_turn_supervision(self):
+        child = self.child()
+        with patch("agent_coord.turn_watchdog.process_failure_followups", side_effect=RuntimeError("deadline scan failed")):
+            with self.assertLogs("agent_coord.turn_watchdog", level="ERROR"):
+                self.tick(301)
+        self.assertEqual(len(self.nudges(child)), 1)
+
     def test_streaming_reasoning_counts_as_progress_without_new_tools(self):
         child = self.child()
         self.now = 290

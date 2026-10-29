@@ -192,6 +192,7 @@ class AntigravityRPC:
                 for turn in history.get("turns", []):
                     if turn.get("status") == "inProgress":
                         turn["status"] = "interrupted"
+                        turn["termination"] = {"origin": "runtime", "reason": "runtime_state_lost", "execution": "unknown"}
                     self._unconfirmed_tools(turn, "The session ended before Antigravity reported this tool's outcome.")
         history["status"] = {"type": "active" if active else "idle"}
         return history
@@ -347,14 +348,16 @@ class AntigravityRPC:
             try:
                 self._submit_prompt(thread_id, turn["id"], connection, prompt)
             except Exception as exc:
-                self._finish(thread_id, "failed", str(exc))
+                self._finish(thread_id, "failed", str(exc),
+                             termination={"origin": "runtime", "reason": "submission_error", "execution": "unknown"})
                 raise
             return {"turn": copy.deepcopy(turn)}
         if method == "turn/interrupt":
             turn = self.turns.get(thread_id)
             if not turn or turn["id"] != params["turnId"]:
                 raise CoordinationError("The active Antigravity turn changed or finished.")
-            self._finish(thread_id, "interrupted")
+            self._finish(thread_id, "interrupted",
+                         termination={"origin": "user", "reason": "turn_interrupt", "execution": "unknown"})
             connection = self.connections.pop(thread_id, None)
             if connection:
                 try:
@@ -367,18 +370,41 @@ class AntigravityRPC:
     def _prompt_done(self, thread_id, turn_id, future):
         if self.turns.get(thread_id, {}).get("id") != turn_id:
             return
+        def finish(status, error=None, *, reason, origin="provider", execution="unknown"):
+            self._finish(thread_id, status, error, expected_turn_id=turn_id,
+                         termination={"origin": origin, "reason": reason, "execution": execution})
         try:
             result = future.result()
             reason = result.get("stopReason", "end_turn")
             error = self._runtime_failure(thread_id)
             if error:
-                self._finish(thread_id, "failed", error)
+                finish("failed", error, reason=reason)
                 return
-            if reason not in {"cancelled", "canceled"}:
+            with self.lock:
+                turn = self.turns.get(thread_id, {})
+                if turn.get("id") != turn_id:
+                    return
+                items = turn.get("items", [])
+                user_cancelled = self.delivery_turns.get(thread_id, {}).get("user_cancel_requested", False)
+                execution = "unknown" if any(i.get("type") == "mcpToolCall" and
+                    i.get("status") in {"inProgress", "unknown"} for i in items) else "ended"
+            if reason in {"cancelled", "canceled"}:
+                finish("interrupted", reason=reason, origin="user" if user_cancelled else "provider")
+            elif reason in {"max_tokens", "max_turn_requests"}:
+                finish("failed", "Antigravity reached " + reason.replace("_", " ") +
+                       ". Review the saved work before continuing.", reason=reason, execution=execution)
+            elif reason != "end_turn":
+                finish("failed", f"Antigravity stopped the prompt ({reason}). Review the response and native session before continuing.",
+                       reason=reason, execution=execution)
+            elif not any((i.get("type") == "agentMessage" and i.get("text", "").strip())
+                         or i.get("type") == "mcpToolCall" for i in items):
+                finish("failed", "Antigravity ended the prompt without a response. Check Antigravity status and logs before continuing.",
+                       reason=reason)
+            else:
                 self._confirm_delivery(thread_id)
-            self._finish(thread_id, "interrupted" if reason in {"cancelled", "canceled"} else "completed")
+                finish("completed", reason=reason, execution=execution)
         except Exception as exc:
-            self._finish(thread_id, "failed", str(exc))
+            finish("failed", str(exc), origin="runtime", reason="prompt_error")
 
     def _runtime_failure(self, thread_id):
         # ACP 1.3.0 emits these runtime diagnostics as assistant text followed
@@ -420,8 +446,10 @@ class AntigravityRPC:
     # delivers them on the next idle turn, with its user queue/Stop/Close guards.
     # Never cancel a prompt (or a pending permission) merely to deliver peers.
 
-    def _finish(self, thread_id, status, error=None):
+    def _finish(self, thread_id, status, error=None, *, termination=None, expected_turn_id=None):
         with self.lock:
+            if expected_turn_id is not None and self.turns.get(thread_id, {}).get("id") != expected_turn_id:
+                return
             turn = self.turns.pop(thread_id, None)
             if not turn:
                 return
@@ -429,6 +457,7 @@ class AntigravityRPC:
             if state and status != "completed":
                 self.delivery.failed(turn["id"], state["batch"], error or "The turn was stopped; receipt is not acknowledgment.")
             turn["status"] = status
+            turn["termination"] = termination or {"origin": "runtime", "reason": "unknown", "execution": "unknown"}
             self._unconfirmed_tools(turn,
                 "The turn ended before Antigravity reported this tool's outcome.")
             if error:
@@ -446,7 +475,8 @@ class AntigravityRPC:
     def _message(self, thread_id, message):
         method, params = message.get("method"), message.get("params", {})
         if method == "disconnected":
-            self._finish(thread_id, "failed", params.get("error"))
+            self._finish(thread_id, "failed", params.get("error"),
+                         termination={"origin": "runtime", "reason": "disconnected", "execution": "unknown"})
             return
         connection = self.connections.get(thread_id)
         if not connection:
@@ -573,13 +603,19 @@ class AntigravityRPC:
             if not selected:
                 raise CoordinationError("This decision is not offered by Antigravity.")
         outcome = {"outcome": "selected", "optionId": selected["optionId"]} if selected else {"outcome": "cancelled"}
+        if selected is None:
+            with self.lock:
+                state = self.delivery_turns.get(thread_id)
+                if state:
+                    state["user_cancel_requested"] = True
         self.connections[thread_id].write({"id": request_id, "result": {"outcome": outcome}})
         self.requests.pop(message["id"], None)
 
     def close(self):
         self.closed = True
         for thread_id in list(self.turns):
-            self._finish(thread_id, "interrupted")
+            self._finish(thread_id, "interrupted",
+                         termination={"origin": "runtime", "reason": "runtime_closed", "execution": "unknown"})
         for thread_id, connection in list(self.connections.items()):
             connection.close()
         self.connections.clear()

@@ -263,7 +263,7 @@ class EventSubscriptions:
                 "result_ref": {"job_id": item["job_id"]}}
 
     def _deliver(self, db, subscription, target, outcomes, now, *, timeout=False):
-        if not timeout and len(outcomes) == 1 and outcomes[0].get("assignment_message_id") and outcomes[0]["state"] == "failed":
+        if not timeout and len(outcomes) == 1 and outcomes[0].get("assignment_message_id") and outcomes[0]["state"] in {"failed", "interrupted"}:
             from .app_agent_failures import turn_failure_message
             outcome = outcomes[0]
             existing = turn_failure_message(db, subscription["owner_session_id"], outcome["session_id"], outcome["turn_id"])

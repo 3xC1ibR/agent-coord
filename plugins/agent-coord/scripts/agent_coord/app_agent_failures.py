@@ -4,6 +4,74 @@ from __future__ import annotations
 import hashlib
 import json
 
+from .workspaces import matches_workspace
+
+
+FOLLOWUP_SECONDS = 600
+
+
+def _track_followup(store, db, request, turn_id):
+    """A terminal turn is no longer watched by the active-turn watchdog."""
+    if not turn_id:
+        return
+    db.execute("""CREATE TABLE IF NOT EXISTS app_agent_followups (
+        thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        created_at REAL NOT NULL, due_at REAL NOT NULL, escalated_at REAL,
+        resolved_at REAL, resolution TEXT, PRIMARY KEY(thread_id, turn_id)
+    )""")
+    db.execute("""CREATE INDEX IF NOT EXISTS app_agent_followups_due ON app_agent_followups(due_at)
+        WHERE resolved_at IS NULL AND escalated_at IS NULL""")
+    now = store.clock()
+    db.execute("""INSERT OR IGNORE INTO app_agent_followups
+        (thread_id, turn_id, request_id, created_at, due_at) VALUES (?, ?, ?, ?, ?)""",
+        (request["thread_id"], turn_id, request["request_id"], now, now + FOLLOWUP_SECONDS))
+
+
+def process_failure_followups(store, cwd=None):
+    """Escalate unresolved work once, without running or transferring it."""
+    with store._connection() as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_agent_followups'").fetchone():
+            return
+        now = store.clock()
+        db.execute("BEGIN IMMEDIATE")
+        rows = db.execute("""SELECT f.*, b.cwd FROM app_agent_followups f
+            JOIN browser_sessions b ON b.thread_id = f.thread_id
+            WHERE f.resolved_at IS NULL AND f.escalated_at IS NULL AND f.due_at <= ?""", (now,)).fetchall()
+        for row in rows:
+            if not matches_workspace(row["cwd"], cwd):
+                continue
+            tid, turn = row["thread_id"], row["turn_id"]
+            current = db.execute("SELECT turn_key, attention FROM work_threads WHERE thread_id = ?", (tid,)).fetchone()
+            wake = db.execute("SELECT paused, pause_kind FROM browser_inbox_wake WHERE thread_id = ?", (tid,)).fetchone()
+            resolution = None
+            if not current or current["attention"] == "archived":
+                resolution = "closed"
+            elif current["turn_key"] != turn:
+                resolution = "new_turn"
+            elif wake and wake["paused"] and wake["pause_kind"] == "stop":
+                resolution = "user_stop"
+            elif db.execute("SELECT 1 FROM handoffs WHERE sender_session_id = ? AND created_at >= ?",
+                            (tid, row["created_at"])).fetchone():
+                resolution = "handoff"
+            elif db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone() and db.execute(
+                    "SELECT 1 FROM thread_close_requests WHERE thread_id = ? AND status IN ('queued', 'closing')", (tid,)).fetchone():
+                resolution = "closing"
+            if resolution:
+                db.execute("UPDATE app_agent_followups SET resolved_at = ?, resolution = ? WHERE thread_id = ? AND turn_id = ?",
+                           (now, resolution, tid, turn))
+                continue
+            request = db.execute("SELECT * FROM app_control_requests WHERE request_id = ?", (row["request_id"],)).fetchone()
+            if request:
+                _notify(store, db, request, event_key=["unresolved", turn], stage="recovery_deadline", turn_id=turn,
+                        error="No newer turn or recorded scope handoff was observed within ten minutes of the failure report.",
+                        event="app_agent_recovery_overdue", guidance=
+                        "Inspect the native agent and existing tool/job results, then recover with fresh instructions or "
+                        "record a scope handoff to an available worker. For a usage limit, choose an available provider "
+                        "or an authorized continuation after quota resets; do not repeatedly retry the exhausted provider. "
+                        "Acknowledging this alert is not recovery. No prompt was replayed and no scope was released. "
+                        "This reminder is sent once; no reply is required.")
+                db.execute("UPDATE app_agent_followups SET escalated_at = ? WHERE thread_id = ? AND turn_id = ?", (now, tid, turn))
+
 
 def _receipt_thread(request_id, event_key):
     return "app-agent-failure:" + hashlib.sha256(json.dumps([request_id, event_key]).encode()).hexdigest()
@@ -90,6 +158,7 @@ def notify_agent_failure(store, thread_id, *, event_key, stage, error=None, turn
             AND status IN ('running', 'completed', 'uncertain')
             ORDER BY created_at, request_id LIMIT 1""", (thread_id,)).fetchone()
         if request:
+            _track_followup(store, db, request, turn_id)
             _notify(store, db, request, event_key=event_key, stage=stage, error=error, turn_id=turn_id)
 
 
