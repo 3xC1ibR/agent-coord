@@ -2,6 +2,7 @@
 from collections import defaultdict
 
 from .store import CoordinationError
+from .supervision import overrides as supervision_overrides
 
 
 def agent_tree(sessions, thread_id):
@@ -14,6 +15,8 @@ def agent_tree(sessions, thread_id):
         for row in db.execute("""SELECT parent_session_id, child_session_id FROM delegations
                                  WHERE child_session_id IS NOT NULL ORDER BY created_at, delegation_id"""):
             parents.setdefault(row[1], row[0])
+        # An explicit supervision transfer replaces the creator edge.
+        parents.update(supervision_overrides(db))
     # Old data can contain cycles. The same edge is dropped for every entry point.
     for child in sorted(parents):
         seen, parent = {child}, parents.get(child)

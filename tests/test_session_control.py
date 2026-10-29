@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 import unittest
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
+from agent_coord import supervision
 from agent_coord.app_control import AppControl, AppControlWorker
 from agent_coord.session_control import SessionControl
 from agent_coord.store import CoordinationError
@@ -188,6 +189,23 @@ class InteractiveControlTests(unittest.TestCase):
         self.assertEqual(
             self.interactive.snapshot("ramble", target)["thread_id"], target
         )
+
+    def test_supervision_transfer_moves_interactive_control_to_successor(self):
+        self.store.register(session_id="successor", client="codex", cwd=str(self.root))
+        with self.store._connection() as db:
+            db.execute("UPDATE messages SET delivered_at = 1 WHERE recipient_session_id = ?", (self.tid,))
+        self.store.touch(self.tid, turn_active=False)
+        with self.assertRaisesRegex(CoordinationError, "Another interactive controller"):
+            self.interactive.authorize("successor", self.tid)
+        supervision.transfer(self.store, requester="ramble", from_session="ramble", to_session="successor",
+                             thread_ids=[self.tid], request_id="adopt-work", reason="Replace lead",
+                             workspace=str(self.root))
+        with self.assertRaisesRegex(CoordinationError, "current supervisor"):
+            self.interactive.authorize("ramble", self.tid)
+        self.interactive.bind("successor", self.tid)
+        self.assertEqual(self.interactive.snapshot("successor", self.tid)["thread_id"], self.tid)
+        with self.assertRaisesRegex(CoordinationError, "Another interactive controller"):
+            self.interactive.authorize("ramble", self.tid)
 
     def test_interactive_creation_binds_before_initial_wake(self):
         receipt = self.control.request(

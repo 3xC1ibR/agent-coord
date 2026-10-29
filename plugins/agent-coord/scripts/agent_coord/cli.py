@@ -258,12 +258,24 @@ def _parser() -> argparse.ArgumentParser:
     move.add_argument("--session-id", help="Target conversation; defaults to the current caller.")
     move.add_argument("--from-session", help="Requester; defaults to the current caller.")
     move.add_argument("--cwd", required=True, help="Absolute destination project directory.")
-    resume = thread_commands.add_parser("resume", help="Let the creating orchestrator recover a failed or interrupted app agent for fresh inbox work.")
+    resume = thread_commands.add_parser("resume", help="Let the current supervisor (the creating orchestrator unless adopted) recover a failed or interrupted app agent for fresh inbox work.")
     resume.add_argument("--session-id", required=True, help="Target app agent.")
-    resume.add_argument("--from-session", help="Creating orchestrator; defaults to the current caller.")
+    resume.add_argument("--from-session", help="Current supervisor; defaults to the current caller.")
     resume.add_argument("--expected-turn-id", required=True, help="Failed or interrupted turn inspected before requesting recovery.")
     resume.add_argument("--reason", help="Why this explicit recovery is safe; saved in the recovery audit.")
     resume.add_argument("--confirm-stopped", action="store_true", help="Attest that native execution stopped after inspecting agent and tool outcomes; requires --reason.")
+    adopt = thread_commands.add_parser("adopt", help="Adopt selected idle app agents from a supervisor that has ended or been closed; never wakes or stops them.")
+    adopt.add_argument("--from-session", help="Successor that adopts the agents; defaults to the current caller.")
+    adopt.add_argument("--from-supervisor", required=True, help="Ended or closed supervisor of every selected agent.")
+    transfer_supervision = thread_commands.add_parser("transfer-supervision", help="Hand off selected idle app agents you supervise to a successor; never wakes or stops them.")
+    transfer_supervision.add_argument("--from-session", help="Current supervisor; defaults to the current caller.")
+    transfer_supervision.add_argument("--to-session", required=True, help="Successor that will supervise the agents.")
+    for supervision_change in (adopt, transfer_supervision):
+        supervision_change.add_argument("--thread", dest="thread_ids", action="append", required=True, help="Direct app agent; repeat for each agent.")
+        supervision_change.add_argument("--request-id", required=True, help="Idempotency key; repeating it returns the recorded transfer.")
+        supervision_change.add_argument("--reason", required=True, help="Why supervision moves; saved in the transfer audit and notices.")
+    supervision_record = thread_commands.add_parser("supervision", help="Show an app agent's creator, current supervisor and supervision transfers.")
+    supervision_record.add_argument("--thread", required=True, help="App agent thread.")
     permissions = settings.add_mutually_exclusive_group()
     permissions.add_argument("--yolo", dest="yolo", action="store_const", const=True, default=None)
     permissions.add_argument("--default-permissions", dest="yolo", action="store_const", const=False)
@@ -829,6 +841,19 @@ def run(arguments: argparse.Namespace) -> Any:
             receipt = control.request(operation, arguments.from_session, payload,
                                       thread_id=getattr(arguments, "session_id", None), request_id=arguments.request_id)
             return control.status(receipt["request_id"], wait=arguments.wait)
+        if arguments.thread_command in {"adopt", "transfer-supervision"}:
+            from . import supervision
+            # The caller is the requester: the successor adopts, or the current supervisor hands off.
+            adopting = arguments.thread_command == "adopt"
+            return supervision.transfer(
+                store, requester=arguments.from_session,
+                from_session=arguments.from_supervisor if adopting else arguments.from_session,
+                to_session=arguments.from_session if adopting else arguments.to_session,
+                thread_ids=arguments.thread_ids, request_id=arguments.request_id, reason=arguments.reason,
+                workspace=store.get_session(arguments.from_session)["cwd"])
+        if arguments.thread_command == "supervision":
+            from . import supervision
+            return supervision.history(store, arguments.thread)
         associations = {key: getattr(arguments, key) for key in ("repository_id", "project_id") if hasattr(arguments, key)}
         if arguments.thread_command == "list":
             return store.threads.list(archived=arguments.archived, cwd=arguments.cwd, **associations)

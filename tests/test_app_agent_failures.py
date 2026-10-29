@@ -11,7 +11,8 @@ from unittest.mock import patch
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
 from test_browser_providers import claude_factory
 from agent_coord.app_control import AppControl, AppControlWorker
-from agent_coord.app_agent_failures import notify_agent_failure, process_failure_followups
+from agent_coord import supervision
+from agent_coord.app_agent_failures import notify_agent_failure, process_failure_followups, turn_failure_message
 
 
 class AppAgentFailureTests(unittest.TestCase):
@@ -325,6 +326,24 @@ class AppAgentFailureTests(unittest.TestCase):
                     # Cancelling a subscription must not suppress the independent failure report.
                     self.sessions.event_subscriptions.cancel(self.parent, subscription["id"])
                     self.assertEqual(len(self.reports()), before)
+
+    def test_failures_after_supervision_transfer_report_to_successor_once(self):
+        child = self.create(subscribe=False)
+        successor = self.sessions.create({"name": "Successor"})["session"]["thread_id"]
+        self.store.inbox(child)
+        self.store.touch(child, turn_active=False)
+        supervision.transfer(self.store, requester=self.parent, from_session=self.parent, to_session=successor,
+                             thread_ids=[child], request_id="adopt", reason="Replace lead", workspace=str(self.root))
+        before = len(self.reports())
+        for _ in range(2):
+            notify_agent_failure(self.store, child, event_key=["turn", "t1"], stage="turn",
+                                 error="Provider crashed", turn_id="t1")
+        self.assertEqual(len(self.reports()), before)
+        reports = [r for r in self.store.inbox(successor, mark_delivered=False) if r["classification"] == "action_required"]
+        self.assertEqual([json.loads(r["body"])["session_id"] for r in reports], [child])
+        with self.store._connection() as db:
+            self.assertEqual(turn_failure_message(db, successor, child, "t1"), reports[0]["id"])
+            self.assertIsNone(turn_failure_message(db, self.parent, child, "t1"))
 
     def test_opt_out_keeps_failure_notification(self):
         child = self.create(subscribe=False)

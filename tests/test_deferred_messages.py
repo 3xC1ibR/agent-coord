@@ -12,9 +12,11 @@ from agent_coord.cli import _parser, run
 from agent_coord.hook import handle, _actionable_context
 from agent_coord.message_delivery import MessageDelivery
 from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord import supervision
 import test_codex_app_server as codex_fakes
 import test_browser_providers as provider_fakes
 import test_antigravity as gravity_fakes
+import test_subagent_close as supervision_fakes
 
 
 class DeferredMessageTests(unittest.TestCase):
@@ -118,6 +120,26 @@ class DeferredMessageTests(unittest.TestCase):
             self.assertIsNotNone(db.execute("SELECT suppressed_at FROM messages WHERE id=?", (msg["id"],)).fetchone()[0])
         next_msg = self.send(thread_id=msg["thread_id"])
         self.assertIn(f"Message #{next_msg['id']}", _actionable_context(self.store, "recipient"))
+
+    def test_retired_supervisor_cannot_use_deferred_to_bypass_instruction_guard(self):
+        supervision_fakes.attach(self.store, "sender", "recipient")
+        supervision.transfer(self.store, requester="sender", from_session="sender", to_session="successor",
+            thread_ids=["recipient"], request_id="transfer", reason="Handoff", workspace=str(self.root))
+        with self.assertRaisesRegex(CoordinationError, "now supervised by successor"):
+            self.send()
+
+    def test_pending_deferred_from_old_supervisor_must_be_resolved_before_transfer(self):
+        supervision_fakes.attach(self.store, "sender", "recipient")
+        msg = self.send()
+        with self.assertRaisesRegex(CoordinationError, "undelivered request"):
+            supervision.transfer(self.store, requester="sender", from_session="sender", to_session="successor",
+                thread_ids=["recipient"], request_id="blocked", reason="Handoff", workspace=str(self.root))
+        self.store.send_message(sender_session_id="sender", recipient_session_id="recipient",
+            body="Withdraw pending constraint before handoff.", classification="closure",
+            thread_id=msg["thread_id"], reply_required=False)
+        result = supervision.transfer(self.store, requester="sender", from_session="sender", to_session="successor",
+            thread_ids=["recipient"], request_id="resolved", reason="Handoff", workspace=str(self.root))
+        self.assertEqual(result["mode"], "handoff")
 
     def test_app_deferral_neither_wakes_nor_reopens_and_reaches_later_user_turn(self):
         sessions = self.sessions()

@@ -80,10 +80,9 @@ class BrowserInboxWake:
                                         "expected failed or interrupted.")
             with self.store._connection() as db:
                 db.execute("BEGIN IMMEDIATE")
-                if not db.execute("""SELECT 1 FROM app_control_requests WHERE operation = 'create'
-                        AND thread_id = ? AND sender_session_id = ? AND status = 'completed'""",
-                        (thread_id, requester)).fetchone():
-                    raise CoordinationError("Only this app agent's creating orchestrator can recover it.")
+                from .supervision import authorizes
+                if not authorizes(db, requester, thread_id):
+                    raise CoordinationError("Only this app agent's current supervisor can recover it.")
                 if self.store.threads.get(thread_id)["attention"] == "archived":
                     raise CoordinationError("Recovery cannot reopen a closed conversation.")
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone() and db.execute(

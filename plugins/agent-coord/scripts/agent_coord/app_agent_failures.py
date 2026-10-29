@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from . import supervision
 from .workspaces import matches_workspace
 
 
@@ -81,9 +82,18 @@ def turn_failure_message(db, creator, child, turn_id):
     """Find the existing runtime report for a subscribed failed turn."""
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
         return None
-    request = db.execute("""SELECT request_id FROM app_control_requests
-        WHERE operation = 'create' AND thread_id = ? AND sender_session_id = ?
-        ORDER BY created_at, request_id LIMIT 1""", (child, creator)).fetchone()
+    current = supervision.override(db, child)
+    if current is not None and current != creator:
+        return None  # Reports for a transferred agent belong to its current supervisor.
+    if current == creator:
+        # The report was routed to the current supervisor under the creation's receipt.
+        request = db.execute("""SELECT request_id FROM app_control_requests
+            WHERE operation = 'create' AND thread_id = ? AND status IN ('running', 'completed', 'uncertain')
+            ORDER BY created_at, request_id LIMIT 1""", (child,)).fetchone()
+    else:
+        request = db.execute("""SELECT request_id FROM app_control_requests
+            WHERE operation = 'create' AND thread_id = ? AND sender_session_id = ?
+            ORDER BY created_at, request_id LIMIT 1""", (child, creator)).fetchone()
     if request is None:
         return None
     row = db.execute("SELECT id FROM messages WHERE thread_id = ?",
@@ -92,8 +102,9 @@ def turn_failure_message(db, creator, child, turn_id):
 
 
 def _notify(store, db, request, *, event_key, stage, error, turn_id=None, event="app_agent_failed", guidance=None):
-    creator = request["sender_session_id"]
     child = request["thread_id"]
+    # Reports go to the current supervisor; creation failures precede any transfer.
+    creator = supervision.override(db, child) or request["sender_session_id"]
     if child == creator or not db.execute(
             "SELECT 1 FROM sessions WHERE session_id = ?", (creator,)).fetchone():
         return

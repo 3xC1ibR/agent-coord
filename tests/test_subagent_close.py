@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import test_codex_app_server
 import test_ui
+from agent_coord import supervision
 from agent_coord.app_control import AppControl
 from agent_coord.store import CoordinationError
 from agent_coord.subagent_close import close_plan, close_with_subagents
@@ -41,6 +42,16 @@ class SubagentCloseTests(unittest.TestCase):
         self.store.attach_delegation(delegation["delegation_id"], "delegate")
         self.assertEqual(set(self.plan_ids(parent)), {child, nested, "delegate"})
         self.assertLess(self.plan_ids(parent).index(nested), self.plan_ids(parent).index(child))
+
+    def test_adopted_agents_close_with_the_successor_not_the_retired_lead(self):
+        lead, successor, child, nested, kept = [self.create() for _ in range(5)]
+        attach(self.store, lead, child)
+        attach(self.store, child, nested)
+        attach(self.store, lead, kept)
+        supervision.transfer(self.store, requester=lead, from_session=lead, to_session=successor,
+                             thread_ids=[child], request_id="adopt", reason="Replace lead", workspace=str(self.root))
+        self.assertEqual(self.plan_ids(lead), [kept])
+        self.assertEqual(self.plan_ids(successor), [nested, child])
 
     def test_no_closes_only_parent_and_leaves_running_child_and_scope_untouched(self):
         parent, child = self.create(), self.create()

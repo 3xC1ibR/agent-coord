@@ -266,6 +266,14 @@ transaction; no separate `ack` is needed. Use `ack` for messages handled without
 replying. Starting new work or asking a follow-up question uses `send`
 with an explicit reply choice.
 
+After an explicit supervisor transfer, a worker's reply addressed to its retired
+supervisor reaches the current supervisor. It keeps `in_reply_to` pointing to the
+original assignment and acknowledges that assignment atomically, but uses a new
+two-participant exchange; the original exchange and creator provenance stay
+unchanged. A retired supervisor cannot send actionable or deferred instructions
+or actionable replies to the transferred worker. Informational and closure messages remain
+available, and ordinary messaging is unchanged when no transfer exists.
+
 Continue a conversation with the same `--thread-id`. A thread accepts only the
 same pair of sessions, in either direction. Close it with one terminal message:
 

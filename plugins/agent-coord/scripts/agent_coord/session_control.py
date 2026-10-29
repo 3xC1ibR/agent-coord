@@ -1,7 +1,8 @@
 """Owner-routed interactive control and a durable journal of public output.
 
 Local callers identify themselves through their registered coordination session.
-A caller needs creator provenance or an explicit local --adopt grant.
+A caller needs current supervision (creator provenance by default) or an
+explicit local --adopt grant.
 Never export reasoning, tool output, or partial agent-message deltas.
 """
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 import time
 
+from . import supervision
 from .store import CoordinationError
 
 
@@ -35,24 +37,22 @@ class SessionControl:
         self.store.get_session(sender)
         self.store.get_session(thread)
         with self.store._connection() as db:
-            created = db.execute(
-                """SELECT 1 FROM app_control_requests WHERE operation='create'
-                AND sender_session_id=? AND thread_id=? AND status='completed'""",
-                (sender, thread),
-            ).fetchone()
-        with self.store._connection() as db:
+            # The current supervisor: the creator unless supervision was transferred.
+            created = supervision.authorizes(db, sender, thread)
             binding = db.execute(
                 "SELECT sender_id FROM interactive_bindings WHERE thread_id=?",
                 (thread,),
             ).fetchone()
-        if binding and binding["sender_id"] != sender:
+            # A transfer revokes the retired supervisor's binding.
+            stale = bool(binding) and supervision.retired_supervisor(db, binding["sender_id"], thread)
+        if binding and binding["sender_id"] != sender and not (stale and created):
             raise CoordinationError(
                 "Another interactive controller owns this conversation."
             )
-        granted = binding is not None
+        granted = binding is not None and binding["sender_id"] == sender and not stale
         if not created and not granted:
             raise CoordinationError(
-                "Interactive controls require this conversation's creating session."
+                "Interactive controls require this conversation's current supervisor."
             )
 
     def adopt(self, sender, thread):
@@ -80,7 +80,8 @@ class SessionControl:
         with self.store._connection() as db:
             db.execute(
                 """INSERT INTO interactive_bindings(thread_id,sender_id,touched_at) VALUES (?,?,?)
-                ON CONFLICT(thread_id) DO UPDATE SET touched_at=excluded.touched_at""",
+                ON CONFLICT(thread_id) DO UPDATE SET sender_id=excluded.sender_id,
+                touched_at=excluded.touched_at""",
                 (thread, sender, self.store.clock()),
             )
 

@@ -19,6 +19,39 @@ from agent_coord.store import CoordinationError
 
 
 class CliTests(unittest.TestCase):
+    def test_supervision_handoff_and_adoption_commands_follow_authority(self):
+        from agent_coord.app_control import AppControl
+        from agent_coord.store import CoordinationStore
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            database = str(root / "coord.sqlite3")
+            store = CoordinationStore(database)
+            for session in ("lead", "successor", "other", "child"):
+                store.register(session_id=session, client="codex", cwd=str(root))
+            control = AppControl(store)
+            request = control.request("create", "lead", {"cwd": str(root), "name": "Child", "prompt": "Work"})
+            control.claim(request["request_id"], "test")
+            control.identified(request["request_id"], "child")
+            control.complete(request["request_id"], result={"thread_id": "child"})
+            handoff = ["--db", database, "thread", "transfer-supervision", "--to-session", "successor",
+                       "--thread", "child", "--request-id", "handoff-1", "--reason", "Replace the lead"]
+            with patch("agent_coord.cli.caller_session", return_value="lead"):
+                result = cli_run(_parser().parse_args(handoff))
+            self.assertEqual((result["mode"], result["from_session_id"], result["to_session_id"]),
+                             ("handoff", "lead", "successor"))
+            self.assertEqual([agent["thread_id"] for agent in result["agents"]], ["child"])
+            record = cli_run(_parser().parse_args(["--db", database, "thread", "supervision", "--thread", "child"]))
+            self.assertEqual((record["created_by"], record["supervisor"]), ("lead", "successor"))
+            adopt = ["--db", database, "thread", "adopt", "--from-session", "other", "--from-supervisor", "successor",
+                     "--thread", "child", "--request-id", "adopt-1", "--reason", "Successor closed"]
+            with self.assertRaisesRegex(CoordinationError, "has not ended or been closed"):
+                cli_run(_parser().parse_args(adopt))
+            with self.assertRaisesRegex(CoordinationError, "supervised by successor, not lead"):
+                cli_run(_parser().parse_args(["--db", database, "thread", "transfer-supervision", "--from-session", "lead",
+                    "--to-session", "other", "--thread", "child", "--request-id", "handoff-2", "--reason", "Stale"]))
+            store.end_session("successor")
+            self.assertEqual(cli_run(_parser().parse_args(adopt))["mode"], "adoption")
+
     @patch("agent_coord.cli.CoordinationStore")
     def test_thread_usage_explicit_recovery_does_not_resume_provider(self, store_class):
         store = store_class.return_value

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .store import CoordinationError
+from .supervision import overrides as supervision_overrides
 
 
 def close_plan(sessions, thread_id):
@@ -14,6 +15,11 @@ def close_plan(sessions, thread_id):
     with sessions.store._connection() as db:
         for row in db.execute("SELECT parent_session_id, child_session_id FROM delegations WHERE child_session_id IS NOT NULL"):
             edges.setdefault(row[0], set()).add(row[1])
+        # A retired supervisor's Close leaves adopted agents with their successor.
+        for child, supervisor in supervision_overrides(db).items():
+            for children in edges.values():
+                children.discard(child)
+            edges.setdefault(supervisor, set()).add(child)
     visited, ordered = {thread_id}, []
 
     def visit(parent):

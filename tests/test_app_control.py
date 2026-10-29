@@ -743,7 +743,7 @@ class AppControlTests(unittest.TestCase):
         thread, turn = self.failed_agent()
         self.continuation(thread)
         self.store.register(session_id="other", client="codex", cwd=str(self.root))
-        with self.assertRaisesRegex(CoordinationError, "creating orchestrator"):
+        with self.assertRaisesRegex(CoordinationError, "current supervisor"):
             self.control.request("resume", "other", {"expected_turn_id": turn}, thread_id=thread)
         request = self.recover_request(thread, "old-failed-turn")
         self.worker.process_once()
@@ -751,6 +751,31 @@ class AppControlTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "failed", receipt)
         self.assertIn("expected turn 'old-failed-turn'", receipt["error"])
         self.assertFalse(self.sessions.read(thread)["running"])
+
+    def test_adopting_supervisor_recovers_and_retired_creator_cannot(self):
+        thread, turn = self.failed_agent()
+        self.store.register(session_id="successor", client="codex", cwd=str(self.root))
+        from agent_coord import supervision
+        supervision.transfer(self.store, requester="dispatcher", from_session="dispatcher", to_session="successor",
+                             thread_ids=[thread], request_id="adopt", reason="Replace the lead",
+                             workspace=str(self.root))
+        self.store.send_message(sender_session_id="successor", recipient_session_id=thread,
+            body="Inspect existing results and current state before continuing. Do not repeat completed side effects.",
+            reply_required=False)
+        with self.assertRaisesRegex(CoordinationError, "current supervisor"):
+            self.recover_request(thread, turn)
+        self.sessions.inbox_wake.process_once()
+        self.assertFalse(self.sessions.read(thread)["running"])
+        request = self.control.request("resume", "successor", {"expected_turn_id": turn}, thread_id=thread)
+        self.worker.process_once()
+        receipt = self.control.status(request["request_id"])
+        self.assertEqual(receipt["status"], "completed", receipt)
+        self.assertEqual(receipt["result"]["resumed_by"], "successor")
+        self.sessions.inbox_wake.process_once()
+        detail = self.sessions.read(thread)
+        self.assertTrue(detail["running"])
+        self.assertEqual(len(detail["thread"]["turns"]), 2)
+        self.assertIn("Inspect existing results", str(self.deliver(thread)))
 
     def test_recovery_waits_safely_for_updated_runtime_and_can_be_cancelled(self):
         thread, turn = self.failed_agent()

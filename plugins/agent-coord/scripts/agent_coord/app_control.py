@@ -110,11 +110,11 @@ class AppControl:
                     raise CoordinationError("Execution confirmation must be a boolean.")
                 if payload.get("execution_confirmed") and not payload.get("reason"):
                     raise CoordinationError("Execution confirmation requires a reason describing the native-state evidence.")
+                from .supervision import authorizes
                 with self.store._connection() as db:
-                    if not db.execute("""SELECT 1 FROM app_control_requests WHERE operation = 'create'
-                            AND thread_id = ? AND sender_session_id = ? AND status = 'completed'""",
-                            (thread_id, sender_session_id)).fetchone():
-                        raise CoordinationError("Only this app agent's creating orchestrator can recover it.")
+                    # The creating orchestrator, unless supervision was explicitly transferred.
+                    if not authorizes(db, sender_session_id, thread_id):
+                        raise CoordinationError("Only this app agent's current supervisor can recover it.")
             elif operation == "move":
                 from .thread_move import destination_directory
                 if set(payload) != {"cwd"}:

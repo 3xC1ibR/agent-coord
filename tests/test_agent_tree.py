@@ -6,6 +6,7 @@ import tempfile
 import test_codex_app_server
 import test_ui
 from test_subagent_close import attach
+from agent_coord import supervision
 from agent_coord.agent_tree import agent_tree
 from agent_coord.store import CoordinationError
 
@@ -34,6 +35,21 @@ class AgentTreeTests(unittest.TestCase):
         self.assertFalse(by_id["delegate"]["browser_session"])
         self.assertEqual(by_id[parent]["attention"], "archived")
         self.assertEqual(self.sessions.rpc.calls, calls)
+
+    def test_supervision_transfer_moves_the_branch_to_the_successor(self):
+        lead, successor, child, nested, kept = [self.create() for _ in range(5)]
+        attach(self.store, lead, child)
+        attach(self.store, child, nested)
+        attach(self.store, lead, kept)
+        supervision.transfer(self.store, requester=lead, from_session=lead, to_session=successor,
+                             thread_ids=[child], request_id="adopt", reason="Replace lead", workspace=str(self.root))
+        result = agent_tree(self.sessions, nested)
+        self.assertEqual(result["root_thread_id"], successor)
+        by_id = {t["thread_id"]: t for t in result["data"]}
+        self.assertEqual(set(by_id), {successor, child, nested})
+        self.assertEqual(by_id[child]["agent_parent_id"], successor)
+        self.assertEqual(by_id[child]["created_by_thread_id"], lead)
+        self.assertEqual({t["thread_id"] for t in agent_tree(self.sessions, lead)["data"]}, {lead, kept})
 
     def test_workspace_boundary_hides_inaccessible_ancestors_and_children(self):
         child = self.create()

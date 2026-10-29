@@ -2667,6 +2667,17 @@ class CoordinationStore:
                 [(outcome, detail, message_id, session_id) for message_id in ids],
             )
 
+    def _guard_message(self, connection, sender, recipient, classification):
+        from .sidecars import guard_message
+        guard_message(connection, sender, recipient)
+        if classification in {"action_required", "deferred"}:
+            from .supervision import effective_supervisor, retired_supervisor
+            if retired_supervisor(connection, sender, recipient):
+                supervisor = effective_supervisor(connection, recipient)
+                raise CoordinationError(
+                    f"{recipient} is now supervised by {supervisor}; send through the current supervisor."
+                )
+
     def send_message(
         self,
         *,
@@ -2718,8 +2729,7 @@ class CoordinationStore:
         )
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            from .sidecars import guard_message
-            guard_message(connection, sender_session_id, recipient["session_id"])
+            self._guard_message(connection, sender_session_id, recipient["session_id"], classification)
             row, inserted = self._insert_message(
                 connection,
                 sender_session_id=sender_session_id,
@@ -2745,6 +2755,7 @@ class CoordinationStore:
     ) -> dict[str, Any]:
         """Atomically answer and acknowledge one request without another reply obligation."""
         from .context_lifecycle import reply_snapshot
+        from .supervision import report_recipient
         if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
             raise CoordinationError("Reply message ID must be a positive integer.")
         if not body.strip():
@@ -2767,15 +2778,23 @@ class CoordinationStore:
             if not original["reply_required"]:
                 raise CoordinationError(f"Message {message_id} does not request a reply. Use send with an explicit reply choice for new work.")
             now = self.clock()
-            from .sidecars import guard_message
-            guard_message(connection, sender_session_id, original["sender_session_id"])
+            recipient_id = report_recipient(connection, sender_session_id, original["sender_session_id"])
+            recipient = connection.execute("SELECT name, bead_id FROM sessions WHERE session_id = ?", (recipient_id,)).fetchone()
+            if recipient is None:
+                raise CoordinationError(f"Session {recipient_id} is not registered.")
+            self._guard_message(connection, sender_session_id, recipient_id, "action_required")
+            # A successor was not a participant in the original exchange.
+            # Keep that pair immutable; in_reply_to preserves assignment ancestry
+            # while this new exchange addresses the worker and current supervisor.
+            thread_id = (original["thread_id"] if recipient_id == original["sender_session_id"]
+                         else f"message:{uuid.uuid4()}")
             row, _ = self._insert_message(
                 connection,
                 sender_session_id=sender_session_id,
-                recipient_session_id=original["sender_session_id"],
+                recipient_session_id=recipient_id,
                 body=body.strip(),
                 classification="action_required",
-                thread_id=original["thread_id"],
+                thread_id=thread_id,
                 reply_required=False,
                 in_reply_to=message_id,
                 context_lifecycle_json=reply_snapshot(connection, sender_session_id, message_id),
@@ -2792,8 +2811,8 @@ class CoordinationStore:
             )
         result = self._row_to_message(row)
         result.update(
-            recipient_name=original["recipient_name"],
-            recipient_bead_id=original["recipient_bead_id"],
+            recipient_name=recipient["name"],
+            recipient_bead_id=recipient["bead_id"],
             idempotent=False,
         )
         return result
