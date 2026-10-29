@@ -119,6 +119,20 @@ p50 3 ms, conversation read p50 35 ms, thread detail p50 8 ms, search p50
 93 ms. Only search p95 failed, from the first search on a fresh database
 building its context cache once (1.17 s); later searches took 77–131 ms.
 
+Follow-up, build 17 (interface live, backend staged): opening a cached
+conversation in another project now paints at p50 68 ms, max 114 ms on the
+live app, because the overview list is redrawn after the conversation's frame
+instead of before it (it took 70–310 ms). A first, uncached open of a 75-turn,
+1.5 MB conversation enables Send with its history shown at p50 530 ms, max
+703 ms on the new backend under the realistic profile; the remainder is
+transferring and rendering the whole history.
+
+Validating startup on a fresh snapshot found that one interrupted conversation
+creation ("database is locked" after its browser session row was saved) left
+a row without a registered session, and every runtime start, including the
+pending handover, would have failed on it. Startup now skips such a row, and
+creation removes it when registration fails.
+
 ## Remaining bottlenecks
 
 - **One Python process runs every agent and every request.** Provider stream
@@ -129,7 +143,8 @@ building its context cache once (1.17 s); later searches took 77–131 ms.
   not further per-endpoint tuning.
 - Each list refresh still transfers and parses about 5 MB; a revisioned or
   incremental inventory would remove that cost from the WebView.
-- Opening a large conversation still renders the whole timeline, including
-  Markdown for every message.
+- Opening a large conversation for the first time transfers and renders its
+  whole history before Send is enabled (about 0.5 s for 1.5 MB under load);
+  loading the latest turns first would remove most of that.
 - Backend changes activate only at an idle runtime handover; see
   [runtime updates](runtime-updates.md). Interface changes apply on reopen.
