@@ -27,7 +27,7 @@ private final class SessionWindow: NSWindow {
 }
 
 private final class DesktopWindow {
-    let id = UUID().uuidString.lowercased()
+    let id: String
     var folderSlot = 0
     var isSettings = false
     var isConversationWindow = false
@@ -52,9 +52,17 @@ private final class DesktopWindow {
     var fileTarget = ""
     // Increases whenever this window becomes key; ranks most recent use.
     var activation = 0
+    var restorable = true
+    var launchRoute = "/"
+    var restoredWorkspace: [String: Any]?
+    var restoringWorkspace = false
+    var workspaceJSON: String?
+    var workspaceVersion = 0
+    var restorationAttempted = false
 
     init(window: NSWindow, webView: WKWebView, status: NSStackView, label: NSTextField,
-         spinner: NSProgressIndicator, retry: NSButton) {
+         spinner: NSProgressIndicator, retry: NSButton, id: String = UUID().uuidString.lowercased()) {
+        self.id = id
         self.window = window; self.webView = webView; self.status = status
         self.label = label; self.spinner = spinner; self.retry = retry
     }
@@ -99,6 +107,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var smokePreferences: String?
     private var smokePasteboard: NSPasteboard?
     private var sessionKeyMonitor: Any?
+    private var windowStore: WindowRestorationStore?
+    private var restoringWindows = false
+    private var nextFolderSlot = 0
+    private var windowSaveScheduled = false
+    private let windowPersistenceQueue = DispatchQueue(label: "com.agentcoord.desktop.windows", qos: .utility)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -114,9 +127,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                     directory = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
                 }
                 smokeDirectory = directory
-                smokePreferences = "com.agentcoord.desktop.smoke." + UUID().uuidString
+                if let flag = CommandLine.arguments.firstIndex(of: "--smoke-preferences"), flag + 1 < CommandLine.arguments.count,
+                   CommandLine.arguments[flag + 1].hasPrefix("com.agentcoord.desktop.smoke.") {
+                    smokePreferences = CommandLine.arguments[flag + 1]
+                } else { smokePreferences = "com.agentcoord.desktop.smoke." + UUID().uuidString }
                 preferences = UserDefaults(suiteName: smokePreferences!)!
-                application(NSApp, open: [URL(string: "agentcoord://overview")!])
+                if !CommandLine.arguments.contains("--smoke-window-restoration") {
+                    application(NSApp, open: [URL(string: "agentcoord://overview")!])
+                }
                 smokeResults["cold_start_link_queued"] = pendingAppLinks.count == 1
                 smokeResults["launch_working_directory_matches_environment"] =
                     ProcessInfo.processInfo.environment["PWD"] == FileManager.default.currentDirectoryPath
@@ -144,7 +162,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 let target = (event.window ?? NSApp.keyWindow) as? SessionWindow
                 return target?.routeSessionShortcut(event) == true ? nil : event
             }
-            makeWindow()
+            let database = smokeDirectory?.appendingPathComponent("state.sqlite3").path ?? configuration.databasePath
+            windowStore = WindowRestorationStore(url: directory.appendingPathComponent("windows/state.json"), database: database)
+            restoreWindows()
             UNUserNotificationCenter.current().delegate = self
             activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
                 reason: "Receive Ribbon Field turn completions while the window is closed")
@@ -157,7 +177,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 for item in self.windows {
                     if !item.isSettings { item.files.connect(BackendWorkspaceFiles(baseURL: url, local: true)) }
                     self.configureScripts(item.webView)
-                    item.webView.load(URLRequest(url: item.isSettings ? url.appendingPathComponent("settings") : url))
+                    item.webView.load(URLRequest(url: self.destination(for: item, base: url)))
                 }
             }
             backend.exited = { [weak self] message in
@@ -273,9 +293,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         NSApp.mainMenu = main
     }
 
-    @discardableResult private func makeWindow(url: URL? = nil) -> DesktopWindow {
-        let settings = url?.path == "/settings"
-        let conversation = URLComponents(url: url ?? serverURL ?? URL(fileURLWithPath: "/"), resolvingAgainstBaseURL: false)?
+    @discardableResult private func makeWindow(url: URL? = nil, restoring saved: RestoredWindow? = nil) -> DesktopWindow {
+        let settings = saved?.kind == .settings || url?.path == "/settings"
+        let conversation = saved?.kind == .conversation || URLComponents(url: url ?? serverURL ?? URL(fileURLWithPath: "/"), resolvingAgainstBaseURL: false)?
             .queryItems?.contains { $0.name == "detached" && $0.value == "1" } == true
         if settings, let existing = windows.first(where: { $0.isSettings }) {
             existing.window.deminiaturize(nil)
@@ -291,7 +311,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.tabbingMode = .disallowed
-        if smokeReport == nil && (settings || windows.isEmpty) { window.setFrameAutosaveName(settings ? "AgentCoordSettings" : "AgentCoordWorkspace") }
+        if saved == nil && smokeReport == nil && (settings || windows.isEmpty) { window.setFrameAutosaveName(settings ? "AgentCoordSettings" : "AgentCoordWorkspace") }
         if settings {
             if smokeReport != nil || !window.setFrameUsingName("AgentCoordSettings") { window.center() }
         } else if let previous = previous, !conversation {
@@ -324,12 +344,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             status.widthAnchor.constraint(equalToConstant: 480),
         ])
         let item = DesktopWindow(window: window, webView: webView, status: status, label: statusLabel,
-                                 spinner: spinner, retry: retry)
+                                 spinner: spinner, retry: retry, id: saved?.id ?? UUID().uuidString.lowercased())
         item.isSettings = settings
         item.isConversationWindow = conversation
         item.files.preferences = preferences
-        // Stable slots restore each window's folder without reusing its runtime identity.
-        while windows.contains(where: { $0.folderSlot == item.folderSlot }) { item.folderSlot += 1 }
+        item.folderSlot = saved?.folderSlot ?? nextFolderSlot
+        nextFolderSlot = max(nextFolderSlot, item.folderSlot + 1)
+        let initialRoute = saved?.route ?? url.map(localRoute) ?? (settings ? "/settings" : "/")
+        item.launchRoute = URL(string: initialRoute).map(localRoute) ?? "/"
+        item.restoredWorkspace = saved?.workspaceState
+        item.workspaceJSON = saved?.workspaceJSON
+        if let saved = saved {
+            var frame = saved.frame
+            if let displayID = saved.displayID, let oldScreen = saved.screen,
+               let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID }) {
+                frame.origin.x += screen.frame.minX - oldScreen.minX
+                frame.origin.y += screen.frame.minY - oldScreen.minY
+            }
+            frame = WindowRestorationStore.usableFrame(frame, screens: NSScreen.screens.map(\.visibleFrame), minimum: window.minSize)
+            window.setFrame(frame, display: false)
+        }
+        let restoredFrame = saved == nil ? nil : window.frame
         window.cycleSession = { [weak item] backwards in
             let command = backwards ? "previousSession" : "nextSession"
             guard let item = item, item.loaded, item.commands.contains(command) else { return false }
@@ -358,19 +393,189 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                     arguments: ["paths": paths, "target": item.fileTarget], in: nil, in: .page) { _ in }
             }
         }
+        // Attaching NSSplitViewController adopts its children's preferred size.
+        // Apply the saved outer frame after that attachment has completed.
+        if let frame = restoredFrame {
+            window.setFrame(frame, display: false)
+            if !settings && !conversation { item.split.splitView.setPosition(max(440, frame.width - 310), ofDividerAt: 0) }
+        }
         windows.append(item)
-        if let destination = url ?? serverURL {
+        if let destination = url ?? serverURL.map({ self.destination(for: item, base: $0) }) {
             if !settings, let serverURL = serverURL { item.files.connect(BackendWorkspaceFiles(baseURL: serverURL, local: true)) }
             configureScripts(webView)
             webView.load(URLRequest(url: destination))
         }
         showStatus("Opening Ribbon Field…", failed: false, in: item)
-        window.makeKeyAndOrderFront(nil)
+        if saved == nil { window.makeKeyAndOrderFront(nil) }
+        else { window.orderFront(nil) }
         NSApp.activate(ignoringOtherApps: true)
+        if saved?.minimized == true { window.miniaturize(nil) }
+        scheduleWindowSave()
         return item
     }
 
     private func item(for view: WKWebView) -> DesktopWindow? { windows.first { $0.webView === view } }
+
+    private func localRoute(_ url: URL) -> String {
+        guard let source = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return "/" }
+        var route = URLComponents()
+        route.percentEncodedPath = source.percentEncodedPath
+        route.percentEncodedQuery = source.percentEncodedQuery
+        route.percentEncodedFragment = source.percentEncodedFragment
+        route.queryItems = route.queryItems?.filter { !["directory", "new_project"].contains($0.name) }
+        if route.queryItems?.isEmpty == true { route.queryItems = nil }
+        let value = route.string ?? "/"
+        return WindowRestorationStore.validRoute(value) ? value : "/"
+    }
+
+    private func destination(for item: DesktopWindow, base: URL) -> URL {
+        URL(string: item.launchRoute, relativeTo: base)?.absoluteURL ?? base
+    }
+
+    private func restoreWindows() {
+        restoringWindows = true
+        let saved = windowStore?.load()
+        nextFolderSlot = saved?.nextFolderSlot ?? 0
+        for record in saved?.windows ?? [] { makeWindow(restoring: record) }
+        if windows.isEmpty { makeWindow() }
+        if let focused = windows.first(where: { $0.id == saved?.focusedWindow && !$0.window.isMiniaturized }) {
+            focused.window.makeKeyAndOrderFront(nil)
+        }
+        restoringWindows = false
+        saveWindowSet()
+    }
+
+    private func scheduleWindowSave() {
+        guard !quitting, !restoringWindows, !windowSaveScheduled else { return }
+        windowSaveScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.windowSaveScheduled = false
+            self?.saveWindowSet()
+        }
+    }
+
+    private func saveWindowSet(_ completion: ((Error?) -> Void)? = nil) {
+        guard !quitting, !restoringWindows, conversationTransfers.isEmpty, let store = windowStore else { completion?(nil); return }
+        let records = windows.filter(\.restorable).map { item -> RestoredWindow in
+            let kind: RestoredWindow.Kind = item.isSettings ? .settings : item.isConversationWindow ? .conversation :
+                item.launchRoute.hasPrefix("/monitor") ? .monitor : .workspace
+            let screen = item.window.screen
+            return RestoredWindow(id: item.id, folderSlot: item.folderSlot, kind: kind, route: item.launchRoute,
+                frame: item.window.frame, screen: screen?.frame,
+                displayID: (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
+                minimized: item.window.isMiniaturized, workspaceJSON: item.workspaceJSON)
+        }
+        let focused = current.flatMap { $0.restorable ? $0.id : nil }, nextSlot = nextFolderSlot
+        windowPersistenceQueue.async {
+            var failure: Error?
+            do { try store.save(windows: records, focusedWindow: focused, nextFolderSlot: nextSlot) }
+            catch { failure = error; NSLog("Could not save Ribbon Field window state: %@", error.localizedDescription) }
+            if let completion = completion {
+                let error = failure
+                DispatchQueue.main.async { completion(error) }
+            }
+        }
+    }
+
+    private func acceptWorkspaceState(_ state: [String: Any], for item: DesktopWindow, completion: (() -> Void)? = nil) {
+        guard JSONSerialization.isValidJSONObject(state) else { completion?(); return }
+        item.workspaceVersion += 1
+        let version = item.workspaceVersion
+        if let route = state["route"] as? String, WindowRestorationStore.validRoute(route), let url = URL(string: route) {
+            item.launchRoute = localRoute(url)
+        }
+        windowPersistenceQueue.async { [weak self, weak item] in
+            let json = (try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]))
+                .flatMap { String(data: $0, encoding: .utf8) }
+            DispatchQueue.main.async {
+                if let item = item, let json = json, item.workspaceVersion == version {
+                    item.workspaceJSON = json
+                    self?.scheduleWindowSave()
+                }
+                completion?()
+            }
+        }
+    }
+
+    private func captureWindowSetForQuit(_ completion: @escaping (Error?) -> Void) {
+        let group = DispatchGroup()
+        var completed = false
+        let finish = { [self] in
+            guard !completed else { return }
+            completed = true
+            saveWindowSet(completion)
+        }
+        for item in windows where item.restorable && item.loaded && (item.restoredWorkspace == nil || item.restorationAttempted) && !item.restoringWorkspace {
+            group.enter()
+            item.webView.callAsyncJavaScript("return window.agentCoordDesktop?.exportWindowState?.() ?? null",
+                arguments: [:], in: nil, in: .page) { [weak self] result in
+                if !completed, case .success(let value) = result, let state = value as? [String: Any] {
+                    self?.acceptWorkspaceState(state, for: item) { group.leave() }
+                } else { group.leave() }
+            }
+        }
+        group.notify(queue: .main, execute: finish)
+        // A crashed web process must not prevent interface Quit. Its last
+        // durable snapshot is retained instead of replacing it with emptiness.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: finish)
+    }
+
+    private func prepareWindowsForQuit(_ completion: @escaping (Error?) -> Void) {
+        let deadline = Date().addingTimeInterval(30)
+        func check() {
+            let group = DispatchGroup()
+            var busy = false
+            var answered = false
+            for item in self.windows where item.restorable && item.loaded {
+                group.enter()
+                item.webView.callAsyncJavaScript("return window.agentCoordDesktop?.windowStateBusy?.() ?? false",
+                    arguments: [:], in: nil, in: .page) { result in
+                    if case .success(let value) = result, value as? Bool == true { busy = true }
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main) {
+                guard !answered else { return }
+                answered = true
+                if !busy { self.captureWindowSetForQuit(completion) }
+                else if Date() >= deadline {
+                    completion(Backend.failure("A message or image is still being accepted. Try quitting again when it finishes."))
+                } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: check) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                guard !answered else { return }
+                answered = true
+                completion(Backend.failure("A window is not responding while saving drafts. Try quitting again when it responds."))
+            }
+        }
+        check()
+    }
+
+    private func restoreWorkspace(in item: DesktopWindow, completion: (() -> Void)? = nil) {
+        guard !item.restoringWorkspace else { return }
+        guard let snapshot = item.restoredWorkspace else { completion?(); return }
+        item.restoringWorkspace = true
+        item.restorationAttempted = true
+        item.webView.callAsyncJavaScript("return await window.agentCoordDesktop.restoreWindowState(snapshot)",
+            arguments: ["snapshot": snapshot], in: nil, in: .page) { [weak self, weak item] result in
+            guard let item = item else { return }
+            item.restoringWorkspace = false
+            if case .success(let value) = result, value as? Bool == true {
+                item.restoredWorkspace = nil
+            } else {
+                // Keep the snapshot available for a later Reload/retry.
+                item.restoredWorkspace = snapshot
+                NSLog("Could not restore Ribbon Field window state; retaining its saved workspace.")
+            }
+            self?.scheduleWindowSave()
+            completion?()
+        }
+    }
+
+    private func windowStateError(_ message: String) {
+        webView?.callAsyncJavaScript("const box = document.getElementById('error'); if (box) { box.querySelector('span').textContent = message; box.hidden = false; }",
+            arguments: ["message": message], in: nil, in: .page) { _ in }
+    }
 
     private func positionConversationWindow(_ window: NSWindow, near drop: NSPoint) {
         let screen = NSScreen.screens.first { $0.frame.contains(drop) } ?? window.screen ?? NSScreen.main
@@ -403,7 +608,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func deliverConversation(to target: DesktopWindow) {
-        guard target.navigationReady, let payload = target.incomingConversation, let transferId = target.conversationTransferId,
+        guard target.navigationReady, !target.restoringWorkspace, let payload = target.incomingConversation, let transferId = target.conversationTransferId,
               target.conversationReply != nil else { return }
         target.incomingConversation = nil
         target.webView.callAsyncJavaScript("return await window.agentCoordConversationTransfer.stage(payload, transferId)",
@@ -436,6 +641,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         target.webView.callAsyncJavaScript("return await window.agentCoordConversationTransfer.finish(transferId, committed)",
             arguments: ["transferId": transferId, "committed": committed], in: nil, in: .page) { [weak self] result in
             self?.conversationTransfers.removeValue(forKey: transferId)
+            self?.scheduleWindowSave()
             target.conversationTransferId = nil
             guard case .success(let value) = result, value as? Bool == true else {
                 transfer.source?.closeAfterConversationTransfer = false
@@ -456,12 +662,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         guard let item = windows.first(where: { $0.window === notification.object as? NSWindow }) else { return }
         activations += 1
         item.activation = activations
+        if !quitting { item.restorable = true; scheduleWindowSave() }
     }
+
+    func windowDidMove(_ notification: Notification) { scheduleWindowSave() }
+    func windowDidResize(_ notification: Notification) { scheduleWindowSave() }
+    func windowDidMiniaturize(_ notification: Notification) { scheduleWindowSave() }
+    func windowDidDeminiaturize(_ notification: Notification) { scheduleWindowSave() }
 
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow,
-              let item = windows.first(where: { $0.window === closing }),
-              item.isSettings || windows.filter({ !$0.isSettings }).count > 1 else { return }
+              let item = windows.first(where: { $0.window === closing }) else { return }
+        if !quitting { item.restorable = false; saveWindowSet() }
+        guard item.isSettings || windows.filter({ !$0.isSettings }).count > 1 else { return }
         for (transferId, transfer) in conversationTransfers where transfer.target === item {
             transfer.source?.closeAfterConversationTransfer = false
             conversationTransfers.removeValue(forKey: transferId)
@@ -517,7 +730,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
     @objc private func showWorkspace() {
         if current?.isSettings == true || current?.isConversationWindow == true {
-            let workspace = windows.last { !$0.isSettings && !$0.isConversationWindow } ?? makeWindow()
+            let workspace = windows.last { !$0.isSettings && !$0.isConversationWindow && $0.launchRoute != "/monitor" } ?? makeWindow()
             workspace.window.makeKeyAndOrderFront(nil)
         }
         showWindow()
@@ -609,8 +822,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         guard !windows.isEmpty else { pendingAppLinks.append(url); return }
         let targetID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "window" }?.value
         var target = preferred ?? windows.first { $0.id == targetID?.lowercased() } ?? current!
-        if target.isSettings || target.webView.url?.path == "/monitor" {
-            target = windows.last { !$0.isSettings && $0.webView.url?.path != "/monitor" } ?? makeWindow()
+        if target.isSettings || target.launchRoute.hasPrefix("/monitor") {
+            target = windows.last { !$0.isSettings && !$0.launchRoute.hasPrefix("/monitor") } ?? makeWindow()
         }
         target.pendingLinks.append(url)
         target.window.deminiaturize(nil)
@@ -620,7 +833,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func deliverLinks(to item: DesktopWindow) {
-        guard item.navigationReady, !item.navigating, !item.pendingLinks.isEmpty else { return }
+        guard item.navigationReady, !item.restoringWorkspace, !item.navigating, !item.pendingLinks.isEmpty else { return }
         let url = item.pendingLinks.removeFirst()
         item.navigating = true
         // The shared router validates the destination against this backend and
@@ -635,16 +848,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func configureScripts(_ webView: WKWebView) {
         guard let source = try? String(contentsOf: resources.appendingPathComponent("bridge.js"), encoding: .utf8),
+              let workspace = try? String(contentsOf: resources.appendingPathComponent("workspace-state.js"), encoding: .utf8),
               let palette = try? String(contentsOf: resources.appendingPathComponent("command-palette.js"), encoding: .utf8),
               let data = try? JSONSerialization.data(withJSONObject: preferences.dictionary(forKey: "webPreferences") ?? [:]),
               let json = String(data: data, encoding: .utf8) else { return }
+        let snapshot = item(for: webView)?.restoredWorkspace
+        let restoration = snapshot.flatMap { try? JSONSerialization.data(withJSONObject: $0) }
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "null"
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
         controller.addUserScript(WKUserScript(source: palette, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        controller.addUserScript(WKUserScript(source: source.replacingOccurrences(of: "__AGENT_COORD_PREFERENCES__", with: json)
-            .replacingOccurrences(of: "__AGENT_COORD_FOLDER_SLOT__", with: String(item(for: webView)?.folderSlot ?? 0))
-            .replacingOccurrences(of: "__AGENT_COORD_CONVERSATION_WINDOW__", with: item(for: webView)?.isConversationWindow == true ? "true" : "false")
-            .replacingOccurrences(of: "__AGENT_COORD_WINDOW_ID__", with: item(for: webView)?.id ?? ""),
+        controller.addUserScript(WKUserScript(source: workspace, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        let bridge = WindowRestorationStore.script(source, values: [
+            "__AGENT_COORD_PREFERENCES__": json, "__AGENT_COORD_WINDOW_STATE__": restoration,
+            "__AGENT_COORD_FOLDER_SLOT__": String(item(for: webView)?.folderSlot ?? 0),
+            "__AGENT_COORD_CONVERSATION_WINDOW__": item(for: webView)?.isConversationWindow == true ? "true" : "false",
+            "__AGENT_COORD_WINDOW_ID__": item(for: webView)?.id ?? "",
+        ])
+        controller.addUserScript(WKUserScript(source: bridge,
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
 
@@ -793,10 +1014,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             finishConversationTransfer(transferId, committed: committed, reply: replyHandler)
         case "navigationReady":
             owner.navigationReady = true
-            deliverLinks(to: owner)
             replyHandler(true, nil)
-            deliverConversation(to: owner)
+            restoreWorkspace(in: owner) { [weak self, weak owner] in
+                guard let self = self, let owner = owner else { return }
+                self.deliverLinks(to: owner)
+                self.deliverConversation(to: owner)
+            }
+        case "saveWindowState":
+            if (owner.restoredWorkspace == nil || owner.restorationAttempted) && !owner.restoringWorkspace, let state = body["state"] as? [String: Any] {
+                owner.restoredWorkspace = nil
+                acceptWorkspaceState(state, for: owner)
+            }
+            replyHandler(true, nil)
         case "windowState":
+            if let route = body["route"] as? String, WindowRestorationStore.validRoute(route), let url = URL(string: route) {
+                owner.launchRoute = localRoute(url); scheduleWindowSave()
+            } else if let url = source.url { owner.launchRoute = localRoute(url); scheduleWindowSave() }
             if let title = body["title"] as? String {
                 owner.window.title = String(title.prefix(160)) + " — Ribbon Field"
             }
@@ -971,7 +1204,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     // tab; otherwise use the most recently focused main workspace window.
     private func revealThread(_ thread: String, completion: ((DesktopWindow?) -> Void)? = nil) {
         let candidates = windows.enumerated()
-            .filter { !$0.element.isSettings && $0.element.webView.url?.path != "/monitor" }
+            .filter { !$0.element.isSettings && !$0.element.launchRoute.hasPrefix("/monitor") }
             .sorted { ($0.element.activation, $0.offset) > ($1.element.activation, $1.offset) }
             .map(\.element)
         var owners = Set<ObjectIdentifier>(), remaining = 1, finished = false
@@ -1007,31 +1240,52 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         checkingQuit = true
         let authorize = {
             self.updater.canTerminateForUpdate { allowed in
-                self.checkingQuit = false
                 if allowed {
-                    self.quitting = true
-                    self.backend.detach()
-                    // Release before Sparkle launches the replacement desktop.
-                    if self.lockFile >= 0 { flock(self.lockFile, LOCK_UN); close(self.lockFile); self.lockFile = -1 }
+                    self.prepareWindowsForQuit { error in
+                        self.checkingQuit = false
+                        if let error = error {
+                            self.windowStateError("Could not save window drafts: " + error.localizedDescription)
+                            NSApp.reply(toApplicationShouldTerminate: false)
+                            return
+                        }
+                        self.quitting = true
+                        self.backend.detach()
+                        // Release before Sparkle launches the replacement desktop.
+                        if self.lockFile >= 0 { flock(self.lockFile, LOCK_UN); close(self.lockFile); self.lockFile = -1 }
+                        NSApp.reply(toApplicationShouldTerminate: true)
+                    }
                 } else {
+                    self.checkingQuit = false
                     self.explicitStop = false
                     let prefix = self.backend.process == nil ? "Work has stopped. Restart the local runtime to continue.\n\n" : ""
                     let reason = self.updater.lastDeferral?.localizedDescription ?? "The update decision changed. Try quitting again."
                     self.showStatus(prefix + reason, failed: true)
+                    NSApp.reply(toApplicationShouldTerminate: false)
                 }
-                NSApp.reply(toApplicationShouldTerminate: allowed)
             }
         }
-        if explicitStop || (smokeReport != nil && !CommandLine.arguments.contains("--smoke-preserve-runtime")) {
-            backend.stop { error in
-                if let error = error {
-                    self.checkingQuit = false
-                    self.explicitStop = false
-                    self.showStatus(error.localizedDescription, failed: true)
-                    NSApp.reply(toApplicationShouldTerminate: false)
-                } else { authorize() }
-            }
-        } else { authorize() }
+        let continueQuit = {
+            if self.explicitStop || (self.smokeReport != nil && !CommandLine.arguments.contains("--smoke-preserve-runtime")) {
+                self.backend.stop { error in
+                    if let error = error {
+                        self.checkingQuit = false
+                        self.explicitStop = false
+                        self.showStatus(error.localizedDescription, failed: true)
+                        NSApp.reply(toApplicationShouldTerminate: false)
+                    } else { authorize() }
+                }
+            } else { authorize() }
+        }
+        let deadline = Date().addingTimeInterval(35)
+        func waitForMoves() {
+            if self.conversationTransfers.isEmpty { continueQuit() }
+            else if Date() >= deadline {
+                self.checkingQuit = false
+                self.windowStateError("The conversation is still moving. Try quitting again when it finishes.")
+                NSApp.reply(toApplicationShouldTerminate: false)
+            } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: waitForMoves) }
+        }
+        waitForMoves()
         return .terminateLater
     }
 
@@ -1050,7 +1304,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if let monitor = sessionKeyMonitor { NSEvent.removeMonitor(monitor) }
         if let activity = activity { ProcessInfo.processInfo.endActivity(activity) }
         if lockFile >= 0 { flock(lockFile, LOCK_UN); close(lockFile) }
-        if let name = smokePreferences { preferences.removePersistentDomain(forName: name) }
+        if let name = smokePreferences, !CommandLine.arguments.contains("--smoke-preferences") { preferences.removePersistentDomain(forName: name) }
         smokePasteboard?.releaseGlobally()
         if let directory = smokeDirectory, !CommandLine.arguments.contains("--smoke-preserve-runtime") {
             try? FileManager.default.removeItem(at: directory)
@@ -1148,6 +1402,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try await smokeReady(first)
         smokeResults["backend_pid"] = backend.process?.processIdentifier
         smokeResults["url"] = serverURL?.absoluteString
+        if CommandLine.arguments.contains("--smoke-window-restoration") {
+            try await smokeWindowRestoration()
+            finishSmoke(error: nil)
+            return
+        }
         if CommandLine.arguments.contains("--smoke-runtime-only") {
             smokeResults["runtime_attached"] = backend.process?.isRunning == true
             let image: NSImage = try await withCheckedThrowingContinuation { continuation in
@@ -2639,6 +2898,185 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return false;
             """, in: item.webView)
         try smokeCheck("previous_session_preserves_tiled_draft", paneDraft as? Bool == true)
+    }
+
+    @MainActor private func smokeWindowRestoration() async throws {
+        let flag = CommandLine.arguments.firstIndex(of: "--smoke-restore-stage")!
+        let stage = CommandLine.arguments[flag + 1]
+        smokeResults["restore_stage"] = stage
+        if stage == "seed" {
+            let firstProject = smokeDirectory!.resolvingSymlinksInPath().appendingPathComponent("Project A")
+            let secondProject = smokeDirectory!.resolvingSymlinksInPath().appendingPathComponent("Project B")
+            for project in [firstProject, secondProject] {
+                try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+            }
+            let first = windows[0]
+            let ids = try await smokeJS("""
+                const result = [];
+                for (const [name, cwd] of [['Restore A1', firstProject], ['Restore A2', firstProject], ['Restore B', secondProject], ['Restore detached', firstProject]]) {
+                  const created = await api('sessions', {client: 'claude', name, cwd});
+                  result.push(created.session.thread_id);
+                }
+                await refreshList(); return result;
+                """, in: first.webView, arguments: ["firstProject": firstProject.path, "secondProject": secondProject.path]) as! [String]
+            _ = try smokePython("""
+                import sys
+                from agent_coord.store import CoordinationStore
+                store = CoordinationStore(sys.argv[1])
+                for index in range(30):
+                    store.send_message(sender_session_id=sys.argv[2], recipient_session_id=sys.argv[3],
+                        body=f'Restored history {index} ' + 'Keep the saved reading position. ' * 15,
+                        classification='informational', reply_required=False)
+                print('{}')
+                """, arguments: [ids[0], ids[3]])
+            _ = try await smokeJS("""
+                await select(firstID); document.querySelector('#message').value = 'background draft';
+                document.querySelector('#message').dispatchEvent(new Event('input', {bubbles: true}));
+                await select(secondID); document.querySelector('#message').value = 'alpha draft';
+                document.querySelector('#message').dispatchEvent(new Event('input', {bubbles: true}));
+                return true;
+                """, in: first.webView, arguments: ["firstID": ids[0], "secondID": ids[1]])
+            var route = URLComponents(url: serverURL!, resolvingAgainstBaseURL: false)!
+            route.queryItems = [URLQueryItem(name: "directory", value: secondProject.path)]
+            let second = makeWindow(url: route.url!)
+            try await smokeReady(second)
+            _ = try await smokeJS("""
+                await select(thread); document.querySelector('#message').value = 'beta conversation draft';
+                document.querySelector('#message').dispatchEvent(new Event('input', {bubbles: true}));
+                await newSession(); document.querySelector('#message').value = 'beta new-session draft';
+                document.querySelector('#message').dispatchEvent(new Event('input', {bubbles: true}));
+                return true;
+                """, in: second.webView, arguments: ["thread": ids[2]])
+            route.queryItems = [URLQueryItem(name: "directory", value: firstProject.path), URLQueryItem(name: "detached", value: "1")]
+            let third = makeWindow(url: route.url!)
+            try await smokeReady(third)
+            _ = try await smokeJS("""
+                await select(thread);
+                document.querySelector('#message').value = 'gamma detached draft';
+                document.querySelector('#message').dispatchEvent(new Event('input', {bubbles: true}));
+                document.querySelector('#message').setSelectionRange(2, 7);
+                state.attachments.drafts.set(thread, [{name:'pixel.png', url:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg=='}]);
+                state.timelineScroll.restore(240); return true;
+                """, in: third.webView, arguments: ["thread": ids[3]])
+            let visible = NSScreen.main!.visibleFrame
+            for (index, item) in [first, second, third].enumerated() {
+                let frame = CGRect(x: visible.minX + 20 + CGFloat(index) * 70, y: visible.minY + 20 + CGFloat(index) * 40,
+                    width: item.isConversationWindow ? 880 : 1000, height: 720)
+                item.window.setFrame(WindowRestorationStore.usableFrame(frame, screens: [visible], minimum: item.window.minSize), display: true)
+            }
+            makeWindow(url: serverURL!.appendingPathComponent("settings"))
+            let monitor = makeWindow(url: serverURL!.appendingPathComponent("monitor"))
+            monitor.window.miniaturize(nil)
+            third.window.makeKeyAndOrderFront(nil)
+            let expected: [[String: Any]] = [
+                ["id": first.id, "threads": [ids[0], ids[1]], "selected": ids[1], "draft": "alpha draft", "project": try await smokeJS("return state.projectCwd;", in: first.webView)],
+                ["id": second.id, "threads": [ids[2], "new-session"], "selected": "new-session", "draft": "beta new-session draft", "project": try await smokeJS("return state.projectCwd;", in: second.webView)],
+                ["id": third.id, "threads": [ids[3]], "selected": ids[3], "draft": "gamma detached draft", "project": try await smokeJS("return state.projectCwd;", in: third.webView)],
+            ]
+            preferences.set(expected, forKey: "restoreSmokeExpected")
+            preferences.set(second.id, forKey: "restoreSmokeClosed")
+            preferences.set(windows.map { ["id": $0.id, "frame": NSStringFromRect($0.window.frame), "slot": $0.folderSlot, "minimized": $0.window.isMiniaturized] }, forKey: "restoreSmokeFrames")
+            try smokeCheck("restore_seed_five_windows", windows.count == 5)
+            for (index, item) in [first, second, third].enumerated() { try await smokeWindowImage(item, suffix: "before-\(index)") }
+        } else if stage == "empty" {
+            try smokeCheck("restore_fresh_window_after_all_closed", windows.count == 1 && windows[0].folderSlot >= 6)
+            try await smokeReady(windows[0])
+            let empty = try await smokeJS("return state.threadTabs.items.length === 0 && state.selected === null;", in: windows[0].webView)
+            try smokeCheck("restore_all_closed_tabs_stay_closed", empty as? Bool == true)
+        } else {
+            for item in windows where !item.isSettings && item.launchRoute != "/monitor" {
+                try await smokeReady(item)
+                for _ in 0..<200 {
+                    if !item.restoringWorkspace && item.restoredWorkspace == nil { break }
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                try smokeCheck("restore_workspace_finished", !item.restoringWorkspace && item.restoredWorkspace == nil)
+            }
+            let closed = preferences.string(forKey: "restoreSmokeClosed")!
+            let expectedCount = ["closed", "again", "lastclose"].contains(stage) ? 4 : 5
+            try smokeCheck("restore_window_count", windows.count == expectedCount)
+            let expected = preferences.array(forKey: "restoreSmokeExpected") as! [[String: Any]]
+            for (index, record) in expected.enumerated() {
+                let id = record["id"] as! String
+                if expectedCount == 4 && id == closed { continue }
+                guard let item = windows.first(where: { $0.id == id }) else { try smokeCheck("restore_stable_ids", false); return }
+                let matched = try await smokeJS("""
+                    const threads = state.threadTabs.items.map(item => item.thread_id);
+                    return JSON.stringify(threads) === JSON.stringify(expectedThreads) && state.selected === expectedSelection &&
+                      document.querySelector('#message').value === expectedDraft && state.projectCwd === expectedProject;
+                    """, in: item.webView, arguments: ["expectedThreads": record["threads"]!, "expectedSelection": record["selected"]!,
+                        "expectedDraft": record["draft"]!, "expectedProject": record["project"]!])
+                smokeResults["restore_window_\(index)_debug"] = try await smokeJS("return {tabs: state.threadTabs.items.map(item => item.thread_id), selected: state.selected, draft: document.querySelector('#message').value, project: state.projectCwd, newDraft: !!state.newSessionDraft};", in: item.webView)
+                smokeResults["restore_window_\(index)_expected"] = record
+                try smokeCheck("restore_window_\(index)_state", matched as? Bool == true)
+                if index < 2 {
+                    let background = try await smokeJS("return state.drafts.get(thread) === text;", in: item.webView,
+                        arguments: ["thread": (record["threads"] as! [String])[0], "text": index == 0 ? "background draft" : "beta conversation draft"])
+                    try smokeCheck("restore_background_draft_\(index)", background as? Bool == true)
+                }
+                if index == 2 {
+                    let extra = try await smokeJS("return agentCoordDesktop.conversationWindow && document.querySelector('#message').selectionStart === 2 && document.querySelector('#message').selectionEnd === 7 && state.attachments.items()[0]?.name === 'pixel.png' && Math.abs(state.timelineScroll.position() - 240) < 3;", in: item.webView)
+                    try smokeCheck("restore_auxiliary_draft_image_scroll", extra as? Bool == true)
+                }
+                try await smokeWindowImage(item, suffix: "after-\(index)")
+            }
+            let frames = preferences.array(forKey: "restoreSmokeFrames") as! [[String: Any]]
+            for frame in frames {
+                guard let item = windows.first(where: { $0.id == frame["id"] as? String }) else { continue }
+                let saved = NSRectFromString(frame["frame"] as! String)
+                smokeResults["restore_frame_\(item.folderSlot)_debug"] = ["saved": frame["frame"]!, "actual": NSStringFromRect(item.window.frame)]
+                try smokeCheck("restore_geometry_\(item.folderSlot)", abs(item.window.frame.minX - saved.minX) < 2 && abs(item.window.frame.minY - saved.minY) < 2 &&
+                    abs(item.window.frame.width - saved.width) < 2 && abs(item.window.frame.height - saved.height) < 2 && item.folderSlot == frame["slot"] as? Int)
+                try smokeCheck("restore_minimized_\(item.folderSlot)", item.window.isMiniaturized == frame["minimized"] as? Bool)
+            }
+            try smokeCheck("restore_settings_and_monitor", windows.contains(where: \.isSettings) && windows.contains { $0.launchRoute == "/monitor" })
+            try smokeCheck("restore_focused_window", current?.id == expected[2]["id"] as? String)
+            if stage == "verify", let first = windows.first(where: { $0.id == expected[0]["id"] as? String }) {
+                _ = try await smokeJS("document.querySelector('#message').value = 'alpha final keystroke'; return true;", in: first.webView)
+                var changed = expected
+                changed[0]["draft"] = "alpha final keystroke"
+                preferences.set(changed, forKey: "restoreSmokeExpected")
+            }
+            if stage == "close" {
+                windows.first { $0.id == closed }!.window.close()
+                try smokeCheck("restore_explicit_close", !windows.contains { $0.id == closed })
+            }
+            if stage == "closed" {
+                let fresh = makeWindow()
+                try await smokeReady(fresh)
+                let empty = try await smokeJS("return state.threadTabs.items.length === 0 && state.selected === null;", in: fresh.webView)
+                try smokeCheck("restore_new_window_does_not_adopt_closed_tabs", empty as? Bool == true)
+                fresh.window.close()
+            }
+            if stage == "lastclose" {
+                for item in Array(windows) { item.window.close() }
+                try smokeCheck("restore_all_windows_explicitly_closed", windows.allSatisfy { !$0.restorable })
+            }
+        }
+        smokeResults["restored_ids"] = windows.map(\.id)
+        smokeResults["runtime_survives_interface_quit"] = backend.process?.isRunning == true
+        if let ready = CommandLine.arguments.firstIndex(of: "--smoke-restore-ready"),
+           let proceed = CommandLine.arguments.firstIndex(of: "--smoke-restore-continue") {
+            try Data("ready".utf8).write(to: URL(fileURLWithPath: CommandLine.arguments[ready + 1]))
+            let deadline = Date().addingTimeInterval(20)
+            while !FileManager.default.fileExists(atPath: CommandLine.arguments[proceed + 1]) && Date() < deadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            try smokeCheck("restore_duplicate_launch_keeps_window_set", windows.count == (stage == "verify" ? 5 : 4))
+        }
+    }
+
+    @MainActor private func smokeWindowImage(_ item: DesktopWindow, suffix: String) async throws {
+        let image: NSImage? = try await withCheckedThrowingContinuation { continuation in
+            item.webView.takeSnapshot(with: nil) { image, error in
+                if let error = error { continuation.resume(throwing: error) }
+                else { continuation.resume(returning: image) }
+            }
+        }
+        if let data = image?.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
+           let png = bitmap.representation(using: .png, properties: [:]) {
+            try png.write(to: URL(fileURLWithPath: smokeReport!.path + "." + suffix + ".png"))
+        }
     }
 
     private func finishSmoke(error: String?) {

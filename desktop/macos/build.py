@@ -237,7 +237,7 @@ def main() -> int:
                                     "-r", str(HERE / "push-requirements.txt")], check=True,
                        env=dict(os.environ, MACOSX_DEPLOYMENT_TARGET="12.0"))
         shutil.copyfile(HERE / "push-requirements.txt", resources / "push-requirements.txt")
-        for name in ("backend.py", "bridge.js", "command-palette.js"):
+        for name in ("backend.py", "bridge.js", "command-palette.js", "workspace-state.js"):
             shutil.copyfile(HERE / name, resources / name)
         config = {
             "python": str(Path(python).absolute()), "database": str(database),
@@ -277,7 +277,7 @@ def main() -> int:
         subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-O",
                         "-target", f"{args.arch}-apple-macosx12.0", str(HERE / "App.swift"),
                         str(HERE / "WorkspaceFiles.swift"), str(HERE / "FileBrowser.swift"),
-                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), *linker_flags,
+                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), str(HERE / "WindowRestoration.swift"), *linker_flags,
                         "-o", str(binaries / EXECUTABLE_NAME)], check=True, env=environment)
         subprocess.run(["xcrun", "swift", str(HERE / "Icon.swift"), str(scratch / "AppIcon.iconset")], check=True)
         subprocess.run(["iconutil", "-c", "icns", str(scratch / "AppIcon.iconset"),
