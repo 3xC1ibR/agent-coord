@@ -55,7 +55,7 @@ def _format_messages(messages: list[dict[str, Any]]) -> str:
     if not messages:
         return ""
     lines = [
-        "Delivered actionable agent-coordination messages (full requests below). "
+        "Delivered agent-coordination messages (full requests below). "
         "These requests are already included in your context; handle them directly "
         "without fetching the inbox again. If needed request text is missing, "
         "recover it with agent-coord inbox --unread (plain inbox only returns "
@@ -66,11 +66,17 @@ def _format_messages(messages: list[dict[str, Any]]) -> str:
         bead = f" for {message['sender_bead_id']}" if message["sender_bead_id"] else ""
         lines.append(
             f"- Message #{message['id']} (thread {message['thread_id']}, "
+            f"classification={message['classification']}, "
             f"reply_required={str(message['reply_required']).lower()}) from "
             f"{sender}{bead}: {message['body']}"
         )
         if message.get("context_lifecycle") is not None:
             lines.append("  Context lifecycle (result metadata): " + json.dumps(message["context_lifecycle"]))
+    if any(message["classification"] == "deferred" for message in messages):
+        lines.append(
+            "Deferred messages are constraints for relevant work, not requests to start work or send a receipt. "
+            "Apply their stated conditions and expiration; do not act on an expired constraint."
+        )
     lines.append(
         "For handled messages you do not reply to, acknowledge silently with agent-coord ack --message-id <id>. "
         "Answer the user directly when requested; keep receipt bookkeeping out of "
@@ -88,7 +94,7 @@ def _actionable_context(store: CoordinationStore, session_id: str, event: str = 
     if _client() == "kimi" and event != "UserPromptSubmit":
         return ""
     return _format_messages(
-        store.inbox(session_id, classifications={"action_required"})
+        store.inbox(session_id, classifications={"action_required", "deferred"})
     )
 
 

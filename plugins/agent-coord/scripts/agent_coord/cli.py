@@ -362,8 +362,10 @@ def _parser() -> argparse.ArgumentParser:
     target.add_argument("--bead")
     send.add_argument(
         "--classification",
-        choices=["action_required", "informational", "closure"],
+        choices=["action_required", "deferred", "informational", "closure"],
         default="action_required",
+        help=("action_required may wake the agent (default); deferred enters its next context without waking; "
+              "informational stays in history; closure withdraws pending instructions."),
     )
     reply_choice = send.add_mutually_exclusive_group(required=True)
     reply_choice.add_argument(

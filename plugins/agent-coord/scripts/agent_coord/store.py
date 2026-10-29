@@ -30,7 +30,7 @@ DEFAULT_INBOX_POLL_SECONDS = 0.5
 WAKEABLE_ACTIVITIES = {"idle", "waiting"}
 WAKE_TRANSPORTS = {"managed-pty", "zellij"}
 LEASE_MODES = {"write", "validation"}
-MESSAGE_CLASSIFICATIONS = {"action_required", "informational", "closure"}
+MESSAGE_CLASSIFICATIONS = {"action_required", "deferred", "informational", "closure"}
 CLIENTS = {"claude", "codex", "antigravity", "kimi", "muse"}
 SCOPE_REQUEST_THREAD_PREFIX = "scope-request:"
 _WILDCARD = re.compile(r"[*?[]")
@@ -858,6 +858,8 @@ class CoordinationStore:
             raise CoordinationError(
                 f"Unknown message classification: {classification}."
             )
+        if classification == "deferred" and reply_required:
+            raise CoordinationError("Deferred messages cannot request a reply. Use --no-reply-required.")
         normalized_thread = thread_id.strip()
         if not normalized_thread:
             raise CoordinationError("Message thread ID must not be empty.")
@@ -910,7 +912,7 @@ class CoordinationStore:
                 # The participant-pair check above deliberately permits a
                 # reverse-direction terminal reply in the same conversation.
                 return existing, False
-        if classification == "action_required":
+        if classification in {"action_required", "deferred"}:
             connection.execute(
                 """
                 UPDATE message_threads
@@ -957,14 +959,14 @@ class CoordinationStore:
                 AND EXISTS (SELECT 1 FROM browser_sessions WHERE thread_id = ?)""",
                 (now, recipient_session_id, recipient_session_id))
         if classification == "closure":
-            # Closure suppresses every older pending actionable notification in
+            # Closure suppresses every older pending instruction in
             # this conversation before any wake or hook can observe it.
             connection.execute(
                 """
                 UPDATE messages
                 SET delivered_at = ?, suppressed_at = ?
                 WHERE thread_id = ?
-                  AND classification = 'action_required'
+                  AND classification IN ('action_required', 'deferred')
                   AND delivered_at IS NULL
                   AND id < ?
                 """,

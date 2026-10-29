@@ -186,6 +186,12 @@ against the current plan.
 Avoid acknowledgement chatter and repetitive progress messages.
 Use `--no-reply-required` for updates that need no conversational answer;
 it does not remove any requested action.
+For constraints that should apply when an agent next works, use
+`--classification deferred --no-reply-required`. This delivers context without
+waking an idle agent; `--no-reply-required` alone still permits wake.
+Notify only agents whose work must change, and omit reminders to agents already
+waiting under an equivalent constraint. Bound temporary holds by affected work
+and an absolute expiry, and request reports only for actual conflicts.
 
 ## Follow through
 

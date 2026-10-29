@@ -220,14 +220,40 @@ Messages stay in SQLite until the recipient reads them. Delivery and explicit
 acknowledgement have separate timestamps. Addressing by Beads issue succeeds
 only when exactly one live session declares that issue.
 
-Messages are classified as `action_required`, `informational`, or `closure`.
-Only undelivered `action_required` messages enter hook context or wake an idle
-agent. `reply_required` is separate: an actionable message may require work but
+Messages are classified as `action_required`, `deferred`, `informational`, or
+`closure`. Only undelivered `action_required` messages wake an idle agent.
+Both `action_required` and `deferred` enter the next supported context boundary;
+informational and closure messages remain history-only.
+`reply_required` is separate: an actionable message may require work but
 no conversational reply, as with an atomic handoff. Every CLI `send` must choose
 `--reply-required` or `--no-reply-required`; an omitted or contradictory choice
 is rejected before a message is created. Use `--no-reply-required` for
-informational and closure messages. Transport acknowledgement is silent and
+deferred, informational and closure messages. Deferred messages reject
+`--reply-required`. Transport acknowledgement is silent and
 never creates another message.
+
+Use deferred delivery for a constraint that matters when the recipient next
+works, without starting a turn or reopening a closed conversation:
+
+```bash
+agent-coord send --session <peer-session-id> \
+  --classification deferred --no-reply-required \
+  'Defer CPU-heavy tests until 2026-10-29 20:32 UTC. This hold expires then; ordinary reads may continue. No receipt needed.'
+```
+
+`--no-reply-required` alone does not prevent wake; the default classification is
+still `action_required`. Deferred messages persist across restarts. Codex,
+Claude and Muse receive them at the next context-capable hook; Kimi receives
+them at prompt submission, and Antigravity receives them with its next prompt.
+An already-running command is not interrupted. Conditions and expiry are
+instructions in the body, not scheduler enforcement or automatic relevance
+matching. Recipients apply them only to the stated work and ignore expired
+conditions. Use a `closure` message on the same `--thread-id` to withdraw a
+pending constraint before delivery. Once delivered, a changed constraint needs
+a new update. Acknowledgement stays silent.
+The selected runtime's `send --help` must list `deferred`. A plugin refresh alone
+does not upgrade an already-running retained backend; activate the matching
+backend through the normal safe update procedure before using this mode there.
 
 Answer a request with `agent-coord reply --message-id <id> '<response>'`.
 The command derives the recipient and exchange from the original message,

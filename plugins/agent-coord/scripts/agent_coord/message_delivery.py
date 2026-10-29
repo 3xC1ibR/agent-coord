@@ -30,13 +30,14 @@ class MessageDelivery:
             return db.execute("""SELECT m.*, s.name AS sender_name, s.client AS sender_client
                 FROM messages m JOIN sessions s ON s.session_id = m.sender_session_id
                 WHERE m.recipient_session_id = ? AND m.acknowledged_at IS NULL
-                AND m.suppressed_at IS NULL AND m.classification = 'action_required'
+                AND m.suppressed_at IS NULL AND m.classification IN ('action_required', 'deferred')
                 AND NOT EXISTS (SELECT 1 FROM message_delivery_attempts a
                     WHERE a.message_id = m.id AND a.turn_id = ?)
                 ORDER BY m.id LIMIT ?""", (session_id, turn_id, MAX_MESSAGES)).fetchall()
 
     def prepare(self, session_id, turn_id):
         entries, ids, full = [], [], []
+        has_deferred = False
         # Bound the serialized payload, including escaped bodies and metadata.
         for row in self.pending(session_id, turn_id):
             entry = {key: row[key] for key in (
@@ -58,6 +59,7 @@ class MessageDelivery:
             entries.append(encoded)
             ids.append(row["id"])
             full.append(whole)
+            has_deferred |= row["classification"] == "deferred"
         if not ids:
             return None
         return {"ids": ids, "full": full, "text": (
@@ -67,6 +69,8 @@ class MessageDelivery:
             "A successful agent-coord reply --message-id ID automatically acknowledges the original message. "
             "Do not use --all-unread. Reply only when reply_required is true. "
             "An acknowledgment records receipt, not completion. More messages may remain queued.\n"
+            + ("Deferred messages constrain relevant work; they do not request new work or a receipt. "
+               "Apply their stated conditions and expiration; ignore expired constraints.\n" if has_deferred else "")
             + "\n".join(entries))}
 
     def attempted(self, turn_id, batch):

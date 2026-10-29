@@ -349,6 +349,22 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
   two sessions in either direction and reject unrelated participants.
 - Use `--no-reply-required` when work is actionable but a conversational reply
   is unnecessary, and for informational and closure messages.
+- Use `send --session <peer-id> --classification deferred --no-reply-required`
+  for a constraint or correction that should enter the agent's next work without
+  starting a turn. Deferred messages never wake an idle agent or reopen a closed
+  conversation, and cannot request a reply. They enter the next supported hook
+  context (prompt/tool boundary), or the next prompt for providers without
+  context-capable hooks. They do not interrupt a running command or enforce a
+  scheduler lock. State which work is affected and any absolute expiry in the
+  body; expired conditions must be ignored. Withdraw an undelivered constraint
+  with `closure` on its message thread. Acknowledge silently when handled.
+- `--no-reply-required` alone still permits wake: `send` defaults to
+  `action_required`. Choose `deferred` explicitly for delivery on later work;
+  `informational` is history-only. Omit updates that merely repeat a constraint
+  the recipient already has.
+- If `send --help` does not list `deferred`, the selected runtime is too old.
+  Refreshing plugins alone may leave the active backend unchanged. Report the
+  pending backend update; do not silently substitute a wake-capable message.
 - Read the compact unacknowledged inbox with `agent-coord inbox --unread`. Use `--all` only for complete history.
 - Block for a peer handoff without polling with
   `agent-coord inbox --wait`. It returns immediately if a
@@ -524,8 +540,9 @@ registered pane, watcher PID, last error, and recent attempts. Use
 The watcher sends one generic prompt only for undelivered `action_required`
 messages, when the model turn is inactive and the visible Claude or Codex prompt
 has no typed input. It does not deliver or acknowledge messages itself; the
-resulting prompt hook performs normal inbox delivery. Informational and closure
-messages remain in history without waking the agent. Do not manually inject
+resulting prompt hook performs normal inbox delivery. Deferred messages wait for
+the next supported context boundary without waking; informational and closure
+messages remain in history. Do not manually inject
 input into another pane as a substitute for this guard.
 
 Hook-delivered messages include their ID, thread and `reply_required` value. Reply
@@ -540,7 +557,9 @@ While Ribbon Field is running, open and closed app conversations automatically s
 turn for undelivered `action_required` messages. This works for both Codex and
 Claude, including conversations not currently displayed. Pending messages are
 combined into one generic inbox prompt; normal hooks deliver the durable bodies
-and thread metadata. Informational and closure messages do not wake recipients.
+and thread metadata. Deferred, informational and closure messages do not wake
+recipients. Deferred constraints enter context when work next runs; informational
+and closure messages remain history-only.
 
 The dispatcher waits for running turns and gives queued user prompts priority.
 Now/Later placement and snoozes are preserved. Saving actionable work to a closed
