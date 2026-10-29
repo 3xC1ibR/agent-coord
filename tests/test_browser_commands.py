@@ -107,7 +107,8 @@ class BrowserCommandTests(unittest.TestCase):
                 self.sessions.rpc.calls.clear()
                 result = self.command(command)
                 methods = [method for method, _ in self.sessions.rpc.calls]
-                self.assertEqual(methods.count("thread/read"), 1)
+                # An idle loaded conversation has no missed turn to reconcile.
+                self.assertEqual(methods.count("thread/read"), 0)
                 self.assertEqual(methods.count("model/list"), 0 if command.startswith(("/permissions", "/yolo")) else 1)
                 self.assertNotIn("turn/start", methods)
                 self.assertIn("command", result)

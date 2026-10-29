@@ -130,6 +130,93 @@ class BrowserSessionTests(unittest.TestCase):
             "outputTokens": 10, "totalTokens": total}, "last": {"totalTokens": 20},
             "modelContextWindow": 1000}, **kwargs}})
 
+    def test_idle_send_does_not_read_the_transcript(self):
+        # Acceptance must not wait for a whole-history read: an idle loaded
+        # conversation has no missed turn to reconcile.
+        thread_id = self.create()
+        self.sessions.rpc.calls.clear()
+        self.sessions.send(thread_id, {"message": "Start"})
+        methods = [method for method, _ in self.sessions.rpc.calls]
+        self.assertNotIn("thread/read", methods)
+        self.assertEqual(methods.count("turn/start"), 1)
+
+    def test_send_reconciles_a_missed_completion_before_choosing_steer(self):
+        thread_id = self.create()
+        self.sessions.send(thread_id, {"message": "First"})
+        self.sessions.rpc.threads[thread_id]["turns"][-1]["status"] = "completed"  # Completion event lost.
+        self.sessions.rpc.calls.clear()
+        self.sessions.send(thread_id, {"message": "Second"})
+        methods = [method for method, _ in self.sessions.rpc.calls]
+        self.assertIn("thread/read", methods)
+        self.assertNotIn("turn/steer", methods)
+        self.assertEqual(methods.count("turn/start"), 1)
+
+    def test_concurrent_thread_list_reads_share_one_build(self):
+        self.create()
+        builds, release = [], threading.Event()
+        original = self.sessions.list_work_threads
+        def slow_list(**options):
+            builds.append(options)
+            release.wait(5)
+            return original(**options)
+        self.sessions.list_work_threads = slow_list
+        with ThreadPoolExecutor(6) as pool:
+            results = [pool.submit(self.sessions.work_thread_inventory) for _ in range(6)]
+            while not builds:
+                threading.Event().wait(.01)
+            release.set()
+            bodies = {future.result(5) for future in results}
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(len(json.loads(bodies.pop())["data"]), 1)
+
+    def test_thread_list_reuse_ends_at_changes_and_after_its_window(self):
+        first = self.create()
+        builds = []
+        original = self.sessions.list_work_threads
+        self.sessions.list_work_threads = lambda **options: builds.append(options) or original(**options)
+        self.sessions.work_thread_inventory()
+        self.sessions._publish("item/agentMessage/delta", {"threadId": first, "delta": "x"})
+        self.sessions._publish("thread/tokenUsage/updated", {"threadId": first})
+        self.sessions.work_thread_inventory()
+        self.assertEqual(len(builds), 1, "conversation-only events keep the shared list")
+        self.sessions.work_thread_inventory(archived=True)
+        self.assertEqual(len(builds), 2, "open and closed lists are separate")
+        self.sessions._publish("turn/completed", {"threadId": first})
+        self.sessions.work_thread_inventory()
+        self.assertEqual(len(builds), 3)
+        self.sessions.inventory_changed()
+        self.sessions.work_thread_inventory()
+        self.assertEqual(len(builds), 4)
+        with patch("agent_coord.codex_app_server.INVENTORY_REUSE_SECONDS", 0):
+            self.sessions.work_thread_inventory()
+        self.assertEqual(len(builds), 5, "external writes appear once reuse expires")
+
+    def test_conversation_projections_share_creators_but_decisions_read_current_ones(self):
+        thread_id = self.create()
+        scans = []
+        with patch("agent_coord.codex_app_server.app_agent_creators", side_effect=lambda db: scans.append(1) or {}):
+            for _ in range(3):
+                self.sessions.work_thread(thread_id)
+            self.assertEqual(len(scans), 1, "opening a conversation repeatedly scans app agents once")
+            self.sessions._app_agent_creators()
+            self.assertEqual(len(scans), 2, "an authoritative read is never shared")
+            self.sessions.inventory_changed()
+            self.sessions.work_thread(thread_id)
+            self.assertEqual(len(scans), 3)
+
+    def test_failed_thread_list_build_is_not_reused(self):
+        self.create()
+        original, failures = self.sessions.list_work_threads, [CoordinationError("busy")]
+        def flaky(**options):
+            if failures:
+                raise failures.pop()
+            return original(**options)
+        self.sessions.list_work_threads = flaky
+        with self.assertRaisesRegex(CoordinationError, "busy"):
+            self.sessions.work_thread_inventory()
+        self.assertEqual(len(json.loads(self.sessions.work_thread_inventory())["data"]), 1)
+
     def test_usage_snapshot_replay_is_durable_and_emits_detail_event(self):
         thread_id = self.create()
         self.usage_event(thread_id, 100)

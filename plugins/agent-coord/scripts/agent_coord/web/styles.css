@@ -408,6 +408,9 @@ main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; pad
 .markdown hr { margin: 1.25em 0; border: 0; border-top: 1px solid var(--line); }
 .message-meta { color: var(--muted); font: 11px/1.6 var(--mono); margin-bottom: 1em; overflow-wrap: anywhere; }
 .message.user { background: var(--user-message-bg); border: 1px solid var(--user-message-line); border-radius: 7px; padding: 18px 21px; }
+.message.user.outgoing[data-status="failed"] { border-color: var(--danger); }
+.message.user.outgoing[data-status="failed"] .outgoing-status { color: var(--danger); }
+.outgoing-images { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .message.agent .speaker { color: var(--muted); }
 details.tool { border: 0; margin-bottom: 4px; color: var(--muted); font-size: 12px; min-width: 0; }
 details.tool > summary { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; list-style: none; }

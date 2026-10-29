@@ -513,20 +513,17 @@ class BrowserWakeTests(unittest.TestCase):
     def test_closure_between_claim_and_submission_cancels_wake_without_pausing(self):
         thread = self.create()
         message = self.message(thread)
-        read = self.sessions.read
-        calls = 0
-        def close_during_second_read(thread_id):
-            nonlocal calls
-            result = read(thread_id)
-            calls += 1
-            if calls == 2:
-                self.message(thread, "closure", thread_id=message["thread_id"])
-            return result
-        self.sessions.read = close_during_second_read
+        # Submission prepares the provider context after the claim. An idle
+        # loaded conversation is not reread there, so close it at that step.
+        resume = self.sessions._resume_thread
+        def close_during_submission(thread_id, record):
+            resume(thread_id, record)
+            self.message(thread, "closure", thread_id=message["thread_id"])
+        self.sessions._resume_thread = close_during_submission
         self.sessions.inbox_wake.process_once()
         self.assertEqual(self.attempts(), [])
         self.assertEqual(self.turns(thread), [])
-        self.sessions.read = read
+        self.sessions._resume_thread = resume
         self.message(thread, thread_id=message["thread_id"])
         self.sessions.inbox_wake.process_once()
         self.assertEqual(len(self.turns(thread)), 1)

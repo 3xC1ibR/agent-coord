@@ -62,6 +62,26 @@ class ProviderTests(unittest.TestCase):
     def finish(self, thread_id):
         self.emit(thread_id, {"type": "result", "subtype": "success"})
 
+    def test_checkpoint_between_turns_keeps_the_running_claude_process(self):
+        # Each message used to pay a full Claude Code start whenever saved
+        # thread context changed, which happens after nearly every checkpoint.
+        thread = self.create()
+        self.start(thread)
+        self.finish(thread)
+        connection = self.sessions.claude.connections[thread]
+        self.store.threads.checkpoint(thread, {"phase": "implementation", "summary": "Changed after the first turn."})
+        self.start(thread)
+        self.assertIs(self.sessions.claude.connections[thread], connection)
+        self.assertFalse(connection.closed)
+        self.assertEqual(len(connection.writes), 2)
+        self.finish(thread)
+        # Settings that are Claude Code arguments still start a new process.
+        self.sessions.update(thread, {"model": "sonnet"})
+        self.start(thread)
+        self.assertTrue(connection.closed)
+        self.assertIsNot(self.sessions.claude.connections[thread], connection)
+        self.assertEqual(self.sessions.claude.connections[thread].options["model"], "sonnet")
+
     def test_provider_selection_and_existing_codex_default(self):
         claude = self.create()
         codex = self.sessions.create({})["session"]["thread_id"]

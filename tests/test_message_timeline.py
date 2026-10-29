@@ -182,6 +182,7 @@ class MessageTimelineTests(unittest.TestCase):
             db.execute('DROP TRIGGER message_inserted')
             db.execute('DROP TRIGGER message_updated')
             db.execute('DROP TABLE message_changes')
+            db.execute('DROP INDEX messages_wake_turn_idx')  # Added with wake_turn_id's first use in lists.
             for column in ('sender_turn_id', 'recipient_turn_id', 'wake_turn_id', 'suppressed_at'):
                 db.execute('ALTER TABLE messages DROP COLUMN ' + column)
         reopened = CoordinationStore(self.store.database_path)

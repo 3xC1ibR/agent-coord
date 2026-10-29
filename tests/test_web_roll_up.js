@@ -329,3 +329,29 @@ test("manual project or conversation navigation still stops the app Roll up pass
     assert.equal(c.state.drafts.get("first"), "Keep my draft", destination);
   }
 });
+
+test("opening a cached conversation in another project paints before that project's thread list loads", async () => {
+  const c = projectAppFixture();
+  const listed = [];
+  let finishList;
+  const api = c.api;
+  c.api = (path, body) => {
+    if (!path.startsWith("threads?")) return api(path, body);
+    listed.push(path);
+    return new Promise(resolve => { finishList = () => resolve({data: c.items.slice()}); });
+  };
+  const painted = [];
+  c.conversationEntry = id => ({detail: id === "second" ? {work_thread: c.items.find(item => item.thread_id === id)} : null,
+    nodes: id === "second" ? [] : null});
+  c.renderThread = () => painted.push(c.state.selected);
+  c.renderQueuedMessages = () => {};
+  c.$("timeline").replaceChildren = () => {};
+  c.refreshDetail = async () => true;
+  const opening = c.select("second", {refreshInventory: false});
+  for (let turn = 0; turn < 5 && !painted.length; turn++) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(painted, ["second"], "the cached conversation is shown while the list read is still pending");
+  assert.equal(c.state.projectCwd, "/second");
+  assert.equal(listed.length, 1);
+  finishList();
+  await opening;
+});

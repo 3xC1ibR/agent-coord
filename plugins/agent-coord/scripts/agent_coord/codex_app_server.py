@@ -188,6 +188,13 @@ class CodexRPC:
             stream.close()
 
 
+# Provider events that change one open conversation, not the thread list.
+CONVERSATION_ONLY_EVENTS = frozenset({"thread/usage/updated", "thread/tokenUsage/updated", "turn/diff/updated",
+                                      "turn/plan/updated", "account/rateLimits/updated", "deprecationNotice",
+                                      "mcpServer/startupStatus/updated", "warning"})
+INVENTORY_REUSE_SECONDS = 1.0
+
+
 class BrowserSessions:
     def __init__(self, store: CoordinationStore, cwd: str | None = None, *, rpc_factory=CodexRPC, claude_factory=ClaudeRPC, antigravity_factory=AntigravityRPC, kimi_factory=KimiRPC, muse_factory=MuseRPC):
         self.store = store
@@ -211,6 +218,10 @@ class BrowserSessions:
         self.history_lock = threading.Lock()
         self.desktop_project_windows: dict[str, dict] = {}
         self.desktop_project_revision = 0
+        self.inventory_lock = threading.Lock()
+        self.inventory_generation = 0
+        self.inventory_builds: dict[bool, Future] = {}
+        self.creators_cache = None
         self.history_rpc = None
         self.rpc_factory = rpc_factory
         self.closed = False
@@ -296,10 +307,48 @@ class BrowserSessions:
         return self._provider(session["client"])
 
     def _publish(self, method: str, params: dict, **extra) -> None:
+        if extra.get("requestKey") or not (method.startswith(("item/", "hook/")) or method.endswith(("/delta", "/outputDelta"))
+                                           or method in CONVERSATION_ONLY_EVENTS):
+            self.inventory_changed()
         with self.changed:
             self.sequence += 1
             self.events.append({"seq": self.sequence, "method": method, "params": params, **extra})
             self.changed.notify_all()
+
+    def inventory_changed(self) -> None:
+        with self.inventory_lock:
+            self.inventory_generation += 1
+
+    def work_thread_inventory(self, *, archived=False) -> bytes:
+        """Return the encoded thread list, shared by concurrent readers.
+
+        Every window, pane, paired phone and event burst asks for the whole
+        list; separate builds convoyed on the GIL behind each other and behind
+        user requests. One build now serves every request that arrives while
+        it runs, and is reused for at most INVENTORY_REUSE_SECONDS unless this
+        runtime changes a thread first. Changes written by other processes
+        appear on the next build, as they did on the next poll.
+        """
+        archived = bool(archived)
+        with self.inventory_lock:
+            generation, build = self.inventory_generation, self.inventory_builds.get(archived)
+            if (build is None or build.generation != generation or build.done() and (
+                    build.exception() is not None or time.monotonic() - build.finished > INVENTORY_REUSE_SECONDS)):
+                build = self.inventory_builds[archived] = Future()
+                build.generation, build.finished = generation, None
+                owner = True
+            else:
+                owner = False
+        if owner:
+            try:
+                encoded = json.dumps({"data": self.list_work_threads(archived=archived)}).encode()
+            except BaseException as exc:
+                build.finished = time.monotonic()
+                build.set_exception(exc)
+            else:
+                build.finished = time.monotonic()
+                build.set_result(encoded)
+        return build.result()
 
     def _event(self, message: dict) -> None:
         method, params = message["method"], message.get("params") or {}
@@ -842,7 +891,17 @@ class BrowserSessions:
             return [{k: v for k, v in request.items() if k not in {"id", "notification_claimed"}}
                     for request in self.requests.values() if request["params"].get("threadId") == thread_id]
 
-    def _app_agent_creators(self, *, db=None) -> dict:
+    def _app_agent_creators(self, *, db=None, shared=False) -> dict:
+        # Each single-thread display projection (opening a conversation, each
+        # completion check on each event stream) needs one creator, but
+        # computing them scans every app agent request. Projections may share
+        # the read-only result as a thread list build is shared: until this
+        # runtime changes a thread or INVENTORY_REUSE_SECONDS pass. Decisions
+        # such as closing an agent's children always read current creators.
+        with self.inventory_lock:
+            generation, cached = self.inventory_generation, self.creators_cache
+            if shared and cached and cached[0] == generation and time.monotonic() - cached[1] <= INVENTORY_REUSE_SECONDS:
+                return cached[2]
         if db is None:
             with self.store._connection() as connection:
                 creators = app_agent_creators(connection)
@@ -862,6 +921,8 @@ class BrowserSessions:
         for creator in creators.values():
             cwd = creator.pop("cwd")
             creator["available"] = bool(cwd and matches_workspace(cwd, self.cwd))
+        with self.inventory_lock:
+            self.creators_cache = (generation, time.monotonic(), creators)
         return creators
 
     def work_thread(self, thread_id: str, *, history=True, _creators=None, _inventory=None) -> dict:
@@ -869,7 +930,7 @@ class BrowserSessions:
                   else _inventory.projected[thread_id])
         if not matches_workspace(thread["cwd"], self.cwd):
             raise CoordinationError("Work thread not found in this workspace.")
-        creators = self._app_agent_creators() if _creators is None else _creators
+        creators = self._app_agent_creators(shared=True) if _creators is None else _creators
         thread["created_by"] = creators.get(thread_id)
         thread["created_by_thread_id"] = thread["created_by"]["thread_id"] if thread["created_by"] else None
         thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
@@ -1656,8 +1717,15 @@ class BrowserSessions:
                 raise CoordinationError("Reopen this thread before sending a message.")
             if not automatic and self.reviews.cancel(thread_id, reason="New input superseded this review.", state="superseded"):
                 expected_turn = None
+            loaded = thread_id in self.loaded
             self._resume_thread(thread_id, record)
-            self.read(thread_id)
+            with self.lock:
+                believed_running = thread_id in self.active
+            # A full read reconciles a missed completion before choosing steer or
+            # start. A loaded conversation this runtime considers idle has no
+            # turn to reconcile, so its send skips reading the whole transcript.
+            if not loaded or believed_running:
+                self.read(thread_id)
             record = self._record(thread_id)
             if automatic and not self.inbox_wake.can_submit(thread_id):
                 raise BrowserBusyError("Inbox wake paused or the conversation is no longer idle.")

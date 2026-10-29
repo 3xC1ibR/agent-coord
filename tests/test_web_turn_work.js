@@ -119,3 +119,18 @@ test('a queued toggle from a background transcript stores expansion under its ow
   assert.ok(JSON.parse(h.storage.get('timeline-disclosures:test')).includes('turn-work:first'));
   assert.equal(h.storage.has('timeline-disclosures:other'),false);
 });
+test('a streamed chunk re-renders only the changed message, not the whole history',()=>{
+  const history=Array.from({length:40},(_,index)=>({id:'t'+index,status:'completed',startedAt:index,completedAt:index+1,
+    items:[{id:'u'+index,type:'userMessage',content:[{type:'text',text:'Question '+index}]},{id:'a'+index,type:'agentMessage',text:'Answer '+index}]}));
+  const live={id:'live',status:'inProgress',startedAt:50,items:[{id:'u-live',type:'userMessage',content:[{type:'text',text:'Now'}]},{id:'a-live',type:'agentMessage',text:'Par'}]};
+  const h=harness([...history,live]);
+  h.render();
+  const before=h.timeline.children.filter(n=>n.tag==='article');
+  h.state.detail.thread.turns.at(-1).items[1].text='Partial';
+  h.render();
+  const after=h.timeline.children.filter(n=>n.tag==='article');
+  assert.equal(after.length,before.length);
+  after.slice(0,-1).forEach((node,index)=>assert.equal(node,before[index],'unchanged message '+index+' is reused'));
+  assert.notEqual(after.at(-1),before.at(-1));
+  assert.equal(after.at(-1).children[0].innerHTML,'Partial');
+});

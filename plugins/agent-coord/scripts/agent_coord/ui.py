@@ -430,7 +430,7 @@ def _handler(
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
-            if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/conversation-scroll.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css", "/thread-tabs.js", "/thread-tabs.css"}:
+            if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/conversation-scroll.js", "/outgoing-messages.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css", "/thread-tabs.js", "/thread-tabs.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -577,7 +577,8 @@ def _handler(
             elif route == "sessions":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_sessions(archived=query.get("archived") == ["true"])})
             elif route == "threads":
-                self._json(HTTPStatus.OK, {"data": browser_sessions.list_work_threads(archived=query.get("archived") == ["true"])})
+                self._send(HTTPStatus.OK, "application/json; charset=utf-8",
+                           browser_sessions.work_thread_inventory(archived=query.get("archived") == ["true"]))
             elif route == "search":
                 from .thread_search import search_threads
                 scope = query.get("scope", ["all"])[0]
@@ -709,7 +710,11 @@ def _handler(
                 if not admitted:
                     self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Runtime maintenance is pausing new work. Try again shortly."})
                     return
-                self._admitted_POST()
+                try:
+                    self._admitted_POST()
+                finally:
+                    # A user action can change any thread's card; the next list read rebuilds.
+                    browser_sessions.inventory_changed()
 
         def _admitted_POST(self) -> None:
             path = urlparse(self.path).path

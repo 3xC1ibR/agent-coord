@@ -175,7 +175,13 @@ class ClaudeRPC:
 
     def _connection(self, thread_id, options):
         current = self.connections.get(thread_id)
-        if current and (current.process.poll() is not None or self.options.get(thread_id) != options):
+        # Instructions are fixed when Claude Code starts. Their saved thread
+        # context changes with nearly every checkpoint, while each prompt
+        # already receives the current context from the UserPromptSubmit hook.
+        # Restarting only for that put a full Claude Code start (plugins, MCP
+        # servers, session hooks) in front of the next message.
+        previous = {**self.options.get(thread_id, {}), "developerInstructions": None}
+        if current and (current.process.poll() is not None or previous != {**options, "developerInstructions": None}):
             current.close()
             self.connections.pop(thread_id, None)
             current = None

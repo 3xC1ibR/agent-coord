@@ -562,6 +562,9 @@ class CoordinationStore:
             connection.executescript("""
                 CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_session_id, id);
                 CREATE INDEX IF NOT EXISTS messages_exchange_idx ON messages(thread_id, id);
+                -- Thread lists find agent-woken turns on every build.
+                CREATE INDEX IF NOT EXISTS messages_wake_turn_idx
+                    ON messages(recipient_session_id, wake_turn_id) WHERE wake_turn_id IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS message_changes (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender_session_id TEXT NOT NULL, recipient_session_id TEXT NOT NULL

@@ -131,6 +131,7 @@ test("event-triggered refreshes join background polling", async () => {
   let callback;
   c.setTimeout = fn => { callback = fn; };
   c.clearTimeout = () => {};
+  c.Date = Date;
   c.showError = error => { throw error; };
   vm.runInContext(source.slice(source.indexOf("let listTimer, detailTimer;"), source.indexOf("function connect(")), c);
   const polling = c.refreshList({background: true});
@@ -138,6 +139,27 @@ test("event-triggered refreshes join background polling", async () => {
   assert.equal(reads.length, 1);
   reads[0].resolve({data: []});
   await polling;
+});
+
+test("an event burst schedules one list read per interval and is never postponed", async () => {
+  const {c, reads} = setup();
+  const timers = [];
+  let now = 10000;
+  c.Date = {now: () => now};
+  c.setTimeout = (fn, wait) => { timers.push({fn, wait}); return timers.length; };
+  c.clearTimeout = () => assert.fail("a scheduled refresh must not be postponed");
+  c.showError = error => { throw error; };
+  vm.runInContext(source.slice(source.indexOf("let listTimer, detailTimer;"), source.indexOf("function connect(")), c);
+  for (let event = 0; event < 20; event++) c.scheduleList();
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].wait, 150);
+  timers[0].fn();
+  assert.equal(reads.length, 1);
+  reads[0].resolve({data: []});
+  now += 200;
+  for (let event = 0; event < 20; event++) c.scheduleList();
+  assert.equal(timers.length, 2);
+  assert.equal(timers[1].wait, 800, "the next read waits for the rest of the interval");
 });
 
 test("pane refreshes preserve background polling and explicit action semantics", async () => {
@@ -163,7 +185,8 @@ test("per-item provider events do not refresh the thread list", () => {
   vm.runInContext(source.slice(source.indexOf("// Per-item provider events change"), source.indexOf("function newProject(")), c);
   for (const method of ["item/started", "item/completed", "item/reasoning/summaryTextDelta", "item/agentMessage/delta",
     "item/commandExecution/outputDelta", "hook/started", "hook/completed", "turn/diff/updated", "turn/plan/updated",
-    "thread/usage/updated", "thread/tokenUsage/updated", "account/rateLimits/updated", "deprecationNotice"]) {
+    "thread/usage/updated", "thread/tokenUsage/updated", "account/rateLimits/updated", "deprecationNotice",
+    "mcpServer/startupStatus/updated", "warning"]) {
     assert.equal(c.changesThreadList({method}), false, method);
   }
   for (const method of ["turn/started", "turn/completed", "thread/started", "thread/name/updated", "thread/closed",

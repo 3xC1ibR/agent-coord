@@ -1,0 +1,119 @@
+# Responsiveness
+
+Ribbon Field must feel immediate while many agents run. This document records
+the latency budgets, how they are measured on real data under agent load, what
+caused the October 2026 slowness, and the bottlenecks that remain.
+
+## Budgets
+
+| Interaction | Budget | Where it is checked |
+| --- | --- | --- |
+| Enter → own message visible | p95 ≤ 50 ms, independent of the backend | Browser driver; `tests/test_web_outgoing_messages.js` |
+| Send acceptance (`POST …/messages`) | p50 ≤ 150 ms, p95 ≤ 400 ms | Load harness `--check` |
+| Sent message reaches other windows | p50 ≤ 150 ms, p95 ≤ 400 ms | Load harness `--check` |
+| Thread list | p50 ≤ 300 ms, p95 ≤ 800 ms | Load harness `--check` |
+| Conversation read / thread detail | p50 ≤ 300 / 100 ms, p95 ≤ 800 / 300 ms | Load harness `--check` |
+| Search | p50 ≤ 300 ms, p95 ≤ 800 ms | Load harness `--check` |
+
+Server budgets apply to the realistic profile below. A sent message shows
+"Sending…" until the backend accepts it, then remains until the conversation
+shows the provider's own copy. A rejected message stays visibly "Not sent" with
+the reason, and its text returns to an empty composer. Pending state is never
+presented as delivered, and a slow backend is not hidden behind a longer timeout.
+
+## Measuring
+
+Both tools use real data and never touch the installed runtime unless pointed at it.
+
+```bash
+# Backend under agent load: repository code on an APFS clone of a snapshot.
+python3 scripts/measure_backend_latency.py --snapshot PATH/state.sqlite3 \
+  --agents 6 --delta-rate 6 --hook-rate 3 --check --output report.json
+# The same workload against another backend tree, e.g. a retained payload:
+python3 scripts/measure_backend_latency.py --snapshot PATH/state.sqlite3 \
+  --source ~/.local/state/agent-coord/.state.sqlite3.runtime/payloads/<digest>/backend
+# Keep the loaded server running, then drive the real web UI in a browser:
+python3 scripts/measure_backend_latency.py --snapshot PATH/state.sqlite3 --sends 0 --reads 0 --hold 600
+node scripts/measure_interaction_latency.mjs --base http://127.0.0.1:PORT --thread ID --sends 15 --switch ID1,ID2
+```
+
+Snapshot a live database with Python's `sqlite3` backup API (`src.backup(dst)`);
+the `sqlite3` shell's `.backup` restarts on every write. The harness replaces
+provider processes with in-process synthetic providers that stream JSON-decoded
+events with realistic transcript sizes, emits the provider notifications that
+make windows refresh, runs three windows that refresh exactly like `app.js`,
+and runs a hook writer process. Its `--profile` option writes a Python
+stack-sample profile of the backend. `/usr/bin/sample` on the live backend PID
+shows native GIL and SQLite waits without stopping it.
+
+Run measurements while the machine is otherwise quiet: concurrent builds and
+test suites raise load averages above 50 on the development Mac and move every
+percentile.
+
+## October 2026 findings
+
+Live, before any change (backend build 10, about twenty agents): Enter → own
+message visible p50 1.39 s, p90 2.29 s, max 2.77 s; acceptance p50 1.80 s, max
+3.13 s (12 sends, real browser). Search took 0.9–4.3 s and the thread list was a
+5.4 MB response.
+
+Causes, each measured:
+
+1. **The UI drew a sent message only after the backend accepted it**, and the
+   backend accepted only after a whole-transcript provider read and the
+   provider's `turn/start`. Any backend delay was therefore input lag.
+2. **A thread-list refresh storm.** Each window rebuilt the full inventory
+   (555 threads, about 130 ms of mostly GIL-bound work idle, over 1 s under
+   load) on nearly every provider event: about 1.7 refreshing events per second
+   per window live, including `mcpServer/startupStatus/updated`. Three windows
+   kept several builds in flight continuously. Native sampling of the live
+   backend found an average of 7 threads queued on the GIL and about 25
+   short-lived request threads per second; every user request waited in that queue.
+3. **Claude Code restarted before most messages.** Its process was restarted
+   whenever developer instructions changed, and those embed the thread's saved
+   checkpoint, which agents update nearly every turn. Each message then waited
+   for a Claude Code start with plugins, MCP servers and session hooks. The
+   same context already reaches every prompt through the UserPromptSubmit hook.
+4. **Per-row Python work inside SQLite** (search UDFs, row iteration) and an
+   unindexed agent-wake join in every list build, each multiplied by GIL convoy.
+
+Changes:
+
+- `web/outgoing-messages.js`: local echo on Enter with Sending/Sent/Not sent.
+- Send skips the whole-transcript read for a loaded idle conversation; a
+  conversation believed to be running still reconciles first.
+- One shared thread-list build serves all concurrent readers and is reused
+  for at most one second unless this runtime changes a thread; app-agent
+  creators are shared the same way for display projections only.
+- Windows refresh the list at most once per second and ignore events that
+  cannot change it.
+- Claude Code keeps running when only its instructions' saved context changes.
+- An index for agent-woken turns; search without per-row Python callbacks.
+
+Harness results, realistic profile (6 streaming agents, 3 windows, hook
+writer), installed build 10 backend versus this repository, same snapshot:
+
+| Metric | Before p50 / p95 / max | After p50 / p95 / max |
+| --- | --- | --- |
+| Send acceptance | 420 / 953 / 1734 ms | 100 / 175 / 258 ms |
+| Sent message reaches windows | 392 / 864 / 1713 ms | 53 / 142 / 151 ms |
+| Thread list | 1162 / 2417 ms | 111 / 508 ms |
+| Backend CPU | 93 % | 49 % |
+
+In a real browser against the loaded harness, Enter → own message visible was
+3–11 ms across 15 sends (live before: p50 1.39 s).
+
+## Remaining bottlenecks
+
+- **One Python process runs every agent and every request.** Provider stream
+  decoding, persistence, event streams and HTTP handlers share one GIL. At twice
+  the realistic load the backend still saturates (send acceptance p95 about
+  0.7 s). The durable fix is to move provider adapters and their persistence
+  out of the request-serving process (or onto a free-threaded interpreter),
+  not further per-endpoint tuning.
+- Each list refresh still transfers and parses about 5 MB; a revisioned or
+  incremental inventory would remove that cost from the WebView.
+- Opening a large conversation still renders the whole timeline, including
+  Markdown for every message.
+- Backend changes activate only at an idle runtime handover; see
+  [runtime updates](runtime-updates.md). Interface changes apply on reopen.

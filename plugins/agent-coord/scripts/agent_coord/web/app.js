@@ -187,7 +187,7 @@ function sessionContext() {
   return newThreadContext(state.organization, {project: $("project").value}, state.folders?.selected);
 }
 function threadsInProject(threads) { return threads.filter(thread => inProject(thread, state.folders?.selected?.cwd)); }
-async function switchProject({restoreConversation = true, preserveRollUp = false} = {}) {
+async function switchProject({restoreConversation = true, preserveRollUp = false, awaitInventory = true} = {}) {
   const cwd = state.folders.selected?.cwd || "";
   if (state.projectCwd === cwd) { renderFolders(); return; }
   // Keep in-memory drafts and tiled destinations as well as the saved tab.
@@ -226,8 +226,10 @@ async function switchProject({restoreConversation = true, preserveRollUp = false
   renderFolders(); navigation?.remember();
   await Promise.all([viewsReady, opening]);
   if (state.projectCwd !== cwd) return;
-  await refreshList({background: true});
-  if (state.projectCwd === cwd && !state.selected) savedViews.restoreScroll();
+  const inventory = refreshList({background: true}).then(() => {
+    if (state.projectCwd === cwd && !state.selected) savedViews.restoreScroll();
+  });
+  if (awaitInventory) await inventory; else inventory.catch(error => showError(error));
 }
 async function restoreProjectTab(id = state.threadTabs?.destination(), {refreshInventory = true} = {}) {
   const cwd = state.projectCwd;
@@ -249,7 +251,9 @@ async function openProjectDirectory(cwd, {preserveRollUp = false} = {}) {
   // A saved conversation remains accessible if its directory was moved/deleted.
   // New session creation still validates the directory on the server.
   state.folders.adopt({cwd});
-  await switchProject({restoreConversation: false, preserveRollUp});
+  // Opening a conversation in another project must not wait for that
+  // project's whole thread list; the cached conversation paints first.
+  await switchProject({restoreConversation: false, preserveRollUp, awaitInventory: false});
 }
 function renderFolders() {
   const cwd = state.folders?.selected?.cwd || "";
@@ -1704,6 +1708,8 @@ function renderTimeline() {
   const workGroups = new Map();
   const conversation = conversationEntry(state.selected);
   const previousTools = conversation.toolNodes || new Map(), toolNodes = new Map();
+  const previousMessages = conversation.messageNodes || new Map(), messageNodes = new Map();
+  const client = state.detail?.work_thread?.client;
   const disclosureListeners = conversation.disclosureListeners ||= new WeakSet();
   for (const entry of entries) {
     if (entry.message) {
@@ -1723,9 +1729,22 @@ function renderTimeline() {
         continue;
       }
       if (messages.length && AgentMessages.isWakePrompt(item, turn, messages)) continue;
-      const text = itemText(item);
       if (item.type === "userMessage" || item.type === "agentMessage") {
+        // A stream changes one message at a time. Rebuilding every message,
+        // with its Markdown, for each chunk kept the main thread busy and
+        // delayed typing in long conversations; reuse unchanged messages.
+        const key = JSON.stringify([turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
+        const signature = JSON.stringify([item, turn.status, turn.startedAt, turn.started_at, turn.completedAt,
+          turn.completed_at, (turn.items || []).length, client]);
+        const reused = previousMessages.get(key);
+        if (reused?.signature === signature) {
+          messageNodes.set(key, reused);
+          fragment.append(reused.node);
+          continue;
+        }
+        const text = itemText(item);
         const message = node("article", null, "message " + (item.type === "userMessage" ? "user" : "agent"));
+        messageNodes.set(key, {signature, node: message});
         message.dataset.searchTurn = turn.id || "search-turn-" + turns.indexOf(turn);
         message.dataset.searchItem = item.id || "search-item-" + (turn.items || []).indexOf(item);
         message.tabIndex = -1;
@@ -1767,6 +1786,7 @@ function renderTimeline() {
         message.append(body, messageTimeLabel(item, turn));
         fragment.append(message);
       } else {
+        const text = itemText(item);
         // Streaming changes one item at a time. Reuse unchanged tool rows,
         // including their disclosure state, instead of churning the full history.
         const key = JSON.stringify([turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
@@ -1826,6 +1846,11 @@ function renderTimeline() {
   }
   // Retain navigation even when the provider cannot return the boundary turn.
   appendForks(null, true);
+  if (state.outgoing) {
+    state.outgoing.settle(state.selected, state.detail);
+    for (const old of el.querySelectorAll("article[data-outgoing]")) old.remove();
+    state.outgoing.append(document, fragment, state.selected);
+  }
   if (globalThis.OpenUIThread) {
     const thread = state.selected;
     OpenUIThread.commit(el, fragment, {
@@ -1836,6 +1861,7 @@ function renderTimeline() {
     });
   } else el.replaceChildren(fragment);
   conversation.toolNodes = toolNodes;
+  conversation.messageNodes = messageNodes;
   const disclosureThread = state.selected;
   for (const detail of el.querySelectorAll("details[data-id]")) {
     if (!disclosureListeners.has(detail)) {
@@ -2068,7 +2094,20 @@ function applyEvent(event) {
   scheduleTimelineRender();
 }
 let listTimer, detailTimer;
-function scheduleList() { clearTimeout(listTimer); listTimer = setTimeout(() => refreshList({background: true}).catch(showError), 150); }
+let listScheduledAt = 0;
+// With many agents working, inventory events arrive several times a second.
+// Each refresh rereads and parses the whole thread list, so read it at most
+// once per interval; a pending refresh is kept rather than postponed by the
+// next event, which could otherwise defer it indefinitely.
+const LIST_REFRESH_INTERVAL = 1000;
+function scheduleList() {
+  if (listTimer) return;
+  const wait = Math.max(150, LIST_REFRESH_INTERVAL - (Date.now() - listScheduledAt));
+  listTimer = setTimeout(() => {
+    listTimer = null; listScheduledAt = Date.now();
+    refreshList({background: true}).catch(showError);
+  }, wait);
+}
 function scheduleDetail() { clearTimeout(detailTimer); detailTimer = setTimeout(() => refreshDetail().catch(showError), 100); }
 function connect() {
   const events = new EventSource(base + "events?completion_after=" + state.config.completionCursor);
@@ -2103,7 +2142,7 @@ function connect() {
 // picks up their side effects, such as the last tool on a card. Provider
 // requests keep refreshing because they change attention.
 const conversationOnlyEvents = new Set(["thread/usage/updated", "thread/tokenUsage/updated", "turn/diff/updated",
-  "turn/plan/updated", "account/rateLimits/updated", "deprecationNotice"]);
+  "turn/plan/updated", "account/rateLimits/updated", "deprecationNotice", "mcpServer/startupStatus/updated", "warning"]);
 function changesThreadList(event) {
   if (event.requestKey) return true;
   const method = event.method || "";
@@ -2914,6 +2953,7 @@ compactContext.addEventListener("change", layoutContext);
 layoutContext();
 if (typeof AgentTree !== "undefined") setupAgentTree();
 state.scratchpad = new ThreadScratchpad({panel: $("thread-scratchpad"), input: $("scratchpad-text"), status: $("scratchpad-status"), api});
+if (typeof OutgoingMessages !== "undefined") state.outgoing = new OutgoingMessages({itemText});
 if (!state.paneMode) {
   state.projectScratchpad = new ProjectScratchpad({document, view: window, api});
   window.agentCoordProjectScratchpad = state.projectScratchpad;
@@ -2978,6 +3018,10 @@ async function sendMessage(mode = "steer") {
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
   if (!dispatcher && !reviewing && detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
   (state.sending ||= new Set()).add(sendKey); renderStatus();
+  let echo = null;
+  const showOutgoing = () => {
+    if (id === state.selected && state.timelineThread === id) state.outgoing.update(document, $("timeline"), id, state.detail);
+  };
   let dispatchReceived = false;
   let commandCompleted = false;
   try {
@@ -3011,7 +3055,17 @@ async function sendMessage(mode = "steer") {
       body.requestId = DispatchUI.requestKey(sessionStorage, id, body);
     }
     if (!reviewing && !detail.running && mode !== "queue") state.reviewUI?.decorate(body, id);
+    // Queued, reviewed, and command input have their own displays.
+    echo = !text.trim().startsWith("/") && body.review == null && (dispatcher || mode !== "queue")
+      ? state.outgoing?.add(id, {text, images: images.length, requestId: dispatcher ? body.requestId : null,
+        detail: conversationEntry(id).detail || detail}) : null;
+    if (echo) {
+      if (id === state.selected && $("message").value === text) { $("message").value = ""; state.drafts.delete(id); }
+      showOutgoing();
+      if (id === state.selected) state.timelineScroll?.latest();
+    }
     const result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
+    if (echo) { state.outgoing.accepted(echo); showOutgoing(); }
     state.reviewUI?.sent(id);
     dispatchReceived = !!result.dispatched;
     commandCompleted = !!result.command;
@@ -3024,7 +3078,8 @@ async function sendMessage(mode = "steer") {
     state.mentions?.sent(id, text, mentions);
     if (result.command) state.commandFeedback.set(id, result.command.message);
     else state.commandFeedback.delete(id);
-    if (id === state.selected) {
+    if (echo) { /* The composer was cleared on Enter; keep anything typed since. */ }
+    else if (id === state.selected) {
       if ($("message").value === text) { $("message").value = ""; state.drafts.delete(id); }
       else state.drafts.set(id, $("message").value);
     } else if (state.drafts.get(id) === text) state.drafts.delete(id);
@@ -3041,6 +3096,13 @@ async function sendMessage(mode = "steer") {
     if (dispatchReceived) {
       console.warn("Dispatcher accepted request before UI refresh failed", error);
       throw new Error("Your request was received, but the view could not refresh. Do not send it again.");
+    }
+    if (echo?.status === "sending") {
+      // Not accepted: say so where the message appeared and return the text.
+      state.outgoing.rejected(echo, error.message || String(error));
+      if (id === state.selected) { if (!$("message").value.trim()) $("message").value = text; }
+      else if (!state.drafts.get(id)) state.drafts.set(id, text);
+      showOutgoing();
     }
     throw error;
   }

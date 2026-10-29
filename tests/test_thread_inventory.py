@@ -34,6 +34,10 @@ class ThreadInventoryTests(unittest.TestCase):
         self.runtime.requests = {}
         self.runtime.active = {}
         self.runtime.loaded = set()
+        self.runtime.inventory_lock = threading.Lock()
+        self.runtime.inventory_generation = 0
+        self.runtime.inventory_builds = {}
+        self.runtime.creators_cache = None
         self.runtime.dispatch = DispatchRuntime.__new__(DispatchRuntime)
         self.runtime.dispatch.store = self.store
         with self.store._connection() as db:
