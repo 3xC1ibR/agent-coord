@@ -612,6 +612,19 @@ test("list group tabs filter rows, remember the choice, and report saved-view gr
   const controlled = listSetup(); controlled.render(threads, {selectedGroup: "g1", view: "group-g1"});
   assert.deepEqual(controlled.rows("idle"), ["a"]);
 });
+test("a background repaint keeps the reader's place in the overview scroller", () => {
+  const c = listSetup();
+  const threads = Array.from({length: 30}, (_, i) => listThread("t" + i, {checkpoint: {id: i + 1}}));
+  c.render(threads);
+  // WebKit resets the scrolled ancestor when the list's rows are replaced by new nodes.
+  const scroller = {scrollTop: 900, scrollLeft: 0, parentElement: null};
+  c.host.parentElement = scroller;
+  const replace = c.host.replaceChildren.bind(c.host);
+  c.host.replaceChildren = (...items) => { replace(...items); scroller.scrollTop = 0; };
+  c.render(threads.map(t => ({...t, checkpoint: {...t.checkpoint, summary: "Updated"}})));
+  assert.equal(scroller.scrollTop, 900);
+  assert.equal(c.rows("idle").length, 30);
+});
 test("Idle shows fifty rows until asked, and empty threads collapse into one control", () => {
   const c = listSetup();
   const many = Array.from({length: 55}, (_, i) => listThread("t" + i, {last_user_message_at: NOW - i, checkpoint: {id: i + 1}}));

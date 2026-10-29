@@ -563,7 +563,12 @@ const WorkingSet = (() => {
             () => { shown.has("empty") ? shown.delete("empty") : shown.add("empty"); paint(); }));
         }
       }
+      // WebKit resets a scrolled ancestor to the top when this content is replaced
+      // by new nodes, so background updates would undo the reader's scrolling.
+      const scrolled = [];
+      for (let el = host; el; el = el.parentElement) if (el.scrollTop || el.scrollLeft) scrolled.push([el, el.scrollTop, el.scrollLeft]);
       host.replaceChildren(...parts);
+      for (const [el, top, left] of scrolled) { el.scrollTop = top; el.scrollLeft = left; }
       if (focusThread) [...host.querySelectorAll("[data-thread]")].find(n => n.dataset.thread === focusThread && n.dataset.action === focusAction)?.focus({preventScroll: true});
     }
     return {
