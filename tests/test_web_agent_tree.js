@@ -252,6 +252,7 @@ test("opening either a parent or leaf conversation defaults to its full tree and
     const c = setupController(records, selected);
     c.controller.bind(); await c.controller.load();
     assert.equal(c.$("panel-agents").hidden, false);
+    assert.equal(c.$("panel-context").hidden, false);
     assert.equal(c.controller.mode, "agents");
     assert.equal(c.controller.root, "root");
     assert.equal(c.collapsed, false);
@@ -265,20 +266,23 @@ test("family discovery includes an archived ancestor missing from overview inven
     data: [thread("root", null, {attention: "archived"}), child]}));
   c.controller.bind(); await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, false);
+  assert.equal(c.$("panel-context").hidden, false);
   assert.equal(c.controller.mode, "agents");
   assert.equal(c.controller.root, "root");
   assert.equal(c.collapsed, false);
 });
 
-test("a standalone conversation keeps Context without forcing the panel open", async () => {
+test("a standalone conversation hides both tabs without forcing the context panel open", async () => {
   const c = setupController([thread("root")]);
   c.controller.bind(); await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("panel-context").hidden, true);
   assert.equal(c.controller.mode, "context");
   assert.equal(c.collapsed, true);
   assert.equal(c.state.threadTabs.items[0].tree_root, undefined);
   await c.controller.open("root");
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("panel-context").hidden, true);
   assert.equal(c.controller.mode, "context");
   let focused = 0, clicked = 0;
   c.$("panel-agents").focus = () => { focused++; };
@@ -295,31 +299,41 @@ test("switching conversations and changing child lists hides or restores the Age
     path.includes("solo") ? {root_thread_id: "solo", data: [solo]} : {root_thread_id: "root", data: family}));
   c.controller.bind(); await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, false);
+  assert.equal(c.$("panel-context").hidden, false);
   assert.equal(c.controller.mode, "agents");
 
   // Switching to a standalone conversation hides Agents and selects Context, even with preservePanel.
   c.state.selected = "solo"; c.state.threadTabs.selected = "solo"; c.state.threadTabs.items.push({thread_id: "solo"});
   c.controller.bind({preservePanel: true}); await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("panel-context").hidden, true);
   assert.equal(c.controller.mode, "context");
 
   // Switching back to a conversation with app agents restores the Agents tab.
   c.state.selected = "root"; c.state.threadTabs.selected = "root";
   c.controller.bind(); await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, false);
+  assert.equal(c.$("panel-context").hidden, false);
   assert.equal(c.controller.mode, "agents");
 
-  // If the child list changes so no app agents remain, Agents hides and cannot remain selected.
+  // If the child list changes, both tabs hide and focus leaves the hidden control.
+  let focusReturned = false;
+  c.document.activeElement = c.$("panel-agents");
+  c.$("toggle-context").focus = () => { focusReturned = true; };
   family = [parent];
   c.controller.inventory([parent, solo], []);
   await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("panel-context").hidden, true);
   assert.equal(c.controller.mode, "context");
+
+  assert.equal(focusReturned, true);
 
   // When a child app agent appears, the Agents tab is restored.
   family = [parent, child];
   c.controller.inventory([parent, child, solo], []);
   assert.equal(c.$("panel-agents").hidden, false);
+  assert.equal(c.$("panel-context").hidden, false);
 });
 
 test("late family discovery respects explicit Context and close choices", async () => {
@@ -331,6 +345,7 @@ test("late family discovery respects explicit Context and close choices", async 
     resolve({root_thread_id: "root", data: [thread("root"), thread("child", "root")]});
     await loaded;
     assert.equal(c.$("panel-agents").hidden, false);
+    assert.equal(c.$("panel-context").hidden, false);
     assert.equal(c.controller.mode, "context");
     assert.equal(c.collapsed, true);
   }
@@ -361,6 +376,7 @@ test("late responses from a previous conversation cannot open its tree in a stan
   replies.get("threads/root/agent-tree")({root_thread_id: "root", data: [thread("root"), thread("child", "root")]}); await previous;
   assert.equal(c.controller.root, "solo");
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("panel-context").hidden, true);
   assert.equal(c.controller.mode, "context");
   assert.equal(c.collapsed, true);
   assert.equal(c.state.threadTabs.items[1].tree_root, undefined);
@@ -372,6 +388,7 @@ test("creating a new draft session or switching conversations with an outstandin
   c.controller.bind();
   assert.equal(c.controller.mode, "agents");
   assert.equal(c.$("panel-agents").hidden, false);
+  assert.equal(c.$("panel-context").hidden, false);
   const previous = c.controller.load();
 
   // Switch to a new draft session while the previous conversation's tree request is still in flight.
@@ -384,6 +401,7 @@ test("creating a new draft session or switching conversations with an outstandin
   assert.equal(c.controller.mode, "context");
   assert.equal(c.controller.root, null);
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("panel-context").hidden, true);
   assert.equal(c.$("context-panel").hidden, true);
   assert.equal(c.$("conversation").classList.contains("context-collapsed"), true);
   assert.equal(c.$("conversation").classList.contains("has-agent-tree"), false);
@@ -400,6 +418,7 @@ test("creating a new draft session or switching conversations with an outstandin
   assert.equal(c.controller.mode, "context");
   assert.equal(c.controller.root, null);
   assert.equal(c.$("panel-agents").hidden, true);
+  assert.equal(c.$("panel-context").hidden, true);
   assert.equal(c.$("context-panel").hidden, true);
   assert.deepEqual(c.errors, []);
 });

@@ -1281,19 +1281,34 @@ function renderThread() {
   $("handle-response").hidden = !work.can_handle_response;
   $("handle-response").disabled = state.updatingThreads.has(work.thread_id);
   $("organize-thread").textContent = work.project_id ? "Change group" : "Add to group";
-  $("checkpoint-phase").textContent = checkpoint ? " · " + checkpoint.phase : "";
   const signature = JSON.stringify(work);
   if ($("checkpoint").dataset.signature === signature) return;
   const sameThread = $("checkpoint").dataset.thread === work.thread_id;
-  const opened = new Set([...$("checkpoint").querySelectorAll("details[open]")].map(el => el.dataset.section));
+  const opened = new Set([...$("context-info").querySelectorAll("details[open]")].map(el => el.dataset.section));
   $("checkpoint").dataset.signature = signature; $("checkpoint").dataset.thread = work.thread_id;
-  $("checkpoint").replaceChildren(node("p", checkpoint?.summary || "No checkpoint yet. The agent will save one when it has a result to report."));
-  if (checkpoint) {
-    $("checkpoint").append(node("small", (checkpoint.author === "user" ? "Edited by you" : "Saved by agent") + " · " + new Date(checkpoint.refreshed_at * 1000).toLocaleString(), "muted"));
-    if (checkpoint.next_action) $("checkpoint").append(node("p", "Next · " + ({user: "You", agent: "Agent", external: "Waiting externally"}[checkpoint.next_actor] || "") + ": " + checkpoint.next_action, "checkpoint-next"));
-  }
+  const phase = checkpoint?.phase;
+  $("checkpoint").replaceChildren(node("h3", "Status"), node("p", phase ? phase[0].toUpperCase() + phase.slice(1) : "No status saved yet."));
+  const next = node("p", null, "checkpoint-next");
+  const owner = checkpoint?.next_action && {user: "You", agent: "Agent", external: "External"}[checkpoint.next_actor];
+  next.append(node("strong", owner ? owner + " next: " : "Next: "), node("span", checkpoint?.next_action || "No next action saved."));
+  $("checkpoint").append(next, node("h3", "Latest"), node("p", checkpoint?.summary || "No checkpoint yet. The agent will save one when it has a result to report."));
   if (work.checkpoint_stale) $("checkpoint").append(node("p", "This checkpoint predates the latest turn. Review the conversation for newer work.", "stale-checkpoint"));
-  globalThis.agentCoordContextLifecycle?.render($("checkpoint"), work, {sameThread, opened});
+  const original = node("section", null, "original-request-section");
+  original.append(node("h3", "Original request"));
+  if (work.original_request?.length > 240) {
+    const expanded = sameThread && opened.has("original");
+    const preview = node("p", work.original_request.slice(0, 240).trimEnd() + "…", "original-request");
+    const full = node("details"); full.dataset.section = "original"; full.open = expanded;
+    preview.hidden = expanded;
+    const toggle = node("summary", expanded ? "Show less" : "Show full request");
+    full.append(toggle, node("p", work.original_request, "original-request"));
+    full.addEventListener("toggle", () => { preview.hidden = full.open; toggle.textContent = full.open ? "Show less" : "Show full request"; });
+    original.append(preview, full);
+  } else original.append(node("p", work.original_request || "No original request saved.", "original-request"));
+  $("checkpoint").append(original);
+  $("context-reuse").replaceChildren();
+  globalThis.agentCoordContextLifecycle?.render($("context-reuse"), work, {sameThread, opened});
+  $("checkpoint-extras").replaceChildren();
   const links = node("div", null, "thread-links");
   for (const link of work.links) {
     const row = node("div", null, "thread-link");
@@ -1306,19 +1321,19 @@ function renderThread() {
     remove.onclick = () => action(async () => { await api(threadPath(work.thread_id) + "/links", {remove: link.id}); await refreshThread(); await refreshList(); }, remove);
     row.append(remove); links.append(row);
   }
-  $("checkpoint").append(links);
-  if (work.forked_from || work.forked_sessions?.length) $("checkpoint").append(forkLinks(work));
+  $("checkpoint-extras").append(links);
+  if (work.forked_from || work.forked_sessions?.length) $("checkpoint-extras").append(forkLinks(work));
   if (work.children?.length) {
     const children = node("details"); children.dataset.section = "children"; children.open = sameThread && opened.has("children"); children.append(node("summary", "Delegated sessions · " + work.children.length));
     for (const child of work.children) { const button = node("button", child.title + " · " + (child.checkpoint?.phase || "No checkpoint yet"), "quiet"); button.onclick = () => action(() => select(child.thread_id)); children.append(button); }
-    $("checkpoint").append(children);
+    $("checkpoint-extras").append(children);
   }
-  if (work.original_request) { const original = node("details"); original.dataset.section = "original"; original.open = sameThread && opened.has("original"); original.append(node("summary", "Original request"), node("p", work.original_request, "original-request")); $("checkpoint").append(original); }
   if (work.checkpoints?.length > 1) {
     const history = node("details"); history.dataset.section = "history"; history.open = sameThread && opened.has("history"); history.append(node("summary", "Checkpoint history · " + work.checkpoints.length));
     for (const entry of work.checkpoints) { const item = node("article", null, "checkpoint-entry"); item.append(node("small", entry.phase + " · " + new Date(entry.created_at * 1000).toLocaleString(), "muted"), node("p", entry.summary)); if (entry.next_action) item.append(node("p", "Next (" + entry.next_actor + "): " + entry.next_action)); history.append(item); }
-    $("checkpoint").append(history);
+    $("checkpoint-extras").append(history);
   }
+  if (checkpoint) $("checkpoint-extras").append(node("small", (checkpoint.author === "user" ? "Edited by you" : "Saved by agent") + " · " + new Date(checkpoint.refreshed_at * 1000).toLocaleString(), "muted"));
   $("resume-browser").hidden = !work.can_resume || work.attention === "archived";
 }
 function renderTitle() {
@@ -2825,6 +2840,8 @@ function setupAgentTree() {
       if (!state.selected || isSessionDraft() || state.selected === "new-session") {
         this.root = null;
         $("panel-agents").hidden = true;
+        $("panel-context").hidden = true;
+        $("context-info").setAttribute("role", "region");
         $("conversation").classList.remove("has-agent-tree");
         if (this.mode === "agents") this.setMode("context", false);
         return;
@@ -2839,9 +2856,12 @@ function setupAgentTree() {
         state.threadTabs.setTree(hasAgents ? this.root : null, hasAgents && tab.tree_open);
       if (this.root && this.tree.nodes.has(this.root)) panel.update([...this.tree.nodes.values()], this.root, state.selected);
       $("panel-agents").hidden = !hasAgents;
+      $("panel-context").hidden = !hasAgents;
+      $("context-info").setAttribute("role", hasAgents ? "tabpanel" : "region");
       $("conversation").classList.toggle("has-agent-tree", hasAgents);
+      if (!hasAgents && [$("panel-agents"), $("panel-context")].includes(document.activeElement))
+        $(state.mobileChat?.matches ? "mobile-sheet-back" : "toggle-context").focus();
       if (!hasAgents && this.mode === "agents") {
-        if ($("panel-agents") === document.activeElement) $("panel-context").focus();
         this.setMode("context", false);
       }
       this.applyDefault();
@@ -3001,12 +3021,11 @@ function readSavedContextCollapsed() {
 contextCollapsed = readSavedContextCollapsed();
 function layoutContext() {
   if (state.mobileChat?.matches) { state.mobileChat.layoutContext(); return; }
-  const context = $("thread-context"), panel = $("context-panel"), button = $("toggle-context");
+  const panel = $("context-panel"), button = $("toggle-context");
   const draft = isSessionDraft() || state.selected === "new-session" || $("conversation").classList.contains("session-draft");
   const collapsed = draft || (contextCollapsed ?? compactContext.matches);
   const containsFocus = panel.contains(document.activeElement);
   panel.hidden = collapsed;
-  context.open = !collapsed;
   $("conversation").classList.toggle("context-collapsed", collapsed);
   $("conversation").classList.toggle("agents-visible", !collapsed && state.agentTreeController?.mode === "agents");
   const label = (collapsed ? "Show " : "Hide ") + (state.agentTreeController?.mode === "agents" ? "agent tree" : "thread context");
@@ -3024,16 +3043,10 @@ function setContextCollapsed(collapsed, {persist = true} = {}) {
   layoutContext();
 }
 $("toggle-context").onclick = () => setContextCollapsed(!$("context-panel").hidden);
-$("thread-context").addEventListener("toggle", () => {
-  if (state.mobileChat?.matches || state.agentTreeController?.mode === "agents") return;
-  // Clicking the panel heading also collapses the whole column.
-  const collapsed = !$("thread-context").open;
-  if (collapsed !== $("context-panel").hidden) setContextCollapsed(collapsed);
-});
 compactContext.addEventListener("change", layoutContext);
 layoutContext();
 if (typeof AgentTree !== "undefined") setupAgentTree();
-state.scratchpad = new ThreadScratchpad({panel: $("thread-scratchpad"), input: $("scratchpad-text"), status: $("scratchpad-status"), api});
+state.scratchpad = new ThreadScratchpad({panel: $("thread-scratchpad"), input: $("scratchpad-text"), status: $("scratchpad-status"), api, compactStatus: true});
 state.outgoing = new OutgoingMessages({itemText});
 if (!state.paneMode) {
   state.projectScratchpad = new ProjectScratchpad({document, view: window, api});

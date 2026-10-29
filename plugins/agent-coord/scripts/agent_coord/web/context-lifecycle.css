@@ -8,3 +8,26 @@
 .context-lifecycle-panel details { margin-top: 12px; }
 .context-lifecycle-panel summary { cursor: pointer; font-weight: 500; }
 .context-lifecycle-panel .context-lifecycle-stale { color: var(--muted); font-size: 12px; }
+
+/* Conversation context uses the existing sidebar type and spacing scale. */
+#context-info {
+  --context-heading-size: 12px; /* drift-ok: module dimensions reuse the DESIGN.md sidebar scale. */
+  --context-heading-weight: 550;
+  --context-section-gap: 24px; /* drift-ok: module dimensions reuse the DESIGN.md sidebar scale. */
+  --context-text-gap: 8px; /* drift-ok: module dimensions reuse the DESIGN.md sidebar scale. */
+  --context-divider-width: 1px; /* drift-ok: module dimensions reuse the DESIGN.md sidebar scale. */
+}
+.context-panel-tabs:has(#panel-agents[hidden]):has(#panel-context[hidden]) { display: none; }
+#thread-context[hidden] ~ .context-secondary { display: none; }
+#checkpoint h3 { font-size: var(--context-heading-size); font-weight: var(--context-heading-weight); margin: var(--context-section-gap) 0 var(--context-text-gap); }
+#checkpoint > h3:first-child { margin-top: 0; }
+#checkpoint p { margin: 0 0 var(--context-text-gap); }
+#checkpoint .checkpoint-next { border: 0; padding: 0; margin: var(--context-section-gap) 0; }
+#checkpoint .original-request-section details { margin-top: 0; }
+#checkpoint .original-request-section summary { color: var(--accent); }
+#context-info .thread-scratchpad { border-top: var(--context-divider-width) solid var(--line); }
+#context-reuse .context-lifecycle-panel { border: 0; margin: 0; padding: 0; }
+#context-reuse h3 { font-size: var(--context-heading-size); font-weight: var(--context-heading-weight); }
+#checkpoint-extras:not(:empty) { border-top: var(--context-divider-width) solid var(--line); margin-top: var(--context-section-gap); padding-top: var(--context-text-gap); }
+#checkpoint-extras > small { display: block; margin-top: var(--context-text-gap); }
+#context-info .speech-controls { border-top: var(--context-divider-width) solid var(--line); border-bottom: 0; }

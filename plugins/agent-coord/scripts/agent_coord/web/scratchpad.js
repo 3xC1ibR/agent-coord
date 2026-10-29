@@ -1,8 +1,8 @@
 "use strict";
 
 class ThreadScratchpad {
-  constructor({panel, input, status, api, view = window, path, draftPrefix = "agent-coord.scratchpad-draft:", onRender}) {
-    Object.assign(this, {panel, input, status, api, view, draftPrefix, onRender});
+  constructor({panel, input, status, api, view = window, path, draftPrefix = "agent-coord.scratchpad-draft:", onRender, compactStatus = false}) {
+    Object.assign(this, {panel, input, status, api, view, draftPrefix, onRender, compactStatus});
     if (path) this.path = entry => path(entry.id);
     this.entries = new Map();
     this.selected = null;
@@ -10,6 +10,7 @@ class ThreadScratchpad {
       const entry = this.entries.get(this.selected);
       if (!entry?.loaded) return;
       entry.text = input.value;
+      entry.edited = true;
       entry.error = "";
       this.remember(entry);
       this.schedule(entry, 500);
@@ -47,6 +48,7 @@ class ThreadScratchpad {
       entry = {id, text: "", saved: "", loaded: false, saving: false, loading: false, error: ""};
       try { draft = this.view.sessionStorage.getItem(this.key(entry)); } catch { /* Optional recovery. */ }
       entry.draft = draft;
+      entry.edited = draft !== null;
       this.entries.set(id, entry);
     }
     if (!entry.saving && (!entry.loaded || entry.text === entry.saved)) this.load(entry);
@@ -115,8 +117,13 @@ class ThreadScratchpad {
     this.input.disabled = !entry.loaded;
     const text = entry.loaded ? entry.text : (entry.draft ?? entry.text);
     if (this.input.value !== text) this.input.value = text;
+    const saved = this.compactStatus ? (entry.edited ? "✓" : "") : "Saved";
     this.status.textContent = entry.error || (!entry.loaded ? "Loading…" :
-      entry.saving || entry.text !== entry.saved ? "Saving…" : "Saved");
+      entry.saving || entry.text !== entry.saved ? "Saving…" : saved);
+    if (this.compactStatus) {
+      this.status.setAttribute("aria-label", this.status.textContent === "✓" ? "Saved" : this.status.textContent);
+      this.status.title = this.status.textContent === "✓" ? "Saved" : "";
+    }
     this.onRender?.(entry);
   }
 }

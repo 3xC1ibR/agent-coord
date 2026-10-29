@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const {ThreadScratchpad} = require("../plugins/agent-coord/scripts/agent_coord/web/scratchpad.js");
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
-function harness(api, storage = new Map()) {
+function harness(api, storage = new Map(), compactStatus = false) {
   const listeners = {}, timers = new Map();
   let timer = 0;
   const input = {value: "", addEventListener: (name, fn) => { listeners[name] = fn; }};
@@ -12,8 +12,8 @@ function harness(api, storage = new Map()) {
     document: {addEventListener: (name, fn) => { listeners[name] = fn; }},
     sessionStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)},
     setTimeout: (fn, delay) => { timers.set(++timer, {fn, delay}); return timer; }, clearTimeout: id => timers.delete(id)};
-  const panel = {}, status = {};
-  const pad = new ThreadScratchpad({panel, input, status, api, view});
+  const panel = {}, status = {setAttribute(key, value) { this[key] = value; }};
+  const pad = new ThreadScratchpad({panel, input, status, api, view, compactStatus});
   return {pad, input, status, panel, storage, listeners,
     type(text) { input.value = text; listeners.input(); },
     async tick() { const jobs = [...timers.values()]; timers.clear(); for (const job of jobs) job.fn(); await settle(); }};
@@ -31,6 +31,27 @@ test("typing debounces saves, preserves exact text, and saves an empty note", as
   assert.equal(h.status.textContent, "Saved"); assert.equal(h.storage.size, 0);
   h.type(""); h.listeners.blur(); await settle();
   assert.equal(saved, ""); assert.equal(writes, 2);
+});
+
+test("compact save feedback is quiet until an edit succeeds and never claims a failed save", async () => {
+  let fail = false;
+  const h = harness(async (_, body) => {
+    if (body && fail) throw new Error("Offline");
+    return {text: body?.text ?? "Existing note"};
+  }, new Map(), true);
+  h.pad.select("one"); await settle();
+  assert.equal(h.status.textContent, "");
+  h.type("Updated note");
+  assert.equal(h.status.textContent, "Saving…");
+  await h.tick();
+  assert.equal(h.status.textContent, "✓");
+  assert.equal(h.status["aria-label"], "Saved");
+  fail = true; h.type("Another edit"); await h.tick();
+  assert.equal(h.status.textContent, "Couldn’t save. Retrying…");
+  fail = false; await h.tick();
+  assert.equal(h.status.textContent, "✓");
+  h.pad.select("two"); await settle();
+  assert.equal(h.status.textContent, "");
 });
 
 test("in-flight saves serialize newer edits including reverting to the previous value", async () => {
