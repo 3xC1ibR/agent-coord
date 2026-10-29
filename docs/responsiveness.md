@@ -133,6 +133,21 @@ a row without a registered session, and every runtime start, including the
 pending handover, would have failed on it. Startup now skips such a row, and
 creation removes it when registration fails.
 
+Live, after the idle handover activated build 17's backend (payload
+`46cfe859`, new runtime instance; startup logged and skipped the orphaned
+conversation row), same probes as before:
+
+| Interaction | Before (build 10/11) | After (build 17) |
+| --- | --- | --- |
+| Enter → own message visible | p50 1.39 s, max 2.77 s | p50 1.6 ms, max 2.7 ms |
+| Send acceptance | p50 1.80 s, max 3.13 s | p50 26 ms, max 59 ms |
+| Search (30 queries) | 0.9–4.3 s | p50 83 ms, p95 93 ms, max 100 ms |
+| Conversation read | 100–200 ms | 15–40 ms |
+| Reopen in another project | p50 0.74 s, max 2.2 s | p50 17 ms, max 77 ms |
+| First open, provider resumed | up to 1.5 s | Send enabled p50 251 ms, max 1.23 s |
+
+The first search after the upgrade built its context cache once (2.1 s).
+
 ## Remaining bottlenecks
 
 - **One Python process runs every agent and every request.** Provider stream
