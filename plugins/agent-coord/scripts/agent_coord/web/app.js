@@ -2710,6 +2710,14 @@ function setChatExpanded(expanded) {
   button.title = expanded ? label + " (Esc)" : label;
 }
 $("expand-chat").onclick = () => setChatExpanded(!document.body.classList.contains("chat-expanded"));
+// Desktop lists the header's thread actions in one menu so they remain
+// available in compact and expanded layouts; the mobile sheet shows them inline.
+function headerMenuItems() {
+  return [...document.querySelectorAll(".session-actions .thread-menu-action")].filter(button => !button.hidden)
+    .map(button => ({label: button.textContent, title: button.title, disabled: button.disabled, run: () => button.click()}));
+}
+$("thread-actions").onclick = event => state.threadActions.showMenu($("thread-actions"),
+  state.detail?.work_thread?.title || "Thread", headerMenuItems(), event);
 function goHome({restoreDispatcher = true, rememberTab = true, preserveRollUp = false, render = true} = {}) {
   state.sidecars?.showThread(null, $("thread-sidecars"));
   state.projectScratchpad?.hideTab();
@@ -3817,10 +3825,10 @@ async function boot() {
   state.asks.refresh().catch(showError);
   window.addEventListener("pagehide", () => clearInterval(state.asks.timer), {once: true});
   const sidecarButton = document.createElement("button");
-  sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet";
+  sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet thread-menu-action";
   sidecarButton.textContent = "Attach sidecar…"; sidecarButton.hidden = true;
   sidecarButton.onclick = () => action(() => state.sidecars.open(state.detail?.work_thread));
-  document.querySelector(".session-actions").append(sidecarButton);
+  $("close-when-done").before(sidecarButton);
   await savedViews.setProject(state.projectCwd);
   state.viewDrops = ViewDrops.create({document, api,
     getThread: id => state.closing.has(id) || state.updatingThreads.has(id) ? null

@@ -589,6 +589,15 @@ test("desktop controls publish window state and request a new window without nav
   assert.equal(f.env.location.hash, "#thread-one");
 });
 
+test("a main window names its active project because tabs and the heading name the thread", () => {
+  const f = fixture();
+  f.nodes.get("session-name").textContent = "Build native app";
+  f.nodes.set("view-tabs", {id: "view-tabs", querySelector: selector =>
+    selector === '[aria-selected="true"] .view-tab-name' ? {textContent: " agent-coord "} : null});
+  f.env.document.dispatchEvent(new Event("DOMContentLoaded"));
+  assert.equal(f.messages.find(m => m.action === "windowState").title, "agent-coord");
+});
+
 test("the palette uses existing navigation and available commands, and Command K toggles only its own dialog", async () => {
   const f = fixture(), opened = [];
   f.env.select = async id => opened.push(id);

@@ -309,6 +309,7 @@ main:has(> .conversation:not([hidden])) > .workspace-bar { min-height: 44px; pad
 .expand-chat .collapse-icon { display: none; }
 .session-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; max-width: 100%; }
 .session-actions button { font-size: 11px; padding: 7px 10px; }
+body:not(.mobile-chat) .session-actions .thread-menu-action, body.mobile-chat .thread-actions-trigger { display: none; }
 .status { font-size: 11px; color: var(--accent); padding: 7px 0; margin-right: 8px; text-transform: capitalize; }
 .context-panel { min-width: 0; min-height: 0; overflow: auto; background: var(--panel); border-left: 1px solid var(--line); scrollbar-width: thin; }
 .thread-scratchpad { padding: 22px; border-bottom: 1px solid var(--line); }
@@ -549,8 +550,7 @@ body.chat-expanded .workspace-bar,
 body.chat-expanded .views-bar,
 body.chat-expanded .context-panel,
 body.chat-expanded .toggle-context,
-body.chat-expanded .session-statusbar,
-body.chat-expanded .session-actions { display: none; }
+body.chat-expanded .session-statusbar { display: none; }
 .chat-expanded .conversation { display: flex; }
 .chat-expanded .conversation-main { flex: 1; width: 100%; }
 .chat-expanded .conversation-content { display: flex; }

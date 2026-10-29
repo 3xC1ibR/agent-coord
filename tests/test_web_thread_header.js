@@ -317,3 +317,19 @@ test("card fork uses its source and opens the result unless the user navigates a
     }
   }
 });
+
+test("the header menu lists visible thread actions and runs the original controls", () => {
+  const buttons = [
+    {textContent: "Fork", title: "Copy", hidden: false, disabled: true, click() {}},
+    {textContent: "Move to Later", hidden: true, disabled: false, click() {}},
+    {textContent: "Close thread", title: "", hidden: false, disabled: false, clicks: 0, click() { this.clicks++; }},
+  ];
+  const c = {document: {querySelectorAll: selector => selector === ".session-actions .thread-menu-action" ? buttons : []}};
+  vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function headerMenuItems("), source.indexOf('$("thread-actions").onclick')), c);
+  const items = c.headerMenuItems();
+  assert.equal(JSON.stringify(items.map(item => [item.label, item.disabled])), JSON.stringify([["Fork", true], ["Close thread", false]]));
+  assert.equal(items[0].title, "Copy");
+  items[1].run();
+  assert.equal(buttons[2].clicks, 1);
+});

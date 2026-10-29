@@ -62,6 +62,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Inline status/error | Loading, coverage, retry feedback |
 | HTML output viewer | Existing file-link action opens a full-height preview using the auxiliary-page dialog pattern; closing preserves the conversation and draft underneath |
 | Native confirmation dialog | Clear local Activity history |
+| Thread options menu | Thread actions on sidebar cards and in the conversation header; the mobile sheet lists the header actions inline |
 | Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover |
 
 ## Do's and Don'ts
@@ -99,3 +100,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-28 | Activity uses shared queries and a shell-owned visit recorder | Comparable reports without duplicated pane counts or inferred attention time. |
 | 2026-10-29 | Browser HTML links open an auxiliary output viewer | Let paired phones read agent output using existing typography, colors, and quiet controls. |
 | 2026-10-29 | Add a List overview with Attention, Working and Idle rows | Re-entry: replies leave Attention once read, requests stay until resolved, and rows follow the user's own last message. |
+| 2026-10-29 | Conversation header lists thread actions in one menu; a main window's title names its active project | Actions remain available in expanded chat, and the thread title already appears in its tab and heading. |

@@ -416,7 +416,11 @@
     let previous = "", scheduled = false;
     const update = () => {
       scheduled = false;
-      const title = visible(chatByID("conversation")) ? chatByID("session-name")?.textContent.trim() || "Conversation" : "Workspace";
+      // A main window names its active project; tabs and the heading already
+      // name the thread. A conversation window has no project tabs.
+      const project = byID("view-tabs")?.querySelector('[aria-selected="true"] .view-tab-name')?.textContent.trim();
+      const title = !conversationWindow && project ? project : visible(chatByID("conversation"))
+        ? chatByID("session-name")?.textContent.trim() || "Conversation" : "Workspace";
       const workspace = visible(chatByID("conversation")) ? chatByID("workspace")?.textContent.trim() || "" : "";
       const state = JSON.stringify({action: "windowState", title, commands: commands(), workspace,
         fileTarget: destination()?.thread || ""});

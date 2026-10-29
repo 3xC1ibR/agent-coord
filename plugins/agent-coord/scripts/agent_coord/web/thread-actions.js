@@ -45,6 +45,7 @@ function createThreadActions(doc, win) {
       const button = make("button", item.label); button.type = "button";
       button.setAttribute("role", "menuitem");
       button.disabled = Boolean(item.disabled);
+      if (item.title) button.title = item.title;
       button.onclick = event => { event.stopPropagation(); closeMenu(true); item.run(); };
       panel.append(button);
     }
