@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.cli import _parser, run
+from agent_coord.conversation_search import sync_messages
 from agent_coord.navigation import NavigationStore
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.thread_search import search_threads
@@ -191,6 +193,39 @@ class ConversationSearchTests(unittest.TestCase):
         self.assertEqual(len(page["items"]), 1)
         self.assertEqual(page["coverage"]["partial_histories"], 1)
         self.assertEqual(page["coverage"]["missing_histories"], 1)
+
+    def test_rebuild_uses_few_statements_and_current_indexes_stay_read_only(self):
+        self.create("small", "Jev once")
+        self.create("large")
+        # Later duplicate IDs replace earlier ones; 261 rows cross several insert batches.
+        items = [{"id": f"m{i % 230}", "type": "agentMessage", "text": f"Jev {i}"} for i in range(260)]
+        items.append({"id": "timed", "type": "userMessage", "timelineAt": 1793247626.5940921,
+                      "content": [{"type": "text", "text": "Timed Jev"}]})
+        with self.store._connection() as db:
+            db.execute("INSERT INTO browser_history VALUES (?, ?)",
+                       ("large", json.dumps({"turns": [{"id": "turn", "items": items}]})))
+        db = sqlite3.connect(self.store.database_path)
+        self.addCleanup(db.close)
+        db.row_factory = sqlite3.Row
+        statements = []
+        db.set_trace_callback(statements.append)
+        with db:
+            sync_messages(db)
+        self.assertLess(len(statements), 25, statements)
+        rows = db.execute("""SELECT item_id, text, position, timestamp FROM conversation_search_messages
+                             WHERE thread_id = 'large' ORDER BY position""").fetchall()
+        self.assertEqual(len(rows), 231)
+        self.assertEqual(dict(rows[0]), {"item_id": "m30", "text": "Jev 30", "position": 30, "timestamp": None})
+        self.assertEqual(dict(rows[-1]), {"item_id": "timed", "text": "Timed Jev", "position": 260,
+                                          "timestamp": 1793247626.5940921})
+        self.assertEqual(db.execute("SELECT text FROM conversation_search_messages WHERE item_id = 'm0'").fetchone()[0], "Jev 230")
+        statements.clear()
+        sync_messages(db)
+        self.assertEqual(len(statements), 1)
+        self.assertFalse(db.in_transaction)
+        hit = next(i for i in search_threads(self.store, "timed jev")["items"] if i["thread_id"] == "large")
+        self.assertEqual(hit["matches"][0]["timestamp"], 1793247626.5940921)
+        self.assertEqual(hit["message_count"], 1)
 
     def test_no_provider_invocation_or_thread_state_mutation_and_cli_parity(self):
         self.create("thread", "can we use Jev?")

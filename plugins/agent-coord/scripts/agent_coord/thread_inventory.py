@@ -133,3 +133,44 @@ class ThreadInventory:
 
     def read(self, db, row):
         return self.threads._read(db, row, inventory=self)
+
+
+_LISTED = """SELECT json_group_array(json_array(t.thread_id, s.cwd,
+        COALESCE(NULLIF(t.project_cwd, ''), s.cwd), t.attention, o.thread_id IS NOT NULL,
+        o.repository_id, o.project_id, t.thread_id IN (SELECT d.child_session_id FROM delegations d
+            JOIN work_threads parent ON parent.thread_id = d.parent_session_id
+            WHERE d.child_session_id IS NOT NULL)))
+    FROM work_threads t JOIN work_projects p ON p.id = t.project_id
+    JOIN sessions s ON s.session_id = t.thread_id
+    LEFT JOIN thread_organization o ON o.thread_id = t.thread_id"""
+
+
+def listed_threads(threads, db, workspace=None):
+    """Identify the threads an overview lists, without projecting their state.
+
+    This is the ThreadInventory and BrowserSessions.list_work_threads boundary
+    in one query: both placements, minus delegated workers of listed parents,
+    within the UI workspace. Placement reflects due snoozes, and incomplete
+    legacy records are repaired the same way.
+    """
+    from .workspaces import matches_workspace
+    threads._wake_snoozes(db)
+    rows = json.loads(db.execute(_LISTED).fetchone()[0])
+    if not all(row[4] for row in rows):
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        for row in rows:
+            if not row[4]:
+                OrganizationStore.ensure_thread(db, row[0], row[1])
+        rows = json.loads(db.execute(_LISTED).fetchone()[0])
+    matches = {}
+    listed = []
+    for thread_id, cwd, project_cwd, attention, _, repository_id, project_id, delegated in rows:
+        if delegated:
+            continue
+        if cwd not in matches:
+            matches[cwd] = matches_workspace(cwd, workspace)
+        if matches[cwd]:
+            listed.append({"thread_id": thread_id, "attention": attention, "project_cwd": project_cwd,
+                           "repository_id": repository_id, "project_id": project_id})
+    return listed

@@ -79,7 +79,7 @@ Causes, each measured:
 
 Changes:
 
-- `web/outgoing-messages.js`: local echo on Enter with Sending/Sent/Not sent.
+- `OutgoingMessages` in `web/app.js`: local echo on Enter with Sending/Sent/Not sent.
 - Send skips the whole-transcript read for a loaded idle conversation; a
   conversation believed to be running still reconciles first.
 - One shared thread-list build serves all concurrent readers and is reused
@@ -102,6 +102,16 @@ writer), installed build 10 backend versus this repository, same snapshot:
 
 In a real browser against the loaded harness, Enter → own message visible was
 3–11 ms across 15 sends (live before: p50 1.39 s).
+
+Live, after installing interface build 15 with the build 10 backend still
+active (12 sends, same probe conversation): Enter → own message visible p50
+1.9 ms, max 7 ms; acceptance p50 0.96 s, max 3.5 s, shown as "Sending…" until
+the staged backend activates. Reopening a cached conversation in another
+project painted in 122–303 ms (before: p50 0.74 s, max 2.2 s in the harness).
+
+The running backend serves only the web files its own `ui.py` lists, so a new
+script file stays unavailable until a backend handover. Keep interface changes
+that must ship without one inside files the running backend already serves.
 
 ## Remaining bottlenecks
 

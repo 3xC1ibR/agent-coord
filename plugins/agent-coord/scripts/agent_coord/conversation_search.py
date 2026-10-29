@@ -6,6 +6,7 @@ History triggers invalidate the projection even when an older runtime saves it.
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from .timeline_clock import seconds
 from .zellij_wake import WAKE_PROMPT
@@ -50,8 +51,33 @@ def routing_history(history, records=None):
             "history_truncated": len(records) > 200}
 
 
+# The complete projection schema: four tables and six history triggers.
+_SCHEMA = ("conversation_search_messages", "conversation_search_dirty", "conversation_search_histories",
+           "conversation_search_routing", *(f"conversation_{kind}_{event}" for kind in ("search", "routing")
+                                            for event in ("insert", "update", "delete")))
+# Read-only: whether any history awaits indexing. This avoids the writer lock
+# on searches while agents stream.
+_CURRENT = f"""SELECT (SELECT COUNT(*) FROM sqlite_master WHERE name IN ({", ".join("?" * len(_SCHEMA))})) = ?
+    AND NOT EXISTS (SELECT 1 FROM conversation_search_dirty)
+    AND NOT EXISTS (SELECT 1 FROM browser_history WHERE thread_id NOT IN
+        (SELECT thread_id FROM conversation_search_histories)
+        OR thread_id NOT IN (SELECT thread_id FROM conversation_search_routing))"""
+# Native parameters keep REAL timestamps exact; 100 rows stay within 999 variables.
+_INSERT_ROWS = 100
+
+
+def _current(db):
+    try:
+        return bool(db.execute(_CURRENT, (*_SCHEMA, len(_SCHEMA))).fetchone()[0])
+    except sqlite3.OperationalError:
+        # A table is missing; the full path below creates it.
+        return False
+
+
 def sync_messages(db, *, cwd=None):
     """Backfill once, then rebuild only changed histories in this transaction."""
+    if _current(db):
+        return
     db.execute("""CREATE TABLE IF NOT EXISTS conversation_search_messages (
         thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, item_id TEXT NOT NULL,
         role TEXT NOT NULL, timestamp REAL, text TEXT NOT NULL, folded TEXT NOT NULL,
@@ -89,28 +115,43 @@ def sync_messages(db, *, cwd=None):
         scope = f""" WHERE d.thread_id IN (SELECT b.thread_id FROM browser_sessions b
             JOIN sessions s ON s.session_id=b.thread_id WHERE {source}=?)"""
         params = (cwd,)
-    for row in db.execute("""SELECT d.thread_id, h.history_json FROM conversation_search_dirty d
-                             LEFT JOIN browser_history h ON h.thread_id=d.thread_id""" + scope, params).fetchall():
+    rows = db.execute("""SELECT d.thread_id, h.history_json FROM conversation_search_dirty d
+                         LEFT JOIN browser_history h ON h.thread_id=d.thread_id""" + scope, params).fetchall()
+    if not rows:
+        return
+    # A fixed number of statements per rebuild: each statement step can wait
+    # for the GIL behind other request threads.
+    records, histories = [], []
+    for row in rows:
         identity = row["thread_id"]
-        db.execute("DELETE FROM conversation_search_messages WHERE thread_id=?", (identity,))
-        db.execute("DELETE FROM conversation_search_histories WHERE thread_id=?", (identity,))
-        db.execute("DELETE FROM conversation_search_routing WHERE thread_id=?", (identity,))
         if row["history_json"] is not None:
             routing = {"messages": [], "history_status": "unavailable"}
             try:
                 history = json.loads(row["history_json"])
-                records = list(messages(history))
-                routing = routing_history(history, records)
+                found = list(messages(history))
+                routing = routing_history(history, found)
                 if not isinstance(history, dict) or not isinstance(history.get("turns", []), list):
                     raise ValueError("Invalid conversation history")
                 status = "partial" if history.get("historyUnavailable") else "saved"
             except (ValueError, TypeError, AttributeError):
-                records, status = [], "unavailable"
-            db.executemany("INSERT OR REPLACE INTO conversation_search_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                           [(identity, *record, position) for position, record in enumerate(records)])
-            db.execute("INSERT INTO conversation_search_histories VALUES (?, ?)", (identity, status))
-            db.execute("INSERT INTO conversation_search_routing VALUES (?, ?)", (identity, json.dumps(routing)))
-        db.execute("DELETE FROM conversation_search_dirty WHERE thread_id=?", (identity,))
+                found, status = [], "unavailable"
+            records.extend((identity, *record, position) for position, record in enumerate(found))
+            histories.append([identity, status, json.dumps(routing)])
+    identities = json.dumps([row["thread_id"] for row in rows])
+    for table in ("conversation_search_messages", "conversation_search_histories", "conversation_search_routing"):
+        db.execute(f"DELETE FROM {table} WHERE thread_id IN (SELECT value FROM json_each(?))", (identities,))
+    for start in range(0, len(records), _INSERT_ROWS):
+        chunk = records[start:start + _INSERT_ROWS]
+        # Later duplicate IDs replace earlier ones, as with sequential inserts.
+        db.execute("INSERT OR REPLACE INTO conversation_search_messages VALUES "
+                   + ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(chunk)), [value for record in chunk for value in record])
+    if histories:
+        histories = json.dumps(histories)
+        db.execute("""INSERT INTO conversation_search_histories SELECT json_extract(value, '$[0]'),
+                      json_extract(value, '$[1]') FROM json_each(?)""", (histories,))
+        db.execute("""INSERT INTO conversation_search_routing SELECT json_extract(value, '$[0]'),
+                      json_extract(value, '$[2]') FROM json_each(?)""", (histories,))
+    db.execute("DELETE FROM conversation_search_dirty WHERE thread_id IN (SELECT value FROM json_each(?))", (identities,))
 
 
 def message_condition(terms, role):
