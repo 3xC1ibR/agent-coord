@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -112,6 +113,30 @@ class ClaudeTransportTests(unittest.TestCase):
             connection.control("disconnect", timeout=3)
         self.assertTrue(event.wait(3))
         self.assertFalse(connection.pending)
+
+    def test_callback_error_does_not_disconnect_a_live_provider(self):
+        messages, complete = [], threading.Event()
+
+        def receive(message):
+            messages.append(message)
+            if message["type"] == "assistant":
+                raise sqlite3.OperationalError("database is locked")
+            if message["type"] == "result":
+                complete.set()
+
+        connection = self.connection(receive)
+        with self.assertLogs("agent_coord.claude_code", level="ERROR") as logs:
+            connection.write({"type": "user", "message": {"role": "user", "content": "Hello"}})
+            self.assertTrue(complete.wait(3))
+        self.assertEqual([m["type"] for m in messages], ["assistant", "result"])
+        self.assertTrue(connection.readers[0].is_alive())
+        self.assertIsNone(connection.process.poll())
+        self.assertIn("test-session", "\n".join(logs.output))
+        self.assertIn("database is locked", "\n".join(logs.output))
+        self.assertIn("database is locked", "\n".join(connection.errors))
+        # A subsequent real EOF still fails pending controls and retains the cause.
+        with self.assertRaisesRegex(CoordinationError, "database is locked"):
+            connection.control("disconnect", timeout=3)
 
     def test_missing_cli_is_actionable(self):
         with self.assertRaisesRegex(CoordinationError, "Install Claude Code"):

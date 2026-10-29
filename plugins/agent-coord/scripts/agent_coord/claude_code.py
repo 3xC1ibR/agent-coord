@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -17,6 +18,7 @@ from concurrent.futures import Future, TimeoutError
 from pathlib import Path
 
 from .context import client_environment
+from .browser_persistence import BrowserPersistence
 from .claude_usage import ClaudeUsage, native_id as usage_native_id
 from .store import CoordinationError
 
@@ -24,6 +26,7 @@ from .store import CoordinationError
 class ClaudeConnection:
     def __init__(self, store, callback, options, *, command=None):
         self.callback = callback
+        self.thread_id = options["threadId"]
         self.lock = threading.Lock()
         self.pending = {}
         self.errors = deque(maxlen=12)
@@ -97,6 +100,17 @@ class ClaudeConnection:
         for line in self.process.stderr:
             self.errors.append(line.rstrip()[-1000:])
 
+    def _notify(self, message):
+        try:
+            self.callback(message)
+        except Exception as exc:
+            # A consumer failure is not EOF. Keep draining the provider so a
+            # transient bookkeeping error cannot discard its later result.
+            self.errors.append(f"Claude event handler failed: {type(exc).__name__}: {exc}")
+            logging.getLogger(__name__).exception(
+                "Claude callback failed: thread=%s frame=%s process_status=%s",
+                self.thread_id, message.get("type"), self.process.poll())
+
     def _read(self):
         try:
             for line in self.process.stdout:
@@ -114,16 +128,20 @@ class ClaudeConnection:
                                 else:
                                     future.set_result(response.get("response") or {})
                     else:
-                        self.callback(message)
+                        self._notify(message)
                 except (ValueError, TypeError, KeyError) as exc:
                     self.errors.append(str(exc))
+        except (OSError, ValueError) as exc:
+            if not self.closed:
+                self.errors.append(f"Claude output read failed: {type(exc).__name__}: {exc}")
+                logging.getLogger(__name__).exception("Claude output read failed: thread=%s", self.thread_id)
         finally:
             with self.lock:
                 for future in self.pending.values():
                     if not future.done():
                         future.set_exception(CoordinationError("Claude Code disconnected. " + "\n".join(self.errors)))
             if not self.closed:
-                self.callback({"type": "disconnected", "error": "\n".join(self.errors)})
+                self._notify({"type": "disconnected", "error": "\n".join(self.errors)})
 
     def close(self):
         self.closed = True
@@ -151,6 +169,8 @@ class ClaudeRPC:
         self.connections, self.options, self.turns, self.requests = {}, {}, {}, {}
         self.blocks = {}
         self.confirmed_blocks = {}
+        self.started = set()
+        self.persistence = BrowserPersistence()
         self.catalog = None
         self.closed = False
         with store._connection() as db:
@@ -188,10 +208,11 @@ class ClaudeRPC:
         if current is None:
             with self.store._connection() as db:
                 row = db.execute("SELECT started, fork_path, native_id FROM claude_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+            started = thread_id in self.started or bool(row and row["started"])
             current = self.connection_factory(self.store, lambda m: self._message(thread_id, m),
-                {**options, "threadId": thread_id, "resume": bool(row and row["started"]),
+                {**options, "threadId": thread_id, "resume": started,
                  "nativeId": row["native_id"] if row and row["native_id"] else thread_id,
-                 "forkPath": row["fork_path"] if row and not row["started"] else None})
+                 "forkPath": row["fork_path"] if row and not started else None})
             self.connections[thread_id] = current
             self.options[thread_id] = dict(options)
             try:
@@ -432,7 +453,18 @@ class ClaudeRPC:
 
     def _message(self, thread_id, message):
         with self.lock:
-            self._handle_message(thread_id, message)
+            turn_id = self.turns.get(thread_id, {}).get("id")
+            try:
+                self._handle_message(thread_id, message)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Claude event handling failed: thread=%s turn=%s frame=%s",
+                    thread_id, turn_id, message.get("type"))
+                raise
+
+    def _persist_started(self, thread_id):
+        with self.store._connection() as db:
+            db.execute("UPDATE claude_sessions SET started = 1 WHERE thread_id = ?", (thread_id,))
 
     def _handle_message(self, thread_id, message):
         # Results can describe background work outside the visible turn.
@@ -455,8 +487,10 @@ class ClaudeRPC:
         if not turn:
             return
         if kind == "system" and message.get("subtype") == "init":
-            with self.store._connection() as db:
-                db.execute("UPDATE claude_sessions SET started = 1 WHERE thread_id = ?", (thread_id,))
+            # Remember in memory too: a process replacement must resume even
+            # when this idempotent write is still waiting for SQLite.
+            self.started.add(thread_id)
+            self.persistence.submit(lambda: self._persist_started(thread_id))
         elif kind == "stream_event":
             event = message.get("event", {})
             index = event.get("index", 0)
@@ -592,3 +626,4 @@ class ClaudeRPC:
             connection.close()
             self._finish(thread_id, "interrupted")
         self.connections.clear()
+        self.persistence.close()
