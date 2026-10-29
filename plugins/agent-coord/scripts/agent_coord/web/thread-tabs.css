@@ -17,7 +17,8 @@
   .conversation-tab-select[data-needs-action=true]::before { animation: none; }
 }
 .conversation-tab button:focus-visible { outline-offset: -3px; }
-.overview-tab { position: sticky; left: 0; z-index: 1; background: var(--paper); }
+.overview-tab { position: sticky; left: 0; z-index: 1; min-width: 0; background: var(--paper); }
+.overview-tab .conversation-tab-select { display: flex; align-items: center; justify-content: center; }
 .pane-document .conversation-tab-strip { display: none; }
 @media (max-width: 720px) {
   .conversation-tabs { padding: 0; }

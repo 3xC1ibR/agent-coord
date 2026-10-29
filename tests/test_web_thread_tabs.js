@@ -481,7 +481,8 @@ test("Overview offers one dropdown/context menu without navigating until a layou
   const tabs = new ThreadTabs({container, document: {createElement: element}, onOverviewMenu: (anchor, event) => opened.push({anchor,event}), onSelect: id => visits.push(id)});
   tabs.setProject('/work');
   const overview = container.children[0], [tab, arrow] = overview.children;
-  assert.equal(tab.textContent,'Overview'); assert.equal(arrow.attributes['aria-haspopup'],'menu');
+  assert.equal(tab.attributes['aria-label'],'Overview'); assert.match(tab.innerHTML, /<svg[^>]*aria-hidden="true"/);
+  assert.equal(arrow.attributes['aria-haspopup'],'menu');
   arrow.onclick({type:'click'}); overview.oncontextmenu({type:'contextmenu'});
   tab.onkeydown({key:'F10',shiftKey:true}); tab.onkeydown({key:'ArrowDown',altKey:true});
   assert.equal(opened.length,4); assert(opened.every(call => call.anchor === arrow)); assert.deepEqual(visits,[]);
