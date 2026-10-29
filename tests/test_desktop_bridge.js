@@ -10,7 +10,7 @@ const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thr
 const source = fs.readFileSync(require.resolve("../desktop/macos/bridge.js"), "utf8");
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture(preferences = {}, permission = "default", subframe = false) {
+function fixture(preferences = {}, permission = "default", subframe = false, workspace = null) {
   const messages = [];
   const replies = {};
   const palettes = [];
@@ -76,7 +76,7 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
     constructor(type, options) { super(type, options); this.dataTransfer = options.dataTransfer; }
   }
   Object.assign(env, {
-    Event, EventTarget, Storage, crypto: {randomUUID}, localStorage: new Storage(),
+    Event, EventTarget, Storage, crypto: {randomUUID}, localStorage: new Storage(), sessionStorage: new Storage(),
     document, DataTransfer, DragEvent, queueMicrotask, URLSearchParams,
     MutationObserver: class { observe() {} disconnect() {} },
     DesktopCommandPalette: class {
@@ -102,10 +102,57 @@ function fixture(preferences = {}, permission = "default", subframe = false) {
   });
   env.window = env;
   env.top = subframe ? {} : env;
+  if (workspace) env.agentCoordWorkspaceState = workspace.api;
   vm.runInContext(source.replace("__AGENT_COORD_PREFERENCES__", JSON.stringify(preferences))
+    .replace("__AGENT_COORD_WINDOW_STATE__", JSON.stringify(workspace?.snapshot ?? null))
     .replace("__AGENT_COORD_CONVERSATION_WINDOW__", "false"), vm.createContext(env));
   return {env, messages, preferences, nodes, replies, palettes};
 }
+
+test("workspace bridge preloads before app boot and uses the page's lexical state at navigationReady", async () => {
+  let options, initial, ready = false, restored;
+  const snapshot = {version: 1, drafts: [["one", "unsent"]]};
+  const f = fixture({}, "denied", false, {snapshot, api: {create(value) {
+    options = value;
+    return {preload: value => { initial = value; }, capture: () => options.getState(),
+      ready() { ready = true; }, async restore(value) { assert.ok(ready); restored = value; return true; },
+      storageChanged() {}, changed() {}};
+  }}});
+  assert.deepEqual(JSON.parse(JSON.stringify(initial)), snapshot);
+  vm.runInContext('const state = {selected: "one"}; let savedViews = null, navigation = null;', f.env);
+  assert.equal(f.env.state, undefined, "app state is not a window property");
+  assert.equal(f.env.agentCoordDesktop.exportWindowState().selected, "one");
+  await f.env.agentCoordDesktop.navigationReady();
+  assert.equal(await f.env.agentCoordDesktop.restoreWindowState(snapshot), true);
+  assert.equal(restored, snapshot);
+  await options.onSave(snapshot);
+  assert.deepEqual(f.messages.at(-1), {action: "saveWindowState", state: snapshot});
+});
+
+test("windowState includes local navigation even when only the hash changes", () => {
+  const f = fixture();
+  f.env.document.dispatchEvent(new Event("DOMContentLoaded"));
+  assert.equal(f.messages.findLast(item => item.action === "windowState").route, "/#thread-one");
+  f.env.location.hash = "#thread-two";
+  f.env.dispatchEvent(new Event("hashchange"));
+  assert.equal(f.messages.findLast(item => item.action === "windowState").route, "/#thread-two");
+});
+
+test("a failed initial conversation reports its loaded shell ready for draft recovery", () => {
+  const f = fixture({}, "denied", false, {snapshot: {version: 1}, api: {create() {
+    return {preload() {}, ready() {}, changed() {}, storageChanged() {}};
+  }}});
+  vm.runInContext('const state = {selected: "gone", threadTabs: {}, conversations: new Map([["gone", {refreshError: "Thread was deleted", pending: null}]])}; let navigation = {};', f.env);
+  f.env.document.dispatchEvent(new Event("DOMContentLoaded"));
+  assert.ok(f.messages.some(item => item.action === "navigationReady"));
+});
+
+test("persisted routes do not replay one-shot folder opening or reset commands", () => {
+  const f = fixture();
+  f.env.location.search = "?new_project=1&directory=%2Fwork&view=group";
+  f.env.document.dispatchEvent(new Event("DOMContentLoaded"));
+  assert.equal(f.messages.findLast(item => item.action === "windowState").route, "/?view=group#thread-one");
+});
 
 test("session commands cycle the filtered display order with wraparound and overview entry", async () => {
   const f = fixture(), opened = [];

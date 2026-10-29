@@ -302,8 +302,12 @@ Local builds are ad hoc signed by the build command.
   database; navigation, selected views, and message drafts are independent.
 - Closing a secondary window (or Command-W) discards that window's unsent draft
   and releases its web view. Closing the final window keeps it and the app's
-  work running. Click the Dock icon to reopen it. Window restoration after a
-  full quit is not yet implemented.
+  work running. Click the Dock icon to reopen it. After a full quit, relaunch
+  restores open normal and detached windows, their tabs, unsent drafts, reading
+  positions and usable window geometry. Secondary windows closed individually
+  stay closed; a closed final window is kept and restored with its tabs.
+  Window state is saved on a best-effort basis: Quit, logout and updates are
+  never refused, and an unsaved change falls back to the last saved snapshot.
 - Command-Q quits the interface and leaves agents, tools, approvals, and queued
   work running. Opening the app reconnects to the runtime for its database.
   **Ribbon Field → Stop Work and Quit…** explicitly stops that work and exits;

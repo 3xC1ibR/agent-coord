@@ -5,6 +5,15 @@
   if (!native || window.top !== window) return;
   const send = body => native.postMessage(body);
   const conversationWindow = __AGENT_COORD_CONVERSATION_WINDOW__;
+  const initialWindowState = __AGENT_COORD_WINDOW_STATE__;
+  let workspaceState = null, updateWindowState = null, navigationReported = false;
+  const route = () => {
+    const query = new URLSearchParams(location.search);
+    query.delete("new_project"); query.delete("directory");
+    // URLSearchParams.size needs Safari 17; macOS 12 WebKit only has toString().
+    const search = query.toString();
+    return location.pathname + (search ? "?" + search : "") + location.hash;
+  };
   if (conversationWindow) document.documentElement?.classList.add("conversation-window");
   const preferences = __AGENT_COORD_PREFERENCES__;
   const savedKey = key => key.startsWith("agent-coord.") || key === "agent-coord-group-by";
@@ -16,13 +25,17 @@
       if (savedKey(key) && key !== "agent-coord.notifications.focus") setItem.call(localStorage, key, value);
     }
     Storage.prototype.setItem = function (key, value) {
+      const previous = this.getItem(key);
       setItem.call(this, key, value);
+      if (previous !== String(value)) workspaceState?.storageChanged(String(key));
       if (this === localStorage && savedKey(String(key)) && key !== "agent-coord.notifications.focus") {
         send({action: "preference", key: String(key), value: String(value)}).catch(() => {});
       }
     };
     Storage.prototype.removeItem = function (key) {
+      const previous = this.getItem(key);
       removeItem.call(this, key);
+      if (previous !== null) workspaceState?.storageChanged(String(key));
       if (this === localStorage && savedKey(String(key))) send({action: "preference", key: String(key), value: null}).catch(() => {});
     };
   } catch { /* Storage restrictions must not prevent the UI from loading. */ }
@@ -38,6 +51,38 @@
     const box = byID("error"), text = box?.querySelector("span");
     if (box && text) { text.textContent = error.message || String(error); box.hidden = false; }
   };
+  workspaceState = window.agentCoordWorkspaceState?.create({window, document,
+    getState: () => typeof state === "object" ? state : null,
+    getViews: () => typeof savedViews !== "undefined" ? savedViews : null,
+    getNavigation: () => typeof navigation !== "undefined" ? navigation : null,
+    select: (...args) => typeof select === "function" ? select(...args) : undefined,
+    newSession: () => typeof newSession === "function" ? newSession() : undefined,
+    goHome: () => typeof goHome === "function" ? goHome({restoreDispatcher: false}) : undefined,
+    setChatExpanded: value => typeof setChatExpanded === "function" ? setChatExpanded(value) : undefined,
+    render: () => {
+      if (typeof renderStatus === "function") renderStatus();
+      if (typeof renderTitle === "function") renderTitle();
+      if (typeof renderList === "function") renderList();
+    },
+    onSave: state => send({action: "saveWindowState", state}), onError: reportError,
+  });
+  workspaceState?.preload(initialWindowState);
+  // The router replaces history without a hashchange. Observe real navigation
+  // here, not the transcript MutationObserver (which also runs on every token).
+  if (window.history) for (const name of ["pushState", "replaceState"]) {
+    const original = window.history[name];
+    window.history[name] = function (...args) {
+      const previous = route(), before = JSON.stringify(window.history.state?.agentCoord);
+      const result = original.apply(this, args);
+      if (previous !== route() || before !== JSON.stringify(window.history.state?.agentCoord)) {
+        workspaceState?.changed(); queueMicrotask(() => updateWindowState?.());
+      }
+      return result;
+    };
+  }
+  for (const name of ["hashchange", "popstate"]) window.addEventListener(name, () => {
+    workspaceState?.changed(); updateWindowState?.();
+  });
   function destination() {
     const dialog = openDialog();
     if (dialog) return null;
@@ -180,7 +225,14 @@
       return send({action: "closeConversationWindow"});
     },
     fileEditor: operation => send({action: "fileEditor", operation}),
-    navigationReady: () => send({action: "navigationReady"}).catch(reportError),
+    exportWindowState: () => workspaceState?.capture() ?? initialWindowState ?? null,
+    windowStateBusy: () => workspaceState?.busy() || false,
+    restoreWindowState: snapshot => workspaceState?.restore(snapshot) || Promise.resolve(false),
+    navigationReady: () => {
+      navigationReported = true;
+      workspaceState?.ready();
+      return send({action: "navigationReady"}).catch(reportError);
+    },
   });
 
   // WebKit's native HTML dragend reports the same result for Escape and an
@@ -328,6 +380,7 @@
   function bindPane(doc) {
     if (boundPanes.has(doc)) return;
     boundPanes.add(doc); doc.addEventListener("drop", handleDrop, true);
+    workspaceState?.bindDocument(doc);
     doc.addEventListener("click", openFileLink, true);
     const observer = new MutationObserver(() => window.dispatchEvent(new Event("agent-coord-pane-state")));
     observer.observe(doc.body, {subtree: true, childList: true, characterData: true,
@@ -350,7 +403,7 @@
 
   function ready() {
     if (location.pathname === "/settings") {
-      send({action: "windowState", title: "Settings", commands: []}).catch(reportError);
+      send({action: "windowState", title: "Settings", commands: [], route: route()}).catch(reportError);
       return;
     }
     palette = new DesktopCommandPalette({document, onError: reportError,
@@ -398,7 +451,7 @@
     });
     if (!byID("back-home")) {
       // The monitor can use the palette, too, without workspace-only controls.
-      send({action: "windowState", title: "Coordination monitor", commands: ["commandPalette"]}).catch(() => {});
+      send({action: "windowState", title: "Coordination monitor", commands: ["commandPalette"], route: route()}).catch(() => {});
       return;
     }
     const hint = byID("image-drop-hint");
@@ -416,16 +469,25 @@
     let previous = "", scheduled = false;
     const update = () => {
       scheduled = false;
+      // A deleted/unavailable initial conversation can reject boot's final
+      // select after the shell and router are ready. Recover that loaded shell
+      // instead of leaving native recovery permanently waiting for readiness.
+      if (!navigationReported && initialWindowState && typeof state === "object" &&
+          typeof navigation !== "undefined" && navigation && state.threadTabs) {
+        const failed = state.conversations?.get(state.selected);
+        if (failed?.refreshError && !failed.pending) window.agentCoordDesktop.navigationReady();
+      }
       // A main window names its active project; tabs and the heading already
       // name the thread. A conversation window has no project tabs.
       const project = byID("view-tabs")?.querySelector('[aria-selected="true"] .view-tab-name')?.textContent.trim();
       const title = !conversationWindow && project ? project : visible(chatByID("conversation"))
         ? chatByID("session-name")?.textContent.trim() || "Conversation" : "Workspace";
       const workspace = visible(chatByID("conversation")) ? chatByID("workspace")?.textContent.trim() || "" : "";
-      const state = JSON.stringify({action: "windowState", title, commands: commands(), workspace,
+      const encodedState = JSON.stringify({action: "windowState", title, commands: commands(), workspace, route: route(),
         fileTarget: destination()?.thread || ""});
-      if (state !== previous) { previous = state; send(JSON.parse(state)).catch(() => {}); }
+      if (encodedState !== previous) { previous = encodedState; send(JSON.parse(encodedState)).catch(() => {}); }
     };
+    updateWindowState = update;
     const observer = new MutationObserver(() => {
       if (!scheduled) { scheduled = true; queueMicrotask(update); }
     });
