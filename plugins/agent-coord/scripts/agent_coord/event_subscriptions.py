@@ -243,6 +243,11 @@ class EventSubscriptions:
             result = {"kind": "turn", "session_id": item["session_id"], "turn_id": turn_id,
                     "state": row["status"], "completion_id": row["id"], "completed_at": row["completed_at"],
                     "result_ref": {"session_id": item["session_id"], "turn_id": turn_id}}
+            if row["status"] != "completed" and db.execute(
+                    "SELECT 1 FROM turn_stop_requests WHERE thread_id = ? AND turn_id = ?",
+                    (item["session_id"], turn_id)).fetchone():
+                result["state"] = "interrupted"
+                result["termination"] = {"origin": "user", "reason": "stopped", "execution": "unknown"}
             if item["kind"] == "message":
                 result["assignment_message_id"] = item["assignment_message_id"]
                 result.update(result_snapshot(db, item["session_id"], turn_id, item["assignment_message_id"]))
@@ -263,15 +268,24 @@ class EventSubscriptions:
                 "result_ref": {"job_id": item["job_id"]}}
 
     def _deliver(self, db, subscription, target, outcomes, now, *, timeout=False):
-        if not timeout and len(outcomes) == 1 and outcomes[0].get("assignment_message_id") and outcomes[0]["state"] in {"failed", "interrupted"}:
+        user_stops = [o for o in outcomes if (o.get("termination") or {}).get("origin") == "user"]
+        if not user_stops and not timeout and len(outcomes) == 1 and outcomes[0].get("assignment_message_id") and outcomes[0]["state"] in {"failed", "interrupted"}:
             from .app_agent_failures import turn_failure_message
             outcome = outcomes[0]
             existing = turn_failure_message(db, subscription["owner_session_id"], outcome["session_id"], outcome["turn_id"])
             if existing is not None:
                 return existing  # The automatic failure report already wakes the creator.
+        continuation = subscription["continuation"]
+        if user_stops:
+            continuation = ("The turns marked termination.origin=user were stopped by the user. "
+                            "This is not an agent failure. Do not retry, resume, or replace their work "
+                            "without a new user instruction. Native tools may still be running; "
+                            "inspect their state before any recovery. Acknowledge this event; no reply is required.")
+            if len(user_stops) < len(outcomes):
+                continuation += " For the other outcomes only: " + subscription["continuation"]
         body = json.dumps({"event": "subscription_timeout" if timeout else "subscription_matched",
                            "subscription_id": subscription["id"], "mode": subscription["mode"],
-                           "target": target, "outcomes": outcomes, "continuation": subscription["continuation"],
+                           "target": target, "outcomes": outcomes, "continuation": continuation,
                            "meaning": "Turn completion is not assignment completion."}, ensure_ascii=True)
         message, _ = self.store._insert_message(
             db, sender_session_id=subscription["owner_session_id"], recipient_session_id=subscription["owner_session_id"],

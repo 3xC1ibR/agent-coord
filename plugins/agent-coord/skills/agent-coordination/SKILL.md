@@ -337,6 +337,21 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
 
 - List relevant sessions with `agent-coord list --relevant --cwd <repo>`.
 - Recheck the current declaration with `agent-coord status`.
+- Read `execution` in normal `status`, `list`, `thread show`, and `thread list`
+  output before diagnosing a stalled agent. `turn_active` means an unfinished
+  native turn, including approval waits; it does not prove computation.
+  `execution.state` distinguishes `running`, `waiting_approval`, `waiting_answer`,
+  `idle`, `failed`, `stopped`, `interrupted`, and `unknown`. A live wait includes
+  sanitized request keys/methods and receipt times, never tool arguments or secrets.
+  Check `source`, `freshness`, `observed_at`, `turn_id`, and `runtime_id` together.
+  `stale`/`unknown` evidence cannot establish a current wait or authorize recovery.
+  `stopped` requires explicit exact-turn user Stop evidence; an interruption alone
+  is insufficient. Metadata reads never resume a provider or replay a prompt.
+  `thread settings --session-id <id>` separates the current saved permission
+  selection, queued permission changes, and the last native observation.
+  A queued YOLO change has not applied, and a saved choice is not proof of native
+  enforcement. Native observations carry their own recording time and runtime;
+  missing or stale evidence must stay unknown.
 - Check overlap with `agent-coord conflicts`.
 - Send actionable work with `agent-coord send --session
   <peer-id> --classification action_required --reply-required '<message>'`.

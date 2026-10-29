@@ -285,12 +285,15 @@ def _handler(
     provider_limits = provider_limits or (ProviderLimits(browser_sessions) if browser_sessions is not None else None)
 
     class Handler(BaseHTTPRequestHandler):
-        def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None) -> None:
+        def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None,
+                  entity_tag: str | None = None) -> None:
             try:
                 self.send_response(status.value)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
+                if entity_tag:
+                    self.send_header("ETag", entity_tag)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
                 if cookie:
@@ -439,7 +442,7 @@ def _handler(
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
-            if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/conversation-scroll.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css", "/thread-tabs.js", "/thread-tabs.css"}:
+            if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/permission-menu.js", "/response-actions.js", "/conversation-scroll.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css", "/thread-tabs.js", "/thread-tabs.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -602,13 +605,25 @@ def _handler(
                 self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.get_project(unquote(route[9:])))
             elif route == "views":
                 self._json(HTTPStatus.OK, {"data": views.list()})
+            elif route == "permission-modes":
+                yolo = query.get("yolo", ["false"])[0]
+                if yolo not in {"true", "false"}:
+                    raise CoordinationError("YOLO must be true or false.")
+                self._json(HTTPStatus.OK, browser_sessions.permission_selection(
+                    query.get("client", ["codex"])[0], cwd=query.get("cwd", [None])[0],
+                    yolo=yolo == "true", permission_mode=query.get("permission_mode", [None])[0]))
             elif route == "models":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.models(query.get("client", ["codex"])[0])})
             elif route == "sessions":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_sessions(archived=query.get("archived") == ["true"])})
             elif route == "threads":
-                self._send(HTTPStatus.OK, "application/json; charset=utf-8",
-                           browser_sessions.work_thread_inventory(archived=query.get("archived") == ["true"]))
+                body, tag = browser_sessions.work_thread_inventory_response(archived=query.get("archived") == ["true"])
+                # A window that already holds this list skips the transfer and
+                # its own parse and render.
+                if self.headers.get("If-None-Match") == tag:
+                    self._send(HTTPStatus.NOT_MODIFIED, "application/json; charset=utf-8", b"", entity_tag=tag)
+                else:
+                    self._send(HTTPStatus.OK, "application/json; charset=utf-8", body, entity_tag=tag)
             elif route == "search":
                 from .thread_search import search_browser_threads
                 # Reuse the app inventory boundary (workspace and managed-worker
@@ -651,7 +666,12 @@ def _handler(
                 thread["close_when_done"] = ThreadControl(store).status(thread_id)
                 self._json(HTTPStatus.OK, thread)
             elif route.startswith("sessions/"):
-                self._json(HTTPStatus.OK, browser_sessions.read(unquote(route[9:])))
+                # Opening a conversation asks for its recent view; other reads
+                # and older clients receive the complete history.
+                view = self.headers.get("X-Agent-Coord-History-View", "complete")
+                if view not in {"complete", "recent"}:
+                    raise CoordinationError("History view must be complete or recent.")
+                self._json(HTTPStatus.OK, browser_sessions.read(unquote(route[9:]), recent=view == "recent"))
             elif route == "events":
                 try:
                     cursor = (self.headers.get("Last-Event-ID") or query.get("after", ["0"])[0]).split(":")
@@ -1095,6 +1115,10 @@ def _handler(
                     browser_sessions._record(thread_id)
                     result = (browser_sessions.dispatch.resolve(thread_id, body) if "action" in body
                               else browser_sessions.dispatch.configure(thread_id, body))
+                elif len(route) == 5 and route[4] == "prewarm":
+                    if body:
+                        raise CoordinationError("Prewarm accepts an empty object.")
+                    result = browser_sessions.prewarm(thread_id)
                 elif len(route) == 5 and route[4] == "interrupt":
                     from .activity_api import activity_context, record_accepted
                     context = activity_context(body)
@@ -1217,6 +1241,7 @@ def make_ui_server(
     sessions.sidecars.start()
     sessions.reviews.start()
     sessions.watchdog.start()
+    sessions.start_residency()
     sessions.dispatch.wake()
     return server
 

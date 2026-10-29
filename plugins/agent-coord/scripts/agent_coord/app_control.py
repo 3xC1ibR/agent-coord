@@ -36,7 +36,7 @@ class AppControl:
             """)
 
     def settings(self, thread_id):
-        self.store.get_session(thread_id)
+        session = self.store.get_session(thread_id)
         with self.store._connection() as db:
             row = None
             if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'browser_sessions'").fetchone():
@@ -47,6 +47,9 @@ class AppControl:
         result["yolo"] = bool(result["yolo"])
         result["archived"] = bool(result["archived"])
         result["session_id"] = thread_id
+        from .execution_state import permission_settings
+        with self.store._connection() as db:
+            result["permissions"] = permission_settings(db, result, session["execution"])
         result["url"] = NavigationStore(self.store).link(thread=thread_id)["url"]
         return result
 

@@ -248,7 +248,7 @@ function projectAppFixture({known = true} = {}) {
     inProject,
     savedViews: {remember() {}, restoreScroll() {}, sync() {}, setProject: async () => {}},
     navigation: {remember() {}}, notifications: {syncFocus() {}}, threadOrganization: {NONE: "__none__"},
-    renderFolders() {}, renderList() {}, renderStatus() {}, renderTitle() {}, setNavigation() {}, setChatExpanded() {},
+    renderFolders() {}, renderList() {}, renderStatus() {}, renderSessionSettings() {}, renderTitle() {}, setNavigation() {}, setChatExpanded() {},
     retainConversation() {}, restoreProjectTab: async () => {}, conversationEntry: () => ({detail: null}), node: () => ({}),
     overlayPendingAttention: item => item, threadPath: id => "threads/" + id, action: fn => fn(), markThreadHandled() {},
     refreshDetail: async () => { c.state.detail = {work_thread: items.find(item => item.thread_id === c.state.selected)}; },

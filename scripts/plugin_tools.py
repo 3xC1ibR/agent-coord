@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -108,32 +109,56 @@ def verify(plugin: Path, installed: Path) -> int:
 
 
 def install_codex(marketplace: str, *, codex_home: Path | None = None) -> dict:
-    """Keep old hook paths usable for sessions that loaded them before refresh."""
+    """Install in isolation, then publish without pruning any live version.
+
+    Backing up and restoring after `plugin add` leaves pinned hooks and web
+    assets absent while Codex prunes the cache. Its installer only ever sees
+    this disposable CODEX_HOME; failures and interrupts cannot prune live files.
+    """
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", marketplace):
         raise ValueError("Invalid marketplace name.")
-    home = codex_home or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    home = (codex_home or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))).expanduser().resolve()
+    home.mkdir(parents=True, exist_ok=True)
     cache = home / "plugins/cache" / marketplace / "agent-coord"
-    with tempfile.TemporaryDirectory(prefix="agent-coord-plugin-backup-") as temporary:
-        backup = Path(temporary) / "versions"
-        if cache.exists():
-            shutil.copytree(cache, backup, symlinks=True)
-        try:
+    # Serialize helpers without locking Codex's unrelated configuration writes.
+    with (home / ".agent-coord-plugin-install.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        config = (home / "config.toml").resolve()
+        original = config.read_bytes() if config.exists() else None
+        mode = config.stat().st_mode & 0o777 if original is not None else 0o600
+        with tempfile.TemporaryDirectory(prefix=".agent-coord-install-", dir=home) as temporary:
+            staging = Path(temporary)
+            staged_config = staging / "config.toml"
+            if original is not None:
+                staged_config.write_bytes(original)
+                staged_config.chmod(0o600)
             result = subprocess.run(["codex", "plugin", "add", f"agent-coord@{marketplace}", "--json"],
-                                    check=True, capture_output=True, text=True)
-        finally:
-            if backup.exists():
-                cache.mkdir(parents=True, exist_ok=True)
-                for previous in backup.iterdir():
-                    target = cache / previous.name
-                    if os.path.lexists(target):
-                        continue
-                    if previous.is_symlink():
-                        target.symlink_to(os.readlink(previous))
-                    elif previous.is_dir():
-                        shutil.copytree(previous, target, symlinks=True)
-                    else:
-                        shutil.copy2(previous, target)
-        return json.loads(result.stdout)
+                                    check=True, capture_output=True, text=True,
+                                    env={**os.environ, "CODEX_HOME": str(staging)})
+            receipt = json.loads(result.stdout)
+            version = receipt["version"]
+            if not isinstance(version, str) or not VERSION.fullmatch(version):
+                raise ValueError("Installer returned an invalid plugin version.")
+            installed = staging / "plugins/cache" / marketplace / "agent-coord" / version
+            if Path(receipt["installedPath"]).resolve() != installed.resolve() or not installed.is_dir():
+                raise ValueError("Installer returned an unexpected cache path.")
+            updated = staged_config.read_bytes()
+            current = config.read_bytes() if config.exists() else None
+            if current != original:
+                raise ValueError("Codex configuration changed during installation; retry the refresh.")
+            cache.mkdir(parents=True, exist_ok=True)
+            target = cache / version
+            if os.path.lexists(target):
+                # Same-version updates must not mutate files pinned by an old
+                # session. A new cachebuster is required for changed payloads.
+                verify(installed, target)
+            else:
+                os.replace(installed, target)
+            if updated != original:
+                staged_config.chmod(mode)
+                os.replace(staged_config, config)
+            receipt["installedPath"] = str(target)
+            return receipt
 
 
 def main() -> None:

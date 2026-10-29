@@ -7,81 +7,92 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 
 function setup() {
   const elements = new Map();
-  const context = {listRequest: 0, $: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
-    state: {busy: false, selected: "one", sessions: [{thread_id: "one"}], detail: {session: {model: "test-model", effort: "high", yolo: 1}, work_thread: {thread_id: "one", browser_session: true, attention: "now", title: "One"}, running: false}, commandFeedback: new Map(), drafts: new Map(), closing: new Set()},
+  const context = {listRequest: 0, $: id => { if (!elements.has(id)) elements.set(id, {setAttribute(key, value) { this[key] = value; }, getBoundingClientRect() { return {width: 100}; }}); return elements.get(id); },
+    state: {busy: false, selected: "one", sessions: [{thread_id: "one"}], detail: {session: {client: "codex", model: "test-model", effort: "high", yolo: 1}, work_thread: {thread_id: "one", browser_session: true, attention: "now", title: "One"}, running: false}, commandFeedback: new Map(), drafts: new Map(), closing: new Set()},
     renderModelPicker() {}, renderStatus() {}, refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id,
     threadPath: id => "threads/" + id, renderList() {}, showError(error) { throw error; },
     select: async id => { context.state.selected = id; },
     goHome: () => { context.state.selected = null; context.state.detail = null; }};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function sessionModelClients(")), context);
-  vm.runInContext(source.slice(source.indexOf("function renderSessionSettings("), source.indexOf("function renderStatus(")), context);
+  vm.runInContext(source.slice(source.indexOf("function sessionPermissionsUnavailable("), source.indexOf("function renderStatus(")), context);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), context);
   vm.runInContext(source.slice(source.indexOf("async function toggleThreadClosed("), source.indexOf('$("close-thread").onclick')), context);
   vm.runInContext(source.slice(source.indexOf("async function forkThread("), source.indexOf("async function boot(")), context);
   return context;
 }
 
-test("status line shows effective settings and YOLO only for that session", () => {
+test("status line shows group and native permission choice without duplicating model or effort", () => {
   const c = setup();
+  c.state.organization = {projects: [{id: "group-one", name: "Release work"}]};
+  c.state.detail.work_thread.project_id = "group-one";
+  c.state.detail.session.permission_mode = "native-choice";
+  c.state.detail.session.permission_modes = [{id: "native-choice", label: "Native choice"}];
   c.renderSessionSettings();
-  assert.equal(c.$("session-model").textContent, "Model · Codex · test-model");
-  assert.equal(c.$("session-effort").textContent, "Reasoning · high");
-  assert.equal(c.$("session-yolo").hidden, false);
-  assert.equal(c.$("edit-permissions").disabled, false);
-  c.state.detail.session = {model: "another", effort: "low", yolo: 0};
-  c.renderSessionSettings();
-  assert.equal(c.$("session-model").textContent, "Model · Codex · another");
-  assert.equal(c.$("session-yolo").hidden, true);
+  assert.equal(c.$("status-group").textContent, "Release work");
+  assert.equal(c.$("status-group").hidden, false);
+  assert.equal(c.$("edit-permissions").textContent, "Permissions · Native choice");
+  assert.equal(c.$("session-model").textContent, undefined);
+  assert.equal(c.$("session-effort").textContent, undefined);
+  c.state.detail.work_thread.project_id = null;
   c.state.detail.work_thread.browser_session = false;
   c.renderSessionSettings();
+  assert.equal(c.$("status-group").hidden, true);
   assert.equal(c.$("session-settings").hidden, true);
 });
 
-test("permissions editor updates YOLO for an existing idle thread", async () => {
-  const c = setup();
-  const dialog = c.$("permissions-dialog");
-  dialog.dataset = {};
-  dialog.showModal = () => { dialog.open = true; };
-  dialog.close = () => { dialog.open = false; };
-  c.state.detail.session.yolo = 0;
-  c.openSessionPermissions();
-  assert.equal(dialog.open, true);
-  assert.equal(dialog.dataset.threadId, "one");
-  assert.equal(c.$("edit-yolo").checked, false);
-  assert.equal(c.$("permissions-thread").textContent, "One");
-  c.$("edit-yolo").checked = true;
-  c.api = async (path, body) => {
-    assert.equal(path, "sessions/one");
-    assert.equal(body.yolo, true);
-    return {...c.state.detail.session, yolo: 1};
-  };
-  await c.saveSessionPermissions();
+test("opening a permissions menu preserves the actual saved provider choice", async () => {
+  const c = setup(); let options;
+  Object.assign(c.state.detail.session, {permission_mode: "provider/native", permission_modes: [
+    {id: "provider/native", label: "Native choice"}, {id: "provider/other", label: "Another choice"}]});
+  c.state.permissionMenu = {open: async (_, value) => { options = value; }};
+  c.api = async () => assert.fail("Catalog in session should not need a request or mutation");
+  await c.openSessionPermissions();
+  const catalog = await options.load();
+  assert.equal(catalog.permission_mode, "provider/native");
+  assert.equal(c.state.detail.session.permission_mode, "provider/native");
   assert.equal(c.state.detail.session.yolo, 1);
-  assert.equal(dialog.open, false);
-  c.renderSessionSettings();
-  assert.equal(c.$("session-yolo").hidden, false);
 });
 
-test("permissions editor waits for a turn and keeps the choice on save failure", async () => {
-  const c = setup();
-  const dialog = c.$("permissions-dialog");
-  dialog.dataset = {};
-  dialog.showModal = () => { dialog.open = true; };
-  dialog.close = () => { dialog.open = false; };
+test("the menu writes a native mode ID and retains state on failure", async () => {
+  const c = setup(); c.state.detail.session.permission_mode = "before";
+  c.api = async (path, body) => {
+    assert.equal(path, "sessions/one");
+    assert.equal(JSON.stringify(body), JSON.stringify({permission_mode: "provider/native"}));
+    return {...c.state.detail.session, permission_mode: "provider/native"};
+  };
+  await c.saveSessionPermissions({id: "provider/native"});
+  assert.equal(c.state.detail.session.permission_mode, "provider/native");
+  c.api = async () => {throw new Error("Could not save");};
+  await assert.rejects(c.saveSessionPermissions({id: "other"}), /Could not save/);
+  assert.equal(c.state.detail.session.permission_mode, "provider/native");
+});
+
+test("running sessions, disabled modes and stale menus cannot change settings", async () => {
+  const c = setup(); c.api = async () => assert.fail("Must not mutate");
+  c.state.permissionMenu = {open: () => assert.fail("Running sessions cannot open the menu"), sync() {}};
   c.state.detail.running = true;
-  c.renderSessionSettings();
-  assert.equal(c.$("edit-permissions").disabled, true);
+  c.renderSessionSettings(); assert.equal(c.$("edit-permissions").disabled, true);
   c.openSessionPermissions();
-  assert.equal(dialog.open, undefined);
+  await assert.rejects(c.saveSessionPermissions({id: "native"}), /conversation changed/);
   c.state.detail.running = false;
-  c.openSessionPermissions();
-  c.$("edit-yolo").checked = false;
-  c.api = async () => { throw new Error("Could not save"); };
-  await assert.rejects(c.saveSessionPermissions(), /Could not save/);
-  assert.equal(dialog.open, true);
-  assert.equal(c.$("edit-yolo").checked, false);
-  assert.equal(c.state.detail.session.yolo, 1);
+  await assert.rejects(c.saveSessionPermissions({id: "native", available: false}), /unavailable/);
+  await assert.rejects(c.saveSessionPermissions({id: "native"}, {id: "previous", client: "codex"}), /conversation changed/);
+});
+
+test("missing catalogs load lazily and preserve an unavailable saved selection", async () => {
+  const c = setup();
+  Object.assign(c.state.detail.session, {cwd: "/project/child", permission_mode: "saved-exception", permission_modes: [], permission_mode_effective: "observed-native"});
+  c.api = async path => {
+    assert.equal(path, "permission-modes?client=codex&yolo=true&cwd=%2Fproject%2Fchild");
+    return {permission_mode: "legacy-mapped", permission_modes: [{id: "offered", label: "Offered choice"}]};
+  };
+  const catalog = await c.sessionPermissionCatalog(c.state.detail.session);
+  assert.equal(catalog.permission_mode, "saved-exception");
+  assert.equal(catalog.permission_mode_effective, "observed-native");
+  assert.equal(catalog.permission_modes.at(-1).id, "saved-exception");
+  assert.equal(catalog.permission_modes.at(-1).available, false);
+  assert.equal(c.state.detail.session.permission_mode, "saved-exception");
 });
 
 test("slash command feedback appears without fabricating conversation items", async () => {

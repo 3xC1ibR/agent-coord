@@ -19,6 +19,62 @@ still advertised `0.1.2` and the alpha arm64 feed returned 404. Check current
 published manifests and feeds before claiming customer updates are operational;
 an installed app or a passing CI run alone does not establish publication.
 
+## Live backend rollout investigation
+
+The current implementation below still uses an idle boundary. Live backend
+replacement is being measured against a stronger contract: a compatible backend
+must become active within 60 seconds with streaming turns, tools and approvals
+in progress, without signaling a provider or resuming a replacement turn. An
+active payload digest alone is insufficient if old coordination or adapter code
+still performs the work behind a forwarding facade.
+
+The independent, real-backend workload is
+[`scripts/runtime_live_acceptance.py`](../scripts/runtime_live_acceptance.py),
+with the wire-level subprocess provider in
+[`tests/fixtures/runtime_live_provider.py`](../tests/fixtures/runtime_live_provider.py).
+It uses a newly created private database/runtime directory and never attaches to
+the installed runtime. Its initial run held Codex streaming and long-tool turns
+and a Claude approval. Activation failed after **60.046 seconds**: the active
+payload remained `a4dd8f12b5a282a38f66e221f0045a0a04f1ab6683a83fc770ebdb5300b40951`
+and candidate `2c8526ded7d59597f422d8e0879b10cbd3c7da42c5bb9d28f9d2a20eb46552de`
+remained pending. See the [baseline report](../build/live-runtime-spike/baseline.json).
+This is a failing baseline, not live-rollout acceptance.
+
+The first migration from the installed implementation is a separate constraint.
+Its authenticated controls expose no provider descriptor export or session-state
+transfer operation. Pending futures, decoder buffers and provider adapter state
+are process-local. Its existing idle handover also calls provider `close()`, which
+signals provider processes. Thus even a naturally idle legacy handover cannot be
+reported as a no-signal live swap. Do not inject code into an existing runtime,
+signal its agents, or substitute native resume to claim otherwise. A future
+stable-host implementation must report its supported first-adoption boundary
+separately from subsequent coordinator upgrades.
+
+Architecture measurements compare direct descriptor/state transfer against
+stable provider hosts with a reconnectable event journal. The decision must
+cover coordinator state and claim/receipt transactions as well as kernel pipes:
+processing an event before acknowledging it can duplicate projection effects
+after a coordinator crash, and writing a provider command before recording its
+receipt can leave a queue claim uncertain. The host must retain command outcomes;
+the coordinator must commit its projection and replay cursor atomically.
+
+Primary precedents clarify the required boundaries:
+
+- [nginx executable upgrades](https://nginx.org/en/docs/control.html) retain old
+  workers while their requests finish.
+- [Envoy hot restart](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/hot_restart)
+  transfers listening sockets, but explicitly does not transfer established
+  connections. Draining alone therefore does not meet this rollout contract.
+- [systemd's descriptor store](https://systemd.io/FILE_DESCRIPTOR_STORE/) keeps
+  duplicated descriptors outside the replaceable service. The design principle
+  is useful on macOS; systemd itself is not a project dependency.
+- [Erlang release handling](https://www.erlang.org/doc/system/release_handling.html)
+  uses explicit state transformation during code upgrades. Python adapter state
+  likewise needs a versioned contract rather than incidental object serialization.
+- [Temporal worker versioning](https://docs.temporal.io/worker-versioning) separates
+  execution compatibility from code deployment; retaining an older execution
+  version must remain visible rather than being described as fully upgraded.
+
 ## Product contract
 
 - Discover and download signed updates while work continues.
@@ -89,12 +145,27 @@ identity, database overrides, arguments, and hook/MCP input are preserved. An
 unavailable or unverified owner fails closed; direct library access still obeys
 the fingerprint guard.
 
+Owner verification uses an authenticated `identity` control request. Its response
+identifies the database, runtime instance, protocol and retained payload. It does not acquire
+the runtime, session or persistence readiness locks or scan the database. CLI,
+hook and MCP entrypoints use the verified payload from that single handshake;
+they do not request full status merely to route a command. Full status and safe
+handover still perform the readiness checks. The owner lock, control-token and
+instance checks, protocol check and retained-payload validation remain enforced.
+An older runtime may return an authenticated `Unknown runtime control action.`
+response; only that response permits fallback to its full status check. A timeout,
+authentication failure or identity mismatch never permits a competing owner.
+
 External schedulers should use the managed `~/.local/bin/agent-coord` launcher,
 installed from the refreshed plugin with `agent-coord install-cli`. Installation
 keeps that plugin's routing entrypoint rather than pinning one retained payload.
 Refresh plugins using the procedure in [reference.md](reference.md#refresh-installed-plugins-after-changes).
 Already running MCP processes retain their imported code and need a fresh
-connection to adopt the routing fix; restarting the desktop runtime is unnecessary.
+connection after plugin refresh. The lightweight handshake requires both refreshed
+entrypoints and a backend that supports `identity`; an older running backend still
+uses the fallback until its safe idle handover. Installing a new interface or
+refreshing plugins alone does not prove backend activation. Check runtime status
+after handover, and do not stop active agents to force it.
 
 ## Runtime maintenance controls
 

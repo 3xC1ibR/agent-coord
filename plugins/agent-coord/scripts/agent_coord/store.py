@@ -198,28 +198,61 @@ def derive_scope_cluster(scopes: Iterable[str], cwd: str) -> str | None:
     return (posixpath.commonpath(directories) or ".") if directories else None
 
 
+def _scope_components_overlap(left: str, right: str) -> bool:
+    """Reject provably disjoint component globs; keep ambiguous pairs conservative."""
+    if not _WILDCARD.search(left):
+        return fnmatch.fnmatchcase(left, right)
+    if not _WILDCARD.search(right):
+        return fnmatch.fnmatchcase(right, left)
+    left_prefix = left[:_WILDCARD.search(left).start()]
+    right_prefix = right[:_WILDCARD.search(right).start()]
+    if not (left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)):
+        return False
+    # A closing bracket ends a character class, so only text after it is fixed.
+    left_suffix = re.split(r"[*?\[\]]", left)[-1]
+    right_suffix = re.split(r"[*?\[\]]", right)[-1]
+    return left_suffix.endswith(right_suffix) or right_suffix.endswith(left_suffix)
+
+
 def scopes_overlap(left: str, right: str) -> bool:
+    left, right = (posixpath.normpath(scope.replace("\\", "/")) for scope in (left, right))
+    if "." in {left, right}:
+        return True
     left_glob = _WILDCARD.search(left) is not None
     right_glob = _WILDCARD.search(right) is not None
-    if not left_glob and not right_glob:
-        return (
-            left == right
-            or left.startswith(right.rstrip("/") + "/")
-            or right.startswith(left.rstrip("/") + "/")
-        )
+    # Preserve the existing path matcher for concrete paths, including its
+    # fnmatch compatibility. A failed match must not fall back to a shared root.
     if left_glob and not right_glob and path_is_in_scope(right, left):
         return True
     if right_glob and not left_glob and path_is_in_scope(left, right):
         return True
-    left_root = _scope_root(left)
-    right_root = _scope_root(right)
-    if "." in {left_root, right_root}:
+    if left_glob and right_glob and _scope_components_overlap(left, right):
+        # fnmatch also lets * span separators. Keep possible intersections
+        # under that compatibility behavior, even across different depths.
         return True
-    return (
-        left_root == right_root
-        or left_root.startswith(right_root.rstrip("/") + "/")
-        or right_root.startswith(left_root.rstrip("/") + "/")
-    )
+    # Scopes also own descendants of matched directories. Compare components
+    # before permitting that suffix, so unrelated siblings never share a scope.
+    # ** may consume zero or more components; ordinary globs consume one.
+    a, b = (([""] if scope == "/" else scope.split("/")) + ["**"] for scope in (left, right))
+    pending, seen = [(0, 0)], set()
+    while pending:
+        i, j = pending.pop()
+        if (i, j) in seen:
+            continue
+        seen.add((i, j))
+        if i == len(a) and j == len(b):
+            return True
+        if i < len(a) and a[i] == "**":
+            pending.append((i + 1, j))
+            if j < len(b):
+                pending.append((i, j + 1))
+        if j < len(b) and b[j] == "**":
+            pending.append((i, j + 1))
+            if i < len(a):
+                pending.append((i + 1, j))
+        if i < len(a) and j < len(b) and _scope_components_overlap(a[i], b[j]):
+            pending.append((i + 1, j + 1))
+    return False
 
 
 class _StoreConnection(sqlite3.Connection):
@@ -293,17 +326,39 @@ class CoordinationStore:
         self._idle_connections = threading.local()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         from .desktop_runtime import schema_access
+        from .browser_persistence import database_busy
+        from .threads import ThreadStore
+        from .thread_usage import ThreadUsageStore
+        from .asks import AskStore
         try:
             with schema_access(self.database_path):
-                self._initialize()
+                # Constructors perform idempotent schema/data upgrades. Retry
+                # only this bookkeeping, before any command (especially send
+                # or reply) can create a message or trigger external work.
+                # Each SQLite lock wait is already bounded by busy_timeout.
+                for attempt in range(3):
+                    try:
+                        self._initialize()
+                        self.threads = ThreadStore(self)
+                        self.usage = ThreadUsageStore(self)
+                        self.asks = AskStore(self)
+                        from .execution_state import initialize as initialize_execution
+                        with self._connection() as db:
+                            initialize_execution(db)
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if not database_busy(exc):
+                            raise
+                        if attempt == 2:
+                            raise CoordinationError(
+                                "Agent Coord database remained busy during initialization "
+                                "after 3 attempts. Try again shortly."
+                            ) from exc
+                        time.sleep(0.1 * (2 ** attempt))
+        except CoordinationError:
+            raise
         except RuntimeError as exc:
             raise CoordinationError(str(exc)) from exc
-        from .threads import ThreadStore
-        self.threads = ThreadStore(self)
-        from .thread_usage import ThreadUsageStore
-        self.usage = ThreadUsageStore(self)
-        from .asks import AskStore
-        self.asks = AskStore(self)
 
     def _connect(self) -> sqlite3.Connection:
         # Only the owning thread uses a connection; an idle one may be closed
@@ -624,7 +679,9 @@ class CoordinationStore:
                     )
             legacy_wake_rows = list(
                 connection.execute(
-                    "SELECT * FROM zellij_wake_targets"
+                    "SELECT legacy.* FROM zellij_wake_targets AS legacy "
+                    "WHERE NOT EXISTS (SELECT 1 FROM wake_targets AS current "
+                    "WHERE current.session_id = legacy.session_id)"
                 )
             )
             for row in legacy_wake_rows:
@@ -1022,6 +1079,9 @@ class CoordinationStore:
             raise CoordinationError("Client must be claude, codex, antigravity, kimi, or muse.")
         repository = str(Path(cwd).resolve())
         now = self.clock()
+        # Relative scopes belong to the repository where they were declared.
+        # Hooks from nested repositories may refresh identity, but must not
+        # silently move that ownership. end_work permits a new registration base.
         with self._connection() as connection:
             connection.execute(
                 """
@@ -1031,7 +1091,8 @@ class CoordinationStore:
                 ) VALUES (?, ?, ?, ?, 'idle', NULL, '[]', ?, ?, NULL)
                 ON CONFLICT(session_id) DO UPDATE SET
                     client = excluded.client,
-                    cwd = excluded.cwd,
+                    cwd = CASE WHEN sessions.write_scope_json != '[]'
+                               THEN sessions.cwd ELSE excluded.cwd END,
                     name = COALESCE(excluded.name, sessions.name),
                     last_seen_at = excluded.last_seen_at,
                     ended_at = NULL
@@ -1048,9 +1109,23 @@ class CoordinationStore:
             row = connection.execute(
                 "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
             ).fetchone()
+            if row is not None:
+                from .execution_state import read_many
+                execution = read_many(self, connection, [session_id])[session_id]
         if row is None:
             raise CoordinationError(f"Session {session_id} is not registered.")
-        return self._row_to_session(row)
+        return {**self._row_to_session(row), "execution": execution}
+
+    def session_label(self, session_id: str, name: str | None = None, *, connection=None) -> str:
+        """Use the saved conversation title in actionable blocker messages."""
+        if connection is None:
+            with self._connection() as db:
+                return self.session_label(session_id, name, connection=db)
+        row = connection.execute("SELECT title FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
+        for label in (row[0] if row else None, name):
+            if label and label.strip().lower() not in {"new session", "new thread"}:
+                return f"{label} ({session_id})"
+        return session_id
 
     def touch(
         self,
@@ -1268,7 +1343,7 @@ class CoordinationStore:
                     {
                         "session_id": row["session_id"],
                         "client": row["client"],
-                        "name": row["name"],
+                        "name": self.session_label(row["session_id"], row["name"], connection=connection),
                         "activity": row["activity"],
                         "bead_id": row["bead_id"],
                         "write_scope": other_scopes,
@@ -1355,7 +1430,7 @@ class CoordinationStore:
                 ]
                 if requested_predecessors:
                     owners = ", ".join(
-                        row["name"] or row["session_id"]
+                        self.session_label(row["session_id"], row["name"], connection=connection)
                         for row in requested_predecessors
                     )
                     raise CoordinationError(
@@ -1684,7 +1759,9 @@ class CoordinationStore:
                     values,
                 )
             )
-        sessions = [self._row_to_session(row) for row in rows]
+            from .execution_state import read_many
+            executions = read_many(self, connection, [row["session_id"] for row in rows])
+        sessions = [{**self._row_to_session(row), "execution": executions[row["session_id"]]} for row in rows]
         if relevant_only:
             sessions = [
                 session

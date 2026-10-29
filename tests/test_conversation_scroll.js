@@ -68,3 +68,20 @@ for (const mobile of [false, true]) {
     assert.equal(button.hidden, true);
   });
 }
+
+
+test("reading just above the latest message remains detached until scrolling to the bottom", () => {
+  const {controller, scroller} = setup();
+  controller.afterRender(controller.beforeRender());
+  scroller.scrollTop -= 40; scroller.fire("scroll");
+  assert.equal(controller.beforeRender(), false);
+  const top = scroller.scrollTop;
+  scroller.scrollHeight += 100; controller.afterRender(false);
+  assert.equal(scroller.scrollTop, top);
+  scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight - 20; scroller.fire("scroll");
+  assert.equal(controller.beforeRender(), false);
+  controller.restore(scroller.scrollTop);
+  assert.equal(controller.beforeRender(), false, "restoring a nearby reading position must not follow");
+  scroller.scrollTop = scroller.scrollHeight; scroller.fire("scroll");
+  assert.equal(controller.beforeRender(), true);
+});

@@ -24,7 +24,7 @@ def check_write(store, session_id, paths, *, has_outside=False):
         if not session["scope_required"]:
             store.request_scope_declarations(session_id, [peer["session_id"] for peer in unscoped])
         store.touch(session_id, "waiting", turn_active=True)
-        owners = ", ".join(peer["name"] or peer["session_id"] for peer in blockers)
+        owners = ", ".join(store.session_label(peer["session_id"], peer["name"]) for peer in blockers)
         next_action = "Wait for the unscoped incumbent(s) to declare, then run " if unscoped else "Run "
         return (
             "Another active session requires write-scope coordination: "
@@ -35,7 +35,11 @@ def check_write(store, session_id, paths, *, has_outside=False):
     if session["lease_mode"] == "validation":
         return "This declaration is a validation lease; explicit write tools are disabled until a write lease is acquired."
     if session["activity"] not in {"implementing", "validating"}:
-        return f"Session activity is {session['activity']}; set it to implementing or validating before editing."
+        return (
+            f"Session activity is {session['activity']}; set it to implementing or validating before editing. "
+            f"To resume the declared work, run agent-coord set-activity --session-id {session_id} "
+            "--activity implementing."
+        )
     if not paths:
         return "The write target could not be determined from the tool input."
     outside = [path for path in paths if not any(path_is_in_scope(path, scope) for scope in session["write_scope"])]

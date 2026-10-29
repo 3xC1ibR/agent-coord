@@ -115,6 +115,19 @@ class HookTests(unittest.TestCase):
         self.assertEqual(thread["attention"], "later")
         self.assertEqual(thread["original_request"], "Investigate the write path.")
 
+    def test_browser_automatic_wake_does_not_capture_human_request(self):
+        from agent_coord.browser_wake import WAKE_PROMPT as BROWSER_WAKE_PROMPT
+        from agent_coord.zellij_wake import WAKE_PROMPT
+        handle(self.payload("SessionStart"), self.store)
+        with self.store._connection() as db:
+            db.execute("CREATE TABLE browser_sessions (thread_id TEXT PRIMARY KEY)")
+            db.execute("INSERT INTO browser_sessions VALUES ('codex-one')")
+        for prompt in (WAKE_PROMPT, BROWSER_WAKE_PROMPT, "  " + BROWSER_WAKE_PROMPT + "\nContinue the assignment."):
+            handle(self.payload("UserPromptSubmit", prompt=prompt), self.store)
+            self.assertEqual(self.store.threads.get("codex-one")["original_request"], "")
+        handle(self.payload("UserPromptSubmit", prompt="Repair the message hook."), self.store)
+        self.assertEqual(self.store.threads.get("codex-one")["original_request"], "Repair the message hook.")
+
     def test_session_start_attaches_inherited_delegation(self) -> None:
         self.store.register(
             session_id="parent",
@@ -558,6 +571,52 @@ class HookTests(unittest.TestCase):
             "I need src/app.py.", first["hookSpecificOutput"]["additionalContext"]
         )
         self.assertNotIn("I need src/app.py.", second["hookSpecificOutput"]["additionalContext"])
+
+    def test_actionable_messages_precede_large_bootstrap_and_remain_recoverable(self):
+        handle(self.payload("SessionStart"), self.store)
+        self.store.register(session_id="peer", client="claude", cwd=str(self.root))
+        for event in ("SessionStart", "UserPromptSubmit"):
+            with self.subTest(event=event):
+                body = "URGENT: scoped handoff " + "complete body " * 500 + "END-OF-REQUEST"
+                sent = self.store.send_message(sender_session_id="peer", recipient_session_id="codex-one",
+                                               body=body, reply_required=True)
+                preamble = "LONG-BOOTSTRAP " * 2000
+                with patch("agent_coord.hook.coordination_bootstrap", return_value=preamble), \
+                     patch.object(self.store.threads, "instructions", return_value=preamble):
+                    result = handle(self.payload(event), self.store)
+                text = result["hookSpecificOutput"]["additionalContext"]
+                self.assertLess(text.index("URGENT:"), 1000)
+                self.assertLess(text.index("END-OF-REQUEST"), text.index("LONG-BOOTSTRAP"))
+                self.assertEqual(text.count(body), 1)
+                again = handle(self.payload("PreToolUse", tool_name="Read"), self.store)
+                self.assertNotIn("URGENT:", json.dumps(again))
+                unread = self.store.inbox("codex-one", unread_only=True, mark_delivered=False)
+                self.assertEqual(next(m["body"] for m in unread if m["id"] == sent["id"]), body)
+
+    def test_nested_repo_hooks_preserve_declared_base_and_resolve_relative_targets(self):
+        (self.root / ".git").mkdir()
+        nested = self.root / "private"
+        (nested / ".git").mkdir(parents=True)
+        target = nested / "orchestration/h.md"
+        handle(self.payload("SessionStart"), self.store)
+        self.store.begin_work(session_id="codex-one", scopes=["private/orchestration/h.md"])
+        for path in (str(target), "orchestration/h.md"):
+            result = handle(self.payload("PreToolUse", cwd=str(nested), tool_name="Write",
+                                         tool_input={"file_path": path}), self.store)
+            self.assertEqual(result, {})
+        session = self.store.get_session("codex-one")
+        self.assertEqual(session["cwd"], str(self.root.resolve()))
+        self.assertEqual(session["write_scope"], ["private/orchestration/h.md"])
+        denied = handle(self.payload("PreToolUse", cwd=str(nested), tool_name="Write",
+                                     tool_input={"file_path": "orchestration/other.md"}), self.store)
+        self.assertIn("outside the declared scope", denied["hookSpecificOutput"]["permissionDecisionReason"])
+        self.store.register(session_id="peer", client="claude", cwd=str(self.root))
+        from agent_coord.store import ConflictError
+        with self.assertRaises(ConflictError):
+            self.store.begin_work(session_id="peer", scopes=["private/orchestration/h.md"])
+        self.store.end_work("codex-one")
+        handle(self.payload("UserPromptSubmit", cwd=str(nested)), self.store)
+        self.assertEqual(self.store.get_session("codex-one")["cwd"], str(nested.resolve()))
 
     def test_hooks_surface_only_action_required_messages(self) -> None:
         self.store.register(

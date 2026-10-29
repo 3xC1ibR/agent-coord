@@ -169,6 +169,109 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertNotIn("turn/steer", methods)
         self.assertEqual(methods.count("turn/start"), 1)
 
+    def idle_conversations(self, count):
+        threads = [self.create() for _ in range(count)]
+        with self.sessions.lock:
+            for index, thread_id in enumerate(threads):
+                self.sessions.last_used[thread_id] = 1000.0 + index  # Oldest first.
+        return threads
+
+    def test_idle_conversations_beyond_the_warm_set_are_released_and_reopen_normally(self):
+        threads = self.idle_conversations(9)
+        released = self.sessions.release_idle_conversations(now=10_000.0)
+        self.assertEqual(released, threads[2::-1], "the six most recent stay warm; older ones go, oldest last")
+        self.assertTrue(set(threads[3:]) <= self.sessions.loaded)
+        self.assertFalse(set(threads[:3]) & self.sessions.loaded)
+        self.assertIsNotNone(self.store.get_session(threads[0])["ended_at"], "shown as saved, as after a restart")
+        self.assertIn(("thread/unsubscribe", {"threadId": threads[0]}), self.sessions.rpc.calls)
+        self.assertEqual(self.sessions.work_thread(threads[0])["status"], "saved")
+        self.sessions.read(threads[0])
+        self.assertIn(threads[0], self.sessions.loaded)
+        self.sessions.send(threads[1], {"message": "Continue"})
+        self.assertIn(threads[1], self.sessions.active)
+
+    def test_recently_used_conversations_wait_for_the_idle_period(self):
+        threads = self.idle_conversations(8)
+        self.assertEqual(self.sessions.release_idle_conversations(now=1300.0), [])
+        self.assertEqual(self.sessions.release_idle_conversations(now=1601.0), [threads[1], threads[0]])
+
+    def test_busy_conversations_are_never_released(self):
+        threads = self.idle_conversations(18)  # The seven most recent fill the warm set.
+        running, approval, unsaved, queued, wake, waiting, review, paused, stopped_queue = threads[:9]
+        self.sessions.send(running, {"message": "Work"})
+        with self.sessions.lock:
+            self.sessions.requests["approval"] = {"params": {"threadId": approval}}
+            self.sessions.dirty_histories.add(unsaved)
+        with self.store._connection() as db:
+            db.execute("""INSERT INTO browser_message_queue (id, thread_id, message, state, error, owner, created_at)
+                VALUES ('q1', ?, 'Next', 'queued', NULL, ?, 1)""", (queued, self.sessions.queue.owner))
+            db.execute("""INSERT INTO browser_message_queue (id, thread_id, message, state, error, owner, created_at)
+                VALUES ('q2', ?, 'Later', 'paused', 'Stopped', ?, 1)""", (stopped_queue, self.sessions.queue.owner))
+        self.store.register(session_id="sender", client="codex", cwd=str(self.root))
+        claimed = self.store.send_message(sender_session_id="sender", recipient_session_id=wake, body="Wake")
+        with self.store._connection() as db:
+            db.execute("INSERT INTO message_wake_attempts (message_id, session_id, attempted_at, outcome) VALUES (?, ?, 1, 'claimed')",
+                       (claimed["id"], wake))
+            db.execute("""INSERT INTO review_runs (id, owner_id, request_id, request_json, packet_json, cwd, standard, state,
+                phase, created_at, deadline) VALUES ('r1', ?, 'req', '{}', '{}', ?, 'strict', 'active', 'draft', 1, 9999999999)""",
+                       (review, str(self.root)))
+        self.store.send_message(sender_session_id="sender", recipient_session_id=waiting, body="Please look")
+        self.store.send_message(sender_session_id="sender", recipient_session_id=paused, body="Paused wake")
+        self.sessions.inbox_wake.pause(paused, "You stopped the turn.", kind="stop")
+        scoped, delegated = threads[9:11]
+        self.store.begin_work(session_id=scoped, scopes=["src/feature.py"])
+        delegation = self.store.create_delegation(parent_session_id=running, cwd=str(self.root), scopes=["child.txt"],
+                                                  instructions="Child work", mode="reviewed")
+        self.store.attach_delegation(delegation["delegation_id"], delegated)
+        released = self.sessions.release_idle_conversations(now=10_000.0)
+        for thread_id in (running, approval, unsaved, queued, wake, waiting, review):
+            self.assertNotIn(thread_id, released, thread_id)
+            self.assertIn(thread_id, self.sessions.loaded)
+        for thread_id in (scoped, delegated):
+            self.assertNotIn(thread_id, released, thread_id)
+        self.assertIn(paused, released, "a stopped inbox keeps its pause, not its process")
+        self.assertIn(stopped_queue, released, "a paused queue waits for the user, not for a loaded provider")
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT paused FROM browser_inbox_wake WHERE thread_id = ?", (paused,)).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT state FROM browser_message_queue WHERE id = 'q2'").fetchone()[0], "paused")
+
+    def test_release_rechecks_use_and_new_work_after_selection(self):
+        threads = self.idle_conversations(10)
+        reopened, queued_later, scoped_later = threads[0], threads[1], threads[2]
+        selection = self.sessions._durably_busy
+        reads = []
+        def busy_after_selection(thread_ids):
+            result = selection(thread_ids)
+            if not reads:  # The selection-time read; then the user and the queue act.
+                reads.append(list(thread_ids))
+                with self.sessions.lock:
+                    self.sessions.last_used[reopened] = 9_999.0
+                with self.store._connection() as db:
+                    db.execute("""INSERT INTO browser_message_queue (id, thread_id, message, state, error, owner, created_at)
+                        VALUES ('late', ?, 'Next', 'queued', NULL, ?, 1)""", (queued_later, self.sessions.queue.owner))
+                self.store.begin_work(session_id=scoped_later, scopes=["src/late.py"])
+            return result
+        with patch.object(self.sessions, "_durably_busy", side_effect=busy_after_selection):
+            released = self.sessions.release_idle_conversations(now=10_000.0)
+        self.assertEqual(released, [threads[3]])
+        self.assertTrue({reopened, queued_later, scoped_later} <= self.sessions.loaded)
+        self.assertIsNone(self.store.get_session(scoped_later)["ended_at"], "a newly scoped agent keeps its session")
+
+    def test_release_skips_a_conversation_in_use(self):
+        threads = self.idle_conversations(7)
+        lock = self.sessions._thread_lock(threads[0])
+        with lock:
+            result = []
+            worker = threading.Thread(target=lambda: result.extend(self.sessions.release_idle_conversations(now=10_000.0)))
+            worker.start(); worker.join(5)
+        self.assertEqual(result, [])
+        self.assertIn(threads[0], self.sessions.loaded)
+        self.assertEqual(self.sessions.release_idle_conversations(now=10_000.0), [threads[0]])
+
+    def test_prewarm_starts_only_idle_claude_conversations(self):
+        codex = self.create()
+        self.assertEqual(self.sessions.prewarm(codex), {"started": False})
+
     def test_concurrent_thread_list_reads_share_one_build(self):
         self.create()
         builds, release = [], threading.Event()
@@ -1169,10 +1272,53 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(isolated.rpc.calls, [])
 
     def test_invalid_model_effort_or_directory_never_creates_a_thread(self):
-        for values in [{"model": "unknown"}, {"effort": "high"}, {"model": "available-model", "effort": "invalid"}, {"cwd": str(self.root / "missing")}]:
+        for values in [{"model": "unknown"}, {"effort": "invalid"}, {"model": "available-model", "effort": "invalid"}, {"cwd": str(self.root / "missing")}]:
             with self.assertRaises(CoordinationError):
                 self.create(**values)
         self.assertFalse(any(call[0] == "thread/start" for call in self.sessions.rpc.calls))
+
+    def test_explicit_effort_with_inherited_model_creates_and_sends_on_first_attempt(self):
+        request = self.sessions.rpc.request
+        def configured(method, params=None):
+            if method == "config/read":
+                self.assertEqual(params, {"cwd": str(self.root), "includeLayers": False})
+                return {"config": {"model": "other-model", "model_reasoning_effort": "low"}}
+            return request(method, params)
+        with patch.object(self.sessions.rpc, "request", side_effect=configured):
+            thread_id = self.create(model=None, effort="low")
+            self.sessions.send(thread_id, {"message": "First Enter"})
+        start = next(params for method, params in self.sessions.rpc.calls if method == "thread/start")
+        self.assertEqual(start["model"], "other-model", "Use the configured model, not the catalog default")
+        self.assertEqual(start["config"]["model_reasoning_effort"], "low")
+        self.assertEqual(sum(method == "thread/start" for method, _ in self.sessions.rpc.calls), 1)
+        self.assertEqual(sum(method == "turn/start" for method, _ in self.sessions.rpc.calls), 1)
+
+    def test_inherited_model_effort_uses_catalog_default_only_when_configuration_is_absent(self):
+        thread_id = self.create(model=None, effort="high")
+        self.assertEqual(self.sessions._record(thread_id)["model"], "available-model")
+        self.assertEqual(self.sessions._record(thread_id)["effort"], "high")
+
+    def test_inherited_model_keeps_unavailable_and_unsupported_effort_errors(self):
+        request = self.sessions.rpc.request
+        for model, error in [("unavailable", "Choose an available model"), ("other-model", "Reasoning effort is not supported")]:
+            with self.subTest(model=model), patch.object(self.sessions.rpc, "request", side_effect=lambda method, params=None:
+                    {"config": {"model": model}} if method == "config/read" else request(method, params)):
+                with self.assertRaisesRegex(CoordinationError, error):
+                    self.create(model=None, effort="high")
+        self.assertFalse(any(method == "thread/start" for method, _ in self.sessions.rpc.calls))
+
+    def test_inherited_model_configuration_failure_does_not_create_or_silently_fall_back(self):
+        request = self.sessions.rpc.request
+        def failed(method, params=None):
+            if method == "config/read":
+                raise CoordinationError("Configuration unavailable")
+            return request(method, params)
+        with patch.object(self.sessions.rpc, "request", side_effect=failed):
+            with self.assertRaisesRegex(CoordinationError, "Configuration unavailable"):
+                self.create(model=None, effort="high")
+            explicit = self.create(model="available-model", effort="high")
+        self.assertEqual(self.sessions._record(explicit)["model"], "available-model")
+        self.assertEqual(sum(method == "thread/start" for method, _ in self.sessions.rpc.calls), 1)
 
     def test_parent_workspace_can_create_read_and_list_child_repository_sessions(self):
         repo = self.root / "repo"

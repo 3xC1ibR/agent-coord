@@ -22,6 +22,7 @@ function harness() {
       get childNodes() { return this.children; },
       setAttribute(key, value) { this[key] = value; },
       addEventListener(name, fn) { this.listeners.push({name, fn}); },
+      querySelector(selector) { return selector === ".openui-block" && this.innerHTML?.includes("openui-block") ? {} : null; },
       querySelectorAll() { return descendants(this).filter(child => child.tag === "details" && child.dataset.id); }};
   }
   const timeline = element("main");
@@ -112,4 +113,27 @@ test("tool cache drops removed items and replaces changed rows while retaining o
   assert.notEqual(descendants(h.timeline).find(node => node.dataset.id === "tool-0"), first);
   assert.equal(descendants(h.timeline).some(node => node.dataset.id === "tool-1"), false);
   assert.equal(h.entries.get("thread").toolNodes.size, 465);
+});
+
+
+test("reused interactive responses become actionable when streaming ends without replacing the message", () => {
+  const h = harness(), turn = h.state.detail.thread.turns[1];
+  turn.items = [{id: "interactive", type: "agentMessage", text: "Interactive response"}];
+  h.c.messageMarkdown.render = () => '<div class="openui-block"></div>';
+  const committed = [];
+  h.c.OpenUIThread = {commit(container, fragment) {
+    committed.push([...fragment.childNodes]);
+    container.replaceChildren(fragment);
+  }};
+  h.c.renderTimeline();
+  const original = committed.at(-1).find(node => node.dataset.openuiKey);
+  assert.ok(original);
+  assert.equal(original.dataset.openuiStreaming, "true");
+  for (const status of ["completed", "inProgress", "failed", "inProgress", "interrupted"]) {
+    turn.status = status;
+    h.c.renderTimeline();
+    const current = committed.at(-1).find(node => node.dataset.openuiKey);
+    assert.equal(current, original, "keep the message mounted while refreshing the interactive state");
+    assert.equal(current.dataset.openuiStreaming, String(status === "inProgress"));
+  }
 });

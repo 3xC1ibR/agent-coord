@@ -159,7 +159,7 @@ test("an event burst schedules one list read per interval and is never postponed
   now += 200;
   for (let event = 0; event < 20; event++) c.scheduleList();
   assert.equal(timers.length, 2);
-  assert.equal(timers[1].wait, 800, "the next read waits for the rest of the interval");
+  assert.equal(timers[1].wait, 1800, "the next read waits for the rest of the interval");
 });
 
 test("pane refreshes preserve background polling and explicit action semantics", async () => {
@@ -197,25 +197,35 @@ test("per-item provider events do not refresh the thread list", () => {
     "provider requests change attention");
 });
 
-test("refreshes joined to a pending inventory read issue no decision or schedule requests", async () => {
+test("background refreshes read decisions and schedules at most every 15 seconds", async () => {
   const {c, reads} = setup();
   const counts = countCompanions(c);
+  let now = 100000;
+  c.Date = {now: () => now};
   const first = c.refreshList({background: true});
   c.refreshList({background: true});
   c.refreshList({background: true});
   assert.equal(reads.length, 1);
-  assert.deepEqual(counts, {asks: 1, schedules: 1});
+  assert.deepEqual(counts, {asks: 1, schedules: 1}, "joined refreshes issue no companion requests");
   reads[0].resolve({data: []});
   await first;
-  const next = c.refreshList({background: true});
-  assert.deepEqual(counts, {asks: 2, schedules: 2});
+  now += 5000;
+  const soon = c.refreshList({background: true});
+  assert.deepEqual(counts, {asks: 1, schedules: 1});
   reads[1].resolve({data: []});
-  await next;
+  await soon;
+  now += 10000;
+  const later = c.refreshList({background: true});
+  assert.deepEqual(counts, {asks: 2, schedules: 2});
+  reads[2].resolve({data: []});
+  await later;
 });
 
-test("explicit refreshes and pane refreshes still update decisions and schedules", async () => {
+test("explicit refreshes always update decisions and schedules; panes follow the background schedule", async () => {
   const {c, reads} = setup();
   const counts = countCompanions(c);
+  let now = 100000;
+  c.Date = {now: () => now};
   c.refreshList({background: true});
   c.refreshList();
   assert.equal(reads.length, 2);
@@ -223,5 +233,64 @@ test("explicit refreshes and pane refreshes still update decisions and schedules
   c.state.paneMode = true;
   c.window = {parent: {agentCoordPanes: {requestList() {}}}};
   await c.refreshList({background: true});
+  assert.deepEqual(counts, {asks: 2, schedules: 2});
+  await c.refreshList();
   assert.deepEqual(counts, {asks: 3, schedules: 3});
+  now += 15000;
+  await c.refreshList({background: true});
+  assert.deepEqual(counts, {asks: 4, schedules: 4});
+});
+
+test("an unchanged list is validated, not reprocessed, and companions keep their own schedule", async () => {
+  const {c, reads, rendered} = setup();
+  let now = 100000;
+  c.Date = {now: () => now};
+  const companions = [];
+  const api = c.api;
+  c.api = (path, body, options) => { if (!path.startsWith("threads?")) companions.push(path); return api(path, body, options); };
+  const first = c.refreshList({background: true});
+  const listed = {data: [thread()]};
+  reads[0].resolve(listed);
+  await first;
+  assert.deepEqual(companions, ["organization", "views"]);
+  assert.equal(rendered.length, 1);
+  now += 10000;
+  const unchanged = c.refreshList({background: true});
+  reads[1].resolve(listed);  // api() resolves a 304 to the previously returned object.
+  await unchanged;
+  assert.equal(rendered.length, 1, "an unchanged list is not redrawn");
+  assert.deepEqual(companions, ["organization", "views"], "groups and views wait for their own interval");
+  now += 30000;
+  const relative = c.refreshList({background: true});
+  reads[2].resolve(listed);
+  await relative;
+  assert.equal(rendered.length, 2, "relative times still advance");
+  now += 30000;
+  const changed = c.refreshList({background: true});
+  reads[3].resolve({data: [thread({title: "Renamed"})]});
+  await changed;
+  assert.equal(rendered.length, 3);
+  assert.deepEqual(companions, ["organization", "views", "organization", "views"]);
+});
+
+test("a validated read sends its entity tag and resolves a 304 to the previous value", async () => {
+  const requests = [];
+  const responses = [
+    {status: 200, ok: true, headers: {get: name => name === "ETag" ? '"one"' : "application/json"}, json: async () => ({data: [1]})},
+    {status: 304, ok: false, headers: {get: () => null}, json: async () => { throw new Error("no body"); }},
+    {status: 200, ok: true, headers: {get: name => name === "ETag" ? '"two"' : "application/json"}, json: async () => ({data: [2]})},
+  ];
+  const c = {listRequest: 0, state: {config: {token: "t"}}, base: "/api/browser/", location: {protocol: "http:"}, console,
+    setTimeout, fetch: async (url, options) => { requests.push(options.headers?.["If-None-Match"] || null); return responses.shift(); }};
+  vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("async function api("), source.indexOf("async function openMentionFile(")), c);
+  const entity = {};
+  const first = await c.api("threads?archived=false", undefined, {entity});
+  assert.deepEqual(first, {data: [1]});
+  const second = await c.api("threads?archived=false", undefined, {entity});
+  assert.equal(second, first, "an unchanged resource resolves to the same object");
+  const third = await c.api("threads?archived=false", undefined, {entity});
+  assert.deepEqual(third, {data: [2]});
+  assert.deepEqual(requests, [null, '"one"', '"one"']);
+  assert.equal(entity.tag, '"two"');
 });

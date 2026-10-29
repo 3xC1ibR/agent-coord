@@ -267,10 +267,15 @@ class ThreadControlWorker:
                     loaded = thread_id in sessions.loaded
                     running = thread_id in sessions.active
                 browser = sessions.store.threads.is_browser_session(thread_id)
-                # A different app-server must not take over an active/loaded
-                # browser session. Ended browser sessions may be archived cold.
-                if browser and not loaded and session["ended_at"] is None:
+                # The independent runtime owns the entire database, including
+                # cold conversations never loaded since restart. Other app
+                # servers must keep the old per-session ownership guard.
+                from .desktop_runtime import _OWNED_DATABASES
+                owns_database = str(sessions.store.database_path.resolve()) in _OWNED_DATABASES
+                if browser and not loaded and session["ended_at"] is None and not owns_database:
                     continue
+                if browser and not loaded and session["turn_active"]:
+                    continue  # Never infer that unobserved native execution stopped.
                 if request["after_turn"] and running:
                     continue
                 pending_input = bool(sessions.pending_requests(thread_id)) if browser else False

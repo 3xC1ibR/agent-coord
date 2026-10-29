@@ -16,7 +16,7 @@ from agent_coord.claude_code import ClaudeConnection, ClaudeRPC
 CLI = '''import json, os, sys
 sys.path.insert(0, sys.argv[1])
 from agent_coord.store import CoordinationStore
-from agent_coord.zellij_wake import WAKE_PROMPT
+from agent_coord.browser_wake import WAKE_PROMPT
 prompt = None
 def emit(message):
     if message.get("type") == "result":

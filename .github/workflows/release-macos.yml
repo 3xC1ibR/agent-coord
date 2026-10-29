@@ -9,6 +9,11 @@ on:
         description: 'Release version (X.Y.Z)'
         required: true
         type: string
+      build_number:
+        description: 'Positive build number above installed/published builds (blank uses workflow run number)'
+        required: false
+        default: ''
+        type: string
       publish:
         description: 'Publish to downloads.ribbonfield.com after release approval'
         default: false
@@ -33,6 +38,7 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       commit: ${{ steps.release.outputs.commit }}
+      build_number: ${{ steps.release.outputs.build_number }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,6 +48,7 @@ jobs:
         id: release
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_BUILD_NUMBER: ${{ inputs.build_number }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == push ]]; then
@@ -51,10 +58,13 @@ jobs:
             [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Manual releases must run from main'; exit 1; }
           fi
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Version must be X.Y.Z'; exit 1; }
+          build_number="${REQUESTED_BUILD_NUMBER:-$GITHUB_RUN_NUMBER}"
+          [[ "$build_number" =~ ^[1-9][0-9]*$ ]] || { echo 'Build number must be a positive integer'; exit 1; }
           commit=$(git rev-parse HEAD)
           git merge-base --is-ancestor "$commit" origin/main
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
@@ -87,6 +97,7 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+      RELEASE_BUILD_NUMBER: ${{ needs.validate.outputs.build_number }}
       RELEASE_ARCH: ${{ matrix.arch }}
       SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
       SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
@@ -144,7 +155,7 @@ jobs:
           unset SPARKLE_PRIVATE_KEY
           trap 'rm -f "$RUNNER_TEMP/sparkle-private-key"' EXIT
           python3 desktop/macos/build.py --standalone --arch "$RELEASE_ARCH" \
-            --version "$RELEASE_VERSION" --build-number "$GITHUB_RUN_NUMBER" \
+            --version "$RELEASE_VERSION" --build-number "$RELEASE_BUILD_NUMBER" \
             --sign-identity "$SIGN_IDENTITY" --notary-profile ribbon-field-ci \
             --output "build/release-app/Ribbon Field.app" \
             --update-feed "https://downloads.ribbonfield.com/updates/$RELEASE_CHANNEL/$RELEASE_ARCH.xml" \
@@ -164,7 +175,7 @@ jobs:
           version, arch = os.environ['RELEASE_VERSION'], os.environ['RELEASE_ARCH']
           Path(f'build/release/Ribbon-Field-{version}-{arch}.dmg.provenance.json').write_text(json.dumps({
               'version': version, 'source_commit': os.environ['RELEASE_COMMIT'],
-              'build_number': os.environ['GITHUB_RUN_NUMBER'],
+              'build_number': os.environ['RELEASE_BUILD_NUMBER'],
               'run_url': f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
           }, indent=2) + '\n')
           PY

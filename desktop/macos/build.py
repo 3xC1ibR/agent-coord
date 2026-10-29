@@ -125,6 +125,24 @@ def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]
         data = source.read_bytes()
         target.write_bytes(data)
         snapshot[str(Path("..") / relative)] = hashlib.sha256(data).hexdigest()
+    # A compatible older runtime serves the new web root through its existing
+    # asset allowlist. Load new modules through established URLs until its safe
+    # idle handover, rather than requiring new HTTP routes to boot the interface.
+    web = resources / "backend/agent_coord/web"
+    if (web / "index.html").is_file():
+        index = (web / "index.html").read_text()
+        modules = ("html-preview.js", "response-actions.js", "permission-menu.js")
+        scripts = []
+        for name in modules:
+            scripts.append((web / name).read_text())
+            index = index.replace(f'  <script src="/{name}" defer></script>\n', "")
+        (web / "app.js").write_text("\n;\n".join(scripts + [(web / "app.js").read_text()]))
+        index = index.replace('  <link rel="stylesheet" href="/html-preview.css">\n', "")
+        (web / "index.html").write_text(index)
+        with (web / "styles.css").open("a") as style:
+            style.write("\n" + (web / "html-preview.css").read_text())
+        for name in ("index.html", "app.js", "styles.css"):
+            snapshot["agent_coord/web/" + name] = hashlib.sha256((web / name).read_bytes()).hexdigest()
     return snapshot
 
 

@@ -124,11 +124,23 @@ class SendWorkTests(unittest.TestCase):
         before = len(self.sessions.rpc.threads)
         for settings in (None, [], {"cwd": "/"}, {"client": "unknown"}, {"client": []},
                          {"model": "unavailable"}, {"model": "other-model", "effort": "high"},
-                         {"effort": "high"}, {"yolo": "true"}):
+                         {"effort": "invalid"}, {"yolo": "true"}):
             with self.subTest(settings=settings), self.assertRaises(CoordinationError):
                 send_work.submit(self.runtime, self.body("new", settings=settings))
         self.assertEqual(len(self.sessions.rpc.threads), before)
         self.assertFalse(self.runtime.process_once())
+
+    def test_new_settings_allow_explicit_effort_with_inherited_model(self):
+        body = self.body("new", settings={"model": None, "effort": "high"})
+        item = send_work.submit(self.runtime, body)["receipt"]
+        self.assertTrue(self.runtime.process_once())
+        target = self.runtime.get(item["id"])["target_id"]
+        record = self.sessions._record(target)
+        self.assertEqual((record["model"], record["effort"]), ("available-model", "high"))
+        self.sessions.queue._dispatch(target)
+        self.assertEqual(self.sessions.rpc.threads[target]["turns"][0]["items"][0]["content"],
+                         [{"type": "text", "text": "Redeploy the release"}])
+        self.assertTrue(send_work.submit(self.runtime, body)["replayed"])
 
     def test_settings_cannot_change_existing_thread_or_dispatcher(self):
         for kind in ("thread", "dispatcher"):

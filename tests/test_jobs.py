@@ -40,6 +40,13 @@ class ManagedJobTests(unittest.TestCase):
     def command(self, code, **kwargs):
         return self.jobs.create("owner", [sys.executable, "-c", code], **kwargs)
 
+    def test_missing_job_diagnostic_is_distinct_from_another_owners_job(self):
+        with self.assertRaisesRegex(CoordinationError, r"^Job missing was not found\. Use job list to see your jobs\.$"):
+            self.jobs.get("owner", "missing")
+        job = self.command("pass")
+        with self.assertRaisesRegex(CoordinationError, "is not owned by session other"):
+            self.jobs.get("other", job["id"])
+
     def wait(self, job_id, predicate=None):
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:

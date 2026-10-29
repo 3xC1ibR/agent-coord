@@ -95,8 +95,7 @@
       signature = next;
       const focused = menu.contains(document.activeElement) ? document.activeElement.dataset.value : null;
       const client = isModel && selected ? JSON.parse(selected.value)[0] : "codex";
-      trigger.replaceChildren(...(isModel ? [logo(client) || logo("codex")] : []), el("span", "model-trigger-name", selected?.textContent || label), el("span", "model-chevron", "⌄"));
-      trigger.lastChild.setAttribute("aria-hidden", "true");
+      trigger.replaceChildren(...(isModel ? [logo(client) || logo("codex")] : []), el("span", "model-trigger-name", selected?.textContent || label));
       trigger.setAttribute("aria-label", label + ": " + (selected?.textContent || "Choose " + label.toLowerCase()));
       menu.replaceChildren();
       for (const [index, group] of groups.entries()) {

@@ -207,6 +207,52 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotEqual(loser.returncode, 0)
         self.assertEqual(runtime.discover(self.database)["instance"], record["instance"])
 
+    def test_hook_owner_handshake_does_not_wait_for_readiness_locks(self):
+        source = self.resources / "backend/agent_coord/desktop_runtime.py"
+        source.write_text(source.read_text() + '''
+_original_status = Runtime.status
+def _status_with_barrier(self):
+    if not getattr(self, '_barrier_started', False):
+        self._barrier_started = True
+        def hold_readiness_locks():
+            root = Path(os.environ['RIBBON_FAKE_ROOT'])
+            while not (root / 'hold-locks').exists():
+                if self.stopping.wait(.01): return
+            sessions = self.server.browser_sessions
+            with self.mutex, sessions.lock, sessions.persistence.condition:
+                (root / 'locks-held').touch()
+                deadline = time.monotonic() + 15
+                while not (root / 'release-locks').exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+        threading.Thread(target=hold_readiness_locks, daemon=True).start()
+    return _original_status(self)
+Runtime.status = _status_with_barrier
+''')
+        first = self.launch(paused=True)
+        record = runtime.discover(self.database, timeout=2)
+        (self.root / "hold-locks").touch()
+        try:
+            self.wait(lambda: (self.root / "locks-held").exists())
+            current = runtime.discover(self.database, timeout=2)
+            identity = runtime.control(current, "identity", timeout=2)
+            self.assertEqual((identity["pid"], identity["instance"]), (first["pid"], first["instance"]))
+            hook = {"hook_event_name": "PreToolUse", "session_id": "contention-test", "cwd": str(self.root),
+                    "tool_name": "Bash", "tool_input": {"command": "pwd"}}
+            env = dict(self.env, AGENT_COORD_DB=str(self.database), AGENT_COORD_SESSION_ID="contention-test",
+                       AGENT_COORD_CLIENT="codex")
+            result = subprocess.run([sys.executable, str(ROOT / "plugins/agent-coord/scripts/agent-coord-hook")],
+                                    input=json.dumps(hook), text=True, capture_output=True, env=env, timeout=8)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((self.root / "release-locks").exists())
+            bad = {**record, "control_token": "wrong"}
+            with self.assertRaises(urllib.error.HTTPError) as denied:
+                runtime.control(bad, "identity", timeout=2)
+            self.assertEqual(denied.exception.code, 403)
+            denied.exception.close()
+        finally:
+            (self.root / "release-locks").touch()
+        self.assertEqual(runtime.control(record, "status")["instance"], first["instance"])
+
     def test_busy_update_swaps_web_assets_then_activates_at_idle(self):
         # Hold the automatic idle probe while an approval is pending. The
         # accepted turn must remain answerable throughout this busy check.

@@ -9,6 +9,16 @@ from .organization import OrganizationStore
 from .notification_policy import available_owners
 
 
+# Paused inbox wakes, with whether an undelivered request is actually waiting.
+WAKE_PAUSES = """SELECT w.*, EXISTS (SELECT 1 FROM messages m WHERE m.recipient_session_id = w.thread_id
+            AND m.delivered_at IS NULL AND m.classification = 'action_required' AND m.suppressed_at IS NULL)
+            AS pending_action FROM browser_inbox_wake w WHERE w.paused = 1"""
+
+
+def has_table(db, name):
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
+
+
 class ThreadInventory:
     def __init__(self, threads, db, *, archived=False):
         self.threads = threads
@@ -21,6 +31,8 @@ class ThreadInventory:
         if not writing:
             db.execute("BEGIN")
         self.rows, self.associations = self._base(db)
+        from .execution_state import read_many
+        self.executions = read_many(threads.store, db, [row["thread_id"] for row in self.rows])
         if any(row["thread_id"] not in self.associations for row in self.rows):
             # A legacy writer created incomplete records after initialization.
             # Release the read snapshot before taking the writer lock, then
@@ -109,6 +121,9 @@ class ThreadInventory:
     def load_runtime(self, db):
         """Load the app-only fields without starting or resuming providers."""
         self.notification_owners = available_owners(db, self.threads.store)
+        # A database that never ran browser inbox wake has no table yet.
+        self.wake_pauses = {row["thread_id"]: dict(row) for row in db.execute(
+            WAKE_PAUSES + " AND w.thread_id IN (" + self.selected + ")", self.params)} if has_table(db, "browser_inbox_wake") else {}
         self.sessions = {row["session_id"]: self.threads.store._row_to_session(row) for row in db.execute(
             "SELECT * FROM sessions WHERE session_id IN (" + self.selected + ")", self.params)}
         self.browser = set(json.loads(db.execute(

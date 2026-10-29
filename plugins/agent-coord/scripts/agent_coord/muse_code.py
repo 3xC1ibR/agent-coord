@@ -22,6 +22,7 @@ from .context import client_environment, coordination_bootstrap
 from .muse_setup import SCHEMA_FINGERPRINT, TESTED_VERSION, host_config, resolve_runtime
 from .muse_usage import MuseUsage
 from .store import CoordinationError
+from .permission_modes import legacy_mode
 
 
 def command_id():
@@ -106,6 +107,7 @@ class MuseRPC:
         self.seen = {}
         self.request_history, self.answered, self.settled = {}, set(), set()
         self.lock, self.catalog_lock = threading.RLock(), threading.Lock()
+        self.permission_catalogs = {}
         self.closed = False
         with store._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS muse_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL, cwd TEXT NOT NULL)")
@@ -132,9 +134,44 @@ class MuseRPC:
 
     @staticmethod
     def _options(params):
+        mode = params.get("permissionMode") or legacy_mode("muse", params.get("approvalPolicy") == "never")
         return {"cwd": params["cwd"], "model": params.get("model"),
                 "effort": params.get("effort") or params.get("config", {}).get("model_reasoning_effort"),
-                "yolo": params.get("approvalPolicy") == "never"}
+                "permission_mode": mode, "yolo": mode == ":unrestricted"}
+
+    def permission_modes(self, cwd):
+        # The native catalog carries managed availability and custom profiles.
+        # A host cannot negotiate its shell sandbox after startup. The four
+        # native built-ins have a known launch posture; unknown profiles cannot
+        # be offered faithfully until the protocol also exposes their axes.
+        with self.catalog_lock:
+            if cwd in self.permission_catalogs:
+                return copy.deepcopy(self.permission_catalogs[cwd])
+            probe = self.connection_factory(self.store, lambda message: None, {"cwd": cwd})
+            try:
+                probe.initialize()
+                result = probe.request("permissionProfile/list", {})
+                catalog = []
+                for entry in result.get("profiles", []):
+                    native_id = entry.get("profileId")
+                    if not isinstance(native_id, str) or not native_id:
+                        continue
+                    known = native_id in {":read-only", ":ask-me", ":auto-review", ":unrestricted"}
+                    available = entry.get("available") is True and known
+                    reason = ("This runtime does not expose the custom profile's shell sandbox requirements."
+                              if not known else ", ".join(entry.get("unavailableReasons", [])))
+                    catalog.append({"id": native_id, "label": entry.get("label") or native_id,
+                                    "description": entry.get("description") or "", "available": available,
+                                    **({"reason": reason or "The native runtime excludes this profile."} if not available else {})})
+                if not catalog:
+                    raise CoordinationError("Muse did not advertise permission profiles. Update Muse Code.")
+                self.permission_catalogs[cwd] = catalog
+                return copy.deepcopy(catalog)
+            finally:
+                probe.close()
+
+    def permission_state(self, thread_id):
+        return self.options.get(thread_id, {}).get("permission_mode") if thread_id in self.connections else None
 
     @staticmethod
     def _command(connection, method, **params):
@@ -169,7 +206,7 @@ class MuseRPC:
         self.connections[thread_id] = connection
         self.native[thread_id] = row["native_id"] if row else thread_id
         self.seen[thread_id] = set()
-        profile = ":unrestricted" if options["yolo"] else ":ask-me"
+        profile = options["permission_mode"]
         try:
             connection.initialize()
             if row:

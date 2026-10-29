@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -49,6 +51,114 @@ class CoordinationStoreTests(unittest.TestCase):
             cwd=str(self.root),
             name=session_id,
         )
+
+    def legacy_wake(self, session_id: str) -> None:
+        self.register(session_id)
+        with self.store._connection() as db:
+            db.execute("""INSERT INTO zellij_wake_targets
+                (session_id, zellij_session, pane_id, enabled, registered_at, updated_at)
+                VALUES (?, 'legacy-session', 'terminal_7', 1, 1, 1)""", (session_id,))
+
+    def test_startup_retries_real_migration_lock_before_sending_once(self) -> None:
+        from agent_coord.cli import main
+
+        self.register("sender")
+        self.legacy_wake("recipient")
+        with closing(sqlite3.connect(self.store.database_path)) as writer:
+            connect = CoordinationStore._connect
+            locked = []
+
+            def trace(sql):
+                if "INSERT OR IGNORE INTO wake_targets" in sql and not locked:
+                    writer.execute("BEGIN IMMEDIATE")
+                    locked.append(True)
+
+            def connection(store):
+                db = connect(store)
+                # Exercise the actual SQLite BUSY path without a five-second test.
+                db.execute("PRAGMA busy_timeout = 1")
+                db.set_trace_callback(trace)
+                return db
+
+            output = io.StringIO()
+            with patch.object(CoordinationStore, "_connect", connection), \
+                 patch("agent_coord.store.time.sleep", side_effect=lambda _: writer.rollback()) as retry, \
+                 redirect_stdout(output):
+                code = main(["--db", str(self.store.database_path), "send", "--from-session", "sender",
+                             "--session", "recipient", "--no-reply-required", "Candidate ready"])
+            self.assertEqual(code, 0)
+            self.assertEqual(len(locked), 1)
+            retry.assert_called_once()
+        messages = self.store.inbox("recipient", include_delivered=True)
+        self.assertEqual([message["body"] for message in messages], ["Candidate ready"])
+        self.assertEqual(json.loads(output.getvalue())["id"], messages[0]["id"])
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM wake_targets").fetchone()[0], 1)
+
+    def test_startup_retries_auxiliary_store_contention(self) -> None:
+        from agent_coord.asks import AskStore
+
+        with patch("agent_coord.asks.AskStore", side_effect=[
+            sqlite3.OperationalError("database is locked"), AskStore(self.store)
+        ]) as initialize, patch("agent_coord.store.time.sleep") as retry:
+            reopened = CoordinationStore(self.store.database_path)
+        self.assertEqual(initialize.call_count, 2)
+        retry.assert_called_once()
+        self.assertEqual(reopened.asks.list(), [])
+
+    def test_startup_lock_exhaustion_returns_cli_error_without_sending(self) -> None:
+        from agent_coord.cli import main
+
+        self.register("sender")
+        self.register("recipient")
+        error = io.StringIO()
+        with patch.object(CoordinationStore, "_initialize", side_effect=sqlite3.OperationalError(
+            "database is locked"
+        )) as initialize, patch("agent_coord.store.time.sleep") as retry, redirect_stderr(error):
+            code = main(["--db", str(self.store.database_path), "send", "--from-session", "sender",
+                         "--session", "recipient", "--no-reply-required", "Candidate ready"])
+        self.assertEqual(code, 2)
+        self.assertEqual(initialize.call_count, 3)
+        self.assertEqual(retry.call_count, 2)
+        self.assertIn("after 3 attempts", json.loads(error.getvalue())["error"])
+        self.assertEqual(self.store.inbox("recipient", include_delivered=True), [])
+
+    def test_startup_does_not_retry_non_lock_errors(self) -> None:
+        error = sqlite3.OperationalError("no such table: missing")
+        with patch.object(CoordinationStore, "_initialize", side_effect=error) as initialize, \
+             patch("agent_coord.store.time.sleep") as retry:
+            with self.assertRaises(sqlite3.OperationalError) as raised:
+                CoordinationStore(self.store.database_path)
+        self.assertIs(raised.exception, error)
+        initialize.assert_called_once()
+        retry.assert_not_called()
+
+    def test_startup_skips_migrated_wake_targets_and_preserves_current_settings(self) -> None:
+        self.legacy_wake("recipient")
+        CoordinationStore(self.store.database_path)
+        with self.store._connection() as db:
+            migrated = db.execute("SELECT * FROM wake_targets WHERE session_id = 'recipient'").fetchone()
+            self.assertEqual(json.loads(migrated["endpoint_json"]), {
+                "zellij_session": "legacy-session", "pane_id": "terminal_7"
+            })
+            db.execute("UPDATE wake_targets SET enabled = 0, endpoint_json = ? WHERE session_id = 'recipient'",
+                       (json.dumps({"zellij_session": "current", "pane_id": "terminal_9"}),))
+        connect = CoordinationStore._connect
+
+        def deny_wake_insert(action, table, *_):
+            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_INSERT and table == "wake_targets" else sqlite3.SQLITE_OK
+
+        def connection(store):
+            db = connect(store)
+            db.set_authorizer(deny_wake_insert)
+            return db
+
+        with patch.object(CoordinationStore, "_connect", connection):
+            CoordinationStore(self.store.database_path)
+        with self.store._connection() as db:
+            current = db.execute("SELECT * FROM wake_targets WHERE session_id = 'recipient'").fetchone()
+        self.assertEqual(current["enabled"], 0)
+        self.assertEqual(json.loads(current["endpoint_json"])["zellij_session"], "current")
 
     def test_legacy_bead_constraints_migrate_without_losing_history(self) -> None:
         self.register("parent")
@@ -549,6 +659,68 @@ class CoordinationStoreTests(unittest.TestCase):
         self.assertFalse(optional["reply_required"])
         self.assertFalse(informational["reply_required"])
         self.assertFalse(closure["reply_required"])
+
+    def supervised_worker(self):
+        from agent_coord.app_control import AppControl
+        for identity in ("lead", "successor", "worker"):
+            self.register(identity)
+        control = AppControl(self.store)
+        request = control.request("create", "lead", {"cwd": str(self.root), "name": "Worker", "prompt": "Work"})
+        control.claim(request["request_id"], "test")
+        control.identified(request["request_id"], "worker")
+        control.complete(request["request_id"], result={"thread_id": "worker"})
+
+    def transfer_worker(self):
+        from agent_coord.supervision import transfer
+        self.store.end_session("lead")
+        return transfer(self.store, requester="successor", from_session="lead", to_session="successor",
+                        thread_ids=["worker"], request_id="test-transfer", reason="Replace lead", workspace=str(self.root))
+
+    def test_transferred_reply_keeps_assignment_ancestry_and_exchange_pair_guard(self):
+        self.supervised_worker()
+        original = self.store.send_message(sender_session_id="lead", recipient_session_id="worker",
+                                           body="Assignment", reply_required=True)
+        self.store.inbox("worker")
+        transfer = self.transfer_worker()
+        with patch.object(self.store, "_insert_message", side_effect=RuntimeError("write failed")):
+            with self.assertRaisesRegex(RuntimeError, "write failed"):
+                self.store.reply_message(sender_session_id="worker", message_id=original["id"], body="Done")
+        pending = self.store.inbox("worker", unread_only=True, mark_delivered=False)
+        self.assertIsNone(pending[0]["acknowledged_at"])
+        self.assertEqual(self.store.inbox("successor"), [])
+        with patch("agent_coord.sidecars.guard_message") as guard:
+            reply = self.store.reply_message(sender_session_id="worker", message_id=original["id"], body="Done")
+        self.assertEqual(guard.call_args.args[1:], ("worker", "successor"))
+        self.assertEqual(reply["recipient_session_id"], "successor")
+        self.assertEqual(reply["recipient_name"], "successor")
+        self.assertEqual(reply["in_reply_to"], original["id"])
+        self.assertNotEqual(reply["thread_id"], original["thread_id"])
+        notices = self.store.inbox("worker", unread_only=True) + self.store.inbox("lead")
+        self.assertCountEqual([m["id"] for m in notices], transfer["notice_message_ids"])
+        for notice in notices:
+            self.assertEqual(notice["classification"], "informational")
+            self.assertFalse(notice["reply_required"])
+        self.assertEqual([m["id"] for m in self.store.inbox("successor")], [reply["id"]])
+        with self.assertRaisesRegex(CoordinationError, "participant pair"):
+            self.store.send_message(sender_session_id="successor", recipient_session_id="worker",
+                                    body="Unrelated third participant", thread_id=original["thread_id"])
+        self.store.send_message(sender_session_id="successor", recipient_session_id="worker",
+                                body="Follow up", thread_id=reply["thread_id"])
+
+    def test_retired_supervisor_cannot_bypass_action_guard_with_reply(self):
+        self.supervised_worker()
+        question = self.store.send_message(sender_session_id="worker", recipient_session_id="lead",
+                                          body="What next?", reply_required=True)
+        self.transfer_worker()
+        with self.assertRaisesRegex(CoordinationError, "now supervised by successor"):
+            self.store.send_message(sender_session_id="lead", recipient_session_id="worker", body="Old lead instruction")
+        with self.assertRaisesRegex(CoordinationError, "now supervised by successor"):
+            self.store.reply_message(sender_session_id="lead", message_id=question["id"], body="Old lead instruction")
+        self.assertIsNone(self.store.inbox("lead", unread_only=True, mark_delivered=False)[0]["acknowledged_at"])
+        for classification in ("informational", "closure"):
+            self.store.send_message(sender_session_id="lead", recipient_session_id="worker",
+                                    body="History only", classification=classification, reply_required=False)
+        self.store.send_message(sender_session_id="successor", recipient_session_id="worker", body="Current instruction")
 
     def test_reply_is_actionable_and_acknowledges_only_its_original_request(self) -> None:
         self.register("one")
@@ -1428,6 +1600,85 @@ class CoordinationStoreTests(unittest.TestCase):
                 parent_session_id="other",
                 reason="Cancel it.",
             )
+
+    def test_parallel_script_scopes_can_be_declared_and_checked(self):
+        self.register("one")
+        self.register("two", "claude")
+        self.store.begin_work(session_id="one", scopes=["scripts/evolution_*.py"])
+        self.store.begin_work(session_id="two", scopes=[
+            "scripts/campaign_health_check.py", "scripts/wake_duty_officer.py"])
+        self.assertFalse(self.store.check_conflicts("one"))
+        self.assertFalse(self.store.check_conflicts("two"))
+        from agent_coord.hook import handle
+        self.assertEqual(handle({
+            "hook_event_name": "PreToolUse", "session_id": "one", "cwd": str(self.root),
+            "tool_name": "apply_patch", "tool_input": {"command":
+                "*** Begin Patch\n*** Update File: scripts/evolution_search.py\n*** End Patch"},
+        }, self.store), {})
+
+    def test_scope_glob_does_not_conflict_with_unrelated_literal_files(self):
+        for literal in ("scripts/campaign_health_check.py", "scripts/wake_duty_officer.py"):
+            with self.subTest(literal=literal):
+                self.assertFalse(scopes_overlap("scripts/evolution_*.py", literal))
+                self.assertFalse(scopes_overlap(literal, "scripts/evolution_*.py"))
+        self.assertFalse(scopes_overlap("private/evolution/population.*", "private/evolution/generator.py"))
+        self.assertTrue(scopes_overlap("private/evolution/population.*", "private/evolution/population.json"))
+
+    def test_scope_intersections_preserve_directories_and_recursive_globs(self):
+        cases = [
+            ("scripts/evolution_*.py", "scripts/evolution_search.py", True),
+            ("scripts/evolution_*.py", "scripts", True),
+            ("scripts/evolution_*.py", "scripts/other", False),
+            ("scripts/evolution_*.py", "scripts/evolution_*.json", False),
+            ("scripts/evolution_*.py", "scripts/campaign_*.py", False),
+            ("scripts/evolution_*.py", "scripts/*_search.py", True),
+            ("scripts/evolution_*.py", "scripts/evolution_?earch.py", True),
+            ("scripts/a*.py", "scripts/*a/b*.py", True),
+            ("scripts/*/b.py", "scripts/a*/c/*.py", True),
+            ("src/**/app.py", "src/app.py", True),
+            ("src/**/app.py", "src/deep/nested/app.py", True),
+            ("src/**/app.py", "tests/app.py", False),
+            ("src/**/app.py", "src/pkg", True),
+            ("src/*/app.py", "src/pkg", True),
+            ("src/*/app.py", "src/pkg/other.py", False),
+            ("src/*", "src/pkg/file.py", True),
+            ("src/**", "src", True),
+            ("src/**", "src-other/file.py", False),
+            ("src/**/a*.py", "src/**/ab*.py", True),
+            ("src/[ab]*/file.py", "src/alpha/file.py", True),
+            ("src/[ab]*/file.py", "src/charlie/file.py", False),
+            (".", "src/file.py", True),
+            ("/", "/src/file.py", True),
+            ("//server/share/src/**", r"\\server\share\src\app.py", True),
+            ("**", "src/file.py", True),
+            ("**/*", "file.py", True),
+            ("src/", "src/file.py", True),
+            ("src/./pkg/../*.py", "src/app.py", True),
+            (r"scripts\evolution_*.py", "scripts/campaign_health_check.py", False),
+            (r"scripts\evolution_*.py", r"scripts\evolution_search.py", True),
+            ("C:/repo/src/**", "C:/repo/src/app.py", True),
+            ("C:/repo/src/**", "D:/repo/src/app.py", False),
+            ("Src/*.py", "src/app.py", False),
+        ]
+        for left, right, expected in cases:
+            with self.subTest(left=left, right=right):
+                self.assertEqual(scopes_overlap(left, right), expected)
+                self.assertEqual(scopes_overlap(right, left), expected)
+
+    def test_scope_globs_preserve_concrete_fnmatch_intersections(self):
+        import fnmatch
+        from itertools import combinations, product
+        patterns = ["scripts/a*.py", "scripts/b*.py", "scripts/*/b.py",
+                    "scripts/a*/c/*.py", "scripts/*a/b*.py", "scripts/a*b/c*.py",
+                    "scripts/**/a.py", "scripts/*/*.json", "scripts/**", "scripts/*.py"]
+        parts = ["a", "b", "ab", "c", "a.py", "b.py", "a.json"]
+        paths = ["scripts/" + "/".join(p) for n in range(1, 4) for p in product(parts, repeat=n)]
+        for left, right in combinations(patterns, 2):
+            witness = next((p for p in paths if fnmatch.fnmatchcase(p, left)
+                            and fnmatch.fnmatchcase(p, right)), None)
+            if witness:
+                with self.subTest(left=left, right=right, witness=witness):
+                    self.assertTrue(scopes_overlap(left, right))
 
     def test_scope_helpers_are_conservative(self) -> None:
         self.assertTrue(scopes_overlap("src/**", "src/api/**"))

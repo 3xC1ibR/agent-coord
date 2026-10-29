@@ -83,11 +83,13 @@ class SyntheticProvider:
     """Wire-compatible provider double. Events pass through JSON like a pipe."""
 
     history_kb = 1500
+    stored_history = False
     delta_rate = 8.0
     stream_seconds = 600.0
     short_turn_seconds = 1.5
 
     def __init__(self, store, callback):
+        self.store = store
         self.callback = callback
         self.threads = {}
         self.lock = threading.Lock()
@@ -104,6 +106,11 @@ class SyntheticProvider:
             return self.threads[thread_id]
 
     def _history(self, thread_id):
+        if self.stored_history:
+            # The snapshot's saved transcript, as the provider would return it.
+            with self.store._connection() as connection:
+                row = connection.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
+            return json.loads(row[0]).get("turns", []) if row else []
         rng = random.Random(thread_id)
         turns, size = [], 0
         while size < self.history_kb * 1024:
@@ -240,6 +247,7 @@ def serve(arguments):
     from agent_coord.codex_app_server import BrowserSessions
     from agent_coord import ui
     SyntheticProvider.history_kb = arguments.history_kb
+    SyntheticProvider.stored_history = arguments.stored_history
     SyntheticProvider.delta_rate = arguments.delta_rate
     store = CoordinationStore(Path(arguments.db))
     workspace = arguments.cwd or None
@@ -252,6 +260,14 @@ def serve(arguments):
         sampler.start()
     print(json.dumps({"port": server.server_address[1], "pid": os.getpid()}), flush=True)
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    # A measurement whose driver was killed must not leave this backend
+    # consuming CPU on a shared machine.
+    parent = os.getppid()
+    def stop_when_orphaned():
+        while os.getppid() == parent:
+            time.sleep(1)
+        server.shutdown()
+    threading.Thread(target=stop_when_orphaned, daemon=True).start()
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
@@ -401,7 +417,9 @@ class Window(threading.Thread):
 HOOK_SOURCE = r"""
 import sqlite3, sys, time, json, random
 database, rate, sessions = sys.argv[1], float(sys.argv[2]), json.loads(sys.argv[3])
-while True:
+import os
+parent = os.getppid()
+while os.getppid() == parent:
     started = time.time()
     connection = sqlite3.connect(database, timeout=5)
     connection.execute("PRAGMA busy_timeout = 5000")
@@ -434,6 +452,8 @@ def main():
     parser.add_argument("--hook-rate", type=float, default=4.0)
     parser.add_argument("--delta-rate", type=float, default=8.0)
     parser.add_argument("--history-kb", type=int, default=1500)
+    parser.add_argument("--stored-history", action="store_true",
+                        help="Serve each conversation's saved snapshot history instead of a synthetic one.")
     parser.add_argument("--sends", type=int, default=30)
     parser.add_argument("--reads", type=int, default=15)
     parser.add_argument("--warmup", type=float, default=15.0)
@@ -460,6 +480,7 @@ def main():
                    if not key.startswith(("AGENT_COORD_", "RIBBON_")) and key not in {"CODEX_THREAD_ID", "CLAUDECODE"}}
     server = subprocess.Popen([sys.executable, "-B", __file__, "serve", "--db", str(database), "--cwd", arguments.cwd,
                                "--history-kb", str(arguments.history_kb), "--delta-rate", str(arguments.delta_rate)]
+                              + (["--stored-history"] if arguments.stored_history else [])
                               + (["--profile", str(Path(arguments.profile).resolve())] if arguments.profile else [])
                               + (["--source", str(Path(arguments.source).resolve())] if arguments.source else []),
                               stdout=subprocess.PIPE, stderr=open(root / "server.log", "w"), env=environment, text=True)

@@ -21,6 +21,7 @@ from .context import client_environment
 from .browser_persistence import BrowserPersistence
 from .claude_usage import ClaudeUsage, native_id as usage_native_id
 from .store import CoordinationError
+from .permission_modes import CLAUDE_MODES, legacy_mode, validate_mode
 
 
 class ClaudeConnection:
@@ -44,8 +45,10 @@ class ClaudeConnection:
             # phantom work thread through SessionStart/SessionEnd hooks.
             args += ["--settings", json.dumps({"disableAllHooks": True}), "--no-session-persistence"]
         # Do not inherit a parent's bypass mode or disable the user's hooks/settings.
-        args += ["--permission-mode", "bypassPermissions" if options.get("yolo") else "default"]
-        if options.get("yolo"):
+        mode = options.get("permission_mode") or legacy_mode("claude", options.get("yolo"))
+        validate_mode(mode, CLAUDE_MODES)
+        args += ["--permission-mode", mode]
+        if mode == "bypassPermissions":
             args += ["--allow-dangerously-skip-permissions"]
         if options.get("model") and options["model"] != "default":
             args += ["--model", options["model"]]
@@ -167,12 +170,16 @@ class ClaudeRPC:
         self.connection_factory = connection_factory
         self.lock = threading.RLock()
         self.connections, self.options, self.turns, self.requests = {}, {}, {}, {}
+        # Starting, reusing and releasing one conversation's process are
+        # serialized per conversation, never across all of them.
+        self.connection_locks = {}
         self.blocks = {}
         self.confirmed_blocks = {}
         self.started = set()
         self.persistence = BrowserPersistence()
         self.catalog = None
         self.closed = False
+        self.effective_permissions = {}
         with store._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS claude_sessions (thread_id TEXT PRIMARY KEY, started INTEGER NOT NULL DEFAULT 0)")
             columns = {row[1] for row in db.execute("PRAGMA table_info(claude_sessions)")}
@@ -193,7 +200,44 @@ class ClaudeRPC:
                              "supportedReasoningEfforts": [{"reasoningEffort": e} for e in m.get("supportedEffortLevels", [])],
                              "defaultReasoningEffort": None} for m in models]
 
+    def _connection_lock(self, thread_id):
+        with self.lock:
+            return self.connection_locks.setdefault(thread_id, threading.Lock())
+
     def _connection(self, thread_id, options):
+        with self._connection_lock(thread_id):
+            return self._open_connection(thread_id, options)
+
+    def release(self, thread_id):
+        """Stop an idle conversation's Claude Code process and its MCP servers.
+
+        The next turn or prewarm starts a new process that resumes the session.
+        A running turn or pending permission request keeps the process.
+        """
+        with self._connection_lock(thread_id):
+            with self.lock:
+                if thread_id in self.turns or any(request[0] == thread_id for request in self.requests.values()):
+                    return False
+                connection = self.connections.pop(thread_id, None)
+            if connection is not None:
+                connection.close()
+        return True
+
+    def prewarm(self, thread_id):
+        """Start Claude Code for an opened conversation before its next message.
+
+        A turn that starts meanwhile waits for this start and reuses it.
+        """
+        with self.lock:
+            options = self.options.get(thread_id)
+            if self.closed or options is None or thread_id in self.connections or thread_id in self.turns:
+                return False
+            options = dict(options)
+        options["developerInstructions"] = self.store.threads.instructions(thread_id, caller_context=True)
+        self._connection(thread_id, options)
+        return True
+
+    def _open_connection(self, thread_id, options):
         current = self.connections.get(thread_id)
         # Instructions are fixed when Claude Code starts. Their saved thread
         # context changes with nearly every checkpoint, while each prompt
@@ -306,10 +350,17 @@ class ClaudeRPC:
 
     @staticmethod
     def _options(params):
+        mode = params.get("permissionMode") or legacy_mode("claude", params.get("approvalPolicy") == "never")
         return {"cwd": params["cwd"], "model": params.get("model") or "default",
                 "effort": params.get("effort") or params.get("config", {}).get("model_reasoning_effort"),
-                "yolo": params.get("approvalPolicy") == "never",
+                "permission_mode": mode, "yolo": mode == "bypassPermissions",
                 "developerInstructions": params.get("developerInstructions", "")}
+
+    def permission_modes(self, cwd):
+        return copy.deepcopy(CLAUDE_MODES)
+
+    def permission_state(self, thread_id):
+        return self.effective_permissions.get(thread_id) if thread_id in self.connections else None
 
     def request(self, method, params=None):
         if self.closed:
@@ -470,6 +521,11 @@ class ClaudeRPC:
         # Results can describe background work outside the visible turn.
         self.usage.capture(thread_id, message)
         kind = message.get("type")
+        if kind == "system" and not message.get("parent_tool_use_id") and message.get("permissionMode"):
+            mode = message["permissionMode"]
+            self.effective_permissions[thread_id] = "default" if mode == "manual" else mode
+            self._emit("thread/permissions/updated", thread_id,
+                       permissionMode=self.effective_permissions[thread_id])
         if kind == "control_request":
             self._permission(thread_id, message)
             return
@@ -590,6 +646,9 @@ class ClaudeRPC:
             connection.write({"type": "control_response", "response": {"subtype": "error", "request_id": request_id,
                 "error": "This Claude control request is not supported by Ribbon Field."}})
             return
+        # Claude retains some native confirmations even in bypassPermissions.
+        # Show its explanation instead of only the tool's action description.
+        reason = request.get("decision_reason")
         key = f"claude:{thread_id}:{request_id}"
         self.requests[key] = (thread_id, request_id, request)
         params = {"threadId": thread_id, "turnId": self.turns.get(thread_id, {}).get("id")}
@@ -598,7 +657,7 @@ class ClaudeRPC:
             params["questions"] = [{**q, "id": str(i)} for i, q in enumerate(request.get("input", {}).get("questions", []))]
         else:
             method = "item/commandExecution/requestApproval"
-            params.update(reason=request.get("description") or request.get("tool_name"),
+            params.update(reason=reason or request.get("description") or request.get("tool_name"),
                           command=json.dumps(request.get("input", {}), indent=2), availableDecisions=["accept", "decline", "cancel"])
         self.on_event({"id": key, "method": method, "params": params})
 

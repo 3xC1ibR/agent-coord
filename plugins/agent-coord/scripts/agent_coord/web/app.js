@@ -31,12 +31,16 @@ function showError(error) {
   }
 }
 $("error").querySelector("button").onclick = () => errorNotice.dismiss();
+// requestOptions.entity, a {tag, value} object kept by the caller, validates a
+// read: an unchanged resource answers 304 and resolves to the same value object.
 async function api(path, body, requestOptions = {}) {
   const submission = body !== undefined && /^sessions\/([^/]+)\/(messages|queue)$/.exec(path);
   if (submission && !body.action) state.activity?.submission(decodeURIComponent(submission[1]), body);
   const viewMutation = body !== undefined && (path === "views" || path.startsWith("views/"));
   if (viewMutation) ++listRequest;
-  const options = {cache: "no-store", ...requestOptions};
+  const {entity, ...fetchOptions} = requestOptions;
+  const options = {cache: "no-store", ...fetchOptions};
+  if (entity?.tag && entity.value) options.headers = {...options.headers, "If-None-Match": entity.tag};
   if (body !== undefined) Object.assign(options, {method: "POST", headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token}, body: JSON.stringify(body)});
   const read = body === undefined && (options.method || "GET").toUpperCase() === "GET";
   for (let attempt = 0; ; ++attempt) {
@@ -44,6 +48,7 @@ async function api(path, body, requestOptions = {}) {
     try {
       response = await fetch(base + path, options);
       if (response.status === 401 && location.protocol === "https:") location.reload();
+      if (response.status === 304 && entity?.value) return entity.value;
       let result;
       try { result = await response.json(); }
       catch (error) {
@@ -59,6 +64,7 @@ async function api(path, body, requestOptions = {}) {
       }
       if (viewMutation) ++listRequest;
       if (!response.ok) throw Object.assign(new Error(result.error || "Request failed"), {status: response.status});
+      if (entity) Object.assign(entity, {tag: response.headers?.get("ETag") || null, value: result});
       return result;
     } catch (error) {
       // A remote connection can briefly return a proxy page or an incomplete
@@ -81,7 +87,7 @@ async function openMentionFile(ref) {
 }
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
 async function refreshList({background = false} = {}) {
-  if (state.paneMode) { refreshDecisionsAndSchedules(); window.parent.agentCoordPanes?.requestList({background}); return; }
+  if (state.paneMode) { refreshDecisionsIfDue(background); window.parent.agentCoordPanes?.requestList({background}); return; }
   const view = $("view").value, pending = state.listRefresh;
   // Polls and streamed events must not keep superseding a slow inventory read.
   // Explicit refreshes after user actions still invalidate earlier snapshots.
@@ -89,31 +95,52 @@ async function refreshList({background = false} = {}) {
   // Coalesce decisions and schedules with the inventory read. Every WebKit
   // fetch retains memory in the Networking process, so skipped refreshes
   // must not still issue their companion requests.
-  refreshDecisionsAndSchedules();
+  refreshDecisionsIfDue(background);
   const refresh = {view, request: ++listRequest};
   state.listRefresh = refresh;
-  refresh.promise = loadThreadList(view, refresh.request);
+  refresh.promise = loadThreadList(view, refresh.request, {background});
   try { return await refresh.promise; }
   finally { if (state.listRefresh === refresh) state.listRefresh = null; }
+}
+// Every WebKit fetch retains memory in the Networking process, so background
+// refreshes read rarely changing companions on their own slower schedules.
+const DECISIONS_REFRESH_INTERVAL = 15000, ORGANIZATION_REFRESH_INTERVAL = 60000;
+function refreshDecisionsIfDue(background) {
+  if (background && Date.now() - (state.decisionsReadAt || 0) < DECISIONS_REFRESH_INTERVAL) return;
+  state.decisionsReadAt = Date.now();
+  refreshDecisionsAndSchedules();
 }
 function refreshDecisionsAndSchedules() {
   state.schedules?.refresh({background: true}).catch(showError);
   state.asks?.refresh().catch(showError);
 }
-async function loadThreadList(view, request) {
+async function loadThreadList(view, request, {background = false} = {}) {
+  const entities = state.inventoryEntities ||= {open: {}, closed: {}};
+  // Groups, repositories and saved views change by explicit action; a
+  // background refresh reads them at most once a minute.
+  const companions = !background || !state.organization || Date.now() - (state.organizationReadAt || 0) >= ORGANIZATION_REFRESH_INTERVAL;
   // Open threads feed every tab's badges, including while browsing a Closed view.
-  const [open, closed, organization, views] = await Promise.all([api("threads?archived=false"),
-    view === "archived" ? api("threads?archived=true") : null, api("organization"), api("views")]);
+  const [open, closed, organization, views] = await Promise.all([api("threads?archived=false", undefined, {entity: entities.open}),
+    view === "archived" ? api("threads?archived=true", undefined, {entity: entities.closed}) : null,
+    companions ? api("organization") : null, companions ? api("views") : null]);
   if (request !== listRequest || view !== $("view").value) return;
+  if (companions) state.organizationReadAt = Date.now();
+  // An unchanged list (304) needs no reprocessing or redraw; relative times
+  // still advance twice a minute.
+  if (background && !companions && open === state.inventoryOpen && (!closed || closed === state.inventoryClosed)) {
+    if (Date.now() - (state.listRenderedAt || 0) >= 30000) { state.listRenderedAt = Date.now(); renderList(); }
+    return;
+  }
+  state.inventoryOpen = open; state.inventoryClosed = closed;
   state.sessions = (closed || open).data.map(overlayPendingAttention);
   state.viewThreads = open.data.map(overlayPendingAttention);
   state.agentTreeController?.inventory(state.viewThreads, closed?.data);
   state.threadTabs?.update([...(state.conversationWindow ? state.sessions : state.viewThreads), ...(closed?.data || [])]);
   state.dispatchWorkspace?.update(state.viewThreads, state.detail);
   state.rollUp?.sync(state.viewThreads);
-  state.organization = organization;
+  if (organization) { state.organization = organization; if (state.detail) renderSessionSettings(); }
   for (const field of ["repository", "project"]) {
-    const select = $(field), selected = select.value, choices = organization[field === "repository" ? "repositories" : "projects"]
+    const select = $(field), selected = select.value, choices = state.organization[field === "repository" ? "repositories" : "projects"]
       .filter(item => field === "repository" || item.cwd === state.folders?.selected?.cwd);
     const signature = JSON.stringify(choices);
     if (select.dataset.signature === signature) continue;
@@ -130,9 +157,10 @@ async function loadThreadList(view, request) {
     }
     select.value = selected;
   }
-  savedViews?.sync(views.data, organization.projects);
+  if (views) savedViews?.sync(views.data, state.organization.projects);
   renderFolders();
   if (view !== $("view").value) return refreshList();
+  state.listRenderedAt = Date.now();
   renderList();
 }
 function currentProjectDispatcher() {
@@ -183,7 +211,7 @@ $("dispatcher-open").onclick = () => {
   if (state.dispatchWorkspace?.active) state.dispatchDock.expand(true);
   else action(() => select(state.selected));
 };
-$("dispatcher-permissions").onclick = () => openSessionPermissions();
+$("dispatcher-permissions").onclick = event => openSessionPermissions(event);
 function sessionContext() {
   return newThreadContext(state.organization, {project: $("project").value}, state.folders?.selected);
 }
@@ -1029,11 +1057,12 @@ function conversationEntry(id) {
 }
 function retainConversation() {
   if (!state.selected || !state.detail || isSessionDraft()) return;
+  if (state.titleEdit) saveTitleEdit({focus: false}).catch(showError);
   const entry = conversationEntry(state.selected);
   entry.detail = state.detail;
   // A streamed update may be waiting for its paint. Do not retain older DOM
   // beside the newer model and later mistake it for an up-to-date transcript.
-  entry.nodes = state.timelineRender?.id === state.selected ? null : [...$("timeline").childNodes];
+  entry.nodes = state.timelineRender?.id === state.selected || state.responseActions?.pending ? null : [...$("timeline").childNodes];
   // Detached iframe documents reload. Rebuild interactive transcripts on a
   // cached-tab restore rather than restoring disposed preview nodes.
   if (entry.nodes?.some(item => item.dataset?.openuiKey)) entry.nodes = null;
@@ -1186,15 +1215,20 @@ async function refreshDetail({markSeen = true} = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     const options = {signal: controller.signal};
+    // Opening transfers the latest turns with shortened tool output. A search
+    // result or message link, earlier turns, or full output need everything;
+    // the conversation then keeps its complete history while it is cached.
+    if (state.searchTarget?.thread === id || state.messageTarget?.thread === id) entry.completeHistory = entry.allTurns = true;
+    const sessionOptions = entry.completeHistory ? options : {...options, headers: {"X-Agent-Coord-History-View": "recent"}};
     let work, detail;
     try {
       // A known app conversation needs both reads; issue them together so
       // opening waits for the slower one, not their sum.
       const known = entry.detail?.work_thread || state.sessions?.find(thread => thread.thread_id === id);
-      const session = known?.browser_session ? api(sessionPath(id), undefined, options) : null;
+      const session = known?.browser_session ? api(sessionPath(id), undefined, sessionOptions) : null;
       session?.catch(() => {}); // Observed below, or superseded by the thread read's failure.
       work = await api(threadPath(id), undefined, options);
-      detail = work.browser_session ? await (session || api(sessionPath(id), undefined, options)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
+      detail = work.browser_session ? await (session || api(sessionPath(id), undefined, sessionOptions)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
         coordinationMessages: (await api(threadPath(id) + "/messages", undefined, options)).data};
     } catch (error) {
       if (controller.signal.aborted) error = new Error("Refreshing this conversation timed out.");
@@ -1373,58 +1407,87 @@ function renderTitle() {
     link.onclick = event => { event.preventDefault(); action(() => select(source.thread_id)); };
     $("fork-origin").append("Forked from ", link);
   }
-  for (const id of ["rename-name", "save-rename", "cancel-rename"]) $(id).disabled = !!saving;
+  $("rename-name").disabled = !!saving;
+  $("rename-hint").textContent = saving ? "Saving…" : state.titleEdit?.error || "Enter or click away to save · Esc to cancel";
+  $("rename-hint").setAttribute?.("role", state.titleEdit?.error ? "alert" : "status");
 }
 function startTitleEdit() {
   if (!state.detail || state.titleEdit?.saving) return;
-  state.titleEdit = {id: state.selected, saving: false};
-  $("rename-name").value = state.detail.work_thread.title;
+  const saved = state.titleDrafts?.get(state.selected);
+  state.titleEdit = {id: state.selected, saving: false, error: saved?.error || ""};
+  $("rename-name").value = saved?.value ?? state.detail.work_thread.title;
   $("rename-name").setCustomValidity("");
   renderTitle();
   $("rename-name").focus(); $("rename-name").select();
 }
-function cancelTitleEdit() {
+function cancelTitleEdit({focus = true} = {}) {
   if (state.titleEdit?.saving) return;
+  state.titleDrafts?.delete(state.titleEdit?.id);
   state.titleEdit = null;
   renderTitle();
-  $("session-name").focus();
+  if (focus) $("session-name").focus();
 }
-async function saveTitleEdit() {
+async function saveTitleEdit({focus = true} = {}) {
   const edit = state.titleEdit;
   if (!edit || edit.saving || edit.id !== state.selected) return;
-  const title = $("rename-name").value.trim();
+  const value = $("rename-name").value, title = value.trim();
+  const draft = {value};
+  (state.titleDrafts ||= new Map()).set(edit.id, draft);
   if (!title || title.length > 160) {
-    $("rename-name").setCustomValidity("Enter a thread title between 1 and 160 characters.");
-    $("rename-name").reportValidity();
-    return;
+    edit.error = "Enter a thread title between 1 and 160 characters.";
+    state.titleDrafts.set(edit.id, {value, error: edit.error});
+    $("rename-name").setCustomValidity(edit.error);
+    if (focus) $("rename-name").reportValidity();
+    renderTitle(); return;
   }
-  edit.saving = true; renderTitle();
+  if (title === state.detail?.work_thread.title) { cancelTitleEdit({focus}); return; }
+  edit.saving = true; edit.error = ""; renderTitle();
   try {
     await api(threadPath(edit.id), {title});
-    if (state.titleEdit === edit && state.selected === edit.id) {
-      await refreshThread();
-      if (state.titleEdit === edit && state.selected === edit.id) {
-        edit.saving = false;
-        cancelTitleEdit();
-      }
-    }
-    await refreshList();
+    if (state.titleDrafts.get(edit.id) === draft) state.titleDrafts.delete(edit.id);
+    for (const list of [state.sessions, state.viewThreads]) for (const thread of list || [])
+      if (thread.thread_id === edit.id) thread.title = title;
+    const cached = state.conversations?.get(edit.id)?.detail;
+    if (cached?.work_thread) cached.work_thread.title = title;
+    if (state.selected === edit.id && state.detail?.work_thread) state.detail.work_thread.title = title;
+    edit.saving = false;
+    if (state.titleEdit === edit && state.selected === edit.id) cancelTitleEdit({focus});
+    refreshList().catch(error => showError(error));
+  } catch (error) {
+    edit.error = "Couldn’t save the title. " + error.message;
+    if (state.titleDrafts.get(edit.id) === draft) state.titleDrafts.set(edit.id, {value, error: edit.error});
+    throw error;
   } finally {
     edit.saving = false;
     if (state.titleEdit === edit) renderTitle();
   }
 }
+function sessionPermissionsUnavailable() {
+  const detail = state.detail, work = detail?.work_thread;
+  return !work?.browser_session || state.detailRefreshing || !!detail.running || work.attention === "archived" || sessionBusy() || state.closing.has(state.selected);
+}
+function sessionPermissionLabel(session) {
+  const remembered = state.selected === "new-session" ? state.newSessionDraft?.permissionChoices?.[session?.client] : null;
+  const mode = session?.permission_modes?.find(mode => mode.id === session.permission_mode) || (remembered?.id === session?.permission_mode ? remembered : null);
+  return mode?.label || session?.permission_mode || "";
+}
 function renderSessionSettings() {
-  const session = state.detail?.session, browserSession = !!state.detail?.work_thread?.browser_session;
-  const effective = session ? effectiveSessionSettings(session) : {};
-  $("workspace").textContent = session?.cwd || state.detail?.work_thread?.cwd || "";
+  const session = state.detail?.session, work = state.detail?.work_thread, browserSession = !!work?.browser_session;
+  $("workspace").textContent = session?.cwd || work?.cwd || "";
   $("workspace").title = $("workspace").textContent;
+  const group = state.organization?.projects?.find(group => group.id === work?.project_id);
+  $("status-group").hidden = !work?.project_id;
+  const groupLabel = group?.name || work?.project_name || "Group";
+  if ($("status-group").textContent !== groupLabel) $("status-group").textContent = groupLabel;
+  $("status-group").title = "Change group · " + $("status-group").textContent;
+  $("status-group").setAttribute?.("aria-label", $("status-group").title);
   $("session-settings").hidden = !browserSession;
-  const providerName = session?.client === "muse" ? "Muse Code" : session?.client === "kimi" ? "Kimi" : session?.client === "antigravity" ? "Antigravity" : session?.client === "claude" ? "Claude Code" : "Codex";
-  $("session-model").textContent = "Model · " + providerName + " · " + (effective.modelLabel || (effective.unavailable ? "Unavailable" : "Loading…"));
-  $("session-effort").textContent = "Reasoning · " + (effective.effort || (effective.unavailable ? "Unavailable" : effective.model && !effective.supportsEffort ? "Not configurable" : "Loading…"));
-  $("session-yolo").hidden = !session?.yolo;
-  $("edit-permissions").disabled = !browserSession || state.detailRefreshing || !!state.detail?.running || state.detail?.work_thread?.attention === "archived" || sessionBusy() || state.closing.has(state.selected);
+  const label = sessionPermissionLabel(session);
+  const permissionLabel = label ? "Permissions · " + label : "Permissions";
+  // WebKit can drop a click if its text node is replaced between pointerdown/up.
+  if ($("edit-permissions").textContent !== permissionLabel) $("edit-permissions").textContent = permissionLabel;
+  $("edit-permissions").disabled = sessionPermissionsUnavailable();
+  state.permissionMenu?.sync(composerDraftId(), $("edit-permissions").disabled);
   const feedback = state.selected === "new-session" ? state.newSessionDraft?.commandFeedback : state.commandFeedback.get(state.selected);
   const permissions = /^Permissions: (yolo|default)\b/.exec(feedback || "")?.[1];
   $("command-feedback").textContent = permissions === "yolo" ? "YOLO · Full access, no approvals"
@@ -1433,35 +1496,42 @@ function renderSessionSettings() {
   $("command-feedback").hidden = !browserSession || !feedback;
   renderModelPicker();
 }
-function openSessionPermissions() {
-  const detail = state.detail, work = detail?.work_thread;
-  if (!work?.browser_session || state.detailRefreshing || detail.running || work.attention === "archived" || sessionBusy() || state.closing.has(state.selected)) return;
-  const dialog = $("permissions-dialog");
-  dialog.dataset.threadId = state.selected;
-  $("permissions-thread").textContent = work.title || detail.session?.name || "This session";
-  $("edit-yolo").checked = !!detail.session?.yolo;
-  $("permissions-description").textContent = detail.session?.client === "claude"
-    ? "With YOLO off, Claude Code uses its configured permissions and asks before restricted tool actions. Changes apply to the next turn."
-    : detail.session?.client === "muse"
-      ? "Muse workspace sandbox with approval for protected actions"
-    : detail.session?.client === "kimi"
-    ? "With YOLO off, Kimi uses manual tool approvals. Changes apply to the next turn."
-    : detail.session?.client === "antigravity"
-    ? "With YOLO off, Antigravity uses its native permissions and tool approval prompts. Changes apply to the next turn."
-    : "With YOLO off, Codex uses workspace access and asks for additional permissions. Changes apply to the next turn.";
-  $("permissions-error").hidden = true;
-  dialog.showModal();
+async function sessionPermissionCatalog(session) {
+  const client = session.client || state.detail?.work_thread?.client || "codex";
+  let catalog = session.permission_modes ? session : state.config?.permission_modes?.[client];
+  if (!catalog?.permission_modes?.length) catalog = await api("permission-modes?client=" + encodeURIComponent(client) + "&yolo=" + Boolean(session.yolo) + (session.cwd ? "&cwd=" + encodeURIComponent(session.cwd) : ""));
+  const current = session.permission_mode || catalog.permission_mode;
+  const modes = [...(catalog.permission_modes || [])];
+  if (current && !modes.some(mode => mode.id === current)) modes.push({id: current, label: current + " (current)",
+    available: false, reason: "This session's current mode is not available for a new selection."});
+  return {permission_mode: current, permission_modes: modes, permission_mode_effective: session.permission_mode_effective ?? catalog.permission_mode_effective ?? null};
 }
-async function saveSessionPermissions() {
-  const dialog = $("permissions-dialog"), id = dialog.dataset.threadId;
-  const body = {yolo: $("edit-yolo").checked};
-  const draft = id === "new-session" && state.newSessionDraft;
-  const session = draft && !draft.createdId
-    ? Object.assign(draft.session, body) : await api(sessionPath(draft?.createdId || id), body);
-  if (draft) { Object.assign(draft.session, body); draft.commandFeedback = null; }
-  if (id === state.selected && state.detail) { state.detail.session = session; renderStatus(); }
-  dialog.close();
-  await refreshList();
+function openSessionPermissions(event) {
+  if (sessionPermissionsUnavailable()) return;
+  const id = state.selected, session = state.detail.session, draft = state.newSessionDraft;
+  let trigger = event?.currentTarget || $("edit-permissions");
+  if (!trigger.getBoundingClientRect().width) trigger = $("mobile-chat-actions");
+  return state.permissionMenu.open(trigger, {id: composerDraftId(id),
+    load: () => sessionPermissionCatalog(session),
+    select: mode => saveSessionPermissions(mode, {id, client: session.client, draft}),
+  });
+}
+async function saveSessionPermissions(mode, {id = state.selected, client = state.detail?.session?.client, draft = state.newSessionDraft} = {}) {
+  if (state.selected !== id || state.detail?.session?.client !== client || id === "new-session" && draft !== state.newSessionDraft || sessionPermissionsUnavailable())
+    throw new Error("This conversation changed. Open Permissions again to choose a mode.");
+  if (!mode?.id || mode.available === false) throw new Error("This permission mode is unavailable.");
+  const localDraft = id === "new-session" && draft && draft === state.newSessionDraft && !draft.createdId;
+  const body = {permission_mode: mode.id};
+  if (localDraft) {
+    Object.assign(draft.session, body);
+    (draft.permissionChoices ||= {})[client] = mode;
+    draft.commandFeedback = null;
+  } else {
+    const session = await api(sessionPath(draft?.createdId && id === "new-session" ? draft.createdId : id), body);
+    if (id === state.selected && state.detail) state.detail.session = session;
+  }
+  if (id === state.selected) renderStatus();
+  if (!localDraft) await refreshList();
 }
 function renderStatus() {
   globalThis.OpenUIThread?.availability(state.selected, !state.detail?.work_thread?.browser_session ||
@@ -1482,7 +1552,8 @@ function renderStatus() {
   const docked = !!state.dispatchDock?.active;
   $("dispatcher-permissions").hidden = !docked;
   $("dispatcher-permissions").disabled = $("edit-permissions").disabled;
-  $("dispatcher-permissions").textContent = state.detail?.session?.yolo ? "Permissions · Full access" : "Permissions";
+  if ($("dispatcher-permissions").textContent !== $("edit-permissions").textContent)
+    $("dispatcher-permissions").textContent = $("edit-permissions").textContent;
   if (docked && state.detail && !state.detailRefreshing) {
     state.dispatchDock.update(state.detail);
     state.dispatchWorkspace?.update(state.viewThreads, state.detail);
@@ -1495,7 +1566,6 @@ function renderStatus() {
     $("agent-recipient").textContent = recipient ? "Messaging " + recipient : "";
   }
   $("message-label").textContent = composerLabel;
-  $("message").placeholder = composerLabel + " or drop images…";
   const archived = work?.attention === "archived";
   const session = state.sessions.find(s => s.thread_id === state.selected);
   const thread = session || work;
@@ -1510,7 +1580,9 @@ function renderStatus() {
   $("composer").hidden = !work?.browser_session && !(!state.detail && state.detailRefreshing);
   renderDetailRefresh();
   $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (!dispatcher && running && !state.detail.activeTurn) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
-  $("send").textContent = dispatcher ? "Send ↑" : running ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue ↑" : "Steer ↑") : "Send ↑";
+  const sendAction = dispatcher ? "Send request" : running ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue message" : "Steer current turn") : "Send message";
+  $("send").setAttribute?.("aria-label", sendAction);
+  $("send").title = sendAction + " (Enter)";
   $("queue").hidden = dispatcher || !running || !["codex", "claude", "muse"].includes(work?.client);
   $("queue").disabled = $("send").disabled;
   $("message").disabled = archived || !!state.transferLocks?.has(state.selected);
@@ -1530,7 +1602,8 @@ function renderStatus() {
   $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (!["codex", "claude", "muse"].includes(work?.client) ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
   if (!archived && !running && work?.client === "codex") $("composer-hint").textContent += " · $ skills";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
-  if (state.detailRefreshing) $("composer-hint").textContent = "";
+  if (state.detailRefreshing) $("composer-hint").textContent = "Opening conversation…";
+  $("message").placeholder = $("composer-hint").textContent;
   state.attachments?.render();
   state.slashCommands?.render();
   state.mentions?.render();
@@ -1637,6 +1710,7 @@ function itemText(item) {
   if (item.type === "commandExecution") return [item.command, item.aggregatedOutput, item.exitCode != null ? "Exit code: " + item.exitCode : ""].filter(Boolean).join("\n\n");
   if (item.type === "fileChange") return (item.changes || []).map(c => c.path + "\n" + (c.diff || "")).join("\n\n");
   if (item.type === "plan") return item.text || "";
+  if (item.type === "contextCompaction") return "Earlier context is summarized so the conversation can continue.";
   return JSON.stringify(item, null, 2);
 }
 function messageTimestamp(item, turn) {
@@ -1732,7 +1806,7 @@ class OutgoingMessages {
     for (const turn of detail?.thread?.turns || []) {
       for (const item of turn.items || []) if (item.type === "userMessage") known.add(item.id);
     }
-    const entry = {key: "outgoing-" + ++this.sequence, text, images, match: text.trim().slice(0, 200),
+    const entry = {key: "outgoing-" + ++this.sequence, text, images, match: text.trim(),
       requestId, known, status: "sending", error: ""};
     this.threads.set(id, [...this.list(id).filter(item => item.status !== "failed"), entry]);
     return entry;
@@ -1747,11 +1821,24 @@ class OutgoingMessages {
   settle(id, detail) {
     const entries = this.list(id);
     if (!entries.length || !detail) return;
+    const messages = (detail.thread?.turns || []).flatMap(turn => turn.items || [])
+      .filter(item => item.type === "userMessage");
     const remaining = entries.filter(entry => {
       if (entry.status === "failed") return true;
       if (entry.requestId) return !(detail.dispatchRequests || []).some(request => request.request_id === entry.requestId);
-      return !(detail.thread?.turns || []).some(turn => (turn.items || []).some(item => item.type === "userMessage" &&
-        !entry.known.has(item.id) && (!entry.match || this.itemText(item).includes(entry.match))));
+      const match = messages.find(item => {
+        if (entry.known.has(item.id)) return false;
+        const images = (item.content || []).filter(part => ["image", "localImage"].includes(part.type)).length;
+        if (images !== entry.images) return false;
+        const raw = this.itemText({...item, content: (item.content || []).filter(part => part.type === "text")});
+        const text = (globalThis.ThreadMentions?.displayMessage(raw).text ?? raw).trim();
+        return text === entry.match || !!entry.match && text.endsWith("\n\n" + entry.match);
+      });
+      if (!match) return true;
+      // Each provider message consumes one echo, including across repeated
+      // snapshots. Two identical steers must not disappear with the first copy.
+      for (const pending of entries) pending.known.add(match.id);
+      return false;
     });
     if (remaining.length) this.threads.set(id, remaining); else this.threads.delete(id);
   }
@@ -1791,7 +1878,43 @@ class OutgoingMessages {
     this.append(document, timeline, id);
   }
 }
+const TIMELINE_WINDOW_TURNS = 40;
+// Read this conversation's complete history once. A failed read keeps the
+// recent view and the control, so the reader can retry.
+async function loadCompleteHistory(button, loadingText) {
+  const id = state.selected, entry = conversationEntry(id), text = button.textContent;
+  entry.completeHistory = true;
+  button.disabled = true; button.textContent = loadingText;
+  try {
+    await entry.pending?.catch(() => {}); // A read already in flight may carry only the recent view.
+    if (state.selected === id) await refreshDetail();
+  } catch (error) {
+    button.disabled = false; button.textContent = text;
+    showError(error);
+  }
+}
+function earlierTurnsControl(count) {
+  const button = node("button", "Show " + count + " earlier " + (count === 1 ? "turn" : "turns"), "quiet timeline-earlier");
+  button.type = "button";
+  button.onclick = async () => {
+    // Keep the reader's place while earlier turns are inserted above it.
+    const el = $("timeline"), fromBottom = el.scrollHeight - el.scrollTop;
+    conversationEntry(state.selected).allTurns = true;
+    if (state.detail?.thread?.earlierTurns) await loadCompleteHistory(button, "Loading earlier turns…");
+    else renderTimeline();
+    if (state.timelineScroll) state.timelineScroll.restore(el.scrollHeight - fromBottom);
+    else el.scrollTop = el.scrollHeight - fromBottom;
+  };
+  return button;
+}
+function completeOutputControl() {
+  const button = node("button", "Show full output", "quiet tool-complete");
+  button.type = "button";
+  button.onclick = () => loadCompleteHistory(button, "Loading full output…");
+  return button;
+}
 function renderTimeline() {
+  if (state.responseActions?.deferRender(state.selected, renderTimeline)) return;
   if (state.timelineRender) { clearTimeout(state.timelineRender.timer); state.timelineRender = null; }
   const el = $("timeline");
   const atBottom = state.timelineScroll?.beforeRender() ?? (el.scrollHeight - el.scrollTop - el.clientHeight < 100);
@@ -1804,7 +1927,7 @@ function renderTimeline() {
     catch { /* Expansion still survives updates when storage is unavailable. */ }
   }
   state.timelineThread = state.selected;
-  const fragment = document.createDocumentFragment();
+  const fragment = globalThis.ResponseActions?.buffer() || document.createDocumentFragment();
   if (state.detail?.thread.historyUnavailable) {
     const notice = node("p", "Conversation history couldn’t be fully loaded. Reload to try again.", "empty");
     notice.setAttribute("role", "status");
@@ -1814,7 +1937,7 @@ function renderTimeline() {
   const sourceTurns = globalThis.ReviewUI ? ReviewUI.turns(state.detail?.thread.turns || [], state.detail?.reviews || [], state.selected) : state.detail?.thread.turns || [];
   const turns = globalThis.DispatchUI && (state.detail?.work_thread?.dispatcher || state.detail?.dispatchRequests?.length)
     ? DispatchUI.turns(sourceTurns, state.detail.dispatchRequests || []) : sourceTurns;
-  const entries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
+  const allEntries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
   const pendingForks = new Set(forkRelations(state.detail?.work_thread));
   const appendForks = (turnId, remaining = false) => {
     for (const relation of pendingForks) if (remaining || (relation.turnId || null) === turnId) {
@@ -1824,6 +1947,20 @@ function renderTimeline() {
   appendForks(null);
   const workGroups = new Map();
   const conversation = conversationEntry(state.selected);
+  // A long conversation first renders its latest turns: rendering every message
+  // delayed opening it. Earlier turns render on request, or when a search
+  // result or message link points into the conversation.
+  // A target keeps every turn rendered after it has been shown.
+  if (state.searchTarget?.thread === state.selected || state.messageTarget?.thread === state.selected) conversation.allTurns = true;
+  const omitted = state.detail?.thread?.earlierTurns || 0;
+  const hidden = conversation.allTurns ? 0 : Math.max(0, turns.length - TIMELINE_WINDOW_TURNS);
+  const windowed = omitted > 0 || hidden > 0;
+  const firstShown = windowed ? Math.max(0, allEntries.findIndex(entry => entry.turn === turns[hidden])) : 0;
+  const entries = firstShown > 0 ? allEntries.slice(firstShown) : allEntries;
+  if (windowed) {
+    for (const turn of turns.slice(0, hidden)) appendForks(turn.id);
+    fragment.append(earlierTurnsControl(omitted + hidden));
+  }
   const previousTools = conversation.toolNodes || new Map(), toolNodes = new Map();
   const previousMessages = conversation.messageNodes || new Map(), messageNodes = new Map();
   const client = state.detail?.work_thread?.client;
@@ -1851,10 +1988,14 @@ function renderTimeline() {
         // with its Markdown, for each chunk kept the main thread busy and
         // delayed typing in long conversations; reuse unchanged messages.
         const key = JSON.stringify([turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
-        const signature = JSON.stringify([item, turn.status, turn.startedAt, turn.started_at, turn.completedAt,
-          turn.completed_at, (turn.items || []).length, client]);
+        const signature = JSON.stringify([item, client]);
         const reused = previousMessages.get(key);
         if (reused?.signature === signature) {
+          if (reused.node.dataset.openuiKey)
+            reused.node.dataset.openuiStreaming = String(!["completed", "failed", "interrupted"].includes(turn.status));
+          const previousTime = reused.node.querySelector?.(":scope > .message-time");
+          const nextTime = messageTimeLabel(item, turn);
+          if (previousTime && previousTime.outerHTML !== nextTime.outerHTML) previousTime.replaceWith(nextTime);
           messageNodes.set(key, reused);
           fragment.append(reused.node);
           continue;
@@ -1868,6 +2009,7 @@ function renderTimeline() {
         const body = node("div", null, item.type === "agentMessage" ? "text markdown" : "text");
         if (item.type === "agentMessage") {
           body.innerHTML = messageMarkdown.render(text);
+          globalThis.ResponseActions?.enhance(body);
           if (body.querySelector?.(".openui-block")) {
             message.dataset.openuiKey = JSON.stringify([state.selected, turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
             message.dataset.openuiText = text;
@@ -1912,7 +2054,7 @@ function renderTimeline() {
         toolNodes.set(key, {signature, node: detail});
         detail.dataset.id = item.id; detail.dataset.status = item.status || ""; detail.open = open.has(item.id);
         if (detail !== cached?.node) {
-          const labels = {fileChange: "File changes", reasoning: "Thinking", mcpToolCall: "Tool", plan: "Plan", webSearch: "Web search"};
+          const labels = {fileChange: "File changes", reasoning: "Thinking", mcpToolCall: "Tool", plan: "Plan", webSearch: "Web search", contextCompaction: "Conversation compaction"};
           const terminal = item.type === "commandExecution" || item.type === "mcpToolCall" && ["Bash", "exec_command", "shell_command"].includes(item.tool);
           const command = String(item.command || item.arguments?.command || item.arguments?.cmd || "");
           const shell = command.match(/^((?:\/[^\s]+\/)?(?:bash|zsh|sh|fish|pwsh))(?:\s|$)/)?.[1];
@@ -1930,6 +2072,7 @@ function renderTimeline() {
           detail.append(summary);
           if (item.statusReason) detail.append(node("p", item.statusReason));
           detail.append(node("pre", text));
+          if (item.abridged) detail.append(completeOutputControl());
         }
         if (["completed", "failed", "interrupted"].includes(turn.status)) {
           let group = workGroups.get(turn);
@@ -1958,7 +2101,8 @@ function renderTimeline() {
       }
     }
     if (!entry.item && turn.error) fragment.append(node("p", turn.error.message || "This turn failed.", "empty"));
-    if (!entry.item && turn.status === "interrupted") fragment.append(node("p", "Turn stopped.", "empty"));
+    if (!entry.item && turn.status === "interrupted") fragment.append(node("p",
+      turn !== turns.at(-1) || state.detail?.running ? "Earlier turn stopped." : "Turn stopped.", "empty"));
     if (!entry.item) appendForks(turn.id);
   }
   // Retain navigation even when the provider cannot return the boundary turn.
@@ -1968,6 +2112,14 @@ function renderTimeline() {
     for (const old of el.querySelectorAll("article[data-outgoing]")) old.remove();
     state.outgoing.append(document, fragment, state.selected);
   }
+  // A turn may compact before emitting user or agent messages. Keep its live
+  // state visible after the historical footer while the transcript catches up.
+  const currentTurn = state.detail?.activeTurn ? turns.find(turn => turn.id === state.detail.activeTurn) : turns.at(-1);
+  if (state.detail?.running && !(currentTurn?.items || []).some(item => item.type === "agentMessage")) {
+    const working = node("p", "Working…", "empty");
+    working.setAttribute("role", "status");
+    fragment.append(working);
+  }
   if (globalThis.OpenUIThread) {
     const thread = state.selected;
     OpenUIThread.commit(el, fragment, {
@@ -1976,7 +2128,8 @@ function renderTimeline() {
       disabled: !state.detail?.work_thread?.browser_session || state.detail.work_thread.attention === "archived" || state.closing?.has(thread),
       onAction: text => sendOpenUIResponse(thread, text),
     });
-  } else el.replaceChildren(fragment);
+  } else if (globalThis.ResponseActions) ResponseActions.commit(el, fragment);
+  else el.replaceChildren(fragment);
   conversation.toolNodes = toolNodes;
   conversation.messageNodes = messageNodes;
   const disclosureThread = state.selected;
@@ -1987,6 +2140,7 @@ function renderTimeline() {
     }
   }
   if (!el.childNodes.length) el.append(node("p", state.detail?.work_thread.browser_session ? "This is the beginning of your session. What would you like to work on?" : "This conversation is in a terminal session. Its checkpoint and related links are saved here." + (state.detail?.work_thread.client === "codex" ? " Close that session to continue it in the browser." : " Continue the conversation in Claude Code."), "empty"));
+  state.responseActions?.update();
   if (state.timelineScroll) state.timelineScroll.afterRender(atBottom);
   else if (atBottom) el.scrollTop = el.scrollHeight;
   if (state.messageTarget && state.messageTarget.thread === state.selected) focusAgentMessage(state.messageTarget.id);
@@ -2020,6 +2174,21 @@ function focusSearchMessage(target) {
   state.timelineScroll?.restore($("timeline").scrollTop);
   state.searchTarget = null;
   return true;
+}
+// A search result can point before the latest turns. Its target makes the
+// read complete; a read already in flight may still hold only the recent view.
+async function openSearchTarget(route) {
+  const target = route.item && {thread: route.id, turn: route.turn, item: route.item};
+  if (target) state.searchTarget = target;
+  await select(route.id);
+  if (!target || state.selected !== route.id || focusSearchMessage(target)) return;
+  if (state.detail?.thread?.view === "recent") {
+    await conversationEntry(route.id).pending?.catch(() => {});
+    state.searchTarget = target;
+    await refreshDetail();
+  }
+  if (state.selected === route.id && !focusSearchMessage(target))
+    throw new Error("The matching message is no longer available in this conversation's saved history.");
 }
 function focusAgentMessage(id) {
   if (!/^\d+$/.test(String(id))) return;
@@ -2216,7 +2385,7 @@ let listScheduledAt = 0;
 // Each refresh rereads and parses the whole thread list, so read it at most
 // once per interval; a pending refresh is kept rather than postponed by the
 // next event, which could otherwise defer it indefinitely.
-const LIST_REFRESH_INTERVAL = 1000;
+const LIST_REFRESH_INTERVAL = 2000;
 function scheduleList() {
   if (listTimer) return;
   const wait = Math.max(150, LIST_REFRESH_INTERVAL - (Date.now() - listScheduledAt));
@@ -2385,10 +2554,13 @@ $("organization-form").onsubmit = event => {
   event.preventDefault();
   action(async () => {
     const thread = organizationThread, id = thread.thread_id, values = await assignmentPayload("edit", thread);
-    await api(threadPath(id), values);
+    const draft = id === "new-session" && state.newSessionDraft?.work_thread === thread ? state.newSessionDraft : null;
+    if (id === "new-session" && !draft) throw new Error("This draft changed. Open the group editor again.");
+    if (draft && !draft.createdId) { Object.assign(draft.session, values); Object.assign(draft.work_thread, values); }
+    else await api(threadPath(draft?.createdId || id), values);
     savedViews?.showGroup(values.project_id, thread.project_cwd || thread.cwd);
     $("organization-dialog").close();
-    if (state.selected === id) await refreshThread();
+    if (state.selected === id) { if (draft && !draft.createdId) renderStatus(); else await refreshThread(); }
     await refreshList();
   }, $("save-organization"));
 };
@@ -2430,6 +2602,12 @@ function sessionModelClients() {
 }
 function selectDraftModel({client, model}) {
   if (!isSessionDraft() || state.newSessionDraft.createdId || state.busy || state.detailRefreshing) return;
+  if (state.newSessionDraft.session.client !== client) {
+    delete state.newSessionDraft.session.permission_mode;
+    delete state.newSessionDraft.session.permission_modes;
+    const remembered = state.newSessionDraft.permissionChoices?.[client];
+    if (remembered) state.newSessionDraft.session.permission_mode = remembered.id;
+  }
   Object.assign(state.newSessionDraft.session, {client, model: model || null, effort: null});
   state.newSessionDraft.work_thread.client = client;
   renderStatus();
@@ -2597,9 +2775,13 @@ async function sendSessionDraft(text, images, mentions = []) {
       throw new Error("Use /yolo without arguments. Use /permissions default to turn it off.");
     if (command === "/permissions" && (parts.length > 2 || parts.length === 2 && !["default", "yolo"].includes(parts[1].toLowerCase())))
       throw new Error("Use /permissions default or /permissions yolo.");
-    if (command === "/yolo" || parts.length === 2)
+    if (command === "/yolo" || parts.length === 2) {
       draft.session.yolo = command === "/yolo" || parts[1].toLowerCase() === "yolo";
-    draft.commandFeedback = draft.session.yolo
+      delete draft.session.permission_mode; delete draft.session.permission_modes;
+      if (draft.permissionChoices) delete draft.permissionChoices[draft.session.client];
+    }
+    draft.commandFeedback = draft.session.permission_mode ? "Permissions: " + sessionPermissionLabel(draft.session) + " — applies to the next message."
+      : draft.session.yolo
       ? "Permissions: yolo — full machine access without approval prompts. Use /permissions default to turn it off."
       : "Permissions: default — approval prompts enabled. Use /yolo to enable full machine access.";
     input.value = ""; state.drafts.delete("new-session");
@@ -2609,7 +2791,9 @@ async function sendSessionDraft(text, images, mentions = []) {
   }
   const cwd = state.projectCwd || draft.session.cwd, draftId = draft.draftId || "new-session";
   if (!draft.createdId) {
-    const result = await api("sessions", {...draft.session});
+    const settings = {...draft.session};
+    if (settings.permission_mode) delete settings.yolo;
+    const result = await api("sessions", settings);
     draft.createdId = result.session.thread_id;
     draft.createdDetail = result;
     if (draft.session.project_id) savedViews?.showGroup(draft.session.project_id, draft.session.cwd);
@@ -3261,6 +3445,17 @@ function composerKeydown(event) {
   }
 }
 $("message").onkeydown = composerKeydown;
+// An idle conversation's Claude Code process may have been released. Start it
+// while the user types, so sending need not wait for it; at most once in five
+// minutes per conversation.
+const PREWARM_INTERVAL = 300000, prewarmedAt = new Map();
+$("message").addEventListener("input", () => {
+  const work = state.detail?.work_thread, id = state.selected;
+  if (!work?.browser_session || work.client !== "claude" || state.detail.running || isSessionDraft() || !$("message").value.trim()) return;
+  if (Date.now() - (prewarmedAt.get(id) || 0) < PREWARM_INTERVAL) return;
+  prewarmedAt.set(id, Date.now());
+  api(sessionPath(id) + "/prewarm", {}).catch(() => {});
+});
 $("queue").onclick = () => action(() => sendMessage("queue"));
 $("stop").onclick = () => action(async () => { await api(sessionPath(state.selected) + "/interrupt", {}); }, $("stop"));
 async function toggleCloseWhenDone() {
@@ -3414,15 +3609,22 @@ $("snooze-form").onsubmit = async event => {
 };
 $("handle-response").onclick = () => action(() => markThreadHandled(state.detail.work_thread), $("handle-response"));
 $("session-name").onclick = startTitleEdit;
-$("cancel-rename").onclick = cancelTitleEdit;
-$("rename-name").oninput = () => $("rename-name").setCustomValidity("");
+$("rename-name").oninput = () => {
+  $("rename-name").setCustomValidity("");
+  if (state.titleEdit) {
+    state.titleEdit.error = "";
+    (state.titleDrafts ||= new Map()).set(state.titleEdit.id, {value: $("rename-name").value});
+    renderTitle();
+  }
+};
+$("rename-name").onblur = () => saveTitleEdit({focus: false}).catch(showError);
 $("rename-name").onkeydown = event => {
   if (event.key === "Escape") { event.preventDefault(); cancelTitleEdit(); }
   if (event.key === "Enter" && event.isComposing) event.preventDefault();
 };
 $("rename-form").onsubmit = event => { event.preventDefault(); action(saveTitleEdit); };
 $("edit-permissions").onclick = openSessionPermissions;
-$("permissions-form").onsubmit = event => { event.preventDefault(); action(saveSessionPermissions, $("save-permissions")); };
+$("status-group").onclick = () => action(() => organizeThread(state.detail?.work_thread), $("status-group"));
 document.querySelectorAll("[data-close]").forEach(button => { button.onclick = () => $(button.dataset.close).close(); });
 $("edit-checkpoint").onclick = () => {
   const work = state.detail.work_thread, cp = work.checkpoint;
@@ -3664,8 +3866,12 @@ function setupComposerSizing(input) {
   return resize;
 }
 async function boot() {
+  state.permissionMenu = new PermissionMenu({document, view: window});
   state.resizeComposer = setupComposerSizing($("message"));
   state.timelineScroll = new ConversationScroll($("timeline"), $("jump-to-latest"));
+  state.responseActions = new ResponseActions({timeline: $("timeline"), input: $("message"), composer: $("composer"),
+    canDiscuss: () => !!state.selected && !$("conversation").hidden && !$("composer").hidden && !$("message").disabled,
+    onHold: () => state.timelineScroll.hold(), onError: showError});
   if (!state.paneMode) {
     let storage; try { storage = localStorage; } catch { /* Optional preference. */ }
     state.dispatchDock = new DispatchUI.Dock({document, view: window, storage,
@@ -3902,10 +4108,7 @@ async function boot() {
         // Message results open a full conversation so an exact target is visible
         // even when the overview previously used tiled panes.
         if (route.item && window.agentCoordPanes?.active) goHome();
-        await select(route.id);
-        if (route.item && state.selected === route.id && !focusSearchMessage({thread: route.id, turn: route.turn, item: route.item})) {
-          throw new Error("The matching message is no longer available in this conversation's saved history.");
-        }
+        await openSearchTarget(route);
       }
       else if (route.kind === "view") {
         const views = (await api("views")).data;

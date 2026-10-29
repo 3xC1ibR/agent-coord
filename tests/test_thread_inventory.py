@@ -125,7 +125,8 @@ class ThreadInventoryTests(unittest.TestCase):
         with self.trace() as (queries, connections):
             self.assertEqual([thread["thread_id"] for thread in self.store.threads.list(cwd=str(self.root))], ["a"])
         self.assertEqual(len(connections), 1)
-        self.assertLess(len(queries), 15)
+        # Execution evidence adds one indexed batch, independent of thread count.
+        self.assertLessEqual(len(queries), 15)
 
     def test_inventory_does_not_resume_or_read_provider_conversations(self):
         self.register("saved", browser=True)

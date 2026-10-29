@@ -674,18 +674,22 @@ test("invalid draft permission commands and attached images never create session
   assert.equal(c.calls.length, 0);
 });
 
-test("draft permission button and commands share the same setting", async () => {
+test("draft native permission choices persist until a legacy permission command explicitly replaces them", async () => {
   const c = setup(); await c.newSession();
-  vm.runInContext(source.slice(source.indexOf("async function saveSessionPermissions()"), source.indexOf("function renderStatus()")), c);
-  const dialog = c.$("permissions-dialog"); dialog.dataset.threadId = "new-session"; dialog.close = () => {};
+  vm.runInContext(source.slice(source.indexOf("async function saveSessionPermissions("), source.indexOf("function renderStatus()")), c);
+  c.sessionPermissionsUnavailable = () => false;
+  c.sessionPermissionLabel = session => session.permission_mode;
   c.calls.length = 0;
   c.$("message").value = "/yolo"; await c.sendMessage();
   assert.equal(c.state.detail.session.yolo, true);
-  c.$("edit-yolo").checked = false; await c.saveSessionPermissions();
-  assert.equal(c.state.detail.session.yolo, false);
+  await c.saveSessionPermissions({id: "provider-native", label: "Native mode"});
+  assert.equal(c.state.detail.session.permission_mode, "provider-native");
   assert.equal(c.state.newSessionDraft.commandFeedback, null);
   c.$("message").value = "/permissions"; await c.sendMessage();
-  assert.match(c.state.newSessionDraft.commandFeedback, /default/);
+  assert.match(c.state.newSessionDraft.commandFeedback, /provider-native/);
+  c.$("message").value = "/permissions default"; await c.sendMessage();
+  assert.equal(c.state.detail.session.permission_mode, undefined);
+  assert.equal(c.state.detail.session.yolo, false);
   assert.equal(c.calls.length, 0);
 });
 
@@ -766,4 +770,35 @@ test("New session uses saved settings for creation and preserves edits when retu
   assert.equal(created.effort, "low"); assert.equal(created.yolo, true);
   await c.newSession();
   for (const [key, value] of Object.entries(defaults)) assert.equal(c.state.newSessionDraft.session[key], value);
+});
+
+
+test("explicit draft native mode omits conflicting legacy flag on create without changing the preference", async () => {
+  for (const yolo of [false, true]) {
+    const c = setup(); await c.newSession();
+    const draft = c.state.newSessionDraft;
+    draft.session.yolo = yolo; draft.session.permission_mode = "provider-native";
+    await c.sendSessionDraft("Hello", []);
+    const settings = c.calls.find(call => call.path === "sessions").body;
+    assert.equal(settings.permission_mode, "provider-native");
+    assert.equal(Object.hasOwn(settings, "yolo"), false);
+    assert.equal(draft.session.yolo, yolo);
+  }
+});
+
+
+test("native draft choices remain provider-specific while the legacy preference is preserved", async () => {
+  const c = setup(); await c.newSession();
+  vm.runInContext(source.slice(source.indexOf("async function saveSessionPermissions("), source.indexOf("function renderStatus()")), c);
+  c.sessionPermissionsUnavailable = () => false;
+  c.state.detail.session.yolo = true;
+  await c.saveSessionPermissions({id: "workspace-write", label: "Auto"});
+  c.selectDraftModel({client: "claude", model: "sonnet"});
+  assert.equal(c.state.detail.session.permission_mode, undefined);
+  assert.equal(c.state.detail.session.yolo, true);
+  await c.saveSessionPermissions({id: "plan", label: "Plan"});
+  c.selectDraftModel({client: "codex", model: "gpt-test"});
+  assert.equal(c.state.detail.session.permission_mode, "workspace-write");
+  c.selectDraftModel({client: "claude", model: "sonnet"});
+  assert.equal(c.state.detail.session.permission_mode, "plan");
 });

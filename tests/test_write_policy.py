@@ -55,10 +55,26 @@ class WritePolicyTests(unittest.TestCase):
         self.store.begin_work(session_id='google', scopes=['allowed'])
         self.assertIn('could not be determined', check_write(self.store, 'google', []))
         self.store.touch('google', 'waiting')
-        self.assertIn('activity is waiting', self.native('create_file', 'allowed/x')['reason'])
+        reason = self.native('create_file', 'allowed/x')['reason']
+        self.assertIn('activity is waiting', reason)
+        self.assertIn('agent-coord set-activity --session-id google --activity implementing', reason)
         self.store.touch('google', 'implementing')
         with patch.object(self.store, 'check_conflicts', return_value=[{'name':'peer', 'session_id':'peer'}]):
             self.assertIn('conflicts', self.native('edit_file', 'allowed/x')['reason'])
+
+    def test_blocker_names_use_thread_titles_with_identifiable_fallbacks(self):
+        self.store.register(session_id='peer', client='codex', cwd=str(self.root), name='New session')
+        self.store.begin_work(session_id='peer', scopes=['allowed'])
+        self.store.threads.update('peer', title='Database migration repair')
+        reason = check_write(self.store, 'google', ['allowed/x'])
+        self.assertIn('Database migration repair (peer)', reason)
+        self.assertNotIn('New session', reason)
+        from agent_coord.store import ConflictError
+        with self.assertRaises(ConflictError) as raised:
+            self.store.begin_work(session_id='google', scopes=['allowed'])
+        self.assertIn('Database migration repair', raised.exception.conflicts[0]['name'])
+        self.store.threads.update('peer', title='New thread')
+        self.assertEqual(self.store.session_label('peer', 'New session'), 'peer')
 
     def test_outside_repository_passes_through(self):
         self.store.begin_work(session_id='google', scopes=['allowed'])

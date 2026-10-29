@@ -20,6 +20,7 @@ from .kimi_setup import ensure_hooks, resolve_runtime
 from .kimi_usage import backfill_usage
 from .kimi_status import PromptJournal
 from .store import CoordinationError
+from .permission_modes import acp_modes, acp_current_mode, legacy_mode, validate_mode
 
 
 class KimiConnection(ACPConnection):
@@ -76,6 +77,8 @@ class KimiRPC:
         self.turns, self.completed, self.requests, self.settings, self.capabilities = {}, {}, {}, {}, {}
         self.journals = {}
         self.catalog = None
+        self.permission_catalogs = {}
+        self.effective_permissions = {}
         self.lock, self.catalog_lock = threading.RLock(), threading.Lock()
         self.closed = False
         with store._connection() as db:
@@ -121,9 +124,37 @@ class KimiRPC:
 
     @staticmethod
     def _options(params):
+        mode = params.get("permissionMode") or legacy_mode("kimi", params.get("approvalPolicy") == "never")
         return {"cwd": params["cwd"], "model": params.get("model"),
                 "effort": params.get("effort") or params.get("config", {}).get("model_reasoning_effort"),
-                "yolo": params.get("approvalPolicy") == "never"}
+                "permission_mode": mode, "yolo": mode == "yolo"}
+
+    def permission_modes(self, cwd):
+        with self.catalog_lock:
+            if cwd in self.permission_catalogs:
+                return copy.deepcopy(self.permission_catalogs[cwd])
+            probe = self.connection_factory(self.store, lambda message: None, {"cwd": cwd})
+            native_id, caps = None, {}
+            try:
+                caps = probe.initialize()["agentCapabilities"].get("sessionCapabilities", {})
+                session = probe.request("session/new", {"cwd": cwd, "mcpServers": []})
+                native_id = session["sessionId"]
+                catalog = acp_modes(session)
+                if not catalog:
+                    raise CoordinationError("Kimi did not advertise permission modes.")
+                self.permission_catalogs[cwd] = catalog
+                return copy.deepcopy(catalog)
+            finally:
+                method = "session/delete" if "delete" in caps else "session/close" if "close" in caps else None
+                if native_id and method:
+                    try:
+                        probe.request(method, {"sessionId": native_id}, timeout=3)
+                    except CoordinationError:
+                        pass
+                probe.close()
+
+    def permission_state(self, thread_id):
+        return self.effective_permissions.get(thread_id) if thread_id in self.connections else None
 
     @staticmethod
     def _select(connection, native_id, session, category, value):
@@ -180,7 +211,12 @@ class KimiRPC:
             if options.get("effort"):
                 thought = config_option(session, "thought_level") or config_option(session, "thinking")
                 session = self._select(connection, native_id, session, thought.get("id", "thinking"), options["effort"])
-            session = self._select(connection, native_id, session, "mode", "yolo" if options["yolo"] else "default")
+            mode = options["permission_mode"]
+            validate_mode(mode, acp_modes(session))
+            session = self._select(connection, native_id, session, "mode", mode)
+            if acp_current_mode(session) != mode:
+                raise CoordinationError("Kimi did not apply the selected permission mode; no turn was started.")
+            self.effective_permissions[thread_id] = mode
             self.settings[thread_id] = current_settings(session)
             self.options[thread_id] = dict(options)
             if row:

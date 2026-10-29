@@ -55,11 +55,16 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 ## Components
 | Component | Use |
 | --- | --- |
+| Permission menu | Provider-supplied session modes as checked menu choices; unavailable native choices remain identified; opening never changes a selection |
+| Composer controls | Shortcut help in the state-aware placeholder; arrow send and calendar schedule retain accessible names and touch targets |
+| Thread group label | Group beside the workspace path opens the existing group assignment editor |
 | Quiet button | Refresh, dismiss, secondary actions |
 | Primary button | The view's principal action |
 | Labelled native inputs | Dates, filters, grouping |
 | Table with row links | Comparable records and drilldown |
 | Inline status/error | Loading, coverage, retry feedback |
+| Response actions | Quiet Copy button on code blocks and selection-only Discuss, preserving drafts and native reading position |
+| Inline title edit | Enter or focus leaving the title saves; Escape discards; failures remain visible beside the draft |
 | HTML output viewer | Existing file-link action opens a full-height preview using the auxiliary-page dialog pattern; closing preserves the conversation and draft underneath |
 | Native confirmation dialog | Clear local Activity history |
 | Thread options menu | Thread actions on sidebar cards and in the conversation header; the mobile sheet lists the header actions inline |
@@ -101,3 +106,5 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-29 | Browser HTML links open an auxiliary output viewer | Let paired phones read agent output using existing typography, colors, and quiet controls. |
 | 2026-10-29 | Add a List overview with Attention, Working and Idle rows | Re-entry: replies leave Attention once read, requests stay until resolved, and rows follow the user's own last message. |
 | 2026-10-29 | Conversation header lists thread actions in one menu; a main window's title names its active project | Actions remain available in expanded chat, and the thread title already appears in its tab and heading. |
+| 2026-10-29 | Direct response actions and title autosave | Reduce friction while preserving drafts, selection and reading position. |
+| 2026-10-29 | Simplify composer controls and expose native permission choices | Remove redundant chrome while preserving shortcuts, actual provider modes and group persistence. |

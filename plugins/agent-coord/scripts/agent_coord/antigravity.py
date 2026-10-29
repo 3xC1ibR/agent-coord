@@ -24,6 +24,7 @@ from .antigravity_setup import model_catalog, provider_directory, resolve_runtim
 from .context import client_environment, cli_path, coordination_bootstrap
 from .message_delivery import MessageDelivery
 from .store import CoordinationError
+from .permission_modes import acp_modes, acp_current_mode, legacy_mode, validate_mode
 
 AUTH_PREFIX = "Open the following link to authenticate the ACP server: "
 BROWSER_MARKER = "RIBBON_FIELD_AUTH_URL="
@@ -155,6 +156,8 @@ class AntigravityRPC:
         self.connections, self.options, self.turns, self.requests, self.native = {}, {}, {}, {}, {}
         self.resolved_models = {}
         self.catalog = None
+        self.permission_catalogs = {}
+        self.effective_permissions = {}
         self.closed = False
         self.lock = threading.RLock()
         self.catalog_lock = threading.Lock()
@@ -210,7 +213,29 @@ class AntigravityRPC:
 
     @staticmethod
     def _options(params):
-        return {"cwd": params["cwd"], "model": params.get("model"), "yolo": params.get("approvalPolicy") == "never"}
+        mode = params.get("permissionMode") or legacy_mode("antigravity", params.get("approvalPolicy") == "never")
+        return {"cwd": params["cwd"], "model": params.get("model"),
+                "permission_mode": mode, "yolo": mode == "yolo"}
+
+    def permission_modes(self, cwd):
+        with self.catalog_lock:
+            if cwd in self.permission_catalogs:
+                return copy.deepcopy(self.permission_catalogs[cwd])
+            probe = self.connection_factory(self.store, lambda message: None, {"cwd": cwd})
+            try:
+                probe.initialize()
+                probe.request("authenticate", {"methodId": "oauth-personal"})
+                session = probe.request("session/new", {"cwd": cwd, "mcpServers": []})
+                catalog = acp_modes(session)
+                if not catalog:
+                    raise CoordinationError("Antigravity did not advertise permission modes.")
+                self.permission_catalogs[cwd] = catalog
+                return copy.deepcopy(catalog)
+            finally:
+                probe.close()
+
+    def permission_state(self, thread_id):
+        return self.effective_permissions.get(thread_id) if thread_id in self.connections else None
 
     def _connection(self, thread_id, options):
         current = self.connections.get(thread_id)
@@ -268,12 +293,20 @@ class AntigravityRPC:
                 if not any(m["model"] == model for m in self.catalog):
                     raise CoordinationError(f"Antigravity model '{model}' is unavailable for this account. Choose an available model.")
                 connection.request("session/set_config_option", {"sessionId": native_id, "configId": "model", "value": model})
-            mode = "yolo" if options.get("yolo") else "default"
+            mode = options["permission_mode"]
+            offered_modes = acp_modes(session)
+            if offered_modes:
+                validate_mode(mode, offered_modes)
+            elif mode not in {"default", "yolo"}:
+                raise CoordinationError("Antigravity did not advertise this permission mode.")
             mode_option = next((o for o in session.get("configOptions", []) if o.get("category") == "mode" or o.get("id") == "mode"), None)
             if mode_option:
-                connection.request("session/set_config_option", {"sessionId": native_id, "configId": mode_option["id"], "value": mode})
+                applied = connection.request("session/set_config_option", {"sessionId": native_id, "configId": mode_option["id"], "value": mode})
+                if acp_current_mode(applied) not in (None, mode):
+                    raise CoordinationError("Antigravity did not apply the selected permission mode; no turn was started.")
             else:
                 connection.request("session/set_mode", {"sessionId": native_id, "modeId": mode})
+            self.effective_permissions[thread_id] = mode
             self.options[thread_id] = dict(options)
             return connection
         except Exception:

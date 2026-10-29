@@ -134,3 +134,92 @@ test('a streamed chunk re-renders only the changed message, not the whole histor
   assert.notEqual(after.at(-1),before.at(-1));
   assert.equal(after.at(-1).children[0].innerHTML,'Partial');
 });
+test('a long conversation renders its latest turns first and earlier ones on request',()=>{
+  const turns=Array.from({length:50},(_,index)=>({id:'t'+index,status:'completed',startedAt:index,completedAt:index+1,
+    items:[{id:'u'+index,type:'userMessage',content:[{type:'text',text:'Question '+index}]},{id:'a'+index,type:'agentMessage',text:'Answer '+index}]}));
+  const h=harness(turns);
+  h.render();
+  const articles=()=>h.timeline.children.filter(n=>n.tag==='article');
+  assert.equal(articles().length,80,'the latest 40 turns');
+  const control=h.timeline.children[0];
+  assert.equal(control.tag,'button');
+  assert.equal(control.textContent,'Show 10 earlier turns');
+  assert.equal(articles()[0].children[0].textContent,'Question 10');
+  control.onclick();
+  assert.equal(articles().length,100);
+  assert.equal(h.timeline.children.filter(n=>n.tag==='button').length,0);
+});
+test('a search result in a long conversation renders every turn',()=>{
+  const turns=Array.from({length:45},(_,index)=>({id:'t'+index,status:'completed',items:[{id:'a'+index,type:'agentMessage',text:'Answer '+index}]}));
+  const h=harness(turns);
+  h.state.searchTarget={thread:'test',turn:'t0',item:'a0'};
+  h.render();
+  assert.equal(h.timeline.children.filter(n=>n.tag==='article').length,45);
+});
+function recentHarness(total, extra = {}) {
+  const turns=Array.from({length:total},(_,index)=>({id:'t'+index,status:'completed',startedAt:index*10+1,completedAt:index*10+5,
+    items:[{id:'u'+index,type:'userMessage',content:[{type:'text',text:'Question '+index}]},{id:'a'+index,type:'agentMessage',text:'Answer '+index}]}));
+  const h=harness(turns.slice(-40),extra.messages||[]);
+  Object.assign(h.state.detail.thread,{view:'recent',earlierTurns:total-40});
+  h.complete=turns;
+  return h;
+}
+function withLoader(h, load) {
+  const errors=[];
+  const ctx=vm.createContext({state:h.state,AgentMessages,node:element,$:()=>h.timeline,
+    document:{createElement:element,createDocumentFragment:()=>element('fragment')},
+    conversationEntry:id=>(h.entries[id] ||= {}),sessionStorage:{getItem:()=>null,setItem(){}},
+    messageMarkdown:{render:t=>t},ChatImageAttachments:{appendPreviews(){}},openAgentMessage(){},focusAgentMessage(){},
+    refreshDetail:async()=>{await load();vm.runInContext('renderTimeline()',ctx);},showError:error=>errors.push(error.message)});
+  vm.runInContext(source.slice(source.indexOf('function itemText('),source.indexOf('function focusAgentMessage(')),ctx);
+  h.entries={};h.errors=errors;h.render=()=>vm.runInContext('renderTimeline()',ctx);
+  return h;
+}
+test('the recent view counts earlier turns held on the server and loads them on request',async()=>{
+  const h=withLoader(recentHarness(65),async()=>{h.state.detail.thread={turns:h.complete};});
+  h.render();
+  const articles=()=>h.timeline.children.filter(n=>n.tag==='article');
+  assert.equal(articles().length,80);
+  const control=h.timeline.children[0];
+  assert.equal(control.textContent,'Show 25 earlier turns');
+  await control.onclick();
+  assert.equal(h.entries.test.completeHistory,true,'later reads keep the complete history');
+  assert.equal(articles().length,130);
+  assert.equal(articles()[0].children[0].textContent,'Question 0');
+  assert.equal(h.timeline.children.filter(n=>n.tag==='button').length,0);
+});
+test('a failed earlier-turn read keeps the recent view and a retryable control',async()=>{
+  const h=withLoader(recentHarness(45),async()=>{throw new Error('Refreshing this conversation timed out.');});
+  h.render();
+  const control=h.timeline.children[0];
+  const reading=control.onclick();
+  assert.equal(control.disabled,true);assert.equal(control.textContent,'Loading earlier turns…');
+  await reading;
+  assert.equal(control.disabled,false);assert.equal(control.textContent,'Show 5 earlier turns');
+  assert.deepEqual(h.errors,['Refreshing this conversation timed out.']);
+  assert.equal(h.timeline.children.filter(n=>n.tag==='article').length,80);
+});
+test('messages from before the recent turns stay with the earlier turns',()=>{
+  const old={id:3,direction:'received',created_at:0.5,body:'Early note',status:'Sent',counterpart:{session_id:'peer',title:'Specialist',available:true}};
+  const h=withLoader(recentHarness(41,{messages:[old]}),async()=>{});
+  h.render();
+  assert.equal(h.timeline.children.some(n=>n.id==='agent-message-3'),false);
+  assert.equal(h.timeline.children[0].textContent,'Show 1 earlier turn');
+});
+test('a shortened tool call offers its full output and loads the complete history',async()=>{
+  const shortened={...command,id:'long',aggregatedOutput:'x'.repeat(512),abridged:true};
+  const h=withLoader(harness([{...turn(),items:[user,command,shortened,answer]}]),async()=>{
+    h.state.detail.thread={turns:[{...turn(),items:[user,command,{...shortened,aggregatedOutput:'x'.repeat(900),abridged:undefined},answer]}]};});
+  h.render();
+  const rows=()=>descendants(groups(h)[0]).filter(n=>n.tag==='details'&&n.className==='tool');
+  const button=row=>row.children.find(n=>n.tag==='button');
+  assert.equal(button(rows()[0]),undefined,'complete output has no control');
+  const control=button(rows()[1]);
+  assert.equal(control.textContent,'Show full output');
+  const reading=control.onclick();
+  assert.equal(control.textContent,'Loading full output…');
+  await reading;
+  assert.equal(button(rows()[1]),undefined);
+  assert.equal(rows()[1].children.find(n=>n.tag==='pre').textContent.length,'run test\n\n'.length+900+'\n\nExit code: 1'.length);
+  assert.equal(h.entries.test.completeHistory,true);
+});

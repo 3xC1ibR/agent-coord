@@ -109,6 +109,11 @@ class ThreadStore:
                     completed_at REAL NOT NULL, notified_at REAL,
                     UNIQUE(thread_id, turn_key)
                 );
+                CREATE TABLE IF NOT EXISTS turn_stop_requests (
+                    thread_id TEXT NOT NULL REFERENCES work_threads(thread_id),
+                    turn_id TEXT NOT NULL, requested_at REAL NOT NULL,
+                    PRIMARY KEY(thread_id, turn_id)
+                );
                 CREATE TABLE IF NOT EXISTS snooze_notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     thread_id TEXT NOT NULL REFERENCES work_threads(thread_id),
@@ -236,6 +241,9 @@ class ThreadStore:
 
     def _read(self, db, row, *, history=False, inventory=None):
         result = dict(row)
+        from .execution_state import read_many
+        result["execution"] = (inventory.executions[row["thread_id"]] if inventory is not None else
+                               read_many(self.store, db, [row["thread_id"]])[row["thread_id"]])
         context = (inventory.notification_contexts.get(row["thread_id"]) if inventory is not None else
                    db.execute("SELECT * FROM turn_notification_context WHERE thread_id = ? AND turn_key = ?",
                               (row["thread_id"], row["turn_key"])).fetchone())
@@ -531,6 +539,21 @@ class ThreadStore:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'browser_sessions'").fetchone():
                 return False
             return db.execute("SELECT 1 FROM browser_sessions WHERE thread_id = ?", (session_id,)).fetchone() is not None
+
+    def request_stop(self, session_id: str, turn_id: str) -> None:
+        """Save user intent before interrupting native execution, scoped to one turn.
+
+        Unlike the inbox pause this survives user continuation and provider
+        disconnects while completion bookkeeping is still pending.
+        """
+        with self.store._connection() as db:
+            db.execute("INSERT OR IGNORE INTO turn_stop_requests VALUES (?, ?, ?)",
+                       (session_id, turn_id, self.store.clock()))
+
+    def stop_requested(self, session_id: str, turn_id: str) -> bool:
+        with self.store._connection() as db:
+            return db.execute("SELECT 1 FROM turn_stop_requests WHERE thread_id = ? AND turn_id = ?",
+                              (session_id, turn_id)).fetchone() is not None
 
     def finish_turn(self, session_id: str, *, turn_id=None, status="completed") -> None:
         """Persist one completion per turn, independently of UI polling or process lifetime."""

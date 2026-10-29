@@ -77,8 +77,7 @@ class ScheduledPromptTests(unittest.TestCase):
         item = self.schedules.create(self.target_body(thread_id, message=message))
         self.assertEqual(item["thread_id"], thread_id)
         self.assertEqual(len(self.starts()), 1)
-        with self.store._connection() as db:
-            db.execute("UPDATE browser_sessions SET effort = 'high', yolo = 1 WHERE thread_id = ?", (thread_id,))
+        self.sessions.update(thread_id, {"effort": "high", "yolo": True})
         self.now = item["run_at"]
         self.schedules.process_once()
         self.assertEqual(self.item(item)["state"], "completed")
@@ -88,6 +87,7 @@ class ScheduledPromptTests(unittest.TestCase):
         self.assertEqual(start["input"], [{"type": "text", "text": message}])
         self.assertEqual(start["effort"], "high")
         self.assertEqual(start["approvalPolicy"], "never")
+        self.assertEqual(start["sandboxPolicy"], {"type": "dangerFullAccess"})
         self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 2)
         self.schedules.process_once()
         self.assertEqual(len(self.starts()), 2)

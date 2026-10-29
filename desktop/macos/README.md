@@ -165,8 +165,14 @@ are not included in release artifacts. Ordinary PR CI has no release secrets.
 ### Build, review, and publish
 
 1. Merge the release source into `main`. In **Actions → Release macOS → Run
-   workflow**, select `main`, enter a new numeric `X.Y.Z` version, and select
-   **Publish** to request a release. Select the channel (`alpha` by default). Leave Publish unchecked for a build-only
+   workflow**, select `main`, enter a new numeric `X.Y.Z` version and a positive
+   **Build number** above both the installed app and published update feeds.
+   A blank build number uses the workflow run number, which can be lower than
+   local development builds. Once an explicit higher build is published, keep
+   choosing increasing build numbers until the workflow count catches up;
+   tag-triggered builds use the workflow count. The selected number is shared
+   by the app, signed update metadata, and release provenance.
+   Select **Publish** to request a release and select the channel (`alpha` by default). Leave Publish unchecked for a build-only
    rehearsal. Pushing a `vX.Y.Z` tag on a commit in `main` also requests a release.
 2. Both architecture jobs retain `macos-release-arm64` and
    `macos-release-x86_64` artifacts for 30 days. Download and extract them while

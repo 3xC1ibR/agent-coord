@@ -148,18 +148,102 @@ conversation row), same probes as before:
 
 The first search after the upgrade built its context cache once (2.1 s).
 
+## Resource and request bounds (October 29 campaign, I15–I19)
+
+Measured on the same day, build 17:
+
+- **Idle conversations retained processes.** Runtime 98754 grew from 136
+  processes and 1.86 GB RSS (16:55Z) to 161 and 2.89 GB (18:09Z), mostly one
+  agent-coord MCP, mcp-grafana and node_repl server per loaded conversation.
+  Nothing unloaded a conversation. `conversation_residency.py` now keeps busy
+  conversations and the six most recently used idle ones; others are released
+  after 10 idle minutes (checked every minute). Busy means a running or
+  starting turn, pending input, unsaved history, queued or due inbox work, an
+  active review, an active delegation child, or a declared write scope.
+  Releasing a Claude conversation stops its CLI and MCP servers; opening it
+  stays offline, and typing in it starts Claude Code before the message is
+  sent. Releasing a Codex conversation unsubscribes it: an isolated Codex
+  0.165 app-server closed an unsubscribed idle thread and its MCP servers
+  after about 30 minutes (`thread/closed`; one probe, so not a guaranteed
+  deadline). A persisted conversation reopened with its history intact after
+  unsubscribe and immediate resume, and after a cold app-server restart. A
+  released conversation shows as saved, as after a runtime restart, and
+  resumes on open or send. Eligibility is checked again under the
+  conversation's lock just before release, so a conversation opened or given
+  work after selection stays loaded.
+- **What is bounded.** The app enforces a retention policy, not a process or
+  memory limit. It keeps loaded every protected conversation and six warm
+  idle ones, and releases any other idle conversation within about 11 minutes
+  of its last use or of becoming eligible (10-minute idle period and a
+  1-minute sweep). A released Claude conversation's CLI and MCP servers stop
+  at release. A released Codex conversation stays loaded in the app-server
+  until Codex closes it; that took about 30 minutes in the one probe, and the
+  app does not enforce a deadline. Active work and per-server MCP memory are
+  not limited.
+- **Requests per window.** One live build-17 window made 131 requests/min on
+  the overview and 188 with a conversation open (about 146 MB/min of thread
+  lists): every list refresh fetched groups, saved views, decisions and
+  schedules too, about 25 times a minute. WebKit retains memory per request
+  (about 5.5 KB in the lab); the live Networking process grew about 4 MB/min
+  while several windows were open. The list is now sent as cards without
+  detail-only fields (5.96 MB to 2.42 MB live) with an entity tag; a window
+  keeps its list on 304; groups and views are read at most once a minute and
+  decisions and schedules every 15 s in the background; event-driven list
+  reads are at most every 2 s. Matched snapshot measurement, one real window:
+  overview 64 to 24.7 requests/min, open conversation 100 to 60.7; list
+  transfer about 69 to 29 MB/min. This slows WebKit's growth; it does not
+  bound it. Reopening the interface (ordinary Quit; agents keep running)
+  starts a new Networking process.
+- **Opening a conversation** transfers its recent view: the latest 40 turns,
+  with tool fields in completed turns shortened to 512 characters and lists
+  to 10 entries (marked `abridged`). Messages, reasoning, plans and a running
+  turn stay complete. The view is built per response from a copy; the saved
+  history is unchanged. Earlier turns, "Show full output", search results and
+  message links read the complete history, which the conversation then keeps
+  while cached. Older backends ignore the request header and send everything.
+  The timeline renders its latest 40 turns either way. Saved histories of 549
+  open conversations (real snapshot, the view computed offline; each
+  percentile of its own distribution): p50 0.74 to 0.14 MB, p90 3.9 to
+  0.83 MB, p99 10.7 to 3.0 MB, largest 37 to 4.8 MB. In a real
+  browser, 7 opens per view, same source, alternating order, measured while
+  the live runtime and an unrelated job loaded the machine (load average
+  about 13), median first open to Send enabled, recent against complete:
+
+  | Conversation | Bytes | Send enabled, median (max) |
+  | --- | --- | --- |
+  | 1 turn | 0.10 vs 0.84 MB | 189 (439) vs 191 (241) ms |
+  | 38 turns | 3.0 vs 4.6 MB | 268 (581) vs 335 (446) ms |
+  | 93 turns | 2.4 vs 8.2 MB | 411 (507) vs 525 (664) ms |
+  | 67 turns | 3.7 vs 11.9 MB | 652 (850) vs 787 (883) ms |
+
+  The server still reads and copies the complete history for each read, and
+  conversations with thousands of tool calls remain megabytes.
+- **Saturation at twice the realistic load** was not reproduced on build 17:
+  send acceptance p50 35 ms, p95 182 ms; reads p50 50 ms, p95 170 ms; backend
+  CPU 56%. Only the first search after a backend start exceeds a budget.
+
 ## Remaining bottlenecks
 
 - **One Python process runs every agent and every request.** Provider stream
-  decoding, persistence, event streams and HTTP handlers share one GIL. At twice
-  the realistic load the backend still saturates (send acceptance p95 about
-  0.7 s). The durable fix is to move provider adapters and their persistence
+  decoding, persistence, event streams and HTTP handlers share one GIL. At
+  twice the realistic load build 17 did not saturate (send acceptance p95
+  182 ms); heavier loads were not measured. The durable fix is to move provider adapters and their persistence
   out of the request-serving process (or onto a free-threaded interpreter),
   not further per-endpoint tuning.
-- Each list refresh still transfers and parses about 5 MB; a revisioned or
-  incremental inventory would remove that cost from the WebView.
-- Opening a large conversation for the first time transfers and renders its
-  whole history before Send is enabled (about 0.5 s for 1.5 MB under load);
-  loading the latest turns first would remove most of that.
+- The list is about 2.4 MB live; a changed list is still sent and parsed in
+  full. A revisioned or incremental inventory would remove that cost.
+- WebKit's per-request retention is slowed, not bounded, within one
+  interface session.
+- The first search after a backend start exceeds the search budget (0.8 to
+  1.5 s measured). It synchronously indexes histories changed since the last
+  search (297 ms for 20 histories, 17.6 MB, in the snapshot) and runs with
+  cold caches. On one cloned snapshot, successive fresh processes took 1,087,
+  643 and 87 ms; later searches take 68–137 ms. Indexing changed histories
+  at idle, outside the search request, would remove the first part. That is
+  a new background writer that holds the GIL, so it needs its own
+  measurement.
+- Conversations with thousands of tool calls still open with a few megabytes
+  of shortened tool rows; loading a completed turn's tool calls on expansion
+  would remove most of that.
 - Backend changes activate only at an idle runtime handover; see
   [runtime updates](runtime-updates.md). Interface changes apply on reopen.

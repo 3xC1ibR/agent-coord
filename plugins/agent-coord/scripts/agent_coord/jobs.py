@@ -291,7 +291,9 @@ class ManagedJobs:
         if not isinstance(job_id, str) or not job_id.strip():
             raise CoordinationError("Job ID must not be empty.")
         row = self._row(db, job_id)
-        if row is None or row["owner_session_id"] != session_id:
+        if row is None:
+            raise CoordinationError(f"Job {job_id} was not found. Use job list to see your jobs.")
+        if row["owner_session_id"] != session_id:
             raise CoordinationError(f"Job {job_id} is not owned by session {session_id}.")
         return row
 

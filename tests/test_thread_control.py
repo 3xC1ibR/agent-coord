@@ -374,6 +374,30 @@ class ThreadControlTests(unittest.TestCase):
                     worker.close()
                     other.close()
 
+    def test_database_owner_closes_cold_unended_session_without_starting_a_turn(self):
+        thread_id = self.create()
+        self.control.request_close(thread_id)
+        with self.sessions.lock:
+            self.sessions.loaded.discard(thread_id)
+        self.assertIsNone(self.store.get_session(thread_id)["ended_at"])
+        with patch("agent_coord.desktop_runtime._OWNED_DATABASES", {str(self.store.database_path.resolve())}):
+            self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "closed")
+        self.assertEqual(self.store.threads.get(thread_id)["attention"], "archived")
+        self.assertFalse(any(method in {"turn/start", "thread/resume"} for method, _ in self.sessions.rpc.calls))
+
+    def test_database_owner_does_not_assume_cold_active_execution_has_stopped(self):
+        thread_id = self.create()
+        self.sessions.send(thread_id, {"message": "Still running"})
+        self.control.request_close(thread_id)
+        with self.sessions.lock:
+            self.sessions.loaded.discard(thread_id)
+            self.sessions.active.pop(thread_id, None)
+        with patch("agent_coord.desktop_runtime._OWNED_DATABASES", {str(self.store.database_path.resolve())}):
+            self.worker.process_once()
+        self.assertEqual(self.control.status(thread_id)["status"], "queued")
+        self.assertTrue(self.store.get_session(thread_id)["turn_active"])
+
     def test_two_workers_can_claim_request_only_once(self):
         thread_id = self.create()
         request = self.control.request_close(thread_id)

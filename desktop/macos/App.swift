@@ -1322,8 +1322,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let paletteAction = try await smokeJS("""
             const input = document.querySelector('#desktop-command-input');
             input.value = 'find thread'; input.dispatchEvent(new Event('input', {bubbles: true}));
-            if (document.querySelectorAll('#desktop-command-results [role=option]').length !== 1) return false;
+            const options = Array.from(document.querySelectorAll('#desktop-command-results [role=option]'));
+            const actions = options.filter(option => option.dataset.entry === 'findThread');
+            if (actions.length !== 1) return false;
             input.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true, cancelable: true}));
+            for (let i = 0; i < options.length && input.getAttribute('aria-activedescendant') !== actions[0].id; i++)
+              input.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true, cancelable: true}));
+            if (input.getAttribute('aria-activedescendant') !== actions[0].id) return false;
             input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
             for (let i = 0; i < 40; i++) {
               if (!document.querySelector('#desktop-command-dialog').open && document.activeElement?.id === 'search')
@@ -1624,6 +1629,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 store.threads.update(name, title=name)
             print('{}')
             """, arguments: [folder.path, root.path])
+        try await smokeInventoryReady(second, present: ["notify-owned", "notify-other", "notify-fresh"])
         let data = try JSONSerialization.data(withJSONObject: [folder.path, root.path])
         let paths = String(data: data, encoding: .utf8)!
         // The second window owns the thread's tab but currently shows another project.
@@ -1692,6 +1698,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             store.threads.update('link-elsewhere', title='link-elsewhere')
             print('{}')
             """, arguments: [root.path])
+        try await smokeInventoryReady(item, present: ["link-elsewhere"])
         let data = try JSONSerialization.data(withJSONObject: [folder.path, root.path])
         let paths = String(data: data, encoding: .utf8)!
         // Use the backend's canonical directories; Foundation strips /private.
@@ -1844,6 +1851,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             store.register(session_id='files-smoke', client='codex', cwd=sys.argv[2])
             print(json.dumps({'ready': True}))
             """, arguments: [base.path])
+        try await smokeInventoryReady(item, present: ["files-smoke"])
         _ = try await smokeJS("""
             // Keep the UI-only draft editable through metadata refreshes without
             // creating a provider session or starting a model turn.
@@ -1964,6 +1972,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             store.threads.update('roll-later', attention='later')
             print(json.dumps({'ready': True}))
             """)
+        try await smokeInventoryReady(window, present: ["roll-old-session", "roll-new-session", "roll-later"],
+                                      absent: ["files-smoke"], attention: ["roll-old-session": "now", "roll-new-session": "now", "roll-later": "later"])
         let oldest = try await smokeJS("""
             await state.rollUp.start();
             return state.selected === 'roll-new-session' && state.rollUp.queue.length === 2 &&
@@ -2014,6 +2024,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
               await api('threads/' + id, {attention: 'archived'});
             goHome(); await refreshList(); return true;
             """, in: window.webView)
+    }
+
+    @MainActor private func smokeInventoryReady(_ item: DesktopWindow, present: [String],
+                                                absent: [String] = [], attention: [String: String] = [:]) async throws {
+        _ = try await smokeJS("""
+            for (let i = 0; i < 120; i++) {
+              const threads = (await api('threads?archived=false')).data;
+              const visible = new Map(threads.map(thread => [thread.thread_id, thread]));
+              if (present.every(id => visible.has(id)) && absent.every(id => !visible.has(id)) &&
+                  Object.entries(attention).every(([id, value]) => visible.get(id)?.attention === value)) return true;
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            throw new Error('Native fixture did not become visible through the thread inventory: ' + present.join(', '));
+            """, in: item.webView, arguments: ["present": present, "absent": absent, "attention": attention])
     }
 
     private func smokePython(_ source: String, arguments: [String] = []) throws -> [String: Any] {
@@ -2084,6 +2108,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             print(json.dumps({'url': opener.call_args.args[0][-1], 'result': json.loads(output.getvalue()),
                               'billing': billing['id'], 'other': other['id'], 'view': view['id'], 'directory': directory}))
             """, arguments: [first.id])
+        try await smokeInventoryReady(first, present: ["navigation-manager", "navigation-billing", "navigation-other"])
         try await smokeAttribution()
         let data = try JSONSerialization.data(withJSONObject: fixture)
         let json = String(data: data, encoding: .utf8)!
@@ -2321,6 +2346,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                     classification='informational', reply_required=False)
             print('{}')
             """)
+        try await smokeInventoryReady(first, present: ["detach-one", "detach-two"])
         _ = try await smokeJS("""
             await refreshList(); await select('detach-one'); await select('detach-two');
             window.detachEvents = [];
@@ -2499,6 +2525,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 store.threads.update(name, title=name)
             print(json.dumps({'cwd': str(store.database_path.parent.resolve())}))
             """)
+        try await smokeInventoryReady(item, present: ["cycling-one", "cycling-two", "cycling-three"])
         _ = try await smokeJS("""
             await openProjectDirectory(cyclingDirectory);
             goHome();

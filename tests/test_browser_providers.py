@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -61,6 +62,43 @@ class ProviderTests(unittest.TestCase):
 
     def finish(self, thread_id):
         self.emit(thread_id, {"type": "result", "subtype": "success"})
+
+    def test_released_claude_process_stops_and_typing_prewarms_the_next_one(self):
+        thread = self.create()
+        self.start(thread)
+        connection = self.sessions.claude.connections[thread]
+        self.assertFalse(self.sessions.claude.release(thread), "a running turn keeps its process")
+        self.finish(thread)
+        with self.sessions.lock:
+            self.sessions.last_used[thread] = 0.0
+        self.assertEqual(self.sessions.release_idle_conversations(now=10_000.0), [])  # Within the warm set.
+        self.assertTrue(self.sessions.claude.release(thread))
+        self.assertTrue(connection.closed)
+        self.assertNotIn(thread, self.sessions.claude.connections)
+        self.sessions._prewarm(thread)
+        warm = self.sessions.claude.connections[thread]
+        self.assertFalse(warm.closed)
+        self.start(thread)
+        self.assertIs(self.sessions.claude.connections[thread], warm, "the next turn reuses the prewarmed process")
+        self.assertEqual(len(warm.writes), 1)
+
+    def test_prewarm_resumes_a_released_conversation_without_sending(self):
+        thread = self.create()
+        self.start(thread)
+        self.finish(thread)
+        with self.sessions.lock:
+            self.sessions.last_used[thread] = 0.0
+        for _ in range(6):
+            self.create()
+        self.assertEqual(self.sessions.release_idle_conversations(now=10_000.0), [thread])
+        self.assertNotIn(thread, self.sessions.loaded)
+        self.assertEqual(self.sessions.prewarm(thread), {"started": True})
+        for _ in range(100):
+            if thread in self.sessions.claude.connections:
+                break
+            threading.Event().wait(0.01)
+        self.assertIn(thread, self.sessions.loaded)
+        self.assertEqual(self.sessions.claude.connections[thread].writes, [])
 
     def test_checkpoint_between_turns_keeps_the_running_claude_process(self):
         # Each message used to pay a full Claude Code start whenever saved

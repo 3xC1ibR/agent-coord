@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
@@ -65,7 +66,9 @@ class ThreadOrganizationTests(unittest.TestCase):
         self.store.threads.update(child, project_id=other["id"], attention="later")
         self.store.threads.update(grandchild, attention="archived", repository_id=None)
         before = {tid: self.store.threads.get(tid, history=True) for tid in (parent, child, grandchild)}
-        request = self.start_ui()
+        # Keep queued synthetic agents idle while checking group-assignment metadata.
+        with patch.object(self.sessions.inbox_wake, "start"):
+            request = self.start_ui()
         request("threads/" + parent, {"project_id": self.project["id"]})
         for tid, original in before.items():
             actual = self.store.threads.get(tid, history=True)

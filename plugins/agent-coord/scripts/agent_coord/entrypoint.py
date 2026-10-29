@@ -47,8 +47,7 @@ def route_to_owner(kind, argv):
     record = runtime.discover(database, timeout=2)
     if record is None:
         raise RuntimeError("The runtime owner is unavailable. Try again shortly.")
-    status = runtime.control(record, "status", timeout=2)
-    payload = Path(status["payload"]).resolve()
+    payload = Path(record["payload"]).resolve()
     if payload.parent != directory / "payloads" or not payload.is_dir():
         raise RuntimeError("The runtime owner did not identify a retained payload.")
     backend = payload / "backend"

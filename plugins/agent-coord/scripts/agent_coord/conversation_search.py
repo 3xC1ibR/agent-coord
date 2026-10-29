@@ -29,6 +29,7 @@ def messages(history):
                 role = "user"
                 # Provider context and inbox wake prompts aren't user conversation.
                 if text.strip() == WAKE_PROMPT or text.lstrip().startswith((
+                        "[Automatic Agent Coord inbox wake",
                         "# AGENTS.md", "<environment_context>", "<INSTRUCTIONS>", "<agent-coord", "[agent-coord")):
                     continue
             elif kind == "agentMessage" and isinstance(item.get("text"), str):

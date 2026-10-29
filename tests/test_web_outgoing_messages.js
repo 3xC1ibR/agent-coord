@@ -51,6 +51,34 @@ test("a stream event that arrives before the acceptance reply settles the messag
   assert.deepEqual(messages.list("thread"), []);
 });
 
+test("identical steers each retain an echo until their own provider copy arrives", () => {
+  const messages = outgoing();
+  const first = messages.add("thread", {text: "?", detail: detailWith()});
+  const second = messages.add("thread", {text: "?", detail: detailWith()});
+  messages.accepted(first); messages.accepted(second);
+  const firstCopy = detailWith(user("one", "?"));
+  messages.settle("thread", firstCopy);
+  assert.deepEqual(messages.list("thread"), [second]);
+  messages.settle("thread", firstCopy);
+  assert.deepEqual(messages.list("thread"), [second], "the same copy cannot settle again on refresh");
+  messages.settle("thread", detailWith(user("one", "?"), user("two", "?")));
+  assert.deepEqual(messages.list("thread"), []);
+});
+
+test("whole text and image counts distinguish messages while compaction delays delivery", () => {
+  const messages = outgoing(), prefix = "Long shared prefix ".repeat(20);
+  const first = messages.add("thread", {text: prefix + "first", detail: detailWith()});
+  const second = messages.add("thread", {text: prefix + "second", detail: detailWith()});
+  messages.settle("thread", detailWith(user("two", prefix + "second")));
+  assert.deepEqual(messages.list("thread"), [first]);
+  const image = messages.add("thread", {text: "", images: 1, detail: detailWith()});
+  messages.settle("thread", detailWith(user("other", "unrelated")));
+  assert.deepEqual(messages.list("thread"), [first, image]);
+  messages.settle("thread", detailWith({id: "photo", type: "userMessage", content: [{type: "image", url: "data:image/png;base64,abc"}]}));
+  assert.deepEqual(messages.list("thread"), [first]);
+  assert.notEqual(first.key, second.key);
+});
+
 test("dispatcher requests settle by their durable request ID", () => {
   const messages = outgoing();
   const entry = messages.add("dispatcher", {text: "Route this", requestId: "request-1", detail: detailWith()});

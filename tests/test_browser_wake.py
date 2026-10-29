@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
 from test_browser_providers import claude_factory
 from agent_coord.app_control import AppControlWorker
-from agent_coord.browser_wake import BrowserInboxWake
+from agent_coord.browser_wake import BrowserInboxWake, WAKE_PROMPT
 from agent_coord.hook import _actionable_context
+from agent_coord.store import CoordinationError
 from agent_coord.thread_control import ThreadControl
-from agent_coord.zellij_wake import WAKE_PROMPT
 
 
 class BrowserWakeTests(unittest.TestCase):
@@ -175,6 +178,204 @@ class BrowserWakeTests(unittest.TestCase):
         self.assertEqual(self.store.threads.get(thread)["attention"], "now")
         self.assertEqual(self.turns(thread), [])
         self.assertEqual(len(self.attempts()), 1)
+
+    def test_transient_pre_submit_lock_retries_after_backoff_without_a_claim(self):
+        thread = self.create()
+        self.message(thread)
+        self.store.clock = lambda: 2000000000.0
+        with patch.object(self.sessions, "read", side_effect=sqlite3.OperationalError("database is locked")):
+            self.sessions.inbox_wake.process_once()
+        self.assertEqual(self.attempts(), [])
+        with self.store._connection() as db:
+            wake = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()
+        self.assertFalse(wake["paused"])
+        self.assertEqual(wake["retry_at"], 2000000005.0)
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(self.turns(thread), [])
+        self.store.clock = lambda: 2000000005.0
+        BrowserInboxWake(self.sessions).process_once()
+        self.assertEqual(len(self.turns(thread)), 1)
+        self.assertEqual(self.attempts()[0]["outcome"], "sent")
+
+    def test_pre_submit_lock_after_claim_is_released_and_retry_cap_survives_restart(self):
+        thread = self.create()
+        self.message(thread)
+        self.wall = 2000000000.0
+        self.store.clock = lambda: self.wall
+        for delay in (5, 30, None):
+            with patch.object(self.sessions.dispatch, "prepare_context", side_effect=sqlite3.OperationalError("database is locked")):
+                BrowserInboxWake(self.sessions).process_once()
+            self.assertEqual(self.attempts(), [])
+            self.assertNotIn(thread, self.sessions.active)
+            if delay:
+                self.wall += delay
+        with self.store._connection() as db:
+            wake = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()
+        self.assertTrue(wake["paused"])
+        self.assertEqual(wake["pause_kind"], "pre_submit")
+        BrowserInboxWake(self.sessions).process_once()
+        self.assertEqual(self.turns(thread), [])
+        view = self.sessions.work_thread(thread)
+        self.assertTrue(view["needs_attention"])
+        self.assertIn("database is locked", view["attention_action"])
+
+    def test_post_submit_database_lock_remains_uncertain_and_is_never_retried(self):
+        thread = self.create()
+        self.message(thread)
+        request = self.sessions.rpc.request
+        def accepted_then_locked(method, params=None):
+            result = request(method, params)
+            if method == "turn/start":
+                raise sqlite3.OperationalError("database is locked")
+            return result
+        with patch.object(self.sessions.rpc, "request", side_effect=accepted_then_locked):
+            self.sessions.inbox_wake.process_once()
+        self.finish(thread)
+        BrowserInboxWake(self.sessions).process_once()
+        self.assertEqual(len(self.turns(thread)), 1)
+        self.assertEqual(self.attempts()[0]["outcome"], "failed")
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT pause_kind FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()[0], "unknown")
+
+    def test_authoritative_completed_turn_reconciles_false_failure_but_not_stop_or_uncertain(self):
+        for kind in ("failure", "stop", "unknown"):
+            with self.subTest(kind=kind):
+                thread = self.create()
+                self.sessions.send(thread, {"message": "Work"})
+                self.finish(thread, "failed")
+                self.sessions.rpc.threads[thread]["turns"][-1]["status"] = "completed"
+                self.sessions.inbox_wake.pause(thread, "Old failure", kind=kind)
+                self.message(thread)
+                BrowserInboxWake(self.sessions).process_once()
+                self.assertEqual(len(self.turns(thread)), 1)
+                with self.store._connection() as db:
+                    wake = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()
+                self.assertTrue(wake["paused"])
+                self.assertEqual(wake["pause_kind"], kind)
+                self.assertEqual(wake["reconciled_turn_id"] is not None, kind == "failure")
+
+    def test_creatorless_lead_pause_is_visible_in_inventory_and_preserves_checkpoint(self):
+        thread = self.create()
+        self.store.threads.checkpoint(thread, {"phase": "orchestrating", "summary": "Coordinating work.",
+                                              "next_step": {"actor": "agent", "action": "Await worker"}})
+        message = self.message(thread)
+        self.sessions.inbox_wake.pause(thread, "Submission outcome unknown")
+        view = next(t for t in self.sessions.list_work_threads() if t["thread_id"] == thread)
+        self.assertTrue(view["needs_attention"])
+        self.assertIn("Submission outcome unknown", view["attention_action"])
+        self.assertEqual(view["checkpoint"]["summary"], "Coordinating work.")
+        self.assertEqual([m["id"] for m in self.store.inbox(thread, mark_delivered=False)], [message["id"]])
+
+    def test_false_failure_reconciliation_waits_for_late_authoritative_completion(self):
+        thread = self.create()
+        self.sessions.send(thread, {"message": "Work"})
+        self.finish(thread, "failed")
+        self.message(thread)
+        self.wall = 2000000000.0
+        self.store.clock = lambda: self.wall
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(len(self.turns(thread)), 1)
+        self.sessions.rpc.threads[thread]["turns"][-1]["status"] = "completed"
+        self.wall += 5
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(len(self.turns(thread)), 1)
+        self.assertEqual(self.store.threads.get(thread)["turn_completion"]["status"], "completed")
+
+    def test_corrected_historical_failure_requires_explicit_recovery_and_new_instructions(self):
+        worker = AppControlWorker(self.sessions)
+        self.addCleanup(worker.close)
+        request = worker.control.request("create", "sender", {
+            "cwd": str(self.root), "client": "codex", "prompt": "Historical work"})
+        worker.process_once()
+        thread = worker.control.status(request["request_id"])["thread_id"]
+        self.sessions.inbox_wake.process_once()
+        self.store.inbox(thread)
+        self.finish(thread, "failed")
+        turn = self.sessions.rpc.threads[thread]["turns"][-1]
+        expected = turn["id"]
+        turn["status"] = "completed"
+        self.store.threads.update(thread, attention="later")
+        stale = self.message(thread)  # External retirement intent is not encoded by this old request.
+        self.sessions.inbox_wake.process_once()
+        BrowserInboxWake(self.sessions).process_once()
+        self.assertEqual(len(self.turns(thread)), 1)
+        self.assertEqual(self.store.threads.get(thread)["attention"], "later")
+        self.assertFalse(any(a["message_id"] == stale["id"] for a in self.attempts()))
+        with self.assertRaisesRegex(CoordinationError, "fresh actionable"):
+            self.sessions.inbox_wake.recover(thread, expected, "sender")
+        self.store.send_message(sender_session_id="sender", recipient_session_id=thread,
+                                body="Inspect old outcomes and do only the newly authorized work",
+                                classification="action_required", reply_required=False)
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(len(self.turns(thread)), 1)  # A fresh peer message alone is not authorization.
+        recovery = worker.control.request("resume", "sender", {"expected_turn_id": expected}, thread_id=thread)
+        worker.process_once()
+        self.assertEqual(worker.control.status(recovery["request_id"])["status"], "completed")
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(len(self.turns(thread)), 2)
+        self.store.inbox(thread)
+        self.finish(thread)
+        self.message(thread)
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(len(self.turns(thread)), 3)  # Ordinary future wakes retain their behavior.
+
+    def test_false_failure_reconciliation_resolves_the_old_failure_deadline(self):
+        worker = AppControlWorker(self.sessions)
+        self.addCleanup(worker.close)
+        request = worker.control.request("create", "sender", {
+            "cwd": str(self.root), "client": "codex", "prompt": "Inspect results"})
+        worker.process_once()
+        thread = worker.control.status(request["request_id"])["thread_id"]
+        self.sessions.inbox_wake.process_once()
+        self.store.inbox(thread)
+        self.finish(thread, "failed")
+        self.sessions.rpc.threads[thread]["turns"][-1]["status"] = "completed"
+        self.message(thread)
+        self.sessions.inbox_wake.process_once()
+        with self.store._connection() as db:
+            followup = db.execute("SELECT * FROM app_agent_followups WHERE thread_id=?", (thread,)).fetchone()
+        self.assertEqual(followup["resolution"], "native_completion")
+        self.assertIsNotNone(followup["resolved_at"])
+
+    def test_automatic_wake_prompt_explicitly_identifies_runtime_provenance(self):
+        self.assertIn("not a human message", WAKE_PROMPT)
+        self.assertIn("generated by the runtime", WAKE_PROMPT)
+
+    def test_native_claude_false_disconnect_requires_matching_prompt_and_successful_stop(self):
+        for proof in ("complete", "wrong_prompt", "wrong_uuid", "prevented", "tool_still_running", "later_prompt", "partial_tail", "late_tool_result"):
+            with self.subTest(proof=proof):
+                thread = self.create("claude")
+                self.sessions.send(thread, {"message": "Inspect the job results"})
+                self.sessions.claude._finish(thread, "failed", "Claude Code disconnected. Send again to resume.")
+                self.message(thread)
+                current = self.store.threads.get(thread)
+                user_id = self.turns(thread)[-1]["items"][0]["id"]
+                stamp = datetime.fromtimestamp(current["turn_started_at"] + 1, timezone.utc).isoformat()
+                entries = [
+                    {"type": "user", "uuid": user_id if proof != "wrong_uuid" else "another-input", "message": {"content": "Inspect the job results" if proof != "wrong_prompt" else "An older request"}},
+                    {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done"}], "stop_reason": "end_turn"}},
+                    {"type": "system", "subtype": "stop_hook_summary", "preventedContinuation": proof == "prevented", "hookErrors": [], "stopReason": ""},
+                ]
+                if proof == "tool_still_running":
+                    entries.append({"type": "api-request"})
+                if proof == "later_prompt":
+                    entries.append({"type": "user", "message": {"content": "New task"}})
+                if proof == "late_tool_result":
+                    entries.append({"type": "user", "message": {"content": [{"type": "tool_result", "content": "Late outcome"}]}})
+                config = self.root / "claude-config"
+                path = config / "projects" / "project" / (thread + ".jsonl")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("\n".join(json.dumps({"sessionId": thread, "timestamp": stamp, **e}) for e in entries) + "\n")
+                if proof == "partial_tail":
+                    with path.open("a") as stream:
+                        stream.write('{"type":"user"')
+                with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(config)}):
+                    BrowserInboxWake(self.sessions).process_once()
+                turns = self.turns(thread)
+                self.assertEqual(len(turns), 1)
+                if proof == "complete":
+                    self.assertEqual(turns[0]["status"], "completed")
+                    self.assertIn("historical inbox work remains paused", self.sessions.work_thread(thread)["wake_pause_reason"])
 
     def test_claim_survives_crash_and_blocks_new_messages_until_user_input(self):
         thread = self.create()
@@ -347,7 +548,9 @@ class BrowserWakeTests(unittest.TestCase):
         self.sessions.rpc.request = fail
         self.sessions.inbox_wake.process_once()
         self.sessions.inbox_wake.process_once()
-        self.assertEqual(self.attempts()[0]["outcome"], "failed")
+        self.assertEqual(self.attempts(), [])  # Rejected before turn/start, not an uncertain submission.
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT pause_kind FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()[0], "pre_submit")
         self.assertEqual(self.store.threads.get(thread)["attention"], "now")
         self.assertEqual(self.turns(thread), [])
 

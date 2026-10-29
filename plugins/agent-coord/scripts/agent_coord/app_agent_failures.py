@@ -162,6 +162,10 @@ def notify_creation_failure(store, db, request):
 def notify_agent_failure(store, thread_id, *, event_key, stage, error=None, turn_id=None):
     with store._connection() as db:
         db.execute("BEGIN IMMEDIATE")
+        if turn_id and db.execute("SELECT 1 FROM turn_stop_requests WHERE thread_id = ? AND turn_id = ?",
+                                  (thread_id, turn_id)).fetchone():
+            # A late callback cannot turn user intent into a failure or recovery deadline.
+            return
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
             return
         request = db.execute("""SELECT * FROM app_control_requests

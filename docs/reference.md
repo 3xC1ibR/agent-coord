@@ -173,11 +173,24 @@ declarations receive the same overlap protection. Repeat `--scope` for each
 path. A comma-separated list is rejected before the declaration changes. For
 a filename that contains a comma, declare its parent directory.
 
+Relative scopes retain the repository base where they were declared. A hook
+from a nested repository refreshes the session without moving that base; relative
+tool targets are resolved from the tool's actual working directory. Release the
+declaration with `end-work` before registering a new scope base. Glob comparisons
+reject provably unrelated names, such as `population.*` and `generator.py`, while
+retaining conflict protection for matching files and directory descendants.
+
 If a newcomer finds an unscoped incumbent, its structured write is denied and
 the incumbent receives one actionable, `reply_required=false` request to
 declare a scope. The incumbent is also denied on its next structured write
 until it declares a scope. Repeated newcomer attempts do not duplicate the
 pending request.
+
+Blocker messages use the saved conversation title and session ID, falling back to
+the session name or ID when no useful title exists. A scoped session in `waiting`
+or `planning` still cannot edit until it declares editing intent. To resume its
+existing work, run `agent-coord set-activity --activity implementing`; this keeps
+the scope and still enforces conflicts and validation leases.
 
 Use `--lease-mode validation` to reserve an exclusive, stable scope without
 granting the session permission to use structured write tools. This is distinct
@@ -254,6 +267,18 @@ a new update. Acknowledgement stays silent.
 The selected runtime's `send --help` must list `deferred`. A plugin refresh alone
 does not upgrade an already-running retained backend; activate the matching
 backend through the normal safe update procedure before using this mode there.
+
+At session start and prompt submission, actionable and deferred bodies precede the
+longer coordination guidance so they appear early in hook previews. The full body
+is preserved, delivery remains once per message, and acknowledgement is still
+explicit. If a client truncates the preview, recover unacknowledged requests with
+`agent-coord inbox --unread`. Labelled automatic browser inbox wakes are excluded
+from the thread's original human request.
+
+SQLite startup contention is retried only during idempotent store initialization,
+before a command runs. After three unsuccessful attempts, the CLI reports a busy
+database error. This does not replay a send or reply, and reopening the store does
+not overwrite wake settings already migrated from the legacy table.
 
 Answer a request with `agent-coord reply --message-id <id> '<response>'`.
 The command derives the recipient and exchange from the original message,
@@ -1971,10 +1996,14 @@ again to replace the cached files even when that version did not change.
 These helpers are repository-owned because Codex manages and may replace its
 `.system` skill bundle; the former `plugin-creator` helpers are not present in
 every Codex installation. Do not put project maintenance dependencies there.
-`install-codex` runs `codex plugin add` and preserves previous cache directories
-even if installation fails. Codex can remove an old version during an update;
-keeping its files prevents missing-hook errors in sessions still using that
-path. Start fresh sessions for live testing of the new version.
+`install-codex` runs `codex plugin add` in a disposable `CODEX_HOME`, then
+atomically publishes the new version and the installer-generated configuration.
+The installer never sees the live cache, so pinned hooks and web assets remain
+available throughout refresh, including installer failure or interruption. Old
+versions are retained; changing an existing payload requires a new cachebuster.
+If unrelated Codex configuration changes during installation, the helper refuses
+to overwrite it; retry the refresh. Start fresh sessions for live testing of the
+new version.
 
 Verify that both installed copies contain the source files. The following
 continues from the variables above and ignores generated Python bytecode:

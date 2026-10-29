@@ -47,6 +47,8 @@ class EntrypointTests(unittest.TestCase):
         self.addCleanup(os.close, self.owner)
         self.status = {"instance": "test-instance", "database": str(self.database),
                        "protocol": runtime.PROTOCOL_VERSION, "payload": str(self.payload)}
+        self.actions = []
+        self.legacy_owner = False
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -56,9 +58,13 @@ class EntrypointTests(unittest.TestCase):
                         or body.get("instance") != "test-instance"):
                     self.send_error(403)
                     return
+                fixture.actions.append(body.get("action"))
+                result = fixture.status
+                if fixture.legacy_owner and body.get("action") == "identity":
+                    result = {**fixture.status, "error": "Unknown runtime control action."}
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(json.dumps(fixture.status).encode())
+                self.wfile.write(json.dumps(result).encode())
 
             def log_message(self, *_):
                 pass
@@ -106,6 +112,32 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("hookSpecificOutput", response)
         self.assertIn("entrypoint-test", export.read_text())
         self.assertIn(str(self.backend), export.read_text())
+
+    def test_owner_routing_uses_one_identity_probe_without_status(self):
+        result = self.invoke("agent-coord", "status")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.actions, ["identity"])
+
+    def test_legacy_owner_falls_back_only_for_authenticated_unsupported_action(self):
+        self.legacy_owner = True
+        result = self.invoke("agent-coord", "status")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.actions, ["identity", "status"])
+        self.legacy_owner = False
+        self.actions.clear()
+        self.status["error"] = "Owner identity rejected."
+        result = self.invoke("agent-coord", "status")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.actions, ["identity"])
+
+    def test_identity_protocol_and_instance_must_match(self):
+        for invalid in ({"protocol": -1}, {"instance": "other-instance"}):
+            with self.subTest(invalid=invalid):
+                original = dict(self.status)
+                self.status.update(invalid)
+                result = self.invoke("agent-coord", "status")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.status = original
 
     def test_mcp_checkpoint_works_without_retained_mcp_executable(self):
         request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {

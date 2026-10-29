@@ -84,8 +84,7 @@ test("failed renames retain the draft and allow retrying", async () => {
   await assert.rejects(c.saveTitleEdit(), /Connection lost/);
   assert.equal(c.$("rename-name").value, "Keep this draft");
   assert.equal(c.$("rename-name").disabled, false);
-  assert.equal(c.$("save-rename").disabled, false);
-  assert.equal(c.$("cancel-rename").disabled, false);
+  assert.match(c.$("rename-hint").textContent, /Couldn’t save the title.*Connection lost/);
   assert.equal(c.$("rename-form").hidden, false);
 });
 
@@ -317,6 +316,48 @@ test("card fork uses its source and opens the result unless the user navigates a
     }
   }
 });
+
+
+test("blur saving leaves focus at the user's chosen destination", async () => {
+  const c = setup(); c.startTitleEdit(); c.$("rename-name").value = "Autosaved title";
+  c.focused = "composer"; c.api = async () => {};
+  await c.saveTitleEdit({focus: false});
+  assert.equal(c.focused, "composer"); assert.equal(c.$("session-name").textContent, "Autosaved title");
+});
+
+test("a failed title draft survives navigation and can be explicitly discarded", async () => {
+  const c = setup(); c.startTitleEdit(); c.$("rename-name").value = "Keep failed draft";
+  c.api = async () => {throw Error("Offline");};
+  await assert.rejects(c.saveTitleEdit({focus: false}), /Offline/);
+  c.state.titleEdit = null; c.startTitleEdit();
+  assert.equal(c.$("rename-name").value, "Keep failed draft");
+  assert.match(c.$("rename-hint").textContent, /Offline/);
+  c.cancelTitleEdit(); c.startTitleEdit(); assert.equal(c.$("rename-name").value, "Original title");
+});
+
+test("leaving an unchanged title does not issue a save request", async () => {
+  const c = setup(); c.startTitleEdit(); c.api = async () => assert.fail("No change");
+  await c.saveTitleEdit({focus: false}); assert.equal(c.state.titleEdit, null);
+});
+
+
+test("a navigation save completing later cannot erase or replace a newer draft for that thread", async () => {
+  for (const fails of [false, true]) {
+    const c = setup(); c.startTitleEdit(); c.$("rename-name").value = "First save";
+    let resolve, reject;
+    c.api = () => new Promise((done, fail) => { resolve = done; reject = fail; });
+    const saving = c.saveTitleEdit({focus: false});
+    c.state.titleEdit = null; // Navigate away, then reopen the same thread before save resolves.
+    c.startTitleEdit(); c.$("rename-name").value = "Newer draft";
+    const newer = {value: "Newer draft"}; c.state.titleDrafts.set("one", newer);
+    if (fails) { reject(new Error("First save failed")); await assert.rejects(saving, /First save failed/); }
+    else { resolve(); await saving; }
+    assert.equal(c.state.titleDrafts.get("one"), newer);
+    assert.equal(c.$("rename-name").value, "Newer draft");
+    assert.equal(c.$("rename-form").hidden, false);
+  }
+});
+
 
 test("the header menu lists visible thread actions and runs the original controls", () => {
   const buttons = [

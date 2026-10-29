@@ -114,7 +114,12 @@ def _extract_paths(payload: dict[str, Any], cwd: str) -> tuple[list[str], bool]:
     has_outside = False
     for value in values:
         try:
-            in_repo.add(normalize_target_path(value, cwd))
+            # The hook's cwd locates relative tool targets; the registered cwd
+            # remains the base of a live declaration even inside a nested repo.
+            target = Path(value)
+            if not target.is_absolute():
+                target = Path(payload.get("cwd") or cwd) / target
+            in_repo.add(normalize_target_path(str(target), cwd))
         except CoordinationError:
             # Paths outside the registered repository are outside Agent Coord
             # ownership; they are reported so the gate can pass them through.
@@ -326,7 +331,8 @@ def handle(
     if event == "UserPromptSubmit":
         if browser:
             prompt = payload.get("prompt")
-            if isinstance(prompt, str):
+            if (isinstance(prompt, str) and prompt.strip() != WAKE_PROMPT
+                    and not prompt.lstrip().startswith("[Automatic Agent Coord inbox wake — not a human message]")):
                 coordination.threads.capture_request(session_id, prompt)
         else:
             coordination.threads.start_turn(session_id, prompt=payload.get("prompt"), turn_id=payload.get("turn_id"))
@@ -347,7 +353,7 @@ def handle(
         )
         messages = _actionable_context(coordination, session_id, event)
         if messages:
-            text += "\n\n" + messages
+            text = messages + "\n\n" + text
         return _context(event, text) if text else {}
 
     if event == "SessionStart":
@@ -404,7 +410,7 @@ def handle(
         ) + text
         formatted = _actionable_context(coordination, session_id, event)
         if formatted:
-            text += "\n\n" + formatted
+            text = formatted + "\n\n" + text
         return _context(event, text)
 
     # Browser runtime events own turn liveness. Late tool/prompt hooks from an

@@ -321,14 +321,24 @@ def discover(database, *, timeout=25):
     if record.get("database") != str(Path(database).resolve()):
         raise RuntimeError("Runtime discovery refers to another database.")
     try:
-        status = control(record, "status", timeout=timeout)
+        try:
+            status = control(record, "identity", timeout=timeout)
+        except RuntimeError as exc:
+            # Older retained runtimes predate the lightweight handshake. Only
+            # their authenticated unsupported-action response permits fallback;
+            # authentication, identity and transport failures still fail closed.
+            if str(exc) != "Unknown runtime control action.":
+                raise
+            status = control(record, "status", timeout=timeout)
     except (OSError, ValueError, RuntimeError):
         if not owner_available(directory):
             raise RuntimeError("The runtime owner is unavailable. Refusing a second owner.")
         return None
     if status.get("protocol") != PROTOCOL_VERSION:
         raise RuntimeError("The running runtime is incompatible with this desktop.")
-    return record
+    # A stale discovery payload is never authority to load client code. Use
+    # the payload authenticated by this instance, without another status scan.
+    return {**record, "payload": status.get("payload")}
 
 
 def bootstrap(database, resources, *, start_paused=False):
@@ -386,16 +396,25 @@ class Runtime:
         self.explicit_stop = False
         self.server = None
 
-    def status(self):
-        return {"status": "serving", "database": self.database, "instance": self.instance,
+    def identity(self):
+        """Immutable owner identity; independent of readiness and session locks."""
+        return {"database": self.database, "instance": self.instance,
                 "protocol": PROTOCOL_VERSION, "schema": SCHEMA_VERSION, "pid": os.getpid(),
-                "url": f"http://127.0.0.1:{self.server.server_port}/", "payload": str(self.payload),
+                "payload": str(self.payload)}
+
+    def status(self):
+        return {**self.identity(), "status": "serving",
+                "url": f"http://127.0.0.1:{self.server.server_port}/",
                 "pending": str(self.pending) if self.pending else None, "upgrade_error": self.error,
                 "paused": self.server.browser_sessions.admission.paused,
                 "busy": readiness(self.server.browser_sessions)}
 
     def dispatch(self, body):
         action = body.get("action")
+        if action == "identity":
+            # The control handler has already authenticated token + instance.
+            # Readiness is required for handover, not for routing a hook/CLI.
+            return self.identity()
         with self.mutex:
             sessions = self.server.browser_sessions
             if action == "attach":

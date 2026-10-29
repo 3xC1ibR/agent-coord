@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -149,7 +150,17 @@ class DesktopPackagingTests(unittest.TestCase):
             self.assertIn("agent_coord/web/notifications.js", snapshot)
             self.assertFalse(any("__pycache__" in path for path in snapshot))
             for relative in snapshot:
-                self.assertEqual((root / "backend" / relative).read_bytes(), (build.SCRIPTS / relative).read_bytes())
+                data = (root / "backend" / relative).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), snapshot[relative])
+                if relative not in {"agent_coord/web/index.html", "agent_coord/web/app.js", "agent_coord/web/styles.css"}:
+                    self.assertEqual(data, (build.SCRIPTS / relative).read_bytes())
+            web = root / "backend/agent_coord/web"
+            index, application = (web / "index.html").read_text(), (web / "app.js").read_text()
+            for name in ("html-preview.js", "response-actions.js", "permission-menu.js"):
+                self.assertNotIn(f'src="/{name}"', index)
+                self.assertIn((build.SCRIPTS / "agent_coord/web" / name).read_text(), application)
+            self.assertNotIn('href="/html-preview.css"', index)
+            self.assertIn((build.SCRIPTS / "agent_coord/web/html-preview.css").read_text(), (web / "styles.css").read_text())
 
     def test_packaged_kimi_hook_runs_and_prompt_guidance_exists(self):
         for standalone in (False, True):
