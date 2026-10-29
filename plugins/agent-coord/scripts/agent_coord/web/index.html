@@ -44,6 +44,8 @@
   <script src="/push-notifications.js" defer></script>
   <script src="/navigation.js" defer></script>
   <script src="/markdown.js" defer></script>
+  <script src="/html-preview.js" defer></script>
+  <link rel="stylesheet" href="/html-preview.css">
   <script src="/openui.js" defer></script>
   <link rel="stylesheet" href="/openui.css">
   <script src="/image-attachments.js" defer></script>
@@ -386,5 +388,6 @@
     </div>
   </dialog>
   <div id="send-work-notice" role="status" aria-live="polite" hidden></div>
+  <dialog id="html-preview-dialog" class="html-preview-dialog" aria-label="HTML output"><iframe id="html-preview-window" title="HTML output" referrerpolicy="no-referrer"></iframe></dialog>
 </body>
 </html>

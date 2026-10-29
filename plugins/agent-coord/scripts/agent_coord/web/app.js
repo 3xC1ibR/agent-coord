@@ -1,6 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const state = {config: null, sessions: [], organization: {repositories: [], projects: []}, selected: null, detail: null, drafts: new Map(), closing: new Set(), pinning: new Set(), updatingThreads: new Set(), groupExpansion: new Map(), phaseScroll: new Map(), commandFeedback: new Map(), busy: false, listSignature: ""};
+window.HTMLPreview?.bind(document, () => state.selected);
 state.threadActions = createThreadActions(document, window);
 let notifications;
 let savedViews;

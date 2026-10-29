@@ -60,6 +60,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Labelled native inputs | Dates, filters, grouping |
 | Table with row links | Comparable records and drilldown |
 | Inline status/error | Loading, coverage, retry feedback |
+| HTML output viewer | Existing file-link action opens a full-height preview using the auxiliary-page dialog pattern; closing preserves the conversation and draft underneath |
 | Native confirmation dialog | Clear local Activity history |
 
 ## Do's and Don'ts
@@ -95,3 +96,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | --- | --- | --- |
 | 2026-10-28 | Document existing tokens and standalone page grammar | Preserve the current design while adding user-approved Activity. |
 | 2026-10-28 | Activity uses shared queries and a shell-owned visit recorder | Comparable reports without duplicated pane counts or inferred attention time. |
+| 2026-10-29 | Browser HTML links open an auxiliary output viewer | Let paired phones read agent output using existing typography, colors, and quiet controls. |

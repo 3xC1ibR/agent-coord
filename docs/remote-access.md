@@ -98,6 +98,25 @@ temporary failures and remove expired push subscriptions. Outgoing requests
 use only recognized Apple, Chrome, and Firefox push providers; no public
 incoming endpoint or developer account is required.
 
+## View linked HTML output
+
+Tap an HTML file link in a conversation to open its preview, then choose **Back
+to conversation** to return. This works in Safari, the Home Screen app, and the
+iOS companion. The Mac must remain online and the device must still be paired.
+Desktop file links continue to use the native file opener.
+
+Previews read UTF-8 `.html` and `.htm` files up to 8 MB within the conversation's
+project, including relative links and absolute paths within that project.
+Symlinks cannot escape the project. Self-contained HTML, inline scripts, and
+public HTTPS scripts, styles, images, and fonts are supported. Separate local
+supporting files, network API calls, forms, and nested pages are not supported;
+ask the agent for a self-contained HTML file when needed. Preview scripts cannot
+read Ribbon Field's parent page, cookies, storage, or APIs.
+
+If the preview says an updated backend is needed, an installed app update may
+still be waiting for running work to finish. Replacing the interface alone does
+not activate backend routes.
+
 ## Manage paired devices
 
 **Remote access** on the Mac lists paired devices. **Revoke** removes that

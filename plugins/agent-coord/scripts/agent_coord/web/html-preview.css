@@ -1,0 +1,21 @@
+/* Module dimensions follow the existing auxiliary-page spacing and touch targets. */
+:root {
+  --preview-gap: 12px; /* drift-ok: module-local row spacing from DESIGN.md. */
+  --preview-pad: 12px; /* drift-ok: module-local row spacing from DESIGN.md. */
+  --preview-title: 14px; /* drift-ok: shared body typography from DESIGN.md. */
+  --preview-weight: 600;
+  --preview-line: 1px; /* drift-ok: shared thin divider from DESIGN.md. */
+  --preview-hit: 44px; /* drift-ok: existing auxiliary-page touch target. */
+  --preview-height: 100dvh; /* drift-ok: full-height output view preserves the conversation underneath. */
+}
+.html-preview-dialog { width: 100%; height: var(--preview-height); max-width: none; max-height: none; margin: 0; padding: 0; border: 0; border-radius: 0; }
+.html-preview-dialog > iframe { display: block; width: 100%; height: 100%; border: 0; }
+body.html-preview-page { display: flex; flex-direction: column; background: var(--paper); color: var(--ink); }
+.html-preview-header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--preview-gap); padding: var(--preview-pad); border-bottom: var(--preview-line) solid var(--line); }
+.html-preview-header h1 { margin: 0; font-size: var(--preview-title); font-weight: var(--preview-weight); overflow-wrap: anywhere; min-width: 0; }
+.html-preview-header button { min-height: var(--preview-hit); flex-shrink: 0; }
+.html-preview-content { display: block; flex: 1; min-height: 0; padding: 0; }
+#preview-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--surface); }
+#preview-status { margin: var(--preview-pad); color: var(--muted); overflow-wrap: anywhere; }
+#preview-status[role="alert"] { color: var(--danger); }
+#preview-retry { margin: var(--preview-pad); min-height: var(--preview-hit); }

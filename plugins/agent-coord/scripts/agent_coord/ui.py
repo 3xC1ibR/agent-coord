@@ -299,6 +299,9 @@ def _handler(
                 query = parse_qs(parsed.query)
                 openui_frame = (status == HTTPStatus.OK and content_type.startswith("text/html")
                                 and parsed.path == "/openui-frame.html")
+                html_preview = (status == HTTPStatus.OK and content_type.startswith("text/html")
+                                and parsed.path.startswith("/api/browser/html-preview-content/"))
+                from .html_preview import PREVIEW_CSP
                 # WebKit resolves 'self' to the sandbox's opaque origin and
                 # blocks even this document's own scripts/styles. Pin assets to
                 # the validated server origin instead; the frame stays opaque.
@@ -307,12 +310,13 @@ def _handler(
                                  if openui_frame else "")
                 embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
                             and ((parsed.path == "/" and query.get("pane") == ["1"])
-                                 or (parsed.path in {"/settings", "/usage", "/activity"} and query.get("embedded") == ["1"]))
+                                 or (parsed.path in {"/settings", "/usage", "/activity", "/html-preview"} and query.get("embedded") == ["1"]))
                             and self._authorized())
-                self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame else "DENY")
+                self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame or html_preview else "DENY")
                 self.send_header(
                     "Content-Security-Policy",
-                    (f"default-src 'none'; script-src {openui_origin}; style-src {openui_origin} 'unsafe-inline'; "
+                    (PREVIEW_CSP if html_preview else
+                     f"default-src 'none'; script-src {openui_origin}; style-src {openui_origin} 'unsafe-inline'; "
                      "img-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; "
                      "form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts"
                      if openui_frame else "default-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -368,6 +372,11 @@ def _handler(
                 return
             if not self._authorized():
                 self._json(HTTPStatus.UNAUTHORIZED, {"error": "Pair this device using a fresh link from your Mac."})
+                return
+            if parsed.path in {"/html-preview", "/html-preview.js", "/html-preview.css"}:
+                asset = "html-preview.html" if parsed.path == "/html-preview" else parsed.path[1:]
+                content_type = {"html": "text/html", "js": "text/javascript", "css": "text/css"}[asset.rsplit(".", 1)[1]]
+                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / asset).read_bytes())
                 return
             if parsed.path == "/api/browser/native-push/status" and native_push is not None:
                 device = remote_access.device_id(self.headers.get("Cookie", "")) if self._remote_request() else None
@@ -525,6 +534,27 @@ def _handler(
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "desktop-projects":
                 self._json(HTTPStatus.OK, browser_sessions.desktop_projects())
+            elif route == "html-preview" or route.startswith("html-preview-content/"):
+                from .html_preview import read_html
+                content = route.startswith("html-preview-content/")
+                if content:
+                    parts = route.split("/")
+                    if len(parts) != 3:
+                        raise CoordinationError("Choose a conversation and HTML file to preview.")
+                    thread_id, file_path = map(unquote, parts[1:])
+                else:
+                    if set(query) != {"thread", "path"} or any(len(value) != 1 for value in query.values()):
+                        raise CoordinationError("Choose a conversation and HTML file to preview.")
+                    thread_id, file_path = query["thread"][0], query["path"][0]
+                # Read saved metadata only. Opening output must not resume an agent.
+                thread = store.threads.get(thread_id, history=False)
+                if not matches_workspace(thread["cwd"], browser_sessions.cwd):
+                    raise CoordinationError("Work thread not found in this workspace.")
+                result = read_html(thread["cwd"], file_path)
+                if content:
+                    self._send(HTTPStatus.OK, "text/html; charset=utf-8", result["html"].encode("utf-8"))
+                else:
+                    self._json(HTTPStatus.OK, {"name": result["name"]})
             elif route == "provider-usage":
                 self._json(HTTPStatus.OK, provider_limits.snapshot())
             elif route == "workspaces":
