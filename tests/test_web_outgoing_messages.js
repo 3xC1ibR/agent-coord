@@ -7,8 +7,10 @@ const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const OutgoingMessages = require("../plugins/agent-coord/scripts/agent_coord/web/outgoing-messages.js");
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+// The class lives in app.js so that any runtime serving app.js also serves it.
+const OutgoingMessages = vm.runInThisContext(source.slice(source.indexOf("class OutgoingMessages {"),
+  source.indexOf("function renderTimeline() {")) + "; OutgoingMessages");
 
 class FakeElement {
   constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.textContent = ""; this.className = ""; this.parent = null; }
