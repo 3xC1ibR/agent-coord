@@ -439,3 +439,23 @@ test("Overview offers one dropdown/context menu without navigating until a layou
   assert.equal(opened.length,4); assert(opened.every(call => call.anchor === arrow)); assert.deepEqual(visits,[]);
   tab.onclick(); assert.deepEqual(visits,[null]);
 });
+
+test("tab ownership includes saved project working sets this window has not displayed", () => {
+  const values = new Map();
+  const storage = {getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value),
+    get length() { return values.size; }, key: index => [...values.keys()][index] ?? null};
+  const saved = new ThreadTabs({storage, scope: ":0"});
+  saved.setProject("/billing"); saved.open(thread("owned"));
+  saved.setProject("/other"); saved.open(thread("visible"));
+  new ThreadTabs({storage, scope: ":1"}).setProject("/billing");
+  values.set("agent-coord.thread-tabs.:10:/billing", JSON.stringify({items: [thread("other-window")]}));
+  const restored = new ThreadTabs({storage, scope: ":1"});
+  restored.setProject("/billing");
+  assert.equal(restored.has("owned"), false);
+  const reopened = new ThreadTabs({storage, scope: ":0"});
+  reopened.setProject("/other");
+  assert.equal(reopened.has("visible"), true);
+  assert.equal(reopened.has("owned"), true);
+  assert.equal(reopened.has("other-window"), false);
+  assert.equal(reopened.has(""), false);
+});

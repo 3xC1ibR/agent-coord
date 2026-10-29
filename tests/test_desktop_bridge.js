@@ -409,6 +409,42 @@ test("existing turn notifications request native permission and keep thread clic
   client.destroy();
 });
 
+test("notification clicks routed natively to the owning window do not open a second tab", async () => {
+  const {env, messages} = fixture();
+  await settle();
+  const opened = [];
+  const button = {setAttribute() {}};
+  const client = new TurnNotifications({button, claim: async () => true, selected: () => null,
+    openThread: async id => opened.push(id), onError: error => { throw error; }}, env);
+  await button.onclick();
+  await client.receive([{id: 7, thread_id: "thread-owned", title: "Finish review", status: "completed"},
+    {id: 8, thread_id: "bad thread/id", title: "Unsafe identifier", status: "completed"}]);
+  await settle();
+  const [routed, unsafe] = messages.filter(m => m.action === "notify");
+  assert.equal(routed.thread, "thread-owned");
+  assert.equal("thread" in unsafe, false);
+  env.__agentCoordNotificationClick(routed.id, true);
+  env.__agentCoordNotificationClick(routed.id);
+  await settle();
+  assert.deepEqual(opened, []);
+  client.destroy();
+});
+
+test("windows report conversation tabs across project working sets and tiled panes", () => {
+  const {env} = fixture();
+  assert.equal(env.agentCoordHasConversation("thread-one"), false);
+  const tabs = new ThreadTabs({storage: env.localStorage, scope: ":native-0"});
+  tabs.setProject("/billing"); tabs.open({thread_id: "thread-one", title: "First"});
+  tabs.setProject("/other");
+  env.state = {threadTabs: tabs};
+  assert.equal(env.agentCoordHasConversation("thread-one"), true);
+  assert.equal(env.agentCoordHasConversation("thread-two"), false);
+  env.agentCoordPanes = {active: true, layout: {groups: [["thread-two"]]}};
+  assert.equal(env.agentCoordHasConversation("thread-two"), true);
+  env.agentCoordPanes.active = false;
+  assert.equal(env.agentCoordHasConversation("thread-two"), false);
+});
+
 test("denied notifications never reach the native delivery handler", async () => {
   const {env, messages} = fixture({}, "denied");
   await settle();

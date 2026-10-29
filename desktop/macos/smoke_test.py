@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--sessions-only", action="store_true", help="Run focused native session-switching checks.")
     parser.add_argument("--detach-only", action="store_true", help="Run focused native conversation-detachment checks.")
     parser.add_argument("--scratchpad-only", action="store_true", help="Run focused project scratchpad checks.")
+    parser.add_argument("--notifications-only", action="store_true", help="Run focused multi-window notification routing checks.")
     parser.add_argument("--attribution-only", action="store_true", help="Verify the native download-token handoff without sending telemetry.")
     parser.add_argument("--runtime-only", action="store_true", help="Quit and reconnect two native interfaces to the same detached runtime.")
     args = parser.parse_args()
@@ -51,6 +52,8 @@ def main() -> int:
         command.append("--smoke-scratchpad-only")
     if args.attribution_only:
         command.append("--smoke-attribution-only")
+    if args.notifications_only:
+        command.append("--smoke-notifications-only")
     if args.runtime_only:
         command += ["--smoke-runtime-only", "--smoke-preserve-runtime"]
     first = None
@@ -109,6 +112,8 @@ def main() -> int:
                 "cold_start_link_queued", "app_link_project_filter", "app_link_source_window",
                 "app_link_acknowledged", "app_link_back_preserves_draft", "app_link_saved_view_unchanged",
                 "app_link_closed_window_fallback",
+                "notification_reveals_existing_tab", "notification_preserves_draft",
+                "notification_restores_minimized_owner", "notification_recent_window_fallback",
                 "next_session_shortcut", "previous_session_shortcut",
                 "next_session_wraps_in_filtered_view", "previous_session_wraps_and_preserves_draft",
                 "next_session_tiled_shortcut", "next_session_selects_stacked_tab",
@@ -142,6 +147,8 @@ def main() -> int:
             continue
         if args.scratchpad_only and not (key.startswith("project_scratchpad_") or key == "ui_loaded"):
             continue
+        if args.notifications_only and not (key.startswith("notification_") or key in {"ui_loaded", "multiple_windows"}):
+            continue
         if result.get(key) is not True:
             raise RuntimeError(f"Native behavior check failed: {key}")
     if not stopped(result["backend_pid"]):
@@ -154,10 +161,10 @@ def main() -> int:
     result["backend_exited_on_quit"] = True
     report.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
-    if not args.sessions_only and not args.scratchpad_only and not args.detach_only:
+    if not args.sessions_only and not args.scratchpad_only and not args.detach_only and not args.notifications_only:
         print(f"File browser: {report}.files.png")
         print(f"Collapsed file browser: {report}.files-collapsed.png")
-    if not args.files_only and not args.sessions_only and not args.scratchpad_only and not args.detach_only:
+    if not args.files_only and not args.sessions_only and not args.scratchpad_only and not args.detach_only and not args.notifications_only:
         print(f"Screenshot: {report}.png")
         print(f"Command palette: {report}.palette.png")
     return 0

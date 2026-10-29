@@ -98,7 +98,7 @@ class TurnNotifications {
     if (this.closed || !this.enabled() || quiet || this.viewing(event.thread_id)) return;
     const label = event.status === "question" ? "Answer needed" : approval ? (event.client === "muse" ? "Muse Code" : event.client === "kimi" ? "Kimi" : event.client === "antigravity" ? "Antigravity" : event.client === "claude" ? "Claude" : "Codex") + " is requesting approval" : snooze ? "Reminder" : event.status === "failed" ? "Turn failed" : "Turn finished";
     const notification = new this.env.Notification(`${event.project_name || event.repository_name || "Ribbon Field"} · ${label}`, {
-      body: event.title, tag: approval ? "agent-coord-approval-" + event.request_key : (snooze ? "agent-coord-snooze-" : "agent-coord-turn-") + event.id,
+      body: event.title, data: {thread_id: event.thread_id}, tag: approval ? "agent-coord-approval-" + event.request_key : (snooze ? "agent-coord-snooze-" : "agent-coord-turn-") + event.id,
     });
     notification.onclick = async () => {
       this.env.focus();

@@ -57,6 +57,24 @@ class ThreadTabs {
     else this.items.push({...thread, title: thread.title || "Conversation"});
     this.selected = thread.thread_id; this.save(true); this.render(); this.reveal(this.selected);
   }
+  // Includes saved project working sets that this window has not displayed yet.
+  has(id) {
+    if (!id) return false;
+    const matches = items => Array.isArray(items) && items.some(item => item?.thread_id === id);
+    for (const items of this.projects.values()) if (matches(items)) return true;
+    const prefix = this.baseKey + ":";
+    for (const storage of [this.storage, this.fallbackStorage]) {
+      try {
+        for (let index = 0; index < (storage?.length || 0); index++) {
+          const key = storage.key(index);
+          if (!key?.startsWith(prefix) || this.projects.has(key.slice(prefix.length))) continue;
+          const saved = JSON.parse(storage.getItem(key));
+          if (matches(Array.isArray(saved) ? saved : saved?.items)) return true;
+        }
+      } catch { /* Optional window state. */ }
+    }
+    return false;
+  }
   conversationFor(id) { return this.items.find(item => item.thread_id === id)?.conversation_id || id; }
   selectConversation(tabId, conversationId) {
     const item = this.items.find(item => item.thread_id === tabId);

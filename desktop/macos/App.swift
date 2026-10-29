@@ -50,6 +50,8 @@ private final class DesktopWindow {
     let split = NSSplitViewController()
     var filesItem: NSSplitViewItem?
     var fileTarget = ""
+    // Increases whenever this window becomes key; ranks most recent use.
+    var activation = 0
 
     init(window: NSWindow, webView: WKWebView, status: NSStackView, label: NSTextField,
          spinner: NSProgressIndicator, retry: NSButton) {
@@ -68,6 +70,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         var finishing = false
     }
     private var conversationTransfers: [String: ConversationTransfer] = [:]
+    private var activations = 0
     // Share local storage (including notification focus) while each web view
     // retains its own session storage, selected thread, and message drafts.
     private let websiteDataStore = WKWebsiteDataStore.nonPersistent()
@@ -445,6 +448,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             } else { transfer.source?.closeAfterConversationTransfer = false }
             reply(true, nil)
         }
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let item = windows.first(where: { $0.window === notification.object as? NSWindow }) else { return }
+        activations += 1
+        item.activation = activations
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -894,7 +903,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             content.title = String(title.prefix(256))
             content.body = String(text.prefix(2000))
             content.sound = .default
-            content.userInfo = ["desktopWindow": owner.id]
+            var info: [String: Any] = ["desktopWindow": owner.id]
+            if let thread = body["thread"] as? String, isThreadIdentifier(thread) { info["thread"] = thread }
+            content.userInfo = info
             center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil)) { error in
                 replyHandler(error == nil, error?.localizedDescription)
             }
@@ -922,15 +933,66 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         DispatchQueue.main.async {
-            let target = self.windows.first { $0.id == response.notification.request.content.userInfo["desktopWindow"] as? String } ?? self.current
-            target?.window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            let id = response.notification.request.identifier
-            if let data = try? JSONSerialization.data(withJSONObject: [id]), let json = String(data: data, encoding: .utf8) {
-                target?.webView.evaluateJavaScript("window.__agentCoordNotificationClick?.(\(json)[0])")
-            }
+            self.activateNotification(response.notification.request.identifier,
+                info: response.notification.request.content.userInfo)
             completionHandler()
         }
+    }
+
+    private func activateNotification(_ id: String, info: [AnyHashable: Any], completion: ((DesktopWindow?) -> Void)? = nil) {
+        let poster = windows.first { $0.id == info["desktopWindow"] as? String }
+        let click = { (routed: Bool) in
+            poster?.webView.callAsyncJavaScript("window.__agentCoordNotificationClick?.(id, routed)",
+                arguments: ["id": id, "routed": routed], in: nil, in: .page) { _ in }
+        }
+        // The posting window only won the delivery claim. Open the thread
+        // where its tab already is instead of in that window.
+        if let thread = info["thread"] as? String, isThreadIdentifier(thread) {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+            click(true)
+            revealThread(thread, completion: completion)
+        } else {
+            let target = poster ?? current
+            target?.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            if target === poster { click(false) }
+            completion?(target)
+        }
+    }
+
+    private func isThreadIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 200 &&
+            value.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "_.~-".unicodeScalars.contains($0)) }
+    }
+
+    // Prefer the most recently focused window that already has the thread's
+    // tab; otherwise use the most recently focused main workspace window.
+    private func revealThread(_ thread: String, completion: ((DesktopWindow?) -> Void)? = nil) {
+        let candidates = windows.enumerated()
+            .filter { !$0.element.isSettings && $0.element.webView.url?.path != "/monitor" }
+            .sorted { ($0.element.activation, $0.offset) > ($1.element.activation, $1.offset) }
+            .map(\.element)
+        var owners = Set<ObjectIdentifier>(), remaining = 1, finished = false
+        let finish = { [weak self] in
+            guard let self = self, !finished else { return }
+            finished = true
+            let live = candidates.filter { item in self.windows.contains { $0 === item } }
+            let target = live.first { owners.contains(ObjectIdentifier($0)) } ?? live.first { !$0.isConversationWindow } ?? live.first
+            self.openAppLink(URL(string: "agentcoord://thread/" + thread)!, preferred: target)
+            completion?(target)
+        }
+        let answered = { remaining -= 1; if remaining == 0 { finish() } }
+        for item in candidates where item.navigationReady {
+            remaining += 1
+            item.webView.callAsyncJavaScript("return window.agentCoordHasConversation?.(thread) === true",
+                arguments: ["thread": thread], in: nil, in: .page) { result in
+                if case .success(let value) = result, value as? Bool == true { owners.insert(ObjectIdentifier(item)) }
+                answered()
+            }
+        }
+        answered()
+        // A busy page must not make the notification appear to do nothing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: finish)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -1131,6 +1193,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try await smokeReady(second)
         try smokeCheck("multiple_windows", windows.count == 2 && first.webView !== second.webView)
         try await smokeWorkingFolders(first, second)
+        if CommandLine.arguments.contains("--smoke-notifications-only") {
+            try await smokeNotificationRouting(first, second)
+            finishSmoke(error: nil)
+            return
+        }
         if CommandLine.arguments.contains("--smoke-scratchpad-only") {
             _ = try await smokeJS("await switchProject(); return true;", in: second.webView)
             try await smokeFocus(second)
@@ -1382,6 +1449,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try smokeCheck("new_session_button_and_shortcut_match", sameNewSessionAction as? Bool == true)
         try await smokeRollUp(first)
         try await smokeNavigation(first, second)
+        try await smokeNotificationRouting(first, second)
 
         second.window.close()
         try smokeCheck("secondary_window_closed", windows.count == 1 && second.window.contentView == nil)
@@ -1537,6 +1605,73 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return restored.selected.cwd === expected && state.folders.selected.cwd === expected;
             """, in: first.webView)
         try smokeCheck("working_folder_restored", restored as? Bool == true)
+    }
+
+    @MainActor private func smokeNotificationRouting(_ first: DesktopWindow, _ second: DesktopWindow) async throws {
+        let root = smokeDirectory!.resolvingSymlinksInPath()
+        let folder = root.appendingPathComponent("Working folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        _ = try smokePython("""
+            import sys
+            from agent_coord.store import CoordinationStore
+            store = CoordinationStore(sys.argv[1])
+            for name, cwd in [('notify-owned', sys.argv[2]), ('notify-other', sys.argv[3]), ('notify-fresh', sys.argv[3])]:
+                store.register(session_id=name, client='codex', cwd=cwd)
+                store.threads.update(name, title=name)
+            print('{}')
+            """, arguments: [folder.path, root.path])
+        let data = try JSONSerialization.data(withJSONObject: [folder.path, root.path])
+        let paths = String(data: data, encoding: .utf8)!
+        // The second window owns the thread's tab but currently shows another project.
+        _ = try await smokeJS("""
+            const paths = \(paths);
+            await refreshList(); await openProjectDirectory(paths[0]); await select('notify-owned');
+            const field = document.querySelector('#message');
+            field.value = 'Owned notification draft'; field.dispatchEvent(new Event('input', {bubbles: true}));
+            await openProjectDirectory(paths[1]); await select('notify-other');
+            return true;
+            """, in: second.webView)
+        _ = try await smokeJS("const paths = \(paths); await refreshList(); await openProjectDirectory(paths[0]); goHome(); return true;", in: first.webView)
+        func activate(_ thread: String, poster: DesktopWindow) async -> DesktopWindow? {
+            await withCheckedContinuation { continuation in
+                activateNotification(UUID().uuidString, info: ["desktopWindow": poster.id, "thread": thread]) {
+                    continuation.resume(returning: $0)
+                }
+            }
+        }
+        let shown = """
+            for (let i = 0; i < 120; i++) {
+              if (state.selected === thread && !navigation.applying) break;
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            return {selected: state.selected, project: state.projectCwd, draft: document.querySelector('#message').value,
+              tabs: state.threadTabs.items.filter(item => item.thread_id === thread).length};
+            """
+        let absent = "return state.threadTabs.has(thread) === false && state.selected !== thread;"
+        // The first window is focused and posted the alert: the old destination.
+        try await smokeFocus(first)
+        let owner = await activate("notify-owned", poster: first)
+        let owned = try await smokeJS(shown, in: second.webView, arguments: ["thread": "notify-owned"]) as? [String: Any]
+        let untouched = try await smokeJS(absent, in: first.webView, arguments: ["thread": "notify-owned"])
+        smokeResults["notification_owner_debug"] = owned ?? [:]
+        try smokeCheck("notification_reveals_existing_tab", owner === second && current === second &&
+            owned?["selected"] as? String == "notify-owned" && owned?["tabs"] as? Int == 1 &&
+            (owned?["project"] as? String)?.hasSuffix("/Working folder") == true && untouched as? Bool == true)
+        try smokeCheck("notification_preserves_draft", owned?["draft"] as? String == "Owned notification draft")
+        try await smokeFocus(first)
+        second.window.miniaturize(nil)
+        for _ in 0..<80 where !second.window.isMiniaturized { try await Task.sleep(nanoseconds: 25_000_000) }
+        let restored = await activate("notify-owned", poster: first)
+        for _ in 0..<80 where second.window.isMiniaturized || current !== second { try await Task.sleep(nanoseconds: 25_000_000) }
+        try smokeCheck("notification_restores_minimized_owner", restored === second && !second.window.isMiniaturized && current === second)
+        // Without an existing tab, the most recently used main window opens it.
+        try await smokeFocus(first)
+        let fallback = await activate("notify-fresh", poster: second)
+        let fresh = try await smokeJS(shown, in: first.webView, arguments: ["thread": "notify-fresh"]) as? [String: Any]
+        let elsewhere = try await smokeJS(absent, in: second.webView, arguments: ["thread": "notify-fresh"])
+        smokeResults["notification_fallback_debug"] = fresh ?? [:]
+        try smokeCheck("notification_recent_window_fallback", fallback === first && current === first &&
+            fresh?["selected"] as? String == "notify-fresh" && fresh?["tabs"] as? Int == 1 && elsewhere as? Bool == true)
     }
 
     @MainActor private func smokeSettings(_ first: DesktopWindow, _ second: DesktopWindow) async throws {

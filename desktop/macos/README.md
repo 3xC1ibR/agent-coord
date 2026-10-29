@@ -509,6 +509,8 @@ python3 desktop/macos/smoke_test.py --runtime-only
 python3 desktop/macos/smoke_test.py --sessions-only
 # Focused project scratchpad, shortcut, autosave, and focus checks:
 python3 desktop/macos/smoke_test.py --scratchpad-only
+# Focused multi-window notification routing checks:
+python3 desktop/macos/smoke_test.py --notifications-only
 ```
 
 The native smoke mode uses a temporary database and preference domain, starts
@@ -517,7 +519,9 @@ shortcuts, independent drafts/navigation/session storage, shared preferences,
 mixed file/image drops through a private pasteboard, directory folder drops into `/cd`, New session/⌘N parity,
 command-palette filtering, execution, focus restoration and modal behavior,
 Roll up shortcut routing, oldest-waiting order, handled/skip controls and window isolation,
-window disposal and Dock reopening, the notification bridge, and quitting. It
+window disposal and Dock reopening, the notification bridge, notification routing
+to the window that already has the thread's tab (including a minimized window and
+another project) or else the most recently used main window, and quitting. It
 writes `build/macos/smoke.json` with `.json.png`, `.json.palette.png`, and
 `.json.roll-up.png` screenshots beside it, then explicitly stops the test runtime
 and verifies it exited.

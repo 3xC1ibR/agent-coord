@@ -448,13 +448,17 @@
       super();
       this.title = String(title);
       this.body = String(options.body || "");
+      this.data = options.data ?? null;
       this.onclick = null;
       this.id = crypto.randomUUID();
       if (permission !== "granted") return;
       pending.set(this.id, this);
       // Keep only a bounded set of live click callbacks.
       if (pending.size > 128) pending.delete(pending.keys().next().value);
-      send({action: "notify", id: this.id, title: this.title, body: this.body}).catch(() => pending.delete(this.id));
+      // A thread lets the app reveal its existing tab in whichever window holds it.
+      const thread = this.data?.thread_id;
+      send({action: "notify", id: this.id, title: this.title, body: this.body,
+        ...(typeof thread === "string" && /^[a-z\d_.~-]{1,200}$/i.test(thread) ? {thread} : {})}).catch(() => pending.delete(this.id));
     }
     close() {
       pending.delete(this.id);
@@ -462,9 +466,15 @@
     }
   }
   window.Notification = DesktopNotification;
-  window.__agentCoordNotificationClick = id => {
+  // Native notification routing asks every window before choosing a destination.
+  window.agentCoordHasConversation = id => typeof id === "string" && Boolean(
+    (window.agentCoordPanes?.active && window.agentCoordPanes.layout?.groups?.some(group => group.includes(id))) ||
+    (typeof state === "object" && state?.threadTabs?.has?.(id)));
+  window.__agentCoordNotificationClick = (id, routed = false) => {
     const item = pending.get(id);
     if (!item) return;
+    // The native app already opened the thread in its owning window.
+    if (routed) { pending.delete(id); return; }
     const event = new Event("click");
     item.dispatchEvent(event);
     if (typeof item.onclick === "function") item.onclick(event);
