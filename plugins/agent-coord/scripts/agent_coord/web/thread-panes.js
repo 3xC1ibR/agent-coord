@@ -548,9 +548,19 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     $("page-location").textContent = tabLayout ? "Conversation" : "Tiled threads";
   };
   const returnTarget = () => ({thread: state.selected, scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop});
-  function canChangeLayout() {
+  // Entering a layout copies each listed conversation's composer draft (text,
+  // mentions, and image items) into its pane. An unaccepted send still holds
+  // its text here, and an image being read has no URL yet: copying either
+  // could send the message twice or lose the image. Other conversations keep
+  // their drafts in this window, so their sends and attachments can continue.
+  function canChangeLayout(ids = []) {
     if (document.querySelector("dialog[open]") || shell.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")) return false;
-    if (state.busy || state.sending?.size || state.attachments.pending()) { showError(new Error("Wait for the current send or image attachment to finish before tiling.")); return false; }
+    // A new conversation is identified by its draft until creation finishes.
+    const moving = [...(state.sending || [])].some(key => typeof key !== "string" || ids.includes(key));
+    if (state.busy || moving || ids.some(id => state.attachments.pending(id))) {
+      showError(new Error("Wait for this conversation's send or image attachment to finish before tiling it."));
+      return false;
+    }
     return true;
   }
   function syncDrafts() {
@@ -562,7 +572,8 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     }
   }
   const tabThreads = () => (state.threadTabs?.items || []).filter(thread => thread.thread_id !== "new-session");
-  shell.canDrag = thread => state.selected !== "new-session" && canChangeLayout() &&
+  shell.canDrag = thread => state.selected !== "new-session" &&
+    canChangeLayout(shell.active ? [thread.thread_id] : tabThreads().map(item => item.thread_id)) &&
     (!state.dispatchWorkspace?.active || shell.layout?.order.includes(thread.thread_id));
   shell.dragGroups = () => [tabThreads().map(thread => thread.thread_id)];
   shell.dragTargets = () => [{body: $(state.selected ? "conversation" : "welcome"), slot: 0}];
@@ -650,8 +661,8 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     shell.onDragEnd = () => { state.threadTabs.dragging = null; state.threadTabs.render(); };
   }
   function tile() {
-    if (!canChangeLayout()) return false;
     const threads = getThreads();
+    if (!canChangeLayout(threads.map(thread => thread.thread_id))) return false;
     if (!threads.some(t => t.attention !== "archived")) { showError(new Error("This view has no open threads to tile.")); return false; }
     const wasActive = shell.active;
     const previous = wasActive ? shell.layout.returnTarget : returnTarget();
@@ -673,7 +684,9 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
   };
   let toggling = false;
   shell.toggleCurrent = async () => {
-    if (toggling || !canChangeLayout()) return false;
+    // Leaving keeps pane drafts; restoring a saved layout moves its drafts.
+    if (toggling || !canChangeLayout(shell.active ? [] : shell.layouts.get(getView())?.order
+      || getThreads().map(thread => thread.thread_id))) return false;
     if (state.dispatchWorkspace?.active) { goHome({restoreDispatcher: false}); return true; }
     toggling = true;
     try {

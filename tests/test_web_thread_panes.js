@@ -204,15 +204,16 @@ test("toggle returns to the original single conversation and resyncs its edited 
 
 test("toggle respects modal/send guards and view restoration returns to that view's overview", async () => {
   const {shell, state, doc, visits, errors, setView} = shellFixture();
+  // Tiling would copy an unaccepted send's draft into its pane.
+  state.sending = new Set(["a"]);
+  assert.equal(shell.tileCurrent(), false); assert.equal(shell.active, false); assert.equal(errors.length, 1);
+  state.sending.clear();
   state.selected = "a"; shell.tileCurrent();
   doc.querySelector = () => ({});
   assert.equal(await shell.toggleCurrent(), false); assert.equal(shell.active, true);
   doc.querySelector = () => null; state.busy = true;
-  assert.equal(await shell.toggleCurrent(), false); assert.equal(errors.length, 1);
-  state.busy = false;
-  state.sending = new Set(["a"]);
   assert.equal(await shell.toggleCurrent(), false); assert.equal(errors.length, 2);
-  state.sending.clear();
+  state.busy = false;
   shell.leave(); state.selected = null; setView("second"); await shell.toggleCurrent();
   assert.equal(shell.viewId, "second");
   shell.leave(); setView("first"); shell.restoreView();

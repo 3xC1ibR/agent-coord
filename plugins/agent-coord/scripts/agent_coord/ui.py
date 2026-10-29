@@ -9,6 +9,7 @@ import socket
 import socketserver
 import sqlite3
 import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -667,22 +668,29 @@ def _handler(
                     self.wfile.flush()
                     message_sequence = message_cursor(store)
                     send_sequence, _ = message_sends(store)
+                    coordination_due = 0.0
                     while not browser_sessions.closed:
                         # Terminal hooks run in separate processes. Read their durable
                         # events even when no app-server event wakes this connection.
                         batch = browser_sessions.events_after(sequence, timeout=1)
                         if browser_sessions.closed or not self._authorized():
                             break
-                        completions = browser_sessions.completions_after(completion_sequence)
                         sequence = batch["seq"]
-                        completion_sequence = completions["seq"]
-                        message_sequence, coordination_events = message_changes(store, message_sequence, browser_sessions.cwd)
-                        batch["events"].extend(coordination_events)
-                        send_sequence, send_events = message_sends(store, send_sequence, browser_sessions.cwd)
-                        batch["events"].extend(send_events)
-                        batch.update(completions=completions["events"], completionSeq=completion_sequence,
-                                     snoozes=browser_sessions.snooze_notifications(),
-                                     approvals=browser_sessions.approval_notifications())
+                        batch.update(completions=[], completionSeq=completion_sequence)
+                        # Provider deltas arrive many times a second. Forward them
+                        # immediately, but read durable coordination state at most
+                        # once a second, as an idle stream already does.
+                        if time.monotonic() >= coordination_due:
+                            coordination_due = time.monotonic() + 1
+                            completions = browser_sessions.completions_after(completion_sequence)
+                            completion_sequence = completions["seq"]
+                            message_sequence, coordination_events = message_changes(store, message_sequence, browser_sessions.cwd)
+                            batch["events"].extend(coordination_events)
+                            send_sequence, send_events = message_sends(store, send_sequence, browser_sessions.cwd)
+                            batch["events"].extend(send_events)
+                            batch.update(completions=completions["events"], completionSeq=completion_sequence,
+                                         snoozes=browser_sessions.snooze_notifications(),
+                                         approvals=browser_sessions.approval_notifications())
                         self.wfile.write(f"id: {sequence}:{completion_sequence}\ndata: {json.dumps(batch)}\n\n".encode())
                         self.wfile.flush()
                 except sqlite3.OperationalError as exc:

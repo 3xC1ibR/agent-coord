@@ -6,8 +6,10 @@ import os
 import posixpath
 import re
 import sqlite3
+import threading
 import time
 import uuid
+import weakref
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -220,6 +222,60 @@ def scopes_overlap(left: str, right: str) -> bool:
     )
 
 
+class _StoreConnection(sqlite3.Connection):
+    """A store connection that can end every statement before it is reused."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.open_cursors: weakref.WeakSet = weakref.WeakSet()
+        self.settings: tuple[int, int] | None = None
+
+    def cursor(self, factory: Any = sqlite3.Cursor) -> sqlite3.Cursor:
+        cursor = super().cursor(factory)
+        self.open_cursors.add(cursor)
+        return cursor
+
+    # The built-in shortcuts create cursors without calling cursor().
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        return self.cursor().execute(sql, parameters)
+
+    def executemany(self, sql: str, parameters: Any, /) -> sqlite3.Cursor:
+        return self.cursor().executemany(sql, parameters)
+
+    def executescript(self, script: str, /) -> sqlite3.Cursor:
+        return self.cursor().executescript(script)
+
+    def end_statements(self) -> None:
+        # An unfinished SELECT would keep an old read snapshot for the next use.
+        for cursor in list(self.open_cursors):
+            cursor.close()
+
+
+class _IdleConnection:
+    """One thread's reusable store connection, closed with the thread or store."""
+
+    def __init__(self) -> None:
+        self.connection: _StoreConnection | None = None
+        self.factory: Callable[[], Any] = lambda: None
+        self.in_use = False
+        self.closer: weakref.finalize | None = None
+
+    def keep(self, connection: _StoreConnection, factory: Any) -> None:
+        self.discard()
+        # Weak, so a replaced factory cannot keep its store alive.
+        self.factory = weakref.ref(factory)
+        self.connection = connection
+        # Unlike __del__, this runs before garbage collection can finalize the
+        # connection along with the store's reference cycle, and at exit.
+        self.closer = weakref.finalize(self, connection.close)
+
+    def discard(self) -> None:
+        if self.closer is not None:
+            self.closer()
+        self.connection, self.closer = None, None
+        self.factory = lambda: None
+
+
 class CoordinationStore:
     def __init__(
         self,
@@ -234,6 +290,7 @@ class CoordinationStore:
             configured_stale or DEFAULT_STALE_AFTER_SECONDS
         )
         self.clock = clock
+        self._idle_connections = threading.local()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         from .desktop_runtime import schema_access
         try:
@@ -249,7 +306,10 @@ class CoordinationStore:
         self.asks = AskStore(self)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=5.0)
+        # Only the owning thread uses a connection; an idle one may be closed
+        # by whichever thread releases the store.
+        connection = sqlite3.connect(self.database_path, timeout=5.0,
+                                     factory=_StoreConnection, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
@@ -257,12 +317,58 @@ class CoordinationStore:
 
     @contextmanager
     def _connection(self):
-        connection = self._connect()
+        # A new connection parses the whole schema, which dominated backend
+        # CPU under concurrent polling. Reuse one idle connection per thread.
+        # A nested use gets its own connection so an inner commit cannot end
+        # the outer transaction.
+        idle = getattr(self, "_idle_connections", None)
+        holder = None if idle is None else getattr(idle, "holder", None)
+        if idle is not None and holder is None:
+            holder = idle.holder = _IdleConnection()
+        factory = getattr(self._connect, "__func__", self._connect)
+        nested = holder is None or holder.in_use
+        connection = None
+        if not nested:
+            if holder.connection is not None and holder.factory() is factory:
+                connection = holder.connection
+                try:
+                    # Start each use with the settings its factory produced.
+                    connection.row_factory = sqlite3.Row
+                    connection.execute(f"PRAGMA busy_timeout = {connection.settings[0]}")
+                    connection.execute(f"PRAGMA foreign_keys = {connection.settings[1]}")
+                except sqlite3.Error:
+                    connection = None
+            if connection is None:
+                holder.discard()
+        fresh = connection is None
+        if fresh:
+            connection = self._connect()
+            if not nested and isinstance(connection, _StoreConnection):
+                connection.settings = (connection.execute("PRAGMA busy_timeout").fetchone()[0],
+                                       connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        reusable = False
+        if not nested:
+            holder.in_use = True
         try:
             with connection:
                 yield connection
+            reusable = (not nested and isinstance(connection, _StoreConnection)
+                        and connection.settings is not None and not connection.in_transaction)
         finally:
-            connection.close()
+            if not nested:
+                holder.in_use = False
+            if reusable:
+                try:
+                    connection.end_statements()
+                    if fresh:
+                        holder.keep(connection, factory)
+                except (sqlite3.Error, TypeError):
+                    reusable = False
+            if not reusable:
+                if not nested and holder.connection is connection:
+                    holder.discard()
+                else:
+                    connection.close()
 
     def _initialize(self) -> None:
         with self._connection() as connection:

@@ -1146,8 +1146,13 @@ async function refreshDetail({markSeen = true} = {}) {
     const options = {signal: controller.signal};
     let work, detail;
     try {
+      // A known app conversation needs both reads; issue them together so
+      // opening waits for the slower one, not their sum.
+      const known = entry.detail?.work_thread || state.sessions?.find(thread => thread.thread_id === id);
+      const session = known?.browser_session ? api(sessionPath(id), undefined, options) : null;
+      session?.catch(() => {}); // Observed below, or superseded by the thread read's failure.
       work = await api(threadPath(id), undefined, options);
-      detail = work.browser_session ? await api(sessionPath(id), undefined, options) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
+      detail = work.browser_session ? await (session || api(sessionPath(id), undefined, options)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
         coordinationMessages: (await api(threadPath(id) + "/messages", undefined, options)).data};
     } catch (error) {
       if (controller.signal.aborted) error = new Error("Refreshing this conversation timed out.");
