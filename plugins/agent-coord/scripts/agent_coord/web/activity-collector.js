@@ -1,14 +1,34 @@
 /* One recorder per top-level window. Pane documents borrow its submission context. */
 (function (root) {
   "use strict";
+  // Where a deliberate navigation began, matched from the most specific container.
+  const SURFACES = [
+    ["#thread-hover", "hover-card"], [".asks-dialog", "decisions"], ["#roll-up-bar", "roll-up"],
+    ["#sessions, #sidebar", "sidebar"], ["#conversation-results", "search"],
+    ["#working-set-overview", "working-set"], ["#atlas-overview", "atlas"], ["#overview", "cards"],
+    ["#conversation-tabs", "tabs"], ["#dispatcher-workspace, #dispatcher-dock, #dispatcher-empty, #send-work-dock", "dispatcher"],
+    ["#agent-tree-panel", "agent-tree"], ["#thread-panes", "panes"], ["#conversation", "conversation"],
+    ["#project-navigation, .views-bar", "projects"],
+  ];
+  function surfaceOf(event) {
+    if (event.type === "keydown" && (event.metaKey || event.ctrlKey || event.altKey)) return "shortcut";
+    for (const [selector, surface] of SURFACES) if (event.target?.closest?.(selector)) return surface;
+    return "other";
+  }
   class VisitRecorder {
     constructor({windowId, send, now = () => Date.now() / 1000, uuid = () => root.crypto.randomUUID(), limit = 80}) {
       Object.assign(this, {windowId, send, now, uuid, limit});
       this.enabled = false; this.foreground = false; this.thread = null;
       this.current = null; this.queue = []; this.pending = null; this.intent = 0;
+      this.intentSurface = null; this.navigationSurface = null;
     }
-    markIntent() { this.intent = this.now() + 1; }
-    source() { const deliberate = this.intent > this.now(); this.intent = 0; return deliberate ? "navigation" : "programmatic"; }
+    markIntent(surface = null) { this.intent = this.now() + 1; this.intentSurface = surface; }
+    source() {
+      const deliberate = this.intent > this.now(); this.intent = 0;
+      // Each deliberate selection replaces the surface its visit will report.
+      if (deliberate) this.navigationSurface = this.intentSurface;
+      return deliberate ? "navigation" : "programmatic";
+    }
     select(thread, source = "programmatic") {
       thread = thread && thread !== "new-session" ? thread : null;
       if (thread !== this.thread) this.end();
@@ -35,6 +55,10 @@
         this.end();
       }
       this.current = {visit_id: this.uuid(), thread_id: this.thread, source};
+      if (source === "navigation") {
+        if (this.navigationSurface) this.current.surface = this.navigationSurface;
+        this.navigationSurface = null;
+      }
       this.enqueue("visit_started", this.current);
     }
     end() {
@@ -52,7 +76,7 @@
         window_id: this.windowId};
       return body;
     }
-    clear() { this.queue = []; this.current = null; }
+    clear() { this.queue = []; this.current = null; this.intentSurface = this.navigationSurface = null; }
     async flush({keepalive = false} = {}) {
       if (this.pending || !this.queue.length) return this.pending;
       const batch = this.queue.slice(0, 40), ids = new Set(batch.map(event => event.event_id));
@@ -73,7 +97,7 @@
     recorder.setForeground(foreground());
     const interact = event => {
       if (!event.isTrusted) return;
-      recorder.markIntent();
+      recorder.markIntent(surfaceOf(event));
       // Let navigation handlers choose their destination before observing it.
       const inConversation = !!event.target.closest?.("#conversation, #thread-panes");
       const inSingleConversation = !!event.target.closest?.("#conversation");
@@ -124,7 +148,7 @@
     view.addEventListener("pageshow", event => { if (event.persisted && stopped) view.location.reload(); });
     return recorder;
   }
-  const exports = {VisitRecorder, bind};
+  const exports = {VisitRecorder, bind, surfaceOf, SURFACES};
   if (typeof module !== "undefined" && module.exports) module.exports = exports;
   else root.ActivityCollector = exports;
 })(typeof globalThis !== "undefined" ? globalThis : this);

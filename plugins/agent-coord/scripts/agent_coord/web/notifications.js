@@ -103,6 +103,7 @@ class TurnNotifications {
     notification.onclick = async () => {
       this.env.focus();
       notification.close();
+      this.env.agentCoordActivity?.markIntent("notification");
       try { await this.openThread(event.thread_id); } catch (error) { this.onError(error); }
     };
   }

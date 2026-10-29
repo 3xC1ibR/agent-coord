@@ -46,8 +46,11 @@ test("a live question alerts once and opens the child with the actual question",
   await f.client.receive([question, question]);
   assert.equal(f.shared.shown.length, 1);
   assert.equal(f.shared.shown[0].title, "agent-coord · Answer needed");
+  const intents = [];
+  f.env.agentCoordActivity = {markIntent: surface => intents.push([surface, f.opened.length])};
   await f.shared.shown[0].onclick();
   assert.deepEqual(f.opened, ["child"]);
+  assert.deepEqual(intents, [["notification", 0]]);
   f.client.destroy();
 });
 

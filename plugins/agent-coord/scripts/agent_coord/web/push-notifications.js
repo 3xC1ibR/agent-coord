@@ -72,6 +72,8 @@ class PhoneNotifications {
     const thread = this.pendingThread;
     this.pendingThread = null;
     if (thread) {
+      // Only a notification click queues a pending thread.
+      this.env.agentCoordActivity?.markIntent("notification");
       try { await this.openThread(thread); } catch (error) { this.onError(error); }
     }
   }

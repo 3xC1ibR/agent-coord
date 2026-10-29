@@ -51,6 +51,11 @@ a dispatcher, an audit, or a different assignment boundary.
   not add human messages.
 - `visit_started` / `visit_ended` are observed foreground visits. Automatic restore
   and programmatic selection are separate from human navigation and focus.
+  Navigation visits recorded after this field was added carry `details.surface`:
+  where the selection began, such as `sidebar`, `cards`, `working-set` (Focus),
+  `atlas`, `search`, `tabs`, `panes`, `conversation`, `notification` (web
+  notification click), `shortcut`, or `other`. Native app notification clicks
+  and app links still arrive as programmatic selections without a surface.
 - `decision_submitted` records explicit app decisions such as an approval, stop,
   or command. `organization_changed` retains organization edits.
 - Counts use human-origin observations. Missing visit ends remain incomplete;

@@ -77,6 +77,17 @@ class ActivityAPITests(unittest.TestCase):
         self.assertEqual(report["totals"]["visits"], 0)
         self.assertEqual(report["events"][0]["actor"], "system")
 
+    def test_navigation_surface_is_recorded_validated_and_normalized(self):
+        events = [self.event(identity="sidebar", surface="sidebar"),
+                  self.event(identity="future", visit_id="later", surface="future-panel")]
+        self.assertEqual(self.request("activity/events", {"events": events})[0], 200)
+        self.assertEqual(self.request("activity/events", {"events": events[:1]})[0], 200)
+        details = {event["event_id"]: event["details"] for event in self.request("activity?start=0")[1]["events"]}
+        self.assertEqual(details, {"sidebar": {"surface": "sidebar"}, "future": {"surface": "other"}})
+        for changes in ({"source": "focus", "surface": "sidebar"}, {"surface": ["sidebar"]}, {"surface": None}):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.request("activity/events", {"events": [self.event(identity="bad", **changes)]})[0], 400)
+
     def test_no_provider_calls_for_activity_or_saved_evidence(self):
         with patch.object(self.sessions.rpc, "request", side_effect=AssertionError("Must not wake")):
             self.assertEqual(self.request("activity?start=0")[0], 200)

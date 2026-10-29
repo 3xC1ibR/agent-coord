@@ -65,11 +65,13 @@ test('Settings controls do not receive or recover notification destinations', as
 });
 
 test('conversation notification navigation works without sidebar controls', async () => {
-  const f = fixture({controls: false});
+  const f = fixture({controls: false}), intents = [];
+  f.env.agentCoordActivity = {markIntent: surface => intents.push([surface, f.opened.length])};
   await f.phone.start();
   f.listeners.get('message')({data: {type: 'agent-coord-open-notification', url: '/#thread-one'}});
   await f.phone.ready();
   assert.deepEqual(f.opened, ['thread-one']);
+  assert.deepEqual(intents, [['notification', 0]]);
   assert.equal(f.button.textContent, '');
 });
 

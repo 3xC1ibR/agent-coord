@@ -16,6 +16,12 @@ from .workspaces import matches_workspace
 
 
 QUERY_FIELDS = {"start", "end", "project", "domain", "group", "thread_id", "group_by", "limit", "cursor"}
+# Where a deliberate navigation began; web/activity-collector.js emits these names.
+NAVIGATION_SURFACES = frozenset({
+    "sidebar", "cards", "working-set", "atlas", "search", "tabs", "panes", "conversation",
+    "agent-tree", "hover-card", "decisions", "roll-up", "dispatcher", "projects",
+    "notification", "shortcut", "other",
+})
 
 
 def query_arguments(values):
@@ -74,12 +80,14 @@ def record_browser_events(sessions, body):
     if set(body) != {"events"} or not isinstance(body["events"], list) or not 1 <= len(body["events"]) <= 100:
         raise CoordinationError("Send a batch of 1–100 activity events.")
     events = body["events"]
-    allowed = {"event_id", "kind", "thread_id", "occurred_at", "window_id", "visit_id", "source"}
+    required = {"event_id", "kind", "thread_id", "occurred_at", "window_id", "visit_id", "source"}
     for event in events:
-        if (not isinstance(event, dict) or set(event) != allowed or
+        if (not isinstance(event, dict) or not required <= set(event) <= required | {"surface"} or
                 event.get("kind") not in {"visit_started", "visit_ended"} or
                 event.get("source") not in {"navigation", "focus", "restore", "programmatic"}):
             raise CoordinationError("Browser activity accepts complete visit-start and visit-end observations only.")
+        if "surface" in event and (event["source"] != "navigation" or not isinstance(event["surface"], str)):
+            raise CoordinationError("Only a deliberate navigation names its surface.")
         activity_context({"activity": {key: event[key] for key in ("event_id", "window_id", "visit_id")}})
         if not isinstance(event["thread_id"], str) or not 1 <= len(event["thread_id"]) <= 200:
             raise CoordinationError("Choose an activity thread ID.")
@@ -92,8 +100,11 @@ def record_browser_events(sessions, body):
     activity = ActivityStore(sessions.store)
     receipts = []
     for event in events:
-        data = {key: value for key, value in event.items() if key not in {"kind", "thread_id"}}
+        data = {key: value for key, value in event.items() if key not in {"kind", "thread_id", "surface"}}
         data["actor"] = "system" if event["source"] in {"restore", "programmatic"} else "human"
+        if "surface" in event:
+            # A surface from a newer or older interface must not block the visit.
+            data["details"] = {"surface": event["surface"] if event["surface"] in NAVIGATION_SURFACES else "other"}
         receipts.append(activity.record(event["kind"], event["thread_id"], **data))
     return {"status": "ok", "receipts": receipts}
 
