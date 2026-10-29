@@ -229,6 +229,9 @@ class ThreadMoveTests(unittest.TestCase):
         self.control.cancel(receipt['request_id'])
         self.worker.process_once()
         self.assert_directory(thread, self.b)
+        # Explicit target management uses the requester's actual identity,
+        # rather than overriding the target's inherited caller identity.
+        env['AGENT_COORD_SESSION_ID'] = 'requester'
         result = subprocess.run([*command, 'move', '--session-id', thread, '--from-session', 'requester',
                                  '--cwd', str(self.a), '--wait', '0'], env=env, text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)

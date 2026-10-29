@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .context import caller_session, install_cli
+from .context import bind_caller, caller_session, install_cli
 from .delegate import delegate_work
 from .managed_pty import read_delegation_output, supervise_managed_pty
 from .navigation import NavigationStore
@@ -648,6 +648,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(arguments: argparse.Namespace) -> Any:
+    bind_command_caller(arguments)
     command = arguments.command
     if command == "install-cli":
         return install_cli(arguments.bin_dir)
@@ -1110,6 +1111,28 @@ def mutation_receipt(arguments, result):
     elif isinstance(result, list):
         receipt["count"] = len(result)
     return receipt
+
+
+def bind_command_caller(arguments):
+    """Enforce actor identity at the CLI boundary, before any state changes.
+
+    Session IDs on inspection and thread-management commands are targets.
+    Runtime-owned orchestration uses the store APIs rather than this client.
+    """
+    if hasattr(arguments, "from_session") and arguments.command != "ui":
+        arguments.from_session = bind_caller(arguments.from_session)
+    owns_session = arguments.command in {
+        "register", "set-activity", "checkpoint", "begin-work", "end-work",
+        "unregister", "ack", "subscribe",
+    }
+    owns_session |= arguments.command == "inbox" and not arguments.peek
+    owns_session |= arguments.command == "job" and arguments.job_command in {"start", "cancel"}
+    owns_session |= arguments.command == "subscription" and arguments.subscription_command == "cancel"
+    owns_session |= arguments.command == "delegation" and arguments.delegation_command == "finish"
+    owns_session |= arguments.command == "sidecar" and arguments.sidecar_command in {"pause", "resume", "detach", "report"}
+    owns_session |= arguments.command == "wake-zellij" and arguments.wake_command in {"enable", "disable", "watch"}
+    if owns_session:
+        arguments.session_id = bind_caller(arguments.session_id)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

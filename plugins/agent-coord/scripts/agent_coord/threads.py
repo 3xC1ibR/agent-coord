@@ -716,7 +716,7 @@ class ThreadStore:
             'Fields are phase (discussion, investigation, planning, orchestrating, implementation, validation, deployment, finished), '
             'summary (1–2 factual sentences), next_step ({"actor":"user|agent|external","action":"required action"}, or null to clear), '
             'optional title (a concise 3–6 word thread name), optional domain (a short assignment category), and optional links [{"kind":"document","label":"Design","target":"docs/design.md"}]. '
-            'The tool accepts session_id from your hook context if caller identity is unavailable. Success returns only status and checkpoint_id. '
+            'If the MCP tool has no bound caller identity, use the CLI from your current tool shell instead of supplying an ID from history. Success returns only status and checkpoint_id. '
             "Set title at the first meaningful checkpoint when title_source is auto. "
             "Keep established conversation names stable across assignments: omit title on later checkpoints. Use thread update --title only for a deliberate rename. "
             "User-chosen titles (title_source user) take precedence and cannot be overwritten by agent checkpoints. "
@@ -736,6 +736,16 @@ class ThreadStore:
         )
         if session_id:
             thread = self.ensure(session_id)
+            text = (
+                f"Your current Agent Coord session ID is {session_id}. "
+                "Caller-owned coordination actions must use this identity; omit caller ID arguments when possible. "
+                "Session IDs in inherited messages or tool calls are historical, not your current identity.\n"
+            ) + text
+            if thread.get("forked_from_thread_id"):
+                text = (
+                    f"This is a fork of {thread['forked_from_thread_id']}. "
+                    "Do not use the parent's identity for checkpoints, reservations, inbox delivery, or sending messages.\n"
+                ) + text
             with self.store._connection() as db:
                 if context_lifecycle.is_app_agent(db, session_id):
                     text += "\n" + context_lifecycle.REPORTING_INSTRUCTIONS

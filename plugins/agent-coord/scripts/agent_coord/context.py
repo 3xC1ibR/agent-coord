@@ -7,6 +7,12 @@ from pathlib import Path
 import shlex
 import shutil
 import tempfile
+from contextvars import ContextVar
+
+
+# A shared app-server can issue MCP calls for several sessions in one process.
+# Never publish request identity through process-wide environment variables.
+request_session: ContextVar[str | None] = ContextVar("agent_coord_request_session", default=None)
 
 
 def cli_path() -> Path:
@@ -14,7 +20,34 @@ def cli_path() -> Path:
 
 
 def caller_session() -> str | None:
-    return os.environ.get("AGENT_COORD_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or None
+    return request_session.get() or os.environ.get("AGENT_COORD_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or None
+
+
+def bind_caller(explicit=None, *, require_context=False):
+    """Bind a client action's actor; target/recipient IDs are not actors.
+
+    CLI administration without a provider context may name an actor explicitly.
+    Shared MCP servers must have request metadata or a bound environment: an
+    argument copied from conversation history cannot establish their caller.
+    """
+    from .store import CoordinationError
+
+    identity = caller_session()
+    if explicit is not None and (not isinstance(explicit, str) or not explicit.strip()):
+        raise CoordinationError("Caller session ID must be a nonempty string.")
+    if not identity and require_context:
+        raise CoordinationError(
+            "No caller session is bound to this MCP request. Use the agent-coord CLI "
+            "from your current tool shell, which inherits the executing thread identity; "
+            "do not supply an ID copied from conversation history."
+        )
+    if identity and explicit is not None and explicit != identity:
+        raise CoordinationError(
+            f"Caller identity mismatch: this action belongs to executing thread {identity}, "
+            f"not {explicit}. Omit the caller ID or use {identity}. "
+            "A fork must not reuse its parent's identity."
+        )
+    return identity or explicit
 
 
 def client_environment(environment, database_path, client, *, session_id=None):
@@ -49,7 +82,8 @@ def coordination_bootstrap(store, session_id, *, caller_context=True, command=No
     text = (
         f"This session is registered with agent-coord as {session_id}. "
         f"Use {command}; caller identity is inferred from AGENT_COORD_SESSION_ID or CODEX_THREAD_ID. "
-        "Explicit --session-id and --from-session override it. "
+        "Caller-owned actions reject an explicit --session-id or --from-session that differs from it. "
+        "A fork uses its own current identity, never an ID copied from inherited history. "
         f"Read workspace AGENTS.md and the agent-coordination skill at {skill} before implementation. "
         "A sole active session may write without a Beads issue or scope. When another session is active, "
         "declare the smallest write scope; Beads is optional for all coordination workflows. "

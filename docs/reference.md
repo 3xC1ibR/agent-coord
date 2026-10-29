@@ -1462,10 +1462,11 @@ plugin to record turn completions.
 
 Agents prefer the plugin's `update_checkpoint` tool. It accepts changed fields
 directly, for example `{"phase":"validation"}` or
-`{"summary":"Tests passed.","next_step":null}`. Pass the registered
-`session_id` announced by the hook when the MCP process has no inherited caller
-identity. The bundled server uses Python's standard library and MCP over stdio;
-Codex and Claude load the same implementation. The CLI is the fallback:
+`{"summary":"Tests passed.","next_step":null}`. MCP mutations require caller
+identity from request metadata or the server environment. An explicit caller
+ID must match; if neither source is available, use the CLI from the current
+tool shell instead. The bundled server uses Python's standard library and MCP
+over stdio; Codex and Claude load the same implementation. The CLI is the fallback:
 
 ```bash
 agent-coord checkpoint --json '{

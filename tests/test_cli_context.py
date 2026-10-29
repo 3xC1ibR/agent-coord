@@ -39,7 +39,7 @@ class CliContextTests(unittest.TestCase):
             code = main(args)
         return code, json.loads(output.getvalue() or errors.getvalue())
 
-    def test_identity_precedence_and_explicit_cross_thread_override(self):
+    def test_identity_precedence_allows_explicit_targets_but_rejects_actor_override(self):
         self.assertEqual(self.invoke("status")[1]["session_id"], "one")
         with patch.dict(os.environ, {"AGENT_COORD_SESSION_ID": "two"}):
             self.assertEqual(self.invoke("status")[1]["session_id"], "two")
@@ -50,8 +50,10 @@ class CliContextTests(unittest.TestCase):
             self.assertEqual(messages[0]["sender_session_id"], "two")
             self.assertEqual(receipt["id"], messages[0]["id"])
             self.assertNotIn("body", receipt)
-            self.invoke("send", "--from-session", "three", "--session", "one", "--no-reply-required", "override")
-            self.assertEqual(self.store.inbox("one", mark_delivered=False)[-1]["sender_session_id"], "three")
+            code, error = self.invoke("send", "--from-session", "three", "--session", "one", "--no-reply-required", "override")
+            self.assertEqual(code, 2)
+            self.assertIn("Caller identity mismatch", error["error"])
+            self.assertEqual(self.store.inbox("one", mark_delivered=False), messages)
 
     def test_missing_identity_fails_even_with_registered_sessions(self):
         with patch.dict(os.environ, {"AGENT_COORD_DB": str(self.database)}, clear=True):
@@ -95,7 +97,7 @@ class CliContextTests(unittest.TestCase):
         self.assertEqual(receipt["in_reply_to"], original["id"])
         code, error = self.invoke("reply", "--from-session", "three", "--message-id", str(original["id"]), "Wrong sender")
         self.assertEqual(code, 2)
-        self.assertIn("Only the recipient", error["error"])
+        self.assertIn("Caller identity mismatch", error["error"])
         self.assertEqual(len(self.store.inbox("two", mark_delivered=False)), 1)
 
     def test_database_override_and_xdg_default(self):

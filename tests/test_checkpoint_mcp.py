@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +17,7 @@ sys.path.insert(0, str(PLUGIN / "scripts"))
 
 from agent_coord.checkpoint_mcp import dispatch, update_checkpoint
 from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.context import caller_session
 
 
 class CheckpointMCPTests(unittest.TestCase):
@@ -26,16 +29,58 @@ class CheckpointMCPTests(unittest.TestCase):
         for name in ("one", "two"):
             self.store.register(session_id=name, client="codex", cwd=str(self.root))
 
+    def test_request_metadata_identity_overrides_stale_environment_and_never_leaks(self):
+        def call(number, identity, arguments):
+            return dispatch({"jsonrpc": "2.0", "id": number, "method": "tools/call", "params": {
+                "name": "update_checkpoint", "_meta": {"threadId": identity}, "arguments": arguments}})
+        with patch.dict(os.environ, {"AGENT_COORD_SESSION_ID": "stale-parent"}, clear=True), \
+                patch("agent_coord.checkpoint_mcp.CoordinationStore", return_value=self.store):
+            for number, identity in enumerate(("one", "two", "one")):
+                result = call(number, identity, {"phase": "validation", "summary": identity + str(number)})
+                self.assertNotIn("isError", result["result"])
+                self.assertEqual(caller_session(), "stale-parent")
+            self.assertEqual(self.store.threads.get("one")["checkpoint"]["summary"], "one2")
+            self.assertEqual(self.store.threads.get("two")["checkpoint"]["summary"], "two1")
+            override = call(4, "one", {"session_id": "two", "summary": "explicit override"})
+            self.assertTrue(override["result"]["isError"])
+            self.assertIn("Caller identity mismatch", override["result"]["content"][0]["text"])
+            self.assertEqual(self.store.threads.get("two")["checkpoint"]["summary"], "two1")
+            failed = call(5, "one", {"next_step": {"actor": "user"}})
+            self.assertTrue(failed["result"]["isError"])
+            self.assertEqual(caller_session(), "stale-parent")
+            malformed = call(6, ["one"], {})
+            self.assertTrue(malformed["result"]["isError"])
+
+    def test_concurrent_requests_keep_independent_caller_identity(self):
+        barrier = Barrier(2)
+        def checkpoint(arguments):
+            barrier.wait(timeout=5)
+            return update_checkpoint(arguments, store=self.store)
+        def call(identity):
+            return dispatch({"jsonrpc": "2.0", "id": identity, "method": "tools/call", "params": {
+                "name": "update_checkpoint", "_meta": {"threadId": identity},
+                "arguments": {"phase": "validation", "summary": identity}}})
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("agent_coord.checkpoint_mcp.update_checkpoint", side_effect=checkpoint), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(call, ("one", "two")))
+            self.assertIsNone(caller_session())
+        for result in results:
+            self.assertNotIn("isError", result["result"])
+        for identity in ("one", "two"):
+            self.assertEqual(self.store.threads.get(identity)["checkpoint"]["summary"], identity)
+
     def test_tool_uses_only_explicit_or_inherited_identity(self):
         with patch.dict(os.environ, {"AGENT_COORD_SESSION_ID": "one", "CODEX_THREAD_ID": "two"}, clear=True):
             receipt = update_checkpoint({"phase": "investigation", "summary": "Investigated."}, store=self.store)
             self.assertEqual(set(receipt), {"status", "checkpoint_id"})
             self.assertEqual(self.store.threads.get("one")["checkpoint"]["id"], receipt["checkpoint_id"])
-            update_checkpoint({"session_id": "two", "phase": "discussion", "summary": "Other."}, store=self.store)
+            with self.assertRaisesRegex(CoordinationError, "Caller identity mismatch"):
+                update_checkpoint({"session_id": "two", "phase": "discussion", "summary": "Other."}, store=self.store)
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(CoordinationError, "No caller session"):
                 update_checkpoint({"phase": "validation"}, store=self.store)
-        self.assertEqual(self.store.threads.get("two")["checkpoint"]["summary"], "Other.")
+        self.assertIsNone(self.store.threads.get("two")["checkpoint"])
 
     def test_tool_accepts_minted_app_thread_links_and_rejects_unvalidated_routes(self):
         from agent_coord.navigation import NavigationStore

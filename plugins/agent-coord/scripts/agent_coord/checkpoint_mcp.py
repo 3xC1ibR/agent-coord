@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import uuid
 
-from .context import caller_session
+from .context import bind_caller, request_session
 from .store import CoordinationError, CoordinationStore
 from .threads import LINK_KINDS, PHASES
 from .context_lifecycle import CHECKPOINT_SCHEMA
@@ -71,13 +71,14 @@ TOOL = {
     "description": (
         "Create or update your work-thread checkpoint. Send only changed fields; omissions preserve saved values. "
         "The first checkpoint requires phase and summary. Set next_step to null to clear it. "
-        "Returns only status and checkpoint_id. Use your session_id from hook context if caller identity is unavailable."
+        "Returns only status and checkpoint_id. Caller identity must be bound by the host; "
+        "use the agent-coord CLI from your current tool shell if it is unavailable."
     ),
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "session_id": {"type": "string", "minLength": 1, "description": "Your registered session ID; omit when inherited from the environment."},
+            "session_id": {"type": "string", "minLength": 1, "description": "Optional assertion of the bound caller ID; a different ID is rejected."},
             "phase": {"type": "string", "enum": sorted(PHASES)},
             "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
             "next_step": {
@@ -121,7 +122,7 @@ MOVE_TOOL = {
         "properties": {
             "cwd": {"type": "string", "minLength": 1, "description": "Absolute destination project directory."},
             "session_id": {"type": "string", "minLength": 1, "description": "Target thread; defaults to your caller identity."},
-            "from_session": {"type": "string", "minLength": 1, "description": "Requester identity from hook context if not inherited."},
+            "from_session": {"type": "string", "minLength": 1, "description": "Optional assertion of the bound caller ID; a different ID is rejected."},
             "request_id": {"type": "string", "minLength": 1, "maxLength": 160,
                            "description": "Stable idempotency key; reuse when retrying."},
         },
@@ -141,7 +142,7 @@ ASK_TOOL = {
     "inputSchema": {
         "type": "object", "additionalProperties": False, "required": ["question", "blocking"],
         "properties": {
-            "session_id": {"type": "string", "minLength": 1, "description": "Your registered session ID; omit when inherited from the environment."},
+            "session_id": {"type": "string", "minLength": 1, "description": "Optional assertion of the bound caller ID; a different ID is rejected."},
             "question": {"type": "string", "minLength": 1, "maxLength": 2000},
             "options": {"type": "array", "maxItems": 8, "description": "Optional answer choices; free text is always allowed.",
                         "items": {"type": "string", "minLength": 1, "maxLength": 200}},
@@ -168,7 +169,7 @@ SCHEDULE_TOOL = {
     "inputSchema": {
         "type": "object", "additionalProperties": False, "required": ["mode", "message", "run_at", "timezone"],
         "properties": {
-            "session_id": {"type": "string", "minLength": 1, "description": "Your registered caller ID if not inherited."},
+            "session_id": {"type": "string", "minLength": 1, "description": "Optional assertion of the bound caller ID; a different ID is rejected."},
             "mode": {"type": "string", "enum": ["self", "new"]},
             "message": {"type": "string", "minLength": 1, "maxLength": 100000},
             "run_at": {"type": "number", "description": "Future execution time as Unix epoch seconds (UTC)."},
@@ -191,7 +192,7 @@ SCHEDULE_TOOL = {
 def schedule_prompt(arguments, *, store=None):
     if not isinstance(arguments, dict) or set(arguments) - SCHEDULE_TOOL["inputSchema"]["properties"].keys():
         raise CoordinationError("Use the schedule_prompt input fields.")
-    sender = arguments.get("session_id") or caller_session()
+    sender = bind_caller(arguments.get("session_id"))
     if not isinstance(sender, str) or not sender.strip():
         raise CoordinationError("No caller session. Pass session_id from your hook context.")
     mode = arguments.get("mode")
@@ -230,7 +231,7 @@ def schedule_prompt(arguments, *, store=None):
 def ask_human(arguments, *, store=None):
     if not isinstance(arguments, dict) or set(arguments) - ASK_TOOL["inputSchema"]["properties"].keys():
         raise CoordinationError("Use the ask_human input fields: question, blocking, options, context, supersedes, wait_seconds.")
-    session_id = arguments.get("session_id", caller_session())
+    session_id = bind_caller(arguments.get("session_id"))
     if not isinstance(session_id, str) or not session_id.strip():
         raise CoordinationError("No caller session. Pass session_id from your hook context, or set AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     wait = arguments.get("wait_seconds")
@@ -255,7 +256,7 @@ def ask_human(arguments, *, store=None):
 def move_thread(arguments, *, store=None):
     if not isinstance(arguments, dict) or set(arguments) - MOVE_TOOL["inputSchema"]["properties"].keys():
         raise CoordinationError("Use the move_thread input fields.")
-    sender = arguments.get("from_session") or caller_session() or arguments.get("session_id")
+    sender = bind_caller(arguments.get("from_session")) or arguments.get("session_id")
     target = arguments.get("session_id") or sender
     if not isinstance(sender, str) or not sender.strip() or not isinstance(target, str) or not target.strip():
         raise CoordinationError("No caller session. Pass from_session or session_id from your hook context.")
@@ -267,7 +268,7 @@ def move_thread(arguments, *, store=None):
 def update_checkpoint(arguments, *, store=None):
     if not isinstance(arguments, dict) or set(arguments) - TOOL["inputSchema"]["properties"].keys():
         raise CoordinationError("Use the update_checkpoint input fields; send only fields that changed.")
-    session_id = arguments.get("session_id", caller_session())
+    session_id = bind_caller(arguments.get("session_id"))
     if not isinstance(session_id, str) or not session_id.strip():
         raise CoordinationError("No caller session. Pass session_id from your hook context, or set AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     payload = {key: value for key, value in arguments.items() if key != "session_id"}
@@ -302,7 +303,24 @@ def dispatch(message):
         if handler is None:
             return {**response, "error": {"code": -32602, "message": "Unknown tool."}}
         try:
-            receipt = handler(params.get("arguments", {}))
+            metadata = params.get("_meta", {})
+            session_id = metadata.get("threadId") if isinstance(metadata, dict) else None
+            if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
+                raise CoordinationError("MCP threadId must be a nonempty session ID.")
+            token = request_session.set(session_id)
+            try:
+                arguments = params.get("arguments", {})
+                if handler in {update_checkpoint, ask_human, schedule_prompt, move_thread}:
+                    if not isinstance(arguments, dict):
+                        raise CoordinationError("Tool arguments must be an object.")
+                    # move_thread's session_id is a target; from_session is the
+                    # actor. Other mutations own the caller's session directly.
+                    field = "from_session" if handler is move_thread else "session_id"
+                    identity = bind_caller(arguments.get(field), require_context=True)
+                    arguments = {**arguments, field: identity}
+                receipt = handler(arguments)
+            finally:
+                request_session.reset(token)
             result = {"content": [{"type": "text", "text": json.dumps(receipt, separators=(",", ":"))}]}
         except (CoordinationError, OSError, sqlite3.Error) as exc:
             result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}

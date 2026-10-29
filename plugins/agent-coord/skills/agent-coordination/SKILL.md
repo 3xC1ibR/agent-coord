@@ -58,11 +58,17 @@ absolute CLI path announced by the hook; the plugin root is two directories
 above this `SKILL.md`.
 
 Routine commands infer the caller from `AGENT_COORD_SESSION_ID`, then
-`CODEX_THREAD_ID`. Explicit `--session-id` / `--from-session` override it.
+`CODEX_THREAD_ID`. On caller-owned actions, explicit `--session-id` /
+`--from-session` must match that identity; a mismatch is rejected before writing.
+Forks use their own current identity, never the parent's ID from inherited
+messages, checkpoints, or tool calls. Omit caller IDs whenever possible.
 Claude browser sessions receive their identity at launch; terminal sessions
 receive it through `CLAUDE_ENV_FILE`. If context is unavailable, use the session
 ID announced by the hook. Never guess an identity from cwd or another session.
-Recipients and other threads remain explicit.
+Recipients and thread-management targets remain explicit. Use `inbox --peek`
+when inspecting another thread, so the read does not consume its delivery.
+A standalone administrative CLI with no inherited caller can still name an
+actor explicitly. Do not clear a provider's identity to bypass a mismatch.
 
 Omit `--db` normally: resolution is `--db`, `AGENT_COORD_DB`, then
 `${XDG_STATE_HOME:-~/.local/state}/agent-coord/state.sqlite3`. Follow an explicit
@@ -95,9 +101,10 @@ new actionable work to a closed app conversation automatically moves it into Now
 
 Before returning control to the user, at a phase change, or after a significant
 result, save a short factual checkpoint with the `update_checkpoint` tool when
-available. Send fields directly, such as `{"phase":"validation"}`. If the MCP
-process has no inherited caller identity, pass your registered `session_id` from
-hook context; never infer it from cwd or another session. Otherwise use the CLI:
+available. Send fields directly, such as `{"phase":"validation"}`. MCP writes
+require host-supplied request identity or an inherited caller environment; an
+explicit argument cannot establish identity. If the MCP process has no bound
+caller, use the CLI from your current tool shell:
 
 ```bash
 agent-coord checkpoint --json '{
@@ -210,8 +217,8 @@ state and does not interrupt a running turn or release a file scope. Call
 `end-work` independently when you no longer own that scope.
 To move a Codex or Claude app conversation to another project directory at the
 user's request, use the `move_thread` tool with an absolute `cwd`. Omit
-`session_id` for your own thread, or provide the target ID. Pass `from_session`
-from hook context if caller identity is unavailable. The shared CLI alternative is:
+`session_id` for your own thread, or provide the target ID. `from_session`, when
+supplied, must match the bound caller. If MCP has no caller identity, use the CLI:
 
 ```bash
 agent-coord thread move --session-id <thread-id> --cwd /absolute/destination --request-id <unique-key> --wait 0

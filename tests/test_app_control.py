@@ -52,8 +52,8 @@ class AppControlTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed", result)
         return result["thread_id"]
 
-    def cli(self, *arguments, expected=0, stdin=None):
-        return self.coord_cli("thread", *arguments, expected=expected, stdin=stdin)
+    def cli(self, *arguments, session_id="dispatcher", expected=0, stdin=None):
+        return self.coord_cli("thread", *arguments, session_id=session_id, expected=expected, stdin=stdin)
 
     def coord_cli(self, *arguments, session_id="dispatcher", expected=0, stdin=None):
         env = dict(os.environ, AGENT_COORD_SESSION_ID=session_id)
@@ -113,7 +113,7 @@ class AppControlTests(unittest.TestCase):
             with self.subTest(client=client):
                 creator = self.sessions.create(dict(cwd=str(self.root), client=client, name="Orchestrator"))["session"]["thread_id"]
                 request = self.cli("create", "--from-session", creator, "--client", client,
-                                   "--name", "Specialist", "--reply-required", "--wait", "0", "Investigate the release.")
+                                   "--name", "Specialist", "--reply-required", "--wait", "0", "Investigate the release.", session_id=creator)
                 self.worker.process_once()
                 receipt = self.control.status(request["request_id"])
                 self.assertEqual(receipt["status"], "completed", receipt)
@@ -289,7 +289,7 @@ class AppControlTests(unittest.TestCase):
             with self.subTest(client=client):
                 creator = self.sessions.create(dict(client=client, name="Creator"))["session"]["thread_id"]
                 queued = self.cli("create", "--from-session", creator, "--client", client,
-                                  "--name", "Worker", "--mode", "orchestration", "--wait", "0", "Do the work.")
+                                  "--name", "Worker", "--mode", "orchestration", "--wait", "0", "Do the work.", session_id=creator)
                 self.worker.process_once()
                 receipt = self.control.status(queued["request_id"])["result"]
                 child = receipt["session_id"]
