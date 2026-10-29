@@ -404,6 +404,17 @@ test("creating a new draft session or switching conversations with an outstandin
   assert.deepEqual(c.errors, []);
 });
 
+test("thread actions such as Dismiss stay available beside a wide agent tree", () => {
+  const fs = require("node:fs");
+  const css = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/agent-tree.css"), "utf8");
+  const hiding = /\.conversation\.agents-visible\s+\.session-actions\s*\{\s*display:\s*none;/g;
+  const blocks = [...css.matchAll(/@media\s*\(([^{]+)\)\s*\{((?:[^{}]*\{[^{}]*\})*[^{}]*)\}/g)];
+  const hidingBlocks = blocks.filter(([, , body]) => hiding.test(body) && (hiding.lastIndex = 0, true));
+  // Hidden only where the narrow conversation column reaches them through Context.
+  assert.deepEqual(hidingBlocks.map(([, query]) => query.replace(/\s+/g, " ")), ["min-width: 721px) and (max-width: 1100px"]);
+  assert.equal([...css.matchAll(hiding)].length, 1);
+});
+
 test("new draft sessions hide and collapse the Context panel across desktop and compact layouts, then restore appropriate Context access after the first message", async () => {
   const fs = require("node:fs");
   const agentTreeCss = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/agent-tree.css"), "utf8");

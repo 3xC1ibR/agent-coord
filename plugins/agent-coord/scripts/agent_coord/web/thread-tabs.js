@@ -53,7 +53,7 @@ class ThreadTabs {
   open(thread) {
     if (!thread?.thread_id) return;
     const item = this.items.find(item => item.thread_id === thread.thread_id);
-    if (item) Object.assign(item, thread, {conversation_id: thread.thread_id});
+    if (item) { Object.assign(item, thread, {conversation_id: thread.thread_id}); delete item.displayedThread; }
     else this.items.push({...thread, title: thread.title || "Conversation"});
     this.selected = thread.thread_id; this.save(true); this.render(); this.reveal(this.selected);
   }
@@ -76,10 +76,18 @@ class ThreadTabs {
     return false;
   }
   conversationFor(id) { return this.items.find(item => item.thread_id === id)?.conversation_id || id; }
+  // A family tab can display another agent; its indicator describes that agent,
+  // so a root's pending request never marks a different, working agent.
+  displayed(item) {
+    const id = item.conversation_id;
+    if (!id || id === item.thread_id) return item;
+    return item.displayedThread?.thread_id === id ? item.displayedThread : {thread_id: id};
+  }
   selectConversation(tabId, conversationId) {
     const item = this.items.find(item => item.thread_id === tabId);
     if (!item || !conversationId) return false;
     item.conversation_id = conversationId;
+    if (item.displayedThread?.thread_id !== conversationId) delete item.displayedThread;
     this.selected = tabId; this.save(true); this.render();
     return true;
   }
@@ -97,7 +105,10 @@ class ThreadTabs {
   suspend() { this.selected = undefined; this.save(true); this.render(); }
   update(threads) {
     const available = new Map(threads.map(thread => [thread.thread_id, thread]));
-    for (const item of this.items) if (available.has(item.thread_id)) Object.assign(item, available.get(item.thread_id));
+    for (const item of this.items) {
+      if (available.has(item.thread_id)) Object.assign(item, available.get(item.thread_id));
+      if (item.conversation_id !== item.thread_id && available.has(item.conversation_id)) item.displayedThread = available.get(item.conversation_id);
+    }
     this.save(); this.render();
   }
   replace(id, thread, {cwd = this.cwd} = {}) {
@@ -173,7 +184,9 @@ class ThreadTabs {
     // Status updates must not replace the native drag source mid-gesture.
     if (!this.container || this.dragging) return;
     const signature = JSON.stringify([this.selected ?? null, this.selected === undefined, this.scratchpadOpen,
-      this.items.map(item => [item.thread_id, item.title, item.response_state, item.unread_result, tabViews.needsAction(item)])]);
+      this.items.map(item => { const shown = this.displayed(item);
+        return [item.thread_id, item.title, item.conversation_id, shown.title, shown.response_state, shown.unread_result,
+          tabViews.needsAction(shown), shown === item ? null : tabViews.needsAction(item)]; })]);
     if (signature === this.signature) return;
     this.signature = signature;
     const focused = this.container.contains(this.document.activeElement) ? this.document.activeElement?.dataset.threadTab : undefined;
@@ -187,12 +200,14 @@ class ThreadTabs {
       tab.setAttribute("aria-selected", String(this.selected === id));
       tab.setAttribute("aria-controls", scratchpad ? "project-scratchpad-page" : id ? "conversation" : "welcome");
       tab.tabIndex = this.selected === id || this.selected === undefined && id === null ? 0 : -1;
-      const needsAction = tabViews.needsAction(item);
-      tab.title = scratchpad ? "Project scratchpad · ⌘⇧S to toggle floating notes" : item.title + (needsAction ? " · Action required" : item.unread_result ? " · New response" : "") + (id ? " · Alt+Shift+←/→ to reorder" : "");
-      tab.setAttribute("aria-label", item.title + (needsAction ? " · Action required" : ""));
+      const shown = id ? this.displayed(item) : item, needsAction = tabViews.needsAction(shown);
+      const label = item.title + (shown !== item && shown.title ? " · Showing " + shown.title : "") + (needsAction ? " · Action required" : "")
+        + (shown !== item && tabViews.needsAction(item) ? " · " + item.title + " needs action in its own conversation" : "");
+      tab.title = scratchpad ? "Project scratchpad · ⌘⇧S to toggle floating notes" : label + (!needsAction && shown.unread_result ? " · New response" : "") + (id ? " · Alt+Shift+←/→ to reorder" : "");
+      tab.setAttribute("aria-label", label);
       tab.dataset.needsAction = String(needsAction);
-      tab.dataset.status = item.response_state || "";
-      tab.dataset.unread = item.unread_result ? "true" : "false";
+      tab.dataset.status = shown.response_state || "";
+      tab.dataset.unread = shown.unread_result ? "true" : "false";
       tab.onclick = event => id && !scratchpad && event.shiftKey ? this.close(id) : this.activate(id);
       tab.onkeydown = event => this.keydown(event, id);
       wrapper.dataset.selected = String(this.selected === id);

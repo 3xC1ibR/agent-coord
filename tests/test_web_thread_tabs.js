@@ -300,6 +300,54 @@ test("conversation tabs keep action dots through reading and refresh when blocke
   assert.doesNotMatch(tab().attributes["aria-label"], /Action required/);
 });
 
+test("a family tab shows the displayed agent's state, not its root's pending request", () => {
+  const element = () => ({children: [], dataset: {}, attributes: {}, scrollLeft: 0, classList: {add() {}},
+    append(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
+    setAttribute(key, value) { this.attributes[key] = value; }, contains: () => false, querySelectorAll: () => []});
+  const storage = new Map();
+  const make = () => {
+    const container = element(), tabs = new ThreadTabs({container, document: {createElement: element},
+      storage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value)}});
+    tabs.setProject("/work");
+    return {tabs, tab: () => container.children[1].children[0]};
+  };
+  // The root lead asked the user for input; its child previously reported a result.
+  const lead = {...thread("lead"), title: "Lead", response_state: "input", needs_attention: true,
+    attention_reason: "blocked", unread_result: false};
+  const owner = {...thread("owner"), title: "Owner", response_state: "reply", needs_attention: true,
+    attention_reason: "reply", unread_result: true};
+  const {tabs, tab} = make();
+  tabs.open(lead); tabs.setTree("lead", true);
+  assert.equal(tab().dataset.needsAction, "true", "the root's own request marks its tab while displayed");
+  tabs.selectConversation("lead", "owner");
+  assert.equal(tab().dataset.needsAction, "false", "a not-yet-loaded agent must not inherit the root's request");
+  tabs.update([lead, owner]);
+  assert.equal(tab().dataset.needsAction, "false"); assert.equal(tab().dataset.unread, "true");
+  // The user continues the displayed agent, which starts tool work.
+  const working = {...owner, response_state: "working", needs_attention: false, attention_reason: null, unread_result: false};
+  tabs.update([working]);
+  assert.equal(tab().dataset.needsAction, "false"); assert.equal(tab().dataset.status, "working");
+  assert.match(tab().attributes["aria-label"], /^Lead · Showing Owner · Lead needs action in its own conversation$/);
+  // Inventory refreshes and reload keep the displayed agent's state.
+  tabs.update([lead, working]);
+  assert.equal(tab().dataset.needsAction, "false"); assert.equal(tab().dataset.status, "working");
+  const reloaded = make();
+  assert.equal(reloaded.tabs.conversationFor("lead"), "owner");
+  assert.equal(reloaded.tab().dataset.needsAction, "false");
+  reloaded.tabs.update([lead, working]);
+  assert.equal(reloaded.tab().dataset.needsAction, "false"); assert.equal(reloaded.tab().dataset.status, "working");
+  // A real request from the displayed agent still marks the tab.
+  reloaded.tabs.update([{...working, response_state: "input", needs_attention: true, attention_reason: "blocked"}]);
+  assert.equal(reloaded.tab().dataset.needsAction, "true");
+  assert.match(reloaded.tab().attributes["aria-label"], /Showing Owner · Action required/);
+  // Returning to the root shows its own outstanding request again.
+  reloaded.tabs.selectConversation("lead", "lead");
+  assert.equal(reloaded.tab().dataset.needsAction, "true"); assert.equal(reloaded.tab().dataset.status, "input");
+  assert.equal(reloaded.tab().attributes["aria-label"], "Lead · Action required");
+  reloaded.tabs.update([{...lead, needs_attention: false}]);
+  assert.equal(reloaded.tab().dataset.needsAction, "false");
+});
+
 test("restart preserves tab order and selection through the initial inventory refresh", async () => {
   const {tabs, storage} = setup();
   tabs.open(thread("a")); tabs.open(thread("b")); tabs.move("b", 0); tabs.open(thread("a"));

@@ -71,8 +71,6 @@
   .conversation.agents-visible .context-panel { order: initial; max-height: none; border-left: 1px solid var(--line); border-bottom: 0; overflow: visible; }
   .conversation.agents-visible .agent-panel-resize { display: block; }
   .conversation.agents-visible .conversation-head { flex-wrap: wrap; gap: 8px; padding: 14px 20px; }
-  .conversation.agents-visible .conversation-controls { flex-wrap: wrap; }
-  .conversation.agents-visible .session-actions { display: none; }
   .conversation.agents-visible .timeline { padding-inline: 24px; }
   .conversation.agents-visible .composer { padding-inline: 24px; }
   html.conversation-window .conversation.has-agent-tree:not(.context-collapsed),
@@ -87,6 +85,11 @@
   body.chat-expanded .conversation.has-agent-tree:not(.context-collapsed) .agent-panel-resize { display: block; }
   html.conversation-window .conversation.has-agent-tree #toggle-context,
   body.chat-expanded .conversation.has-agent-tree #toggle-context { display: inline-flex; }
+}
+/* Thread actions such as Dismiss stay beside a wide tree; the narrow column reaches them through Context. */
+@media (min-width: 721px) and (max-width: 1100px) {
+  .conversation.agents-visible .conversation-controls { flex-wrap: wrap; }
+  .conversation.agents-visible .session-actions { display: none; }
 }
 body.mobile-chat .mobile-thread-sheet .agent-panel-resize { display: none !important; }
 body.mobile-chat .mobile-thread-sheet:has(.agents-mode:not([hidden])) { width: calc(100vw - 16px); max-width: none; }
