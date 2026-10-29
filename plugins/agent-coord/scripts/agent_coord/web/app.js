@@ -1023,6 +1023,15 @@ function sameConversation(first, second) {
     JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.reviews, second.work_thread.browser_session, second.work_thread.client]);
 }
 async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true, tabId = null} = {}) {
+  // A conversation's tab belongs only to its own project, including a tab opened
+  // before the project was known or saved in the wrong project by an earlier version.
+  const removeMisplacedTab = () => {
+    const tabs = state.threadTabs, index = tabs?.items?.findIndex(item => item.thread_id === id) ?? -1;
+    if (index < 0) return;
+    tabs.items.splice(index, 1);
+    if (tabs.selected === id) tabs.selected = null;
+    tabs.save?.(true); tabs.render?.();
+  };
   const activitySource = state.paneMode || globalThis.agentCoordPanes?.active ? "programmatic" : state.activity?.source();
   const previousTab = state.threadTabs?.selected;
   state.projectScratchpad?.hideTab();
@@ -1032,6 +1041,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   if ((!tabId || tabId === id) && !state.paneMode && !state.conversationWindow) {
     const known = state.sessions?.find(thread => thread.thread_id === id) || state.conversations?.get(id)?.detail?.work_thread;
     const related = known?.orchestration_workspaces?.includes(state.projectCwd);
+    if (!related && known?.project_cwd && known.project_cwd !== state.folders?.selected?.cwd) removeMisplacedTab();
     if (stayInProject && !related && (known?.project_cwd || known?.cwd) && (known.project_cwd || known.cwd) !== state.projectCwd) return;
     const cwd = known?.project_cwd || known?.cwd;
     if (!related && cwd && cwd !== state.folders?.selected?.cwd) await openProjectDirectory(cwd, {preserveRollUp: rollUp});
@@ -1116,13 +1126,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   const displayed = state.detail.work_thread;
   if ((!tabId || tabId === id) && !state.conversationWindow && !displayed.orchestration_workspaces?.includes(state.projectCwd)
       && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
-    // A tab opened before the thread's project was known belongs only to that project.
-    const tabs = state.threadTabs, misplaced = tabs?.items.findIndex(item => item.thread_id === id) ?? -1;
-    if (misplaced >= 0) {
-      tabs.items.splice(misplaced, 1);
-      if (tabs.selected === id) tabs.selected = null;
-      tabs.save(true); tabs.render();
-    }
+    removeMisplacedTab();
     if (stayInProject) { goHome({restoreDispatcher: false}); return; }
     await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp});
     return select(id, {rollUp});
