@@ -1074,9 +1074,10 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   const cached = conversationEntry(id);
   cached.refreshFailures = 0;
   cached.refreshError = null;
+  cached.requestsRefreshing = true;
   notifications?.syncFocus();
   state.detail = cached.detail;
-  state.detailRefreshing = true;
+  state.detailRefreshing = !cached.detail;
   state.titleEdit = null;
   state.attachments?.highlight(false);
   renderStatus();
@@ -1149,6 +1150,8 @@ async function refreshDetail({markSeen = true} = {}) {
   entry.retryTimer = null;
   entry.pending = (async () => {
     const revision = entry.revision;
+    const streamedItems = entry.streamedItems = new Map();
+    entry.streamedUsage = false;
     const attentionRevision = state.attentionMutations?.get(id)?.revision || 0;
     // A hung read must not hold the shared refresh promise (and Send) forever.
     // Only reads use this deadline; a submitted message must never be retried.
@@ -1188,10 +1191,25 @@ async function refreshDetail({markSeen = true} = {}) {
       if (id === state.selected) scheduleDetail();
       return false;
     }
+    // Retain items changed locally during this read without replaying deltas:
+    // the snapshot may already include a delta, so replay would duplicate text.
+    for (const [turnId, itemIds] of streamedItems) {
+      const live = entry.detail?.thread.turns?.find(turn => turn.id === turnId);
+      if (!live) continue;
+      const turns = detail.thread.turns ||= [];
+      let turn = turns.find(turn => turn.id === turnId);
+      if (!turn) { turns.push(live); continue; }
+      for (const item of live.items || []) if (itemIds.has(item.id)) {
+        const index = turn.items.findIndex(current => current.id === item.id);
+        if (index < 0) turn.items.push(item); else turn.items[index] = item;
+      }
+    }
+    if (entry.streamedUsage && entry.detail?.work_thread) detail.work_thread.usage = entry.detail.work_thread.usage;
     const recovering = !!entry.refreshError;
     const same = sameConversation(entry.detail, detail);
     entry.refreshError = null;
     entry.refreshFailures = 0;
+    entry.requestsRefreshing = false;
     entry.detail = detail;
     if (!same) entry.nodes = null;
     if (id !== state.selected || state.conversations.get(id) !== entry) return true;
@@ -1202,7 +1220,7 @@ async function refreshDetail({markSeen = true} = {}) {
       goHome(); return true;
     }
     renderThread();
-    if (!same || state.timelineThread !== id) renderTimeline();
+    if (!same || state.timelineThread !== id || state.timelineRender?.id === id) renderTimeline();
     renderRequests(); renderQueuedMessages(); renderStatus();
     if (recovering && detail.work_thread.browser_session) loadSessionModels();
     // Opening a tab sends its own receipt. Also acknowledge replies rendered
@@ -1217,6 +1235,7 @@ async function refreshDetail({markSeen = true} = {}) {
     return !changed;
   })().finally(() => {
     entry.pending = null;
+    entry.streamedItems = null;
     if (id === state.selected && state.conversations.get(id) === entry) renderStatus();
   });
   if (id === state.selected) renderStatus();
@@ -1906,7 +1925,7 @@ function requestButton(label, decision, request, form) {
 }
 function renderRequests() {
   const area = $("requests");
-  if (state.detailRefreshing) { area.replaceChildren(); delete area.dataset.signature; return; }
+  if (state.detailRefreshing || state.conversations?.get(state.selected)?.requestsRefreshing) { area.replaceChildren(); delete area.dataset.signature; return; }
   // Preserve partially entered answers while unrelated events stream.
   const signature = JSON.stringify((state.detail?.requests || []).map(r => r.key));
   if (area.dataset.signature === signature) return;
@@ -1984,14 +2003,23 @@ function applyEvent(event) {
   if (event.method === "coordination/messageSent") { state.agentTreeController?.message(event.params); return; }
   if (event.method === "thread/closedWhenDone") { threadClosedWhenDone(event.params.threadId).catch(showError); return; }
   const cached = state.conversations?.get(event.params.threadId);
-  if (cached) cached.revision++;
   if (event.method === "thread/usage/updated") {
+    if (cached) cached.streamedUsage = true;
     if (cached?.detail?.work_thread) cached.detail.work_thread.usage = event.params.usage;
     if (state.detail?.work_thread?.thread_id === event.params.threadId) {
       state.detail.work_thread.usage = event.params.usage;
       renderStatus();
     }
     return;
+  }
+  const streamedItem = state.detail && event.params.threadId === state.selected && !event.requestKey &&
+    event.method.startsWith("item/") && event.params.turnId && (event.params.item?.id || event.params.itemId);
+  if (cached) {
+    if (streamedItem && cached.streamedItems) {
+      const ids = cached.streamedItems.get(event.params.turnId) || new Set();
+      ids.add(event.params.item?.id || event.params.itemId);
+      cached.streamedItems.set(event.params.turnId, ids);
+    } else if (!streamedItem) cached.revision++;
   }
   if (event.method === "browser/changed" && event.params.projectCwd) {
     for (const list of [state.sessions, state.viewThreads]) for (const thread of list || []) {
@@ -2427,6 +2455,7 @@ async function sendSessionDraft(text, images, mentions = []) {
   if (!draft.createdId) {
     const result = await api("sessions", {...draft.session});
     draft.createdId = result.session.thread_id;
+    draft.createdDetail = result;
     if (draft.session.project_id) savedViews?.showGroup(draft.session.project_id, draft.session.cwd);
   }
   const body = {message: text, windowId: state.sourceWindowId};
@@ -2434,6 +2463,14 @@ async function sendSessionDraft(text, images, mentions = []) {
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
   state.reviewUI?.decorate(body, draftId);
   const result = await api(sessionPath(draft.createdId) + "/messages", body);
+  // Creation and message acceptance already establish this conversation. Show
+  // that state immediately while its full detail catches up in the background.
+  const created = draft.createdDetail || {};
+  const entry = conversationEntry(draft.createdId);
+  entry.detail = {session: {...draft.session, ...created.session},
+    work_thread: {...draft.work_thread, thread_id: draft.createdId, title: "Conversation", client: draft.session.client},
+    thread: {...created.thread, turns: result.turn ? [result.turn] : created.thread?.turns || []},
+    requests: [], queuedMessages: [], running: !!(result.turn || result.turnId), activeTurn: result.turn?.id || result.turnId || null};
   state.reviewUI?.sent(draftId);
   state.attachments?.sent(draftId, images);
   state.mentions?.sent(draftId, text, mentions);
@@ -2451,17 +2488,18 @@ async function sendSessionDraft(text, images, mentions = []) {
     state.drafts.delete("new-session");
     state.newSessionDraft = null;
   }
+  state.sending?.delete(draft);
   state.threadTabs?.replace("new-session", {thread_id: draft.createdId, title: "Conversation"}, {cwd});
   const destination = state.projectDestinations?.get(cwd);
   if (destination?.tab === "new-session") destination.tab = draft.createdId;
   if (current && state.selected === "new-session") {
     $("message").value = "";
     restoreFocus = !!result.command && hadComposerFocus && state.navigationRevision === navigationRevision;
-    const selecting = select(draft.createdId, {focus: !result.command});
+    const selecting = select(draft.createdId, {focus: !result.command, refreshInventory: false});
     focusRevision = state.navigationRevision;
-    await selecting;
+    await selecting.catch(error => showError(new Error("Your message was received, but the view could not refresh. " + error.message)));
   }
-  await refreshList();
+  refreshList({background: true}).catch(showError);
   // The first command replaces the draft, including inside a pane where select
   // does not focus the composer. Preserve any intervening navigation or click.
   if (restoreFocus && state.selected === draft.createdId && state.navigationRevision === focusRevision &&
@@ -2989,10 +3027,15 @@ async function sendMessage(mode = "steer") {
     if (id === state.selected) {
       if ($("message").value === text) { $("message").value = ""; state.drafts.delete(id); }
       else state.drafts.set(id, $("message").value);
-      await refreshDetail();
     } else if (state.drafts.get(id) === text) state.drafts.delete(id);
-    await refreshList();
-    if (!result.command) await state.rollUp?.responded(ticket, {pending: !!state.detail?.requests?.length});
+    // Acceptance releases the composer. Neither transcript reconciliation nor
+    // an unrelated inventory read is part of sending the user's message.
+    const refreshFailed = error => showError(new Error("Your message was received, but the view could not refresh. " + error.message));
+    const refreshing = id === state.selected ? refreshDetail() : Promise.resolve();
+    refreshing.then(() => {
+      if (!result.command) return state.rollUp?.responded(ticket, {pending: !!state.detail?.requests?.length});
+    }).catch(refreshFailed);
+    refreshList({background: true}).catch(refreshFailed);
   }
   catch (error) {
     if (dispatchReceived) {

@@ -25,12 +25,13 @@ function setup() {
     },
     goHome: () => { if (c.state.selected) c.state.drafts.set(c.state.selected, c.$("message").value); c.state.selected = null; c.state.detail = null; },
     select: async id => { c.state.selected = id; c.$("message").value = c.state.drafts.get(id) || ""; },
-    renderTitle() {}, renderQueuedMessages() {}, renderStatus() { c.renderModelPicker(); }, refreshList: async () => {}, calls,
+    renderTitle() {}, renderQueuedMessages() {}, renderStatus() { c.renderModelPicker(); }, refreshList: async () => {}, showError() {}, calls,
   };
   c.sessionContext = () => newThreadContext(c.state.organization,
     {repository: c.$("repository").value, project: c.$("project").value}, c.state.folders.selected);
   c.renderFolders = () => {};
   vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function retainConversation(")), c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function filtersChanged()")), c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   return c;
@@ -607,6 +608,35 @@ test("an existing send and its refresh cannot block another project's send or cl
   refresh.resolve(); await first;
   assert.equal(c.state.drafts.has("a"), false);
   assert.equal(c.state.sending.size, 0);
+});
+
+test("first acceptance seeds a usable conversation and refreshes inventory only once in background", async () => {
+  const c = setup(); await c.newSession();
+  c.$("message").value = "First message";
+  const api = c.api, detail = deferred(), inventory = deferred();
+  let inventories = 0;
+  c.api = async (path, body) => path.endsWith("/messages")
+    ? {turn: {id: "accepted-turn", status: "inProgress", items: []}} : api(path, body);
+  c.refreshList = () => { inventories++; return inventory.promise; };
+  c.select = async (id, options) => {
+    assert.equal(options.refreshInventory, false);
+    c.state.selected = id;
+    c.state.detail = c.state.conversations.get(id).detail;
+    c.$("message").value = c.state.drafts.get(id) || "";
+    await detail.promise;
+  };
+  const sending = c.sendMessage(); await settle();
+  assert.equal(c.state.selected, "created");
+  assert.equal(c.state.detail.work_thread.thread_id, "created");
+  assert.equal(c.state.detail.activeTurn, "accepted-turn");
+  assert.equal(c.state.detail.running, true);
+  assert.equal(c.state.sending.size, 0, "the accepted first send is released before the detail read");
+  assert.equal(c.$("message").value, "");
+  c.$("message").value = "Next message";
+  detail.resolve(); await sending;
+  assert.equal(inventories, 1);
+  assert.equal(c.$("message").value, "Next message");
+  inventory.resolve();
 });
 
 test("draft permission commands stay local and configure the first real message", async () => {

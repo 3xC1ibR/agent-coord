@@ -94,7 +94,7 @@ test("large conversation reopens immediately with the same nodes, draft and scro
   assert.equal(c.$("timeline").childNodes[0], original);
   assert.equal(c.$("message").value, "unsent draft");
   assert.equal(c.$("timeline").scrollTop, 123);
-  assert.equal(c.state.detailRefreshing, true);
+  assert.equal(c.state.detailRefreshing, false);
   assert.equal(c.renders, 1);
   gate.resolve(clone(c.replies.get("one"))); await opening;
   assert.equal(c.state.detailRefreshing, false);
@@ -212,11 +212,96 @@ test("a delayed background read cannot overwrite newer streamed text or a new ap
   assert.equal(c.state.detail.thread.turns[0].items[0].text, "Saved answer update");
   assert.equal(c.state.detail.requests[0].key, "new-approval");
   assert.ok(c.scheduled > 0);
-  assert.equal(c.state.detailRefreshing, true);
+  assert.equal(c.state.detailRefreshing, false);
   c.gate = null;
   c.replies.set("one", clone(c.state.detail));
   await c.refreshDetail();
   assert.equal(c.state.detailRefreshing, false);
+});
+
+test("continuous streamed items do not starve successful detail reads or cached sending", async () => {
+  const c = recoverySetup(); await c.select("one");
+  for (let index = 1; index <= 10; index++) {
+    c.goHome();
+    const {opening, gate} = await startRefresh(c, "one");
+    assert.equal(c.$("send").disabled, false, "cached sending stays available during the read");
+    c.applyEvent({method: "item/agentMessage/delta", params: {threadId: "one", turnId: "turn", itemId: "answer", delta: "!"}});
+    const snapshot = fixture("one", "Saved answer" + "!".repeat(index), index + 1);
+    snapshot.thread.turns[0].items.push({id: "other", type: "agentMessage", text: "Fresh history " + index});
+    gate.resolve(snapshot); await opening;
+    assert.equal(c.state.detail.thread.turns[0].items[0].text, "Saved answer" + "!".repeat(index), "a delta already in the snapshot is not replayed");
+    assert.equal(c.state.detail.thread.turns[0].items[1].text, "Fresh history " + index);
+    assert.equal(c.state.detail.work_thread.checkpoint.id, index + 1);
+    assert.equal(c.$("send").disabled, false);
+    assert.equal(c.$("conversation-refresh").hidden, true);
+    assert.equal(c.state.conversations.get("one").requestsRefreshing, false);
+  }
+  assert.equal(c.scheduled || 0, 0, "ordinary item deltas must not trigger retry reads");
+});
+
+test("a cold conversation becomes usable while events continue during every read", async () => {
+  const c = recoverySetup();
+  const first = await startRefresh(c, "one");
+  c.applyEvent({method: "item/agentMessage/delta", params: {threadId: "one", turnId: "turn", itemId: "answer", delta: " initial"}});
+  first.gate.resolve(fixture("one", "Saved answer initial")); await first.opening;
+  assert.equal(c.$("send").disabled, true, "the event arrived before any local detail could apply it");
+  c.gate = {id: "one", ...deferred()};
+  const refreshing = c.refreshDetail();
+  c.applyEvent({method: "item/agentMessage/delta", params: {threadId: "one", turnId: "turn", itemId: "answer", delta: " next"}});
+  c.gate.resolve(fixture("one", "Saved answer initial")); await refreshing;
+  assert.equal(c.$("send").disabled, false);
+  assert.equal(c.$("conversation-refresh").hidden, true);
+  assert.equal(c.state.detail.thread.turns[0].items[0].text, "Saved answer initial next");
+});
+
+test("first-send acknowledgement opens its cached conversation before full detail returns", async () => {
+  const c = recoverySetup(), api = c.api;
+  const draft = {...fixture("new-session", ""), session: {cwd: "/project", client: "codex"}};
+  c.state.selected = "new-session"; c.state.detail = draft; c.state.newSessionDraft = draft;
+  c.state.commandFeedback = new Map(); c.state.sending = new Set([draft]);
+  c.$("message").value = "First message";
+  c.gate = {id: "created", ...deferred()};
+  c.api = async (path, body) => {
+    if (path === "sessions") return {session: {thread_id: "created"}, thread: {turns: []}};
+    if (path === "sessions/created/messages") return {turn: {id: "first-turn", status: "inProgress", items: []}};
+    return api(path, body);
+  };
+  vm.runInContext(source.slice(source.indexOf("async function sendSessionDraft("), source.indexOf('$("new-session").onclick')), c);
+  const sending = c.sendSessionDraft("First message", []);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(c.state.selected, "created");
+  assert.equal(c.state.detail.activeTurn, "first-turn");
+  assert.equal(c.$("send").disabled, false);
+  assert.equal(c.$("conversation-refresh").hidden, true);
+  assert.equal(c.state.sending.size, 0);
+  assert.equal(c.$("message").value, "");
+  c.gate.resolve(fixture("created")); await sending;
+});
+
+test("a detail read paints a streamed item whose batched render is still pending", async () => {
+  const c = setup(); await c.select("one");
+  vm.runInContext(source.slice(source.indexOf("function scheduleTimelineRender("), source.indexOf("function applyEvent(")), c);
+  const {opening, gate} = await startRefresh(c, "one");
+  c.applyEvent({method: "item/agentMessage/delta", params: {threadId: "one", turnId: "turn", itemId: "answer", delta: " update"}});
+  assert.ok(c.state.timelineRender);
+  gate.resolve(fixture("one")); await opening;
+  assert.equal(c.$("timeline").childNodes[0].textContent, "Saved answer update");
+});
+
+test("streamed tool output and newly added items survive a concurrent detail read", async () => {
+  const c = setup();
+  const detail = fixture("one");
+  detail.thread.turns[0].items.push({id: "tool", type: "commandExecution", aggregatedOutput: "before"});
+  c.replies.set("one", detail); await c.select("one");
+  const {opening, gate} = await startRefresh(c, "one");
+  c.applyEvent({method: "item/commandExecution/outputDelta", params: {threadId: "one", turnId: "turn", itemId: "tool", delta: " after"}});
+  c.applyEvent({method: "item/started", params: {threadId: "one", turnId: "new-turn", item: {id: "new-item", type: "agentMessage", text: "New"}}});
+  c.applyEvent({method: "thread/usage/updated", params: {threadId: "one", usage: {tokens: 200}}});
+  gate.resolve(clone(detail)); await opening;
+  assert.equal(c.state.detail.thread.turns[0].items[1].aggregatedOutput, "before after");
+  assert.equal(c.state.detail.thread.turns[1].items[0].text, "New");
+  assert.equal(c.state.detail.work_thread.usage.tokens, 200);
+  assert.equal(c.scheduled || 0, 0);
 });
 
 test("an old session response does not replace the conversation selected while it was loading", async () => {
@@ -241,17 +326,17 @@ test("overlapping refreshes share a request, and failures keep the cached transc
   gate.reject(new Error("offline")); await Promise.all([failed, failedAgain]);
   assert.equal(c.$("timeline").childNodes[0].textContent, "Saved answer");
   assert.equal(c.calls.filter(call => call.path === "sessions/one").length, 2);
-  assert.equal(c.state.detailRefreshing, true);
+  assert.equal(c.state.detailRefreshing, false);
   c.gate = null; await c.refreshDetail(); assert.equal(c.state.detailRefreshing, false);
 });
 
-test("a failed cached refresh recovers automatically without losing the draft or stale-state guard", async () => {
+test("a failed cached refresh recovers automatically without disabling the draft", async () => {
   const c = recoverySetup(); await c.select("one");
   c.$("message").value = "Keep this follow-up"; c.goHome();
   const {opening, gate} = await startRefresh(c, "one");
   const failed = assert.rejects(opening, /offline/);
   gate.reject(new Error("offline")); await failed;
-  assert.equal(c.$("send").disabled, true);
+  assert.equal(c.$("send").disabled, false);
   assert.equal(c.$("conversation-refresh").hidden, false);
   assert.match(c.$("conversation-refresh-message").textContent, /Retrying/);
   assert.equal(c.state.conversations.get("one").pending, null);
@@ -274,7 +359,7 @@ test("persistent refresh failure stops retrying and an explicit Retry recovers i
   for (const delay of [1000, 2000, 4000]) await c.runTimer(delay);
   assert.equal(c.timers.size, 0);
   assert.equal(c.state.conversations.get("one").refreshFailures, 4);
-  assert.equal(c.$("send").disabled, true);
+  assert.equal(c.$("send").disabled, false);
   assert.equal(c.$("retry-conversation").hidden, false);
   assert.equal(c.$("retry-conversation").disabled, false);
   assert.doesNotMatch(c.$("conversation-refresh-message").textContent, /Retrying/);
@@ -300,7 +385,7 @@ test("a hanging detail read times out and frees the shared request for recovery"
   await c.runTimer(15000); await failed;
   assert.equal(signal.aborted, true);
   assert.equal(c.state.conversations.get("one").pending, null);
-  assert.equal(c.$("send").disabled, true);
+  assert.equal(c.$("send").disabled, false);
   c.api = api; await c.runTimer(1000);
   assert.equal(c.$("send").disabled, false);
 });
@@ -327,6 +412,7 @@ test("initial-load failures offer recovery without a cached transcript", async (
   const failed = assert.rejects(opening, /offline/);
   gate.reject(new Error("offline")); await failed;
   assert.equal(c.state.detail, null);
+  assert.equal(c.$("send").disabled, true);
   assert.equal(c.$("conversation-refresh").hidden, false);
   c.gate = null; await c.$("retry-conversation").onclick();
   assert.equal(c.state.detail.work_thread.thread_id, "one");
@@ -335,7 +421,7 @@ test("initial-load failures offer recovery without a cached transcript", async (
   assert.equal(catalogs, 1, "Recovery must load controls skipped by the failed initial selection");
 });
 
-test("cached approvals and sending remain unavailable until authoritative refresh", async () => {
+test("cached approvals wait for authoritative refresh while the composer stays usable", async () => {
   const c = setup();
   c.replies.set("one", {...fixture("one"), requests: [{key: "old", method: "unknown", params: {}}]});
   await c.select("one"); c.goHome();
@@ -343,8 +429,7 @@ test("cached approvals and sending remain unavailable until authoritative refres
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   const {opening, gate} = await startRefresh(c, "one");
   c.renderRequests(); assert.equal(c.$("requests").childNodes.length, 0);
-  c.$("message").value = "must wait";
-  const before = c.calls.length; await c.sendMessage(); assert.equal(c.calls.length, before);
+  assert.equal(c.state.detailRefreshing, false, "cached sending must remain usable");
   gate.resolve(fixture("one")); await opening;
   assert.equal(c.state.detailRefreshing, false);
 });
@@ -357,7 +442,7 @@ test("an SSE reset invalidates an outstanding cached refresh", async () => {
   c.events.onmessage({data: JSON.stringify({reset: true, events: []})});
   gate.resolve(fixture("one", "obsolete")); await opening;
   assert.equal(c.state.detail.thread.turns[0].items[0].text, "Saved answer");
-  assert.equal(c.state.detailRefreshing, true);
+  assert.equal(c.state.detailRefreshing, false);
 });
 
 test("a completion notification without an item event invalidates an outstanding snapshot", async () => {

@@ -12,7 +12,7 @@ function setup() {
     state: {busy: false, selected: "one", sessions: [], closing: new Set(), commandFeedback: new Map(), drafts: new Map(),
       detail: {running: true, activeTurn: "turn-one", work_thread: {client: "codex", browser_session: true, attention: "now"}}},
     renderSessionSettings() {}, threadGrouping: {status: () => ({label: "Idle"})},
-    refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id,
+    refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id, showError() {},
   };
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), context);
@@ -153,4 +153,36 @@ test("closed threads and turns without an ID cannot submit steering", async () =
     await c.sendMessage();
     assert.equal(c.$("message").value, "Focus on the UI first");
   }
+});
+
+test("accepted sends release the composer before detail and inventory refreshes finish", async () => {
+  const c = setup();
+  let accept, finishDetail, finishList, posts = 0;
+  c.api = () => { posts++; return new Promise(resolve => { accept = resolve; }); };
+  c.refreshDetail = () => new Promise(resolve => { finishDetail = resolve; });
+  c.refreshList = () => new Promise(resolve => { finishList = resolve; });
+  const sending = c.sendMessage();
+  assert.equal(c.$("send").disabled, true);
+  await c.sendMessage(); assert.equal(posts, 1);
+  c.$("message").value = "Next draft";
+  accept({turnId: "turn-one"}); await sending;
+  assert.equal(c.$("send").disabled, false);
+  assert.equal(c.state.sending.size, 0);
+  assert.equal(c.$("message").value, "Next draft");
+  assert.equal(c.state.drafts.get("one"), "Next draft");
+  assert.ok(finishDetail); assert.ok(finishList);
+  finishDetail(); finishList();
+});
+
+test("refresh failures after acceptance do not reject the send or restore sent text", async () => {
+  const c = setup(), errors = [];
+  c.api = async () => ({turnId: "turn-one"});
+  c.refreshDetail = async () => { throw new Error("Detail unavailable"); };
+  c.refreshList = async () => { throw new Error("Inventory unavailable"); };
+  c.showError = error => errors.push(error.message);
+  await c.sendMessage(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(c.$("message").value, "");
+  assert.equal(c.$("send").disabled, false);
+  assert.equal(errors.length, 2);
+  assert.ok(errors.every(message => message.startsWith("Your message was received")));
 });

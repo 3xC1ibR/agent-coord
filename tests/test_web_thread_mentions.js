@@ -120,7 +120,8 @@ test('first message in a new conversation carries resolved mentions and clears t
  const state={selected:'new-session',newSessionDraft:{session:{client:'codex'}},drafts:new Map(),commandFeedback:new Map(),mentions:h.mentions};
  const ctx=vm.createContext({state,$:()=>h.input,sessionPath:id=>'sessions/'+id,isSessionDraft:()=>state.selected==='new-session',
   api:async(path,body)=>{calls.push({path,body});return path==='sessions'?{session:{thread_id:'created'}}:{};},
-  select:async id=>{state.selected=id;h.switch(id);h.input.value=state.drafts.get(id)||'';},refreshList:async()=>{}});
+  select:async id=>{state.selected=id;h.switch(id);h.input.value=state.drafts.get(id)||'';},refreshList:async()=>{},showError(){}});
+ vm.runInContext(source.slice(source.indexOf('function conversationEntry('),source.indexOf('function retainConversation(')),ctx);
  vm.runInContext(source.slice(source.indexOf('async function sendSessionDraft('),source.indexOf('$("new-session").onclick',source.indexOf('async function sendSessionDraft('))),ctx);
  await ctx.sendSessionDraft(d.text,[],d.refs);
  assert.deepEqual(calls[1].body.mentions,d.refs);assert.equal(calls[1].path,'sessions/created/messages');

@@ -7,12 +7,13 @@ const DispatchUI = require("../plugins/agent-coord/scripts/agent_coord/web/dispa
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
 
 function setup() {
-  const values = new Map(), elements = new Map(), calls = [], warnings = [], delays = [];
+  const values = new Map(), elements = new Map(), calls = [], warnings = [], delays = [], errors = [];
   const c = {state: {busy: false, selected: "dispatcher", config: {token: "test"}, drafts: new Map(),
     closing: new Set(), commandFeedback: new Map(), detail: {running: false,
       work_thread: {browser_session: true, dispatcher: true, attention: "now"}}},
     base: "/api/browser/", listRequest: 0, location: {protocol: "http:"},
     console: {warn: (...args) => warnings.push(args)},
+    showError: error => errors.push(error.message),
     setTimeout: (callback, delay) => { delays.push(delay); callback(); },
     DispatchUI, sessionStorage: {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key)},
     $: id => { if (!elements.has(id)) elements.set(id, {value: "", checked: false}); return elements.get(id); },
@@ -27,7 +28,7 @@ function setup() {
   vm.runInContext(source.slice(source.indexOf("async function api("), source.indexOf("async function openMentionFile(")), c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   c.$("message").value = "Review the navigation";
-  return {c, values, calls, warnings, delays};
+  return {c, values, calls, warnings, delays, errors};
 }
 
 test("unreadable send response preserves draft and reuses the same dispatcher request ID", async () => {
@@ -48,9 +49,10 @@ test("unreadable send response preserves draft and reuses the same dispatcher re
 });
 
 test("accepted dispatch followed by refresh failure reports receipt without replaying", async () => {
-  const {c, calls, values} = setup();
+  const {c, calls, values, errors} = setup();
   c.refreshDetail = async () => { throw new SyntaxError("The string did not match the expected pattern."); };
-  await assert.rejects(c.sendMessage(), /request was received.*Do not send it again/);
+  await c.sendMessage(); await new Promise(resolve => setImmediate(resolve));
+  assert.match(errors[0], /message was received.*view could not refresh/);
   assert.equal(calls.length, 1);
   assert.equal(c.$("message").value, "");
   assert.equal(values.has("dispatch-request:dispatcher"), false);
@@ -58,13 +60,14 @@ test("accepted dispatch followed by refresh failure reports receipt without repl
 });
 
 test("typing a new draft during an accepted send survives a failed refresh", async () => {
-  const {c} = setup();
+  const {c, errors} = setup();
   c.response.json = async () => {
     c.$("message").value = "A different request";
     return {dispatched: true};
   };
   c.refreshList = async () => { throw new Error("Disconnected"); };
-  await assert.rejects(c.sendMessage(), /request was received/);
+  await c.sendMessage(); await new Promise(resolve => setImmediate(resolve));
+  assert.match(errors[0], /message was received/);
   assert.equal(c.$("message").value, "A different request");
   assert.equal(c.state.drafts.get("dispatcher"), "A different request");
 });

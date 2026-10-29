@@ -1,6 +1,8 @@
 """User attention is separate from agent message delivery and turn subscriptions."""
 from __future__ import annotations
 
+import json
+
 from .organization import app_agent_creators
 
 
@@ -73,20 +75,23 @@ def automatic_context(store, thread_id):
 
 
 def available_owners(db, store):
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    paused = {row[0] for row in db.execute("SELECT thread_id FROM browser_inbox_wake WHERE paused = 1")} if "browser_inbox_wake" in tables else set()
-    browsers = {row[0] for row in db.execute("SELECT thread_id FROM browser_sessions")} if "browser_sessions" in tables else set()
-    result = set()
-    for row in db.execute("""SELECT t.thread_id, t.attention, s.ended_at, s.turn_active, s.last_seen_at,
-            c.status FROM work_threads t JOIN sessions s ON s.session_id = t.thread_id
-            LEFT JOIN turn_completions c ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key"""):
-        tid = row["thread_id"]
-        if (row["attention"] != "archived" and tid not in paused
-                and (row["turn_active"] or row["status"] not in {"failed", "interrupted"})
-                and (tid in browsers or row["ended_at"] is None
-                     and row["last_seen_at"] >= store.clock() - store.stale_after_seconds)):
-            result.add(tid)
-    return result
+    # Filter in SQLite and return one row. Python's sqlite3 releases and
+    # reacquires the GIL for every result row, which convoys behind other
+    # request threads when thousands of rows are filtered here.
+    tables = {row[0] for row in db.execute("""SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('browser_inbox_wake', 'browser_sessions')""")}
+    paused = ("NOT EXISTS (SELECT 1 FROM browser_inbox_wake w WHERE w.thread_id = t.thread_id AND w.paused = 1)"
+              if "browser_inbox_wake" in tables else "1")
+    browser = ("EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)"
+               if "browser_sessions" in tables else "0")
+    owners = db.execute(f"""SELECT json_group_array(t.thread_id) FROM work_threads t
+        JOIN sessions s ON s.session_id = t.thread_id
+        LEFT JOIN turn_completions c ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
+        WHERE t.attention IS NOT 'archived' AND {paused}
+        AND (s.turn_active OR c.status IS NULL OR c.status NOT IN ('failed', 'interrupted'))
+        AND ({browser} OR s.ended_at IS NULL AND s.last_seen_at >= ?)""",
+        (store.clock() - store.stale_after_seconds,)).fetchone()[0]
+    return set(json.loads(owners))
 
 
 def decide(thread, *, waiting=False, owners=()):

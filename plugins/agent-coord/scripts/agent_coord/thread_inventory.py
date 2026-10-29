@@ -45,19 +45,26 @@ class ThreadInventory:
         self.automatic_turns = {row[0] for row in db.execute("""SELECT DISTINCT t.thread_id
             FROM work_threads t JOIN messages m ON m.recipient_session_id = t.thread_id AND m.wake_turn_id = t.turn_id
             WHERE (t.attention = 'archived') = ?""", self.params)}
+        # Walk each thread's checkpoint index from the newest entry instead of
+        # grouping every checkpoint by phase.
         self.prior = {row["thread_id"]: row["phase"] for row in db.execute("""
-            SELECT c.thread_id, c.phase FROM thread_checkpoints c WHERE c.id IN (
-                SELECT MAX(id) FROM thread_checkpoints WHERE phase != 'finished' AND thread_id IN (
-        """ + self.selected + ") GROUP BY thread_id)", self.params)}
+            SELECT thread_id, phase FROM (SELECT t.thread_id, (SELECT c.phase FROM thread_checkpoints c
+                WHERE c.thread_id = t.thread_id AND c.phase != 'finished' ORDER BY c.id DESC LIMIT 1) AS phase
+            FROM work_threads t WHERE (t.attention = 'archived') = ?) WHERE phase IS NOT NULL""", self.params)}
         self.completions = {row["thread_id"]: dict(row) for row in db.execute("""
             SELECT c.thread_id, c.id, c.status, c.completed_at FROM turn_completions c
             JOIN work_threads t ON t.thread_id = c.thread_id AND t.turn_key = c.turn_key
             WHERE (t.attention = 'archived') = ?
         """, self.params)}
+        # Links are the largest batch. Aggregate them in SQLite: each result
+        # row costs a GIL handoff, which convoys behind other request threads.
         self.links = defaultdict(list)
-        for row in db.execute("SELECT * FROM thread_links WHERE thread_id IN (" +
-                              self.selected + ") ORDER BY id", self.params):
-            self.links[row["thread_id"]].append(dict(row))
+        for link in sorted(json.loads(db.execute("""SELECT json_group_array(json_object(
+                'id', id, 'thread_id', thread_id, 'kind', kind, 'label', label,
+                'target', target, 'project_id', project_id))
+                FROM thread_links WHERE thread_id IN (""" + self.selected + ")", self.params).fetchone()[0]),
+                key=lambda link: link["id"]):
+            self.links[link["thread_id"]].append(link)
         self.classifications = {}
         for row in db.execute("""
             SELECT r.* FROM response_classification_cache r
@@ -104,13 +111,17 @@ class ThreadInventory:
         self.notification_owners = available_owners(db, self.threads.store)
         self.sessions = {row["session_id"]: self.threads.store._row_to_session(row) for row in db.execute(
             "SELECT * FROM sessions WHERE session_id IN (" + self.selected + ")", self.params)}
-        self.browser = {row[0] for row in db.execute(
-            "SELECT thread_id FROM browser_sessions WHERE thread_id IN (" + self.selected + ")", self.params)}
+        self.browser = set(json.loads(db.execute(
+            "SELECT json_group_array(thread_id) FROM browser_sessions WHERE thread_id IN (" + self.selected + ")",
+            self.params).fetchone()[0]))
         self.dispatchers = {row[0] for row in db.execute(
             "SELECT thread_id FROM dispatch_settings WHERE enabled != 0 AND thread_id IN (" + self.selected + ")", self.params)}
         self.delegated = {row[0] for row in db.execute("""SELECT d.child_session_id FROM delegations d
             JOIN work_threads p ON p.thread_id = d.parent_session_id WHERE d.child_session_id IS NOT NULL""")}
-        self.titles = {row[0]: row[1] for row in db.execute("SELECT thread_id, title FROM work_threads")}
+        # Titles are read only for the sources of listed forks.
+        self.titles = {row[0]: row[1] for row in db.execute("""SELECT thread_id, title FROM work_threads
+            WHERE thread_id IN (SELECT forked_from_thread_id FROM work_threads
+            WHERE thread_id IN (""" + self.selected + "))", self.params)}
         from .asks import AskStore
         self.blocking_asks = AskStore.open_blocking(db)
         self.forks = defaultdict(list)
