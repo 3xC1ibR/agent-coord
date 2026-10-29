@@ -2888,6 +2888,7 @@ function setChatExpanded(expanded) {
   expanded = Boolean(expanded && state.selected);
   if (expanded) setNavigation(false);
   document.body.classList.toggle("chat-expanded", expanded);
+  layoutContext();
   const button = $("expand-chat"), label = expanded ? "Collapse chat" : "Expand chat";
   button.setAttribute("aria-pressed", String(expanded));
   button.setAttribute("aria-label", label);
@@ -3236,7 +3237,9 @@ function layoutContext() {
   if (state.mobileChat?.matches) { state.mobileChat.layoutContext(); return; }
   const panel = $("context-panel"), button = $("toggle-context");
   const draft = isSessionDraft() || state.selected === "new-session" || $("conversation").classList.contains("session-draft");
-  const collapsed = draft || (contextCollapsed ?? compactContext.matches);
+  const expanded = document.body.classList.contains("chat-expanded");
+  // Expansion temporarily hides context without changing the saved panel preference.
+  const collapsed = expanded || draft || (contextCollapsed ?? compactContext.matches);
   const containsFocus = panel.contains(document.activeElement);
   panel.hidden = collapsed;
   $("conversation").classList.toggle("context-collapsed", collapsed);
@@ -3245,7 +3248,7 @@ function layoutContext() {
   button.setAttribute("aria-expanded", String(!collapsed));
   button.setAttribute("aria-label", label);
   button.title = label;
-  if (collapsed && containsFocus) button.focus({preventScroll: true});
+  if (collapsed && containsFocus) $(expanded ? "expand-chat" : "toggle-context").focus({preventScroll: true});
 }
 function setContextCollapsed(collapsed, {persist = true} = {}) {
   state.agentTreeController?.cancelDefault();

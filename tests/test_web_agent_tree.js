@@ -226,6 +226,7 @@ function setupController(records, selected = "root", response, {compact = true} 
         return {...result, data: result.data.map(t => ({...t, agent_parent_id: tree.parents.get(t.thread_id) || null}))};
       });
     }};
+  c.document.body = c.$("body");
   c.state.threadTabs = {selected, items: [{thread_id: selected}],
     setTree(root, open) { const item = this.items.find(t => t.thread_id === this.selected);
       if (item) Object.assign(item, {tree_root: root, tree_open: open}); }};

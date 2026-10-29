@@ -73,18 +73,12 @@
   .conversation.agents-visible .conversation-head { flex-wrap: wrap; gap: 8px; padding: 14px 20px; }
   .conversation.agents-visible .timeline { padding-inline: 24px; }
   .conversation.agents-visible .composer { padding-inline: 24px; }
-  html.conversation-window .conversation.has-agent-tree:not(.context-collapsed),
-  body.chat-expanded .conversation.has-agent-tree:not(.context-collapsed) { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, var(--context-panel-width, 340px)); }
-  html.conversation-window .conversation.has-agent-tree.agents-visible,
-  body.chat-expanded .conversation.has-agent-tree.agents-visible { grid-template-columns: minmax(300px, 1fr) minmax(0, var(--agent-panel-width, 52%)); }
-  html.conversation-window .conversation.has-agent-tree .context-panel,
-  body.chat-expanded .conversation.has-agent-tree .context-panel { display: flex; flex-direction: column; overflow: visible; }
-  html.conversation-window .conversation.has-agent-tree #context-info,
-  body.chat-expanded .conversation.has-agent-tree #context-info { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
-  html.conversation-window .conversation.has-agent-tree:not(.context-collapsed) .agent-panel-resize,
-  body.chat-expanded .conversation.has-agent-tree:not(.context-collapsed) .agent-panel-resize { display: block; }
-  html.conversation-window .conversation.has-agent-tree #toggle-context,
-  body.chat-expanded .conversation.has-agent-tree #toggle-context { display: inline-flex; }
+  html.conversation-window .conversation.has-agent-tree:not(.context-collapsed) { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, var(--context-panel-width, 340px)); }
+  html.conversation-window .conversation.has-agent-tree.agents-visible { grid-template-columns: minmax(300px, 1fr) minmax(0, var(--agent-panel-width, 52%)); }
+  html.conversation-window .conversation.has-agent-tree .context-panel { display: flex; flex-direction: column; overflow: visible; }
+  html.conversation-window .conversation.has-agent-tree #context-info { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
+  html.conversation-window .conversation.has-agent-tree:not(.context-collapsed) .agent-panel-resize { display: block; }
+  html.conversation-window .conversation.has-agent-tree #toggle-context { display: inline-flex; }
 }
 /* Thread actions stay beside a wide tree. The narrow column keeps only Dismiss
    for a pending request; the other actions remain in Context. */
