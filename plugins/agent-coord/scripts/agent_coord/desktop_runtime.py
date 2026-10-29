@@ -294,14 +294,14 @@ def payload_environment(payload):
     return environment
 
 
-def control(record, action, **values):
+def control(record, action, *, timeout=25, **values):
     url = record["control_url"]
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password or parsed.path != "/":
         raise RuntimeError("Invalid runtime discovery address.")
     request = urllib.request.Request(url, method="POST", data=json.dumps({"action": action, "instance": record["instance"], **values}).encode(),
         headers={"Authorization": "Bearer " + record["control_token"], "Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=25) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         result = json.load(response)
     if result.get("instance") != record["instance"] or result.get("database") != record["database"]:
         raise RuntimeError("Runtime discovery identity does not match the live instance.")
@@ -310,7 +310,7 @@ def control(record, action, **values):
     return result
 
 
-def discover(database):
+def discover(database, *, timeout=25):
     directory = runtime_directory(database)
     path = directory / "discovery.json"
     if not path.exists():
@@ -321,7 +321,7 @@ def discover(database):
     if record.get("database") != str(Path(database).resolve()):
         raise RuntimeError("Runtime discovery refers to another database.")
     try:
-        status = control(record, "status")
+        status = control(record, "status", timeout=timeout)
     except (OSError, ValueError, RuntimeError):
         if not owner_available(directory):
             raise RuntimeError("The runtime owner is unavailable. Refusing a second owner.")

@@ -73,11 +73,21 @@ server: opening a store must not bypass the compatibility boundary. If installat
 rolls back to an older interface, that interface must not activate a staged newer
 runtime merely because its payload is present.
 
-The first implementation conservatively fingerprints backend Python modules.
-A newly bundled CLI or hook with different backend code refuses database access
-while the older runtime owns it. Running providers use their retained matching
-tools; new CLI versions wait for the idle runtime upgrade. This is stricter than
-the interface protocol handshake and avoids accidental schema changes.
+Store initialization conservatively fingerprints backend Python modules and
+refuses mismatched code while a runtime owns the database. CLI, hook, and MCP
+entrypoints authenticate the live owner and execute the requested client from
+its retained payload before initializing a store. This keeps repository changes
+and plugin refreshes from breaking coordination while work continues. Caller
+identity, database overrides, arguments, and hook/MCP input are preserved. An
+unavailable or unverified owner fails closed; direct library access still obeys
+the fingerprint guard.
+
+External schedulers should use the managed `~/.local/bin/agent-coord` launcher,
+installed from the refreshed plugin with `agent-coord install-cli`. Installation
+keeps that plugin's routing entrypoint rather than pinning one retained payload.
+Refresh plugins using the procedure in [reference.md](reference.md#refresh-installed-plugins-after-changes).
+Already running MCP processes retain their imported code and need a fresh
+connection to adopt the routing fix; restarting the desktop runtime is unnecessary.
 
 ## Runtime maintenance controls
 
