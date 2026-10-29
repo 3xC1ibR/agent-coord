@@ -2368,10 +2368,11 @@ async function newSession() {
   goHome({restoreDispatcher: false});
   // A fresh draft re-reads configuration changed outside the app.
   if (!state.newSessionDraft) state.sessionDefaults?.clear();
+  const defaults = globalThis.NewSessionDefaults?.read() || {client: "codex", model: null, effort: null, yolo: false};
   state.newSessionDraft ||= {
     draftId: "new-session:" + (state.draftSequence = (state.draftSequence || 0) + 1),
-    session: {...body, client: "codex", model: null, effort: null, yolo: false},
-    work_thread: {thread_id: "new-session", title: "New session", ...body, project_cwd: body.cwd, client: "codex", browser_session: true, attention: "now", links: []},
+    session: {...body, ...defaults},
+    work_thread: {thread_id: "new-session", title: "New session", ...body, project_cwd: body.cwd, client: defaults.client, browser_session: true, attention: "now", links: []},
     thread: {turns: []}, requests: [], queuedMessages: [], running: false,
   };
   state.selected = "new-session";

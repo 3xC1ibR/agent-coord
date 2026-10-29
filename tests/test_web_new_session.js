@@ -715,3 +715,25 @@ test("failed defaults show unavailable and a fresh draft retries changed native 
   assert.equal(c.$("model-picker").children[0].children[0].text, "new-config");
   assert.equal(reads, 2);
 });
+
+test("New session uses saved settings for creation and preserves edits when returning to a draft", async () => {
+  const c = setup();
+  let defaults = {client: "claude", model: "sonnet", effort: "high", yolo: true};
+  c.NewSessionDefaults = {read: () => ({...defaults})};
+  await c.newSession();
+  assert.equal(c.state.newSessionDraft.work_thread.client, "claude");
+  assert.equal(c.state.newSessionDraft.session.cwd, "/workspace");
+  for (const [key, value] of Object.entries(defaults)) assert.equal(c.state.newSessionDraft.session[key], value);
+  c.state.newSessionDraft.session.effort = "low";
+  defaults = {client: "codex", model: "gpt-test", effort: null, yolo: false};
+  await c.newSession();
+  assert.equal(c.state.newSessionDraft.session.effort, "low");
+  assert.equal(c.state.newSessionDraft.session.client, "claude");
+  c.$("message").value = "Start work";
+  await c.sendMessage();
+  const created = c.calls.find(call => call.path === "sessions").body;
+  assert.equal(created.client, "claude"); assert.equal(created.model, "sonnet");
+  assert.equal(created.effort, "low"); assert.equal(created.yolo, true);
+  await c.newSession();
+  for (const [key, value] of Object.entries(defaults)) assert.equal(c.state.newSessionDraft.session[key], value);
+});

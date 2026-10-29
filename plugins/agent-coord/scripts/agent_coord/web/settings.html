@@ -22,6 +22,16 @@
   <header class="settings-header"><h1>Settings</h1><button id="close-settings" class="quiet" type="button">Done</button></header>
   <main class="settings-content">
     <p id="settings-error" role="alert" hidden></p>
+    <section class="settings-section" aria-labelledby="new-session-defaults-title">
+      <h2 id="new-session-defaults-title">New button defaults</h2>
+      <p>Choose the starting settings for new conversations. You can change them in the draft before sending.</p>
+      <label for="new-session-model">Model<select id="new-session-model" disabled><option>Loading models…</option></select></label>
+      <label for="new-session-effort">Reasoning level<select id="new-session-effort" disabled><option>Loading reasoning levels…</option></select></label>
+      <label for="new-session-permissions">Permissions<select id="new-session-permissions" aria-describedby="new-session-permissions-description" disabled><option value="default">Default permissions</option><option value="full">Full access</option></select></label>
+      <p id="new-session-permissions-description">Default permissions use the provider’s normal approval rules. Full access runs without approval prompts or sandbox restrictions.</p>
+      <p id="new-session-defaults-status" role="status">Loading defaults…</p>
+      <div class="settings-actions"><button id="refresh-new-session-models" type="button">Refresh models</button></div>
+    </section>
     <section id="jev-settings" class="settings-section" aria-labelledby="jev-heading" hidden></section>
     <section class="settings-section" aria-labelledby="appearance-title">
       <h2 id="appearance-title">Appearance</h2>

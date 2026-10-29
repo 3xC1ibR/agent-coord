@@ -11,11 +11,13 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 function fixture({remote = false, desktop, embedded = false, nativePhone = false, ok = true} = {}) {
   const nodes = new Map(), calls = [], notices = [], panels = [], speech = [], messages = [];
   class Element extends EventTarget {
-    constructor() { super(); this.hidden = true; this.textContent = ""; this.disabled = false; }
+    constructor() { super(); this.hidden = true; this.textContent = ""; this.disabled = false; this.children = []; }
     click() { return this.onclick?.({preventDefault() {}}); }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
   }
   const $ = id => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
-  const document = Object.assign(new EventTarget(), {getElementById: $,
+  const document = Object.assign(new EventTarget(), {getElementById: $, createElement: () => new Element(),
     querySelector: selector => nativePhone && selector === "#native-notification-style" ? {} : null});
   const keyListeners = [], addListener = document.addEventListener.bind(document);
   document.addEventListener = (type, listener, options) => {
