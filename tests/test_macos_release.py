@@ -297,9 +297,13 @@ class MacOSReleaseTests(unittest.TestCase):
 
     def test_public_download_checks_actual_bytes(self):
         path = self.directory / "Ribbon-Field-1.2.3-arm64.dmg"
-        with mock.patch.object(release.urllib.request, "urlopen", return_value=io.BytesIO(b"wrong")):
+        with mock.patch.object(release.urllib.request, "urlopen", return_value=io.BytesIO(b"wrong")) as urlopen:
             with self.assertRaisesRegex(ValueError, "Public download checksum mismatch"):
-                release.verify_download("key", path)
+                release.verify_download("updates/alpha/arm64.xml", path)
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://downloads.ribbonfield.com/updates/alpha/arm64.xml")
+        # The download host returns 403 to Python's default urllib agent on updates/.
+        self.assertEqual(request.get_header("User-agent"), "Ribbon Field release verifier")
 
     def test_r2_errors_fail_closed_and_only_missing_keys_allow_upload(self):
         r2 = release.R2()

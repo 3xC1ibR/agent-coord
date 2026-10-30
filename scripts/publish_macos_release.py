@@ -253,7 +253,10 @@ class R2:
 
 
 def verify_download(key: str, path: Path) -> None:
-    with urllib.request.urlopen(f"{DOWNLOAD_URL}/{key}", timeout=120) as response:
+    # The download host refuses Python's default urllib agent on updates/ (403),
+    # while browsers and Sparkle are served; identify the verifier explicitly.
+    request = urllib.request.Request(f"{DOWNLOAD_URL}/{key}", headers={"User-Agent": "Ribbon Field release verifier"})
+    with urllib.request.urlopen(request, timeout=120) as response:
         if digest(response) != file_digest(path):
             raise ValueError(f"Public download checksum mismatch: {key}")
 
