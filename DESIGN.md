@@ -43,6 +43,9 @@ and pane regions. Auxiliary pages have a simple title, controls, and centered
 content. Activity uses a 1120px content maximum, 24px page spacing, 12px row spacing,
 and 8px control gaps. Declare additional module dimensions once as CSS properties.
 Narrow layouts stack controls and keep tables in labelled horizontal scroll areas.
+Status uses a 1280px reading area, a 360px report index beside an open sheet,
+and a 1400px auxiliary dialog. Module dimensions follow the existing Activity
+pattern; semantic colors and controls remain shared with the workspace.
 
 ## Elevation & Depth
 Content precedes controls, popovers, dialogs, and notices. Reuse native dialogs for
@@ -109,3 +112,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-29 | Direct response actions and title autosave | Reduce friction while preserving drafts, selection and reading position. |
 | 2026-10-29 | Simplify composer controls and expose native permission choices | Remove redundant chrome while preserving shortcuts, actual provider modes and group persistence. |
 | 2026-10-29 | List overview uses the shared group tabs and Filters | Remove duplicate group navigation; ungrouped threads remain available through the No group filter. |
+| 2026-10-30 | Add a global Status report inbox using the auxiliary page pattern | Collect generated reports across providers and projects; dismiss and restore individual reports without changing threads or future reports. |
