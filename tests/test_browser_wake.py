@@ -38,7 +38,9 @@ class BrowserWakeTests(unittest.TestCase):
         return sessions
 
     def create(self, client="codex"):
-        return self.sessions.create({"client": client})["session"]["thread_id"]
+        thread_id = self.sessions.create({"client": client})["session"]["thread_id"]
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
+        return thread_id
 
     def message(self, recipient, classification="action_required", **values):
         return self.store.send_message(sender_session_id="sender", recipient_session_id=recipient,
@@ -52,6 +54,7 @@ class BrowserWakeTests(unittest.TestCase):
             turn["status"] = status
             self.sessions._event({"method": "turn/completed", "params": {
                 "threadId": thread_id, "turn": copy.deepcopy(turn)}})
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
 
     def attempts(self):
         with self.store._connection() as db:
@@ -347,6 +350,7 @@ class BrowserWakeTests(unittest.TestCase):
                 thread = self.create("claude")
                 self.sessions.send(thread, {"message": "Inspect the job results"})
                 self.sessions.claude._finish(thread, "failed", "Claude Code disconnected. Send again to resume.")
+                self.assertTrue(self.sessions.persistence.flush(key=thread))
                 self.message(thread)
                 current = self.store.threads.get(thread)
                 user_id = self.turns(thread)[-1]["items"][0]["id"]

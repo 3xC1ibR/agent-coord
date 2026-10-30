@@ -13,6 +13,9 @@ function setup() {
     threadPath: id => "threads/" + id, renderList() {}, showError(error) { throw error; },
     select: async id => { context.state.selected = id; },
     goHome: () => { context.state.selected = null; context.state.detail = null; }};
+  const storage = new Map();
+  context.DispatchUI = require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js");
+  context.sessionStorage = {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function sessionModelClients(")), context);
   vm.runInContext(source.slice(source.indexOf("function sessionPermissionsUnavailable("), source.indexOf("function renderStatus(")), context);

@@ -113,7 +113,7 @@ class BrowserCommandTests(unittest.TestCase):
                 self.assertNotIn("turn/start", methods)
                 self.assertIn("command", result)
 
-    def test_settings_validation_still_checks_effort_and_direct_updates_reconcile(self):
+    def test_settings_validation_checks_effort_and_direct_updates_reuse_idle_state(self):
         before = self.sessions._record(self.thread)
         with self.assertRaisesRegex(CoordinationError, "not supported"):
             self.command("/model available-model unsupported")
@@ -122,7 +122,7 @@ class BrowserCommandTests(unittest.TestCase):
         self.sessions.rpc.calls.clear()
         self.sessions.update(self.thread, {"effort": "high"})
         methods = [method for method, _ in self.sessions.rpc.calls]
-        self.assertEqual(methods.count("thread/read"), 1)
+        self.assertEqual(methods.count("thread/read"), 0)
         self.assertEqual(methods.count("model/list"), 1)
         self.sessions.send(self.thread, {"message": "Work"})
         with self.assertRaises(BrowserBusyError):

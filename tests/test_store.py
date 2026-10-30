@@ -58,6 +58,9 @@ class CoordinationStoreTests(unittest.TestCase):
             db.execute("""INSERT INTO zellij_wake_targets
                 (session_id, zellij_session, pane_id, enabled, registered_at, updated_at)
                 VALUES (?, 'legacy-session', 'terminal_7', 1, 1, 1)""", (session_id,))
+            # This fixture represents a database awaiting the wake migration,
+            # rather than a current database written by an obsolete client.
+            db.execute("DELETE FROM coordination_schema")
 
     def test_startup_retries_real_migration_lock_before_sending_once(self) -> None:
         from agent_coord.cli import main
@@ -111,6 +114,8 @@ class CoordinationStoreTests(unittest.TestCase):
 
         self.register("sender")
         self.register("recipient")
+        with self.store._connection() as db:
+            db.execute("DELETE FROM coordination_schema")
         error = io.StringIO()
         with patch.object(CoordinationStore, "_initialize", side_effect=sqlite3.OperationalError(
             "database is locked"
@@ -125,6 +130,8 @@ class CoordinationStoreTests(unittest.TestCase):
 
     def test_startup_does_not_retry_non_lock_errors(self) -> None:
         error = sqlite3.OperationalError("no such table: missing")
+        with self.store._connection() as db:
+            db.execute("DELETE FROM coordination_schema")
         with patch.object(CoordinationStore, "_initialize", side_effect=error) as initialize, \
              patch("agent_coord.store.time.sleep") as retry:
             with self.assertRaises(sqlite3.OperationalError) as raised:

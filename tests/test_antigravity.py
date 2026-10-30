@@ -507,6 +507,30 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.assertFalse(connection.writes)
         self.assertIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][-1]['text'])
 
+    def test_completion_during_history_read_cannot_restore_running_tools(self):
+        thread = self.create()
+        connection = self.start(thread)
+        self.update(thread, sessionUpdate='tool_call', toolCallId='tool', status='in_progress')
+        history = self.sessions.antigravity._history
+
+        def complete_after_snapshot(identity):
+            stale = history(identity)
+            self.update(thread, sessionUpdate='tool_call_update', toolCallId='tool', status='completed', rawOutput='contents')
+            self.update(thread, sessionUpdate='agent_message_chunk', content={'type': 'text', 'text': 'Finished'})
+            connection.future.set_result({'stopReason': 'end_turn'})
+            return stale
+
+        with patch.object(self.sessions.antigravity, '_history', side_effect=complete_after_snapshot):
+            detail = self.sessions.read(thread)
+        self.assertFalse(detail['running'])
+        turn = detail['thread']['turns'][-1]
+        self.assertEqual(turn['status'], 'completed')
+        tool = next(item for item in turn['items'] if item['id'] == 'tool')
+        self.assertEqual(tool['status'], 'completed')
+        self.assertEqual(tool['result'], 'contents')
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        self.assertEqual(self.sessions.read(thread, snapshot=True)['thread']['turns'][-1]['status'], 'completed')
+
     def test_user_stop_during_delivery_never_resumes(self):
         thread = self.create()
         connection = self.start(thread)
@@ -546,6 +570,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.assertTrue(self.sessions.read(thread)['running'])
         connection.future.set_exception(CoordinationError('Provider quota exhausted'))
         self.assertFalse(self.sessions.read(thread)['running'])
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
         self.assertEqual(self.sessions.antigravity.delivery.read('sender', initial)['delivery']['state'], 'submitted')
         receipt = self.sessions.antigravity.delivery.read('sender', later)
         self.assertEqual(receipt['delivery']['state'], 'queued')

@@ -110,6 +110,11 @@ class BrowserMessageQueue:
                         self.sessions.dispatch.transition(db, row[0], "cancelled")
                     db.execute("DELETE FROM browser_message_queue WHERE thread_id = ? AND id = ?", (thread_id, item_id))
             elif body.get("action") == "resume":
+                # Explicit resume supersedes the prior terminal turn's pause.
+                # Reconcile and save that turn before clearing its queue gate.
+                self.sessions._await_persistence(thread_id)
+                self.sessions.read(thread_id)
+                self.sessions._await_persistence(thread_id)
                 with self.sessions.store._connection() as db:
                     if db.execute("""SELECT 1 FROM browser_message_queue q JOIN dispatch_requests d ON d.id=q.dispatch_id
                         WHERE q.thread_id=? AND d.state IN ('sending','uncertain','dismissed')""", (thread_id,)).fetchone():
@@ -160,10 +165,16 @@ class BrowserMessageQueue:
                 return
             item = items[0]
             try:
+                sessions._await_persistence(thread_id)
                 self._open(thread_id)
                 # Re-read before delivery: another browser may have started work.
                 if sessions.read(thread_id)["running"]:
                     return
+                # Reading native state can discover a missed failure. Its pause
+                # must commit while this item is still queued, before claiming
+                # delivery and before send's later persistence barrier.
+                sessions._await_persistence(thread_id)
+                self._open(thread_id)
                 dispatch_id = item.get("dispatch_id")
                 if dispatch_id is not None:
                     receipt = sessions.dispatch.get(dispatch_id)

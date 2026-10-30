@@ -466,6 +466,7 @@ class KimiTests(unittest.TestCase):
                 self.assertEqual(turn["error"]["statusCode"], 429)
                 self.assertEqual(turn["error"]["code"], "provider.api_error")
                 self.assertNotIn("private", str(turn["error"]))
+                self.assertTrue(self.sessions.persistence.flush(key=thread))
                 messages = self.store.inbox("parent", mark_delivered=False)
                 self.assertIn("5-hour usage limit", messages[-1]["body"])
                 self.assertNotIn("hook", messages[-1]["body"])

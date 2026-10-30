@@ -221,7 +221,7 @@ class TurnWatchdog:
 
     def process_once(self):
         s = self.sessions
-        if s.closed or not s.persistence.flush(timeout=0):
+        if s.closed:
             return
         try:
             process_failure_followups(self.store, s.cwd)
@@ -235,6 +235,8 @@ class TurnWatchdog:
         with self.store._connection() as db:
             candidates.update(r[0] for r in db.execute("SELECT session_id FROM sessions WHERE turn_active = 1") if r[0] in loaded)
         for tid in sorted(candidates):
+            if not s.persistence.flush(timeout=0, key=tid):
+                continue
             lock = s._thread_lock(tid)
             if not lock.acquire(blocking=False):
                 continue  # Stop, send, and other user operations take priority.

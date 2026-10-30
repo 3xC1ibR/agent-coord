@@ -32,6 +32,7 @@ class ExecutionEvidenceTests(unittest.TestCase):
         self.addCleanup(self.runtime.close)
 
     def read(self):
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key="s"))
         with self.store._connection() as db:
             return read_many(self.store, db, ["s"])["s"]
 
@@ -151,6 +152,7 @@ class BrowserExecutionTests(unittest.TestCase):
         self.thread = self.sessions.create({})["session"]["thread_id"]
 
     def state(self):
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=self.thread))
         return self.store.get_session(self.thread)["execution"]
 
     def start(self):
@@ -193,17 +195,19 @@ class BrowserExecutionTests(unittest.TestCase):
 
     def test_contended_snapshot_defers_without_losing_or_replaying_the_request(self):
         self.start()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=self.thread))
         writer = sqlite3.connect(self.store.database_path)
         try:
             writer.execute("BEGIN IMMEDIATE")
             with self.assertLogs("agent_coord.browser_persistence", "WARNING"):
                 self.sessions._event({"id": 7, "method": "item/fileChange/requestApproval", "params": {
                     "threadId": self.thread, "turnId": self.sessions.active[self.thread]}})
+                self.assertFalse(self.sessions.persistence.flush(timeout=.2, key=self.thread))
             self.assertEqual(len(self.sessions.pending_requests(self.thread)), 1)
         finally:
             writer.rollback()
             writer.close()
-        self.assertTrue(self.sessions.persistence.flush())
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=self.thread))
         self.assertEqual(self.state()["state"], "waiting_approval")
         self.assertEqual(len(self.state()["pending_requests"]), 1)
         self.assertEqual(self.sessions.rpc.writes, [])
@@ -281,12 +285,15 @@ class NativeAdapterWaitTests(unittest.TestCase):
                     # Muse's helper routes native approval events through event().
                     self.event = lambda target, method, **params: MuseTests.event(self, target, method, **params)
                     MuseTests.permission(self, thread)
+                self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
                 state = self.store.threads.get(thread)["execution"]
                 self.assertEqual((state["state"], state["freshness"]), ("waiting_approval", "live"))
                 request = self.sessions.pending_requests(thread)[0]
                 self.sessions.answer(thread, request["key"], {"decision": "decline"})
+                self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
                 self.assertEqual(self.store.get_session(thread)["execution"]["state"], "running")
                 self.sessions.interrupt(thread)
+                self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
                 self.assertEqual(self.store.get_session(thread)["execution"]["state"], "stopped")
                 self.sessions.close()
 

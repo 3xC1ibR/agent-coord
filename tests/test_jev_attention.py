@@ -126,6 +126,7 @@ class JevAttentionTests(unittest.TestCase):
             {"type": "agentMessage", "phase": "final_answer", "text": "The backfill finished. All records are present."},
         ]}]}
         self.sessions._save_history("terminal")
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key="terminal"))
         return self.thread()
 
     def thread(self):
@@ -394,6 +395,7 @@ class JevAttentionTests(unittest.TestCase):
         history["turns"][0]["items"].pop()
         self.assertIsNone(history_messages(history, item))
         self.sessions._save_history("terminal")
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key="terminal"))
         with self.assertRaisesRegex(ClassificationError, "context_unavailable"):
             context_for(self.store, item)
 
@@ -401,6 +403,7 @@ class JevAttentionTests(unittest.TestCase):
         self.finish()
         self.sessions.histories["terminal"]["turns"][0]["items"][-1]["text"] = "Result. " * 1000 + "Please approve the remaining work."
         self.sessions._save_history("terminal")
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key="terminal"))
         self.worker.scan()
         item = self.thread()
         self.assertEqual(item["response_state"], "reply")

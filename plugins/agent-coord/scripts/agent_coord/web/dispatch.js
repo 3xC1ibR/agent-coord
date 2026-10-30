@@ -47,7 +47,9 @@
   }
   function requestKey(storage, thread, body, uuid = () => root.crypto.randomUUID()) {
     // Store only a fingerprint and key, never prompt or image content.
-    let hash = 2166136261; const text = JSON.stringify(body);
+    const input = Object.fromEntries(Object.entries(body).filter(([key]) =>
+      !["requestId", "windowId", "activity", "expectedTurnId"].includes(key)));
+    let hash = 2166136261; const text = JSON.stringify(input);
     for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
     const signature = text.length + ":" + (hash >>> 0), key = "dispatch-request:" + thread;
     let previous;

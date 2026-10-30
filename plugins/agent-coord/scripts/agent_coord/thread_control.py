@@ -33,8 +33,24 @@ def finish_close(store, thread_id: str) -> None:
 class ThreadControl:
     def __init__(self, store):
         self.store = store
+        # Status is read on every conversation refresh. Checking a current
+        # schema must not contend for SQLite's writer lock.
+        with store._connection() as db:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(thread_close_requests)")}
+            runtime_table = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'thread_control_runtimes'").fetchone()
+            request_index = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'one_pending_thread_close'").fetchone()
+            if "success_only" in columns and runtime_table is not None and request_index is not None:
+                return
+            if db.execute("PRAGMA query_only").fetchone()[0]:
+                return
+        self._initialize_schema()
+
+    def _initialize_schema(self):
+        """Upgrade missing lifecycle tables before servicing status reads."""
+        store = self.store
         with store._connection() as db:
             db.executescript("""
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS thread_close_requests (
                     request_id TEXT PRIMARY KEY,
                     thread_id TEXT NOT NULL REFERENCES work_threads(thread_id),
@@ -48,7 +64,6 @@ class ThreadControl:
                     id TEXT PRIMARY KEY, heartbeat REAL NOT NULL
                 );
             """)
-            db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(thread_close_requests)")}
             if "success_only" not in columns:
                 db.execute("ALTER TABLE thread_close_requests ADD COLUMN success_only INTEGER NOT NULL DEFAULT 0")
@@ -83,7 +98,7 @@ class ThreadControl:
     def _describe(self, db, row):
         result = dict(row)
         result["after_turn"] = bool(result["after_turn"])
-        result["success_only"] = bool(result["success_only"])
+        result["success_only"] = bool(result.get("success_only", False))
         result.pop("owner", None)
         result["waiting_for"] = None
         if result["status"] == "queued":
@@ -100,6 +115,9 @@ class ThreadControl:
     def request_close(self, thread_id: str, *, after_turn=False, success_only=False) -> dict:
         if success_only and not after_turn:
             raise CoordinationError("Close when done must wait for a turn.")
+        barrier = getattr(self.store, "conversation_barrier", None)
+        if after_turn and barrier is not None and not barrier(thread_id):
+            raise CoordinationError("Conversation state is still being saved. Try again shortly.")
         self.store.threads.ensure(thread_id)
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -138,15 +156,29 @@ class ThreadControl:
         return self.status(thread_id)
 
     def status(self, thread_id: str) -> dict:
-        self.store.threads.ensure(thread_id)
-        with self.store._connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            self._reconcile(db)
-            row = db.execute("SELECT * FROM thread_close_requests WHERE thread_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (thread_id,)).fetchone()
-            if row:
-                return self._describe(db, row)
-            thread = db.execute("""SELECT t.attention, s.ended_at FROM work_threads t
+        with self.store.reading(), self.store._connection() as db:
+            # Project recovery on a read snapshot. The worker and explicit
+            # lifecycle commands persist it through _reconcile; opening a
+            # conversation never needs to acquire the writer lock.
+            db.execute("BEGIN")
+            thread = db.execute("""SELECT t.attention, t.turn_key, s.ended_at FROM work_threads t
                 JOIN sessions s ON s.session_id = t.thread_id WHERE t.thread_id = ?""", (thread_id,)).fetchone()
+            if thread is None:
+                raise CoordinationError("Work thread not found.")
+            has_requests = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'thread_close_requests'").fetchone()
+            row = db.execute("SELECT * FROM thread_close_requests WHERE thread_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (thread_id,)).fetchone() if has_requests else None
+            if row:
+                projected = dict(row)
+                if row["status"] == "queued" and row["turn_key"] != thread["turn_key"]:
+                    projected.update(status="cancelled", error="A new turn superseded the pending close request.")
+                elif row["status"] == "closing" and row["updated_at"] < self.store.clock() - RUNTIME_LEASE_SECONDS:
+                    has_runtimes = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'thread_control_runtimes'").fetchone()
+                    runtime = db.execute("SELECT heartbeat FROM thread_control_runtimes WHERE id = ?", (row["owner"],)).fetchone() if has_runtimes else None
+                    if runtime is None or runtime["heartbeat"] < self.store.clock() - RUNTIME_LEASE_SECONDS:
+                        closed = self._is_closed(thread_id, thread)
+                        projected.update(status="closed" if closed else "failed", error=None if closed else
+                                         "The closing runtime stopped. Inspect the thread and retry close.")
+                return self._describe(db, projected)
             closed = self._is_closed(thread_id, thread)
             return {"thread_id": thread_id, "status": "closed" if closed else "none", "request_id": None}
 
@@ -255,6 +287,8 @@ class ThreadControlWorker:
     def process_once(self):
         sessions = self.sessions
         self._heartbeat()
+        with sessions.store._connection() as db:
+            sessions.store.threads._wake_snoozes(db)
         for request in self.control.queued():
             if self.stopped.is_set() or sessions.closed:
                 return

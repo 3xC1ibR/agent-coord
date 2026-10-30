@@ -67,8 +67,10 @@ def repository_root(cwd: str) -> str | None:
 
 
 class OrganizationStore:
-    def __init__(self, store):
+    def __init__(self, store, *, initialize=True):
         self.store = store
+        if not initialize:
+            return
         with store._connection() as db:
             # Keep the legacy workspace tables intact for artifact references and
             # clients that were already running when this additive upgrade began.
@@ -188,10 +190,10 @@ class OrganizationStore:
         if association is UNSET:
             association = OrganizationStore.association(db, thread["thread_id"])
         if association is None:
-            # An older client may create a thread after startup repair. Repair
-            # that record only; ordinary reads never scan unrelated threads.
-            OrganizationStore.ensure_thread(db, thread["thread_id"], thread["cwd"])
-            association = OrganizationStore.association(db, thread["thread_id"])
+            # A legacy writer may leave incomplete organization metadata. Show
+            # its derived association without turning a detail read into a
+            # writer. Registration and explicit maintenance repair the record.
+            association = OrganizationStore.projected_association(db, thread["thread_id"], thread["cwd"])
         thread.update(dict(association))
         for link in thread["links"]:
             link["workspace_id"] = link.pop("project_id")
@@ -206,6 +208,23 @@ class OrganizationStore:
                                      LEFT JOIN work_repositories r ON r.id = o.repository_id
                                      LEFT JOIN named_projects p ON p.id = o.project_id
                                      WHERE o.thread_id = ?""", (thread_id,)).fetchone()
+
+    @staticmethod
+    def projected_association(db, thread_id, cwd, *, creators=None):
+        """Derive an incomplete legacy association without modifying storage."""
+        root = repository_root(cwd)
+        repository = db.execute("SELECT id, name FROM work_repositories WHERE root = ?", (root,)).fetchone() if root else None
+        repository_id = repository["id"] if repository else (
+            str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:repository:" + root)) if root else None)
+        result = {"repository_id": repository_id,
+                  "repository_name": repository["name"] if repository else (Path(root).name or root) if root else None,
+                  "repository_root": root, "project_id": None, "project_name": None}
+        creator = (app_agent_creators(db) if creators is None else creators).get(thread_id)
+        if creator and creator["mode"] == "orchestration":
+            parent = OrganizationStore.association(db, creator["thread_id"])
+            if parent:
+                result.update(project_id=parent["project_id"], project_name=parent["project_name"])
+        return result
 
     def create_project(self, name: str, cwd: str | None = None) -> dict:
         if not isinstance(name, str) or not name.strip() or len(name) > 160:

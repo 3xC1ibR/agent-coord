@@ -108,11 +108,14 @@ attach to a compatible older runtime while its replacement remains staged.
 Pending upgrades must not start a second scheduler, inbox dispatcher, or queue
 consumer against the same live ownership domain.
 
-This ownership boundary does not prohibit normal CLI and hook database writes.
-Independently hosted terminal agents and managed job supervisors need not finish
-before a runtime upgrade if their lifetime and state do not depend on that
-runtime. In-flight routing, reviews, sidecars, control operations, and provider
-work owned by the runtime do participate in the handover boundary.
+The owning runtime executes finite CLI, hook, MCP and supervisor metadata
+mutations through authenticated requests. Standalone operations hold the same
+ownership lock for their finite transaction or command, preventing runtime
+startup from racing a local writer. Read-only observers use query-only SQLite
+snapshots. Terminal processes and managed jobs retain their own process lifetime;
+their metadata calls do not transfer process supervision into the runtime.
+In-flight routing, reviews, sidecars, control operations, and provider work owned
+by the runtime participate in the handover boundary.
 
 ## Compatibility and activation
 
@@ -144,6 +147,16 @@ and plugin refreshes from breaking coordination while work continues. Caller
 identity, database overrides, arguments, and hook/MCP input are preserved. An
 unavailable or unverified owner fails closed; direct library access still obeys
 the fingerprint guard.
+
+Runtimes advertising `client_requests: 1` execute the complete finite operation
+inside the owner, using request-local identity and environment. A transport
+failure after submission is never retried locally. Owner discovery may be
+retried before submission during startup. Older retained runtimes continue using
+their matching implementation until a safe upgrade; refreshing the launcher
+alone cannot add mutation ownership to an already-running older backend.
+
+See [conversation responsiveness](responsiveness.md) for the persistence,
+query-only read, and submission receipt invariants introduced with this repair.
 
 Owner verification uses an authenticated `identity` control request. Its response
 identifies the database, runtime instance, protocol and retained payload. It does not acquire

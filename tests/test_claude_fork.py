@@ -39,6 +39,7 @@ class ClaudeForkTests(unittest.TestCase):
             connection.callback({"type": "system", "subtype": "init"})
         connection.callback({"type": "assistant", "message": {"content": [{"type": "text", "text": "Answer"}]}})
         connection.callback({"type": "result", "subtype": "success"})
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
 
     def transcript(self, thread_id):
         path = self.config / "projects" / "workspace" / f"{thread_id}.jsonl"

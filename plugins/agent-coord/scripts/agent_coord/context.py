@@ -8,6 +8,8 @@ import shlex
 import shutil
 import tempfile
 from contextvars import ContextVar
+from contextlib import contextmanager
+import sys
 
 
 # A shared app-server can issue MCP calls for several sessions in one process.
@@ -19,8 +21,44 @@ def cli_path() -> Path:
     return Path(__file__).resolve().parents[1] / "agent-coord"
 
 
+request_environment: ContextVar[dict | None] = ContextVar("agent_coord_request_environment", default=None)
+request_directory: ContextVar[str | None] = ContextVar("agent_coord_request_directory", default=None)
+request_input: ContextVar[str | None] = ContextVar("agent_coord_request_input", default=None)
+request_ownership: ContextVar[frozenset[tuple[int, str]]] = ContextVar("agent_coord_request_ownership", default=frozenset())
+
+
+def caller_environment():
+    selected = request_environment.get()
+    return os.environ if selected is None else selected
+
+
+def caller_directory():
+    return request_directory.get() or os.getcwd()
+
+
+def read_input(limit=-1):
+    value = request_input.get()
+    if value is None:
+        return sys.stdin.read(limit)
+    return value if limit < 0 else value[:limit]
+
+
+@contextmanager
+def client_context(*, environment, directory, session=None, input_text=None):
+    tokens = [(request_environment, request_environment.set(environment)),
+              (request_directory, request_directory.set(directory)),
+              (request_session, request_session.set(session)),
+              (request_input, request_input.set(input_text))]
+    try:
+        yield
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
+
+
 def caller_session() -> str | None:
-    return request_session.get() or os.environ.get("AGENT_COORD_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or None
+    environment = caller_environment()
+    return request_session.get() or environment.get("AGENT_COORD_SESSION_ID") or environment.get("CODEX_THREAD_ID") or None
 
 
 def bind_caller(explicit=None, *, require_context=False):
@@ -121,7 +159,7 @@ def coordination_bootstrap(store, session_id, *, caller_context=True, command=No
 
 def persist_claude_environment(database_path, session_id) -> bool:
     """SessionStart exports used by Claude's subsequent Bash commands."""
-    destination = os.environ.get("CLAUDE_ENV_FILE")
+    destination = caller_environment().get("CLAUDE_ENV_FILE")
     if not destination:
         return False
     with open(destination, "a", encoding="utf-8") as output:

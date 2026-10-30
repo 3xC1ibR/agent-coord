@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import copy
+import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
@@ -79,6 +82,67 @@ class BrowserQueueTests(unittest.TestCase):
     def test_failed_turn_pauses_queue(self):
         self.sessions.queue.enqueue(self.thread_id, {"message": "Later"})
         self.finish("failed")
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=self.thread_id))
+        self.assertEqual(self.pending()[0]["state"], "paused")
+        self.assertEqual(len(self.sessions.rpc.threads[self.thread_id]["turns"]), 1)
+
+    def test_recovered_failure_is_persisted_before_queued_submission_is_claimed(self):
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=self.thread_id))
+        read_returned, barrier_entered, release, sent = (threading.Event() for _ in range(4))
+        persist = self.sessions._persist_event
+        read = self.sessions.read
+        barrier = self.sessions._await_persistence
+        send = self.sessions.send
+        errors = []
+
+        def delayed_failure(method, params, *args):
+            if method == "turn/completed" and not release.is_set():
+                raise sqlite3.OperationalError("database is locked")
+            return persist(method, params, *args)
+
+        def observed_read(identity):
+            result = read(identity)
+            read_returned.set()
+            return result
+
+        def observed_barrier(identity):
+            if read_returned.is_set():
+                barrier_entered.set()
+                if not release.wait(3):
+                    raise AssertionError("Test did not release the completion barrier")
+            return barrier(identity)
+
+        def observed_send(*args, **kwargs):
+            sent.set()
+            return send(*args, **kwargs)
+
+        def dispatch():
+            try:
+                self.sessions.queue._dispatch(self.thread_id)
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(self.sessions.queue, "wake"), \
+                patch.object(self.sessions, "_persist_event", side_effect=delayed_failure), \
+                patch.object(self.sessions, "read", side_effect=observed_read), \
+                patch.object(self.sessions, "_await_persistence", side_effect=observed_barrier), \
+                patch.object(self.sessions, "send", side_effect=observed_send):
+            self.sessions.queue.enqueue(self.thread_id, {"message": "Must wait for failure review"})
+            # No completion callback arrived: the dispatch read must recover
+            # this failure, then let its durable pause precede the queue claim.
+            self.sessions.rpc.threads[self.thread_id]["turns"][-1]["status"] = "failed"
+            worker = threading.Thread(target=dispatch)
+            worker.start()
+            try:
+                self.assertTrue(barrier_entered.wait(2))
+                self.assertFalse(sent.is_set(), "A queued submission was claimed before its recovered failure was saved")
+                self.assertEqual(self.pending()[0]["state"], "queued")
+            finally:
+                release.set()
+                worker.join(4)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=self.thread_id))
         self.assertEqual(self.pending()[0]["state"], "paused")
         self.assertEqual(len(self.sessions.rpc.threads[self.thread_id]["turns"]), 1)
 

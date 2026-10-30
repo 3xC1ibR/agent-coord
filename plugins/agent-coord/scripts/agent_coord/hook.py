@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .cli import find_repository_root
-from .context import command_prefix, coordination_bootstrap, persist_claude_environment
+from .context import (command_prefix, coordination_bootstrap, persist_claude_environment,
+                      caller_environment, caller_directory)
 from .store import (
     CoordinationError,
     CoordinationStore,
@@ -25,10 +26,10 @@ PATCH_PATH = re.compile(
 
 
 def _client() -> str:
-    configured = os.environ.get("AGENT_COORD_CLIENT")
+    configured = caller_environment().get("AGENT_COORD_CLIENT")
     if configured in {"claude", "codex", "kimi", "antigravity", "muse"}:
         return configured
-    return "codex" if os.environ.get("PLUGIN_ROOT") else "claude"
+    return "codex" if caller_environment().get("PLUGIN_ROOT") else "claude"
 
 
 def _context(event: str, text: str) -> dict[str, Any]:
@@ -157,8 +158,8 @@ def _record_tool(
 def _ensure_registered(
     store: CoordinationStore, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    session_id = (os.environ.get("AGENT_COORD_SESSION_ID") if _client() in {"kimi", "muse"} else None) or payload.get("session_id")
-    cwd = payload.get("cwd") or os.getcwd()
+    session_id = (caller_environment().get("AGENT_COORD_SESSION_ID") if _client() in {"kimi", "muse"} else None) or payload.get("session_id")
+    cwd = payload.get("cwd") or caller_directory()
     if not isinstance(session_id, str) or not session_id:
         raise CoordinationError("Hook input does not contain a session_id.")
     return store.register(
@@ -172,7 +173,7 @@ def _ensure_registered(
 def _capture_terminal_delegation_usage(
     store: CoordinationStore, payload: dict[str, Any], session_id: str
 ) -> None:
-    inherited_id = os.environ.get("AGENT_COORD_DELEGATION_ID")
+    inherited_id = caller_environment().get("AGENT_COORD_DELEGATION_ID")
     try:
         delegations = [
             item
@@ -257,7 +258,7 @@ def handle(
     event = payload.get("hook_event_name")
     if not isinstance(event, str):
         raise CoordinationError("Hook input does not contain hook_event_name.")
-    owner = os.environ.get("AGENT_COORD_SESSION_ID")
+    owner = caller_environment().get("AGENT_COORD_SESSION_ID")
     if _client() == "claude" and owner and payload.get("session_id") != owner:
         try:
             app_session = coordination.get_session(owner)
@@ -366,7 +367,7 @@ def handle(
         coordination.touch(session_id, turn_active=False)
         text = ""
         delegation_warning = None
-        delegation_id = os.environ.get("AGENT_COORD_DELEGATION_ID")
+        delegation_id = caller_environment().get("AGENT_COORD_DELEGATION_ID")
         if delegation_id:
             try:
                 delegation = coordination.attach_delegation(
@@ -394,7 +395,7 @@ def handle(
         wake_status = None
         wake_warning = None
         try:
-            wake_status = enable_from_environment(coordination, session_id)
+            wake_status = enable_from_environment(coordination, session_id, environ=caller_environment())
         except (CoordinationError, OSError) as exc:
             wake_warning = str(exc)
         if wake_status:
@@ -443,7 +444,7 @@ ANTIGRAVITY_WRITE_TOOLS = {
 def handle_antigravity(payload, store=None):
     """Translate Google's vetoable PreToolUse hook, never ACP notifications."""
     coordination = store or CoordinationStore()
-    session_id = os.environ.get("AGENT_COORD_SESSION_ID")
+    session_id = caller_environment().get("AGENT_COORD_SESSION_ID")
     if not session_id:
         raise CoordinationError("Antigravity hook has no Ribbon Field session identity.")
     session = coordination.get_session(session_id)
@@ -470,7 +471,9 @@ def main() -> int:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise CoordinationError("Hook input must be a JSON object.")
-        result = handle_antigravity(payload) if _client() == "antigravity" else handle(payload)
+        from .runtime_requests import run_local_or_forward
+        result = run_local_or_forward("hook", {"input": payload},
+            lambda: handle_antigravity(payload) if _client() == "antigravity" else handle(payload))
     except Exception as exc:  # noqa: BLE001 -- Hooks must return JSON, not a traceback.
         event = "PreToolUse"
         tool_name = None

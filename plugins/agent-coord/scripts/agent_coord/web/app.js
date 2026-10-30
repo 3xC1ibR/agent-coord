@@ -2801,7 +2801,9 @@ async function sendSessionDraft(text, images, mentions = []) {
   if (mentions.length) body.mentions = mentions;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
   state.reviewUI?.decorate(body, draftId);
+  body.requestId ||= DispatchUI.requestKey(sessionStorage, draft.createdId, body);
   const result = await api(sessionPath(draft.createdId) + "/messages", body);
+  sessionStorage.removeItem("dispatch-request:" + draft.createdId);
   // Creation and message acceptance already establish this conversation. Show
   // that state immediately while its full detail catches up in the background.
   const created = draft.createdDetail || {};
@@ -3364,6 +3366,7 @@ async function sendMessage(mode = "steer") {
       body.requestId = DispatchUI.requestKey(sessionStorage, id, body);
     }
     if (!reviewing && !detail.running && mode !== "queue") state.reviewUI?.decorate(body, id);
+    body.requestId ||= DispatchUI.requestKey(sessionStorage, id, body);
     // Queued, reviewed, and command input have their own displays.
     echo = !text.trim().startsWith("/") && body.review == null && (dispatcher || mode !== "queue")
       ? state.outgoing?.add(id, {text, images: images.length, requestId: dispatcher ? body.requestId : null,
@@ -3374,6 +3377,7 @@ async function sendMessage(mode = "steer") {
       if (id === state.selected) state.timelineScroll?.latest();
     }
     const result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
+    sessionStorage.removeItem("dispatch-request:" + id);
     if (echo) { state.outgoing.accepted(echo); showOutgoing(); }
     state.reviewUI?.sent(id);
     dispatchReceived = !!result.dispatched;

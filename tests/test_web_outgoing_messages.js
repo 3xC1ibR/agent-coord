@@ -120,8 +120,11 @@ test("updating in place replaces only outgoing nodes", () => {
 
 function composer({running = false} = {}) {
   const elements = new Map();
+  const storage = new Map();
   const context = {
     document, OutgoingMessages,
+    DispatchUI: require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js"),
+    sessionStorage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)},
     $: id => {
       if (!elements.has(id)) elements.set(id, id === "timeline" ? new FakeElement("div") : {});
       return elements.get(id);

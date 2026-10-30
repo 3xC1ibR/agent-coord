@@ -142,8 +142,10 @@ def checkpoint_id(thread):
 class AttentionStore:
     _WHERE = "completion_id = ? AND checkpoint_id = ? AND model = ? AND policy_version = ?"
 
-    def __init__(self, store):
+    def __init__(self, store, *, initialize=True):
         self.store = store
+        if not initialize:
+            return
         with store._connection() as db:
             # Older app processes replace the legacy table's one row per reply.
             # Keep their writes separate and retain each classification identity,

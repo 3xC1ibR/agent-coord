@@ -69,6 +69,7 @@ class SubagentCloseTests(unittest.TestCase):
         attach(self.store, child, nested)
         for thread in (child, nested, unrelated):
             self.sessions.send(thread, {"message": "Working"})
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
         self.sessions._event({"id": 77, "method": "item/commandExecution/requestApproval", "params": {"threadId": nested}})
         self.store.begin_work(session_id=child, scopes=["file.py"])
         self.assertTrue(all(item["running"] for item in close_plan(self.sessions, parent)["subagents"]))

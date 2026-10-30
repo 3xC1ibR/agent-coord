@@ -256,6 +256,9 @@ test("a cold conversation becomes usable while events continue during every read
 
 test("first-send acknowledgement opens its cached conversation before full detail returns", async () => {
   const c = recoverySetup(), api = c.api;
+  const storage = new Map();
+  c.DispatchUI = require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js");
+  c.sessionStorage = {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)};
   const draft = {...fixture("new-session", ""), session: {cwd: "/project", client: "codex"}};
   c.state.selected = "new-session"; c.state.detail = draft; c.state.newSessionDraft = draft;
   c.state.commandFeedback = new Map(); c.state.sending = new Set([draft]);

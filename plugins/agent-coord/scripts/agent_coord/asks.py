@@ -23,7 +23,7 @@ DEFAULT_POLL_SECONDS = 2.0
 THREAD_PREFIX = "ask:"
 
 
-def initialize(db) -> None:
+def initialize_schema(db) -> None:
     db.execute("""CREATE TABLE IF NOT EXISTS asks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL REFERENCES sessions(session_id),
@@ -110,10 +110,12 @@ def answer_body(ask: dict[str, Any], answer: str) -> str:
 
 
 class AskStore:
-    def __init__(self, store):
+    def __init__(self, store, *, initialize=True):
         self.store = store
+        if not initialize:
+            return
         with store._connection() as db:
-            initialize(db)
+            initialize_schema(db)
 
     # -- reads -----------------------------------------------------------
     def get(self, ask_id: Any) -> dict[str, Any]:

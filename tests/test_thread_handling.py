@@ -89,6 +89,7 @@ class ThreadHandlingTests(unittest.TestCase):
         thread_id = self.sessions.create({})["session"]["thread_id"]
         self.sessions.rpc.fast_turn = True
         self.sessions.send(thread_id, {"message": "Investigate."})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         before = self.sessions.work_thread(thread_id)
         self.assertTrue(before["needs_attention"])
         self.sessions.send(thread_id, {"message": "/help"})
@@ -100,12 +101,14 @@ class ThreadHandlingTests(unittest.TestCase):
         self.sessions.rpc.fail_turn = False
         self.sessions.rpc.fast_turn = False
         self.sessions.send(thread_id, {"message": "Continue."})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         working = self.sessions.work_thread(thread_id)
         self.assertEqual(working["response_state"], "working")
         self.assertEqual(working["handled_completion_id"], before["turn_completion"]["id"])
         turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
         turn["status"] = "completed"
         self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         self.assertTrue(self.sessions.work_thread(thread_id)["needs_attention"])
 
     def test_saved_actions_can_be_acknowledged_while_live_approvals_remain_pending(self):

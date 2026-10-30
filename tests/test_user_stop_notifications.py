@@ -25,6 +25,7 @@ class UserStopNotificationTests(unittest.TestCase):
     def start(self, **options):
         child = self.fixture.create(**options)
         self.sessions.inbox_wake._dispatch(child)
+        self.assertTrue(self.sessions.persistence.flush(key=child))
         self.store.inbox(child)
         return child, self.sessions.active[child]
 
@@ -85,6 +86,7 @@ class UserStopNotificationTests(unittest.TestCase):
                 saved(method, params, disconnected, disconnected_turns)
         with patch.object(self.sessions, "_persist_event", side_effect=persist):
             self.sessions.interrupt(child)
+            self.assertTrue(self.sessions.persistence.flush(key=child))
         # Direct user input clears the session-wide pause before bookkeeping.
         self.sessions.inbox_wake.resume(child)
         saved(*pending[0])

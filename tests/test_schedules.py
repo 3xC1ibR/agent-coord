@@ -45,6 +45,7 @@ class ScheduledPromptTests(unittest.TestCase):
                 "timezone": "America/Chicago", "settings": {"cwd": str(self.root), "model": "available-model", "effort": "high", "yolo": True}, **changes}
 
     def item(self, item):
+        self.assertTrue(self.sessions.persistence.flush())
         return next(row for row in self.schedules.list() if row["id"] == item["id"])
 
     def starts(self, sessions=None):
@@ -68,6 +69,7 @@ class ScheduledPromptTests(unittest.TestCase):
         turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
         turn["status"] = status
         self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
 
     def test_existing_thread_receives_verbatim_message_with_current_settings(self):
         thread_id = self.existing_thread()

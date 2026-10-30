@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -45,8 +47,24 @@ class EntrypointTests(unittest.TestCase):
                        env=self.env, capture_output=True, text=True, check=True)
         self.owner = runtime.lock_file(self.directory / "owner.lock")
         self.addCleanup(os.close, self.owner)
+        # Load the retained backend in an isolated package namespace. The
+        # fixture owns the same kernel lock as a runtime and executes complete
+        # requests against one shared store, rather than returning status for
+        # every action and accidentally allowing client-side database writes.
+        package = "retained_owner_" + self.root.name.replace("-", "_")
+        spec = importlib.util.spec_from_file_location(package, self.backend / "agent_coord/__init__.py",
+            submodule_search_locations=[str(self.backend / "agent_coord")])
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[package] = module
+        self.addCleanup(lambda: [sys.modules.pop(name, None) for name in list(sys.modules)
+                                if name == package or name.startswith(package + ".")])
+        spec.loader.exec_module(module)
+        owner_runtime = importlib.import_module(package + ".desktop_runtime")
+        owner_runtime._OWNED_DATABASES.add(str(self.database))
+        self.owner_store = module.CoordinationStore(self.database)
+        self.execute_request = importlib.import_module(package + ".runtime_requests").execute_request
         self.status = {"instance": "test-instance", "database": str(self.database),
-                       "protocol": runtime.PROTOCOL_VERSION, "payload": str(self.payload)}
+                       "protocol": runtime.PROTOCOL_VERSION, "payload": str(self.payload), "client_requests": 1}
         self.actions = []
         self.legacy_owner = False
         fixture = self
@@ -62,6 +80,8 @@ class EntrypointTests(unittest.TestCase):
                 result = fixture.status
                 if fixture.legacy_owner and body.get("action") == "identity":
                     result = {**fixture.status, "error": "Unknown runtime control action."}
+                elif body.get("action") == "client-request":
+                    result = {**fixture.status, **fixture.execute_request(fixture.owner_store, body)}
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode())
@@ -113,16 +133,16 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("entrypoint-test", export.read_text())
         self.assertIn(str(self.backend), export.read_text())
 
-    def test_owner_routing_uses_one_identity_probe_without_status(self):
+    def test_owner_routing_authenticates_retained_code_and_execution_without_status(self):
         result = self.invoke("agent-coord", "status")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.actions, ["identity"])
+        self.assertEqual(self.actions, ["identity", "identity", "client-request"])
 
     def test_legacy_owner_falls_back_only_for_authenticated_unsupported_action(self):
         self.legacy_owner = True
         result = self.invoke("agent-coord", "status")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.actions, ["identity", "status"])
+        self.assertEqual(self.actions, ["identity", "status", "identity", "status", "client-request"])
         self.legacy_owner = False
         self.actions.clear()
         self.status["error"] = "Owner identity rejected."

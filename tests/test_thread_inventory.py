@@ -151,7 +151,7 @@ class ThreadInventoryTests(unittest.TestCase):
         self.assertEqual(self.runtime.list_work_threads(), [])
         self.assertEqual(self.runtime.list_work_threads(archived=True)[0]["title"], "Changed")
 
-    def test_legacy_repair_reopens_the_snapshot_before_writing(self):
+    def test_legacy_projection_preserves_the_read_snapshot_without_writing(self):
         self.register("legacy")
         with self.store._connection() as db:
             db.execute("DELETE FROM thread_organization WHERE thread_id = 'legacy'")
@@ -170,9 +170,10 @@ class ThreadInventoryTests(unittest.TestCase):
         with patch.object(ThreadInventory, "_base", write_after_snapshot), \
              patch.object(self.store.threads.organization, "backfill", side_effect=AssertionError("global repair")):
             listed = self.runtime.list_work_threads()
-        self.assertEqual(listed[0]["title"], "New title")
+        self.assertNotEqual(listed[0]["title"], "New title")
+        self.assertEqual(self.runtime.list_work_threads()[0]["title"], "New title")
         with self.store._connection() as db:
-            self.assertIsNotNone(db.execute("SELECT 1 FROM thread_organization WHERE thread_id = 'legacy'").fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM thread_organization WHERE thread_id = 'legacy'").fetchone())
 
     def test_due_snoozes_still_wake_before_filtering_the_inventory(self):
         self.register("later")

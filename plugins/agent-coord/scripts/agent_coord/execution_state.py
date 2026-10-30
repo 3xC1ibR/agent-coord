@@ -190,7 +190,7 @@ class RuntimeExecution:
                     observed_at=excluded.observed_at, pending_json=excluded.pending_json,
                     permissions_json=excluded.permissions_json
                     WHERE execution_snapshots.observed_at <= excluded.observed_at""", payload)
-        sessions.persistence.submit(persist)
+        sessions.persistence.submit(persist, key=thread_id, coalesce="execution", required=False)
 
     def close(self):
         with self.store._connection() as db:

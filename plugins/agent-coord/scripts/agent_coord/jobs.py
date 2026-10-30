@@ -232,6 +232,8 @@ class ManagedJobs:
         self.store = store
         self._run = run
         with store._connection() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone():
+                return
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
@@ -534,7 +536,7 @@ def _supervisor_heartbeat_is_fresh(store: CoordinationStore, job_id: str, stale_
 
 @contextmanager
 def _supervisor_connection(store: CoordinationStore):
-    with store._connection() as db:
+    with store.reading(), store.connection_timeout(0), store._connection() as db:
         # Never spend the store's five-second busy wait in the child control
         # loop: keep draining output and enforcing timeouts during contention.
         db.execute("PRAGMA busy_timeout = 0")
@@ -543,17 +545,17 @@ def _supervisor_connection(store: CoordinationStore):
 
 def _save_progress(store, job_id, token, child_pid, discarded) -> bool:
     _touch_supervisor(store, job_id)
+    from .runtime_requests import RuntimeRequestUnavailable
     try:
-        with _supervisor_connection(store) as db:
-            now = store.clock()
-            db.execute("""UPDATE jobs SET child_pid = ?, heartbeat_at = ?, updated_at = ?, output_discarded = ?
-                          WHERE id = ? AND supervisor_token = ? AND state = 'running'""",
-                       (child_pid, now, now, discarded, job_id, token))
-        return True
+        from .runtime_metadata import job_operation
+        return job_operation(store, "save_progress", job_id, token, child_pid, discarded, timeout=.25)
     except sqlite3.OperationalError as exc:
         if not database_busy(exc):
             raise
         return False  # Coalesce bookkeeping and retry on the next poll.
+    except RuntimeRequestUnavailable:
+        # Progress is idempotent; retain the newest values for the next poll.
+        return False
 
 
 @contextmanager
@@ -595,14 +597,9 @@ def supervise(store: CoordinationStore, job_id: str, token: str, *,
         raise CoordinationError("Job poll interval must be positive.")
     jobs = ManagedJobs(store)
     with _supervisor_lock(store, job_id):
-        now = store.clock()
-        with store._connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            claimed = db.execute("""UPDATE jobs SET state = 'running', started_at = ?, heartbeat_at = ?, updated_at = ?,
-                                    supervisor_pid = ? WHERE id = ? AND supervisor_token = ? AND state = 'starting'
-                                    AND cancel_requested_at IS NULL""",
-                                 (now, now, now, os.getpid(), job_id, token)).rowcount
-            row = jobs._row(db, job_id)
+        from .runtime_metadata import job_operation
+        result = job_operation(store, "claim", job_id, token, os.getpid())
+        claimed, row = result["claimed"], result["row"]
         if row is None:
             raise CoordinationError(f"Job {job_id} does not exist.")
         if not claimed:
@@ -615,17 +612,15 @@ def supervise(store: CoordinationStore, job_id: str, token: str, *,
 
 def _finish(store: CoordinationStore, job_id: str, token: str, *, state: str, exit_code: int | None,
             error: str | None, discarded: int) -> dict[str, Any]:
+    from .runtime_requests import RuntimeRequestUnavailable
     now = store.clock()
     warned = False
     while True:
         _touch_supervisor(store, job_id)
         try:
-            with _supervisor_connection(store) as db:
-                db.execute("""UPDATE jobs SET state = ?, exit_code = ?, error = ?, finished_at = ?, updated_at = ?,
-                              heartbeat_at = ?, output_discarded = ?
-                              WHERE id = ? AND supervisor_token = ? AND state = 'running'""",
-                           (state, exit_code, error, now, now, now, discarded, job_id, token))
-                return ManagedJobs._record(db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
+            from .runtime_metadata import job_operation
+            return job_operation(store, "finish", job_id, token, state=state,
+                exit_code=exit_code, error=error, discarded=discarded, finished_at=now)
         except sqlite3.OperationalError as exc:
             if not database_busy(exc):
                 raise
@@ -633,6 +628,10 @@ def _finish(store: CoordinationStore, job_id: str, token: str, *, state: str, ex
                 logging.getLogger(__name__).warning("Database busy; retaining result for job %s until it can be saved", job_id)
                 warned = True
             # Only retry publishing the result, never executing the command.
+            time.sleep(DEFAULT_POLL_SECONDS)
+        except RuntimeRequestUnavailable:
+            # The terminal result is retained locally and publication is
+            # idempotent. Never restart the completed command after a timeout.
             time.sleep(DEFAULT_POLL_SECONDS)
 
 

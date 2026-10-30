@@ -332,10 +332,12 @@ class ThreadAttentionTests(unittest.TestCase):
         turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
         turn["status"] = "failed"
         self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         self.assertEqual(self.sessions.work_thread(thread_id)["response_state"], "failed")
         self.assertTrue(self.sessions.work_thread(thread_id)["needs_attention"])
         self.sessions.send(thread_id, {"message": "Try again."})
         self.sessions.rpc.request("turn/interrupt", {"threadId": thread_id})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         stopped = self.sessions.work_thread(thread_id)
         self.assertEqual(stopped["response_state"], "interrupted")
         self.assertFalse(stopped["needs_attention"])

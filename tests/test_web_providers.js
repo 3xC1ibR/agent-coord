@@ -11,6 +11,9 @@ function composer(client) {
       drafts: new Map(), commandFeedback: new Map(), closing: new Set()},
     sessionPath: id => "sessions/" + id, renderStatus() {}, refreshDetail: async () => {}, refreshList: async () => {},
     api: async (path, body) => { calls.push({path, body}); return {}; }};
+  const storage = new Map();
+  c.DispatchUI = require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js");
+  c.sessionStorage = {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);

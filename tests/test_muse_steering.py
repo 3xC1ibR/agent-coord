@@ -47,6 +47,7 @@ class MuseSteeringTests(unittest.TestCase):
         self.assertEqual(len(self.users()), 2)
         self.h.complete(self.thread)
         self.assertNotIn(self.thread, self.h.sessions.active)
+        self.assertTrue(self.h.sessions.persistence.flush(key=self.thread))
         reopened = self.h.make_sessions()
         self.assertEqual(reopened.read(self.thread)["thread"]["turns"][-1]["items"][1]["content"],
                          [{"type": "text", "text": "Use the smaller change"}])

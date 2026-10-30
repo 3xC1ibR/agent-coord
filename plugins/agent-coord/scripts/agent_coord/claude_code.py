@@ -176,7 +176,7 @@ class ClaudeRPC:
         self.blocks = {}
         self.confirmed_blocks = {}
         self.started = set()
-        self.persistence = BrowserPersistence()
+        self.persistence = BrowserPersistence(context=lambda: self.store.connection_timeout(0))
         self.catalog = None
         self.closed = False
         self.effective_permissions = {}
@@ -283,13 +283,14 @@ class ClaudeRPC:
             child_id = str(uuid.uuid4())
             snapshot = None
             snapshot_created = False
-            if source["started"] or source["fork_path"]:
+            started = thread_id in self.started or bool(source["started"])
+            if started or source["fork_path"]:
                 # Freeze the native transcript now, including tool/context data
                 # absent from display history. Claude performs the actual branch
                 # on first input; --resume <snapshot> never follows later parent
                 # turns, even after restart or when forking an unused fork.
                 try:
-                    if source["started"]:
+                    if started:
                         session_id = str(uuid.UUID(source["native_id"] or thread_id))
                         root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
                         paths = list((root / "projects").glob(f"*/{session_id}.jsonl"))
@@ -546,7 +547,7 @@ class ClaudeRPC:
             # Remember in memory too: a process replacement must resume even
             # when this idempotent write is still waiting for SQLite.
             self.started.add(thread_id)
-            self.persistence.submit(lambda: self._persist_started(thread_id))
+            self.persistence.submit(lambda: self._persist_started(thread_id), key=thread_id)
         elif kind == "stream_event":
             event = message.get("event", {})
             index = event.get("index", 0)

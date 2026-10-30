@@ -28,6 +28,19 @@ class AppAgentFailureTests(unittest.TestCase):
         self.addCleanup(self.worker.close)
         self.control = self.worker.control
         self.parent = self.sessions.create({"name": "Orchestrator"})["session"]["thread_id"]
+        self.persisted(self.parent)
+
+    def persisted(self, identity):
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+
+    def send(self, identity, body):
+        result = self.sessions.send(identity, body)
+        self.persisted(identity)
+        return result
+
+    def dispatch(self, identity):
+        self.sessions.inbox_wake._dispatch(identity)
+        self.persisted(identity)
 
     def request(self, **values):
         return self.control.request("create", self.parent, {
@@ -39,25 +52,29 @@ class AppAgentFailureTests(unittest.TestCase):
         self.worker.process_once()
         receipt = self.control.status(request["request_id"])
         self.assertEqual(receipt["status"], "completed")
+        self.persisted(receipt["thread_id"])
         return receipt["thread_id"]
 
     def reports(self):
         return self.store.inbox(self.parent, mark_delivered=False)
 
-    def finish(self, child, status="failed", error=None):
+    def finish(self, child, status="failed", error=None, *, persist=True):
         turn = self.sessions.rpc.threads[child]["turns"][-1]
         turn.update(status=status, error={"message": error} if error else None)
         event = {"method": "turn/completed", "params": {"threadId": child, "turn": copy.deepcopy(turn)}}
         self.sessions._event(event)
+        if persist:
+            self.persisted(child)
         return event
 
     def test_limits_and_other_errors_notify_creator_without_reply_contract(self):
         for error in ("5 hour usage limit reached; resets at 6pm", "Insufficient credits", "Provider crashed"):
             child = self.create()
-            self.sessions.inbox_wake._dispatch(child)
+            self.dispatch(child)
             self.store.inbox(child)  # Normal hook delivery.
             event = self.finish(child, error=error)
             self.sessions._event(event)
+            self.persisted(child)
             report = self.reports()[-1]
             body = json.loads(report["body"])
             self.assertEqual(body["session_id"], child)
@@ -68,39 +85,42 @@ class AppAgentFailureTests(unittest.TestCase):
             with self.store._connection() as db:
                 self.assertEqual(db.execute("SELECT paused FROM browser_inbox_wake WHERE thread_id = ?", (child,)).fetchone()[0], 1)
         self.assertEqual(len(self.reports()), 3)
-        self.sessions.inbox_wake._dispatch(self.parent)
+        self.dispatch(self.parent)
         self.assertIn(self.parent, self.sessions.active)
 
     def test_claude_limit_result_uses_same_notification_path(self):
         child = self.create(client="claude", mode="orchestration", reply_required=True)
-        self.sessions.inbox_wake._dispatch(child)
+        self.dispatch(child)
         self.sessions.claude.connections[child].callback({
             "type": "result", "subtype": "error_during_execution", "is_error": True,
             "errors": ["You have hit your limit; resets at 7pm"]})
+        self.persisted(child)
         self.assertEqual(json.loads(self.reports()[0]["body"])["error"], "You have hit your limit; resets at 7pm")
 
     def test_success_stop_and_unrelated_conversations_do_not_notify(self):
         for status in ("completed", "interrupted"):
             child = self.create()
-            self.sessions.send(child, {"message": "Start"})
+            self.send(child, {"message": "Start"})
             if status == "interrupted":
                 self.sessions.interrupt(child)
+                self.persisted(child)
             else:
                 self.finish(child, status=status)
         ordinary = self.sessions.create({})["session"]["thread_id"]
-        self.sessions.send(ordinary, {"message": "Start"})
+        self.send(ordinary, {"message": "Start"})
         self.finish(ordinary)
         self.assertEqual(self.reports(), [])
 
     def test_unsolicited_interruption_after_initial_result_alerts_and_does_not_resume(self):
         child = self.create()
-        self.sessions.inbox_wake._dispatch(child)
+        self.dispatch(child)
         self.finish(child, status="completed")
         self.sessions.event_subscriptions.process_once()
         before = len(self.reports())
-        self.sessions.send(child, {"message": "Continue the assignment"})
+        self.send(child, {"message": "Continue the assignment"})
         event = self.finish(child, status="interrupted")
         self.sessions._event(event)
+        self.persisted(child)
         self.assertEqual(len(self.reports()), before + 1)
         self.assertEqual(json.loads(self.reports()[-1]["body"])["stage"], "turn")
         with self.store._connection() as db:
@@ -110,7 +130,7 @@ class AppAgentFailureTests(unittest.TestCase):
 
     def test_native_user_cancellation_remains_stop_without_failure_alert(self):
         child = self.create()
-        self.sessions.send(child, {"message": "Start"})
+        self.send(child, {"message": "Start"})
         turn = self.sessions.rpc.threads[child]["turns"][-1]
         turn["termination"] = {"origin": "user", "reason": "cancelled", "execution": "unknown"}
         self.finish(child, status="interrupted")
@@ -122,7 +142,7 @@ class AppAgentFailureTests(unittest.TestCase):
         self.wall = 2000000000.0
         self.store.clock = lambda: self.wall
         child = self.create()
-        self.sessions.inbox_wake._dispatch(child)
+        self.dispatch(child)
         self.store.inbox(child)
         self.finish(child, status="interrupted")
         return child
@@ -147,7 +167,7 @@ class AppAgentFailureTests(unittest.TestCase):
             child = self.overdue_child()
             before = len(self.reports())
             if resolution == "new_turn":
-                self.sessions.send(child, {"message": "Checked prior native results; continue"})
+                self.send(child, {"message": "Checked prior native results; continue"})
             elif resolution == "user_stop":
                 self.sessions.inbox_wake.pause(child, "User stopped", kind="stop")
             else:
@@ -188,7 +208,7 @@ class AppAgentFailureTests(unittest.TestCase):
         self.sessions.inbox_wake.pause(self.parent, "User stopped", kind="stop")
         self.wall += 600
         process_failure_followups(self.store)
-        self.sessions.inbox_wake._dispatch(self.parent)
+        self.dispatch(self.parent)
         self.assertNotIn(self.parent, self.sessions.active)
         self.assertEqual(len(self.reports()), 2)
         self.assertIsNone(self.reports()[-1]["delivered_at"])
@@ -203,11 +223,11 @@ class AppAgentFailureTests(unittest.TestCase):
 
     def test_later_failure_reports_again_and_busy_parent_keeps_message(self):
         child = self.create()
-        self.sessions.send(self.parent, {"message": "Continue orchestration"})
+        self.send(self.parent, {"message": "Continue orchestration"})
         for _ in range(2):
-            self.sessions.send(child, {"message": "Try again"})
+            self.send(child, {"message": "Try again"})
             self.finish(child, error="No credits")
-        self.sessions.inbox_wake._dispatch(self.parent)
+        self.dispatch(self.parent)
         self.assertEqual(len(self.sessions.rpc.threads[self.parent]["turns"]), 1)
         self.assertEqual(len(self.reports()), 2)
         self.assertTrue(all(report["delivered_at"] is None for report in self.reports()))
@@ -215,9 +235,10 @@ class AppAgentFailureTests(unittest.TestCase):
     def test_disconnect_reports_active_child_once_but_not_idle_children(self):
         child = self.create()
         self.create()
-        self.sessions.send(child, {"message": "Start"})
+        self.send(child, {"message": "Start"})
         self.sessions._event({"method": "bridge/disconnected"})
         self.sessions._event({"method": "bridge/disconnected"})
+        self.persisted(child)
         self.assertEqual(len(self.reports()), 1)
         self.assertEqual(json.loads(self.reports()[0]["body"])["stage"], "disconnect")
         self.assertEqual(self.store.threads.get(child)["turn_completion"]["status"], "failed")
@@ -225,7 +246,7 @@ class AppAgentFailureTests(unittest.TestCase):
     def test_normal_runtime_shutdown_does_not_report_disconnect_failure(self):
         for client in ("codex", "claude"):
             child = self.create(client=client)
-            self.sessions.send(child, {"message": "Start"})
+            self.send(child, {"message": "Start"})
         self.sessions.close()
         self.assertEqual(self.reports(), [])
         with self.store._connection() as db:
@@ -234,13 +255,13 @@ class AppAgentFailureTests(unittest.TestCase):
     def test_wake_start_and_resume_failures_report_and_do_not_retry(self):
         child = self.create()
         self.sessions.rpc.fail_turn = True
-        self.sessions.inbox_wake._dispatch(child)
-        self.sessions.inbox_wake._dispatch(child)
+        self.dispatch(child)
+        self.dispatch(child)
         self.assertEqual(len(self.reports()), 1)
         self.assertIn("Provider unavailable", self.reports()[0]["body"])
         other = self.create()
         with patch.object(self.sessions, "read", side_effect=RuntimeError("Login expired")):
-            self.sessions.inbox_wake._dispatch(other)
+            self.dispatch(other)
         self.assertEqual(len(self.reports()), 2)
         self.assertIn("Login expired", self.reports()[1]["body"])
 
@@ -270,19 +291,22 @@ class AppAgentFailureTests(unittest.TestCase):
 
     def test_database_contention_retries_report_without_replaying_turn(self):
         child = self.create()
-        self.sessions.send(child, {"message": "Start"})
+        self.send(child, {"message": "Start"})
         from agent_coord import codex_app_server
         real = codex_app_server.notify_agent_failure
         locked = threading.Event()
+        attempted = threading.Event()
         def notify(*args, **kwargs):
+            attempted.set()
             if not locked.is_set():
                 raise sqlite3.OperationalError("database is locked")
             return real(*args, **kwargs)
         with patch.object(codex_app_server, "notify_agent_failure", side_effect=notify):
-            self.finish(child, error="Credit limit")
+            self.finish(child, error="Credit limit", persist=False)
+            self.assertTrue(attempted.wait(1), "The persistence worker must encounter the held report write")
             self.assertEqual(self.reports(), [])
             locked.set()
-            self.assertTrue(self.sessions.persistence.flush(timeout=3))
+            self.persisted(child)
         self.assertEqual(len(self.reports()), 1)
         self.assertEqual(len(self.sessions.rpc.threads[child]["turns"]), 1)
 
@@ -300,7 +324,7 @@ class AppAgentFailureTests(unittest.TestCase):
         for failure_first in (True, False):
             with self.subTest(failure_first=failure_first):
                 child = self.create(mode="orchestration")
-                self.sessions.inbox_wake._dispatch(child)
+                self.dispatch(child)
                 self.store.inbox(child)
                 turn = self.sessions.rpc.threads[child]["turns"][-1]["id"]
                 if failure_first:
@@ -347,7 +371,7 @@ class AppAgentFailureTests(unittest.TestCase):
 
     def test_opt_out_keeps_failure_notification(self):
         child = self.create(subscribe=False)
-        self.sessions.inbox_wake._dispatch(child)
+        self.dispatch(child)
         self.store.inbox(child)
         self.finish(child, error="Usage limit")
         self.sessions.event_subscriptions.process_once()
@@ -357,7 +381,7 @@ class AppAgentFailureTests(unittest.TestCase):
 
     def test_failure_snapshot_contains_only_this_turns_assignment_report(self):
         child = self.create(mode="orchestration")
-        self.sessions.inbox_wake._dispatch(child)
+        self.dispatch(child)
         message = self.store.inbox(child)[0]
         self.store.threads.checkpoint(child, {
             "phase": "implementation", "summary": "Provider failed during the requested work.",
@@ -371,7 +395,7 @@ class AppAgentFailureTests(unittest.TestCase):
         body = json.loads(self.reports()[0]["body"])
         self.assertEqual(body["context_lifecycle"]["recommendation"], "fresh")
         self.assertEqual(body["assignment_message_id"], message["id"])
-        self.sessions.send(child, {"message": "Try again"})
+        self.send(child, {"message": "Try again"})
         self.finish(child, error="Still no credits")
         later = json.loads(self.reports()[1]["body"])
         self.assertIsNone(later["context_lifecycle"])

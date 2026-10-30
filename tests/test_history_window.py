@@ -83,6 +83,8 @@ class RecentViewTransferTests(unittest.TestCase):
         self.url = "http://127.0.0.1:" + str(self.server.server_address[1])
         self.thread = self.sessions.create({"name": "Long work"})["session"]["thread_id"]
         self.sessions.rpc.threads[self.thread]["turns"] = history(RECENT_TURNS + 3, output_size=20000)
+        self.sessions._remember_thread(self.sessions.rpc.threads[self.thread])
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=self.thread))
 
     def stop(self):
         self.server.shutdown()

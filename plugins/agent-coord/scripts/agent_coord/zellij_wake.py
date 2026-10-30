@@ -296,6 +296,8 @@ def watch_zellij(
 ) -> dict[str, Any]:
     if poll_interval_seconds <= 0:
         raise CoordinationError("Wake poll interval must be positive.")
+    from .runtime_metadata import metadata_store
+    store = metadata_store(store)
     with _watcher_lock(store, session_id):
         watcher_pid = os.getpid()
         store.set_zellij_watcher_pid(session_id, watcher_pid)
@@ -398,8 +400,8 @@ def environment_requests_wake(environ: dict[str, str] | None = None) -> bool:
 
 
 def enable_from_environment(
-    store: CoordinationStore, session_id: str
+    store: CoordinationStore, session_id: str, *, environ=None
 ) -> dict[str, Any] | None:
-    if not environment_requests_wake():
+    if not environment_requests_wake(environ):
         return None
-    return enable_zellij_wake(store, session_id)
+    return enable_zellij_wake(store, session_id, environ=environ)

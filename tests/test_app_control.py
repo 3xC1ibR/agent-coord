@@ -74,6 +74,9 @@ class AppControlTests(unittest.TestCase):
             turn["items"].append({"type": "agentMessage", "id": "answer-" + turn["id"], "text": text})
             turn["status"] = "completed"
             self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": copy.deepcopy(turn)}})
+        # Completion callbacks publish durable bookkeeping asynchronously.
+        # Workflow assertions below observe the committed completion boundary.
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
 
     def deliver(self, thread_id):
         with patch.dict(os.environ, {"AGENT_COORD_CLIENT": self.control.settings(thread_id)["client"]}):
@@ -398,6 +401,7 @@ class AppControlTests(unittest.TestCase):
         child = self.create()
         self.sessions.inbox_wake._dispatch(child)
         # Wake evidence binds the turn even when prompt-hook delivery never ran.
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=child))
         turn = self.sessions.rpc.threads[child]["turns"][-1]
         self.store.threads.finish_turn(child, turn_id=turn["id"], status="interrupted")
         self.sessions.event_subscriptions.process_once()
@@ -697,6 +701,7 @@ class AppControlTests(unittest.TestCase):
             turn = self.sessions.rpc.threads[thread]["turns"][-1]
             turn.update(status="failed", error={"message": "Provider quota exhausted"})
             self.sessions._event({"method": "turn/completed", "params": {"threadId": thread, "turn": copy.deepcopy(turn)}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
         detail = self.sessions.read(thread)
         self.assertFalse(detail["running"])
         self.assertEqual(detail["thread"]["turns"][-1]["status"], "failed")
@@ -798,6 +803,7 @@ class AppControlTests(unittest.TestCase):
         turn = self.sessions.rpc.threads[thread]["turns"][-1]
         turn.update(status="interrupted", termination={"origin": "provider", "reason": "cancelled", "execution": "unknown"})
         self.sessions._event({"method": "turn/completed", "params": {"threadId": thread, "turn": copy.deepcopy(turn)}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
         self.continuation(thread)
         request = self.recover_request(thread, turn["id"])
         self.worker.process_once()
@@ -819,6 +825,7 @@ class AppControlTests(unittest.TestCase):
         self.sessions.inbox_wake.process_once()
         self.deliver(thread)
         self.sessions.interrupt(thread)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
         turn = self.sessions.read(thread)["thread"]["turns"][-1]
         self.continuation(thread)
         request = self.control.request("resume", "dispatcher", {"expected_turn_id": turn["id"],

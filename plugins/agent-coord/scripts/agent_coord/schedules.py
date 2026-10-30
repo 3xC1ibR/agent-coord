@@ -187,9 +187,11 @@ class ScheduledPrompts:
                 return
             state = "running" if method == "turn/started" else "completed" if turn.get("status") == "completed" else "failed"
             error = None if state != "failed" else "The scheduled turn failed or was interrupted. Open its thread for details."
+            if row["state"] == "review" and method == "turn/started":
+                state, error = "review", row["error"]
             db.execute("""UPDATE scheduled_prompts SET state = ?, error = ?, turn_id = ?,
-                version = version + 1, updated_at = ? WHERE id = ?""",
-                (state, error, turn["id"], self.store.clock(), row["id"]))
+                version = version + 1, updated_at = ? WHERE id = ? AND version = ?""",
+                (state, error, turn["id"], self.store.clock(), row["id"], row["version"]))
         self._changed()
 
     def _recover(self, row):
@@ -277,6 +279,10 @@ class ScheduledPrompts:
                     detail = self.sessions.read(thread_id)
                     if detail["running"] or detail["queuedMessages"]:
                         return
+                    # Prior turn events must finish before this schedule can
+                    # claim an unbound starting turn. Otherwise an older start
+                    # notification could attach itself to the new schedule.
+                    self.sessions._await_persistence(thread_id)
                     with self.store._connection() as db:
                         claimed = db.execute("""UPDATE scheduled_prompts SET state = 'starting', version = version + 1,
                             updated_at = ? WHERE id = ? AND state = 'waiting' AND owner = ? AND version = ?

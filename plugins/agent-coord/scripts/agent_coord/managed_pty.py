@@ -588,6 +588,8 @@ def supervise_managed_pty(
 ) -> dict[str, Any]:
     if poll_interval_seconds <= 0:
         raise CoordinationError("Managed PTY poll interval must be positive.")
+    from .runtime_metadata import metadata_store
+    store = metadata_store(store)
     delegation = store.get_delegation(delegation_id)
     if delegation["runtime_kind"] != "managed-pty":
         raise CoordinationError(

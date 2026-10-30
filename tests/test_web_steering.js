@@ -14,6 +14,9 @@ function setup() {
     renderSessionSettings() {}, threadGrouping: {status: () => ({label: "Idle"})},
     refreshDetail: async () => {}, refreshList: async () => {}, sessionPath: id => "sessions/" + id, showError() {},
   };
+  const storage = new Map();
+  context.DispatchUI = require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js");
+  context.sessionStorage = {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), context);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function itemText(")), context);

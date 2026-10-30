@@ -246,10 +246,15 @@ def serve(arguments):
     from agent_coord.store import CoordinationStore
     from agent_coord.codex_app_server import BrowserSessions
     from agent_coord import ui
+    from agent_coord import desktop_runtime
     SyntheticProvider.history_kb = arguments.history_kb
     SyntheticProvider.stored_history = arguments.stored_history
     SyntheticProvider.delta_rate = arguments.delta_rate
     store = CoordinationStore(Path(arguments.db))
+    # Match the production runtime's ownership context. This database is an
+    # isolated clone; external pressure below deliberately uses raw SQLite.
+    owner = desktop_runtime.lock_file(desktop_runtime.runtime_directory(store.database_path) / "owner.lock")
+    desktop_runtime._OWNED_DATABASES.add(str(store.database_path.resolve()))
     workspace = arguments.cwd or None
     sessions = BrowserSessions(store, workspace, rpc_factory=SyntheticProvider, claude_factory=SyntheticProvider,
                                antigravity_factory=SyntheticProvider, kimi_factory=SyntheticProvider,
@@ -276,6 +281,8 @@ def serve(arguments):
         if sampler:
             sampler.write()
         server.server_close()
+        desktop_runtime._OWNED_DATABASES.discard(str(store.database_path.resolve()))
+        os.close(owner)
 
 
 # --------------------------------------------------------------------------

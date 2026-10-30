@@ -91,6 +91,7 @@ class ToolHistoryTests(unittest.TestCase):
         self.update(thread, sessionUpdate='tool_call', toolCallId='pending', status='in_progress')
         self.update(thread, sessionUpdate='tool_call_update', toolCallId='confirmed', status='completed', rawOutput='contents')
         # Snapshot the on-disk history as it would be left by a process crash.
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
         with self.store._connection() as db:
             saved = db.execute('SELECT history_json FROM browser_history WHERE thread_id = ?', (thread,)).fetchone()[0]
         self.sessions.close()
@@ -127,6 +128,7 @@ class DeliveryToolHistoryTests(unittest.TestCase):
         self.deliver(thread)
         self.assertEqual(self.tools(thread)['confirmed']['status'], 'completed')
         self.assertEqual(self.tools(thread)['pending']['status'], 'unknown')
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
         with self.store._connection() as db:
             saved = json.loads(db.execute('SELECT history_json FROM browser_history WHERE thread_id = ?', (thread,)).fetchone()[0])
         pending = next(i for i in saved['turns'][0]['items'] if i['id'] == 'pending')

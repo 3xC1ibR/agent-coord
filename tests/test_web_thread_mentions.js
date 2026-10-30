@@ -64,6 +64,8 @@ test('normal send and queue include selected references and failed submission re
     mentions:{snapshot:()=>d.snapshot(),sent:()=>{d.refs=[];}},drafts:new Map(),commandFeedback:new Map()};
   const ctx=vm.createContext({state,$:()=>input,sessionPath:id=>'sessions/'+id,isSessionDraft:()=>false,
     renderStatus(){},refreshDetail:async()=>{},refreshList:async()=>{},api:async(path,body)=>{calls.push({path,body});return{};}});
+  ctx.DispatchUI=require('../plugins/agent-coord/scripts/agent_coord/web/dispatch.js');
+  const storage=new Map();ctx.sessionStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
   vm.runInContext(source.slice(source.indexOf('async function sendMessage('),source.indexOf('$("composer").onsubmit')),ctx);
   const refs=d.snapshot();await ctx.sendMessage(mode);assert.deepEqual(calls[0].body.mentions,refs);
   assert.equal(calls[0].path,mode==='queue'?'sessions/receiver/queue':'sessions/receiver/messages');
@@ -123,6 +125,8 @@ test('first message in a new conversation carries resolved mentions and clears t
   select:async id=>{state.selected=id;h.switch(id);h.input.value=state.drafts.get(id)||'';},refreshList:async()=>{},showError(){}});
  vm.runInContext(source.slice(source.indexOf('function conversationEntry('),source.indexOf('function retainConversation(')),ctx);
  vm.runInContext(source.slice(source.indexOf('async function sendSessionDraft('),source.indexOf('$("new-session").onclick',source.indexOf('async function sendSessionDraft('))),ctx);
+ ctx.DispatchUI=require('../plugins/agent-coord/scripts/agent_coord/web/dispatch.js');
+ const storage=new Map();ctx.sessionStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
  await ctx.sendSessionDraft(d.text,[],d.refs);
  assert.deepEqual(calls[1].body.mentions,d.refs);assert.equal(calls[1].path,'sessions/created/messages');
  assert.equal(h.mentions.snapshot('created','').length,0);assert.equal(state.newSessionDraft,null);

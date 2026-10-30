@@ -116,8 +116,10 @@ def _details(value):
 
 
 class ActivityStore:
-    def __init__(self, store):
+    def __init__(self, store, *, initialize=True):
         self.store = store
+        if not initialize:
+            return
         now = _timestamp(store.clock(), "Clock")
         with store._connection() as db:
             db.executescript("""

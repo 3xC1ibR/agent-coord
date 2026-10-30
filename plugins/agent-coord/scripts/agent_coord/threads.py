@@ -55,8 +55,17 @@ def project_root(cwd: str) -> str:
 
 
 class ThreadStore:
-    def __init__(self, store):
+    def __init__(self, store, *, initialize=True):
         self.store = store
+        if initialize:
+            self._initialize_schema()
+        self.organization = OrganizationStore(store, initialize=initialize)
+        self.attention = AttentionStore(store, initialize=initialize)
+        from .activity import ActivityStore
+        self.activity = ActivityStore(store, initialize=initialize)
+
+    def _initialize_schema(self):
+        store = self.store
         with store._connection() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS work_projects (
@@ -183,11 +192,6 @@ class ThreadStore:
                     if row["title"] not in {"New thread", "New session"} and (row["title"] != excerpt or row["title"] == row["name"]):
                         db.execute("UPDATE work_threads SET title_source = 'user' WHERE thread_id = ?", (row["thread_id"],))
 
-        self.organization = OrganizationStore(store)
-        self.attention = AttentionStore(store)
-        from .activity import ActivityStore
-        self.activity = ActivityStore(store)
-
     @staticmethod
     def record_scope(db, thread_id, scopes, cwd):
         cluster = derive_scope_cluster(scopes, cwd)
@@ -223,7 +227,7 @@ class ThreadStore:
         session = self.store.get_session(session_id)
         launch_directory = str(Path(project_cwd or session["cwd"]).expanduser().resolve())
         with self.store._connection() as db:
-            existing = db.execute("SELECT project_id FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
+            existing = db.execute("SELECT project_id, project_cwd FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
             if not existing:
                 root = project_root(session["cwd"])
                 project_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:" + root))
@@ -235,14 +239,26 @@ class ThreadStore:
                 db.execute("INSERT OR IGNORE INTO work_threads (thread_id, project_id, title, title_source, created_at, updated_at, project_cwd) VALUES (?, ?, ?, ?, ?, ?, ?)",
                            (session_id, project_id, title, source, now, now, launch_directory))
             # Older installed clients can still create rows after migration.
-            db.execute("UPDATE work_threads SET project_cwd = ? WHERE thread_id = ? AND project_cwd IS NULL",
-                       (launch_directory, session_id))
+            if existing is not None and existing["project_cwd"] is None:
+                db.execute("UPDATE work_threads SET project_cwd = ? WHERE thread_id = ? AND project_cwd IS NULL",
+                           (launch_directory, session_id))
             self.organization.ensure_thread(db, session_id, session["cwd"])
             if session["bead_id"]:
-                self._save_link(db, session_id, ("bead", session["bead_id"], session["bead_id"], existing["project_id"] if existing else project_id))
+                link_project = existing["project_id"] if existing else project_id
+                link = db.execute("""SELECT label FROM thread_links WHERE thread_id = ?
+                                     AND kind = 'bead' AND target = ? AND project_id = ?""",
+                                  (session_id, session["bead_id"], link_project)).fetchone()
+                if link is None or link["label"] != session["bead_id"]:
+                    self._save_link(db, session_id, ("bead", session["bead_id"], session["bead_id"], link_project))
         return self.get(session_id)
 
     def _read(self, db, row, *, history=False, inventory=None):
+        row = dict(row)
+        if (row["attention"] == "later" and row["snoozed_until"] is not None
+                and row["snoozed_until"] <= self.store.clock()):
+            # A due reminder is visible immediately, even if the lifecycle
+            # worker has not yet committed its durable notification receipt.
+            row["attention"] = "now"
         result = dict(row)
         from .execution_state import read_many
         result["execution"] = (inventory.executions[row["thread_id"]] if inventory is not None else
@@ -313,7 +329,6 @@ class ThreadStore:
 
     def get(self, thread_id: str, *, history=False) -> dict:
         with self.store._connection() as db:
-            self._wake_snoozes(db)
             row = db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone()
             if row is None:
                 raise CoordinationError("Work thread not found.")
@@ -519,6 +534,12 @@ class ThreadStore:
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
+            if (occurred_at is not None and row["turn_id"] and row["turn_id"] != turn_id
+                    and row["turn_started_at"] is not None and row["turn_started_at"] > occurred_at):
+                # Deferred provider bookkeeping can arrive after a newer turn
+                # was registered by a hook. Check inside the write transaction
+                # so the old event cannot overwrite that newer lifecycle.
+                return
             if notification_context and turn_id:
                 notification_policy.record_context(db, session_id, turn_id, notification_context)
             # App-server notifications and lifecycle hooks may describe the same turn.

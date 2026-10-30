@@ -115,25 +115,63 @@ def schema_fingerprint():
     return digest.hexdigest()
 
 
-@contextmanager
-def schema_access(database):
-    """Serialize constructors and reject new CLI/hook schema under an old owner."""
-    directory = runtime_directory(database)
-    descriptor = lock_file(directory / "schema.lock", blocking=True)
+def schema_initialized(database, fingerprint, *, check_cookie=True):
+    """The database, not a sidecar file, records completed initialization."""
+    path = Path(database).resolve()
+    if not path.exists():
+        return False
     try:
-        record = directory / "schema.json"
-        fingerprint = schema_fingerprint()
+        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=.1)
+        try:
+            row = connection.execute("SELECT fingerprint, schema_cookie FROM coordination_schema WHERE id=1").fetchone()
+            cookie = connection.execute("PRAGMA schema_version").fetchone()[0]
+            return bool(row and row[0] == fingerprint and (not check_cookie or row[1] == cookie))
+        finally:
+            connection.close()
+    except sqlite3.OperationalError:
+        return False
+
+
+@contextmanager
+def schema_access(database, *, read_only=False):
+    """Run migrations once; current-schema readers never take the schema lock."""
+    directory = runtime_directory(database)
+    record = directory / "schema.json"
+    fingerprint = schema_fingerprint()
+    from .runtime_requests import owner_operation, owns_database
+
+    def verify():
         previous = read_json(record) if record.exists() else None
-        owner = str(Path(database).resolve()) in _OWNED_DATABASES
+        owner = owns_database(database)
         if previous and previous["fingerprint"] != fingerprint and not owner_available(directory) and not owner:
             raise RuntimeError("A different Ribbon Field runtime owns this database. Wait for its idle upgrade before using the new CLI or hooks.")
         if previous and previous["schema"] > SCHEMA_VERSION:
             raise RuntimeError("This database requires a newer Ribbon Field runtime; downgrade is unsafe.")
-        yield
-        if previous is None or previous["fingerprint"] != fingerprint:
-            atomic_json(record, {"schema": SCHEMA_VERSION, "fingerprint": fingerprint})
-    finally:
-        os.close(descriptor)
+        return previous
+
+    previous = verify()
+    # The runtime creates optional feature tables after the core migration.
+    # Its matching clients trust that completed migration, without competing
+    # for schema ownership when those additional tables change the cookie.
+    live_owner = (str(Path(database).resolve()) in _OWNED_DATABASES
+                  or not owns_database(database) and not owner_available(directory))
+    if previous and previous["fingerprint"] == fingerprint and schema_initialized(database, fingerprint, check_cookie=not (live_owner or read_only)):
+        yield False
+        return
+    if read_only:
+        raise RuntimeError("Database initialization is required. Start the matching Ribbon Field runtime before querying it.")
+    with owner_operation(database) as owner:
+        if not owner:
+            raise RuntimeError("Database initialization is owned by the running Ribbon Field runtime.")
+        descriptor = lock_file(directory / "schema.lock", blocking=True)
+        try:
+            previous = verify()
+            initialize = not schema_initialized(database, fingerprint)
+            yield initialize
+            if previous is None or previous["fingerprint"] != fingerprint:
+                atomic_json(record, {"schema": SCHEMA_VERSION, "fingerprint": fingerprint})
+        finally:
+            os.close(descriptor)
 
 
 class AdmissionGate:
@@ -338,7 +376,8 @@ def discover(database, *, timeout=25):
         raise RuntimeError("The running runtime is incompatible with this desktop.")
     # A stale discovery payload is never authority to load client code. Use
     # the payload authenticated by this instance, without another status scan.
-    return {**record, "payload": status.get("payload")}
+    return {**record, "payload": status.get("payload"),
+            "client_requests": status.get("client_requests")}
 
 
 def bootstrap(database, resources, *, start_paused=False):
@@ -400,7 +439,7 @@ class Runtime:
         """Immutable owner identity; independent of readiness and session locks."""
         return {"database": self.database, "instance": self.instance,
                 "protocol": PROTOCOL_VERSION, "schema": SCHEMA_VERSION, "pid": os.getpid(),
-                "payload": str(self.payload)}
+                "payload": str(self.payload), "client_requests": 1}
 
     def status(self):
         return {**self.identity(), "status": "serving",
@@ -415,6 +454,18 @@ class Runtime:
             # The control handler has already authenticated token + instance.
             # Readiness is required for handover, not for routing a hook/CLI.
             return self.identity()
+        if action == "client-request":
+            from .runtime_requests import execute_request
+            from .runtime_metadata import install_operations
+            install_operations()
+            sessions = self.server.browser_sessions
+            # Complete operations execute inside the owner. Never hold the
+            # runtime mutex while waiting on application state or providers.
+            with sessions.admission.enter() as allowed:
+                if not allowed:
+                    return {**self.identity(), "failure": {
+                        "type": "CoordinationError", "message": "Runtime maintenance is pausing new coordination requests."}}
+                return {**self.identity(), **execute_request(sessions.store, body)}
         with self.mutex:
             sessions = self.server.browser_sessions
             if action == "attach":
@@ -490,7 +541,7 @@ class Runtime:
                     return
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
-                    if not 0 < length < 65536:
+                    if not 0 < length <= 8 * 1024 * 1024:
                         raise ValueError("Invalid control request size.")
                     body = json.loads(self.rfile.read(length))
                     if body.get("instance") != runtime.instance:

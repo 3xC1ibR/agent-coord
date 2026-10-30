@@ -138,12 +138,14 @@ class TurnNotificationTests(unittest.TestCase):
         turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
         self.hook("UserPromptSubmit", thread_id, prompt="Do the work.")
         self.hook("Stop", thread_id)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         self.assertEqual(self.store.threads.completion_cursor(), 0)
         self.assertEqual(self.store.threads.get(thread_id)["turn_id"], turn["id"])
         event = {"method": "turn/completed", "params": {"threadId": thread_id, "turn": {**turn, "status": "completed"}}}
         self.sessions._event(event)
         self.sessions._event(event)
         self.hook("Stop", thread_id)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         events = self.sessions.completions_after(0)["events"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["title"], "Browser turn")
@@ -154,6 +156,7 @@ class TurnNotificationTests(unittest.TestCase):
             self.sessions.send(thread_id, {"message": "Start."})
             turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
             self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {**turn, "status": status}}})
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         events = self.sessions.completions_after(0)["events"]
         self.assertEqual([event["status"] for event in events], ["failed", "interrupted"])
         self.assertFalse(self.sessions.claim_notification(events[1]["id"]))

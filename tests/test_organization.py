@@ -213,13 +213,17 @@ class OrganizationTests(unittest.TestCase):
             self.store.threads.snooze_notifications()
             self.store.threads.completions_after(0)
 
-    def test_late_legacy_record_is_repaired_without_touching_other_records(self):
+    def test_late_legacy_record_is_projected_without_writing(self):
         with self.store._connection() as db:
             db.execute("DELETE FROM thread_organization")
         with patch.object(self.store.threads.organization, "backfill", side_effect=AssertionError("global repair")):
             thread = self.store.threads.get("code")
         self.assertEqual(thread["repository_root"], str(self.repo))
         self.assertIsNone(thread["project_id"])
+        with self.store._connection() as db:
+            self.assertEqual([row[0] for row in db.execute("SELECT thread_id FROM thread_organization")], [])
+        # Explicit registration maintenance still repairs the missing record.
+        self.store.threads.ensure("code")
         with self.store._connection() as db:
             self.assertEqual([row[0] for row in db.execute("SELECT thread_id FROM thread_organization")], ["code"])
 

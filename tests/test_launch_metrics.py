@@ -112,8 +112,7 @@ class LaunchMetricsTests(unittest.TestCase):
         for path, config in (("/Applications/Ribbon Field.app/Contents/Resources", {"database": "/dev/db"}),
                              ("/Volumes/Ribbon Field/Ribbon Field.app/Contents/Resources", {}),
                              ("/tmp/Ribbon Field.app/Contents/Resources", {})):
-            with self.subTest(path=path), patch.object(Path, "resolve", return_value=Path(path)), \
-                    patch.object(Path, "read_text", return_value=json.dumps(config)), \
+            with self.subTest(path=path), patch.object(Path, "read_text", return_value=json.dumps(config)), \
                     patch.object(metrics.threading, "Thread") as worker:
                 metrics.start(self.store, threading.Event(), path)
                 worker.assert_not_called()

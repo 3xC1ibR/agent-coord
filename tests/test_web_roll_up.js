@@ -180,6 +180,9 @@ function appFixture() {
     renderStatus() {}, renderList() {}, renderThread() {}, refreshDetail: async () => {}, refreshList: async () => {},
     sessionPath: id => "sessions/" + id, threadPath: id => "threads/" + id,
     api: async () => ({}), node: () => ({}), action: fn => fn()};
+  const storage = new Map();
+  c.DispatchUI = require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js");
+  c.sessionStorage = {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
   for (const [start, end] of [["async function sendMessage(", '$("composer").onsubmit'],

@@ -35,14 +35,17 @@ class TurnWatchdogTests(unittest.TestCase):
         self.worker.process_once()
         child = self.worker.control.status(request["request_id"])["thread_id"]
         self.sessions.inbox_wake._dispatch(child)
+        self.assertTrue(self.sessions.persistence.flush(key=child))
         return child
 
     def turn(self, child):
         return self.sessions.rpc.threads[child]["turns"][-1]
 
     def tick(self, now):
+        self.assertTrue(self.sessions.persistence.flush())
         self.now = now
         self.watchdog.process_once()
+        self.assertTrue(self.sessions.persistence.flush())
 
     def reports(self):
         return self.store.inbox(self.parent, mark_delivered=False)
@@ -71,6 +74,7 @@ class TurnWatchdogTests(unittest.TestCase):
         self.turn(child)["status"] = "interrupted"
         self.sessions.active.pop(child)
         self.sessions.read(child)
+        self.assertTrue(self.sessions.persistence.flush(key=child))
         self.assertFalse(self.store.get_session(child)["turn_active"])
         self.assertEqual(self.store.threads.get(child)["turn_completion"]["status"], "interrupted")
 
@@ -190,6 +194,7 @@ class TurnWatchdogTests(unittest.TestCase):
             handle({**payload, "hook_event_name": "Stop"}, self.store)
             self.assertTrue(self.store.get_session(child)["turn_active"])
             self.sessions.interrupt(child)
+            self.assertTrue(self.sessions.persistence.flush(key=child))
             for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
                 handle({**payload, "hook_event_name": event, "prompt": "Old prompt"}, self.store)
                 self.assertFalse(self.store.get_session(child)["turn_active"], event)
@@ -237,6 +242,7 @@ class TurnWatchdogTests(unittest.TestCase):
         old = copy.deepcopy(self.turn(child))
         self.sessions.interrupt(child)
         self.sessions.send(child, {"message": "New turn"})
+        self.assertTrue(self.sessions.persistence.flush(key=child))
         new_id = self.turn(child)["id"]
         old["status"] = "completed"
         self.sessions._event({"method": "turn/completed", "params": {"threadId": child, "turn": old}})

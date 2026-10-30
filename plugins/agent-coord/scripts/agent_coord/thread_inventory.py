@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 
 from .attention import AttentionStore, MODEL, POLICY_VERSION
-from .organization import OrganizationStore
+from .organization import OrganizationStore, app_agent_creators
 from .notification_policy import available_owners
 
 
@@ -22,7 +22,6 @@ def has_table(db, name):
 class ThreadInventory:
     def __init__(self, threads, db, *, archived=False):
         self.threads = threads
-        threads._wake_snoozes(db)
         self.selected = "SELECT thread_id FROM work_threads WHERE (attention = 'archived') = ?"
         self.params = (int(archived),)
         # Status and placement can change between queries. Keep every batch on
@@ -34,18 +33,14 @@ class ThreadInventory:
         from .execution_state import read_many
         self.executions = read_many(threads.store, db, [row["thread_id"] for row in self.rows])
         if any(row["thread_id"] not in self.associations for row in self.rows):
-            # A legacy writer created incomplete records after initialization.
-            # Release the read snapshot before taking the writer lock, then
-            # reload so concurrent placement changes cannot leave mixed data.
-            if not writing:
-                db.rollback()
-                db.execute("BEGIN IMMEDIATE")
-                self.rows, self.associations = self._base(db)
+            # Keep even incomplete legacy rows on the same read snapshot.
+            # Registration/maintenance owns durable association repair.
+            creators = app_agent_creators(db)
             for row in self.rows:
                 thread_id = row["thread_id"]
                 if thread_id not in self.associations:
-                    OrganizationStore.ensure_thread(db, thread_id, row["cwd"])
-                    self.associations[thread_id] = dict(OrganizationStore.association(db, thread_id))
+                    self.associations[thread_id] = OrganizationStore.projected_association(
+                        db, thread_id, row["cwd"], creators=creators)
         self.latest = {row["thread_id"]: dict(row) for row in db.execute("""
             SELECT c.* FROM thread_checkpoints c WHERE c.id IN (
                 SELECT MAX(id) FROM thread_checkpoints WHERE thread_id IN (
@@ -151,7 +146,9 @@ class ThreadInventory:
 
 
 _LISTED = """SELECT json_group_array(json_array(t.thread_id, s.cwd,
-        COALESCE(NULLIF(t.project_cwd, ''), s.cwd), t.attention, o.thread_id IS NOT NULL,
+        COALESCE(NULLIF(t.project_cwd, ''), s.cwd),
+        CASE WHEN t.attention = 'later' AND t.snoozed_until <= ? THEN 'now' ELSE t.attention END,
+        o.thread_id IS NOT NULL,
         o.repository_id, o.project_id, t.thread_id IN (SELECT d.child_session_id FROM delegations d
             JOIN work_threads parent ON parent.thread_id = d.parent_session_id
             WHERE d.child_session_id IS NOT NULL)))
@@ -166,18 +163,16 @@ def listed_threads(threads, db, workspace=None):
     This is the ThreadInventory and BrowserSessions.list_work_threads boundary
     in one query: both placements, minus delegated workers of listed parents,
     within the UI workspace. Placement reflects due snoozes, and incomplete
-    legacy records are repaired the same way.
+    legacy records receive the same read-only organization projection.
     """
     from .workspaces import matches_workspace
-    threads._wake_snoozes(db)
-    rows = json.loads(db.execute(_LISTED).fetchone()[0])
+    rows = json.loads(db.execute(_LISTED, (threads.store.clock(),)).fetchone()[0])
     if not all(row[4] for row in rows):
-        if not db.in_transaction:
-            db.execute("BEGIN IMMEDIATE")
+        creators = app_agent_creators(db)
         for row in rows:
             if not row[4]:
-                OrganizationStore.ensure_thread(db, row[0], row[1])
-        rows = json.loads(db.execute(_LISTED).fetchone()[0])
+                association = OrganizationStore.projected_association(db, row[0], row[1], creators=creators)
+                row[5], row[6] = association["repository_id"], association["project_id"]
     matches = {}
     listed = []
     for thread_id, cwd, project_cwd, attention, _, repository_id, project_id, delegated in rows:

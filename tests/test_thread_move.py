@@ -48,6 +48,7 @@ class ThreadMoveTests(unittest.TestCase):
         turn = self.sessions.rpc.threads[thread]['turns'][-1]
         turn['status'] = 'completed'
         self.sessions._event({'method': 'turn/completed', 'params': {'threadId': thread, 'turn': copy.deepcopy(turn)}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
 
     def request(self, thread, **kwargs):
         return self.control.request('move', 'requester', {'cwd': str(self.a)}, thread_id=thread, **kwargs)

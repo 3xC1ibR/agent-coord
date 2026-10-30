@@ -34,7 +34,7 @@ from .thread_usage import codex_totals
 from .app_agent_failures import notify_agent_failure
 from .browser_wake import BrowserInboxWake
 from .message_timeline import message_timeline
-from .timeline_clock import preserve_timing, restore_timing, set_time
+from .timeline_clock import preserve_timing, restore_timing, set_time, seconds
 from .schedules import ScheduledPrompts
 from .claude_code import ClaudeRPC
 from .antigravity import AntigravityRPC
@@ -227,7 +227,9 @@ class BrowserSessions:
         self.dirty_histories: set[str] = set()
         self.history_revisions: dict[str, int] = {}
         self.usage_recovery_attempts: set[str] = set()
-        self.persistence = BrowserPersistence()
+        self.persistence = BrowserPersistence(context=lambda: self.store.connection_timeout(0))
+        self.conversation_barrier = lambda identity: self.persistence.flush(key=identity)
+        self.store.conversation_barrier = self.conversation_barrier
         self.history_lock = threading.Lock()
         self.desktop_project_windows: dict[str, dict] = {}
         self.desktop_project_revision = 0
@@ -265,6 +267,8 @@ class BrowserSessions:
                 thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL
             )""")
         self.navigation = NavigationStore(store)
+        from .submission_receipts import SubmissionReceipts
+        self.submissions = SubmissionReceipts(store)
         self.queue = BrowserMessageQueue(self)
         self.rpc = rpc_factory(store, self._event)
         self.claude = claude_factory(store, self._event)
@@ -577,7 +581,7 @@ class BrowserSessions:
                     and self.starting_notification_context.get(thread_id, {}).get("origin") == "user"
                     and params.get("turnId")):
                 accepted_turn = params["turnId"]
-                self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, accepted_turn))
+                self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, accepted_turn), key=thread_id)
             if "id" in message:
                 key = str(uuid.uuid4())
                 self.requests[key] = {**message, "key": key, "received_at": self.store.clock()}
@@ -626,18 +630,90 @@ class BrowserSessions:
                                            turn_id=disconnected_turns.get(identity))
             self._publish(method, public)
             if not review_stage and (method == "turn/completed" or (method == "item/completed" and params.get("item", {}).get("type") == "agentMessage")):
-                public_params = copy.deepcopy(params)
-                def record_public_output():
-                    from .session_control import SessionControl
-                    SessionControl(self.store).observe(method, public_params)
-                self.persistence.submit(record_public_output)
+                self._queue_public_output(method, params)
             if method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected", "thread/tokenUsage/updated"}:
-                saved_params = copy.deepcopy(params)
+                saved_params = self._persistence_event_params(method, params)
                 saved_params["usage_observed_at"] = self.store.clock()
                 saved_params["turn_observed_at"] = saved_params["usage_observed_at"]
                 if method == "turn/started":
                     saved_params["notification_context"] = self.starting_notification_context.get(thread_id)
-                self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected, disconnected_turns))
+                if method == "bridge/disconnected":
+                    # Provider-wide notifications still have conversation-local barriers.
+                    for identity in disconnected:
+                        self.persistence.submit(lambda identity=identity: self._persist_event(
+                            method, saved_params, {identity}, disconnected_turns), key=identity)
+                else:
+                    self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected, disconnected_turns),
+                                            key=thread_id, coalesce="usage" if method == "thread/tokenUsage/updated" else None,
+                                            required=method != "thread/tokenUsage/updated")
+
+    def _queue_public_output(self, method, params):
+        """Queue bounded public records, never copies of tool transcripts."""
+        thread_id = params.get("threadId")
+        turn = params.get("turn") or {}
+        turn_id = params.get("turnId") or turn.get("id")
+        if not thread_id or not turn_id:
+            return
+        items = [params.get("item") or {}] if method == "item/completed" else turn.get("items", [])
+        for item in items:
+            if (item.get("type") != "agentMessage" or not item.get("id")
+                    or not isinstance(item.get("text"), str)
+                    or item.get("phase") not in {None, "commentary", "final_answer"}):
+                continue
+            # SessionControl stores at most 64k characters for a public message.
+            selected = {"id": item["id"], "type": "agentMessage", "text": item["text"][:64000],
+                        "phase": item.get("phase")}
+            public_params = {"threadId": thread_id, "turnId": turn_id, "item": selected}
+            self.persistence.submit(lambda public_params=public_params: self._persist_public_output("item/completed", public_params),
+                                    key=thread_id, coalesce=("public-message", turn_id, item["id"]))
+        if method == "turn/completed":
+            public_params = {"threadId": thread_id, "turn": {"id": turn_id, "status": turn.get("status")}}
+            self.persistence.submit(lambda: self._persist_public_output("turn/completed", public_params), key=thread_id)
+
+    def _persist_public_output(self, method, params):
+        from .session_control import SessionControl
+        SessionControl(self.store).observe(method, params)
+
+    @staticmethod
+    def _persistence_event_params(method, params):
+        """Retain only the bounded metadata each lifecycle callback consumes."""
+        saved = {"threadId": params.get("threadId")}
+        if method == "thread/tokenUsage/updated":
+            usage = params.get("tokenUsage") or {}
+            usage = usage if isinstance(usage, dict) else {}
+            names = {"inputTokens", "outputTokens", "totalTokens", "cachedInputTokens", "cacheWriteInputTokens", "reasoningOutputTokens",
+                     "input_tokens", "output_tokens", "total_tokens", "cached_input_tokens", "cache_write_input_tokens", "reasoning_output_tokens"}
+            saved["tokenUsage"] = {}
+            for key in ("total", "last"):
+                counters = usage.get(key)
+                saved["tokenUsage"][key] = {name: value for name, value in counters.items()
+                                           if name in names and isinstance(value, (int, float))} if isinstance(counters, dict) else {}
+            limit = usage.get("modelContextWindow")
+            saved["tokenUsage"]["modelContextWindow"] = limit if isinstance(limit, (int, float)) else None
+        elif method in {"turn/started", "turn/completed"}:
+            turn = params.get("turn") or {}
+            selected = {key: turn[key] for key in ("id", "status") if key in turn}
+            if turn.get("error") is not None:
+                error = turn["error"]
+                if isinstance(error, dict):
+                    error = error.get("message") or "The provider reported an error without a message."
+                selected["error"] = str(error)[:8000]
+            if isinstance(turn.get("termination"), dict):
+                selected["termination"] = {"origin": turn["termination"].get("origin")}
+            saved.update(turn=selected, controlledShutdown=bool(params.get("controlledShutdown")))
+            if method == "turn/started":
+                item = next((item for item in turn.get("items", []) if item.get("type") == "userMessage"), None)
+                pieces, remaining = [], 100000
+                for content in item.get("content", []) if item is not None else []:
+                    text = content.get("text", "")
+                    text = text[:remaining] if isinstance(text, str) else ""
+                    piece = (("\n" if pieces else "") + text)[:remaining]
+                    pieces.append(piece)
+                    remaining -= len(piece)
+                    if not remaining:
+                        break
+                saved["prompt"] = "".join(pieces) if item is not None else None
+        return saved
 
     def _persist_event(self, method, params, disconnected, disconnected_turns=None):
         """Idempotent bookkeeping only: never replay a streamed event or prompt."""
@@ -662,15 +738,24 @@ class BrowserSessions:
                 self._publish("thread/usage/updated", {"threadId": thread_id,
                               "usage": self.store.usage.summary(thread_id)})
             return
+        if method in {"turn/started", "turn/completed"} and thread_id:
+            incoming = params.get("turn", {}).get("id")
+            with self.store._connection() as db:
+                current = db.execute("SELECT turn_id, turn_started_at FROM work_threads WHERE thread_id = ?", (thread_id,)).fetchone()
+            if current and incoming != current["turn_id"]:
+                if method == "turn/completed" or (current["turn_started_at"] or 0) > params.get("turn_observed_at", float("inf")):
+                    return  # A hook or newer runtime already advanced this turn.
         if hasattr(self, "schedules"):
             self.schedules.event(method, params)
         if method == "turn/started" and thread_id:
-            self.store.touch(thread_id, turn_active=True)
-            prompt = next(("\n".join(c.get("text", "") for c in item.get("content", []))
-                           for item in params["turn"].get("items", []) if item.get("type") == "userMessage"), None)
+            prompt = params.get("prompt") if "prompt" in params else next((
+                "\n".join(c.get("text", "") for c in item.get("content", []))
+                for item in params["turn"].get("items", []) if item.get("type") == "userMessage"), None)
             self.store.threads.start_turn(thread_id, prompt=prompt, turn_id=params["turn"]["id"],
                                          notification_context=params.get("notification_context"),
                                          occurred_at=params.get("turn_observed_at"))
+            if not self._touch_turn(thread_id, params["turn"]["id"], active=True):
+                return
             with self.store._connection() as db:
                 self.reviews.bind(db, thread_id, params["turn"]["id"])
         if method == "turn/completed" and thread_id:
@@ -685,14 +770,16 @@ class BrowserSessions:
                 status = "interrupted"
             self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=status,
                                            occurred_at=params.get("turn_observed_at"))
+            session = self.store.get_session(thread_id)
+            unfinished = session["write_scope"] or session["scope_required"] or session["activity"] in {"implementing", "validating", "planning", "waiting"}
+            if not self._touch_turn(thread_id, turn.get("id"), active=False,
+                                    activity="waiting" if unfinished else "idle"):
+                return
             if unsuccessful and not deliberate:
                 notify_agent_failure(self.store, thread_id, event_key=["turn", turn.get("id")],
                                      stage="turn", error=turn.get("error") or
                                      "The provider interrupted this turn. Inspect native execution and tool outcomes before recovery.",
                                      turn_id=turn.get("id"))
-            session = self.store.get_session(thread_id)
-            unfinished = session["write_scope"] or session["scope_required"] or session["activity"] in {"implementing", "validating", "planning", "waiting"}
-            self.store.touch(thread_id, "waiting" if unfinished else "idle", turn_active=False)
             if turn.get("status") == "completed":
                 self.queue.wake()
                 self.classifier.wake()
@@ -718,6 +805,17 @@ class BrowserSessions:
                                          stage="disconnect", error=reason, turn_id=turn_id)
             self.store.end_session(identity)
 
+    def _touch_turn(self, thread_id, turn_id, *, active, activity=None):
+        """A retried notification must never clear or revive another turn."""
+        with self.store._connection() as db:
+            return bool(db.execute("""UPDATE sessions SET last_seen_at = ?,
+                ended_at = CASE WHEN ? THEN NULL ELSE ended_at END,
+                activity = COALESCE(?, activity), turn_active = ? WHERE session_id = ?
+                AND EXISTS (SELECT 1 FROM work_threads t WHERE t.thread_id = sessions.session_id
+                    AND t.turn_id IS ? AND (? = 0 OR NOT EXISTS (
+                        SELECT 1 FROM turn_completions c WHERE c.thread_id = t.thread_id AND c.turn_key = t.turn_key)))""",
+                (self.store.clock(), int(active), activity, int(active), thread_id, turn_id, int(active))).rowcount)
+
     def _history(self, thread_id: str) -> dict:
         if thread_id not in self.histories:
             with self.store._connection() as connection:
@@ -734,7 +832,7 @@ class BrowserSessions:
 
     def _save_history(self, thread_id: str) -> None:
         self._dirty_history(thread_id)
-        self.persistence.submit(lambda: self._persist_history(thread_id))
+        self.persistence.submit(lambda: self._persist_history(thread_id), key=thread_id, coalesce="history")
 
     def _persist_history(self, thread_id):
         with self.lock:
@@ -742,8 +840,9 @@ class BrowserSessions:
             # successful retry saves the latest mirror for all of them.
             if thread_id not in self.dirty_histories:
                 return
-            history = json.dumps(self._history(thread_id))
+            snapshot = copy.deepcopy(self._history(thread_id))
             revision = self.history_revisions[thread_id]
+        history = json.dumps(snapshot)
         with self.store._connection() as connection:
             connection.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (thread_id, history))
         with self.lock:
@@ -842,7 +941,8 @@ class BrowserSessions:
             else:
                 label = str(item.get("query") or "")
             item_type = item["type"]
-            self.persistence.submit(lambda: self.store.record_tool(thread_id, item_type, label, kind=kind))
+            self.persistence.submit(lambda: self.store.record_tool(thread_id, item_type, label, kind=kind),
+                                    key=thread_id, coalesce="tool", required=False)
         except Exception:  # noqa: BLE001 -- activity must never break history capture.
             return
 
@@ -879,8 +979,23 @@ class BrowserSessions:
                 raise
 
     def _read_thread(self, thread_id: str) -> dict:
+        provider = self._rpc(thread_id)
+        if provider is not self.rpc:
+            # Normalized provider histories read our SQLite mirror. Flush this
+            # conversation before that read so a completed live turn cannot be
+            # replaced by its older saved in-progress version. Browser snapshot
+            # reads bypass this internal reconciliation path entirely.
+            with self.lock:
+                revision = self.history_revisions.get(thread_id, 0)
+            self._await_persistence(thread_id)
+            thread = self._query_thread(provider, thread_id, include_turns=True)
+            with self.lock:
+                if revision != self.history_revisions.get(thread_id, 0):
+                    return copy.deepcopy(self._history(thread_id))
+                thread["historyUnavailable"] = False
+                return self._remember_thread(thread)
         try:
-            thread = self._query_thread(self._rpc(thread_id), thread_id, include_turns=True)
+            thread = self._query_thread(provider, thread_id, include_turns=True)
         except CoordinationError as exc:
             if "list_turns is not supported" not in str(exc):
                 raise
@@ -1392,6 +1507,7 @@ class BrowserSessions:
         """
         self.reviews.cancel(thread_id, reason="The conversation was closed.")
         with self._thread_lock(thread_id):
+            self._await_persistence(thread_id)
             thread = self.work_thread(thread_id)
             external = False
             if thread["browser_session"]:
@@ -1404,6 +1520,7 @@ class BrowserSessions:
                     with self.changed:
                         if not self.changed.wait_for(lambda: thread_id not in self.active, timeout=stop_timeout):
                             raise BrowserBusyError("The turn is still stopping. Retry Close when it has stopped.")
+                    self._await_persistence(thread_id)
                 if not record["archived"]:
                     # Codex archives the rollout and unloads this thread; the
                     # shared app-server stays available to other conversations.
@@ -1489,6 +1606,14 @@ class BrowserSessions:
     def fork_work_thread(self, thread_id: str) -> dict:
         with self._thread_lock(thread_id):
             source = self.work_thread(thread_id)
+            if source["client"] == "claude":
+                self._await_persistence(thread_id)
+                source = self.work_thread(thread_id)
+            with self.lock:
+                completion_pending = source["status"] == "running" and thread_id not in self.active
+            if completion_pending:
+                self._await_persistence(thread_id)
+                source = self.work_thread(thread_id)
             if source["status"] in {"running", "needs input"}:
                 raise BrowserBusyError("Wait for the running turn and pending input to finish before forking.")
             if not source["can_fork"]:
@@ -1519,13 +1644,13 @@ class BrowserSessions:
                     # after prior bookkeeping drains; a stale immutable baseline
                     # would charge inherited tokens to the child. If the bounded
                     # wait expires, leave it unknown for native-prefix recovery.
-                    if self.persistence.flush(timeout=1):
+                    if self.persistence.flush(timeout=1, key=thread_id):
                         self.store.usage.backfill(thread_id)
                         with self.lock:
                             # Do not wait holding the event lock: a worker may
                             # need it to publish its durable usage notification.
                             # Newly queued work during backfill also fails closed.
-                            if self.persistence.flush(timeout=0):
+                            if self.persistence.flush(timeout=0, key=thread_id):
                                 baseline = self.store.usage.raw_snapshot(thread_id, provider="codex", native_id=thread_id)
                 except Exception:
                     pass
@@ -1652,7 +1777,15 @@ class BrowserSessions:
 
     def _change_settings(self, thread_id: str, body: dict, *, reconciled_session: dict | None = None) -> dict:
         # send() already reconciles provider turn state under this thread's lock.
-        record = reconciled_session if reconciled_session is not None else self.read(thread_id)["session"]
+        self._await_persistence(thread_id)
+        record = reconciled_session if reconciled_session is not None else self._record(thread_id)
+        if reconciled_session is None:
+            with self.lock:
+                active = thread_id in self.active
+            if active:
+                # Recover a missed completion before rejecting a setting change.
+                # An idle selection never requires a complete provider transcript.
+                record = self.read(thread_id)["session"]
         if self.store.threads.get(thread_id)["attention"] == "archived":
             raise CoordinationError("Restore this session before changing its settings.")
         with self.lock:
@@ -1861,10 +1994,17 @@ class BrowserSessions:
             raise CoordinationError(f"{label} must contain 1–{limit} characters.")
         return value.strip()
 
+    def _await_persistence(self, thread_id: str) -> None:
+        if self.persistence.flush(key=thread_id):
+            return
+        if self.persistence.failure(thread_id):
+            raise BrowserBusyError("Conversation state could not be saved. Review the runtime diagnostic before continuing.")
+        raise BrowserBusyError("Conversation state is still being saved. Try again shortly.")
+
     def _resume_thread(self, thread_id: str, record: dict) -> None:
         """Restore provider context and settings without changing UI placement."""
-        if thread_id not in self.loaded and not self.persistence.flush():
-            raise BrowserBusyError("Conversation state is still being saved. Try again shortly.")
+        if thread_id not in self.loaded:
+            self._await_persistence(thread_id)
         if record["archived"]:
             self._rpc(thread_id).request("thread/unarchive", {"threadId": thread_id})
             with self.store._connection() as db:
@@ -1878,8 +2018,10 @@ class BrowserSessions:
                 self.loaded_clients[thread_id] = record["client"]
             self._remember_thread(result["thread"])
 
-    def read(self, thread_id: str, *, recent: bool = False) -> dict:
+    def read(self, thread_id: str, *, recent: bool = False, snapshot: bool = False) -> dict:
         """Read a conversation; ``recent`` returns only the view for opening it."""
+        if recent or snapshot:
+            return self._read_snapshot(thread_id, recent=recent)
         with self._thread_lock(thread_id):
             with self.lock:
                 revision = self.turn_revisions.get(thread_id, 0)
@@ -1909,6 +2051,82 @@ class BrowserSessions:
                     "dispatchSettings": self.dispatch.settings(thread_id),
                     "reviews": self.reviews.list(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
+
+    def _read_snapshot(self, thread_id: str, *, recent: bool = True) -> dict:
+        """Open from saved history and received events, without provider admission.
+
+        Full reads and sends reconcile native execution. Opening a window must
+        remain available while another request resumes a provider or saves a
+        turn, so it does not take that conversation's operation lock or wait
+        for persistence. The mirror may lag a provider event not yet received;
+        the event stream and watchdog retain their existing recovery roles.
+        """
+        record = self._record(thread_id)
+        work_thread = self.work_thread(thread_id)
+        with self.lock:
+            self.last_used[thread_id] = time.monotonic()
+            thread = copy.deepcopy(self.histories.get(thread_id))
+            active_turn = self.active.get(thread_id)
+            running = thread_id in self.active
+            revision = self.turn_revisions.get(thread_id, 0)
+        if thread is None:
+            with self.store._connection() as db:
+                row = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
+            thread = json.loads(row[0]) if row else {"id": thread_id, "turns": [], "historyUnavailable": True}
+        self._schedule_saved_completion(thread_id, thread, work_thread, revision)
+        if not running and work_thread["status"] == "running":
+            # A live lifecycle hook can precede the provider subscription.
+            active_turn, running = work_thread["turn_id"], True
+        if recent:
+            thread = recent_view(thread, live_turn=active_turn)
+        return {"session": record, "thread": self.reviews.public_history(thread_id, thread),
+                "work_thread": work_thread, "requests": self.pending_requests(thread_id),
+                "activeTurn": active_turn, "running": running,
+                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "dispatchRequests": self.dispatch.receipts(thread_id),
+                "dispatchSettings": self.dispatch.settings(thread_id),
+                "reviews": self.reviews.list(thread_id), "queuedMessages": self.queue.list(thread_id)}
+
+    def _schedule_saved_completion(self, thread_id, history, work_thread, revision):
+        """Recover a proven terminal outcome after a crash, outside the read."""
+        if work_thread["turn_completion"] and not work_thread["turn_active"]:
+            return
+        turn = next((turn for turn in reversed(history.get("turns", []))
+                     if turn.get("id") == work_thread["turn_id"]), None)
+        if not turn or turn.get("status") not in {"completed", "failed", "interrupted"}:
+            return  # A missing or in-progress mirror cannot establish an outcome.
+        terminal = {key: copy.deepcopy(turn[key]) for key in ("id", "status", "error", "termination") if key in turn}
+        observed = seconds(turn.get("completedAt"))
+        params = {"threadId": thread_id, "turn": terminal,
+                  "turn_observed_at": observed if observed is not None else self.store.clock()}
+        self.persistence.submit(lambda: self._recover_saved_completion(thread_id, params, revision),
+                                key=thread_id, coalesce=("saved-completion", terminal["id"], revision))
+
+    def _recover_saved_completion(self, thread_id, params, revision):
+        turn_id = params["turn"]["id"]
+        with self.lock:
+            if (self.turn_revisions.get(thread_id, 0) != revision
+                    or thread_id in self.active and self.active[thread_id] != turn_id):
+                return
+        # _persist_event checks the durable identity before reconciliation, and
+        # the session-flag update checks it atomically again. No provider call
+        # or prompt is needed to restore this exact saved terminal outcome.
+        self._persist_event("turn/completed", params, set())
+        with self.store._connection() as db:
+            confirmed = db.execute("""SELECT 1 FROM work_threads t JOIN turn_completions c
+                ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
+                WHERE t.thread_id = ? AND t.turn_id = ?""", (thread_id, turn_id)).fetchone()
+        if not confirmed:
+            return
+        with self.lock:
+            if (self.turn_revisions.get(thread_id, 0) != revision
+                    or thread_id in self.active and self.active[thread_id] != turn_id):
+                return
+            self.active.pop(thread_id, None)
+            status = params["turn"]["status"]
+            self.execution.capture(thread_id, state="idle" if status == "completed" else status,
+                                   source="saved_history", turn_id=turn_id)
+        self._publish("browser/changed", {"threadId": thread_id})
 
     def _reconcile_turn(self, thread_id, thread, revision):
         """Repair a missed completion in both live and durable state.
@@ -1952,7 +2170,7 @@ class BrowserSessions:
         turn_id = result.get("turnId") or (result.get("turn") or {}).get("id")
         # Dispatcher and reviewed requests have their own durable acceptance
         # IDs. Older clients may retry them without browser activity metadata.
-        request_id = body.get("requestId") if result.get("dispatched") or result.get("review") else None
+        request_id = body.get("requestId")
         event_id = ("request:" + str(uuid.uuid5(uuid.NAMESPACE_URL, thread_id + ":" + request_id))
                     if request_id else None)
         record_accepted(self.store, "decision_submitted" if command else "message_submitted", thread_id,
@@ -1969,7 +2187,8 @@ class BrowserSessions:
             return self.reviews.submit(thread_id, body)
         if self.dispatch.settings(thread_id)["enabled"] and not (isinstance(message, str) and message.strip().startswith("/")):
             return self.dispatch.submit(thread_id, body)
-        return self.queue.enqueue(thread_id, body) if queued else self.send(thread_id, body)
+        return self.submissions.run(thread_id, body,
+            lambda: self.queue.enqueue(thread_id, body) if queued else self.send(thread_id, body), queued=queued)
 
     def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False, preserve_text: bool = False) -> dict:
         with self._thread_lock(thread_id):
@@ -1991,8 +2210,7 @@ class BrowserSessions:
               preserve_text: bool, submission: dict) -> dict:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
-        if not self.persistence.flush():
-            raise BrowserBusyError("Conversation state is still being saved. Try again shortly.")
+        self._await_persistence(thread_id)
         message, images = message_images(body)
         if preserve_text or body.get("mentions"):
             message = body["message"]  # Selected ranges refer to the untrimmed composer text.
@@ -2061,7 +2279,7 @@ class BrowserSessions:
                 finally:
                     with self.lock:
                         self.starting_notification_context.pop(thread_id, None)
-                self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, turn_id))
+                self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, turn_id), key=thread_id)
                 self.dispatch.confirm_context(thread_id, dispatch_context)
                 self.store.threads.user_message(thread_id)
                 self.inbox_wake.resume(thread_id)
@@ -2095,7 +2313,7 @@ class BrowserSessions:
                 # Some providers reply before emitting turn/started. Save by
                 # the accepted ID too; the callback path covers fast completion.
                 self.persistence.submit(lambda: self.store.threads.remember_notification_context(
-                    thread_id, result["turn"]["id"], context))
+                    thread_id, result["turn"]["id"], context), key=thread_id)
             except Exception:
                 with self.lock:
                     self.active.pop(thread_id, None)
@@ -2136,6 +2354,7 @@ class BrowserSessions:
 
     def update(self, thread_id: str, body: dict) -> dict:
         with self._thread_lock(thread_id):
+            self._await_persistence(thread_id)
             record = self._record(thread_id)
             if {"model", "effort", "yolo", "service_tier", "permission_mode"}.intersection(body):
                 record = self._change_settings(thread_id, body)
@@ -2248,4 +2467,6 @@ class BrowserSessions:
                 self.history_rpc.close()
                 self.history_rpc = None
         self.persistence.close()
+        if getattr(self.store, "conversation_barrier", None) is self.conversation_barrier:
+            del self.store.conversation_barrier
         self.execution.close()

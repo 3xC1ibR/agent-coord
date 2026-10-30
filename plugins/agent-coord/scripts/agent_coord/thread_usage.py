@@ -96,8 +96,10 @@ def codex_totals(raw):
 
 
 class ThreadUsageStore:
-    def __init__(self, store):
+    def __init__(self, store, *, initialize=True):
         self.store = store
+        if not initialize:
+            return
         with store._connection() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS thread_usage_samples (

@@ -11,7 +11,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .context import bind_caller, caller_session, install_cli
+from .context import (bind_caller, caller_session, install_cli, caller_directory,
+                      caller_environment, read_input)
 from .delegate import delegate_work
 from .managed_pty import read_delegation_output, supervise_managed_pty
 from .navigation import NavigationStore
@@ -171,7 +172,7 @@ def _parser() -> argparse.ArgumentParser:
     register = subcommands.add_parser("register", help="Register or refresh a session.")
     register.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     register.add_argument("--client", required=True, choices=["claude", "codex", "antigravity", "kimi", "muse"])
-    register.add_argument("--cwd", default=os.getcwd())
+    register.add_argument("--cwd", default=caller_directory())
     register.add_argument("--name")
 
     status = subcommands.add_parser("status", help="Show one session.")
@@ -207,6 +208,9 @@ def _parser() -> argparse.ArgumentParser:
             options.add_argument("--no-" + field, dest=field + "_id", action="store_const", const=None, default=argparse.SUPPRESS)
     thread_show = thread_commands.add_parser("show")
     thread_show.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
+    thread_metadata = thread_commands.add_parser("metadata", help="Read metadata for up to 200 threads in one query.")
+    thread_metadata.add_argument("--thread-id", dest="thread_ids", action="append", required=True)
+    thread_metadata.add_argument("--workspace", help="Limit results to this workspace and its linked worktrees.")
     usage = thread_commands.add_parser("usage", help="Read durable thread token consumption without running a model.")
     usage.add_argument("--session-id", help="Target thread; defaults to the current caller.")
     usage.add_argument("--backfill", action="store_true", help="Recover one bounded native transcript without running a model.")
@@ -236,7 +240,7 @@ def _parser() -> argparse.ArgumentParser:
     dispatch_label.add_argument("--note", default="")
     create_agent = thread_commands.add_parser("create", help="Create an independent app agent and route its first request.")
     create_agent.add_argument("--from-session", help="Dispatcher; defaults to the current caller.")
-    create_agent.add_argument("--cwd", default=os.getcwd())
+    create_agent.add_argument("--cwd", default=caller_directory())
     create_agent.add_argument("--name", required=True)
     create_agent.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
     create_agent.add_argument("--mode", choices=["orchestration"],
@@ -282,11 +286,11 @@ def _parser() -> argparse.ArgumentParser:
     permissions.add_argument("--default-permissions", dest="yolo", action="store_const", const=False)
     models = thread_commands.add_parser("models", help="Query the running app for supported provider models and effort levels.")
     models.add_argument("--from-session", help="Requester; defaults to the current caller.")
-    models.add_argument("--cwd", default=os.getcwd())
+    models.add_argument("--cwd", default=caller_directory())
     models.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
     limits = thread_commands.add_parser("provider-limits", help="Read provider quota windows through the running app.")
     limits.add_argument("--from-session", help="Requester; defaults to the current caller.")
-    limits.add_argument("--cwd", default=os.getcwd())
+    limits.add_argument("--cwd", default=caller_directory())
     limits.add_argument("--client", choices=["codex", "claude", "antigravity", "kimi", "muse"], default="codex")
     for control in (create_agent, settings, models, limits, move, resume):
         control.add_argument("--request-id", help="Stable idempotency key; reuse the same key when retrying this request.")
@@ -321,7 +325,7 @@ def _parser() -> argparse.ArgumentParser:
     project_commands.add_parser("list")
     project_create = project_commands.add_parser("create")
     project_create.add_argument("--name", required=True)
-    project_create.add_argument("--cwd", default=str(Path.cwd()), help="Project directory that owns this group (default: current directory).")
+    project_create.add_argument("--cwd", default=caller_directory(), help="Project directory that owns this group (default: current directory).")
     repository = subcommands.add_parser("repository", help="List or register Git repositories without changing a workspace.")
     repository_commands = repository.add_subparsers(dest="repository_command", required=True)
     repository_commands.add_parser("list")
@@ -356,7 +360,7 @@ def _parser() -> argparse.ArgumentParser:
     unregister.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
 
     list_parser = subcommands.add_parser("list", help="List known sessions.")
-    list_parser.add_argument("--cwd", default=os.getcwd())
+    list_parser.add_argument("--cwd", default=caller_directory())
     list_parser.add_argument(
         "--relevant", action="store_true",
         help="Show sessions with work or an active turn, excluding the current caller when known.",
@@ -479,7 +483,7 @@ def _parser() -> argparse.ArgumentParser:
         "delegate", help="Launch scoped work in an Agent Coord-managed terminal worker."
     )
     delegate.add_argument("--from-session", help="Sender; defaults to the current caller session.")
-    delegate.add_argument("--cwd", default=os.getcwd())
+    delegate.add_argument("--cwd", default=caller_directory())
     delegate.add_argument(
         "--bead", help="Optional open, ready, and unclaimed Beads issue."
     )
@@ -660,14 +664,14 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(arguments: argparse.Namespace) -> Any:
+def run(arguments: argparse.Namespace, *, store=None) -> Any:
     bind_command_caller(arguments)
     command = arguments.command
     if command == "install-cli":
         return install_cli(arguments.bin_dir)
     if command == "antigravity":
         from .antigravity_setup import run_setup
-        return run_setup(CoordinationStore(arguments.db), arguments.antigravity_command)
+        return run_setup(store or CoordinationStore(arguments.db), arguments.antigravity_command)
     for field in ("session_id", "from_session"):
         if hasattr(arguments, field) and not getattr(arguments, field):
             # ui open's origin is an optional window hint, not a required caller.
@@ -702,17 +706,17 @@ def run(arguments: argparse.Namespace) -> Any:
                             request_id=arguments.request_id, overrides=overrides, live=arguments.live, instructions=instructions)
         except (OSError, sqlite3.Error, ValueError) as exc:
             raise CoordinationError("Cannot evaluate routing records: " + str(exc)) from exc
-    store = CoordinationStore(arguments.db)
+    store = store or CoordinationStore(arguments.db)
     if command == "activity":
         from .activity import ActivityStore
         from .activity_api import read_activity_history, query_arguments, QUERY_FIELDS
         if arguments.activity_command == "settings":
-            return ActivityStore(store).settings()
+            return store.threads.activity.settings()
         if arguments.activity_command == "history":
             return read_activity_history(store, arguments.thread_id, start=arguments.start, end=arguments.end,
                                          limit=arguments.limit, cursor=arguments.cursor, allowed_cwd=arguments.workspace)
         values = {key: getattr(arguments, key) for key in QUERY_FIELDS if getattr(arguments, key, None) is not None}
-        return ActivityStore(store).query(**query_arguments(values), allowed_cwd=arguments.workspace)
+        return store.threads.activity.query(**query_arguments(values), allowed_cwd=arguments.workspace)
     if command == "sidecar":
         from .sidecars import Sidecars
         watches = Sidecars(store)
@@ -793,7 +797,7 @@ def run(arguments: argparse.Namespace) -> Any:
     if command == "set-activity":
         return store.touch(arguments.session_id, arguments.activity)
     if command == "checkpoint":
-        raw = sys.stdin.read(100001) if arguments.checkpoint_json == "-" else arguments.checkpoint_json
+        raw = read_input(100001) if arguments.checkpoint_json == "-" else arguments.checkpoint_json
         if len(raw) > 100000:
             raise CoordinationError("Checkpoint JSON is too large.")
         try:
@@ -802,6 +806,9 @@ def run(arguments: argparse.Namespace) -> Any:
             raise CoordinationError("Checkpoint must be valid JSON.") from exc
         return store.threads.checkpoint(arguments.session_id, payload)
     if command == "thread":
+        if arguments.thread_command == "metadata":
+            from .observer_queries import metadata
+            return metadata(store, arguments.thread_ids, allowed_cwd=arguments.workspace)
         if arguments.thread_command == "usage":
             if arguments.transcript_path and not arguments.backfill:
                 raise CoordinationError("--transcript-path requires --backfill.")
@@ -835,7 +842,7 @@ def run(arguments: argparse.Namespace) -> Any:
             else:
                 payload = {"cwd": arguments.cwd, "client": arguments.client}
                 if operation == "create":
-                    prompt = sys.stdin.read(100001) if arguments.prompt == "-" else arguments.prompt
+                    prompt = read_input(100001) if arguments.prompt == "-" else arguments.prompt
                     payload.update(name=arguments.name, prompt=prompt, yolo=arguments.yolo,
                                    reply_required=arguments.reply_required, subscribe=arguments.subscribe, interactive=arguments.interactive)
                     payload.update({key: getattr(arguments, key) for key in ("model", "effort", "mode") if getattr(arguments, key) is not None})
@@ -863,9 +870,11 @@ def run(arguments: argparse.Namespace) -> Any:
             return search_threads(store, arguments.query, limit=arguments.limit, cursor=arguments.cursor,
                                   cwd=arguments.cwd, app_only=arguments.app_only, source=arguments.source,
                                   my_messages=arguments.my_messages, **associations)
-        store.threads.ensure(arguments.session_id)
         if arguments.thread_command == "show":
             return store.threads.get(arguments.session_id, history=True)
+        if arguments.thread_command == "close-status":
+            return ThreadControl(store).status(arguments.session_id)
+        store.threads.ensure(arguments.session_id)
         if arguments.thread_command in {"close", "close-status", "cancel-close"}:
             control = ThreadControl(store)
             if arguments.thread_command == "close":
@@ -888,7 +897,7 @@ def run(arguments: argparse.Namespace) -> Any:
         if arguments.action != "watch":
             payload["expected_turn_id"] = arguments.expected_turn_id
         if arguments.action == "submit":
-            payload["message"] = sys.stdin.read(100001) if arguments.message == "-" else arguments.message
+            payload["message"] = read_input(100001) if arguments.message == "-" else arguments.message
         receipt = control.request("session", arguments.from_session, payload, thread_id=arguments.thread, request_id=arguments.request_id)
         return control.status(receipt["request_id"], wait=arguments.wait)
     if command == "project":
@@ -931,7 +940,7 @@ def run(arguments: argparse.Namespace) -> Any:
             sender_session_id=arguments.from_session,
             recipient_session_id=arguments.session,
             recipient_bead_id=arguments.bead,
-            body=sys.stdin.read() if arguments.message == "-" else arguments.message,
+            body=read_input() if arguments.message == "-" else arguments.message,
             classification=arguments.classification,
             thread_id=arguments.thread_id,
             reply_required=arguments.reply_required,
@@ -942,7 +951,7 @@ def run(arguments: argparse.Namespace) -> Any:
         return store.reply_message(
             sender_session_id=arguments.from_session,
             message_id=arguments.message_id,
-            body=sys.stdin.read() if arguments.message == "-" else arguments.message,
+            body=read_input() if arguments.message == "-" else arguments.message,
         )
     if command == "handoff":
         sender = store.get_session(arguments.from_session)
@@ -1012,6 +1021,7 @@ def run(arguments: argparse.Namespace) -> Any:
             lease_mode=arguments.lease_mode,
             runtime=arguments.runtime,
             dry_run=arguments.dry_run,
+            environ={**os.environ, **caller_environment()},
         )
     if command == "delegation":
         if arguments.delegation_command == "status":
@@ -1114,7 +1124,7 @@ def run_ask(store, arguments):
         raise CoordinationError("--wait applies to blocking asks; a non-blocking ask continues on its stated default.")
     if arguments.wait is not None and (not math.isfinite(arguments.wait) or arguments.wait < 0):
         raise CoordinationError("--wait must be a finite, non-negative number of seconds.")
-    question = sys.stdin.read() if arguments.question == "-" else arguments.question
+    question = read_input() if arguments.question == "-" else arguments.question
     ask = store.asks.create(session_id, question, options=arguments.options, blocking=arguments.blocking,
                             context=arguments.context, supersedes=arguments.supersedes)
     if arguments.wait is None:
@@ -1163,9 +1173,13 @@ def bind_command_caller(arguments):
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
-    arguments = parser.parse_args(argv)
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
+    arguments = parser.parse_args(actual_argv)
     try:
-        result = run(arguments)
+        from .runtime_requests import forward_cli
+        forwarded, result = forward_cli(arguments, actual_argv)
+        if not forwarded:
+            result = run(arguments)
     except ConflictError as exc:
         print(
             json.dumps({"error": str(exc), "conflicts": exc.conflicts}), file=sys.stderr

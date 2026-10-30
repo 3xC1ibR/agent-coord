@@ -205,6 +205,7 @@ class EvaluationTests(unittest.TestCase):
         with self.store._connection() as db:
             db.execute("UPDATE messages SET sender_turn_id=? WHERE sender_session_id=?", (turn, self.dispatcher))
         self.finish(self.dispatcher)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=self.dispatcher))
         result = evaluate(self.store.database_path, self.dispatcher)
         self.assertEqual(result["summary"]["llm_agreements"], 1)
         self.assertEqual(result["summary"]["labels"]["user"]["count"], 0)

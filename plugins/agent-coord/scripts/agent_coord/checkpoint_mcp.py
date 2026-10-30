@@ -54,7 +54,7 @@ def query_activity(arguments, *, store=None):
         raise CoordinationError("Choose activity query fields.")
     fields = dict(arguments)
     workspace = fields.pop("workspace", None)
-    return ActivityStore(store or CoordinationStore()).query(**query_arguments(fields), allowed_cwd=workspace)
+    return (store or CoordinationStore()).threads.activity.query(**query_arguments(fields), allowed_cwd=workspace)
 
 
 def read_activity_history(arguments, *, store=None):
@@ -277,7 +277,33 @@ def update_checkpoint(arguments, *, store=None):
     return {"status": "ok", "checkpoint_id": result["checkpoint"]["id"]}
 
 
-def dispatch(message):
+def call_tool(name, arguments, *, store=None, remote=False):
+    handlers = {TOOL["name"]: update_checkpoint, MOVE_TOOL["name"]: move_thread,
+                ASK_TOOL["name"]: ask_human, SCHEDULE_TOOL["name"]: schedule_prompt,
+                ACTIVITY_TOOL["name"]: query_activity, ACTIVITY_HISTORY_TOOL["name"]: read_activity_history}
+    handler = handlers.get(name)
+    if handler is None:
+        raise CoordinationError("Unknown tool.")
+    if not isinstance(arguments, dict):
+        raise CoordinationError("Tool arguments must be an object.")
+    if handler in {update_checkpoint, ask_human, schedule_prompt, move_thread}:
+        field = "from_session" if handler is move_thread else "session_id"
+        arguments = {**arguments, field: bind_caller(arguments.get(field), require_context=True)}
+    if remote and store is None:
+        from .runtime_requests import run_local_or_forward
+        read_only = name in {ACTIVITY_TOOL["name"], ACTIVITY_HISTORY_TOOL["name"]}
+        return run_local_or_forward("mcp", {"name": name, "arguments": arguments},
+            lambda: call_tool(name, arguments, store=CoordinationStore(read_only=read_only)),
+            read_only=read_only)
+    if store is None:
+        return handler(arguments)
+    if name in {ACTIVITY_TOOL["name"], ACTIVITY_HISTORY_TOOL["name"]}:
+        with store.reading():
+            return handler(arguments, store=store)
+    return handler(arguments, store=store)
+
+
+def dispatch(message, *, remote=False):
     """Handle the MCP methods needed for a fixed tool catalog, without SDK dependencies."""
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or not isinstance(message.get("method"), str):
         return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid JSON-RPC request."}}
@@ -319,7 +345,7 @@ def dispatch(message):
                     field = "from_session" if handler is move_thread else "session_id"
                     identity = bind_caller(arguments.get(field), require_context=True)
                     arguments = {**arguments, field: identity}
-                receipt = handler(arguments)
+                receipt = call_tool(params.get("name"), arguments, remote=remote)
             finally:
                 request_session.reset(token)
             result = {"content": [{"type": "text", "text": json.dumps(receipt, separators=(",", ":"))}]}
@@ -333,7 +359,7 @@ def dispatch(message):
 def main():
     for line in sys.stdin:
         try:
-            response = dispatch(json.loads(line))
+            response = dispatch(json.loads(line), remote=True)
         except json.JSONDecodeError:
             response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Invalid JSON."}}
         if response is not None:

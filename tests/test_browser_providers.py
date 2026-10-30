@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_codex_app_server import FakeCodex, BrowserSessions, CoordinationStore, CoordinationError
 from agent_coord.claude_code import ClaudeRPC
@@ -51,7 +52,9 @@ class ProviderTests(unittest.TestCase):
         return sessions
 
     def create(self, **values):
-        return self.sessions.create({"client": "claude", **values})["session"]["thread_id"]
+        thread_id = self.sessions.create({"client": "claude", **values})["session"]["thread_id"]
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
+        return thread_id
 
     def emit(self, thread_id, message):
         self.sessions.claude.connections[thread_id].callback(message)
@@ -62,6 +65,7 @@ class ProviderTests(unittest.TestCase):
 
     def finish(self, thread_id):
         self.emit(thread_id, {"type": "result", "subtype": "success"})
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
 
     def test_released_claude_process_stops_and_typing_prewarms_the_next_one(self):
         thread = self.create()
@@ -311,6 +315,57 @@ class ProviderTests(unittest.TestCase):
         saved = self.make_sessions().read(thread)["thread"]["turns"]
         self.assertEqual([t["status"] for t in saved], ["interrupted", "completed"])
         self.assertEqual(saved[-1]["items"][-1]["text"], "Resumed research")
+
+    def test_native_history_read_waits_for_pending_completion_without_blocking_snapshot(self):
+        thread = self.create()
+        self.start(thread)
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        entered, release, waiting = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        reads = []
+
+        def hold():
+            entered.set()
+            release.wait(2)
+
+        self.sessions.persistence.submit(hold, key=thread)
+        self.assertTrue(entered.wait(1))
+        self.emit(thread, {"type": "result", "subtype": "success"})
+        await_persistence = self.sessions._await_persistence
+
+        def observed_barrier(identity):
+            waiting.set()
+            await_persistence(identity)
+
+        with patch.object(self.sessions, "_await_persistence", side_effect=observed_barrier):
+            reader = threading.Thread(target=lambda: reads.append(self.sessions.read(thread)))
+            reader.start()
+            self.assertTrue(waiting.wait(1))
+            self.assertEqual(reads, [])
+            snapshot = self.sessions.read(thread, snapshot=True)
+            self.assertEqual(snapshot["thread"]["turns"][-1]["status"], "completed")
+            release.set()
+            reader.join(2)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(reads[0]["thread"]["turns"][-1]["status"], "completed")
+
+    def test_completion_during_native_history_read_preserves_newer_mirror(self):
+        thread = self.create()
+        self.start(thread)
+        query = self.sessions._query_thread
+
+        def complete_after_query(*args, **kwargs):
+            stale = query(*args, **kwargs)
+            self.assertEqual(stale["turns"][-1]["status"], "inProgress")
+            self.emit(thread, {"type": "result", "subtype": "success"})
+            return stale
+
+        with patch.object(self.sessions, "_query_thread", side_effect=complete_after_query):
+            detail = self.sessions.read(thread)
+        self.assertFalse(detail["running"])
+        self.assertEqual(detail["thread"]["turns"][-1]["status"], "completed")
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        self.assertEqual(self.sessions.read(thread, snapshot=True)["thread"]["turns"][-1]["status"], "completed")
 
     def test_results_match_any_consumed_prompt_uuid(self):
         thread = self.create()

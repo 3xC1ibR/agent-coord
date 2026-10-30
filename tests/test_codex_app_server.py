@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
@@ -122,13 +123,17 @@ class BrowserSessionTests(unittest.TestCase):
         self.addCleanup(self.sessions.close)
 
     def create(self, **values):
-        return self.sessions.create({"name": "Feature discussion", **values})["session"]["thread_id"]
+        identity = self.sessions.create({"name": "Feature discussion", **values})["session"]["thread_id"]
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        return identity
 
-    def usage_event(self, thread_id, total, **kwargs):
+    def usage_event(self, thread_id, total, *, persist=True, **kwargs):
         self.sessions._event({"method": "thread/tokenUsage/updated", "params": {
             "threadId": thread_id, "tokenUsage": {"total": {"inputTokens": total-10,
             "outputTokens": 10, "totalTokens": total}, "last": {"totalTokens": 20},
             "modelContextWindow": 1000}, **kwargs}})
+        if persist:
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
 
     def test_startup_skips_a_browser_session_whose_creation_was_interrupted(self):
         # Observed live: a create hit "database is locked" after saving the
@@ -359,6 +364,7 @@ class BrowserSessionTests(unittest.TestCase):
                 self.usage_event(thread_id, 100)
         self.sessions.interrupt(thread_id)
         self.assertNotIn(thread_id, self.sessions.active)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         self.assertFalse(self.store.get_session(thread_id)["turn_active"])
 
     def test_usage_busy_retry_does_not_replay_provider_work(self):
@@ -411,7 +417,7 @@ class BrowserSessionTests(unittest.TestCase):
             return original_flush(*args, **kwargs)
 
         with patch.object(self.store.usage, "record_snapshot", side_effect=deferred):
-            self.usage_event(parent, 2000)
+            self.usage_event(parent, 2000, persist=False)
             self.assertEqual(self.store.usage.raw_snapshot(parent, provider="codex", native_id=parent)["total_tokens"], 1000)
             try:
                 with patch.object(self.sessions.persistence, "flush", side_effect=flush):
@@ -438,12 +444,13 @@ class BrowserSessionTests(unittest.TestCase):
                 raise sqlite3.OperationalError("database is locked")
             return original(*args, **kwargs)
 
-        def short_wait(*, timeout):
+        def short_wait(*, timeout, key):
             self.assertEqual(timeout, 1)
-            return original_flush(timeout=0.02)
+            self.assertEqual(key, parent)
+            return original_flush(timeout=0.02, key=key)
 
         with patch.object(self.store.usage, "record_snapshot", side_effect=deferred):
-            self.usage_event(parent, 2000)
+            self.usage_event(parent, 2000, persist=False)
             try:
                 with patch.object(self.sessions.persistence, "flush", side_effect=short_wait):
                     child = self.sessions.fork_work_thread(parent)["thread_id"]
@@ -493,6 +500,7 @@ class BrowserSessionTests(unittest.TestCase):
         parent = self.create(yolo=True, model="available-model", effort="high")
         self.sessions.rpc.fast_turn = True
         self.sessions.send(parent, {"message": "Explore the original approach"})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=parent))
         project = self.store.threads.organization.create_project("Fork project")
         self.store.threads.update(parent, attention="later", pinned=True, project_id=project["id"], repository_id=None)
         self.store.threads.checkpoint(parent, {"phase": "planning", "summary": "Original plan",
@@ -943,6 +951,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertTrue(detail["running"])
         self.assertEqual(len(detail["thread"]["turns"]), 1)
         self.assertEqual(detail["thread"]["turns"][0]["items"][-1]["content"][0]["text"], "New direction")
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         with self.store._connection() as db:
             history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
         self.assertEqual(history["turns"][0]["items"][-1]["content"][0]["text"], "New direction")
@@ -1104,6 +1113,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertFalse(result["thread"]["historyUnavailable"])
         self.assertEqual(result["thread"]["status"], {"type": "idle"})
         self.assertEqual(reader.calls, [("thread/read", {"threadId": thread_id, "includeTurns": True})])
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         with self.store._connection() as db:
             saved = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
         self.assertEqual(saved["turns"], turns)
@@ -1128,6 +1138,7 @@ class BrowserSessionTests(unittest.TestCase):
             {"id": "answer", "type": "agentMessage", "text": "long transcript " * 100000}]}]
         self.sessions.rpc.threads[thread_id].update(turns=turns, status={"type": "idle"})
         self.sessions.read(thread_id)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         with patch.object(self.sessions, "_save_history", wraps=self.sessions._save_history) as save:
             result = self.sessions.read(thread_id)
             self.sessions.read(thread_id)
@@ -1138,6 +1149,7 @@ class BrowserSessionTests(unittest.TestCase):
         with patch.object(self.sessions, "_save_history", wraps=self.sessions._save_history) as save:
             self.sessions.read(thread_id)
             save.assert_called_once_with(thread_id)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         with self.store._connection() as db:
             persisted = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
         self.assertEqual(persisted["turns"][0]["items"][0]["text"], "changed answer")
@@ -1154,8 +1166,10 @@ class BrowserSessionTests(unittest.TestCase):
         with patch.object(self.sessions, "_save_history", wraps=self.sessions._save_history) as save:
             self.sessions.read(thread_id)
             save.assert_called_once_with(thread_id)
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
             self.sessions.read(thread_id)
             save.assert_called_once_with(thread_id)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         with self.store._connection() as db:
             persisted = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
         self.assertEqual(persisted["turns"][0]["items"][0]["text"], "Partial update")
@@ -1223,7 +1237,9 @@ class BrowserSessionTests(unittest.TestCase):
         thread_id = self.create()
         self.sessions.rpc.fast_turn = True
         self.sessions.send(thread_id, {"message": "Instant response"})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         self.assertNotIn(thread_id, self.sessions.active)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         self.assertFalse(self.store.get_session(thread_id)["turn_active"])
 
     def test_failed_turn_can_be_retried(self):
@@ -1240,6 +1256,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.store.begin_work(session_id=thread_id, scopes=["src/**"])
         self.sessions.rpc.fast_turn = True
         self.sessions.send(thread_id, {"message": "Keep work reserved"})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         state = self.store.get_session(thread_id)
         self.assertEqual(state["activity"], "waiting")
         self.assertEqual(state["write_scope"], ["src/**"])
@@ -1480,6 +1497,7 @@ class BrowserSessionTests(unittest.TestCase):
         thread_id = self.create()
         self.sessions.rpc.fast_turn = True
         self.sessions.send(thread_id, {"message": "The earlier request."})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         with self.store._connection() as db:
             # Simulate an installation predating both work threads and telemetry.
             db.execute("DELETE FROM activity_events WHERE thread_id = ?", (thread_id,))
@@ -1501,6 +1519,258 @@ class BrowserSessionTests(unittest.TestCase):
 class DatabaseContentionTests(unittest.TestCase):
     setUp = BrowserSessionTests.setUp
     create = BrowserSessionTests.create
+
+    def test_history_contention_does_not_hold_global_session_lock(self):
+        identity = self.create()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        blocker = sqlite3.connect(self.store.database_path)
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            started = time.monotonic()
+            self.sessions._remember_thread({"id": identity, "turns": [], "status": {"type": "idle"}})
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(self.sessions._thread_lock, "unrelated").result(timeout=.5)
+            self.assertLess(time.monotonic() - started, .8)
+            self.assertFalse(self.sessions.persistence.flush(timeout=.02, key=identity))
+        finally:
+            blocker.rollback()
+            blocker.close()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+
+    def test_deferred_metadata_excludes_large_tool_payloads_without_truncating_history(self):
+        identity = self.create()
+        turn = self.sessions.send(identity, {"message": "Work"})["turn"]
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        output, answer = "tool output " * 50000, "answer " * 20000
+        complete = {"id": turn["id"], "status": "completed", "items": [
+            {"id": "tool", "type": "commandExecution", "aggregatedOutput": output},
+            {"id": "answer", "type": "agentMessage", "text": answer}]}
+        lifecycle, public = [], []
+        original = self.sessions._persist_event
+
+        def capture(method, params, *args):
+            lifecycle.append(copy.deepcopy(params))
+            return original(method, params, *args)
+
+        with patch.object(self.sessions, "_persist_event", side_effect=capture), patch.object(
+                self.sessions, "_persist_public_output", side_effect=lambda method, params: public.append((method, params))):
+            self.sessions._event({"method": "turn/completed", "params": {"threadId": identity, "turn": complete}})
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        self.assertNotIn("aggregatedOutput", json.dumps(lifecycle + public))
+        self.assertNotIn("items", lifecycle[0]["turn"])
+        self.assertEqual(public[0][0], "item/completed")
+        self.assertEqual(len(public[0][1]["item"]["text"]), 64000)
+        self.assertEqual(public[1][0], "turn/completed")
+        with self.store._connection() as db:
+            saved = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0])
+        items = {item["id"]: item for item in saved["turns"][0]["items"]}
+        self.assertEqual(items["tool"]["aggregatedOutput"], output)
+        self.assertEqual(items["answer"]["text"], answer)
+
+    def test_one_conversation_backlog_does_not_block_other_model_changes_or_sends(self):
+        blocked, independent = self.create(), self.create()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        release = threading.Event()
+
+        def pending():
+            if not release.is_set():
+                raise sqlite3.OperationalError("database is locked")
+
+        self.sessions.persistence.submit(pending, key=blocked)
+        try:
+            result = self.sessions.update(independent, {"model": "other-model"})
+            self.assertEqual(result["model"], "other-model")
+            result = self.sessions.send(independent, {"message": "Independent message"})
+            self.assertIn("turn", result)
+            self.assertFalse(self.sessions.persistence.flush(timeout=0, key=blocked))
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=independent))
+        finally:
+            release.set()
+
+    def test_idle_model_change_does_not_read_or_resume_provider_history(self):
+        identity = self.create()
+        self.sessions.loaded.discard(identity)
+        original = self.sessions.rpc.request
+
+        def catalog_only(method, params=None):
+            self.assertNotIn(method, {"thread/read", "thread/resume"})
+            return original(method, params)
+
+        with patch.object(self.sessions.rpc, "request", side_effect=catalog_only):
+            result = self.sessions.update(identity, {"model": "other-model"})
+        self.assertEqual(result["model"], "other-model")
+        self.assertNotIn(identity, self.sessions.loaded)
+
+    def test_recent_open_uses_saved_history_without_resuming_or_waiting_on_operation(self):
+        identity = self.create()
+        history = {"id": identity, "turns": [{"id": "saved", "status": "completed", "items": [
+            {"id": "answer", "type": "agentMessage", "text": "Saved answer"}]}]}
+        self.sessions._remember_thread(history)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        self.sessions.loaded.discard(identity)
+        self.sessions.histories.pop(identity)
+        acquired, release = threading.Event(), threading.Event()
+
+        def hold_operation():
+            with self.sessions._thread_lock(identity):
+                acquired.set()
+                release.wait(3)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            holding = executor.submit(hold_operation)
+            self.assertTrue(acquired.wait(1))
+            try:
+                with patch.object(self.sessions.rpc, "request", side_effect=AssertionError("Opening resumed provider")):
+                    with self.store.reading():
+                        result = self.sessions.read(identity, recent=True)
+                self.assertEqual(result["thread"]["turns"][0]["items"][0]["text"], "Saved answer")
+                self.assertNotIn(identity, self.sessions.loaded)
+                self.assertFalse(result["running"])
+            finally:
+                release.set()
+            holding.result(timeout=1)
+
+    def test_recent_open_remains_readable_while_writer_is_locked(self):
+        identity = self.create()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        blocker = sqlite3.connect(self.store.database_path)
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            with patch.object(self.sessions.rpc, "request", side_effect=AssertionError("Opening queried provider")):
+                with self.store.reading():
+                    result = self.sessions.read(identity, recent=True)
+            self.assertEqual(result["session"]["thread_id"], identity)
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+    def test_full_snapshot_keeps_all_saved_turns_and_output_without_provider_requests(self):
+        identity = self.create()
+        turns = [{"id": str(index), "status": "completed", "items": [
+            {"id": "tool-" + str(index), "type": "commandExecution", "aggregatedOutput": "output " * 500}
+        ]} for index in range(45)]
+        self.sessions._remember_thread({"id": identity, "turns": turns})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        self.sessions.loaded.discard(identity)
+        self.sessions.histories.pop(identity)
+        with patch.object(self.sessions.rpc, "request", side_effect=AssertionError("Snapshot queried provider")):
+            with self.store.reading():
+                result = self.sessions.read(identity, snapshot=True)
+        self.assertEqual(result["thread"]["turns"], turns)
+        self.assertNotIn(identity, self.sessions.loaded)
+
+    def reopen_with_saved_outcome(self, status):
+        identity = self.create()
+        self.store.threads.start_turn(identity, turn_id="recorded-turn", occurred_at=100)
+        self.store.touch(identity, turn_active=True)
+        history = {"id": identity, "turns": [{"id": "recorded-turn", "status": status,
+                                             "startedAt": 100, "completedAt": 120, "items": []}]}
+        with self.store._connection() as db:
+            db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (identity, json.dumps(history)))
+        # Model a crash after the history commit but before lifecycle completion:
+        # the new runtime starts with no loaded provider or in-memory event queue.
+        self.sessions.loaded.clear()
+        self.sessions.active.clear()
+        self.sessions.close()
+        self.sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(self.sessions.close)
+        return identity
+
+    def test_snapshot_recovers_exact_saved_completion_after_crash_without_provider(self):
+        identity = self.reopen_with_saved_outcome("completed")
+        self.assertIsNone(self.store.threads.get(identity)["turn_completion"])
+        self.assertTrue(self.store.get_session(identity)["turn_active"])
+        with patch.object(self.sessions.rpc, "request", side_effect=AssertionError("Recovery queried provider")):
+            blocker = sqlite3.connect(self.store.database_path)
+            blocker.execute("BEGIN IMMEDIATE")
+            try:
+                started = time.monotonic()
+                with self.store.reading():
+                    result = self.sessions.read(identity, snapshot=True)
+                self.assertLess(time.monotonic() - started, .8)
+                self.assertFalse(self.sessions.persistence.flush(timeout=.02, key=identity))
+            finally:
+                blocker.rollback()
+                blocker.close()
+            self.assertEqual(result["thread"]["turns"][0]["status"], "completed")
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+            with self.store.reading():
+                self.sessions.read(identity, snapshot=True)
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        self.assertFalse(self.store.get_session(identity)["turn_active"])
+        self.assertEqual(self.store.threads.get(identity)["turn_completion"]["completed_at"], 120)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM turn_completions WHERE thread_id=?", (identity,)).fetchone()[0], 1)
+        self.assertNotIn(identity, self.sessions.loaded)
+
+    def test_snapshot_keeps_incomplete_crash_history_unknown(self):
+        identity = self.reopen_with_saved_outcome("inProgress")
+        with patch.object(self.sessions.rpc, "request", side_effect=AssertionError("Recovery queried provider")):
+            with self.store.reading():
+                self.sessions.read(identity, snapshot=True)
+            self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        self.assertIsNone(self.store.threads.get(identity)["turn_completion"])
+        self.assertTrue(self.store.get_session(identity)["turn_active"])
+        self.assertNotIn(identity, self.sessions.loaded)
+
+    def test_queued_snapshot_recovery_cannot_overwrite_newer_durable_turn(self):
+        identity = self.reopen_with_saved_outcome("completed")
+        started, release = threading.Event(), threading.Event()
+
+        def hold():
+            started.set()
+            release.wait(3)
+
+        self.sessions.persistence.submit(hold, key=identity)
+        self.assertTrue(started.wait(1))
+        try:
+            with self.store.reading():
+                self.sessions.read(identity, snapshot=True)
+            self.store.threads.start_turn(identity, turn_id="newer-turn", occurred_at=200)
+            self.store.touch(identity, turn_active=True)
+        finally:
+            release.set()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        current = self.store.threads.get(identity)
+        self.assertEqual(current["turn_id"], "newer-turn")
+        self.assertIsNone(current["turn_completion"])
+        self.assertTrue(self.store.get_session(identity)["turn_active"])
+
+    def test_snapshot_recovery_does_not_remove_starting_turn_placeholder(self):
+        identity = self.reopen_with_saved_outcome("completed")
+        self.sessions.active[identity] = None
+        with self.store.reading():
+            self.sessions.read(identity, snapshot=True)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        self.assertIn(identity, self.sessions.active)
+        self.assertIsNone(self.sessions.active[identity])
+
+    def test_permanent_lifecycle_failure_blocks_only_affected_conversation(self):
+        blocked, independent = self.create(), self.create()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3))
+
+        def failed():
+            raise ValueError("Lifecycle record could not be persisted")
+
+        with self.assertLogs("agent_coord.browser_persistence", level="ERROR"):
+            self.sessions.persistence.submit(failed, key=blocked)
+            self.assertFalse(self.sessions.persistence.flush(timeout=1, key=blocked))
+        calls = list(self.sessions.rpc.calls)
+        with self.assertRaisesRegex(BrowserBusyError, "could not be saved"):
+            self.sessions.send(blocked, {"message": "Must remain unsent"})
+        self.assertEqual(self.sessions.rpc.calls, calls)
+        self.assertIn("turn", self.sessions.send(independent, {"message": "Unaffected"}))
+
+    def test_stale_completion_cannot_clear_newer_durable_turn(self):
+        identity = self.create()
+        self.sessions.send(identity, {"message": "First"})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        self.store.threads.start_turn(identity, turn_id="newer", occurred_at=self.store.clock() + 1)
+        self.store.touch(identity, turn_active=True)
+        self.sessions._persist_event("turn/completed", {"threadId": identity,
+            "turn": {"id": "turn-0", "status": "completed"}, "turn_observed_at": self.store.clock()}, set())
+        self.assertTrue(self.store.get_session(identity)["turn_active"])
+        self.assertEqual(self.store.threads.get(identity)["turn_id"], "newer")
 
     @contextmanager
     def database_locked(self):
@@ -1596,6 +1866,7 @@ for line in sys.stdin:
         self.assertNotEqual(first, second)
         self.assertEqual(len(self.sessions.rpc.threads[identity]["turns"]), 2)
         self.assertEqual(self.sessions.active[identity], second)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
         with self.store._connection() as db:
             self.assertEqual(db.execute("SELECT turn_id FROM work_threads WHERE thread_id=?", (identity,)).fetchone()[0], second)
             self.assertEqual(db.execute("SELECT turn_key FROM turn_completions WHERE thread_id=?", (identity,)).fetchone()[0], first)
@@ -1713,12 +1984,14 @@ class ToolActivityTests(unittest.TestCase):
         params = {"threadId": thread_id, "turnId": turn["id"]}
         self.sessions._event({"method": "item/started", "params": {**params, "item": {
             "id": "cmd-1", "type": "commandExecution", "command": "python3 -m unittest  -q", "status": "inProgress"}}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         tool = self.sessions.work_thread(thread_id, history=False)["last_tool"]
         self.assertEqual((tool["name"], tool["kind"], tool["label"]), ("commandExecution", "run", "python3 -m unittest -q"))
         self.sessions._event({"method": "item/completed", "params": {**params, "item": {
             "id": "cmd-1", "type": "commandExecution", "command": "python3 -m unittest  -q", "status": "completed"}}})
         self.sessions._event({"method": "item/started", "params": {**params, "item": {
             "id": "patch-1", "type": "fileChange", "changes": [{"path": "web/app.js", "kind": "update"}, {"path": "web/styles.css", "kind": "update"}]}}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         tool = self.store.get_session(thread_id)["last_tool"]
         self.assertEqual((tool["kind"], tool["label"]), ("edit", "web/app.js, web/styles.css"))
         # Messages and reasoning are not activity; the last tool stays.

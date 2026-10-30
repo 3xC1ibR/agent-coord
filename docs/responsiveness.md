@@ -247,3 +247,93 @@ Measured on the same day, build 17:
   would remove most of that.
 - Backend changes activate only at an idle runtime handover; see
   [runtime updates](runtime-updates.md). Interface changes apply on reopen.
+
+## October 30 contention repair
+
+The October 30 investigation reproduced a shared session lock held for SQLite's
+five-second busy timeout. Independent observer CLI processes repeatedly ran
+initialization and no-op updates, while completion persistence and conversation
+refreshes depended on those writes. A global save barrier then blocked unrelated
+conversations.
+
+### Ownership and initialization
+
+An authenticated runtime advertising `client_requests: 1` executes finite CLI,
+hook, MCP and supervisor metadata mutations. Requests carry a bounded, explicit
+context; they never mutate process-global environment or working directory.
+Only registered high-level operations are callable. SQL text is not a transport
+operation. Uncertain mutation responses never fall back to local execution.
+
+Without a runtime, a finite local mutation holds the runtime ownership lock.
+Concurrent local threads serialize ownership acquisition; a zero-timeout
+background write yields on contention. Schema initialization uses the same
+ownership boundary plus its migration lock. A database marker records completed
+initialization, so reopening a current store does not rerun migrations or
+backfills. Matching live owners may add optional feature tables without causing
+their observers to initialize again.
+
+### Reads and saves
+
+Thread inventory, detail, saved history and batch metadata reads enter SQLite
+query-only boundaries. Overdue snoozes and missing legacy organization links are
+projected in read results; explicit lifecycle work persists their repair.
+Opening recent or complete saved history does not resume the provider or acquire
+the conversation operation lock. It may briefly show the latest saved snapshot
+until live events arrive.
+
+Provider events enqueue persistence outside the shared session lock. Each
+conversation has ordered required lifecycle writes and coalesced optional
+snapshots. A blocked conversation yields to other keys. Barriers wait only for
+their conversation; failures remain visible to that barrier rather than being
+silently discarded. Optional snapshots cannot coalesce across required lifecycle
+boundaries. Queue limits prevent unbounded accumulation.
+
+Saved history can recover a terminal turn after a restart only when its exact
+turn ID matches the durable current turn. Recovery runs in background, verifies
+the history revision and durable identity again, and never contacts the provider.
+Unknown or still-running saved outcomes remain unknown.
+
+### Submission receipts
+
+Composer submissions carry a stable request ID through retries. Before invoking
+the provider, the runtime commits an acceptance receipt. Completed retries return
+the saved result. Reuse with different content is rejected. A crash or uncertain
+provider response retains an unconfirmed receipt and never replays the effect.
+Only a proven pre-submission rejection permits another attempt with that ID.
+The provider call runs outside the database transaction. The first message in a
+new conversation uses the same receipt path.
+
+This provides duplicate detection, not an exactly-once guarantee from an external
+provider. Unconfirmed outcomes require inspecting the conversation; the runtime
+does not guess that a timeout means the message was not received.
+
+### Observer contract and validation
+
+`agent-coord thread metadata --thread-id ID` accepts repeated IDs, with at most
+200 per request. The HTTP equivalent is
+`GET /api/browser/threads/metadata?id=ID&id=ID`. Both preserve input order,
+deduplicate IDs, enforce the workspace boundary, and return metadata from one
+read snapshot. Activity readers should retain cursors instead of re-reading
+complete history. Background analysis should never spawn a CLI process for each
+thread.
+
+Regression coverage includes held-writer HTTP requests, cold full/recent history,
+query-only mutation rejection, per-conversation barriers, stale completion events,
+saved-terminal restart recovery, durable receipt retries, concurrent ownership,
+and supervisor process independence. `scripts/measure_backend_latency.py` runs
+the real HTTP implementation against an isolated database snapshot with synthetic
+providers, streaming turns, multiple windows and independent writer pressure.
+
+Installations still obey the runtime update contract: new backend code remains
+pending while the previous runtime owns active work. Do not stop agents to force
+activation or describe a staged backend as active.
+
+The repaired implementation was measured against a 1.99 GB snapshot with six
+synthetic active conversations, three windows, six deltas per second per agent,
+and three independent SQLite writes per second. Across 20 sends and 20 read
+cycles there were no request errors. Median / p95 latency was 63 / 304 ms for
+send acceptance, 72 / 269 ms for conversation reads, 29 / 107 ms for thread
+detail, and 2 / 474 ms for inventory. Search remained above its separate budget
+(373 / 1,207 ms); its index maintenance and context caching remain outside this
+contention repair. These are isolated backend measurements, not evidence that
+the installed runtime has activated the update.

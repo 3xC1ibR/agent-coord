@@ -237,6 +237,7 @@ class ThreadOrganizationTests(unittest.TestCase):
             self.create(repository_id="missing")
         self.assertEqual(self.sessions.rpc.calls, calls)
         thread_id = self.create()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         before = self.sessions.work_thread(thread_id)
         with self.assertRaises(CoordinationError):
             self.sessions.update_work_thread(thread_id, {"title": "Changed", "project_id": "missing"})

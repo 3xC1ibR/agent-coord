@@ -133,7 +133,7 @@ class BrowserInboxWake:
                     history["turns"][index] = latest
                     self.sessions._save_history(thread_id)
                     break
-        if not self.sessions.persistence.flush():
+        if not self.sessions.persistence.flush(key=thread_id):
             self.checked_pauses.pop(thread_id, None)
             return
         with self.store._connection() as db:
@@ -223,7 +223,7 @@ class BrowserInboxWake:
         """
         supplied_reason = reason
         reason = reason or "Creating orchestrator authorized fresh inbox work after inspecting the terminal turn."
-        if not self.sessions.persistence.flush():
+        if not self.sessions.persistence.flush(key=thread_id):
             raise CoordinationError("Conversation state is still being saved. Try again shortly.")
         with self.sessions._thread_lock(thread_id):
             detail = self.sessions.read(thread_id)
@@ -379,6 +379,7 @@ class BrowserInboxWake:
         from .codex_app_server import BrowserBusyError, BrowserNotSubmittedError
         sessions = self.sessions
         with sessions._thread_lock(thread_id):
+            sessions._await_persistence(thread_id)
             self._reconcile_pause(thread_id)
             with self.store._connection() as db:
                 if not self._eligible(db, thread_id):
@@ -390,6 +391,7 @@ class BrowserInboxWake:
             # before a turn is sent. Pause instead of repeatedly launching it.
             try:
                 detail = sessions.read(thread_id)
+                sessions._await_persistence(thread_id)
             except Exception as exc:
                 self._not_submitted(thread_id, exc)
                 return
@@ -436,6 +438,12 @@ class BrowserInboxWake:
                                    [(message_id,) for message_id in ids])
                 self._not_submitted(thread_id, exc.__cause__ or exc)
             except Exception as exc:
+                # A provider can acknowledge a start, receive Stop, and fail
+                # its response before lifecycle bookkeeping commits. Preserve
+                # that accepted Stop before classifying the transport failure.
+                # If persistence is unavailable, retain the existing claim;
+                # replaying an uncertain provider submission is never safe.
+                sessions._await_persistence(thread_id)
                 with self.store._connection() as db:
                     stopped = db.execute("""SELECT r.turn_id FROM turn_stop_requests r
                         JOIN work_threads t ON t.thread_id = r.thread_id AND t.turn_id = r.turn_id
@@ -461,7 +469,7 @@ class BrowserInboxWake:
                     db.execute("UPDATE browser_inbox_wake SET dispatching = 0 WHERE thread_id = ?", (thread_id,))
 
     def _report_failure(self, thread_id, error):
-        self.sessions.persistence.submit(lambda: self._persist_failure(thread_id, error))
+        self.sessions.persistence.submit(lambda: self._persist_failure(thread_id, error), key=thread_id)
 
     def _persist_failure(self, thread_id, error):
         with self.store._connection() as db:

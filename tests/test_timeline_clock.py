@@ -97,6 +97,7 @@ class TimelineClockTests(unittest.TestCase):
         item=next(e for e in stream if e['method']=='item/completed')
         self.assertEqual(item['params']['item']['timelineAt'],110)
         self.assertEqual(item['params']['turnStartedAt'],100)
+        self.assertTrue(sessions.persistence.flush(timeout=3, key=sid))
         with self.store._connection() as db:
             persisted=json.loads(db.execute('SELECT history_json FROM browser_history WHERE thread_id=?',(sid,)).fetchone()[0])
         self.assertEqual(persisted['turns'][0]['startedAt'],100)

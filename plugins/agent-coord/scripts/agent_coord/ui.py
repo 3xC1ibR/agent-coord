@@ -11,6 +11,7 @@ import sqlite3
 import threading
 import time
 import webbrowser
+from contextlib import nullcontext
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .remote_access import PAIR_PAGE, RemoteAccess
@@ -455,7 +456,15 @@ def _handler(
                 return
             if parsed.path.startswith("/api/browser/") and browser_sessions is not None:
                 try:
-                    self._browser_get(parsed)
+                    route = parsed.path.removeprefix("/api/browser/")
+                    if route in {"config", "organization", "asks", "sessions", "threads", "views",
+                                 "activity", "activity/settings", "activity/history", "workspaces/scratchpad"} or route.startswith(("threads/", "sessions/", "projects/")):
+                        # Sidecar receipts still perform explicit stale-request
+                        # reconciliation; they have a separate mutation boundary.
+                        with (nullcontext() if route.endswith("/sidecars") else store.reading()):
+                            self._browser_get(parsed)
+                    else:
+                        self._browser_get(parsed)
                 except CoordinationError as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 except sqlite3.OperationalError as exc:
@@ -620,7 +629,8 @@ def _handler(
             elif route == "sessions":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_sessions(archived=query.get("archived") == ["true"])})
             elif route == "threads":
-                body, tag = browser_sessions.work_thread_inventory_response(archived=query.get("archived") == ["true"])
+                with store.reading():
+                    body, tag = browser_sessions.work_thread_inventory_response(archived=query.get("archived") == ["true"])
                 # A window that already holds this list skips the transfer and
                 # its own parse and render.
                 if self.headers.get("If-None-Match") == tag:
@@ -633,6 +643,9 @@ def _handler(
                 # exclusions) from one query, without projecting every thread.
                 # No detail reads, provider resumes, or seen marks.
                 self._json(HTTPStatus.OK, search_browser_threads(store, browser_sessions, query))
+            elif route == "threads/metadata":
+                from .observer_queries import metadata
+                self._json(HTTPStatus.OK, metadata(store, query.get("id", []), allowed_cwd=browser_sessions.cwd))
             elif route.startswith("threads/") and route.endswith("/close-when-done"):
                 from .thread_control import ThreadControl
                 thread_id = unquote(route[8:-16])
@@ -665,8 +678,9 @@ def _handler(
             elif route.startswith("threads/"):
                 from .thread_control import ThreadControl
                 thread_id = unquote(route[8:])
-                thread = browser_sessions.work_thread(thread_id)
-                thread["close_when_done"] = ThreadControl(store).status(thread_id)
+                with store.reading():
+                    thread = browser_sessions.work_thread(thread_id)
+                    thread["close_when_done"] = ThreadControl(store).status(thread_id)
                 self._json(HTTPStatus.OK, thread)
             elif route.startswith("sessions/"):
                 # Opening a conversation asks for its recent view; other reads
@@ -674,7 +688,9 @@ def _handler(
                 view = self.headers.get("X-Agent-Coord-History-View", "complete")
                 if view not in {"complete", "recent"}:
                     raise CoordinationError("History view must be complete or recent.")
-                self._json(HTTPStatus.OK, browser_sessions.read(unquote(route[9:]), recent=view == "recent"))
+                with store.reading():
+                    result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
+                self._json(HTTPStatus.OK, result)
             elif route == "events":
                 try:
                     cursor = (self.headers.get("Last-Event-ID") or query.get("after", ["0"])[0]).split(":")

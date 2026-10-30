@@ -9,9 +9,12 @@ const ChatImageAttachments = require("../plugins/agent-coord/scripts/agent_coord
 const {ThreadMentions} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-mentions.js");
 function setup() {
   const elements = new Map(), calls = [];
+  const storage = new Map();
   const element = () => ({value: "", dataset: {}, children: [], classList: {add() {}, remove() {}},
     focus() {}, replaceChildren(...children) { this.children = children; }, append(...children) { this.children.push(...children); }});
   const c = {
+    DispatchUI: require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js"),
+    sessionStorage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)},
     $: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); },
     node: (tag, text) => Object.assign(element(), {tag, textContent: text}),
     Option: function(text, value) { return {text, value}; }, navigation: null, savedViews: null,

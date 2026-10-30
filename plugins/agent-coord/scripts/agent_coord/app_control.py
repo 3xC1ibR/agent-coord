@@ -22,6 +22,8 @@ class AppControl:
     def __init__(self, store):
         self.store = store
         with store._connection() as db:
+            if db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('app_control_requests','app_control_runtimes')").fetchone()[0] == 2:
+                return
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS app_control_requests (
                     request_id TEXT PRIMARY KEY, operation TEXT NOT NULL,

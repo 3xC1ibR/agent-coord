@@ -31,6 +31,20 @@ function setup() {
   return {c, values, calls, warnings, delays, errors};
 }
 
+test("ordinary conversation retry retains its request ID across provider and window changes", async () => {
+  const {c, calls, values} = setup();
+  c.state.detail.work_thread.dispatcher = false;
+  c.response.json = async () => { throw new SyntaxError("Incomplete response"); };
+  await assert.rejects(c.sendMessage(), /check the conversation before sending again/);
+  c.state.sourceWindowId = "replacement-window";
+  c.state.detail.running = true;
+  c.state.detail.activeTurn = "possibly-accepted-turn";
+  c.response.json = async () => ({turnId: "possibly-accepted-turn"});
+  await c.sendMessage();
+  assert.equal(calls[1].body.requestId, calls[0].body.requestId);
+  assert.equal(values.has("dispatch-request:dispatcher"), false);
+});
+
 test("unreadable send response preserves draft and reuses the same dispatcher request ID", async () => {
   const {c, calls, values, warnings} = setup();
   c.response.json = async () => { throw new SyntaxError("The string did not match the expected pattern."); };

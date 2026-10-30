@@ -34,14 +34,22 @@ class ThreadControlTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def send(self, thread_id, body):
+        result = self.sessions.send(thread_id, body)
+        # The fake provider acknowledges before its asynchronous lifecycle
+        # bookkeeping commits. These tests then exercise durable close state.
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
+        return result
+
     def complete_turn(self, thread_id, status="completed"):
         turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
         turn["status"] = status
         self.sessions._event({"method": "turn/completed", "params": {"threadId": thread_id, "turn": turn}})
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
 
     def arm_success_close(self):
         thread_id = self.create()
-        self.sessions.send(thread_id, {"message": "Implement the fix."})
+        self.send(thread_id, {"message": "Implement the fix."})
         self.control.request_close(thread_id, after_turn=True, success_only=True)
         return thread_id
 
@@ -95,7 +103,7 @@ class ThreadControlTests(unittest.TestCase):
     def test_close_when_done_does_not_trust_a_previous_turns_finished_checkpoint(self):
         thread_id = self.create()
         self.checkpoint_done(thread_id)
-        self.sessions.send(thread_id, {"message": "Implement another fix."})
+        self.send(thread_id, {"message": "Implement another fix."})
         self.control.request_close(thread_id, after_turn=True, success_only=True)
         self.complete_turn(thread_id)
         self.worker.process_once()
@@ -163,7 +171,7 @@ class ThreadControlTests(unittest.TestCase):
                 if action == "cancel":
                     self.control.cancel(thread_id)
                 elif action == "steer":
-                    self.sessions.send(thread_id, {"message": "Another thing."})
+                    self.send(thread_id, {"message": "Another thing."})
                 else:
                     self.sessions.queue.enqueue(thread_id, {"message": "Follow up."})
                 self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
@@ -175,7 +183,7 @@ class ThreadControlTests(unittest.TestCase):
         thread_id = self.create()
         with self.assertRaisesRegex(CoordinationError, "Start a task"):
             self.control.request_close(thread_id, after_turn=True, success_only=True)
-        self.sessions.send(thread_id, {"message": "Fix it."})
+        self.send(thread_id, {"message": "Fix it."})
         self.control.request_close(thread_id, after_turn=True)
         with self.assertRaisesRegex(CoordinationError, "different close"):
             self.control.request_close(thread_id, after_turn=True, success_only=True)
@@ -196,7 +204,7 @@ class ThreadControlTests(unittest.TestCase):
             db.execute("ALTER TABLE thread_close_requests DROP COLUMN success_only")
         control = ThreadControl(self.store)
         thread_id = self.create()
-        self.sessions.send(thread_id, {"message": "Working."})
+        self.send(thread_id, {"message": "Working."})
         control.request_close(thread_id, after_turn=True)
         self.complete_turn(thread_id, "failed")
         self.worker.process_once()
@@ -204,8 +212,8 @@ class ThreadControlTests(unittest.TestCase):
 
     def test_cli_after_turn_is_durable_and_preserves_history_checkpoint_and_other_threads(self):
         thread_id, other = self.create(), self.create()
-        self.sessions.send(thread_id, {"message": "Keep this conversation."})
-        self.sessions.send(other, {"message": "Keep working."})
+        self.send(thread_id, {"message": "Keep this conversation."})
+        self.send(other, {"message": "Keep working."})
         self.store.begin_work(session_id=thread_id, scopes=["src/**"])
         self.store.threads.checkpoint(thread_id, {"phase": "discussion", "summary": "A proposal, still unapproved."})
         receipt = self.cli("close", thread_id, "--after-turn")
@@ -228,7 +236,7 @@ class ThreadControlTests(unittest.TestCase):
 
     def test_immediate_close_uses_existing_interrupt_then_archive(self):
         thread_id = self.create()
-        self.sessions.send(thread_id, {"message": "Working"})
+        self.send(thread_id, {"message": "Working"})
         self.cli("close", thread_id)
         self.worker.process_once()
         self.assertEqual(self.control.status(thread_id)["status"], "closed")
@@ -250,10 +258,10 @@ class ThreadControlTests(unittest.TestCase):
 
     def test_steering_cancels_close_even_when_turn_identity_is_unchanged(self):
         thread_id = self.create()
-        self.sessions.send(thread_id, {"message": "Working"})
+        self.send(thread_id, {"message": "Working"})
         self.control.request_close(thread_id, after_turn=True)
         turn_key = self.store.threads.get(thread_id)["turn_key"]
-        self.sessions.send(thread_id, {"message": "Actually, let's pivot."})
+        self.send(thread_id, {"message": "Actually, let's pivot."})
         self.assertEqual(self.store.threads.get(thread_id)["turn_key"], turn_key)
         self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
         self.complete_turn(thread_id)
@@ -262,7 +270,7 @@ class ThreadControlTests(unittest.TestCase):
 
     def test_queued_followup_cancels_close_before_dispatch(self):
         thread_id = self.create()
-        self.sessions.send(thread_id, {"message": "Working"})
+        self.send(thread_id, {"message": "Working"})
         self.control.request_close(thread_id, after_turn=True)
         self.sessions.queue.enqueue(thread_id, {"message": "One more thing"})
         self.assertEqual(self.control.status(thread_id)["status"], "cancelled")
@@ -270,7 +278,7 @@ class ThreadControlTests(unittest.TestCase):
 
     def test_new_turn_cancels_but_duplicate_start_notification_does_not(self):
         thread_id = self.create()
-        self.sessions.send(thread_id, {"message": "Working"})
+        self.send(thread_id, {"message": "Working"})
         self.control.request_close(thread_id, after_turn=True)
         turn_id = self.store.threads.get(thread_id)["turn_id"]
         self.store.threads.start_turn(thread_id, turn_id=turn_id)
@@ -288,7 +296,7 @@ class ThreadControlTests(unittest.TestCase):
 
     def test_early_browser_stop_hook_cannot_close_before_provider_completion(self):
         thread_id = self.create()
-        self.sessions.send(thread_id, {"message": "Working"})
+        self.send(thread_id, {"message": "Working"})
         self.control.request_close(thread_id, after_turn=True)
         handle({"hook_event_name": "Stop", "session_id": thread_id, "cwd": str(self.root)}, self.store)
         self.worker.process_once()
@@ -388,7 +396,7 @@ class ThreadControlTests(unittest.TestCase):
 
     def test_database_owner_does_not_assume_cold_active_execution_has_stopped(self):
         thread_id = self.create()
-        self.sessions.send(thread_id, {"message": "Still running"})
+        self.send(thread_id, {"message": "Still running"})
         self.control.request_close(thread_id)
         with self.sessions.lock:
             self.sessions.loaded.discard(thread_id)
@@ -423,7 +431,7 @@ class ThreadControlTests(unittest.TestCase):
         thread_id = self.create()
         server = make_ui_server(self.store, port=0, cwd=str(self.root), browser_sessions=self.sessions)
         self.addCleanup(server.server_close)
-        self.sessions.send(thread_id, {"message": "Finish before closing."})
+        self.send(thread_id, {"message": "Finish before closing."})
         # Turn bookkeeping is asynchronous. A close queued before it lands records
         # no turn, and the late turn start then cancels it as superseding input
         # (seen on CI as 'cancelled' with turn_key null; tracked separately).
@@ -445,6 +453,7 @@ class ThreadControlTests(unittest.TestCase):
 
 
 class CloseWhenDoneHTTPTests(unittest.TestCase):
+    send = ThreadControlTests.send
     import test_ui as _http
     setUp = _http.BrowserHTTPTests.setUp
     stop_server = _http.BrowserHTTPTests.stop_server
@@ -452,7 +461,7 @@ class CloseWhenDoneHTTPTests(unittest.TestCase):
 
     def test_enable_read_and_cancel_without_submitting_a_model_message(self):
         thread_id = self.sessions.create({"name": "Fix"})["session"]["thread_id"]
-        self.sessions.send(thread_id, {"message": "Fix it."})
+        self.send(thread_id, {"message": "Fix it."})
         path = "/api/browser/threads/" + thread_id + "/close-when-done"
         self.assertEqual(self.request(path)[1]["status"], "none")
         status, result = self.request(path, {"enabled": True})
@@ -466,7 +475,7 @@ class CloseWhenDoneHTTPTests(unittest.TestCase):
 
     def test_endpoint_rejects_invalid_settings_and_requires_csrf(self):
         thread_id = self.sessions.create({"name": "Fix"})["session"]["thread_id"]
-        self.sessions.send(thread_id, {"message": "Fix it."})
+        self.send(thread_id, {"message": "Fix it."})
         path = "/api/browser/threads/" + thread_id + "/close-when-done"
         for body in ({}, {"enabled": "true"}, {"enabled": True, "extra": True}):
             self.assertEqual(self.request(path, body)[0], 400)

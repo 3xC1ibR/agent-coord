@@ -121,6 +121,7 @@ class ClaudeContentionTests(unittest.TestCase):
     def test_real_failure_still_pauses_inbox(self):
         self.connection.control("emit", frames=[{"type": "result", "subtype": "error_during_execution",
             "is_error": True, "errors": ["Provider failed"]}])
+        self.assertTrue(self.sessions.persistence.flush(key=self.thread))
         with self.store._connection() as db:
             self.assertEqual(db.execute("SELECT status FROM turn_completions WHERE turn_key=?", (self.turn,)).fetchone()[0], "failed")
             self.assertEqual(tuple(db.execute("SELECT paused,pause_kind FROM browser_inbox_wake WHERE thread_id=?", (self.thread,)).fetchone()), (1, "failure"))
@@ -143,12 +144,14 @@ class ClaudeContentionTests(unittest.TestCase):
             self.connection.control("disconnect", timeout=3)
         self.connection.readers[0].join(timeout=3)
         self.assertFalse(self.connection.readers[0].is_alive())
+        self.assertTrue(self.sessions.persistence.flush(key=self.thread))
         with self.store._connection() as db:
             self.assertEqual(db.execute("SELECT status FROM turn_completions WHERE turn_key=?", (self.turn,)).fetchone()[0], "failed")
             self.assertEqual(tuple(db.execute("SELECT paused,pause_kind FROM browser_inbox_wake WHERE thread_id=?", (self.thread,)).fetchone()), (1, "failure"))
 
     def test_deliberate_stop_still_pauses_inbox(self):
         self.sessions.interrupt(self.thread)
+        self.assertTrue(self.sessions.persistence.flush(key=self.thread))
         with self.store._connection() as db:
             self.assertEqual(db.execute("SELECT status FROM turn_completions WHERE turn_key=?", (self.turn,)).fetchone()[0], "interrupted")
             self.assertEqual(tuple(db.execute("SELECT paused,pause_kind FROM browser_inbox_wake WHERE thread_id=?", (self.thread,)).fetchone()), (1, "stop"))

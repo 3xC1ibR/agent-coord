@@ -316,6 +316,7 @@ class CoordinationStore:
         *,
         stale_after_seconds: int | None = None,
         clock: Any = time.time,
+        read_only: bool = False,
     ) -> None:
         self.database_path = Path(database_path or default_database_path()).expanduser()
         configured_stale = os.environ.get("AGENT_COORD_STALE_AFTER_SECONDS")
@@ -323,7 +324,9 @@ class CoordinationStore:
             configured_stale or DEFAULT_STALE_AFTER_SECONDS
         )
         self.clock = clock
+        self.read_only = read_only
         self._idle_connections = threading.local()
+        self._connection_options = threading.local()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         from .desktop_runtime import schema_access
         from .browser_persistence import database_busy
@@ -331,20 +334,28 @@ class CoordinationStore:
         from .thread_usage import ThreadUsageStore
         from .asks import AskStore
         try:
-            with schema_access(self.database_path):
+            with schema_access(self.database_path, read_only=read_only) as initialize:
                 # Constructors perform idempotent schema/data upgrades. Retry
                 # only this bookkeeping, before any command (especially send
                 # or reply) can create a message or trigger external work.
                 # Each SQLite lock wait is already bounded by busy_timeout.
                 for attempt in range(3):
                     try:
-                        self._initialize()
-                        self.threads = ThreadStore(self)
-                        self.usage = ThreadUsageStore(self)
-                        self.asks = AskStore(self)
-                        from .execution_state import initialize as initialize_execution
-                        with self._connection() as db:
-                            initialize_execution(db)
+                        if initialize:
+                            self._initialize()
+                        self.threads = ThreadStore(self, initialize=initialize)
+                        self.usage = ThreadUsageStore(self, initialize=initialize)
+                        self.asks = AskStore(self, initialize=initialize)
+                        if initialize:
+                            from .execution_state import initialize as initialize_execution
+                            from .desktop_runtime import schema_fingerprint
+                            with self._connection() as db:
+                                initialize_execution(db)
+                                db.execute("CREATE TABLE IF NOT EXISTS coordination_schema (id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL, schema_cookie INTEGER NOT NULL)")
+                                if "schema_cookie" not in {row["name"] for row in db.execute("PRAGMA table_info(coordination_schema)")}:
+                                    db.execute("ALTER TABLE coordination_schema ADD COLUMN schema_cookie INTEGER NOT NULL DEFAULT 0")
+                                cookie = db.execute("PRAGMA schema_version").fetchone()[0]
+                                db.execute("INSERT OR REPLACE INTO coordination_schema VALUES (1, ?, ?)", (schema_fingerprint(), cookie))
                         break
                     except sqlite3.OperationalError as exc:
                         if not database_busy(exc):
@@ -363,7 +374,9 @@ class CoordinationStore:
     def _connect(self) -> sqlite3.Connection:
         # Only the owning thread uses a connection; an idle one may be closed
         # by whichever thread releases the store.
-        connection = sqlite3.connect(self.database_path, timeout=5.0,
+        reading = self.read_only or getattr(self._connection_options, "reading", False)
+        target = self.database_path.resolve().as_uri() + "?mode=ro" if reading else self.database_path
+        connection = sqlite3.connect(target, timeout=5.0, uri=reading,
                                      factory=_StoreConnection, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -371,7 +384,49 @@ class CoordinationStore:
         return connection
 
     @contextmanager
+    def connection_timeout(self, milliseconds):
+        """Bound SQLite waits for every nested connection on this worker."""
+        if type(milliseconds) is not int or milliseconds < 0:
+            raise ValueError("Connection timeout must be nonnegative milliseconds.")
+        previous = getattr(self._connection_options, "timeout", None)
+        self._connection_options.timeout = milliseconds
+        try:
+            yield
+        finally:
+            self._connection_options.timeout = previous
+
+    @contextmanager
+    def reading(self):
+        """Enforce a query-only boundary, including nested store operations."""
+        previous = getattr(self._connection_options, "reading", False)
+        self._connection_options.reading = True
+        try:
+            yield self
+        finally:
+            self._connection_options.reading = previous
+
+    @contextmanager
     def _connection(self):
+        from .runtime_requests import connection_ownership
+        reading = self.read_only or getattr(self._connection_options, "reading", False)
+        if reading:
+            with self._local_connection() as connection:
+                yield connection
+            return
+        # A direct library caller may read alongside the owner, but only the
+        # owner (or a standalone transaction holding its lock) can mutate.
+        # CLI/hooks route complete operations before reaching this boundary.
+        milliseconds = getattr(self._connection_options, "timeout", None)
+        with connection_ownership(self.database_path, timeout=5 if milliseconds is None else milliseconds / 1000) as owner:
+            if owner:
+                with self._local_connection() as connection:
+                    yield connection
+            else:
+                with self.reading(), self._local_connection() as connection:
+                    yield connection
+
+    @contextmanager
+    def _local_connection(self):
         # A new connection parses the whole schema, which dominated backend
         # CPU under concurrent polling. Reuse one idle connection per thread.
         # A nested use gets its own connection so an inner commit cannot end
@@ -401,6 +456,11 @@ class CoordinationStore:
             if not nested and isinstance(connection, _StoreConnection):
                 connection.settings = (connection.execute("PRAGMA busy_timeout").fetchone()[0],
                                        connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        timeout = getattr(self._connection_options, "timeout", None)
+        if timeout is not None:
+            connection.execute(f"PRAGMA busy_timeout = {timeout}")
+        reading = self.read_only or getattr(self._connection_options, "reading", False)
+        connection.execute(f"PRAGMA query_only = {int(reading)}")
         reusable = False
         if not nested:
             holder.in_use = True
@@ -415,8 +475,14 @@ class CoordinationStore:
             if reusable:
                 try:
                     connection.end_statements()
+                    # A mode=ro connection cannot later become a writable one.
+                    # Do not retain a connection opened for a read boundary.
+                    if fresh and reading:
+                        connection.close()
+                        reusable = False
                     if fresh:
-                        holder.keep(connection, factory)
+                        if reusable:
+                            holder.keep(connection, factory)
                 except (sqlite3.Error, TypeError):
                     reusable = False
             if not reusable:
