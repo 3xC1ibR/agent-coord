@@ -51,6 +51,37 @@ class AgentTreeTests(unittest.TestCase):
         self.assertEqual(by_id[child]["created_by_thread_id"], lead)
         self.assertEqual({t["thread_id"] for t in agent_tree(self.sessions, lead)["data"]}, {lead, kept})
 
+    def test_forks_share_a_family_with_closed_sources_siblings_and_delegated_agents(self):
+        source, fork, sibling, nested, agent = [self.create() for _ in range(5)]
+        for child, parent in ((fork, source), (sibling, source), (nested, fork)):
+            self.store.threads.record_fork(child, self.store.threads.get(parent))
+        attach(self.store, fork, agent)
+        self.sessions.close_work_thread(source)
+        calls = list(self.sessions.rpc.calls)
+        for selected in (source, fork, sibling, nested, agent):
+            result = agent_tree(self.sessions, selected)
+            self.assertEqual(result["root_thread_id"], source)
+            by_id = {t["thread_id"]: t for t in result["data"]}
+            self.assertEqual(set(by_id), {source, fork, sibling, nested, agent})
+            self.assertEqual(by_id[fork]["agent_parent_id"], source)
+            self.assertEqual(by_id[nested]["agent_parent_id"], fork)
+            self.assertEqual(by_id[agent]["agent_parent_id"], fork)
+            self.assertEqual(by_id[fork]["forked_from"]["thread_id"], source)
+            self.assertIsNone(by_id[fork]["created_by_thread_id"])
+        self.assertEqual(self.sessions.rpc.calls, calls)
+
+    def test_fork_lineage_respects_workspace_boundaries(self):
+        source, fork = self.create(), self.create()
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        self.store.register(session_id="outside", client="codex", cwd=outside.name)
+        self.store.threads.record_fork(fork, self.store.threads.get("outside"))
+        self.store.threads.record_fork("outside", self.store.threads.get(source))
+        self.assertEqual([t["thread_id"] for t in agent_tree(self.sessions, source)["data"]], [source])
+        result = agent_tree(self.sessions, fork)
+        self.assertEqual(result["root_thread_id"], fork)
+        self.assertIsNone(result["data"][0]["agent_parent_id"])
+
     def test_workspace_boundary_hides_inaccessible_ancestors_and_children(self):
         child = self.create()
         outside = tempfile.TemporaryDirectory()

@@ -69,6 +69,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Native confirmation dialog | Clear local Activity history |
 | Thread options menu | Thread actions on sidebar cards and in the conversation header; the mobile sheet lists the header actions inline |
 | Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover |
+| Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
 
 ## Do's and Don'ts
 Never use UI eyebrow labels. Do not invent percentages or time-spent estimates
@@ -109,3 +110,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-29 | Direct response actions and title autosave | Reduce friction while preserving drafts, selection and reading position. |
 | 2026-10-29 | Simplify composer controls and expose native permission choices | Remove redundant chrome while preserving shortcuts, actual provider modes and group persistence. |
 | 2026-10-29 | List overview uses the shared group tabs and Filters | Remove duplicate group navigation; ungrouped threads remain available through the No group filter. |
+| 2026-10-30 | Chat agent trees include fork lineage with dotted connectors | Show shared conversation origins without implying supervision ownership. |

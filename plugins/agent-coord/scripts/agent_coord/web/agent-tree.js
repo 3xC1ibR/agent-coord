@@ -1,24 +1,28 @@
 "use strict";
 
 // A full card-and-connector tree. It navigates conversations; it never starts,
-// stops, or reparents an agent. Creation provenance is the relationship shown.
+// stops, or reparents an agent. Solid lines show supervision; dotted lines show forks.
 const AgentTree = (() => {
   const grouping = typeof module !== "undefined" ? require("./thread-groups.js") : threadGrouping;
   const CARD_W = 232, CARD_H = 152, ROW_GAP = 24, INDENT = 28, COLUMN_GAP = 32;
   function graph(threads) {
     const nodes = new Map(threads.filter(t => t?.thread_id).map(t => [t.thread_id, t]));
-    const parents = new Map(), children = new Map();
+    const parents = new Map(), children = new Map(), relationships = new Map();
     for (const t of nodes.values()) {
+      const source = t.forked_from?.thread_id || t.forked_from_thread_id;
       const parent = Object.hasOwn(t, "agent_parent_id") ? t.agent_parent_id
-        : t.creation_mode === "orchestration" ? t.created_by_thread_id : t.parent?.session_id;
-      if (parent && parent !== t.thread_id && nodes.has(parent)) parents.set(t.thread_id, parent);
+        : (t.creation_mode === "orchestration" ? t.created_by_thread_id : t.parent?.session_id) || source;
+      if (parent && parent !== t.thread_id && nodes.has(parent)) {
+        parents.set(t.thread_id, parent);
+        relationships.set(t.thread_id, parent === source ? "fork" : "agent");
+      }
     }
     // Break corrupt historical cycles deterministically, retaining every node.
     for (const id of [...nodes.keys()].sort()) {
       const seen = new Set([id]);
       let next = parents.get(id);
       while (next && !seen.has(next)) { seen.add(next); next = parents.get(next); }
-      if (next) parents.delete(id);
+      if (next) { parents.delete(id); relationships.delete(id); }
     }
     for (const [id, parent] of parents) {
       if (!children.has(parent)) children.set(parent, []);
@@ -35,14 +39,14 @@ const AgentTree = (() => {
       }
       return result;
     }
-    return {nodes, parents, children, root, family};
+    return {nodes, parents, children, relationships, root, family};
   }
   function layout(tree, root, collapsed = new Set()) {
     if (!tree.nodes.has(root)) return {nodes: [], edges: [], width: 0, height: 0};
     const nodes = [], edges = [], positions = new Map();
     const add = (id, x, y, level, parent = null) => {
       const item = {id, x, y, level, parent}; nodes.push(item); positions.set(id, item);
-      if (parent) edges.push({from: parent, to: id});
+      if (parent) edges.push({from: parent, to: id, relationship: tree.relationships.get(id)});
     };
     const first = collapsed.has(root) ? [] : tree.children.get(root) || [];
     // Keep wide sibling groups from becoming a single, endlessly wide row.
@@ -80,7 +84,6 @@ const AgentTree = (() => {
           : `M${x1},${y1} V${y1 + 32} H${x2} V${y2}`;
       } else {
         const x = b.x - 14, y = b.y + 24;
-        edge.path = `M${a.x + 14},${a.y + CARD_H} V${y} H${b.x}`;
         // The vertical child rail stays to the left of its own card.
         edge.path = `M${x},${a.y + CARD_H} V${y} H${b.x}`;
       }
@@ -194,6 +197,7 @@ const AgentTree = (() => {
         this.messageSvg.setAttribute("width", positioned.width); this.messageSvg.setAttribute("height", positioned.height);
         for (const edge of positioned.edges) {
           const path = this.document.createElementNS("http://www.w3.org/2000/svg", "path");
+          if (edge.relationship === "fork") path.classList.add("agent-tree-fork");
           path.setAttribute("d", edge.path); this.svg.append(path);
         }
         const visible = new Set(positioned.nodes.map(n => n.id));
@@ -271,7 +275,10 @@ const AgentTree = (() => {
       const selected = id === this.selected;
       card.classList.toggle("selected", selected); card.dataset.status = value.key;
       card.tabIndex = selected || !this.cardEls.has(this.selected) && id === this.root ? 0 : -1;
-      card.setAttribute("aria-selected", String(selected)); card.setAttribute("aria-label", (t.title || "Agent") + ": " + value.label);
+      const source = this.tree.relationships.get(id) === "fork" ? this.tree.nodes.get(this.tree.parents.get(id)) : null;
+      card.setAttribute("aria-selected", String(selected));
+      card.setAttribute("aria-label", (t.title || "Agent") + ": " + value.label +
+        (source ? ". Forked from " + (source.title || "Untitled agent") : ""));
       if (kids.length) card.setAttribute("aria-expanded", String(!this.view.collapsed.has(id)));
       else card.removeAttribute("aria-expanded");
       const summary = (!t.checkpoint_stale && t.checkpoint?.next_actor === "user" && t.checkpoint.next_action)

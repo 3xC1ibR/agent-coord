@@ -1,4 +1,4 @@
-"""Read-only agent families, independent of overview filters and thread placement."""
+"""Read-only agent and fork families, independent of filters and placement."""
 from collections import defaultdict
 
 from .store import CoordinationError
@@ -17,6 +17,10 @@ def agent_tree(sessions, thread_id):
             parents.setdefault(row[1], row[0])
         # An explicit supervision transfer replaces the creator edge.
         parents.update(supervision_overrides(db))
+        # Fork lineage is a display relationship, not supervision ownership.
+        for row in db.execute("""SELECT thread_id, forked_from_thread_id FROM work_threads
+                                 WHERE forked_from_thread_id IS NOT NULL"""):
+            parents.setdefault(row[0], row[1])
     # Old data can contain cycles. The same edge is dropped for every entry point.
     for child in sorted(parents):
         seen, parent = {child}, parents.get(child)

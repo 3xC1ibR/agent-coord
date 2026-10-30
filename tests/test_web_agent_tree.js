@@ -5,15 +5,28 @@ const thread = (id, parent, extra = {}) => ({thread_id: id, title: id, browser_s
   attention: "now", status: "idle", response_state: "available", work_phase: "planning",
   ...(parent ? {creation_mode: "orchestration", created_by_thread_id: parent} : {}), ...extra});
 
-test("the tree spans state, placement and group boundaries without inventing dispatch or fork edges", () => {
+test("the tree spans state, placement and group boundaries with fork lineage and no dispatch edges", () => {
   const records = [thread("root"), thread("child", "root", {attention: "later", project_id: "different"}),
     thread("closed", "child", {attention: "archived"}), thread("dispatch", "root", {creation_mode: null}),
     thread("fork", null, {forked_from: {thread_id: "root"}}), thread("unrelated", null, {project_id: "different"})];
   const tree = Tree.graph(records);
-  assert.deepEqual(tree.family("root"), ["root", "child", "closed"]);
+  assert.deepEqual(tree.family("root"), ["root", "child", "closed", "fork"]);
   assert.equal(tree.root("closed"), "root");
   assert.equal(tree.root("dispatch"), "dispatch");
-  assert.equal(tree.root("fork"), "fork");
+  assert.equal(tree.root("fork"), "root");
+  assert.equal(tree.relationships.get("fork"), "fork");
+  assert.equal(tree.relationships.get("child"), "agent");
+});
+test("fork chains join their immediate source and preserve delegated descendants", () => {
+  const tree = Tree.graph([thread("root"), thread("fork", null, {agent_parent_id: "root", forked_from: {thread_id: "root"}}),
+    thread("nested", null, {forked_from_thread_id: "fork"}), thread("agent", "fork")]);
+  const layout = Tree.layout(tree, "root");
+  assert.equal(tree.root("nested"), "root");
+  assert.deepEqual(layout.edges.filter(e => e.relationship === "fork").map(e => [e.from, e.to]),
+    [["root", "fork"], ["fork", "nested"]]);
+  assert.deepEqual(Tree.layout(tree, "root", new Set(["fork"])).nodes.map(n => n.id).sort(), ["fork", "root"]);
+  const inaccessible = Tree.graph([thread("root"), thread("fork", null, {agent_parent_id: null, forked_from: {thread_id: "root"}})]);
+  assert.equal(inaccessible.root("fork"), "fork", "the family endpoint controls workspace visibility");
 });
 test("missing parents, self links, and historical cycles cannot trap tree navigation", () => {
   const tree = Tree.graph([thread("a", "b"), thread("b", "a"), thread("c", "b"),
@@ -21,6 +34,9 @@ test("missing parents, self links, and historical cycles cannot trap tree naviga
   assert.deepEqual(tree.family(tree.root("c")).sort(), ["a", "b", "c"]);
   assert.equal(tree.root("missing"), "missing");
   assert.equal(tree.root("self"), "self");
+  const forks = Tree.graph([thread("a", null, {forked_from_thread_id: "b"}),
+    thread("b", null, {forked_from_thread_id: "a"})]);
+  assert.deepEqual(forks.family(forks.root("a")).sort(), ["a", "b"]);
 });
 test("full cards have non-overlapping positions, first-level columns and connected deeper descendants", () => {
   const records = [thread("root"), thread("research", "root"), thread("writer", "root"), thread("coder", "root"),
@@ -90,6 +106,24 @@ function setup() {
   const selected = [], panel = new Tree.Panel({document: doc, window, host: doc.createElement("div"), onSelect: id => selected.push(id)});
   return {panel, selected, doc, timers, window};
 }
+test("only fork connectors are dotted and fork cards describe their source accessibly", () => {
+  const {panel, selected} = setup();
+  const records = [thread("root"), thread("agent", "root"), thread("fork", null, {forked_from: {thread_id: "root"}})];
+  panel.update(records, "root", "root");
+  assert.equal(panel.svg.children.length, 2);
+  assert.equal(panel.svg.children[0].classList.contains("agent-tree-fork"), false);
+  assert.equal(panel.svg.children[1].classList.contains("agent-tree-fork"), true);
+  assert.match(panel.cardEls.get("fork").attrs["aria-label"], /Forked from root/);
+  const card = panel.cardEls.get("fork");
+  card.onclick({target: card});
+  assert.deepEqual(selected, ["fork"]);
+  panel.update(records, "root", "fork");
+  assert.equal(panel.cardEls.get("fork"), card);
+  assert.equal(card.attrs["aria-selected"], "true");
+  panel.update(records.map(t => t.thread_id === "fork" ? thread("fork", "root") : t), "root", "fork");
+  assert.equal(panel.svg.children.some(path => path.classList.contains("agent-tree-fork")), false,
+    "relationship updates redraw connectors even when card geometry stays the same");
+});
 test("large trees start readable and explicit fit still shows the full tree", () => {
   const {panel} = setup();
   panel.viewport.clientWidth = 600; panel.viewport.clientHeight = 400;
@@ -271,6 +305,23 @@ test("family discovery includes an archived ancestor missing from overview inven
   assert.equal(c.controller.mode, "agents");
   assert.equal(c.controller.root, "root");
   assert.equal(c.collapsed, false);
+});
+
+test("fork-only families open the Agents panel, including an archived source absent from inventory", async () => {
+  const source = thread("source"), fork = thread("fork", null, {forked_from: {thread_id: "source"}});
+  for (const selected of ["source", "fork"]) {
+    const c = setupController([source, fork], selected);
+    c.controller.bind(); await c.controller.load();
+    assert.equal(c.controller.mode, "agents");
+    assert.equal(c.controller.root, "source");
+    assert.equal(c.collapsed, false);
+  }
+  const c = setupController([fork], "fork", () => Promise.resolve({root_thread_id: "source",
+    data: [{...source, attention: "archived"}, fork]}));
+  c.controller.bind(); await c.controller.load();
+  assert.equal(c.controller.mode, "agents");
+  assert.equal(c.controller.root, "source");
+  assert.equal(c.controller.tree.relationships.get("fork"), "fork");
 });
 
 test("a standalone conversation hides both tabs without forcing the context panel open", async () => {

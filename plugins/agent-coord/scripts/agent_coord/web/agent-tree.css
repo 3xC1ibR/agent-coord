@@ -3,7 +3,7 @@
 .context-panel-tabs button { padding: 7px 13px; border-color: transparent; background: transparent; font-size: 12px; }
 .context-panel-tabs button[aria-selected="true"] { background: var(--surface); border-color: var(--line); }
 .context-panel-tabs .agent-panel-close { margin-left: auto; }
-.agent-tree-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; }
+.agent-tree-panel { --agent-tree-fork-dash: 1 5; display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; }
 .context-panel.agents-mode { display: flex; flex-direction: column; overflow: hidden; max-height: none; }
 .agent-tree-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 16px 20px 4px; font-size: 12px; min-height: 40px; }
 .agent-tree-summary { color: var(--muted); }
@@ -13,6 +13,7 @@
 .agent-tree-scene { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .agent-tree-connectors { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
 .agent-tree-connectors path { fill: none; stroke: #6099cd; stroke-width: 1.4; stroke-linejoin: round; }
+.agent-tree-connectors .agent-tree-fork { stroke-dasharray: var(--agent-tree-fork-dash); stroke-linecap: round; }
 .agent-tree-messages { position: absolute; inset: 0; overflow: visible; pointer-events: none; z-index: 1; }
 .agent-tree-message { animation: agent-tree-message-fade 1.5s ease-out both; }
 .agent-tree-message-route { fill: none; stroke: var(--accent, #6099cd); stroke-width: 2; stroke-dasharray: 4 5; opacity: .65; }
