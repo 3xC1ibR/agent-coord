@@ -40,7 +40,6 @@ from .speech import Speech, spoken_text
 from .jev_settings import JevSettings
 from .provider_limits import ProviderLimits
 from . import launch_metrics
-from .status_reports import StatusReports, REPORT_CSP
 
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 8765
@@ -284,7 +283,6 @@ def _handler(
     navigation = NavigationStore(store)
     speech = Speech(store.database_path)
     jev = JevSettings(store.database_path)
-    status_reports = StatusReports()
     provider_limits = provider_limits or (ProviderLimits(browser_sessions) if browser_sessions is not None else None)
 
     class Handler(BaseHTTPRequestHandler):
@@ -306,9 +304,7 @@ def _handler(
                 openui_frame = (status == HTTPStatus.OK and content_type.startswith("text/html")
                                 and parsed.path == "/openui-frame.html")
                 html_preview = (status == HTTPStatus.OK and content_type.startswith("text/html")
-                                and (parsed.path.startswith("/api/browser/html-preview-content/")
-                                     or parsed.path.startswith("/api/browser/status-report-content/")))
-                status_report = parsed.path.startswith("/api/browser/status-report-content/")
+                                and parsed.path.startswith("/api/browser/html-preview-content/"))
                 from .html_preview import PREVIEW_CSP
                 # WebKit resolves 'self' to the sandbox's opaque origin and
                 # blocks even this document's own scripts/styles. Pin assets to
@@ -318,12 +314,12 @@ def _handler(
                                  if openui_frame else "")
                 embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
                             and ((parsed.path == "/" and query.get("pane") == ["1"])
-                                 or (parsed.path in {"/settings", "/usage", "/activity", "/status", "/html-preview"} and query.get("embedded") == ["1"]))
+                                 or (parsed.path in {"/settings", "/usage", "/activity", "/html-preview"} and query.get("embedded") == ["1"]))
                             and self._authorized())
                 self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame or html_preview else "DENY")
                 self.send_header(
                     "Content-Security-Policy",
-                    (REPORT_CSP if html_preview and status_report else PREVIEW_CSP if html_preview else
+                    (PREVIEW_CSP if html_preview else
                      f"default-src 'none'; script-src {openui_origin}; style-src {openui_origin} 'unsafe-inline'; "
                      "img-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; "
                      "form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts"
@@ -430,11 +426,6 @@ def _handler(
                 return
             if parsed.path == "/activity":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "activity.html").read_bytes())
-                return
-            if parsed.path in {"/status", "/status-reports.js", "/status-reports.css"}:
-                asset = "status-reports.html" if parsed.path == "/status" else parsed.path[1:]
-                content_type = {"html": "text/html", "js": "text/javascript", "css": "text/css"}[asset.rsplit(".", 1)[1]]
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / asset).read_bytes())
                 return
             if parsed.path in {"/activity.js", "/activity.css", "/activity-collector.js"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
@@ -555,10 +546,6 @@ def _handler(
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "desktop-projects":
                 self._json(HTTPStatus.OK, browser_sessions.desktop_projects())
-            elif route == "status-reports":
-                self._json(HTTPStatus.OK, status_reports.list())
-            elif route.startswith("status-report-content/"):
-                self._send(HTTPStatus.OK, "text/html; charset=utf-8", status_reports.content(route.removeprefix("status-report-content/")).encode())
             elif route == "html-preview" or route.startswith("html-preview-content/"):
                 from .html_preview import read_html
                 content = route.startswith("html-preview-content/")
@@ -812,11 +799,6 @@ def _handler(
                 body = json.loads(raw_body)
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
-                if route == ["api", "browser", "status-reports", "dismiss"]:
-                    if set(body) != {"id", "dismissed"}:
-                        raise CoordinationError("Choose a status report and its dismissed state.")
-                    self._json(HTTPStatus.OK, status_reports.dismiss(body["id"], body["dismissed"]))
-                    return
                 if route[:3] == ["api", "browser", "activity"]:
                     from .activity_api import record_browser_events, create_activity_review
                     if route == ["api", "browser", "activity", "events"]:
