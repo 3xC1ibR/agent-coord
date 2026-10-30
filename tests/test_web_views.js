@@ -3,6 +3,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {threadViews, SavedViews} = require("../plugins/agent-coord/scripts/agent_coord/web/views.js");
 const grouping = require("../plugins/agent-coord/scripts/agent_coord/web/thread-groups.js");
+const WorkingSet = require("../plugins/agent-coord/scripts/agent_coord/web/working-set.js");
 
 const thread = (id, values = {}) => ({thread_id: id, title: id, attention: "now", repository_id: "rig", project_id: "migration",
   response_state: "working", checkpoint: {phase: "implementation"}, ...values});
@@ -47,6 +48,47 @@ test("badges count grouped attention once, while filtered children remain visibl
   const child = thread("child", {needs_attention: true, response_state: "input", attention_grouped_under: "owner", repository_id: "other"});
   assert.equal(threadViews.badges([owner, child], {}).attention, 1);
   assert.equal(threadViews.badges([owner, child], {repository: "other"}).attention, 1);
+});
+
+test("List badges stop counting replies when read or a day old", () => {
+  const now = 200000, options = {layout: "list", now};
+  const reply = thread("reply", {status: "saved", response_state: "update", needs_attention: true,
+    unhandled_response: true, unread_result: true, attention_since: now - 60});
+  assert.deepEqual(threadViews.badges([reply], {}, options), {attention: 1, action: false, active: false, completed: true});
+  for (const patch of [{unread_result: false}, {attention_since: now - 86400}, {attention: "archived"}, {snoozed: true}]) {
+    const t = {...reply, ...patch};
+    assert.deepEqual(threadViews.badges([t], {}, options), {attention: 0, action: false, active: false, completed: false});
+  }
+  const readRequest = {...reply, unread_result: false, response_state: "input", attention_reason: "blocked",
+    checkpoint: {id: 2, next_actor: "user", next_action: "Choose a plan"}};
+  assert.equal(threadViews.badges([readRequest], {}, options).action, false);
+  assert.equal(threadViews.badges([readRequest], {}, options).attention, 0);
+  assert.equal(threadViews.badges([readRequest], {}).attention, 1, "other overview modes keep their existing policy");
+});
+
+test("List badge counts match the visible rows across groups, requests, and filters", () => {
+  const now = 200000, options = {layout: "list", now};
+  const idle = (id, extra = {}) => thread(id, {status: "saved", response_state: "available", ...extra});
+  const child = (id, extra) => idle(id, {creation_mode: "orchestration", created_by_thread_id: "lead", project_id: null, ...extra});
+  const input = [idle("lead"), child("finding", {unread_result: true, attention_since: now - 1}),
+    child("approval", {status: "needs input", response_state: "input"}),
+    child("request", {unread: true, attention_since: now - 1, checkpoint: {id: 4, next_actor: "user", next_action: "Choose"}}),
+    idle("question", {open_ask: {id: 1}}), idle("reminder", {snooze_due: true}), idle("failure", {response_state: "failed"}),
+    idle("reply", {project_id: "other", unread_result: true, attention_since: now - 1}),
+    idle("later", {attention: "later", needs_attention: true, unread_result: true, attention_since: now - 1}),
+    thread("working", {project_id: "other"})];
+  for (const values of [{}, {search: "request"}, {repository: "rig"}, {repository: "missing"}, {show: "later"}, {show: "archived"}]) {
+    const visible = input.filter(t => threadViews.matches(t, values));
+    for (const group of [null, "migration", "other", "empty"]) {
+      const sections = WorkingSet.listSections(visible, {now, view: values.show, pageKey: group ? "group:" + group : "overview:all"}).sections;
+      const badges = threadViews.badges(input, {...values, ...(group ? {project: group} : {})}, {...options, group});
+      assert.equal(badges.attention, sections.attention.length, JSON.stringify({values, group}));
+      assert.equal(badges.active, sections.working.length > 0);
+    }
+  }
+  const group = threadViews.badges(input, {project: "migration"}, {...options, group: "migration"});
+  assert.equal(group.attention, 5, "inherited requests count, nested findings and Later replies do not");
+  assert.equal(group.action, true);
 });
 
 test("active-work badges follow the view's filters and ignore waiting or closed work", () => {
@@ -98,7 +140,7 @@ function storage() {
   return {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)};
 }
 
-function setup({saved = [], groups = [], windowStorage = storage(), preferences = storage()} = {}) {
+function setup({saved = [], groups = [], windowStorage = storage(), preferences = storage(), getLayout} = {}) {
   const doc = {activeElement: null, listeners: {}, body: {classList: {contains: () => false}},
     addEventListener(type, fn) { this.listeners[type] = fn; },
     querySelector() { return Object.values(controls).find(el => el.open && el.id.endsWith("dialog")) || null; }};
@@ -154,10 +196,23 @@ function setup({saved = [], groups = [], windowStorage = storage(), preferences 
     Object.assign(item, structuredClone(body), {version: item.version + 1}); return structuredClone(item);
   };
   let switches = 0;
-  const views = new SavedViews({document: doc, api, storage: windowStorage, preferences, onError: error => errors.push(error),
+  const views = new SavedViews({document: doc, api, storage: windowStorage, preferences, getLayout, onError: error => errors.push(error),
     onSwitch: async () => { switches++; controls.welcome.hidden = false; }});
   return {views, controls, doc, calls, records, errors, windowStorage, preferences, switches: () => switches};
 }
+
+test("group and mobile badges update when switching between List and Cards", async () => {
+  let layout = "cards";
+  const c = setup({groups: [{id: "migration", name: "Migration"}], getLayout: () => layout});
+  await c.views.start();
+  const reply = thread("read", {status: "saved", response_state: "update", needs_attention: true, unread_result: false});
+  const badgeCount = () => c.controls["saved-view-tabs"].children.filter(tab => tab.children.some(child => child.className === "view-attention")).length;
+  c.views.render([reply]); assert.equal(badgeCount(), 2);
+  layout = "list"; c.views.render();
+  assert.equal(badgeCount(), 0); assert.equal(c.controls["mobile-view-attention"].hidden, true);
+  assert.ok(c.controls["saved-view-tabs"].children.every(tab => !tab.attributes["aria-label"].includes("need attention")));
+  layout = "cards"; c.views.render(); assert.equal(badgeCount(), 2);
+});
 
 test("mobile picker switches saved filters, keeps counts current, and falls back after deletion", async () => {
   const c = setup({saved: [{id: "rig", name: "Rig", filters: {repository: "rig"}},

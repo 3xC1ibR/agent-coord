@@ -2,6 +2,7 @@
 
 const threadViews = (() => {
   const grouping = typeof module !== "undefined" ? require("./thread-groups.js") : threadGrouping;
+  const overview = typeof module !== "undefined" ? require("./working-set.js") : WorkingSet;
   const defaults = {repository: "", project: "", phase: "", show: "active", search: ""};
   function filters(values = {}) {
     return Object.fromEntries(Object.entries(defaults).map(([key, value]) =>
@@ -28,7 +29,19 @@ const threadViews = (() => {
   function needsAction(thread) {
     return needsYou(thread) && ["blocked", "review"].includes(grouping.reason(thread).key);
   }
-  function badges(threads, values) {
+  function badges(threads, values, {layout, group, workspace = "all", now = Date.now() / 1000} = {}) {
+    if (layout === "list") {
+      const f = filters(values);
+      // Group pages retain the other groups so orchestration children inherit
+      // their owner's group exactly as they do in the List overview.
+      const visible = threads.filter(thread => matches(thread, group ? {...f, project: ""} : f));
+      const {sections} = overview.listSections(visible, {workspace, now, view: f.show,
+        pageKey: group ? "group:" + group : "overview:all"});
+      return {attention: sections.attention.length,
+        action: sections.attention.some(t => needsAction(t) || ["approval", "question", "needs-you", "failed"].includes(overview.requestOf(t))),
+        active: sections.working.length > 0,
+        completed: sections.attention.some(t => t.unread_result || t.unread)};
+    }
     const visible = threads.filter(thread => matches(thread, values));
     const visibleIds = new Set(visible.map(thread => thread.thread_id));
     return {attention: visible.filter(thread => needsYou(thread) && !visibleIds.has(thread.attention_grouped_under)).length,
@@ -54,8 +67,9 @@ const threadViews = (() => {
 })();
 
 class SavedViews {
-  constructor({document, api, onSwitch, onRefresh, onError, notify, storage, preferences, scope = ""}) {
+  constructor({document, api, onSwitch, onRefresh, onError, notify, storage, preferences, scope = "", getLayout = () => "cards"}) {
     this.doc = document; this.api = api; this.onSwitch = onSwitch; this.onError = onError;
+    this.getLayout = getLayout;
     this.onRefresh = onRefresh;
     this.notify = notify;
     this.storage = storage; this.preferences = preferences;
@@ -528,7 +542,9 @@ class SavedViews {
     // Inventory polling must not replace the native drag source mid-gesture.
     if (this.dragGroup?.key === this.key) return;
     this.changed();
-    const badges = this.items.map(view => threadViews.badges(threads, this.effective(view).filters));
+    const layout = this.getLayout(), now = Date.now() / 1000;
+    const badges = this.items.map(view => threadViews.badges(threads, this.effective(view).filters,
+      {layout, now, workspace: this.cwd || "all", group: view.kind === "group" ? view.projectId : null}));
     const signature = JSON.stringify([this.items, this.activeId, badges, [...this.hiddenGroupIds()]]);
     if (signature === this.signature) return;
     this.signature = signature;

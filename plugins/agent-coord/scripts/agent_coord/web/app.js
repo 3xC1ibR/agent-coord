@@ -4021,6 +4021,7 @@ async function boot() {
     onError: showError, onOpened: switchProject});
   state.projectTabs = new ProjectTabs({document, folders: state.folders, onSwitch: switchProject, onError: showError});
   savedViews = new SavedViews({document, api, storage: windowStorage, preferences,
+    getLayout: () => state.overviewLayout.mode,
     onRefresh: refreshList,
     notify: (...args) => state.threadActions.notify(...args),
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
