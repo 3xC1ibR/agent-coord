@@ -485,6 +485,10 @@ class ThreadStore:
             if domain is not UNSET:
                 self._save_domain(db, thread_id, domain, "user")
             if attention is not None:
+                if attention == "archived":
+                    # Closing a supervisor passes its agents to a successor; the succession scan does the work.
+                    from .supervision import record_retirement
+                    record_retirement(db, thread_id, self.store.clock())
                 db.execute("UPDATE work_threads SET attention = ?, snoozed_until = NULL, deferred_at = ? WHERE thread_id = ?",
                            (attention, self.store.clock() if attention == "later" else None, thread_id))
             if pinned is not UNSET:

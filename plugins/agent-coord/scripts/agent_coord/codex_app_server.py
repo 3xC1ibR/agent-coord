@@ -1272,6 +1272,14 @@ class BrowserSessions:
         thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
         thread["orchestration_workspaces"] = thread["created_by"]["workspaces"] if thread["created_by"] else []
         if _inventory is None:
+            from .supervision import relations
+            with self.store._connection() as db:
+                related = relations(db)
+        else:
+            related = _inventory.supervision
+        from .supervision import display_fields
+        thread.update(display_fields(thread_id, thread["created_by"], related))
+        if _inventory is None:
             from .asks import AskStore
             with self.store._connection() as db:
                 thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
@@ -1371,7 +1379,8 @@ class BrowserSessions:
                           attention_since=open_ask["created_at"])
             if thread["status"] != "running":
                 thread["response_state"] = "input"
-        blocked_wake = bool(wake_pause and wake_pause["pause_kind"] != "stop" and wake_pause["pending_action"]
+        # Stops wait for the user; a released Stop waits for its supervisor, not the user.
+        blocked_wake = bool(wake_pause and wake_pause["pause_kind"] not in {"stop", "released"} and wake_pause["pending_action"]
                             and thread["attention"] != "archived" and not thread["snoozed"] and not running)
         if blocked_wake:
             thread.update(needs_attention=True, attention_reason="blocked",
@@ -1379,6 +1388,7 @@ class BrowserSessions:
                           attention_key=f"wake:{thread_id}:{wake_pause['paused_at'] or wake_pause['error']}",
                           attention_since=wake_pause["paused_at"] or thread["updated_at"], can_handle_response=False)
         thread["wake_pause_reason"] = wake_pause["error"] if wake_pause else None
+        thread["wake_pause_kind"] = wake_pause["pause_kind"] if wake_pause else None
         policy = notification_policy.decide(thread, waiting=bool(waiting) or blocked_on_ask or blocked_wake, owners=owners)
         health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
         thread["turn_health"] = health
@@ -1443,6 +1453,8 @@ class BrowserSessions:
             if hasattr(self, "reviews"):
                 inventory.reviews = self.reviews.inventory(db)
             inventory.creators = self._app_agent_creators(db=db)
+            from .supervision import relations
+            inventory.supervision = relations(db)
             inventory.projected = {row["thread_id"]: inventory.read(db, row) for row in inventory.rows
                                    if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)}
         return notification_policy.group_attention([

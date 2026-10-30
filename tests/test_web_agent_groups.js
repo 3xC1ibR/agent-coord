@@ -276,3 +276,16 @@ test("pinned agents remain directly accessible and Later and Closed support grou
     assert.ok(walk(c.$("overview")).filter(n => n.tag === "button").every(n => !walk(n).slice(1).some(x => x.tag === "button" || x.tag === "details")));
   }
 });
+
+test("agents group under their current supervisor, and the user's agents stand alone", () => {
+  const moved = thread("moved", "lead", {supervisor_thread_id: "next"});
+  const orphan = thread("orphan", "lead", {supervisor_thread_id: null, supervised_by_user: true});
+  const kept = thread("kept", "lead", {supervisor_thread_id: "lead"});
+  const c = harness([thread("lead"), thread("next"), moved, orphan, kept]);
+  assert.deepEqual(c.cards().sort(), ["lead", "next", "orphan"]);
+  const groups = walk(c.$("overview")).filter(n => n.className.split(" ").includes("agent-thread-group"));
+  const membership = Object.fromEntries(groups.map(group => [walk(group).find(n => n.dataset.cardThread)?.dataset.cardThread,
+    withClass(group, "agent-row").map(row => row.dataset.thread).sort()]));
+  assert.deepEqual(membership.next, ["moved"]);
+  assert.deepEqual(membership.lead, ["kept"]);
+});

@@ -637,6 +637,11 @@ def _handler(
                     self._send(HTTPStatus.NOT_MODIFIED, "application/json; charset=utf-8", b"", entity_tag=tag)
                 else:
                     self._send(HTTPStatus.OK, "application/json; charset=utf-8", body, entity_tag=tag)
+            elif route == "roles":
+                from .workspace_roles import list_roles
+                self._json(HTTPStatus.OK, list_roles(store, browser_sessions.cwd))
+            elif route == "stops":
+                self._json(HTTPStatus.OK, browser_sessions.inbox_wake.stopped_conversations())
             elif route == "search":
                 from .thread_search import search_browser_threads
                 # Reuse the app inventory boundary (workspace and managed-worker
@@ -815,6 +820,33 @@ def _handler(
                         result = browser_sessions.activity.clear(**body)
                     else:
                         raise CoordinationError("Unknown activity action.")
+                    self._json(HTTPStatus.OK, result)
+                    return
+                if route[:3] == ["api", "browser", "roles"]:
+                    # App requests act for the user, who may appoint any holder.
+                    from . import workspace_roles
+                    if len(route) == 3:
+                        if set(body) != {"name"}:
+                            raise CoordinationError("Creating a role accepts a name only.")
+                        result = workspace_roles.create_role(store, workspace=browser_sessions.cwd, name=body["name"],
+                                                             requester_kind="user")
+                    elif len(route) == 5 and route[4] == "holder":
+                        if set(body) != {"session_id"} or not (body["session_id"] is None or isinstance(body["session_id"], str)):
+                            raise CoordinationError("Choose a holder session_id, or null to vacate the role.")
+                        result = workspace_roles.appoint(store, role_id=unquote(route[3]), holder=body["session_id"],
+                                                         requester_kind="user", workspace=browser_sessions.cwd)
+                    elif len(route) == 5 and route[4] == "delete" and not body:
+                        result = workspace_roles.delete_role(store, role_id=unquote(route[3]), workspace=browser_sessions.cwd)
+                    else:
+                        raise CoordinationError("Unknown role action.")
+                    browser_sessions._publish("browser/changed", {})
+                    self._json(HTTPStatus.OK, result)
+                    return
+                if route == ["api", "browser", "stops", "release"]:
+                    if set(body) != {"thread_ids"}:
+                        raise CoordinationError("Releasing Stops accepts thread_ids only.")
+                    result = browser_sessions.inbox_wake.release_stops(body["thread_ids"])
+                    browser_sessions._publish("browser/changed", {})
                     self._json(HTTPStatus.OK, result)
                     return
                 if route == ["api", "browser", "provider-usage", "refresh"]:
@@ -1104,6 +1136,15 @@ def _handler(
                             control = ThreadControl(store)
                             result = (control.request_close(thread_id, after_turn=True, success_only=True)
                                       if body["enabled"] else control.cancel(thread_id))
+                        browser_sessions._publish("browser/changed", {"threadId": thread_id})
+                    elif route[4] == "supervisor":
+                        # App requests act for the user, who may give any agent a new supervisor.
+                        from .workspace_roles import assign_supervisor
+                        if set(body) != {"session_id"} or not isinstance(body["session_id"], str):
+                            raise CoordinationError("Choose the supervising session_id.")
+                        browser_sessions.work_thread(thread_id, history=False)
+                        result = assign_supervisor(store, thread_id=thread_id, holder=body["session_id"],
+                                                   workspace=browser_sessions.cwd)
                         browser_sessions._publish("browser/changed", {"threadId": thread_id})
                     elif route[4] == "close":
                         from .subagent_close import close_with_subagents

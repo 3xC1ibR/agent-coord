@@ -156,6 +156,40 @@ class BrowserWakeTests(unittest.TestCase):
                 self.sessions.inbox_wake.process_once()
                 self.assertEqual(len(self.turns(thread)), 3)
 
+    def test_released_stop_waits_for_its_supervisor_and_nothing_restarts(self):
+        from test_subagent_close import attach
+        supervisor, worker = self.create(), self.create()
+        attach(self.store, supervisor, worker)
+        self.sessions.send(worker, {"message": "Initial work"})
+        self.sessions.interrupt(worker)
+        self.message(worker)
+        turn = self.turns(worker)[-1]["id"]
+        listed = self.sessions.inbox_wake.stopped_conversations()["data"]
+        self.assertEqual([(item["thread_id"], item["supervisor"]) for item in listed], [(worker, supervisor)])
+        with self.assertRaisesRegex(CoordinationError, "Stop or uncertain wake needs direct user input"):
+            self.sessions.inbox_wake.recover(worker, turn, supervisor, reason="Checked", execution_confirmed=True)
+        result = self.sessions.inbox_wake.release_stops([worker])
+        self.assertEqual((result["released_thread_ids"], result["notified_supervisors"]), ([worker], [supervisor]))
+        self.assertEqual(self.sessions.inbox_wake.stopped_conversations()["data"], [])
+        # Releasing never restarts the conversation, even with queued actionable messages.
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(len(self.turns(worker)), 1)
+        notices = [m for m in self.store.inbox(supervisor, mark_delivered=False) if m["thread_id"].startswith("stop-release:")]
+        self.assertEqual([json.loads(m["body"])["thread_ids"] for m in notices], [[worker]])
+        self.assertEqual(notices[0]["classification"], "action_required")
+        # Its supervisor may now recover it after inspection with a fresh continuation.
+        with self.assertRaisesRegex(CoordinationError, "Queue a fresh actionable continuation"):
+            self.sessions.inbox_wake.recover(worker, turn, supervisor, reason="Checked", execution_confirmed=True)
+        with self.assertRaisesRegex(CoordinationError, "Only this app agent's current supervisor"):
+            self.sessions.inbox_wake.recover(worker, turn, "sender", reason="Checked", execution_confirmed=True)
+        self.store.send_message(sender_session_id=supervisor, recipient_session_id=worker,
+                                body="Continue the checked work.", reply_required=False)
+        self.sessions.inbox_wake.recover(worker, turn, supervisor, reason="Checked tool outcomes", execution_confirmed=True)
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(len(self.turns(worker)), 2)
+        skipped = self.sessions.inbox_wake.release_stops([worker])
+        self.assertEqual((skipped["released_thread_ids"], skipped["skipped"][0]["reason"]), ([], "No longer held by a Stop."))
+
     def test_failed_turn_does_not_restart_itself(self):
         thread = self.create()
         self.sessions.send(thread, {"message": "Initial work"})

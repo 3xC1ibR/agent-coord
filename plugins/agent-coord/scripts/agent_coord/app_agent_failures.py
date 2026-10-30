@@ -83,6 +83,8 @@ def turn_failure_message(db, creator, child, turn_id):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
         return None
     current = supervision.override(db, child)
+    if supervision.supervised_by_user(db, child):
+        return None
     if current is not None and current != creator:
         return None  # Reports for a transferred agent belong to its current supervisor.
     if current == creator:
@@ -103,8 +105,12 @@ def turn_failure_message(db, creator, child, turn_id):
 
 def _notify(store, db, request, *, event_key, stage, error, turn_id=None, event="app_agent_failed", guidance=None):
     child = request["thread_id"]
+    if supervision.supervised_by_user(db, child):
+        return  # The app shows the failure to its supervising user; a retired session is not woken.
     # Reports go to the current supervisor; creation failures precede any transfer.
     creator = supervision.override(db, child) or request["sender_session_id"]
+    if supervision.passing_from(db, creator, child):
+        return  # A closed supervisor is not woken; the app shows the failure until the move completes.
     if child == creator or not db.execute(
             "SELECT 1 FROM sessions WHERE session_id = ?", (creator,)).fetchone():
         return

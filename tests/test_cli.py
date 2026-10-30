@@ -19,6 +19,27 @@ from agent_coord.store import CoordinationError
 
 
 class CliTests(unittest.TestCase):
+    def test_role_commands_create_hand_off_and_release_only_the_callers_role(self):
+        from agent_coord.store import CoordinationStore
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            database = str(root / "coord.sqlite3")
+            store = CoordinationStore(database)
+            for session in ("lead", "next"):
+                store.register(session_id=session, client="codex", cwd=str(root))
+            def run(*arguments, caller):
+                with patch("agent_coord.cli.caller_session", return_value=caller):
+                    return cli_run(_parser().parse_args(["--db", database, "role", *arguments]))
+            created = run("create", "--name", "Field lead", caller="lead")
+            self.assertEqual((created["name"], created["holder_session_id"]), ("Field lead", "lead"))
+            with self.assertRaisesRegex(CoordinationError, "holds no role"):
+                run("transfer", "--to-session", "lead", "--reason", "Take it", caller="next")
+            handed = run("transfer", "--to-session", "next", "--reason", "Context exhausted", caller="lead")
+            self.assertEqual(handed["holder_session_id"], "next")
+            released = run("release", "--reason", "Finished", caller="next")
+            self.assertIsNone(released["holder_session_id"])
+            self.assertEqual([r["name"] for r in run("list", caller="lead")["data"]], ["Field lead"])
+
     def test_supervision_handoff_and_adoption_commands_follow_authority(self):
         from agent_coord.app_control import AppControl
         from agent_coord.store import CoordinationStore

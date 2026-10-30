@@ -505,6 +505,11 @@ function threadCard(thread, compact = false, inAttention = false) {
     const designation = node("span", "Dispatcher", "dispatcher-designation");
     (compact ? title : button.querySelector(".card-meta")).append(designation);
   }
+  if (thread.role) {
+    const designation = node("span", thread.role.name, "role-designation");
+    designation.title = "Role: " + thread.role.name;
+    (compact ? title : button.querySelector(".card-meta")).append(designation);
+  }
   button.onclick = () => action(() => select(thread.attention_target_thread_id || thread.thread_id));
   if (!compact && thread.attention !== "archived") {
     button.draggable = true; button.dataset.dragThread = thread.thread_id;
@@ -582,6 +587,9 @@ function threadMenuItems(thread) {
     run: () => action(() => forkThread(undefined, thread.thread_id))});
   if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.dispatcher ? "Stop using as dispatcher" : "Use as dispatcher", run: () => action(() => toggleDispatcher(thread))});
   if (thread.browser_session && thread.attention !== "archived") items.push({label: "Attach sidecar…", run: () => action(() => state.sidecars.open(thread))});
+  if (thread.browser_session && thread.attention !== "archived") items.push({label: thread.role ? "Change role…" : "Assign role…", run: () => action(() => openRoleDialog(thread))});
+  if (thread.attention !== "archived" && (thread.supervised_by_user || thread.supervisor_thread_id || thread.created_by_thread_id))
+    items.push({label: "Change supervisor…", run: () => openSupervisorDialog(thread)});
   if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
   return items;
 }
@@ -739,6 +747,11 @@ function renderList() {
   const signature = JSON.stringify([state.overviewLayout?.mode, threads, upcoming, state.selected, [...(state.closing || [])], [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
   $("back-home").setAttribute("aria-current", state.selected && !state.dispatchDock?.active ? "false" : "page");
   const projects = new Set(threads.map(t => t.project_id).filter(Boolean)).size;
+  const stopped = (state.viewThreads || []).filter(t => t.wake_pause_kind === "stop" && t.attention !== "archived").length;
+  $("release-stops-open").hidden = !stopped;
+  $("release-stops-open").textContent = stopped + " stopped…";
+  $("release-stops-open").title = "Release " + stopped + (stopped === 1 ? " stopped conversation" : " stopped conversations");
+  $("release-stops-open").ariaLabel = $("release-stops-open").title;
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
     " · " + projects + (projects === 1 ? " group" : " groups") +
     (upcoming.length ? " · " + upcoming.length + (upcoming.length === 1 ? " scheduled prompt" : " scheduled prompts") : "");
@@ -919,22 +932,27 @@ function upcomingSchedules(query) {
         repository: $("repository").value, search: query});
   }}) || [];
 }
+function supervisorOf(thread) {
+  if (Object.hasOwn(thread, "supervisor_thread_id")) return thread.supervisor_thread_id;
+  return thread.creation_mode === "orchestration" ? thread.created_by_thread_id : null;
+}
 function agentThreadTree(threads) {
   // Filter first: a hidden, closed, or differently placed creator must never
   // swallow a matching child. Keep the original records and counts untouched.
   const visible = new Map(threads.map(thread => [thread.thread_id, thread]));
   const parents = new Map(), children = new Map();
   for (const thread of threads) {
-    // Group explicit orchestration creations only; provenance alone also
-    // includes dispatch and older creations whose intent was never recorded.
-    if (thread.creation_mode !== "orchestration") continue;
-    const parent = visible.get(thread.created_by_thread_id);
+    // Group under the current supervisor. Without a transfer that is an
+    // explicit orchestration creator; dispatch provenance alone never groups.
+    const supervisor = supervisorOf(thread);
+    if (!supervisor) continue;
+    const parent = visible.get(supervisor);
     if (!parent || parent.attention !== thread.attention) continue;
     const seen = new Set([thread.thread_id]);
     let ancestor = parent;
     while (ancestor && !seen.has(ancestor.thread_id)) {
       seen.add(ancestor.thread_id);
-      ancestor = ancestor.creation_mode === "orchestration" ? visible.get(ancestor.created_by_thread_id) : null;
+      ancestor = visible.get(supervisorOf(ancestor));
     }
     if (ancestor) continue; // Defensive against malformed historical cycles.
     parents.set(thread.thread_id, parent.thread_id);
@@ -2539,6 +2557,141 @@ $("move-thread-form").onsubmit = event => {
   action(submitThreadMove, $("save-thread-move"));
 };
 $("organize-thread").onclick = () => action(() => organizeThread(state.detail?.work_thread), $("organize-thread"));
+// Roles: the user names positions and appoints the conversations that hold them.
+let roleThread = null;
+async function openRoleDialog(thread) {
+  if (!thread) return;
+  const roles = (await api("roles")).data;
+  roleThread = thread; state.roles = roles;
+  $("role-names").replaceChildren(...roles.map(role => new Option(role.name, role.name)));
+  $("role-name").value = thread.role?.name || "";
+  $("vacate-role").hidden = !thread.role;
+  if (thread.role) $("vacate-role").textContent = "Remove from " + thread.role.name;
+  $("role-error").hidden = true;
+  describeRoleChoice();
+  $("role-dialog").showModal();
+  $("role-name").focus();
+}
+function matchingRole() {
+  const name = $("role-name").value.trim().replace(/\s+/g, " ").toLowerCase();
+  return (state.roles || []).find(role => role.name.toLowerCase() === name);
+}
+function plural(count, one, many) { return count + " " + (count === 1 ? one : many); }
+function describeRoleChoice() {
+  const role = matchingRole(), note = $("role-current"), holder = role?.holder_session_id;
+  note.hidden = !role || holder === roleThread?.thread_id;
+  if (role && holder) note.textContent = "Held by " + (role.holder_title || "another conversation") + ". " +
+    (role.agent_count ? plural(role.agent_count, "agent", "agents") + " will report to this conversation instead." : "It has no agents.");
+  else if (role) note.textContent = "Vacant." + (role.user_supervised_count
+    ? " " + plural(role.user_supervised_count, "agent waiting for this role", "agents waiting for this role") + " will report to this conversation." : "");
+  $("save-role").textContent = role || !$("role-name").value.trim() ? "Assign role" : "Create and assign";
+}
+function roleOutcome(text, result) {
+  const moved = result.moved_thread_ids?.length || 0, deferred = result.deferred_thread_ids?.length || 0;
+  return text + (moved ? " " + plural(moved, "agent", "agents") + " moved." : "") +
+    (deferred ? " " + plural(deferred, "busy agent moves", "busy agents move") + " when " + (deferred === 1 ? "its turn ends." : "their turns end.") : "");
+}
+async function saveRole(sessionId) {
+  const thread = roleThread;
+  if (!thread) return;
+  let created = null;
+  try {
+    let role = matchingRole();
+    if (sessionId && !role) role = created = await api("roles", {name: $("role-name").value});
+    const target = sessionId ? role : thread.role;
+    let result;
+    try { result = await api("roles/" + encodeURIComponent(target.role_id) + "/holder", {session_id: sessionId}); }
+    catch (error) {
+      // A role created for this assignment is removed when the assignment fails.
+      if (created) await api("roles/" + encodeURIComponent(created.role_id) + "/delete", {}).catch(() => {});
+      throw error;
+    }
+    $("role-dialog").close();
+    state.threadActions.notify("role:" + target.role_id, roleOutcome(sessionId
+      ? thread.title + " now holds " + result.name + "." : thread.title + " no longer holds " + result.name + "; its agents report to you.", result));
+    await refreshList();
+  } catch (error) {
+    $("role-error").textContent = error.message;
+    $("role-error").hidden = false;
+  }
+}
+$("role-name").oninput = describeRoleChoice;
+$("role-form").onsubmit = event => {
+  event.preventDefault();
+  if (matchingRole()?.holder_session_id === roleThread?.thread_id) { $("role-dialog").close(); return; }
+  action(() => saveRole(roleThread.thread_id), $("save-role"));
+};
+$("vacate-role").onclick = () => action(() => saveRole(null), $("vacate-role"));
+// Supervisors: the user gives one agent a new supervising conversation.
+let supervisorThread = null;
+function openSupervisorDialog(thread) {
+  supervisorThread = thread;
+  const choices = (state.sessions || []).filter(item => item.browser_session && item.attention !== "archived"
+    && item.thread_id !== thread.thread_id && item.thread_id !== thread.supervisor_thread_id);
+  $("supervisor-choice").replaceChildren(...choices.map(item => new Option(item.title, item.thread_id)));
+  $("save-supervisor").disabled = !choices.length;
+  $("supervisor-error").textContent = choices.length ? "" : "No other open app conversation can supervise this agent.";
+  $("supervisor-error").hidden = !!choices.length;
+  $("supervisor-dialog").showModal();
+  $("supervisor-choice").focus();
+}
+$("supervisor-form").onsubmit = event => {
+  event.preventDefault();
+  action(async () => {
+    const thread = supervisorThread, select = $("supervisor-choice");
+    try {
+      const result = await api(threadPath(thread.thread_id) + "/supervisor", {session_id: select.value});
+      $("supervisor-dialog").close();
+      const name = select.selectedOptions[0]?.textContent || "the chosen conversation";
+      state.threadActions.notify("supervisor:" + thread.thread_id, result.deferred_thread_ids.length
+        ? thread.title + " reports to " + name + " when its turn ends." : thread.title + " now reports to " + name + ".");
+      await refreshList();
+    } catch (error) {
+      $("supervisor-error").textContent = error.message;
+      $("supervisor-error").hidden = false;
+    }
+  }, $("save-supervisor"));
+};
+// Stops: one user action lifts deliberate Stops; supervisors decide what restarts.
+async function openStopsDialog() {
+  const stopped = (await api("stops")).data;
+  const titles = new Map((state.sessions || []).map(thread => [thread.thread_id, thread.title]));
+  const rows = stopped.map(item => {
+    const label = node("label", null, "stops-row"), box = node("input");
+    box.type = "checkbox"; box.value = item.thread_id; box.checked = true;
+    const copy = node("span", null, "stops-copy");
+    copy.append(node("span", item.title, "stops-title"), node("small", item.supervisor
+      ? "Supervised by " + (titles.get(item.supervisor) || "another agent")
+      : "No supervising agent · restart it yourself", "muted"));
+    label.append(box, copy);
+    return label;
+  });
+  $("stops-list").replaceChildren($("stops-list").querySelector("legend"), ...rows);
+  if (!rows.length) $("stops-list").append(node("p", "No conversations are stopped.", "muted"));
+  $("release-stops").disabled = !rows.length;
+  $("stops-error").hidden = true;
+  $("stops-dialog").showModal();
+}
+$("release-stops-open").onclick = () => action(openStopsDialog, $("release-stops-open"));
+$("stops-form").onsubmit = event => {
+  event.preventDefault();
+  action(async () => {
+    const ids = [...$("stops-list").querySelectorAll("input:checked")].map(box => box.value);
+    if (!ids.length) { $("stops-error").textContent = "Choose at least one conversation."; $("stops-error").hidden = false; return; }
+    try {
+      const result = await api("stops/release", {thread_ids: ids});
+      $("stops-dialog").close();
+      const released = result.released_thread_ids.length, notified = result.notified_supervisors.length;
+      state.threadActions.notify("stops", "Released " + plural(released, "conversation", "conversations") + "." +
+        (notified ? " " + plural(notified, "supervising agent was", "supervising agents were") + " notified." : "") +
+        (result.skipped.length ? " " + plural(result.skipped.length, "was", "were") + " no longer stopped." : ""));
+      await refreshList();
+    } catch (error) {
+      $("stops-error").textContent = error.message;
+      $("stops-error").hidden = false;
+    }
+  }, $("release-stops"));
+};
 async function organizeThread(thread) {
   if (!thread) return;
   const selected = state.selected;

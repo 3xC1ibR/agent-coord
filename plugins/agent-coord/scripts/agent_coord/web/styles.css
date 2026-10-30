@@ -501,6 +501,12 @@ dialog p { font-size: 11px; margin-top: 0; }
 .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 #create { width: 100%; margin-top: 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.role-designation { color: var(--muted); font-size: 10px; font-weight: 600; }
+.session.compact .role-designation { margin-left: auto; }
+.stops-list { display: grid; gap: 8px; max-height: 50dvh; overflow: auto; margin: 0 0 16px; padding: 0; border: 0; }
+.stops-row { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; margin: 0; }
+.stops-copy { display: grid; min-width: 0; overflow-wrap: anywhere; }
+#release-stops-open { flex-shrink: 0; white-space: nowrap; }
 .error { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); width: min(650px, calc(100% - 40px)); display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 12px 17px; background: var(--warm-tint); border: 1px solid var(--warm); border-radius: 7px; box-shadow: 0 6px 30px var(--shadow); z-index: 30; font-size: 12px; }
 .error button { border: 0; background: transparent; }
 

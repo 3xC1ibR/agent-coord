@@ -299,6 +299,49 @@ unchanged. A retired supervisor cannot send actionable or deferred instructions
 or actionable replies to the transferred worker. Informational and closure messages remain
 available, and ordinary messaging is unchanged when no transfer exists.
 
+### Supervision, roles and succession
+
+An app agent's creator never changes; its supervisor can. The current
+supervisor receives its reports, recovers it with `thread resume`, and owns it
+in the agent tree and in Close with subagents. A supervisor hands selected idle
+agents to a successor, or a successor adopts them once the supervisor's
+conversation is closed (or a terminal session has ended). The runtime also ends
+an app conversation's session when it unloads it while idle; that is not
+retirement.
+
+```bash
+agent-coord thread transfer-supervision --to-session SUCCESSOR --thread AGENT --request-id KEY --reason TEXT
+agent-coord thread adopt --from-supervisor CLOSED_LEAD --thread AGENT --request-id KEY --reason TEXT
+agent-coord thread supervision --thread AGENT
+```
+
+A role is a position you name in the app, such as a lead, held by one
+conversation at a time. Choose **Assign role…** in a conversation's options to
+create or appoint a role. The new holder takes over the previous holder's
+agents: idle agents immediately and busy agents when their turn ends. A
+session holds at most one role. A holder can hand its role on or vacate it:
+
+```bash
+agent-coord role list
+agent-coord role create --name NAME            # held by the caller
+agent-coord role transfer --to-session SESSION --reason TEXT
+agent-coord role release --reason TEXT
+```
+
+When a supervisor is closed, its open agents pass to the next holder of its
+role, or to you when there is none; busy agents follow when their turn ends.
+Agents you supervise report through the app instead of waking or reopening the
+closed conversation, and they follow the role when you appoint its next holder.
+Agents of supervisors closed before this behavior existed are not moved.
+Every move records an audit entry and sends informational notices that wake no
+one. Moves never resume, stop, or deliver queued work.
+
+A Stop holds a conversation until you send it a message. The overview status
+bar counts your Stops; **Release** lifts the selected ones in one action. A
+released conversation stays paused: its supervising agent receives one notice
+and may recover it with `thread resume` after inspecting it and queuing a fresh
+continuation. Nothing restarts by itself.
+
 Continue a conversation with the same `--thread-id`. A thread accepts only the
 same pair of sessions, in either direction. Close it with one terminal message:
 

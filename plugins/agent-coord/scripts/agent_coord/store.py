@@ -1801,6 +1801,9 @@ class CoordinationStore:
             )
             if cursor.rowcount != 1:
                 raise CoordinationError(f"Session {session_id} is not registered.")
+            # Succession decides later whether this end is a retirement.
+            from .supervision import record_retirement
+            record_retirement(connection, session_id, now)
         return self.get_session(session_id)
 
     def list_sessions(
@@ -2898,7 +2901,7 @@ class CoordinationStore:
     ) -> dict[str, Any]:
         """Atomically answer and acknowledge one request without another reply obligation."""
         from .context_lifecycle import reply_snapshot
-        from .supervision import report_recipient
+        from .supervision import passing_from, report_recipient
         if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
             raise CoordinationError("Reply message ID must be a positive integer.")
         if not body.strip():
@@ -2925,7 +2928,11 @@ class CoordinationStore:
             recipient = connection.execute("SELECT name, bead_id FROM sessions WHERE session_id = ?", (recipient_id,)).fetchone()
             if recipient is None:
                 raise CoordinationError(f"Session {recipient_id} is not registered.")
-            self._guard_message(connection, sender_session_id, recipient_id, "action_required")
+            # A report to a closed supervisor whose agents are passing on stays on
+            # record without waking or reopening that conversation.
+            classification = ("informational" if passing_from(connection, recipient_id, sender_session_id)
+                              else "action_required")
+            self._guard_message(connection, sender_session_id, recipient_id, classification)
             # A successor was not a participant in the original exchange.
             # Keep that pair immutable; in_reply_to preserves assignment ancestry
             # while this new exchange addresses the worker and current supervisor.
@@ -2936,7 +2943,7 @@ class CoordinationStore:
                 sender_session_id=sender_session_id,
                 recipient_session_id=recipient_id,
                 body=body.strip(),
-                classification="action_required",
+                classification=classification,
                 thread_id=thread_id,
                 reply_required=False,
                 in_reply_to=message_id,

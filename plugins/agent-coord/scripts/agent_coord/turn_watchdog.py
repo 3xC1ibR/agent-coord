@@ -227,6 +227,12 @@ class TurnWatchdog:
             process_failure_followups(self.store, s.cwd)
         except Exception:
             logging.getLogger(__name__).exception("Agent recovery deadline scan failed")
+        try:
+            from .workspace_roles import process as process_supervision
+            if process_supervision(self.store, s.cwd):
+                s._publish("browser/changed", {})
+        except Exception:
+            logging.getLogger(__name__).exception("Supervisor succession scan failed")
         with s.lock:
             candidates = set(s.active)
             loaded = set(s.loaded)

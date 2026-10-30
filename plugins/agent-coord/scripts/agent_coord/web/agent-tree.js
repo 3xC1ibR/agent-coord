@@ -10,7 +10,9 @@ const AgentTree = (() => {
     const parents = new Map(), children = new Map(), relationships = new Map();
     for (const t of nodes.values()) {
       const source = t.forked_from?.thread_id || t.forked_from_thread_id;
+      // The current supervisor, not the creator, owns the solid connector.
       const parent = Object.hasOwn(t, "agent_parent_id") ? t.agent_parent_id
+        : Object.hasOwn(t, "supervisor_thread_id") ? t.supervisor_thread_id || t.parent?.session_id || source
         : (t.creation_mode === "orchestration" ? t.created_by_thread_id : t.parent?.session_id) || source;
       if (parent && parent !== t.thread_id && nodes.has(parent)) {
         parents.set(t.thread_id, parent);

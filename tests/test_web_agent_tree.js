@@ -584,3 +584,15 @@ test("both Context and Agents side panel modes support pointer and keyboard resi
   assert.equal(conv.style.getPropertyValue("--agent-panel-width"), "57%");
   assert.equal(c.storage.get("agent-coord.agent-panel-width"), "57");
 });
+
+test("inventory records follow the current supervisor rather than the creator", () => {
+  const records = [
+    {thread_id: "lead", created_at: 1}, {thread_id: "next", created_at: 2},
+    {thread_id: "moved", created_at: 3, creation_mode: "orchestration", created_by_thread_id: "lead", supervisor_thread_id: "next"},
+    {thread_id: "kept", created_at: 4, creation_mode: "orchestration", created_by_thread_id: "lead", supervisor_thread_id: "lead"},
+    {thread_id: "orphan", created_at: 5, creation_mode: "orchestration", created_by_thread_id: "lead", supervisor_thread_id: null}];
+  const tree = Tree.graph(records);
+  assert.deepEqual(tree.children.get("lead"), ["kept"]);
+  assert.deepEqual(tree.children.get("next"), ["moved"]);
+  assert.equal(tree.parents.has("orphan"), false);
+});

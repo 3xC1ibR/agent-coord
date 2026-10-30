@@ -55,6 +55,10 @@ class BrowserInboxWake:
             )""")
             if "execution_confirmed" not in {row[1] for row in db.execute("PRAGMA table_info(browser_wake_recoveries)")}:
                 db.execute("ALTER TABLE browser_wake_recoveries ADD COLUMN execution_confirmed INTEGER NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS browser_stop_releases (
+                id INTEGER PRIMARY KEY, release_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+                released_at REAL NOT NULL
+            )""")
 
     def pause(self, thread_id, reason, *, kind="unknown"):
         self.checked_pauses.pop(thread_id, None)
@@ -77,6 +81,71 @@ class BrowserInboxWake:
                 retry_count = 0, retry_at = NULL, paused_at = NULL,
                 reconciled_turn_id = NULL, recovery_after_message_id = 0 WHERE thread_id = ?""",
                        (thread_id,))
+
+    def stopped_conversations(self):
+        """Open conversations held by a deliberate Stop, for the user's release action."""
+        from .supervision import effective_supervisor
+        with self.store._connection() as db:
+            rows = db.execute("""SELECT w.thread_id, w.error, w.paused_at, t.title, s.cwd FROM browser_inbox_wake w
+                JOIN work_threads t ON t.thread_id = w.thread_id JOIN sessions s ON s.session_id = w.thread_id
+                WHERE w.paused = 1 AND w.pause_kind = 'stop' AND t.attention != 'archived'
+                ORDER BY w.paused_at, t.title, w.thread_id""").fetchall()
+            data = [{"thread_id": row["thread_id"], "title": row["title"], "reason": row["error"],
+                     "paused_at": row["paused_at"], "supervisor": effective_supervisor(db, row["thread_id"])}
+                    for row in rows if matches_workspace(row["cwd"], self.sessions.cwd)]
+        return {"data": data}
+
+    def release_stops(self, thread_ids):
+        """User action: lift deliberate Stops so supervisors may recover the conversations.
+
+        Wakes stay paused, so nothing restarts by itself. Each current
+        supervisor receives one actionable notice listing its released agents;
+        recovery still requires inspection and a fresh continuation.
+        """
+        import uuid
+        from .supervision import effective_supervisor, retired
+        if (not isinstance(thread_ids, list) or not thread_ids or len(thread_ids) > 500
+                or any(not isinstance(item, str) or not item for item in thread_ids) or len(set(thread_ids)) != len(thread_ids)):
+            raise CoordinationError("Choose between 1 and 500 distinct stopped conversations.")
+        release_id, now = str(uuid.uuid4()), self.store.clock()
+        released, skipped, notices = [], [], {}
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for thread_id in thread_ids:
+                row = db.execute("""SELECT w.paused, w.pause_kind, t.attention, s.cwd FROM browser_inbox_wake w
+                    JOIN work_threads t ON t.thread_id = w.thread_id JOIN sessions s ON s.session_id = w.thread_id
+                    WHERE w.thread_id = ?""", (thread_id,)).fetchone()
+                if row is None or not matches_workspace(row["cwd"], self.sessions.cwd):
+                    skipped.append({"thread_id": thread_id, "reason": "Not found in this workspace."})
+                elif not row["paused"] or row["pause_kind"] != "stop":
+                    skipped.append({"thread_id": thread_id, "reason": "No longer held by a Stop."})
+                elif row["attention"] == "archived":
+                    skipped.append({"thread_id": thread_id, "reason": "The conversation is closed."})
+                else:
+                    # Work queued before the release never counts as the fresh continuation recovery requires.
+                    db.execute("""UPDATE browser_inbox_wake SET pause_kind = 'released', error = ?,
+                        recovery_after_message_id = (SELECT COALESCE(MAX(id), 0) FROM messages)
+                        WHERE thread_id = ? AND paused = 1 AND pause_kind = 'stop'""",
+                        ("You released this Stop. Its supervisor can restart it; nothing restarts by itself.", thread_id))
+                    db.execute("INSERT INTO browser_stop_releases (release_id, thread_id, released_at) VALUES (?, ?, ?)",
+                               (release_id, thread_id, now))
+                    released.append(thread_id)
+                    supervisor = effective_supervisor(db, thread_id)
+                    if supervisor and not retired(db, supervisor):
+                        notices.setdefault(supervisor, []).append(thread_id)
+            for supervisor, agents in notices.items():
+                body = json.dumps({"event": "stops_released", "release_id": release_id, "thread_ids": agents,
+                    "guidance": "The user released the Stop on these agents. Nothing restarted. Inspect each agent and "
+                                "its tool outcomes, queue a fresh continuation that states the authorized work, then "
+                                "recover it with agent-coord thread resume. No reply is required."}, ensure_ascii=True)
+                # The user is not a session, so the notice is addressed from the supervisor to itself.
+                self.store._insert_message(db, sender_session_id=supervisor, recipient_session_id=supervisor, body=body,
+                                           classification="action_required", thread_id=f"stop-release:{release_id}:{supervisor}",
+                                           reply_required=False, now=now)
+        for thread_id in released:
+            self.checked_pauses.pop(thread_id, None)
+        return {"release_id": release_id, "released_thread_ids": released, "skipped": skipped,
+                "notified_supervisors": sorted(notices)}
 
     def _not_submitted(self, thread_id, error):
         """Retry only transient contention proven to precede turn submission."""
@@ -257,7 +326,8 @@ class BrowserInboxWake:
                     raise CoordinationError("Recovery refused: inbox wake is not paused.")
                 if wake["dispatching"]:
                     raise CoordinationError("Recovery refused: an inbox wake is still dispatching; inspect its outcome first.")
-                if wake["pause_kind"] != "failure":
+                # A Stop the user released is recoverable like a failure; an unreleased Stop is not.
+                if wake["pause_kind"] not in {"failure", "released"}:
                     raise CoordinationError(f"Recovery refused: pause kind {wake['pause_kind']!r} is uncertain; "
                                             "Stop or uncertain wake needs direct user input.")
                 if latest.get("status") == "completed" and wake["reconciled_turn_id"] != expected_turn_id:

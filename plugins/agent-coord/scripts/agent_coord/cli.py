@@ -326,6 +326,18 @@ def _parser() -> argparse.ArgumentParser:
     project_create = project_commands.add_parser("create")
     project_create.add_argument("--name", required=True)
     project_create.add_argument("--cwd", default=caller_directory(), help="Project directory that owns this group (default: current directory).")
+    role = subcommands.add_parser("role", help="List workspace roles, create one for this session, or hand this session's role to another.")
+    role_commands = role.add_subparsers(dest="role_command", required=True)
+    role_list = role_commands.add_parser("list", help="Show roles in the caller's workspace and their holders.")
+    role_create = role_commands.add_parser("create", help="Create a role held by the caller.")
+    role_create.add_argument("--name", required=True, help="User-facing role name, for example a lead's position.")
+    role_transfer = role_commands.add_parser("transfer", help="Hand the caller's role and its agents to another session.")
+    role_transfer.add_argument("--to-session", required=True, help="Live session that becomes the holder.")
+    role_release = role_commands.add_parser("release", help="Vacate the caller's role; its agents pass to the user.")
+    for role_change in (role_transfer, role_release):
+        role_change.add_argument("--reason", required=True, help="Saved in the appointment history and notices.")
+    for role_command in (role_list, role_create, role_transfer, role_release):
+        role_command.add_argument("--from-session", help="Caller; defaults to the current caller session.")
     repository = subcommands.add_parser("repository", help="List or register Git repositories without changing a workspace.")
     repository_commands = repository.add_subparsers(dest="repository_command", required=True)
     repository_commands.add_parser("list")
@@ -904,6 +916,24 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
         if arguments.project_command == "create":
             return store.threads.organization.create_project(arguments.name, arguments.cwd)
         return store.threads.organization.list()["projects"]
+    if command == "role":
+        from . import workspace_roles
+        from .organization import repository_root
+        caller = store.get_session(arguments.from_session)
+        workspace = repository_root(caller["cwd"]) or caller["cwd"]
+        if arguments.role_command == "list":
+            return workspace_roles.list_roles(store, workspace)
+        if arguments.role_command == "create":
+            return workspace_roles.create_role(store, workspace=workspace, name=arguments.name,
+                                               requester_kind="session", requester_session=arguments.from_session)
+        with store._connection() as db:
+            held = workspace_roles.held_role(db, arguments.from_session)
+        if held is None:
+            raise CoordinationError("The caller holds no role. The user appoints holders in the app.")
+        return workspace_roles.appoint(store, role_id=held["role_id"],
+                                       holder=arguments.to_session if arguments.role_command == "transfer" else None,
+                                       requester_kind="session", requester_session=arguments.from_session,
+                                       reason=arguments.reason, workspace=workspace)
     if command == "repository":
         if arguments.repository_command == "add":
             return store.threads.organization.add_repository(arguments.path)
