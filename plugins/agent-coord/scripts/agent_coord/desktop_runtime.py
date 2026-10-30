@@ -386,20 +386,35 @@ def bootstrap(database, resources, *, start_paused=False):
     launcher = lock_file(directory / "launch.lock", blocking=True)
     try:
         payload = stage_payload(Path(resources), directory)
-        record = discover(database)
-        if record:
-            if start_paused and not control(record, "status")["paused"]:
-                raise RuntimeError("A runtime is already admitting work. Pause it explicitly before maintenance.")
-            return control(record, "attach", payload=str(payload))
-        if not owner_available(directory):
-            raise RuntimeError("Another runtime is starting. Try again shortly.")
-        with (directory / "runtime.log").open("ab", buffering=0) as log:
-            command = payload_command(payload) + ["--runtime-serve", "--db", database]
-            if start_paused:
-                command.append("--runtime-start-paused")
-            child = subprocess.Popen(command,
-                                     env=payload_environment(payload), cwd=str(Path.home()), stdin=subprocess.DEVNULL,
-                                     stdout=log, stderr=log, start_new_session=True)
+        deadline = time.monotonic() + 20
+        while True:
+            record = discover(database)
+            if record:
+                if start_paused and not control(record, "status")["paused"]:
+                    raise RuntimeError("A runtime is already admitting work. Pause it explicitly before maintenance.")
+                return control(record, "attach", payload=str(payload))
+            try:
+                owner_fd = lock_file(directory / "owner.lock")
+                break
+            except BlockingIOError:
+                # A finite CLI/hook operation can own this lock without a
+                # runtime discovery record. Wait without starting a competitor.
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Runtime ownership remained busy; no runtime was started.") from None
+                time.sleep(.05)
+        try:
+            with (directory / "runtime.log").open("ab", buffering=0) as log:
+                # Reserve ownership through exec: checking availability before
+                # spawning leaves a window for another standalone writer.
+                command = payload_command(payload) + ["--runtime-serve", "--db", database,
+                                                       "--inherit-owner-fd", str(owner_fd)]
+                if start_paused:
+                    command.append("--runtime-start-paused")
+                child = subprocess.Popen(command, pass_fds=(owner_fd,),
+                                         env=payload_environment(payload), cwd=str(Path.home()), stdin=subprocess.DEVNULL,
+                                         stdout=log, stderr=log, start_new_session=True)
+        finally:
+            os.close(owner_fd)
         for _ in range(200):
             if child.poll() is not None:
                 raise RuntimeError("The detached runtime failed to start; see " + str(directory / "runtime.log"))

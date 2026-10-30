@@ -14,6 +14,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
@@ -206,6 +207,61 @@ class RuntimeTests(unittest.TestCase):
                                env=dict(self.env, PYTHONPATH=str(Path(record["payload"]) / "backend")), capture_output=True, timeout=5)
         self.assertNotEqual(loser.returncode, 0)
         self.assertEqual(runtime.discover(self.database)["instance"], record["instance"])
+
+    def test_bootstrap_waits_for_standalone_operation(self):
+        directory = runtime.runtime_directory(self.database)
+        payload = runtime.stage_payload(self.resources, directory)
+        descriptor = runtime.lock_file(directory / "owner.lock")
+        release = threading.Timer(.5, os.close, args=(descriptor,))
+        release.start()
+        try:
+            with patch.object(runtime, "stage_payload", return_value=payload), patch.dict(os.environ, self.env):
+                result = runtime.bootstrap(self.database, self.resources, start_paused=True)
+            self.assertEqual(result["status"], "serving")
+            self.assertTrue(result["paused"])
+        finally:
+            release.join()
+
+    def test_bootstrap_reserves_ownership_before_spawning_child(self):
+        directory = runtime.runtime_directory(self.database)
+        spawn = subprocess.Popen
+
+        def inspect_reservation(*args, **kwargs):
+            try:
+                descriptor = runtime.lock_file(directory / "owner.lock")
+            except BlockingIOError:
+                pass
+            else:
+                os.close(descriptor)
+                self.fail("A standalone writer can take ownership before the runtime starts.")
+            return spawn(*args, **kwargs)
+
+        with patch.object(runtime.subprocess, "Popen", side_effect=inspect_reservation), patch.dict(os.environ, self.env):
+            first = runtime.bootstrap(self.database, self.resources, start_paused=True)
+        self.assertFalse(runtime.owner_available(directory))
+        second = self.launch(paused=True)
+        self.assertEqual(first["instance"], second["instance"])
+
+    def test_bootstrap_releases_reservation_when_spawn_fails(self):
+        with patch.object(runtime.subprocess, "Popen", side_effect=OSError("Cannot spawn runtime")):
+            with self.assertRaisesRegex(OSError, "Cannot spawn runtime"):
+                runtime.bootstrap(self.database, self.resources)
+        self.assertTrue(runtime.owner_available(runtime.runtime_directory(self.database)))
+
+    def test_bootstrap_does_not_spawn_when_ownership_stays_busy(self):
+        directory = runtime.runtime_directory(self.database)
+        payload = runtime.stage_payload(self.resources, directory)
+        descriptor = runtime.lock_file(directory / "owner.lock")
+        try:
+            with patch.object(runtime, "stage_payload", return_value=payload), \
+                    patch.object(runtime.time, "monotonic", side_effect=(0, 20)), \
+                    patch.object(runtime.subprocess, "Popen") as spawn:
+                with self.assertRaisesRegex(RuntimeError, "no runtime was started"):
+                    runtime.bootstrap(self.database, self.resources)
+                spawn.assert_not_called()
+            self.assertFalse(runtime.owner_available(directory))
+        finally:
+            os.close(descriptor)
 
     def test_hook_owner_handshake_does_not_wait_for_readiness_locks(self):
         source = self.resources / "backend/agent_coord/desktop_runtime.py"

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 from . import desktop_runtime as runtime
 
@@ -44,9 +45,19 @@ def route_to_owner(kind, argv):
     directory = runtime.runtime_directory(database)
     if runtime.owner_available(directory):
         return
-    record = runtime.discover(database, timeout=2)
-    if record is None:
-        raise RuntimeError("The runtime owner is unavailable. Try again shortly.")
+    deadline = time.monotonic() + 2
+    while True:
+        record = runtime.discover(database, timeout=max(.001, deadline - time.monotonic()))
+        if record is not None:
+            break
+        # A standalone operation may release its reservation, or a starting
+        # runtime may publish discovery. Neither has submitted this request.
+        if runtime.owner_available(directory):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("The runtime owner is unavailable. Try again shortly.")
+        time.sleep(min(.05, remaining))
     payload = Path(record["payload"]).resolve()
     if payload.parent != directory / "payloads" or not payload.is_dir():
         raise RuntimeError("The runtime owner did not identify a retained payload.")

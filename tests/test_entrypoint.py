@@ -227,6 +227,29 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["target"], str(SCRIPTS / "agent-coord"))
 
+    def test_standalone_operation_waits_for_transient_owner(self):
+        database = self.root / "contended.sqlite3"
+        directory = runtime.runtime_directory(database)
+        descriptor = runtime.lock_file(directory / "owner.lock")
+        release = threading.Timer(.5, os.close, args=(descriptor,))
+        release.start()
+        try:
+            result = self.invoke("agent-coord", "--db", str(database), "register", "--client", "claude")
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            release.join()
+
+    def test_entrypoint_waits_for_runtime_discovery_publication(self):
+        (self.directory / "discovery.json").unlink()
+        publish = threading.Timer(.5, self.save_record)
+        publish.start()
+        try:
+            result = self.invoke("agent-coord", "status")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("client-request", self.actions)
+        finally:
+            publish.join()
+
     def test_database_option_inside_child_arguments_is_untouched(self):
         args = ["job", "start", "--", "child", "--db", "child.sqlite3"]
         with patch.dict(os.environ, self.env):
