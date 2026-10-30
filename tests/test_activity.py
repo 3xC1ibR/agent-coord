@@ -1,5 +1,6 @@
 """Activity evidence remains local, scoped, reproducible, and human-attributed."""
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -129,19 +130,72 @@ class ActivityTests(unittest.TestCase):
         self.assertTrue(all(e["received_at"] > e["occurred_at"] for e in events))
         self.assertEqual(events[1]["details"]["started_at"], start)
 
-    def test_turn_record_failure_rolls_back_lifecycle_state(self):
-        before = self.store.threads.get("one")["turn_id"]
-        with patch.object(self.store.threads.activity, "record_turn", side_effect=RuntimeError("write failed")):
-            with self.assertRaises(RuntimeError):
-                self.store.threads.start_turn("one", turn_id="atomic")
-        self.assertEqual(self.store.threads.get("one")["turn_id"], before)
-        self.store.threads.start_turn("one", turn_id="atomic")
-        with patch.object(self.store.threads.activity, "record_turn", side_effect=RuntimeError("write failed")):
-            with self.assertRaises(RuntimeError):
-                self.store.threads.finish_turn("one", turn_id="atomic")
-        self.assertEqual(self.store.threads.completion_cursor(), 0)
-        self.store.threads.finish_turn("one", turn_id="atomic")
+    def test_turn_record_failure_preserves_lifecycle_and_rolls_back_only_telemetry(self):
+        recorder = self.store.threads.activity.record_turn
+        for index, failure in enumerate((RuntimeError("write failed"), CoordinationError("invalid metadata"),
+                                         sqlite3.IntegrityError("constraint failed"))):
+            with self.subTest(failure=type(failure).__name__):
+                def record_then_fail(db, *args, **kwargs):
+                    recorder(db, *args, **kwargs)
+                    db.execute("UPDATE activity_settings SET enabled=0 WHERE id=1")
+                    raise failure
+
+                turn_id = "recording-failure-" + str(index)
+                started_at = self.now
+                with patch.object(self.store.threads.activity, "record_turn", side_effect=record_then_fail):
+                    with self.assertLogs("agent_coord.threads", level="ERROR") as logs:
+                        self.store.threads.start_turn("one", turn_id=turn_id)
+                    self.assertIn("turn_started", logs.output[0])
+                    thread = self.store.threads.get("one")
+                    self.assertEqual(thread["turn_id"], turn_id)
+                    self.assertEqual(thread["turn_started_at"], started_at)
+                    self.now += 1
+                    with self.assertLogs("agent_coord.threads", level="ERROR") as logs:
+                        self.store.threads.finish_turn("one", turn_id=turn_id, status="failed")
+                    self.assertIn("turn_ended", logs.output[0])
+                thread = self.store.threads.get("one")
+                self.assertEqual(thread["updated_at"], self.now)
+                self.assertEqual(thread["turn_completion"]["status"], "failed")
+                self.assertEqual(thread["turn_completion"]["completed_at"], self.now)
+                self.assertEqual(self.store.threads.completion_cursor(), index + 1)
+                self.assertTrue(self.activity.settings()["enabled"])
+                self.now += 1
+                self.assertEqual(self.query()["events"], [])
+        # A successful subsequent turn proves savepoints were released and
+        # recording was not disabled by the failing recorder's partial writes.
+        self.store.threads.start_turn("one", turn_id="recovered")
+        self.store.threads.finish_turn("one", turn_id="recovered")
+        self.now += 1
+        self.assertEqual([e["kind"] for e in self.query()["events"]], ["turn_started", "turn_ended"])
+
+    def test_repeated_turn_start_with_changed_time_or_context_keeps_original_event(self):
+        started_at = self.now
+        self.store.threads.start_turn("one", turn_id="same", notification_context={"origin": "coordination"})
+        self.now += 1
+        self.store.threads.start_turn("one", turn_id="same", occurred_at=self.now,
+                                      notification_context={"origin": "user"})
+        self.assertEqual(self.store.threads.get("one")["turn_started_at"], started_at)
+        events = self.query()["events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["occurred_at"], started_at)
+        self.assertEqual(events[0]["details"]["trigger"], "inbox")
+
+    def test_replayed_turn_start_metadata_conflict_cannot_abort_lifecycle(self):
+        self.store.threads.start_turn("one", turn_id="original", notification_context={"origin": "coordination"})
+        self.now += 1
+        self.store.threads.start_turn("one", turn_id="intervening")
+        self.now += 1
+        with self.assertLogs("agent_coord.threads", level="ERROR") as logs:
+            self.store.threads.start_turn("one", turn_id="original", occurred_at=self.now,
+                                          notification_context={"origin": "user"})
+        self.assertIn("Event ID already belongs to different activity", logs.output[0])
+        self.assertEqual(self.store.threads.get("one")["turn_id"], "original")
+        self.assertEqual(self.store.threads.get("one")["turn_started_at"], self.now)
+        self.store.threads.finish_turn("one", turn_id="original")
         self.assertEqual(self.store.threads.completion_cursor(), 1)
+        self.now += 1
+        events = self.query()["events"]
+        self.assertEqual([e["turn_id"] for e in events if e["kind"] == "turn_started"], ["original", "intervening"])
 
     def test_turn_pause_clear_stale_completion_and_range_boundary(self):
         self.store.threads.start_turn("one", turn_id="first")

@@ -88,7 +88,11 @@ include turn events by default; CLI `--include-turns false` or the Python/MCP
 Pair events by `(thread_id, turn_id)`. A native turn ID is used when available;
 otherwise a durable generated key identifies a terminal turn, with
 `details.native_turn_id: null`. Duplicate native callbacks and repeated
-completions create one event per transition. Each event includes:
+completions create one event per transition. Recording is best-effort within a
+savepoint: recorder exceptions discard only telemetry writes and are logged;
+turn starts and completion state still commit. A recording error therefore
+represents missing evidence, not evidence that lifecycle processing failed.
+Each event includes:
 
 - `details.started_at`: Unix seconds for the recorded turn start. The end event
   repeats it so a consumer can recover a start outside the queried period.

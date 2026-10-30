@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import shlex
 import uuid
@@ -536,12 +537,26 @@ class ThreadStore:
             turn_key = turn_id or str(uuid.uuid4())
             db.execute("UPDATE work_threads SET original_request = ?, title = ?, turn_started_at = ?, turn_id = ?, turn_key = ?, updated_at = ? WHERE thread_id = ?",
                        (request, title, now, turn_id, turn_key, now, session_id))
-            context = notification_context
-            if context is None and turn_id:
-                context = db.execute("SELECT origin FROM turn_notification_context WHERE thread_id=? AND turn_key=?",
-                                     (session_id, turn_id)).fetchone()
-            self.activity.record_turn(db, "turn_started", session_id, turn_key, turn_id=turn_id,
-                                      started_at=now, occurred_at=now, context=dict(context) if context else None)
+            self._record_turn_activity(db, "turn_started", session_id, turn_key, turn_id=turn_id,
+                                       started_at=now, occurred_at=now, context=notification_context)
+
+    def _record_turn_activity(self, db, kind, session_id, turn_key, **metadata):
+        """Discard failed telemetry writes without undoing lifecycle state."""
+        try:
+            db.execute("SAVEPOINT turn_activity")
+            try:
+                if kind == "turn_started" and metadata.get("context") is None and metadata.get("turn_id"):
+                    context = db.execute("SELECT origin FROM turn_notification_context WHERE thread_id=? AND turn_key=?",
+                                         (session_id, metadata["turn_id"])).fetchone()
+                    metadata["context"] = dict(context) if context else None
+                self.activity.record_turn(db, kind, session_id, turn_key, **metadata)
+            except Exception:
+                db.execute("ROLLBACK TO SAVEPOINT turn_activity")
+                raise
+            finally:
+                db.execute("RELEASE SAVEPOINT turn_activity")
+        except Exception:
+            logging.getLogger(__name__).exception("Could not record %s activity for thread %s", kind, session_id)
 
     def is_browser_session(self, session_id: str) -> bool:
         with self.store._connection() as db:
@@ -577,9 +592,9 @@ class ThreadStore:
             inserted = db.execute("INSERT OR IGNORE INTO turn_completions (thread_id, turn_key, status, completed_at) VALUES (?, ?, ?, ?)",
                                   (session_id, turn["turn_key"], status, now)).rowcount
             if inserted:
-                self.activity.record_turn(db, "turn_ended", session_id, turn["turn_key"],
-                                          turn_id=turn["turn_id"], started_at=turn["turn_started_at"],
-                                          occurred_at=now, status=status)
+                self._record_turn_activity(db, "turn_ended", session_id, turn["turn_key"],
+                                           turn_id=turn["turn_id"], started_at=turn["turn_started_at"],
+                                           occurred_at=now, status=status)
                 db.execute("""UPDATE turn_notification_context SET checkpoint_id = (
                     SELECT id FROM thread_checkpoints WHERE thread_id = ? AND turn_id IS ? ORDER BY id DESC LIMIT 1)
                     WHERE thread_id = ? AND turn_key = ?""", (session_id, turn["turn_id"], session_id, turn["turn_key"]))
