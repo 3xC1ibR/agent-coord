@@ -5,6 +5,7 @@
 (function (root) {
   "use strict";
   const escape = value => String(value).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+  const link = (url, label) => '<a href="' + escape(url.replace(/^agentcoord:/i, "agentcoord:")) + '" target="_blank" rel="noopener noreferrer">' + label + "</a>";
   function safeURL(value) {
     if (!value || /[\s\u0000-\u001f\u007f\\]/.test(value)) return false;
     if (/^agentcoord:/i.test(value)) {
@@ -13,7 +14,7 @@
     }
     return /^(https?:\/\/|mailto:)/i.test(value) || (!/^[a-z][a-z\d+.-]*:/i.test(value) && !value.startsWith("//"));
   }
-  function inline(text, depth = 0) {
+  function inline(text, depth = 0, allowLinks = true) {
     if (depth > 16) return escape(text);
     let out = "", i = 0;
     while (i < text.length) {
@@ -25,16 +26,26 @@
       if ((match = /^(`+)([\s\S]*?[^`])\1(?!`)/.exec(rest))) {
         out += "<code>" + escape(match[2].replace(/\n/g, " ")) + "</code>"; i += match[0].length; continue;
       }
-      if ((match = /^\[([^\]\n]+)\]\((<[^>\n]+>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)(?:\s+"[^"\n]*")?\)/.exec(rest))) {
+      if (allowLinks && (match = /^\[([^\]\n]+)\]\((<[^>\n]+>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)(?:\s+"[^"\n]*")?\)/.exec(rest))) {
         const url = match[2].replace(/^<|>$/g, "");
         // Labels cannot contain links of their own.
-        const label = inline(match[1], depth + 1);
-        out += safeURL(url) ? '<a href="' + escape(url) + '" target="_blank" rel="noopener noreferrer">' + label + "</a>" : label;
+        const label = inline(match[1], depth + 1, false);
+        out += safeURL(url) ? link(url, label) : label;
         i += match[0].length; continue;
       }
-      if ((match = /^<(https?:\/\/[^<>\s]+|mailto:[^<>\s]+)>/.exec(rest)) && safeURL(match[1])) {
-        out += '<a href="' + escape(match[1]) + '" target="_blank" rel="noopener noreferrer">' + escape(match[1]) + "</a>";
+      if (allowLinks && (match = /^<(https?:\/\/[^<>\s]+|mailto:[^<>\s]+|agentcoord:\/\/[^<>\s]+)>/i.exec(rest)) && safeURL(match[1])) {
+        out += link(match[1], escape(match[1]));
         i += match[0].length; continue;
+      }
+      if (allowLinks && (i === 0 || /[\s([{"'“‘]/.test(text[i - 1])) &&
+          (match = /^agentcoord:\/\/[^\s<>"'`]+/i.exec(rest))) {
+        // Sentence punctuation and closing prose delimiters are not URL data.
+        // Encoded punctuation in message destinations remains untouched.
+        const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
+        if (safeURL(url)) {
+          out += link(url, escape(url));
+          i += url.length; continue;
+        }
       }
       let formatted = false;
       for (const [mark, tag] of [["***", "strong"], ["**", "strong"], ["__", "strong"], ["~~", "del"], ["*", "em"], ["_", "em"]]) {
@@ -42,7 +53,7 @@
         if (mark.includes("_") && /[\w]/.test(text[i - 1] || "")) continue;
         const end = text.indexOf(mark, i + mark.length);
         if (end <= i + mark.length || /\s/.test(text[end - 1])) continue;
-        const body = inline(text.slice(i + mark.length, end), depth + 1);
+        const body = inline(text.slice(i + mark.length, end), depth + 1, allowLinks);
         out += "<" + tag + ">" + (mark === "***" ? "<em>" + body + "</em>" : body) + "</" + tag + ">";
         i = end + mark.length; formatted = true; break;
       }

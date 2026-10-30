@@ -67,6 +67,41 @@ test("links allow web and relative targets without enabling executable schemes",
   }
 });
 
+test("bare app links recognize validated destinations and leave prose punctuation outside", () => {
+  const thread = "agentcoord://thread/01a18856-1b45-7a51-b3d9-06cc54c5e0da";
+  for (const [prefix, suffix] of [["", ""], ["Open (", ")."], ["See [", "];"], ['Open "', '".'], ["Next:\n", "!"]]) {
+    const html = render(prefix + thread + suffix);
+    assert.ok(html.includes('href="' + thread + '"'), html);
+    assert.ok(html.includes('>' + thread + '</a>' + suffix.replace(/"/g, "&quot;")), html);
+  }
+  for (const url of ["agentcoord://overview?project=billing", "agentcoord://view/review",
+    "agentcoord://thread/t?turn=turn%2Fid&item=item%3A1%29", "AGENTCOORD://thread/t"]) {
+    const href = url.replace(/^agentcoord:/i, "agentcoord:").replace(/&/g, "&amp;");
+    assert.ok(render(url).includes('href="' + href + '"'), url);
+    assert.ok(render('<' + url + '>').includes('href="' + href + '"'), url);
+    assert.ok(render('[Open](' + url + ')').includes('href="' + href + '"'), url);
+  }
+  assert.equal((render(thread + " and " + thread).match(/<a /g) || []).length, 2);
+  assert.match(render('**' + thread + '**'), /<strong><a /);
+});
+
+test("automatic app links preserve code, explicit labels, and invalid routes", () => {
+  const url = "agentcoord://thread/t";
+  assert.equal(render('`' + url + '`'), '<p><code>' + url + '</code></p>');
+  assert.equal(render('```\n' + url + '\n```'), '<pre><code>' + url + '</code></pre>');
+  const labeled = render('[' + url + '](https://example.com)');
+  assert.equal((labeled.match(/<a /g) || []).length, 1);
+  assert.match(labeled, /href="https:\/\/example.com"/);
+  assert.match(render('[Open **thread**](' + url + ')'), /<a [^>]+>Open <strong>thread<\/strong><\/a>/);
+  for (const invalid of ["agentcoord://send?message=oops", "agentcoord://thread/", "agentcoord://thread/a%2Fb",
+    "agentcoord://thread/t?turn=t", "agentcoord://thread/t?project=x", "agentcoord://overview?project=x&project=y",
+    "agentcoord://user@overview", "agentcoord://thread/t\\unsafe", "agentcoord://thread/t#fragment",
+    "javascript:" + url, "https://example.com/" + url, "prefix" + url]) {
+    assert.doesNotMatch(render(invalid), /<a /, invalid);
+    assert.doesNotMatch(render('<' + invalid + '>'), /<a href="agentcoord:/, invalid);
+  }
+});
+
 test("HTML, entities, image syntax, and attribute injection cannot execute", () => {
   const html = render('<img src=x onerror=alert(1)> <script>bad()</script> &lt;svg&gt;\n\n[x](https://example.com/"onclick="bad)');
   assert.doesNotMatch(html, /<(?:img|script|svg)\b/);
