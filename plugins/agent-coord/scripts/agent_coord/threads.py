@@ -184,6 +184,8 @@ class ThreadStore:
 
         self.organization = OrganizationStore(store)
         self.attention = AttentionStore(store)
+        from .activity import ActivityStore
+        self.activity = ActivityStore(store)
 
     @staticmethod
     def record_scope(db, thread_id, scopes, cwd):
@@ -510,7 +512,7 @@ class ThreadStore:
             notification_policy.record_context(db, session_id, turn_id, context)
             notification_policy.snapshot_checkpoint(db, session_id, turn_id)
 
-    def start_turn(self, session_id: str, *, prompt=None, turn_id=None, notification_context=None) -> None:
+    def start_turn(self, session_id: str, *, prompt=None, turn_id=None, notification_context=None, occurred_at=None) -> None:
         from .thread_control import cancel_pending
         self.ensure(session_id)
         with self.store._connection() as db:
@@ -523,7 +525,7 @@ class ThreadStore:
                 return
             self._mark_seen(db, session_id)
             self._mark_receipts(db, session_id, kind="handled")
-            now = self.store.clock()
+            now = self.store.clock() if occurred_at is None else occurred_at
             cancel_pending(db, session_id, now)
             request = row["original_request"]
             title = row["title"]
@@ -531,8 +533,15 @@ class ThreadStore:
                 request = prompt.strip()[:100000]
                 if row["title_source"] == "auto" and title in {"New thread", "New session"}:
                     title = " ".join(request.split())[:100]
+            turn_key = turn_id or str(uuid.uuid4())
             db.execute("UPDATE work_threads SET original_request = ?, title = ?, turn_started_at = ?, turn_id = ?, turn_key = ?, updated_at = ? WHERE thread_id = ?",
-                       (request, title, now, turn_id, turn_id or str(uuid.uuid4()), now, session_id))
+                       (request, title, now, turn_id, turn_key, now, session_id))
+            context = notification_context
+            if context is None and turn_id:
+                context = db.execute("SELECT origin FROM turn_notification_context WHERE thread_id=? AND turn_key=?",
+                                     (session_id, turn_id)).fetchone()
+            self.activity.record_turn(db, "turn_started", session_id, turn_key, turn_id=turn_id,
+                                      started_at=now, occurred_at=now, context=dict(context) if context else None)
 
     def is_browser_session(self, session_id: str) -> bool:
         with self.store._connection() as db:
@@ -555,19 +564,22 @@ class ThreadStore:
             return db.execute("SELECT 1 FROM turn_stop_requests WHERE thread_id = ? AND turn_id = ?",
                               (session_id, turn_id)).fetchone() is not None
 
-    def finish_turn(self, session_id: str, *, turn_id=None, status="completed") -> None:
+    def finish_turn(self, session_id: str, *, turn_id=None, status="completed", occurred_at=None) -> None:
         """Persist one completion per turn, independently of UI polling or process lifetime."""
         if status not in {"completed", "failed", "interrupted"}:
             return
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            turn = db.execute("SELECT turn_id, turn_key FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
+            turn = db.execute("SELECT turn_id, turn_key, turn_started_at FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
             if not turn or not turn["turn_key"] or (turn_id and turn_id != turn["turn_id"]):
                 return
-            now = self.store.clock()
+            now = self.store.clock() if occurred_at is None else occurred_at
             inserted = db.execute("INSERT OR IGNORE INTO turn_completions (thread_id, turn_key, status, completed_at) VALUES (?, ?, ?, ?)",
                                   (session_id, turn["turn_key"], status, now)).rowcount
             if inserted:
+                self.activity.record_turn(db, "turn_ended", session_id, turn["turn_key"],
+                                          turn_id=turn["turn_id"], started_at=turn["turn_started_at"],
+                                          occurred_at=now, status=status)
                 db.execute("""UPDATE turn_notification_context SET checkpoint_id = (
                     SELECT id FROM thread_checkpoints WHERE thread_id = ? AND turn_id IS ? ORDER BY id DESC LIMIT 1)
                     WHERE thread_id = ? AND turn_key = ?""", (session_id, turn["turn_id"], session_id, turn["turn_key"]))

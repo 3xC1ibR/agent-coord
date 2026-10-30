@@ -576,6 +576,9 @@ def _handler(
                         raise CoordinationError("Choose a thread, optional history period, limit, and cursor.")
                     result = read_activity_history(store, fields.pop("thread_id", None), allowed_cwd=browser_sessions.cwd, **fields)
                 else:
+                    # Preserve the dashboard's interaction rows even while an
+                    # older interface remains attached during a runtime update.
+                    fields.setdefault("include_turns", False)
                     result = browser_sessions.activity.query(allowed_cwd=browser_sessions.cwd, **query_arguments(fields))
                 self._json(HTTPStatus.OK, result)
             elif route == "workspaces/scratchpad":

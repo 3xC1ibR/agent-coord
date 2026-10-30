@@ -15,7 +15,7 @@ from .context_lifecycle import CHECKPOINT_SCHEMA
 
 ACTIVITY_TOOL = {
     "name": "query_activity",
-    "description": "Read Ribbon Field activity totals and paginated raw interaction events for retrospective analysis. "
+    "description": "Read Ribbon Field activity totals and paginated interaction and agent turn lifecycle events for retrospective analysis. "
                    "Use when the user asks to review their work or attention. Does not wake workers. "
                    "Counts describe observed human interactions, not mental attention or productivity. "
                    "Project means a directory; group means the user's named thread group. Follow next_cursor with the same filters.",
@@ -24,6 +24,7 @@ ACTIVITY_TOOL = {
         "end": {"type": "number", "description": "Exclusive Unix seconds; defaults to now. Preserve this cutoff when paging."},
         "project": {"type": "string"}, "domain": {"type": "string"}, "group": {"type": "string"},
         "thread_id": {"type": "string"},
+        "include_turns": {"type": "boolean", "description": "Include agent turn lifecycle events; defaults to true. Human totals are unchanged."},
         "workspace": {"type": "string", "description": "Limit evidence to this workspace and its linked worktrees."},
         "group_by": {"type": "string", "enum": ["thread", "project", "domain", "group"]},
         "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "cursor": {"type": "string"},

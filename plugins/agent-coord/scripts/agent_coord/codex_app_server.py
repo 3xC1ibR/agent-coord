@@ -634,6 +634,7 @@ class BrowserSessions:
             if method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected", "thread/tokenUsage/updated"}:
                 saved_params = copy.deepcopy(params)
                 saved_params["usage_observed_at"] = self.store.clock()
+                saved_params["turn_observed_at"] = saved_params["usage_observed_at"]
                 if method == "turn/started":
                     saved_params["notification_context"] = self.starting_notification_context.get(thread_id)
                 self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected, disconnected_turns))
@@ -668,7 +669,8 @@ class BrowserSessions:
             prompt = next(("\n".join(c.get("text", "") for c in item.get("content", []))
                            for item in params["turn"].get("items", []) if item.get("type") == "userMessage"), None)
             self.store.threads.start_turn(thread_id, prompt=prompt, turn_id=params["turn"]["id"],
-                                         notification_context=params.get("notification_context"))
+                                         notification_context=params.get("notification_context"),
+                                         occurred_at=params.get("turn_observed_at"))
             with self.store._connection() as db:
                 self.reviews.bind(db, thread_id, params["turn"]["id"])
         if method == "turn/completed" and thread_id:
@@ -681,7 +683,8 @@ class BrowserSessions:
             status = turn.get("status", "completed")
             if (unsuccessful and user_stop) or status in {"cancelled", "canceled"}:
                 status = "interrupted"
-            self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=status)
+            self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=status,
+                                           occurred_at=params.get("turn_observed_at"))
             if unsuccessful and not deliberate:
                 notify_agent_failure(self.store, thread_id, event_key=["turn", turn.get("id")],
                                      stage="turn", error=turn.get("error") or
@@ -707,7 +710,8 @@ class BrowserSessions:
             if identity in (disconnected_turns or {}):
                 turn_id = disconnected_turns[identity]
                 user_stop = self.store.threads.stop_requested(identity, turn_id)
-                self.store.threads.finish_turn(identity, turn_id=turn_id, status="interrupted" if user_stop else "failed")
+                self.store.threads.finish_turn(identity, turn_id=turn_id, status="interrupted" if user_stop else "failed",
+                                               occurred_at=params.get("turn_observed_at"))
                 self.inbox_wake.pause(identity, reason, kind="stop" if user_stop else "unknown")
                 if not user_stop:
                     notify_agent_failure(self.store, identity, event_key=["turn", turn_id],

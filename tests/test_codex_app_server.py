@@ -1481,6 +1481,8 @@ class BrowserSessionTests(unittest.TestCase):
         self.sessions.rpc.fast_turn = True
         self.sessions.send(thread_id, {"message": "The earlier request."})
         with self.store._connection() as db:
+            # Simulate an installation predating both work threads and telemetry.
+            db.execute("DELETE FROM activity_events WHERE thread_id = ?", (thread_id,))
             db.execute("DELETE FROM turn_completions WHERE thread_id = ?", (thread_id,))
             db.execute("DELETE FROM work_threads WHERE thread_id = ?", (thread_id,))
         reopened = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)

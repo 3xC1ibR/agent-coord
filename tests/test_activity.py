@@ -6,6 +6,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
@@ -35,6 +36,154 @@ class ActivityTests(unittest.TestCase):
 
     def query(self, **kwargs):
         return self.activity.query(**{"start": self.base, "end": self.now, **kwargs})
+
+    def test_turn_lifecycle_is_atomic_idempotent_and_metadata_only(self):
+        self.store.threads.update("one", title="Worker", domain="backend")
+        group = self.store.threads.organization.create_project("Campaign")
+        self.store.threads.update("one", project_id=group["id"])
+        started = self.now
+        self.store.threads.start_turn("one", turn_id="turn-1", prompt="private prompt",
+                                      notification_context={"origin": "user"})
+        self.now += 2
+        self.store.threads.start_turn("one", turn_id="turn-1")
+        self.store.threads.update("one", title="Renamed")
+        ended = self.now
+        self.store.threads.finish_turn("one", turn_id="turn-1")
+        self.now += 1
+        self.store.threads.finish_turn("one", turn_id="turn-1", status="failed")
+        self.store.threads.start_turn("one", turn_id="turn-1")
+        events = self.query()["events"]
+        self.assertEqual([e["kind"] for e in events], ["turn_started", "turn_ended"])
+        self.assertEqual([e["occurred_at"] for e in events], [started, ended])
+        self.assertEqual({e["turn_id"] for e in events}, {"turn-1"})
+        self.assertTrue(all(e["actor"] == "agent" and e["source"] == "turn_lifecycle" for e in events))
+        self.assertEqual(events[1]["details"], {"started_at": started, "native_turn_id": "turn-1",
+                                                "trigger": "human", "origin": "user", "status": "completed"})
+        self.assertEqual(events[0]["snapshot"]["title"], "Worker")
+        self.assertEqual(events[1]["snapshot"]["title"], "Renamed")
+        self.assertEqual(events[0]["snapshot"]["group_id"], group["id"])
+        self.assertEqual(events[0]["snapshot"]["client"], "codex")
+        self.assertEqual(events[0]["snapshot"]["project"], str(self.root))
+        self.assertIn("forked_from_thread_id", events[0]["snapshot"])
+        self.assertIn("created_by_thread_id", events[0]["snapshot"])
+        self.assertNotIn("private prompt", json.dumps(events))
+        self.assertEqual(self.query()["totals"], dict.fromkeys(METRICS, 0))
+        self.assertEqual(self.query()["groups"], [])
+
+    def test_turn_statuses_unknown_and_terminal_identity(self):
+        for status in ("completed", "failed", "interrupted"):
+            self.store.threads.start_turn("one")
+            self.now += 1
+            self.store.threads.finish_turn("one", status="inProgress")
+            self.store.threads.finish_turn("one", status=status)
+            self.store.threads.finish_turn("one", status=status)
+        self.now += 1
+        events = self.query()["events"]
+        starts = [e for e in events if e["kind"] == "turn_started"]
+        ends = [e for e in events if e["kind"] == "turn_ended"]
+        self.assertEqual(len(starts), 3)
+        self.assertEqual(len({e["turn_id"] for e in starts}), 3)
+        self.assertEqual([e["turn_id"] for e in starts], [e["turn_id"] for e in ends])
+        self.assertEqual([e["details"]["status"] for e in ends], ["completed", "failed", "interrupted"])
+        self.assertTrue(all(e["details"]["trigger"] == "unknown" and e["details"]["native_turn_id"] is None for e in events))
+
+    def test_turn_trigger_context_is_not_changed_by_human_steering(self):
+        for origin, trigger in (("user", "human"), ("coordination", "inbox"),
+                                ("dispatch", "inbox"), ("schedule", "schedule"), ("agent", "agent")):
+            self.store.threads.remember_notification_context("one", origin, {"origin": origin})
+            self.store.threads.start_turn("one", turn_id=origin)
+            self.store.threads.user_turn_context("one", origin)
+            self.store.threads.finish_turn("one", turn_id=origin)
+            self.now += 1
+            pair = [e for e in self.query()["events"] if e["turn_id"] == origin]
+            self.assertEqual([e["details"]["trigger"] for e in pair], [trigger, trigger])
+
+    def test_overlapping_turns_reconstruct_running_threads(self):
+        self.register("two")
+        self.store.threads.start_turn("one", turn_id="first")
+        self.now += 1
+        self.store.threads.start_turn("two", turn_id="second")
+        self.now += 1
+        self.store.threads.finish_turn("one", turn_id="first")
+        self.now += 1
+        self.store.threads.finish_turn("two", turn_id="second")
+        self.now += 1
+        active, counts = set(), []
+        for event in self.query()["events"]:
+            key = event["thread_id"], event["turn_id"]
+            if event["kind"] == "turn_started":
+                active.add(key)
+            else:
+                active.discard(key)
+            counts.append(len({thread for thread, _ in active}))
+        self.assertEqual(counts, [1, 2, 1, 0])
+
+    def test_turn_occurrence_times_survive_delayed_persistence(self):
+        start = self.now - 100
+        end = self.now - 10
+        self.store.threads.start_turn("one", turn_id="delayed", occurred_at=start)
+        self.store.threads.finish_turn("one", turn_id="delayed", occurred_at=end)
+        self.now += 1
+        events = self.query()["events"]
+        self.assertEqual([e["occurred_at"] for e in events], [start, end])
+        self.assertTrue(all(e["received_at"] > e["occurred_at"] for e in events))
+        self.assertEqual(events[1]["details"]["started_at"], start)
+
+    def test_turn_record_failure_rolls_back_lifecycle_state(self):
+        before = self.store.threads.get("one")["turn_id"]
+        with patch.object(self.store.threads.activity, "record_turn", side_effect=RuntimeError("write failed")):
+            with self.assertRaises(RuntimeError):
+                self.store.threads.start_turn("one", turn_id="atomic")
+        self.assertEqual(self.store.threads.get("one")["turn_id"], before)
+        self.store.threads.start_turn("one", turn_id="atomic")
+        with patch.object(self.store.threads.activity, "record_turn", side_effect=RuntimeError("write failed")):
+            with self.assertRaises(RuntimeError):
+                self.store.threads.finish_turn("one", turn_id="atomic")
+        self.assertEqual(self.store.threads.completion_cursor(), 0)
+        self.store.threads.finish_turn("one", turn_id="atomic")
+        self.assertEqual(self.store.threads.completion_cursor(), 1)
+
+    def test_turn_pause_clear_stale_completion_and_range_boundary(self):
+        self.store.threads.start_turn("one", turn_id="first")
+        self.now += 1
+        self.store.threads.finish_turn("one", turn_id="older", status="failed")
+        self.assertEqual(self.store.threads.completion_cursor(), 0)
+        self.activity.configure(False)
+        self.store.threads.finish_turn("one", turn_id="first")
+        self.activity.configure(True)
+        self.store.threads.start_turn("one", turn_id="second")
+        cutoff = self.now
+        self.now += 2
+        self.store.threads.finish_turn("one", turn_id="second", status="interrupted")
+        self.now += 1
+        result = self.query(start=cutoff + 1)
+        self.assertEqual([e["kind"] for e in result["events"]], ["turn_ended"])
+        self.assertEqual(result["events"][0]["details"]["started_at"], cutoff)
+        self.activity.clear()
+        self.store.threads.finish_turn("one", turn_id="second")
+        self.store.threads.start_turn("one", turn_id="second")
+        self.assertEqual(self.query()["events"], [])
+
+    def test_turn_filter_preserves_pagination_and_human_summary(self):
+        self.store.threads.start_turn("one", turn_id="work")
+        self.now += 1
+        self.activity.record("message_submitted", "one")
+        self.store.threads.finish_turn("one", turn_id="work")
+        self.now += 1
+        self.activity.record("decision_submitted", "one")
+        self.now += 1
+        first = self.query(include_turns=False, limit=1)
+        second = self.query(include_turns=False, limit=1, cursor=first["next_cursor"])
+        self.assertEqual([e["kind"] for e in first["events"] + second["events"]],
+                         ["message_submitted", "decision_submitted"])
+        self.assertIsNone(second["next_cursor"])
+        self.assertEqual(self.query()["totals"], first["totals"])
+        with self.assertRaises(CoordinationError):
+            self.query(include_turns=True, cursor=first["next_cursor"])
+        with self.assertRaises(CoordinationError):
+            self.query(include_turns="false")
+        with self.assertRaises(CoordinationError):
+            self.activity.record("turn_started", "one")
 
     def test_additive_initialization_settings_and_no_backfill(self):
         self.store.threads.capture_request("one", "private original prompt")

@@ -1952,6 +1952,15 @@ counts remain consistent across these interfaces. See
 [the activity evidence guide](../plugins/agent-coord/skills/agent-coordination/references/activity.md)
 for filters, pagination, provenance, and interpretation.
 
+Raw activity queries also include `turn_started` and `turn_ended` agent events,
+paired by thread and turn ID, with start time, trigger metadata, end status, and
+organization snapshots. These metadata-only events do not affect human totals.
+HTTP activity queries default to `include_turns=false` to preserve the
+dashboard's interaction rows; HTTP consumers can opt in with `include_turns=true`.
+Recording begins with the updated backend (and updated hooks for terminal
+sessions); historical turns are not backfilled. Plugin refresh alone does not
+activate app lifecycle recording in an already-running backend.
+
 ## Refresh installed plugins after changes
 
 Run this workflow after a change under `plugins/agent-coord/`, including a

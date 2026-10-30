@@ -15,7 +15,7 @@ from .store import CoordinationError
 from .workspaces import matches_workspace
 
 
-QUERY_FIELDS = {"start", "end", "project", "domain", "group", "thread_id", "group_by", "limit", "cursor"}
+QUERY_FIELDS = {"start", "end", "project", "domain", "group", "thread_id", "group_by", "limit", "cursor", "include_turns"}
 # Where a deliberate navigation began; web/activity-collector.js emits these names.
 NAVIGATION_SURFACES = frozenset({
     "sidebar", "cards", "working-set", "list", "atlas", "search", "tabs", "panes", "conversation",
@@ -45,6 +45,13 @@ def query_arguments(values):
             result["limit"] = int(result["limit"])
         except (ValueError, TypeError, OverflowError) as exc:
             raise CoordinationError("Activity limit must be an integer.") from exc
+    if "include_turns" in result:
+        value = result["include_turns"]
+        if isinstance(value, str) and value in {"true", "false"}:
+            value = value == "true"
+        if not isinstance(value, bool):
+            raise CoordinationError("Include turns must be true or false.")
+        result["include_turns"] = value
     return result
 
 
@@ -206,7 +213,7 @@ def _saved_requests(db, thread_id, allowed_cwd):
 
 def review_prompt(filters, question=""):
     command = "agent-coord activity query " + " ".join(
-        "--" + key.replace("_", "-") + " " + shlex.quote(str(value)) for key, value in filters.items() if value is not None)
+        "--" + key.replace("_", "-") + " " + shlex.quote(json.dumps(value) if isinstance(value, bool) else str(value)) for key, value in filters.items() if value is not None)
     return ("Review my Ribbon Field activity for the selected period and help me improve how I organize work with agents.\n\n"
         "Scope (Unix seconds; end is exclusive):\n" + json.dumps(filters, indent=2) + "\n\n"
         "Use the query_activity and read_activity_history tools, or the dependency-free CLI:\n" + command + "\n"

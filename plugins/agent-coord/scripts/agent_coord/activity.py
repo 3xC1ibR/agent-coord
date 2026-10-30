@@ -20,7 +20,8 @@ from .store import CoordinationError
 from .workspaces import matches_workspace
 
 KINDS = frozenset({"visit_started", "visit_ended", "message_submitted",
-                   "decision_submitted", "organization_changed"})
+                   "decision_submitted", "organization_changed", "turn_started", "turn_ended"})
+TURN_KINDS = frozenset({"turn_started", "turn_ended"})
 VISIT_KINDS = frozenset({"visit_started", "visit_ended"})
 ACTORS = frozenset({"human", "agent", "system"})
 GROUPINGS = frozenset({"thread", "project", "domain", "group"})
@@ -141,6 +142,8 @@ class ActivityStore:
                     ON activity_events(thread_id, occurred_at, sequence);
                 CREATE INDEX IF NOT EXISTS activity_events_visit_idx
                     ON activity_events(thread_id, window_id, visit_id, kind, actor);
+                CREATE INDEX IF NOT EXISTS activity_events_turn_idx
+                    ON activity_events(thread_id, turn_id, kind);
                 CREATE TABLE IF NOT EXISTS activity_pauses (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     started_at REAL NOT NULL, ended_at REAL
@@ -249,6 +252,8 @@ class ActivityStore:
             raise CoordinationError("Unknown activity kind.")
         if not isinstance(actor, str) or actor not in ACTORS:
             raise CoordinationError("Activity actor must be human, agent, or system.")
+        if kind in TURN_KINDS and actor != "agent":
+            raise CoordinationError("Turn lifecycle activity must have an agent actor.")
         _text(thread_id, "Thread ID")
         event_id = str(uuid.uuid4()) if event_id is None else _text(event_id, "Event ID")
         _text(source, "Activity source", 64)
@@ -260,46 +265,88 @@ class ActivityStore:
             occurred_at = _timestamp(occurred_at, "Activity time")
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            threads = self._thread_rows(db, thread_id)
-            if not threads:
-                raise CoordinationError("Work thread not found.")
-            previous = db.execute("SELECT * FROM activity_events WHERE event_id=?", (event_id,)).fetchone()
-            fields = dict(kind=kind, thread_id=thread_id, actor=actor, source=source,
-                          window_id=window_id, visit_id=visit_id, turn_id=turn_id, details_json=details_json)
-            if previous is not None:
-                if (any(previous[key] != value for key, value in fields.items())
-                        or occurred_at is not None and previous["occurred_at"] != occurred_at):
-                    raise CoordinationError("Event ID already belongs to different activity.")
-                return self._receipt(previous, duplicate=True)
-            settings = self._settings(db)
-            visit_key = self._visit_key(settings, event_id) if kind in VISIT_KINDS else None
-            if visit_key is not None:
-                discarded = db.execute("SELECT reason FROM activity_discarded_visits WHERE event_key=?",
-                                       (visit_key,)).fetchone()
-                if discarded:
-                    return self._skip(db, event_id, discarded["reason"])
-            if not settings["enabled"]:
-                return self._skip(db, event_id, "recording_paused", visit_key=visit_key)
-            received_at = _timestamp(self.store.clock(), "Clock")
-            occurred_at = received_at if occurred_at is None else occurred_at
-            # Visit timestamps come from buffered browser observations. Backend
-            # submissions keep their existing acceptance-time behavior instead.
-            if visit_key is not None:
-                if settings["cleared_before"] is not None and occurred_at < settings["cleared_before"]:
-                    return self._skip(db, event_id, "history_cleared", visit_key=visit_key)
-                if occurred_at < settings["recording_started_at"]:
-                    return self._skip(db, event_id, "before_recording_started", visit_key=visit_key)
-                if db.execute("""SELECT 1 FROM activity_pauses WHERE started_at<=?
-                                  AND (ended_at IS NULL OR ?<ended_at) LIMIT 1""",
-                              (occurred_at, occurred_at)).fetchone():
-                    return self._skip(db, event_id, "recording_paused_at_occurrence", visit_key=visit_key)
-            snapshot = self._snapshot(threads[0], self._creators(db))
-            db.execute("""INSERT INTO activity_events (event_id, kind, thread_id, occurred_at,
-                received_at, actor, source, window_id, visit_id, turn_id, details_json, snapshot_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (event_id, kind, thread_id, occurred_at, received_at, actor, source,
-                 window_id, visit_id, turn_id, details_json, _json(snapshot)))
-            return self._receipt(db.execute("SELECT * FROM activity_events WHERE event_id=?", (event_id,)).fetchone())
+            return self._record(db, kind, thread_id, event_id=event_id, occurred_at=occurred_at,
+                                actor=actor, source=source, window_id=window_id,
+                                visit_id=visit_id, turn_id=turn_id, details_json=details_json)
+
+    def _record(self, db, kind, thread_id, *, event_id, occurred_at, actor, source,
+                window_id=None, visit_id=None, turn_id=None, details_json="{}"):
+        """Insert validated metadata using the caller's transaction."""
+        threads = self._thread_rows(db, thread_id)
+        if not threads:
+            raise CoordinationError("Work thread not found.")
+        previous = db.execute("SELECT * FROM activity_events WHERE event_id=?", (event_id,)).fetchone()
+        fields = dict(kind=kind, thread_id=thread_id, actor=actor, source=source,
+                      window_id=window_id, visit_id=visit_id, turn_id=turn_id, details_json=details_json)
+        if previous is not None:
+            if (any(previous[key] != value for key, value in fields.items())
+                    or occurred_at is not None and previous["occurred_at"] != occurred_at):
+                raise CoordinationError("Event ID already belongs to different activity.")
+            return self._receipt(previous, duplicate=True)
+        settings = self._settings(db)
+        visit_key = self._visit_key(settings, event_id) if kind in VISIT_KINDS else None
+        if visit_key is not None:
+            discarded = db.execute("SELECT reason FROM activity_discarded_visits WHERE event_key=?",
+                                   (visit_key,)).fetchone()
+            if discarded:
+                return self._skip(db, event_id, discarded["reason"])
+        if not settings["enabled"]:
+            return self._skip(db, event_id, "recording_paused", visit_key=visit_key)
+        received_at = _timestamp(self.store.clock(), "Clock")
+        occurred_at = received_at if occurred_at is None else occurred_at
+        # Visit timestamps come from buffered browser observations. Backend
+        # submissions keep their existing acceptance-time behavior instead.
+        if visit_key is not None:
+            if settings["cleared_before"] is not None and occurred_at < settings["cleared_before"]:
+                return self._skip(db, event_id, "history_cleared", visit_key=visit_key)
+            if occurred_at < settings["recording_started_at"]:
+                return self._skip(db, event_id, "before_recording_started", visit_key=visit_key)
+            if db.execute("""SELECT 1 FROM activity_pauses WHERE started_at<=?
+                              AND (ended_at IS NULL OR ?<ended_at) LIMIT 1""",
+                          (occurred_at, occurred_at)).fetchone():
+                return self._skip(db, event_id, "recording_paused_at_occurrence", visit_key=visit_key)
+        snapshot = self._snapshot(threads[0], self._creators(db))
+        db.execute("""INSERT INTO activity_events (event_id, kind, thread_id, occurred_at,
+            received_at, actor, source, window_id, visit_id, turn_id, details_json, snapshot_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, kind, thread_id, occurred_at, received_at, actor, source,
+             window_id, visit_id, turn_id, details_json, _json(snapshot)))
+        return self._receipt(db.execute("SELECT * FROM activity_events WHERE event_id=?", (event_id,)).fetchone())
+
+    def record_turn(self, db, kind, thread_id, turn_key, *, turn_id, started_at,
+                    occurred_at, status=None, context=None):
+        """Commit lifecycle evidence atomically with its thread state transition."""
+        occurred_at = _timestamp(occurred_at, "Turn time")
+        if started_at is not None:
+            started_at = _timestamp(started_at, "Turn start")
+        details = {"started_at": started_at, "trigger": "unknown"}
+        if kind == "turn_started":
+            origin = (context or {}).get("origin")
+            details["trigger"] = {"user": "human", "coordination": "inbox",
+                                  "dispatch": "inbox", "schedule": "schedule",
+                                  "agent": "agent"}.get(origin, "unknown")
+            if origin in {"user", "coordination", "dispatch", "schedule", "agent"}:
+                details["origin"] = origin
+            # The scheduler binds its accepted native turn before ThreadStore
+            # receives the event. Match that exact turn, never thread ancestry.
+            if turn_id and db.execute("SELECT 1 FROM sqlite_master WHERE name='scheduled_prompts'").fetchone():
+                if db.execute("SELECT 1 FROM scheduled_prompts WHERE thread_id=? AND turn_id=?",
+                              (thread_id, turn_id)).fetchone():
+                    details["trigger"] = "schedule"
+        else:
+            start = db.execute("""SELECT details_json FROM activity_events
+                WHERE thread_id=? AND turn_id=? AND kind='turn_started' ORDER BY sequence LIMIT 1""",
+                               (thread_id, turn_key)).fetchone()
+            if start:
+                details.update(json.loads(start["details_json"]))
+            details["status"] = status
+        # Native IDs may be absent in terminal hooks; turn_key is the durable
+        # fallback already used for completion deduplication.
+        details["native_turn_id"] = turn_id
+        event_id = "turn:" + hashlib.sha256(_json([kind, thread_id, turn_key]).encode()).hexdigest()
+        return self._record(db, kind, thread_id, event_id=event_id, occurred_at=occurred_at,
+                            actor="agent", source="turn_lifecycle", turn_id=turn_key,
+                            details_json=_details(details))
 
     def clear(self, before=None):
         if before is not None:
@@ -362,11 +409,14 @@ class ActivityStore:
             snapshot["creator_outside_workspace"] = True
 
     def query(self, *, start=None, end=None, project=None, domain=None, group=None,
-              thread_id=None, group_by="thread", limit=100, cursor=None, allowed_cwd=None):
+              thread_id=None, group_by="thread", limit=100, cursor=None, allowed_cwd=None,
+              include_turns=True):
         if not isinstance(group_by, str) or group_by not in GROUPINGS:
             raise CoordinationError("Group activity by thread, project, domain, or group.")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise CoordinationError("Activity limit must be an integer from 1 to 500.")
+        if not isinstance(include_turns, bool):
+            raise CoordinationError("Include turns must be a boolean.")
         start = None if start is None else _timestamp(start, "Range start")
         end = None if end is None else _timestamp(end, "Range end")
         project = None if project is None else _path(project, "Project")
@@ -378,7 +428,7 @@ class ActivityStore:
         if thread_id is not None:
             _text(thread_id, "Thread ID")
         filters = {"project": project, "domain": domain, "group": group,
-                   "thread_id": thread_id, "allowed_cwd": allowed_cwd}
+                   "thread_id": thread_id, "allowed_cwd": allowed_cwd, "include_turns": include_turns}
         with self.store._connection() as db:
             db.execute("BEGIN")  # One coherent read snapshot; no writer lock.
             settings = self._settings(db)
@@ -415,16 +465,16 @@ class ActivityStore:
             events = []
             first_event_at = None
             # Find the first accessible evidence without loading all old details.
-            for row in db.execute("""SELECT thread_id, occurred_at, snapshot_json FROM activity_events
+            for row in db.execute("""SELECT thread_id, occurred_at, snapshot_json, kind FROM activity_events
                     WHERE sequence<=? AND occurred_at<? ORDER BY occurred_at, sequence""", (high_water, end)):
-                if row["thread_id"] in threads and self._visible(json.loads(row["snapshot_json"]), allowed_cwd):
+                if (include_turns or row["kind"] not in TURN_KINDS) and row["thread_id"] in threads and self._visible(json.loads(row["snapshot_json"]), allowed_cwd):
                     first_event_at = row["occurred_at"]
                     break
             # Aggregate the whole selected range, independently of page size.
             rows = db.execute("""SELECT * FROM activity_events WHERE sequence<=? AND occurred_at>=?
                                  AND occurred_at<? ORDER BY occurred_at, sequence""", (high_water, start, end))
             for row in rows:
-                if row["thread_id"] not in threads:
+                if row["thread_id"] not in threads or not include_turns and row["kind"] in TURN_KINDS:
                     continue
                 event = self._event(row)
                 if not self._visible(event["snapshot"], allowed_cwd):

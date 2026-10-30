@@ -69,6 +69,63 @@ concrete experiments or assignment briefs over a productivity score. Do not
 reorganize work, modify code, or launch additional agents merely because an
 activity review suggests doing so.
 
+## Agent execution history
+
+`turn_started` and `turn_ended` record accepted lifecycle transitions for app
+providers through the shared runtime, and for terminal sessions through their
+start/stop hooks. Both have `actor: "agent"`, `source: "turn_lifecycle"`, and the
+usual `thread_id`, `occurred_at`, `received_at`, `sequence`, and organization
+`snapshot` (client, project, group, creator and fork lineage). `occurred_at` is
+captured at provider-event receipt and survives deferred database persistence;
+`received_at` is when the ledger write is accepted. They do not add to
+human totals or groups. HTTP activity queries default to `include_turns=false`,
+so the Activity dashboard retains its existing requests, interaction rows, empty
+state, and pagination, including with an older interface during runtime updates.
+HTTP consumers opt in with `include_turns=true`. CLI, MCP, and Python queries
+include turn events by default; CLI `--include-turns false` or the Python/MCP
+`include_turns: false` field excludes them before pagination.
+
+Pair events by `(thread_id, turn_id)`. A native turn ID is used when available;
+otherwise a durable generated key identifies a terminal turn, with
+`details.native_turn_id: null`. Duplicate native callbacks and repeated
+completions create one event per transition. Each event includes:
+
+- `details.started_at`: Unix seconds for the recorded turn start. The end event
+  repeats it so a consumer can recover a start outside the queried period.
+- `details.native_turn_id`: the provider ID, or null for hooks without one.
+- `details.trigger`: `human`, `inbox`, `schedule`, `agent`, or `unknown`.
+  App direct inputs (including queued human follow-ups) are human; automatic
+  coordination/dispatch wakes are inbox. Inter-agent assignments therefore
+  appear as inbox starts. Scheduled turns are identified by their exact saved
+  schedule turn ID. Explicit agent origins can be recorded as agent. Terminal
+  hooks and older providers without origin evidence remain unknown; thread
+  ancestry and prompt text do not establish a trigger.
+- `details.origin`, when available: the runtime notification origin (`user`,
+  `coordination`, `dispatch`, `schedule`, or `agent`). This is separate from the
+  trigger; scheduled prompts can have a notification origin of user.
+- End events additionally have `details.status`: `completed`, `failed`, or
+  `interrupted`. A human steering an existing turn does not change its start
+  trigger. A confirmed provider disconnect follows the runtime's existing failed
+  or interrupted completion path. Terminal stop hooks report completed when no
+  authoritative provider outcome is available.
+
+To reconstruct running agents, replay starts and ends into a set keyed by
+`(thread_id, turn_id)`; count distinct thread IDs in the set. Query from before the
+period of interest (or retain an earlier baseline), since a start before the
+range with no end inside it will not appear in that range. Ranges are half-open;
+a start at a boundary is included and an end at that boundary belongs to the next
+range. Drain every page and deduplicate by event ID when polling overlapping
+ranges. Existing cursors freeze the cutoff, so start a new query for new events.
+
+Recording pauses and clearing apply to turn events too. No execution history is
+backfilled, and running turns at activation may lack a start event. A missing end
+can mean a still-running turn or missing evidence after a crash, pause, or
+upgrade; do not treat it as proof of indefinite execution. Existing coverage
+metadata describes ledger availability, not guaranteed lifecycle completeness.
+Current execution state may help reconcile the present, but cannot prove a past
+end time. Activation of app lifecycle recording requires a backend runtime
+handover to a new payload; plugin refresh alone only updates CLI/hook consumers.
+
 ## Local controls and review launch
 
 The dashboard supports pausing recording and clearing local activity. Clearing

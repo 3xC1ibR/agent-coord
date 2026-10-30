@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 import urllib.error
 import urllib.request
 from unittest.mock import patch
@@ -37,6 +38,7 @@ class ActivityAPITests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.worker.join(2)
+        self.sessions.close()
 
     def request(self, route, body=None, *, token=None):
         headers = {}
@@ -55,6 +57,67 @@ class ActivityAPITests(unittest.TestCase):
         return {"event_id": identity, "kind": kind, "thread_id": self.thread,
                 "occurred_at": self.store.clock() - 5, "window_id": "window", "visit_id": "visit",
                 "source": "navigation", **changes}
+
+    def test_provider_turn_events_are_queryable_and_dashboard_can_exclude_them(self):
+        self.sessions.rpc.fast_turn = True
+        self.store.threads.update(self.thread, title="Worker")
+        self.assertEqual(self.request("sessions/" + self.thread + "/messages", {"message": "Private task"})[0], 200)
+        self.sessions.persistence.flush()
+        report = self.request("activity?start=0&include_turns=true")[1]
+        turns = [e for e in report["events"] if e["kind"].startswith("turn_")]
+        self.assertEqual([e["kind"] for e in turns], ["turn_started", "turn_ended"])
+        self.assertEqual({e["turn_id"] for e in turns}, {"turn-0"})
+        self.assertEqual(turns[1]["details"]["status"], "completed")
+        self.assertEqual(turns[0]["details"]["trigger"], "human")
+        self.assertNotIn("Private task", json.dumps(turns))
+        dashboard = self.request("activity?start=0")[1]
+        self.assertEqual([e["kind"] for e in dashboard["events"]], ["message_submitted"])
+        self.assertEqual(report["totals"], dashboard["totals"])
+        self.assertEqual(self.request("activity?start=0&include_turns=0")[0], 400)
+        for kind in ("turn_started", "turn_ended"):
+            self.assertEqual(self.request("activity/events", {"events": [self.event(kind=kind)]})[0], 400)
+
+    def test_scheduled_turn_attribution_uses_exact_turn_and_survives_completion(self):
+        self.sessions.rpc.fast_turn = True
+        item = self.sessions.schedules.create({"id": str(uuid.uuid4()), "message": "Scheduled work", "run_at": time.time() + 10,
+                                             "timezone": "America/Chicago", "settings": {"cwd": str(self.root), "model": "available-model"}})
+        self.store.clock = lambda: item["run_at"]
+        self.sessions.schedules.process_once()
+        self.sessions.persistence.flush()
+        self.store.clock = lambda: item["run_at"] + 1
+        self.assertEqual(self.sessions.schedules.list()[0]["state"], "completed")
+        events = self.request("activity?start=0&include_turns=true")[1]["events"]
+        turns = [e for e in events if e["kind"].startswith("turn_")]
+        self.assertEqual(len(turns), 2)
+        self.assertEqual([e["details"]["trigger"] for e in turns], ["schedule", "schedule"])
+
+    def test_inbox_wake_records_agent_execution_without_human_input(self):
+        self.sessions.rpc.fast_turn = True
+        self.store.register(session_id="sender", client="claude", cwd=str(self.root))
+        self.store.send_message(sender_session_id="sender", recipient_session_id=self.thread,
+                                body="An assignment", reply_required=False)
+        self.sessions.inbox_wake.process_once()
+        self.sessions.persistence.flush()
+        report = self.request("activity?start=0&include_turns=true")[1]
+        turns = [e for e in report["events"] if e["kind"].startswith("turn_")]
+        self.assertEqual([e["details"]["trigger"] for e in turns], ["inbox", "inbox"])
+        self.assertEqual(report["totals"]["messages"], 0)
+        self.assertEqual(report["groups"], [])
+
+    def test_provider_failure_interruption_and_disconnect_close_recorded_turns(self):
+        for status in ("failed", "interrupted", "disconnect"):
+            with self.subTest(status=status):
+                thread = self.sessions.create({"name": "Worker"})["session"]["thread_id"]
+                turn = self.sessions.send(thread, {"message": "Work"})["turn"]
+                if status == "disconnect":
+                    self.sessions._event({"method": "bridge/disconnected", "params": {}})
+                else:
+                    self.sessions._event({"method": "turn/completed", "params": {
+                        "threadId": thread, "turn": {**turn, "status": status}}})
+                self.sessions.persistence.flush()
+                events = self.request("activity?start=0&include_turns=true&thread_id=" + thread)[1]["events"]
+                self.assertEqual([e["kind"] for e in events], ["turn_started", "turn_ended"])
+                self.assertEqual(events[1]["details"]["status"], "failed" if status == "disconnect" else status)
 
     def test_visit_upload_is_authenticated_idempotent_and_reconciles_summary(self):
         event = self.event()

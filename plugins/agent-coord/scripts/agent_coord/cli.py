@@ -95,6 +95,7 @@ def _parser() -> argparse.ArgumentParser:
     for field in ("project", "domain", "group", "thread_id"):
         activity_query.add_argument("--" + field.replace("_", "-"))
     activity_query.add_argument("--group-by", choices=["thread", "project", "domain", "group"], default="thread")
+    activity_query.add_argument("--include-turns", choices=["true", "false"], help="Include agent turn lifecycle events (default: true).")
     activity_commands.add_parser("settings", help="Show recording status and coverage start.")
 
     antigravity = subcommands.add_parser("antigravity", help="Install or sign in to Google Antigravity.")
@@ -704,14 +705,14 @@ def run(arguments: argparse.Namespace) -> Any:
     store = CoordinationStore(arguments.db)
     if command == "activity":
         from .activity import ActivityStore
-        from .activity_api import read_activity_history, QUERY_FIELDS
+        from .activity_api import read_activity_history, query_arguments, QUERY_FIELDS
         if arguments.activity_command == "settings":
             return ActivityStore(store).settings()
         if arguments.activity_command == "history":
             return read_activity_history(store, arguments.thread_id, start=arguments.start, end=arguments.end,
                                          limit=arguments.limit, cursor=arguments.cursor, allowed_cwd=arguments.workspace)
         values = {key: getattr(arguments, key) for key in QUERY_FIELDS if getattr(arguments, key, None) is not None}
-        return ActivityStore(store).query(**values, allowed_cwd=arguments.workspace)
+        return ActivityStore(store).query(**query_arguments(values), allowed_cwd=arguments.workspace)
     if command == "sidecar":
         from .sidecars import Sidecars
         watches = Sidecars(store)
