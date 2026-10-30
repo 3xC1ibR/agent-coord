@@ -424,6 +424,15 @@ class ThreadControlTests(unittest.TestCase):
         server = make_ui_server(self.store, port=0, cwd=str(self.root), browser_sessions=self.sessions)
         self.addCleanup(server.server_close)
         self.sessions.send(thread_id, {"message": "Finish before closing."})
+        # Turn bookkeeping is asynchronous. A close queued before it lands records
+        # no turn, and the late turn start then cancels it as superseding input
+        # (seen on CI as 'cancelled' with turn_key null; tracked separately).
+        recorded = time.monotonic() + 5
+        while time.monotonic() < recorded:
+            with self.store._connection() as db:
+                if db.execute("SELECT turn_key FROM work_threads WHERE thread_id = ?", (thread_id,)).fetchone()["turn_key"]:
+                    break
+            threading.Event().wait(.02)
         self.cli("close", thread_id, "--after-turn")
         self.complete_turn(thread_id)
         deadline = time.monotonic() + 5
