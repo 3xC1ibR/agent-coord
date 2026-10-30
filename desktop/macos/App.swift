@@ -409,7 +409,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if saved == nil { window.makeKeyAndOrderFront(nil) }
         else { window.orderFront(nil) }
         NSApp.activate(ignoringOtherApps: true)
-        if saved?.minimized == true { window.miniaturize(nil) }
+        if saved?.minimized == true { minimizeWhenOnScreen(window) }
         scheduleWindowSave()
         return item
     }
@@ -432,15 +432,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         URL(string: item.launchRoute, relativeTo: base)?.absoluteURL ?? base
     }
 
+    /// AppKit ignores miniaturize while a window is still being ordered in during
+    /// launch, so retry briefly until the restored window is actually minimized.
+    private func minimizeWhenOnScreen(_ window: NSWindow, attempts: Int = 20) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak window] in
+            guard let window = window, !window.isMiniaturized, attempts > 0 else { return }
+            window.miniaturize(nil)
+            self?.minimizeWhenOnScreen(window, attempts: attempts - 1)
+        }
+    }
+
     private func restoreWindows() {
         restoringWindows = true
         let saved = windowStore?.load()
         nextFolderSlot = saved?.nextFolderSlot ?? 0
         for record in saved?.windows ?? [] { makeWindow(restoring: record) }
         if windows.isEmpty { makeWindow() }
-        if let focused = windows.first(where: { $0.id == saved?.focusedWindow && !$0.window.isMiniaturized }) {
-            focused.window.makeKeyAndOrderFront(nil)
+        let focus = { [weak self] in
+            guard let self = self else { return }
+            if let focused = self.windows.first(where: { $0.id == saved?.focusedWindow && !$0.window.isMiniaturized }) {
+                focused.window.makeKeyAndOrderFront(nil)
+            }
         }
+        focus()
+        // Deferred miniaturizing and launch activation can move key status; the
+        // main queue runs this after every restored window has been minimized.
+        DispatchQueue.main.async(execute: focus)
         restoringWindows = false
         saveWindowSet()
     }
@@ -2975,6 +2992,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             makeWindow(url: serverURL!.appendingPathComponent("settings"))
             let monitor = makeWindow(url: serverURL!.appendingPathComponent("monitor"))
             monitor.window.miniaturize(nil)
+            // Record the expected state only after the minimize animation has finished.
+            for _ in 0..<60 where !monitor.window.isMiniaturized { try await Task.sleep(nanoseconds: 50_000_000) }
+            try smokeCheck("restore_seed_minimized_monitor", monitor.window.isMiniaturized)
             third.window.makeKeyAndOrderFront(nil)
             let expected: [[String: Any]] = [
                 ["id": first.id, "threads": [ids[0], ids[1]], "selected": ids[1], "draft": "alpha draft", "project": try await smokeJS("return state.projectCwd;", in: first.webView)],
@@ -3038,10 +3058,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 smokeResults["restore_frame_\(item.folderSlot)_debug"] = ["saved": frame["frame"]!, "actual": NSStringFromRect(item.window.frame)]
                 try smokeCheck("restore_geometry_\(item.folderSlot)", abs(item.window.frame.minX - saved.minX) < 2 && abs(item.window.frame.minY - saved.minY) < 2 &&
                     abs(item.window.frame.width - saved.width) < 2 && abs(item.window.frame.height - saved.height) < 2 && item.folderSlot == frame["slot"] as? Int)
+                smokeResults["restore_minimized_\(item.folderSlot)_debug"] = ["saved": frame["minimized"] as? Bool ?? false, "actual": item.window.isMiniaturized]
                 try smokeCheck("restore_minimized_\(item.folderSlot)", item.window.isMiniaturized == frame["minimized"] as? Bool)
             }
             try smokeCheck("restore_settings_and_monitor", windows.contains(where: \.isSettings) && windows.contains { $0.launchRoute == "/monitor" })
-            try smokeCheck("restore_focused_window", current?.id == expected[2]["id"] as? String)
+            // macOS cooperative activation keeps a probe launched in the background
+            // inactive, with no key window to compare; record that instead of guessing.
+            if NSApp.isActive {
+                try smokeCheck("restore_focused_window", current?.id == expected[2]["id"] as? String)
+            } else {
+                smokeResults["restore_focus_unverified_inactive_app"] = expected[2]["id"] as? String ?? ""
+            }
             if stage == "verify", let first = windows.first(where: { $0.id == expected[0]["id"] as? String }) {
                 _ = try await smokeJS("document.querySelector('#message').value = 'alpha final keystroke'; return true;", in: first.webView)
                 var changed = expected
@@ -3060,9 +3087,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 fresh.window.close()
             }
             if stage == "lastclose" {
-                let final = windows.last { !$0.isSettings }!
+                let final = windows.last { !$0.isSettings && $0.launchRoute != "/monitor" }!
                 let tabs = try await smokeJS("return state.threadTabs.items.length;", in: final.webView)
-                for item in Array(windows) { item.window.close() }
+                for item in Array(windows) where item !== final { item.window.close() }
+                final.window.close()
                 try smokeCheck("restore_released_windows_stay_closed",
                                windows.count == 1 && windows[0] === final && final.restorable)
                 preferences.set(final.id, forKey: "restoreSmokeFinal")
