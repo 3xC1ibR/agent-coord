@@ -869,7 +869,7 @@ function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) 
   $("overview").classList.toggle("atlas-schedules-only", atlas || workingSet || list);
   if (listHost) listHost.hidden = !list;
   if (list && listHost && !$("welcome").hidden) {
-    state.threadList ||= WorkingSet.createList({document, storage: state.overviewPreferences,
+    state.threadList ||= WorkingSet.createList({document,
       onOpen: id => action(() => select(id)),
       onRead: thread => action(async () => {
         await api(threadPath(thread.thread_id), {seen: true, seen_checkpoint_id: thread.checkpoint?.id || 0,
@@ -877,8 +877,7 @@ function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) 
         await refreshList();
       }),
       onClose: thread => action(() => toggleThreadClosed(thread)),
-      onMenu: (thread, anchor, event) => state.threadActions.showMenu(anchor, thread.title, threadMenuItems(thread), event),
-      onGroupChange: id => action(() => savedViews.openGroup(id))});
+      onMenu: (thread, anchor, event) => state.threadActions.showMenu(anchor, thread.title, threadMenuItems(thread), event)});
     const view = savedViews?.activeId || "all";
     state.threadList.render(workingThreads, listHost, {workspace: state.projectCwd || "all", view,
       selectedGroup: view.startsWith("group-") ? view.slice(6) : view === "all" ? null : undefined,

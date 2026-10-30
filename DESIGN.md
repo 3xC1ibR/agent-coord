@@ -108,3 +108,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-29 | Conversation header lists thread actions in one menu; a main window's title names its active project | Actions remain available in expanded chat, and the thread title already appears in its tab and heading. |
 | 2026-10-29 | Direct response actions and title autosave | Reduce friction while preserving drafts, selection and reading position. |
 | 2026-10-29 | Simplify composer controls and expose native permission choices | Remove redundant chrome while preserving shortcuts, actual provider modes and group persistence. |
+| 2026-10-29 | List overview uses the shared group tabs and Filters | Remove duplicate group navigation; ungrouped threads remain available through the No group filter. |

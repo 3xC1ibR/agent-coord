@@ -537,7 +537,9 @@ test("list groups count Attention per group, filter by the chosen group, and sho
   assert.deepEqual(all.groups.map(g => [g.key, g.attention]), [["overview:all", 1], ["group:g1", 1], ["group:g2", 0], ["ungrouped:/work", 0]]);
   const one = WorkingSet.listSections(threads, {now: NOW, workspace: "/work", pageKey: "group:g2"});
   assert.equal(one.selected, "group:g2"); assert.deepEqual(one.sections.idle.map(t => t.thread_id), ["b"]); assert.equal(one.sections.attention.length, 0);
-  assert.equal(WorkingSet.listSections(threads, {now: NOW, pageKey: "group:missing"}).selected, "overview:all");
+  const empty = WorkingSet.listSections(threads, {now: NOW, pageKey: "group:empty"});
+  assert.equal(empty.selected, "group:empty");
+  assert.equal(Object.values(empty.sections).flat().length, 0, "an empty shared group never widens to other groups");
   const later = WorkingSet.listSections([listThread("l", {attention: "later", checkpoint: {id: 3}})], {now: NOW, view: "later"});
   assert.deepEqual(later.sections.idle.map(t => t.thread_id), ["l"]);
   const domains = WorkingSet.listSections(threads.map(t => ({...t, domain: t.thread_id === "c" ? "ui" : null})), {now: NOW, dimension: "domain"});
@@ -600,17 +602,22 @@ test("list agents expand under their orchestrator, and a waiting agent names its
   assert.deepEqual(c.rows("idle"), ["lead", "blocked", "worker"]);
   assert.equal(c.control("lead", "agents").attrs["aria-expanded"], "true");
 });
-test("list group tabs filter rows, remember the choice, and report saved-view group changes", () => {
-  const c = listSetup();
+test("list follows shared group selection without restoring a second group filter", () => {
+  const key = 'agent-coord.thread-list:v1:["/work","groups","active"]';
+  const c = listSetup({data: new Map([[key, JSON.stringify({dimension: "domain", pageKey: "domain:old"})]])});
   const threads = [listThread("a", {project_id: "g1", project_name: "One", checkpoint: {id: 1}}), listThread("b", {checkpoint: {id: 2}})];
-  c.render(threads);
-  const tab = c.host.querySelectorAll(".tl-group").find(n => n.dataset.group === "group:g1");
-  tab.onclick({stopPropagation() {}});
-  assert.deepEqual(c.rows("idle"), ["a"]); assert.deepEqual(c.calls, [["group", "g1"]]);
-  assert.match([...c.data.values()][0], /"pageKey":"group:g1"/);
-  const again = listSetup({data: c.data}); again.render(threads); assert.deepEqual(again.rows("idle"), ["a"]);
-  const controlled = listSetup(); controlled.render(threads, {selectedGroup: "g1", view: "group-g1"});
-  assert.deepEqual(controlled.rows("idle"), ["a"]);
+  c.render(threads, {selectedGroup: "g1", view: "group-g1"});
+  assert.deepEqual(c.rows("idle"), ["a"]);
+  assert.equal(c.host.querySelectorAll(".tl-group").length, 0);
+  assert.equal(c.host.querySelectorAll(".tl-bar").length, 0);
+  c.render(threads, {selectedGroup: "empty", view: "group-empty"});
+  assert.deepEqual(c.rows("idle"), []);
+  c.render(threads, {selectedGroup: null, view: "all"});
+  assert.deepEqual(c.rows("idle"), ["a", "b"]);
+  c.render(threads.filter(t => !t.project_id), {selectedGroup: null, view: "all"});
+  assert.deepEqual(c.rows("idle"), ["b"], "the shared No group filter remains effective");
+  const again = listSetup({data: c.data}); again.render(threads);
+  assert.deepEqual(again.rows("idle"), ["a", "b"], "legacy List preferences cannot hide rows on return");
 });
 test("a background repaint keeps the reader's place in the overview scroller", () => {
   const c = listSetup();

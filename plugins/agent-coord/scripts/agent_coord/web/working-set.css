@@ -63,21 +63,13 @@
   .working-set .ws-vtrack, .working-set .ws-htrack { transition: none; }
 }
 
-/* List overview: full-width rows with a constant title column, grouped like Focus. */
+/* List overview: full-width rows with a constant title column; shared tabs own groups. */
 .thread-list {
   --tl-row: 36px; --tl-title: clamp(200px, 24vw, 360px); --tl-label: 112px; --tl-phase: 104px; --tl-time: 44px;
   --tl-mark: 8px; --tl-logo: 16px; --tl-indent: 28px;
   width: 100%; padding: 4px 0 32px;
 }
 .thread-list[hidden] { display: none; }
-.thread-list .tl-bar { display: flex; align-items: center; gap: 12px; padding: 0 0 12px; border-bottom: 1px solid var(--line); }
-.thread-list .tl-groups { display: flex; gap: 4px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
-.thread-list .tl-group { flex: none; display: inline-flex; align-items: baseline; gap: 6px; border: 0; border-radius: 6px; background: transparent; padding: 4px 10px; font-size: 13px; color: var(--muted); white-space: nowrap; }
-.thread-list .tl-group:hover { background: var(--hover-bg); color: var(--ink); }
-.thread-list .tl-group[aria-pressed="true"] { background: var(--hover-bg); color: var(--ink); font-weight: 600; }
-.thread-list .tl-group .tl-count { color: var(--warm); font-weight: 600; }
-.thread-list .tl-grouping { display: flex; flex-direction: row; align-items: center; gap: 4px; margin: 0; flex: none; font-size: 12px; color: var(--muted); }
-.thread-list .tl-grouping select { width: auto; padding: 3px 6px; font-size: 12px; }
 .thread-list .tl-section { margin-top: 24px; }
 .thread-list .tl-heading { display: flex; align-items: baseline; gap: 8px; margin: 0 0 6px; font-size: 14px; font-weight: 600; }
 .thread-list .tl-heading .tl-count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
@@ -119,7 +111,6 @@
 .thread-list .tl-agent .tl-time { font-weight: 400; color: var(--muted); }
 .thread-list .tl-more { margin-top: 8px; }
 @media (max-width: 720px) {
-  .thread-list .tl-bar { flex-wrap: wrap; }
   .thread-list .tl-row, .thread-list .tl-agent { grid-template-columns: var(--tl-mark) var(--tl-logo) minmax(0, 1fr) auto auto; grid-template-rows: auto auto; row-gap: 2px; padding-top: 6px; padding-bottom: 6px; }
   .thread-list .tl-agent { padding-left: calc(12px + var(--tl-indent) / 2); }
   .thread-list .tl-open { grid-column: 3; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -130,6 +121,6 @@
   .thread-list .tl-actions { position: static; transform: none; display: flex; grid-column: 5; grid-row: 1; padding: 0; background: none; }
   .thread-list .tl-actions .tl-action:not(.tl-icon) { display: none; }
   .thread-list .tl-row:hover :is(.tl-label, .tl-phase) { visibility: visible; }
-  .thread-list .tl-group, .thread-list .tl-more, .thread-list .tl-icon { min-height: 44px; }
+  .thread-list .tl-more, .thread-list .tl-icon { min-height: 44px; } /* drift-ok: preserve the existing mobile touch target. */
 }
 @media (prefers-reduced-motion: reduce) { .thread-list .tl-working .tl-mark { animation: none; } }

@@ -403,7 +403,7 @@ const WorkingSet = (() => {
     }
     const ordered = [...groups.values()].sort((a, b) => b.touch - a.touch || a.name.localeCompare(b.name));
     const all = {key: ALL, name: "All groups", attention: rows.filter(r => r.place === "attention").length};
-    const selected = pageKey === ALL || groups.has(pageKey) ? pageKey : ALL;
+    const selected = pageKey;
     const sections = {attention: [], working: [], idle: [], empty: []};
     for (const {thread, place, group} of rows) {
       if (selected !== ALL && group.key !== selected) continue;
@@ -423,7 +423,7 @@ const WorkingSet = (() => {
     const s = Math.max(0, now - at);
     return !at ? "" : s < 3600 ? Math.max(1, Math.round(s / 60)) + "m" : s < DAY ? Math.round(s / 3600) + "h" : Math.round(s / DAY) + "d";
   }
-  function createList({document, storage, onOpen, onRead, onClose, onMenu, onGroupChange, now = () => Date.now() / 1000}) {
+  function createList({document, onOpen, onRead, onClose, onMenu, now = () => Date.now() / 1000}) {
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
     const button = (text, cls, fn, label) => {
       const b = el("button", cls, text); b.type = "button";
@@ -431,23 +431,8 @@ const WorkingSet = (() => {
       if (label) { b.setAttribute("aria-label", label); b.title = label; }
       return b;
     };
-    let host, source = [], options = {}, context = "", key = "", dimension = "group", pageKey = ALL, selectedGroup, signature = "";
+    let host, source = [], options = {}, context = "", pageKey = ALL, signature = "";
     const expanded = new Set(), shown = new Set();
-    function restore(nextKey) {
-      key = nextKey; expanded.clear(); shown.clear();
-      let saved = null;
-      try { saved = JSON.parse(storage?.getItem(key) || "null"); } catch { /* Optional preference. */ }
-      dimension = GROUPINGS.includes(saved?.dimension) ? saved.dimension : "group";
-      pageKey = typeof saved?.pageKey === "string" ? saved.pageKey : ALL;
-    }
-    function save() {
-      try { storage?.setItem(key, JSON.stringify({dimension, pageKey})); } catch { /* Selection also works without storage. */ }
-    }
-    function choose(next) {
-      if (next === pageKey) return;
-      pageKey = next; save(); paint();
-      if (dimension === "group") onGroupChange?.(next.startsWith("group:") ? next.slice(6) : null);
-    }
     function row(t, data, {agent = false} = {}) {
       const time = now(), request = requestOf(t), place = agent ? "nested" : placementOf(t, data.byId, time, data.workingRoots);
       const unread = !!(t.unread_result || request === "needs-you" && t.unread);
@@ -532,24 +517,9 @@ const WorkingSet = (() => {
       const focused = host.contains(document.activeElement) ? document.activeElement : null;
       const focusThread = focused?.dataset?.thread, focusAction = focused?.dataset?.action;
       const parked = ["later", "archived"].includes(options.placement);
-      const data = listSections(source, {dimension, workspace: options.workspace || "all", pageKey, view: options.placement, now: now()});
+      const data = listSections(source, {workspace: options.workspace || "all", pageKey, view: options.placement, now: now()});
       if (data.selected !== pageKey) pageKey = data.selected;
-      const bar = el("div", "tl-bar"), tabs = el("div", "tl-groups"); tabs.setAttribute("aria-label", "Groups");
-      for (const g of data.groups) {
-        const tab = button(g.name, "tl-group", () => choose(g.key));
-        tab.setAttribute("aria-pressed", String(g.key === data.selected));
-        tab.dataset.group = g.key;
-        if (g.attention) tab.append(el("span", "tl-count", String(g.attention)));
-        tabs.append(tab);
-      }
-      const label = el("label", "tl-grouping", "Group by "), select = el("select");
-      for (const value of GROUPINGS) { const o = el("option", "", value); o.value = value; o.selected = value === dimension; select.append(o); }
-      select.onchange = () => {
-        dimension = select.value; pageKey = ALL; save(); paint();
-        if (selectedGroup != null) onGroupChange?.(null);
-      };
-      label.append(select); bar.append(tabs, label);
-      const parts = [bar];
+      const parts = [];
       if (parked) {
         const title = options.placement === "later" ? "Later" : "Closed";
         parts.push(section(data, "parked", title, [...data.sections.idle, ...data.sections.empty], options.placement === "later" ? "Nothing set aside." : "No closed threads."));
@@ -579,12 +549,11 @@ const WorkingSet = (() => {
         const nextSignature = JSON.stringify([nextContext, next.selectedGroup, next.revision]);
         // The app's list revision changes whenever thread data changes, and once a minute for relative times.
         if (signature === nextSignature && next.revision !== undefined) return;
-        if (context !== nextContext) { context = nextContext; restore("agent-coord.thread-list:v1:" + context); }
-        if (controlled && selectedGroup !== next.selectedGroup) {
-          if (next.selectedGroup != null) dimension = "group";
-          if (dimension === "group") pageKey = next.selectedGroup == null ? ALL : "group:" + next.selectedGroup;
-        }
-        selectedGroup = next.selectedGroup; source = threads; options = next; signature = nextSignature;
+        if (context !== nextContext) { context = nextContext; expanded.clear(); shown.clear(); }
+        // Shared group tabs and Filters own selection; old List preferences must
+        // not retain a second, invisible filter after its navigation is removed.
+        pageKey = next.selectedGroup == null ? ALL : "group:" + next.selectedGroup;
+        source = threads; options = next; signature = nextSignature;
         paint();
       },
     };
