@@ -1321,6 +1321,12 @@ async function refreshDetail({markSeen = true} = {}) {
   return entry.pending;
 }
 async function refreshThread() {
+  // A pane is refreshed by its parent window, rather than its own timer.
+  // Reconcile any event snapshot deferred while that pane was inactive.
+  if (state.backgroundDetailPending) {
+    state.backgroundDetailPending = false;
+    return refreshDetail();
+  }
   if (state.paneMode) state.schedules?.refresh({background: true}).catch(showError);
   const id = state.selected;
   if (!id || !state.detail || isSessionDraft()) return;
@@ -2403,15 +2409,41 @@ let listScheduledAt = 0;
 // once per interval; a pending refresh is kept rather than postponed by the
 // next event, which could otherwise defer it indefinitely.
 const LIST_REFRESH_INTERVAL = 2000;
+const INACTIVE_REFRESH_INTERVAL = 15000;
+function backgroundRefreshAllowed(kind) {
+  if (document.hidden) return false;
+  const now = Date.now(), previous = state.backgroundReads?.[kind];
+  if (!document.hasFocus() && previous !== undefined && now - previous < INACTIVE_REFRESH_INTERVAL) return false;
+  (state.backgroundReads ||= {})[kind] = now;
+  return true;
+}
+function refreshBackgroundView({reconcile = false} = {}) {
+  if (!state.paneMode && backgroundRefreshAllowed("list")) refreshList({background: true}).catch(showError);
+  if (backgroundRefreshAllowed("detail")) {
+    if (reconcile || state.backgroundDetailPending) {
+      state.backgroundDetailPending = false;
+      refreshDetail().catch(showError);
+    } else refreshThread().catch(showError);
+    window.agentCoordPanes?.refresh();
+  }
+}
 function scheduleList() {
   if (listTimer) return;
   const wait = Math.max(150, LIST_REFRESH_INTERVAL - (Date.now() - listScheduledAt));
   listTimer = setTimeout(() => {
     listTimer = null; listScheduledAt = Date.now();
-    refreshList({background: true}).catch(showError);
+    if (backgroundRefreshAllowed("list")) refreshList({background: true}).catch(showError);
   }, wait);
 }
-function scheduleDetail() { clearTimeout(detailTimer); detailTimer = setTimeout(() => refreshDetail().catch(showError), 100); }
+function scheduleDetail() {
+  clearTimeout(detailTimer);
+  detailTimer = setTimeout(() => {
+    if (backgroundRefreshAllowed("detail")) {
+      state.backgroundDetailPending = false;
+      refreshDetail().catch(showError);
+    } else state.backgroundDetailPending = true;
+  }, 100);
+}
 function connect() {
   const events = new EventSource(base + "events?completion_after=" + state.config.completionCursor);
   events.onopen = () => { for (const entry of state.conversations?.values() || []) entry.revision++; $("connection").replaceChildren(node("span", "Connected locally", "sr-only")); $("connection").title = "Connected locally"; $("connection").dataset.state = "connected"; scheduleList(); if (state.selected) scheduleDetail(); };
@@ -4121,6 +4153,8 @@ async function boot() {
   state.attachments.bind();
   const turnTimer = setInterval(() => { if (!document.hidden) renderTurnElapsed(); }, 1000);
   window.addEventListener("pagehide", () => clearInterval(turnTimer), {once: true});
+  window.addEventListener("focus", () => refreshBackgroundView({reconcile: true}));
+  document.addEventListener("visibilitychange", () => refreshBackgroundView({reconcile: true}));
   if (state.paneMode) {
     await setupPaneConversation({state, document, api, select, refreshDetail, refreshThread, applyEvent, scheduleDetail, renderStatus, showError});
     return;
@@ -4328,9 +4362,7 @@ async function boot() {
   window.agentCoordDesktop?.navigationReady();
   if (state.config.remote) await notifications.ready();
   // Checkpoints written by terminal agents arrive through the shared database.
-  const metadataTimer = setInterval(() => {
-    if (!document.hidden) { refreshList({background: true}).catch(showError); refreshThread().catch(showError); window.agentCoordPanes?.refresh(); }
-  }, 5000);
+  const metadataTimer = setInterval(refreshBackgroundView, 5000);
   window.addEventListener("pagehide", () => clearInterval(metadataTimer), {once: true});
   window.addEventListener("pagehide", () => savedViews.remember());
 }

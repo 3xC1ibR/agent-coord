@@ -535,8 +535,11 @@ class BrowserSessions:
         archived = bool(archived)
         with self.inventory_lock:
             generation, build = self.inventory_generation, self.inventory_builds.get(archived)
-            if (build is None or build.generation != generation or build.done() and (
-                    build.exception() is not None or time.monotonic() - build.finished > INVENTORY_REUSE_SECONDS)):
+            # Invalidation must not replace an unfinished build: every arriving
+            # reader shares it, and the next read rebuilds the newer generation.
+            if (build is None or build.done() and (
+                    build.generation != generation or build.exception() is not None
+                    or time.monotonic() - build.finished > INVENTORY_REUSE_SECONDS)):
                 build = self.inventory_builds[archived] = Future()
                 build.generation, build.finished = generation, None
                 owner = True

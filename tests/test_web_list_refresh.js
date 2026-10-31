@@ -13,6 +13,7 @@ function setup() {
     project: {dataset: {signature: "[]"}}};
   const reads = [], rendered = [];
   const c = {listRequest: 0, state: {sessions: [thread()]}, $: id => controls[id],
+    document: {hidden: false, hasFocus: () => true},
     overlayPendingAttention: item => item, threadsInProject: items => items,
     savedViews: {sync() {}}, renderFolders() {},
     renderList() { rendered.push(grouping.groupThreads(c.state.sessions)); },

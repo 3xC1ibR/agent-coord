@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -133,6 +134,69 @@ class ThreadInventoryTests(unittest.TestCase):
         with patch.object(self.runtime, "read", side_effect=AssertionError("provider read")), \
              patch.object(self.store, "get_session", side_effect=AssertionError("per-thread lookup")):
             self.assertEqual(self.runtime.list_work_threads()[0]["thread_id"], "saved")
+
+    def test_invalidations_share_pending_inventory_and_refresh_after_completion(self):
+        condition = threading.Condition()
+        release = threading.Event()
+        builds = 0
+        waiters = 0
+
+        def build_inventory(*, archived=False):
+            nonlocal builds
+            with condition:
+                builds += 1
+                generation = self.runtime.inventory_generation
+                condition.notify_all()
+            if not release.wait(5):
+                raise TimeoutError("Inventory test did not release the pending build.")
+            return [{"thread_id": "example", "title": f"Generation {generation}"}]
+
+        with patch.object(self.runtime, "list_work_threads", side_effect=build_inventory), \
+             ThreadPoolExecutor(max_workers=6) as readers:
+            pending = [readers.submit(self.runtime.work_thread_inventory_response)]
+            try:
+                with condition:
+                    self.assertTrue(condition.wait_for(lambda: builds == 1, timeout=5))
+                first = self.runtime.inventory_builds[False]
+                result = first.result
+
+                def wait_for_inventory(*args, **kwargs):
+                    nonlocal waiters
+                    with condition:
+                        waiters += 1
+                        condition.notify_all()
+                    return result(*args, **kwargs)
+
+                with patch.object(first, "result", side_effect=wait_for_inventory):
+                    for expected_waiters in range(1, 6):
+                        self.runtime.inventory_changed()
+                        pending.append(readers.submit(self.runtime.work_thread_inventory_response))
+                        with condition:
+                            self.assertTrue(condition.wait_for(
+                                lambda: waiters >= expected_waiters or builds > 1, timeout=5))
+                            self.assertEqual(builds, 1, "Invalidation started a duplicate pending inventory build.")
+                    release.set()
+                    results = [reader.result(timeout=5) for reader in pending]
+            finally:
+                release.set()
+
+            self.assertTrue(all(value == results[0] for value in results))
+            self.assertEqual(json.loads(results[0][0])["data"][0]["title"], "Generation 0")
+            refreshed = self.runtime.work_thread_inventory_response()
+            self.assertEqual(json.loads(refreshed[0])["data"][0]["title"], "Generation 5")
+            self.assertNotEqual(refreshed[1], results[0][1])
+            self.assertEqual(self.runtime.work_thread_inventory_response(), refreshed)
+            self.assertEqual(builds, 2)
+
+    def test_failed_inventory_build_is_retried_before_cache_reuse(self):
+        with patch.object(self.runtime, "list_work_threads", side_effect=[
+                RuntimeError("Inventory unavailable"), [{"thread_id": "example", "title": "Recovered"}]]) as build:
+            with self.assertRaisesRegex(RuntimeError, "Inventory unavailable"):
+                self.runtime.work_thread_inventory_response()
+            recovered = self.runtime.work_thread_inventory_response()
+            self.assertEqual(json.loads(recovered[0])["data"][0]["title"], "Recovered")
+            self.assertEqual(self.runtime.work_thread_inventory_response(), recovered)
+            self.assertEqual(build.call_count, 2)
 
     def test_concurrent_archive_cannot_split_the_inventory_snapshot(self):
         self.register("moving", browser=True)
