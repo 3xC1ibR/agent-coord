@@ -2832,11 +2832,11 @@ async function changeSessionEffort() {
   } finally { state.busy = false; renderStatus(); }
 }
 $("effort-picker").onchange = () => action(changeSessionEffort);
-$("effort-picker").onfocus = () => { loadSessionModels(); };
-async function loadModelCatalog(client) {
+$("effort-picker").onfocus = () => loadSessionModels({refresh: true});
+async function loadModelCatalog(client, {refresh = false} = {}) {
   const catalogs = state.modelCatalogs ||= new Map(), loading = state.modelLoading ||= new Map();
   const errors = state.modelErrors ||= new Map();
-  if (catalogs.has(client)) return catalogs.get(client);
+  if (!refresh && catalogs.has(client) && !loading.has(client)) return catalogs.get(client);
   if (!loading.has(client)) {
     loading.set(client, api("models?client=" + encodeURIComponent(client)).then(result => {
       catalogs.set(client, result.data); errors.delete(client);
@@ -2846,10 +2846,11 @@ async function loadModelCatalog(client) {
   }
   return loading.get(client);
 }
-async function loadSessionModels() {
+async function loadSessionModels({refresh = false} = {}) {
   const clients = sessionModelClients();
-  // Share completed and in-flight requests with slash autocomplete.
-  await Promise.all([loadSessionDefaults(), ...clients.map(client => loadModelCatalog(client).catch(() => {}))]);
+  // Opening either menu rechecks native access; retain choices while loading
+  // and share the request with the other picker and slash autocomplete.
+  await Promise.all([loadSessionDefaults(), ...clients.map(client => loadModelCatalog(client, {refresh}).catch(() => {}))]);
 }
 async function changeSessionModel() {
   const id = state.selected, [client, model] = JSON.parse($("model-picker").value);
@@ -2863,7 +2864,7 @@ async function changeSessionModel() {
   } finally { state.busy = false; renderStatus(); }
 }
 $("model-picker").onchange = () => action(changeSessionModel);
-$("model-picker").onfocus = () => { loadSessionModels(); };
+$("model-picker").onfocus = () => loadSessionModels({refresh: true});
 async function newSession() {
   state.mobileChat?.close();
   if (!state.config || state.choosingSessionFolder) return;

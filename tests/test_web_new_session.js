@@ -320,6 +320,61 @@ test("failed shared catalog requests can retry without poisoning other providers
   assert.equal(c.state.modelLoading.size, 0);
 });
 
+test("reopening model and effort menus discovers newly available Muse models", async () => {
+  for (const picker of ["model-picker", "effort-picker"]) {
+    const c = setup(); await c.newSession();
+    const catalog = [{model: "muse-wonder-1.0"}, {model: "muse-wonder-full-1.0"}];
+    const api = c.api;
+    c.api = async (path, body) => path === "models?client=muse" ? {data: catalog} : api(path, body);
+    await c.$(picker).onfocus();
+    assert.equal(c.state.modelCatalogs.get("muse"), catalog, picker);
+    assert(c.$("model-picker").children.flatMap(group => group.children)
+      .some(option => option.value === c.modelValue("muse", "muse-wonder-full-1.0")), picker);
+    assert.equal(c.state.detail.session.client, "codex");
+    assert.equal(c.state.detail.session.model, null);
+  }
+});
+
+test("catalog refresh retains visible choices and shares overlapping requests", async () => {
+  const c = setup(); await c.newSession();
+  const previous = c.state.modelCatalogs.get("muse");
+  let release, loads = 0;
+  const api = c.api;
+  c.api = (path, body) => {
+    if (path !== "models?client=muse") return api(path, body);
+    loads++;
+    return new Promise(resolve => { release = resolve; });
+  };
+  const opening = c.$("model-picker").onfocus();
+  const otherOpening = c.$("effort-picker").onfocus();
+  const completion = c.loadModelCatalog("muse");
+  assert.equal(loads, 1);
+  assert.equal(c.state.modelCatalogs.get("muse"), previous);
+  const catalog = [{model: "muse-wonder-full-1.0"}];
+  release({data: catalog});
+  await Promise.all([opening, otherOpening]);
+  assert.equal(await completion, catalog);
+  assert.equal(c.state.modelLoading.size, 0);
+});
+
+test("a failed catalog refresh preserves choices and retries on the next opening", async () => {
+  const c = setup(); await c.newSession();
+  const previous = c.state.modelCatalogs.get("muse"), api = c.api;
+  let attempts = 0;
+  const catalog = [{model: "muse-wonder-full-1.0"}];
+  c.api = async (path, body) => {
+    if (path !== "models?client=muse") return api(path, body);
+    if (++attempts === 1) throw new Error("Muse temporarily offline");
+    return {data: catalog};
+  };
+  await c.$("model-picker").onfocus();
+  assert.equal(c.state.modelCatalogs.get("muse"), previous);
+  assert.equal(c.state.modelErrors.get("muse"), "Muse temporarily offline");
+  await c.$("model-picker").onfocus();
+  assert.equal(c.state.modelCatalogs.get("muse"), catalog);
+  assert.equal(c.state.modelErrors.has("muse"), false);
+});
+
 test("first session requires a folder, retains its group, and cancellation starts nothing", async () => {
   const c = setup(); c.state.folders.selected = null;
   c.state.organization.projects = [{id: "evaluation"}]; c.$("project").value = "evaluation";
