@@ -768,8 +768,25 @@ Scheduling from a new-conversation draft creates a new thread. Set its workspace
 date and time (with your browser's time zone shown), model, reasoning effort,
 and permissions, and include the context the agent needs. **Full access** uses the same unrestricted,
 no-approval settings as session YOLO mode; workspace access can pause for approval.
-Saving a schedule does not start a model turn. Attachments and recurrence are
-not supported.
+Saving a schedule does not start a model turn. Attachments are not supported.
+
+**Repeat** supports an interval in whole minutes, daily, weekdays, weekly, and
+monthly jobs. The selected date and time is the first run; calendar recurrences
+keep that local time in the displayed time zone, including after daylight-saving
+changes. Nonexistent spring-transition times are skipped, repeated fall times
+run once, and monthly runs use the last day in shorter months. Interval schedules
+use elapsed minutes. Each recurrence uses the same destination: an existing
+thread retains its conversation, while a new-thread schedule creates a fresh
+thread each time. Multiple independent schedules can be saved.
+
+Recurring jobs never overlap their own previous run. Slow runs skip elapsed
+occurrences and continue at the next future time. **Pause** and **Cancel** stop
+future deliveries while allowing a run already starting or running to finish.
+**Resume** continues at the next future occurrence without replaying downtime.
+Edit a paused job to adjust its prompt, schedule, or settings while keeping it
+paused. Result cards retain the latest run outcome and its thread; each finished
+occurrence is recorded durably. An uncertain delivery remains **Needs review**
+and stops automatic recurrence.
 
 Open **Scheduled prompts** in the sidebar to edit or cancel a pending run and
 open its result thread. For new-thread schedules, the saved model and reasoning
@@ -778,7 +795,8 @@ choosing a substitute.
 The Mac must remain awake and Ribbon Field must remain running. Future schedules
 survive restarts. A time already past when the backend starts, or over one minute
 late during operation, becomes **Missed** and waits for **Run now** or rescheduling.
-The one-minute allowance covers ordinary dispatch delays, not a promise to wake
+Recurring jobs record missed runs and advance to the next future occurrence
+without a burst of catch-up work. The one-minute allowance covers ordinary dispatch delays, not a promise to wake
 the computer. Closing the browser tab does not stop the backend scheduler.
 
 Schedules persist in the coordination database. Atomic claims prevent concurrent

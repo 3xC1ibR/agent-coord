@@ -542,6 +542,7 @@ def _handler(
             query = parse_qs(parsed.query, keep_blank_values=True)
             if route == "config":
                 self._json(HTTPStatus.OK, {"token": csrf_token, "cwd": browser_sessions.cwd or os.getcwd(), "workspaceRoot": browser_sessions.cwd,
+                                          "recurringSchedules": True,
                                           "remote": self._remote_request(),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "desktop-projects":

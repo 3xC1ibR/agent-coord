@@ -160,11 +160,11 @@ ASK_TOOL = {
 SCHEDULE_TOOL = {
     "name": "schedule_prompt",
     "description": (
-        "Schedule a one-time prompt through the running Ribbon Field app. Use only when the user authorizes scheduling. "
+        "Schedule a one-time or recurring prompt through the running Ribbon Field app. Use only when the user authorizes scheduling. "
         "Choose self for your own app conversation, or new for a new agent with explicit provider settings. "
         "Self uses the conversation's settings at delivery. A queued receipt is not a saved schedule; inspect "
         "agent-coord thread request-status --request-id <id>. Reuse request_id on retry. "
-        "The Mac must be awake and Ribbon Field running at the scheduled time; missed runs need review. "
+        "The Mac must be awake and Ribbon Field running; missed one-time prompts need review and recurring runs are skipped. "
         "Terminal sessions cannot schedule a prompt to themselves. Only set yolo with explicit authorization."
     ),
     "inputSchema": {
@@ -175,6 +175,10 @@ SCHEDULE_TOOL = {
             "message": {"type": "string", "minLength": 1, "maxLength": 100000},
             "run_at": {"type": "number", "description": "Future execution time as Unix epoch seconds (UTC)."},
             "timezone": {"type": "string", "minLength": 1, "description": "IANA time zone, e.g. America/Chicago."},
+            "recurrence": {"type": "object", "additionalProperties": False, "required": ["frequency"],
+                           "description": "Omit for one-time. Calendar schedules keep local time; interval requires minutes. Runs never overlap.",
+                           "properties": {"frequency": {"type": "string", "enum": ["interval", "daily", "weekdays", "weekly", "monthly"]},
+                                          "minutes": {"type": "integer", "minimum": 1, "maximum": 525600}}},
             "settings": {"type": "object", "additionalProperties": False,
                          "required": ["cwd", "client", "model"], "description": "Required for new; forbidden for self.",
                          "properties": {"cwd": {"type": "string", "minLength": 1},
@@ -212,6 +216,9 @@ def schedule_prompt(arguments, *, store=None):
                                       or not arguments["request_id"].strip() or len(arguments["request_id"]) > 160):
         raise CoordinationError("request_id must contain 1–160 characters.")
     payload = {"mode": mode, "message": message, "run_at": run_at, "timezone": timezone}
+    if "recurrence" in arguments:
+        from .schedule_recurrence import validate_recurrence
+        payload["recurrence"] = validate_recurrence(arguments["recurrence"])
     if mode == "new":
         settings = arguments.get("settings")
         allowed = {"cwd", "client", "model", "effort", "yolo", "project_id", "repository_id"}

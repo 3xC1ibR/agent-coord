@@ -83,9 +83,12 @@ class AppControl:
             payload = Sidecars(self.store).validate(sender_session_id, payload)
             cwd = payload["cwd"]
         elif operation == "schedule":
-            if (set(payload) - {"mode", "message", "run_at", "timezone", "settings"}
+            if (set(payload) - {"mode", "message", "run_at", "timezone", "settings", "recurrence"}
                     or not isinstance(payload.get("mode"), str) or payload["mode"] not in {"self", "new"}):
                 raise CoordinationError("Choose a self or new-agent schedule with valid fields.")
+            if "recurrence" in payload:
+                from .schedule_recurrence import validate_recurrence
+                validate_recurrence(payload["recurrence"])
             if payload["mode"] == "self":
                 if "settings" in payload:
                     raise CoordinationError("A self schedule uses the conversation's current settings.")
@@ -371,6 +374,8 @@ class AppControlWorker:
                 schedule_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:schedule:" + request["request_id"]))
                 body = {"id": schedule_id, "message": payload.get("message"), "run_at": payload.get("run_at"),
                         "timezone": payload.get("timezone")}
+                if "recurrence" in payload:
+                    body["recurrence"] = payload["recurrence"]
                 if payload["mode"] == "self":
                     body["target_thread_id"] = request["sender_session_id"]
                 else:

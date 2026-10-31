@@ -56,6 +56,9 @@
   --response-action-radius: 6px;
   --response-action-layer: 40;
   --response-copy-buffer-offset: -10000px;
+  --schedule-gap: 8px; /* drift-ok: layout token in the DESIGN.md implementation source */
+  --schedule-action-height: 44px; /* drift-ok: touch-target token in the DESIGN.md implementation source */
+  --schedule-form-inset: 100px; /* drift-ok: dialog margins, padding and borders in the DESIGN.md implementation source */
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -724,7 +727,7 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 .dialog-error { color: var(--danger); font-size: 13px; }
 .session-actions, .view-filters { flex-wrap: wrap; }
 @media (max-width: 720px) { .organization-fields { grid-template-columns: 1fr; } }
-/* One-time prompt scheduling uses the same dialogs on desktop and phones. */
+/* Prompt scheduling uses the same dialogs on desktop and phones. */
 #schedule-dialog, #schedules-dialog { width: min(640px, calc(100vw - 32px)); }
 .schedule-settings { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; }
 .schedule-settings select { width: 100%; min-width: 0; }
@@ -734,6 +737,12 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 .schedule-card p { margin: 6px 0; font-size: 12px; }
 .schedule-meta { font-weight: 600; }
 .schedule-error { color: var(--warm); }
+.schedule-card .dialog-actions { flex-wrap: wrap; }
+.schedule-card .dialog-actions button { white-space: nowrap; overflow-wrap: normal; }
+#schedule-list { margin-bottom: var(--schedule-gap); }
+#schedule-form { display: flex; flex-direction: column; max-height: calc(100dvh - var(--schedule-form-inset)); }
+.schedule-form-body { overflow: auto; min-height: 0; padding-inline: var(--schedule-gap); margin-inline: calc(-1 * var(--schedule-gap)); }
+#schedule-form > .dialog-actions { flex-shrink: 0; padding-top: var(--schedule-gap); }
 .thread-schedules { flex: none; max-height: 180px; overflow-y: auto; border-top: 1px solid var(--line); padding: 10px 28px; }
 .thread-schedules > h2, .upcoming-schedules > h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
 .thread-schedules .schedule-card { padding: 10px 12px; margin-top: 8px; }
@@ -744,6 +753,10 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 @media (max-width: 720px) { .thread-schedules { padding: 10px 16px; max-height: 160px; } }
 .composer-footer > div { flex-wrap: wrap; justify-content: flex-end; }
 @media (max-width: 520px) { .schedule-settings { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 520px) {
+  .schedule-card .dialog-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--schedule-gap); }
+  .schedule-card .dialog-actions button { min-height: var(--schedule-action-height); }
+}
 
 /* Mobile chat is a fixed frame: one header, a scrolling transcript, and a composer. */
 .mobile-chat-control { display: none; }

@@ -660,8 +660,14 @@ explicit authorization. The tool returns a request and schedule ID; `queued` is
 not a saved schedule. Check `agent-coord thread request-status --request-id ID`
 until confirmed, or inspect Scheduled prompts in the app. Self scheduling is
 available for app conversations, not terminal sessions. The Mac must be awake
-and Ribbon Field running at the scheduled time; missed runs need user action.
-Schedules are one-time, without attachments or recurrence.
+and Ribbon Field running at the scheduled time; missed one-time runs need user action.
+Schedules support one-time runs or an explicitly authorized `recurrence`: use
+`frequency` of `daily`, `weekdays`, `weekly`, or `monthly`, or `interval` with
+whole `minutes` (1–525600). Calendar schedules keep their local time zone;
+monthly runs use the last day in shorter months. Recurring runs never overlap,
+skip missed occurrences, and can be paused, resumed, or cancelled in Scheduled
+prompts. An uncertain send stops the recurrence for review. Attachments are not
+supported.
 
 Use `--client claude` for Claude Code, `--client antigravity` for Google
 Antigravity, `--client kimi` for Kimi Code, or `--client muse` for Muse Code

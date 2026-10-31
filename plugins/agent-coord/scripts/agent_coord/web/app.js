@@ -4096,6 +4096,7 @@ async function boot() {
   state.config = await api("config");
   state.activity = globalThis.ActivityCollector?.bind({window, document, state, api});
   state.schedules = new ScheduledPromptsUI({document, api, openThread: select, onError: showError,
+    supportsRecurrence: state.config.recurringSchedules === true,
     onChange: () => renderList(),
     getThread: id => state.sessions.find(thread => thread.thread_id === id) ||
       (state.detail?.work_thread?.thread_id === id ? state.detail.work_thread : null),

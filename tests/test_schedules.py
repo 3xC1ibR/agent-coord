@@ -562,6 +562,188 @@ class ScheduledPromptTests(unittest.TestCase):
         self.assertEqual(self.item(item)["state"], "completed")
         self.assertFalse(self.starts())
 
+    def test_recurring_job_creates_distinct_threads_and_keeps_latest_result(self):
+        item = self.launch(recurrence={"frequency": "interval", "minutes": 10})
+        self.complete_turn(item["thread_id"])
+        self.schedules.process_once()
+        following = self.item(item)
+        self.assertEqual(following["state"], "scheduled")
+        self.assertEqual(following["run_at"], item["run_at"] + 600)
+        self.assertEqual(following["last_run"]["state"], "completed")
+        self.assertEqual(following["last_run"]["thread_id"], item["thread_id"])
+        self.assertIsNone(following["turn_id"])
+        self.now = following["run_at"]
+        self.schedules.process_once()
+        second = self.item(item)
+        self.assertEqual(second["state"], "running")
+        self.assertNotEqual(second["thread_id"], item["thread_id"])
+        self.assertEqual(len(self.starts()), 2)
+
+    def test_agent_tool_carries_authorized_recurrence_through_app_request(self):
+        self.store.register(session_id="caller", client="codex", cwd=str(self.root))
+        worker = AppControlWorker(self.sessions)
+        self.addCleanup(worker.close)
+        args = {"session_id": "caller", "mode": "new", "message": "Review progress", "run_at": self.now + 60,
+                "timezone": "UTC", "request_id": "recurring-schedule", "wait_seconds": 0,
+                "recurrence": {"frequency": "weekdays"},
+                "settings": {"cwd": str(self.root), "client": "codex", "model": "available-model"}}
+        receipt = schedule_prompt(args, store=self.store)
+        worker.process_once()
+        saved = worker.control.status(receipt["request_id"])
+        self.assertEqual(saved["status"], "completed", saved)
+        self.assertEqual(saved["result"]["recurrence"], {"frequency": "weekdays"})
+        self.assertEqual(saved["result"]["recurrence_status"], "active")
+        with self.assertRaisesRegex(CoordinationError, "repeat"):
+            schedule_prompt({**args, "recurrence": {"frequency": "invalid"}}, store=self.store)
+
+    def test_recurring_slow_run_never_overlaps_and_skips_elapsed_intervals(self):
+        item = self.launch(recurrence={"frequency": "interval", "minutes": 1})
+        self.now += 601
+        self.schedules.process_once()
+        self.assertEqual(len(self.starts()), 1)
+        self.complete_turn(item["thread_id"])
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["run_at"], item["run_at"] + 660)
+        self.assertEqual(len(self.starts()), 1)
+
+    def test_recurring_existing_thread_repeats_without_replacing_conversation(self):
+        thread_id = self.existing_thread()
+        item = self.schedules.create(self.target_body(thread_id, recurrence={"frequency": "interval", "minutes": 5}))
+        self.now = item["run_at"]
+        self.schedules.process_once()
+        self.complete_turn(thread_id)
+        self.schedules.process_once()
+        self.now = self.item(item)["run_at"]
+        self.schedules.process_once()
+        self.assertEqual(len(self.starts()), 2)
+        self.assertEqual({start["threadId"] for start in self.starts()}, {thread_id})
+        self.assertEqual(self.item(item)["state"], "running")
+
+    def test_recurring_pause_resume_skips_downtime_and_preserves_paused_edits(self):
+        item = self.schedules.create(self.body(recurrence={"frequency": "interval", "minutes": 10}))
+        item = self.schedules.change(item["id"], {"action": "pause", "version": item["version"]})
+        self.now += 1200
+        self.schedules.process_once()
+        self.assertFalse(self.starts())
+        item = self.schedules.change(item["id"], {**self.body(recurrence=item["recurrence"]), "action": "edit", "version": item["version"]})
+        self.assertEqual(item["state"], "paused")
+        self.now += 1201
+        item = self.schedules.change(item["id"], {"action": "resume", "version": item["version"]})
+        self.assertEqual(item["state"], "scheduled")
+        self.assertGreater(item["run_at"], self.now)
+        self.assertLessEqual(item["run_at"] - self.now, 600)
+        self.now = item["run_at"]
+        self.sessions.rpc.fast_turn = True
+        self.schedules.process_once()
+        self.item(item)  # Flush the asynchronous completion before the next tick.
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["last_run"]["state"], "completed")
+        self.assertEqual(len(self.starts()), 1)
+
+    def test_pause_or_cancel_while_running_keeps_the_result_and_stops_future_runs(self):
+        for action, status in [("pause", "paused"), ("cancel", "cancelled")]:
+            item = self.launch(recurrence={"frequency": "interval", "minutes": 1})
+            changed = self.schedules.change(item["id"], {"action": action, "version": item["version"]})
+            self.assertEqual(changed["state"], "running")
+            self.complete_turn(item["thread_id"])
+            self.schedules.process_once()
+            changed = self.item(item)
+            self.assertEqual(changed["state"], status)
+            self.assertEqual(changed["last_run"]["state"], "completed")
+            before = len(self.starts())
+            self.now += 600
+            self.schedules.process_once()
+            self.assertEqual(len(self.starts()), before)
+
+    def test_resume_after_finished_run_clears_old_turn_before_fast_completion(self):
+        item = self.launch(recurrence={"frequency": "interval", "minutes": 1})
+        self.schedules.change(item["id"], {"action": "pause", "version": item["version"]})
+        self.complete_turn(item["thread_id"])
+        self.schedules.process_once()
+        item = self.item(item)
+        item = self.schedules.change(item["id"], {"action": "resume", "version": item["version"]})
+        self.assertIsNone(item["turn_id"])
+        self.now = item["run_at"]
+        self.sessions.rpc.fast_turn = True
+        self.schedules.process_once()
+        self.item(item)
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "scheduled")
+        self.assertEqual(self.item(item)["last_run"]["state"], "completed")
+
+    def test_recurring_sleep_and_restart_skip_missed_runs_without_catchup(self):
+        item = self.schedules.create(self.body(recurrence={"frequency": "interval", "minutes": 1}))
+        self.sessions.close()
+        self.now += 601
+        restarted = self.runtime()
+        restarted.schedules.process_once()
+        item = self.item(item)
+        self.assertEqual(item["state"], "scheduled")
+        self.assertEqual(item["last_run"]["state"], "missed")
+        self.assertEqual(item["run_at"], self.now + 59)
+        self.assertFalse(self.starts(restarted))
+        self.now = item["run_at"]
+        restarted.schedules.process_once()
+        self.assertEqual(len(self.starts(restarted)), 1)
+
+    def test_recurring_uncertain_delivery_stays_for_review_without_repetition(self):
+        with patch.object(self.sessions, "send", side_effect=CoordinationError("Reply lost")):
+            item = self.launch(recurrence={"frequency": "interval", "minutes": 1})
+        self.now += 600
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "review")
+        self.assertEqual(self.item(item)["last_run"]["state"], "review")
+        self.assertFalse(self.starts())
+
+    def test_recurring_failed_turn_records_failure_and_continues_at_next_time(self):
+        item = self.launch(recurrence={"frequency": "daily"})
+        self.complete_turn(item["thread_id"], "failed")
+        self.schedules.process_once()
+        item = self.item(item)
+        self.assertEqual(item["state"], "scheduled")
+        self.assertEqual(item["last_run"]["state"], "failed")
+
+    def test_recurring_two_runtimes_claim_each_occurrence_once(self):
+        item = self.schedules.create(self.body(recurrence={"frequency": "interval", "minutes": 1}))
+        other = self.runtime()
+        self.sessions.rpc.fast_turn = other.rpc.fast_turn = True
+        self.now = item["run_at"]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda runtime: runtime.schedules.process_once(), [self.sessions, other]))
+        self.assertEqual(len(self.starts()) + len(self.starts(other)), 1)
+        self.assertTrue(other.persistence.flush())
+        self.item(item)
+        self.schedules.process_once()
+        self.assertEqual(self.item(item)["state"], "scheduled")
+
+    def test_old_database_migrates_recurrence_columns_without_changing_one_time_jobs(self):
+        from agent_coord.schedules import ScheduledPrompts
+        item = self.schedules.create(self.body())
+        with self.store._connection() as db:
+            for column in ("recurrence_json", "recurrence_status", "anchor_at"):
+                db.execute("ALTER TABLE scheduled_prompts DROP COLUMN " + column)
+        self.sessions.schedules = self.schedules = ScheduledPrompts(self.sessions)
+        self.assertIsNone(self.item(item)["recurrence"])
+        self.assertEqual(self.item(item)["state"], "scheduled")
+
+    def test_weekday_job_requires_its_first_run_on_a_weekday(self):
+        self.now = 1793448000  # Saturday, October 31, 2026.
+        with self.assertRaisesRegex(CoordinationError, "weekday"):
+            self.schedules.create(self.body(recurrence={"frequency": "weekdays"}))
+
+    def test_stale_recovery_cannot_overwrite_a_later_recurring_run(self):
+        item = self.launch(recurrence={"frequency": "interval", "minutes": 1})
+        with self.store._connection() as db:
+            old = dict(self.schedules._get(db, item["id"]))
+        self.complete_turn(item["thread_id"])
+        self.schedules.process_once()
+        self.now = self.item(item)["run_at"]
+        self.schedules.process_once()
+        latest = self.item(item)
+        self.schedules._recover(old)
+        self.assertEqual(self.item(item)["state"], "running")
+        self.assertEqual(self.item(item)["turn_id"], latest["turn_id"])
+
 
 class ScheduleHTTPTests(unittest.TestCase):
     def setUp(self):
@@ -603,6 +785,18 @@ class ScheduleHTTPTests(unittest.TestCase):
     def test_browser_controls(self):
         result = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_web_schedules.js"))], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_recurring_http_schedule_exposes_capability_and_pause_resume(self):
+        import time
+        self.assertTrue(self.request("/api/browser/config")["recurringSchedules"])
+        body = {"id": str(uuid.uuid4()), "message": "Review progress", "run_at": time.time() + 600,
+                "timezone": "UTC", "settings": {"cwd": str(self.root), "model": "available-model"},
+                "recurrence": {"frequency": "daily"}}
+        item = self.request("/api/browser/schedules", body, self.token)
+        self.assertEqual(item["recurrence"], {"frequency": "daily"})
+        for action, state in [("pause", "paused"), ("resume", "scheduled"), ("cancel", "cancelled")]:
+            item = self.request("/api/browser/schedules/" + item["id"], {"action": action, "version": item["version"]}, self.token)
+            self.assertEqual(item["state"], state)
 
 
 if __name__ == "__main__":

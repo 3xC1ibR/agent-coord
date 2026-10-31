@@ -43,6 +43,10 @@ and pane regions. Auxiliary pages have a simple title, controls, and centered
 content. Activity uses a 1120px content maximum, 24px page spacing, 12px row spacing,
 and 8px control gaps. Declare additional module dimensions once as CSS properties.
 Narrow layouts stack controls and keep tables in labelled horizontal scroll areas.
+Scheduled prompt actions wrap on desktop and use two columns on narrow screens.
+Their `--schedule-gap` (8px) and `--schedule-action-height` (44px) tokens live in
+`web/styles.css`; the form's action row stays visible as its body scrolls.
+`--schedule-form-inset` (100px) reserves the existing dialog margin, padding and borders.
 
 ## Elevation & Depth
 Content precedes controls, popovers, dialogs, and notices. Reuse native dialogs for
@@ -57,6 +61,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | --- | --- |
 | Permission menu | Provider-supplied session modes as checked menu choices; unavailable native choices remain identified; opening never changes a selection |
 | Composer controls | Shortcut help in the state-aware placeholder; arrow send and calendar schedule retain accessible names and touch targets |
+| Scheduled prompts | Repeat is an attribute of a scheduled prompt; reuse native labelled selects and inputs, existing result cards, and quiet Edit, Pause, Resume and Cancel actions |
 | Thread group label | Group beside the workspace path opens the existing group assignment editor |
 | Quiet button | Refresh, dismiss, secondary actions |
 | Primary button | The view's principal action |
@@ -114,3 +119,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-29 | List overview uses the shared group tabs and Filters | Remove duplicate group navigation; ungrouped threads remain available through the No group filter. |
 | 2026-10-30 | Chat agent trees include fork lineage with dotted connectors | Show shared conversation origins without implying supervision ownership. |
 | 2026-10-30 | Agents group under their current supervisor; roles and Stop release use existing menu, designation and dialog patterns | Replace a lead without restarting its agents, and release many Stops in one action while supervisors decide what restarts. |
+| 2026-10-31 | Scheduled prompts include recurrence and quiet lifecycle actions in their existing form and list | Run recurring jobs without introducing another navigation surface or object. |

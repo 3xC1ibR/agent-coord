@@ -1,7 +1,7 @@
 "use strict";
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
-const {ScheduledPromptsUI, localInput, scheduledTime, upcomingPrompts} = require("../plugins/agent-coord/scripts/agent_coord/web/schedules.js");
+const {ScheduledPromptsUI, localInput, scheduledTime, upcomingPrompts, repeatLabel} = require("../plugins/agent-coord/scripts/agent_coord/web/schedules.js");
 
 class Element {
   constructor(tag = "input") { this.tag = tag; this.children = []; this.hidden = false; this.disabled = false; this.open = false; this.listeners = {}; this.dataset = {}; this.attributes = {}; }
@@ -48,6 +48,50 @@ test("date input handles midnight and rejects past dates and nonexistent DST tim
     assert.equal(scheduledTime("2026-10-09T00:00", now), new Date(2026, 9, 9, 0, 0).getTime() / 1000);
     for (const value of ["", "invalid", "2026-10-08T22:00", "2027-03-14T02:30"]) assert.throws(() => scheduledTime(value, now), /future/);
   } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+});
+
+test("editing in a different browser zone retains the schedule's local time and instant", () => {
+  const value = "2027-01-15T09:30", instant = Date.parse("2027-01-15T15:30:00Z");
+  assert.equal(localInput(new Date(instant), "America/Chicago"), value);
+  assert.equal(scheduledTime(value, 0, "America/Chicago"), instant / 1000);
+  assert.equal(scheduledTime("2027-07-15T09:30", 0, "America/Chicago"), Date.parse("2027-07-15T14:30:00Z") / 1000);
+  assert.throws(() => scheduledTime("2027-03-14T02:30", 0, "America/Chicago"), /future/);
+});
+
+test("recurring form saves interval, previews repetition, and restores existing recurrence", async t => {
+  const c = setup(t); await c.ui.open();
+  c.$("schedule-repeat").value = "interval";
+  c.$("schedule-interval").value = "120";
+  c.ui.repeatChanged();
+  assert.equal(c.$("schedule-interval-field").hidden, false);
+  assert.equal(c.$("schedule-interval").required, true);
+  assert.match(c.$("schedule-preview").textContent, /Every 120 minutes/);
+  await c.ui.save();
+  assert.deepEqual(c.calls.find(call => call.path === "schedules" && call.body).body.recurrence, {frequency: "interval", minutes: 120});
+  await c.ui.open(scheduled("repeat", {timezone: "Asia/Tokyo", recurrence: {frequency: "monthly"}}));
+  assert.equal(c.$("schedule-repeat").value, "monthly");
+  assert.equal(c.$("schedule-timezone").textContent, "Asia/Tokyo");
+  assert.equal(c.$("schedule-interval-field").hidden, true);
+  assert.equal(c.$("schedule-interval").disabled, true);
+  assert.match(c.$("schedule-preview").textContent, /Last day in shorter months/);
+});
+
+test("invalid interval is shown inline and does not save a job", async t => {
+  const c = setup(t); await c.ui.open();
+  c.$("schedule-repeat").value = "interval"; c.$("schedule-interval").value = "0.5";
+  await c.ui.save();
+  assert.match(c.$("schedule-error").textContent, /whole minutes/);
+  assert.equal(c.calls.some(call => call.path === "schedules" && call.body), false);
+  assert.equal(c.$("schedule-dialog").open, true);
+});
+
+test("new interface preserves one-time saves while an older runtime awaits its update", async t => {
+  const c = setup(t); c.ui.supportsRecurrence = false;
+  await c.ui.open();
+  assert.equal(c.$("schedule-repeat").disabled, true);
+  assert.match(c.$("schedule-availability").textContent, /runtime update/);
+  await c.ui.save();
+  assert.equal(Object.hasOwn(c.calls.find(call => call.path === "schedules" && call.body).body, "recurrence"), false);
 });
 
 test("saving snapshots selected model, effort, workspace, permission, and date without starting a session", async t => {
@@ -184,6 +228,24 @@ const scheduled = (id, extra = {}) => ({id, version: 1, message: "Continue " + i
   run_at: 1800000000, timezone: "America/Chicago", cwd: "/repo", settings: {model: "luna"}, ...extra});
 const textContent = element => [element.textContent || "", ...element.children.map(textContent)].join(" ");
 const buttons = card => card.children.at(-1).children;
+
+test("recurring cards expose pause, resume, cancellation and the latest result thread", async t => {
+  const c = setup(t), item = scheduled("repeat", {recurrence: {frequency: "daily"}, recurrence_status: "active",
+    last_run: {state: "completed", run_at: 1700000000, thread_id: "result-thread"}});
+  const active = c.ui.card(item);
+  assert.match(textContent(active), /Daily/);
+  assert.match(textContent(active), /Last run: Completed/);
+  assert.deepEqual(buttons(active).map(button => button.textContent), ["Edit", "Pause", "Cancel", "Open thread"]);
+  await buttons(active).find(button => button.textContent === "Pause").onclick();
+  assert.deepEqual(c.calls.find(call => call.body).body, {action: "pause", version: 1});
+  const paused = c.ui.card({...item, state: "paused", recurrence_status: "paused"});
+  assert.deepEqual(buttons(paused).map(button => button.textContent), ["Edit", "Resume", "Cancel", "Open thread"]);
+  await buttons(paused).find(button => button.textContent === "Open thread").onclick();
+  assert.deepEqual(c.opened, ["result-thread"]);
+  assert.match(textContent(c.ui.card({...item, state: "running", recurrence_status: "paused"})), /Pauses after this run/);
+  assert.deepEqual(buttons(c.ui.card({...item, state: "review", recurrence_status: "paused"})).map(button => button.textContent), ["Cancel", "Open thread"]);
+  assert.equal(repeatLabel({frequency: "interval", minutes: 1}), "Every 1 minute");
+});
 
 test("upcoming includes new and existing threads in run order, including waiting and starting prompts", () => {
   const rows = [scheduled("later", {run_at: 1900000000}), scheduled("target", {target_thread_id: "thread-a"}),
