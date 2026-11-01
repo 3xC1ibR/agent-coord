@@ -1033,6 +1033,14 @@ requirement identifiers, including changes to a pending approval. Single-choice
 questions accept custom text; multiple-choice questions use the native options.
 Fork and native terminal-session import are not exposed for Muse.
 
+Muse workflows can continue after their launching foreground turn finishes.
+Their progress and terminal result remain attached to that original turn, and
+automatic result-processing turns stream and save their answers in the same
+conversation. Foreground completion does not mark an active workflow complete.
+Background workflows also prevent idle conversation release and runtime
+handover until they settle. Replayed terminal turns and notifications from a
+stopped host cannot reopen a conversation or replace a newer active turn.
+
 The protocol contract and upstream test transcripts are published in
 [Meta's Muse Code SDK](https://github.com/meta-models/muse-code-sdk).
 

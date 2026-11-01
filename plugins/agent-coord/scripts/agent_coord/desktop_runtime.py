@@ -254,6 +254,9 @@ def busy_reasons(sessions):
             reasons.append("active turns")
         if sessions.requests:
             reasons.append("pending approvals or questions")
+    background_active = getattr(getattr(sessions, "muse", None), "background_active", None)
+    if background_active and background_active():
+        reasons.append("Muse background workflows")
     with sessions.persistence.condition:
         if sessions.persistence.pending or sessions.persistence.draining:
             reasons.append("pending provider bookkeeping")

@@ -105,6 +105,7 @@ class MuseRPC:
         self.connections, self.options, self.native, self.generations = {}, {}, {}, {}
         self.turns, self.completed, self.items, self.requests, self.settings = {}, {}, {}, {}, {}
         self.seen = {}
+        self.ready, self.terminal_turns, self.background_turns = set(), {}, {}
         self.request_history, self.answered, self.settled = {}, set(), set()
         self.lock, self.catalog_lock = threading.RLock(), threading.Lock()
         self.permission_catalogs = {}
@@ -122,9 +123,17 @@ class MuseRPC:
         history = json.loads(row[0]) if row else {"id": thread_id, "turns": []}
         with self.lock:
             active = self.turns.get(thread_id)
-            latest = active or self.completed.get(thread_id)
-            if latest:
-                history["turns"] = [t for t in history.get("turns", []) if t["id"] != latest["id"]] + [copy.deepcopy(latest)]
+            updates = dict(self.background_turns.get(thread_id, {}))
+            for latest in (self.completed.get(thread_id), active):
+                if latest:
+                    updates[latest["id"]] = latest
+            turns = history.setdefault("turns", [])
+            for identity, latest in updates.items():
+                index = next((i for i, turn in enumerate(turns) if turn["id"] == identity), None)
+                if index is None:
+                    turns.append(copy.deepcopy(latest))
+                else:
+                    turns[index].update(copy.deepcopy(latest))
             if not active:
                 for turn in history.get("turns", []):
                     if turn.get("status") == "inProgress":
@@ -206,6 +215,12 @@ class MuseRPC:
         self.connections[thread_id] = connection
         self.native[thread_id] = row["native_id"] if row else thread_id
         self.seen[thread_id] = set()
+        self.items[thread_id] = {}
+        with self.store._connection() as db:
+            saved = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
+        history = json.loads(saved[0]) if saved else {}
+        self.terminal_turns[thread_id] = {t["id"] for t in history.get("turns", [])
+                                          if t.get("status") != "inProgress"}
         profile = options["permission_mode"]
         try:
             connection.initialize()
@@ -244,6 +259,9 @@ class MuseRPC:
                 self._command(connection, "session/setReasoningEffort", sessionId=native_id, reasoningEffort=options["effort"])
             self.settings[thread_id] = (options.get("model") or session.get("modelId"), options.get("effort"))
             self.options[thread_id] = {**options, "model": self.settings[thread_id][0]}
+            self.terminal_turns[thread_id].update(t["turnId"] for t in session.get("turns", [])
+                if t.get("terminal") and t.get("turnId"))
+            self.ready.add(thread_id)
             return connection
         except Exception:
             self._shutdown(thread_id)
@@ -332,12 +350,8 @@ class MuseRPC:
             inputs = [{"type": "text", "text": context}, *self._input(params["input"])]
             turn = {"id": command_id(), "status": "inProgress", "items": [
                 {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}]}
-            self.turns[thread_id] = turn
-            self.items[thread_id] = {}
-            self.request_history = {k: v for k, v in self.request_history.items() if k[0] != thread_id}
-            self.answered = {k for k in self.answered if k[0] != thread_id}
-            self.settled = {k for k in self.settled if k[0] != thread_id}
-            self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
+            if not self._start_turn(thread_id, turn):
+                raise CoordinationError("Muse started another turn. Your message was not sent; send it again to steer that turn.")
             try:
                 result = connection.request("turn/start", {"commandId": turn["id"], "sessionId": self.native[thread_id],
                     "input": inputs, "displayText": "\n".join(p.get("text", "[Image]") for p in params["input"])})
@@ -361,6 +375,33 @@ class MuseRPC:
             return {}
         raise CoordinationError(f"Muse does not support {method}.")
 
+    def _start_turn(self, thread_id, turn):
+        with self.lock:
+            if thread_id not in self.ready or thread_id in self.turns:
+                return False
+            if turn["id"] in self.terminal_turns.get(thread_id, set()):
+                return False
+            background = self.background_turns.get(thread_id, {})
+            self.items[thread_id] = {key: item for key, item in self.items.get(thread_id, {}).items()
+                                     if item.get("turnId") in background}
+            self.turns[thread_id] = turn
+        self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
+        return True
+
+    def background_active(self, thread_id=None):
+        with self.lock:
+            histories = (self.background_turns.values() if thread_id is None else
+                         [self.background_turns.get(thread_id, {})])
+            return any(item.get("nativeKind") == "workflow" and item.get("status") == "inProgress"
+                       for turns in histories for turn in turns.values()
+                       for item in turn["items"])
+
+    def release(self, thread_id):
+        if thread_id in self.turns or self.background_active(thread_id):
+            return False
+        self._shutdown(thread_id)
+        return True
+
     def _finish(self, thread_id, status, error=None):
         with self.lock:
             turn = self.turns.pop(thread_id, None)
@@ -369,10 +410,15 @@ class MuseRPC:
             turn["status"] = status
             for item in turn["items"]:
                 if item.get("status") == "inProgress":
+                    if status == "completed" and item.get("nativeKind") == "workflow":
+                        continue  # Foreground completion does not settle a background workflow.
                     item["status"] = "completed" if status == "completed" else status
             if error:
                 turn["error"] = {"message": str(error)}
             self.completed[thread_id] = copy.deepcopy(turn)
+            self.terminal_turns.setdefault(thread_id, set()).add(turn["id"])
+            if any(i.get("nativeKind") == "workflow" and i.get("status") == "inProgress" for i in turn["items"]):
+                self.background_turns.setdefault(thread_id, {})[turn["id"]] = self.completed[thread_id]
             self.requests = {k: v for k, v in self.requests.items() if v["thread"] != thread_id}
         self._emit("turn/completed", thread_id, turn=copy.deepcopy(turn))
 
@@ -381,9 +427,19 @@ class MuseRPC:
         item = {"id": native["itemId"], "status": native.get("status", "inProgress")}
         kind = native["kind"]
         if kind == "agentMessage":
-            return {**item, "type": kind, "text": native.get("text", ""), "phase": native.get("messagePhase", "finalAnswer")}
+            phase = native.get("messagePhase", "finalAnswer")
+            return {**item, "type": kind, "text": native.get("text", ""),
+                    "phase": {"finalAnswer": "final_answer"}.get(phase, phase)}
         if kind == "reasoning":
             return {**item, "type": kind, "summary": native.get("summary") or [native.get("text", "")]}
+        if kind == "workflow":
+            lines = [native.get("message") or native.get("fallbackText") or "Workflow"]
+            for child in native.get("children", []):
+                label = child.get("label") or "Research task"
+                state = child.get("terminal") or child.get("status", "unknown")
+                lines.append(f"{label}: {state}")
+            return {**item, "type": "mcpToolCall", "tool": "workflow", "arguments": {},
+                    "nativeKind": kind, "workflowRunId": native.get("workflowRunId"), "result": "\n".join(lines)}
         args = native.get("args", "{}")
         try:
             args = json.loads(args)
@@ -397,6 +453,7 @@ class MuseRPC:
             return
         method, params = message.get("method"), message.get("params") or {}
         if method == "disconnected":
+            self._shutdown(thread_id)
             self._finish(thread_id, "failed", params.get("error", "Muse disconnected."))
             return
         if "id" in message:
@@ -426,15 +483,25 @@ class MuseRPC:
             if key in self.seen[thread_id]:
                 return
             self.seen[thread_id].add(key)
+        if method == "view/gap":
+            self._shutdown(thread_id)
+            self._finish(thread_id, "failed", "Muse lost conversation events. Stop and resume the session before continuing.")
+            return
+        if method == "turn/started":
+            identity = params.get("turnId")
+            if isinstance(identity, str) and identity:
+                self._start_turn(thread_id, {"id": identity, "status": "inProgress", "items": []})
+            return
+        if method in {"item/started", "item/updated", "item/completed", "item/delta"}:
+            if thread_id in self.ready:
+                self._update_item(thread_id, method, params)
+            return
         turn = self.turns.get(thread_id)
         if not turn:
             return  # Native history replay is already in our persisted display mirror.
         if params.get("turnId") and params["turnId"] != turn["id"]:
             return
-        if method == "view/gap":
-            self._shutdown(thread_id)
-            self._finish(thread_id, "failed", "Muse lost conversation events. Stop and resume the session before continuing.")
-        elif method == "turn/completed":
+        if method == "turn/completed":
             status = {"completed": "completed", "failed": "failed", "cancelled": "interrupted"}.get(params.get("terminal"), "failed")
             error = (params.get("error") or {}).get("message") or params.get("reason")
             if status == "completed" and not any(i.get("type") == "agentMessage" and i.get("text", "").strip() or
@@ -447,44 +514,50 @@ class MuseRPC:
             native_id = params.get("approvalId") or params.get("userInputId")
             self.settled.add((thread_id, native_id))
             self._resolve(thread_id, native_id)
-        elif method in {"item/started", "item/updated", "item/completed", "item/delta"}:
-            with self.lock:
-                items = self.items[thread_id]
-                if method == "item/delta":
-                    native = items.get(params.get("itemId"))
-                    if not native:
+
+    def _update_item(self, thread_id, method, params):
+        with self.lock:
+            items = self.items[thread_id]
+            native = (items.get(params.get("itemId")) if method == "item/delta"
+                      else copy.deepcopy(params["item"]))
+            if not native or native["kind"] == "userMessage":
+                return
+            turn = self.turns.get(thread_id)
+            identity = native.get("turnId") or params.get("turnId") or (turn or {}).get("id")
+            if not turn or identity != turn["id"]:
+                turn = self.background_turns.get(thread_id, {}).get(identity)
+            if not turn:
+                return
+            if method == "item/delta":
+                field = params.get("field", "text")
+                if field == "output":
+                    field = "visibleOutput"
+                if field in {"text", "visibleOutput", "args"}:
+                    native[field] = native.get(field, "") + params["delta"]
+                elif re.fullmatch(r"summary\.\d+", field):
+                    index = int(field.split(".")[1])
+                    if index > 100:
                         return
-                    field = params.get("field", "text")
-                    if field == "output":
-                        field = "visibleOutput"
-                    if field in {"text", "visibleOutput", "args"}:
-                        native[field] = native.get(field, "") + params["delta"]
-                    elif re.fullmatch(r"summary\.\d+", field):
-                        index = int(field.split(".")[1])
-                        if index > 100:
-                            return
-                        summary = native.setdefault("summary", [])
-                        while len(summary) <= index:
-                            summary.append("")
-                        summary[index] += params["delta"]
-                    else:
-                        return
+                    summary = native.setdefault("summary", [])
+                    while len(summary) <= index:
+                        summary.append("")
+                    summary[index] += params["delta"]
                 else:
-                    native = copy.deepcopy(params["item"])
-                    if native.get("turnId") not in {None, turn["id"]} or native["kind"] == "userMessage":
-                        return
-                    previous = items.get(native["itemId"])
-                    if previous and native.get("revision", 0) <= previous.get("revision", 0):
-                        return
-                    items[native["itemId"]] = native
-                item = self._item(native)
-                index = next((i for i, old in enumerate(turn["items"]) if old["id"] == item["id"]), None)
-                if index is None:
-                    turn["items"].append(item)
-                else:
-                    turn["items"][index] = item
-            self._emit("item/completed" if item["status"] != "inProgress" else "item/started", thread_id,
-                       turnId=turn["id"], item=copy.deepcopy(item))
+                    return
+            else:
+                previous = items.get(native["itemId"])
+                if previous and native.get("revision", 0) <= previous.get("revision", 0):
+                    return
+                native["turnId"] = identity
+                items[native["itemId"]] = native
+            item = self._item(native)
+            index = next((i for i, old in enumerate(turn["items"]) if old["id"] == item["id"]), None)
+            if index is None:
+                turn["items"].append(item)
+            else:
+                turn["items"][index] = item
+        self._emit("item/completed" if item["status"] != "inProgress" else "item/started", thread_id,
+                   turnId=turn["id"], item=copy.deepcopy(item))
 
     def _resolve(self, thread_id, native_id):
         for key, pending in list(self.requests.items()):
@@ -596,10 +669,16 @@ class MuseRPC:
         self.requests.pop(message["id"], None)
 
     def _shutdown(self, thread_id):
+        self.ready.discard(thread_id)
         self.generations.pop(thread_id, None)
         connection = self.connections.pop(thread_id, None)
         if connection:
             connection.close()
+        for turn in self.background_turns.get(thread_id, {}).values():
+            for item in turn["items"]:
+                if item.get("status") == "inProgress":
+                    item["status"] = "interrupted"
+                    self._emit("item/completed", thread_id, turnId=turn["id"], item=copy.deepcopy(item))
 
     def close(self):
         self.closed = True
