@@ -7,11 +7,13 @@ import tempfile
 import threading
 import urllib.request
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.codex_app_server import BrowserSessions
+from agent_coord import conversation_search
 from agent_coord.dispatch_runtime import CONTEXT_PREFIX
 from agent_coord.dispatch_runtime import routing_history
 from agent_coord.dispatch_snapshot import read_snapshot
@@ -72,6 +74,37 @@ class DispatchRuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.get(identity)["state"], "accepted")
         self.assertEqual(self.sessions.rpc.threads[self.vendor]["turns"][0]["items"][0]["content"], [{"type": "text", "text": "Add multiple vendors"}])
         self.assertTrue(self.sessions.read(self.vendor)["running"])
+
+    def test_dispatch_index_preparation_releases_writer_admission(self):
+        with self.store._connection() as db:
+            db.execute("INSERT OR REPLACE INTO browser_history(thread_id,history_json) VALUES (?,?)",
+                       (self.vendor, json.dumps({"turns": [{"id": "turn", "items": [
+                           {"id": "item", "type": "agentMessage", "text": "Vendor history"}]}]})))
+        self.submit()
+        entered, release, written = threading.Event(), threading.Event(), threading.Event()
+        messages = conversation_search.messages
+
+        def delayed(history):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("Dispatch preparation did not resume")
+            return messages(history)
+
+        def write():
+            with self.store._connection() as db:
+                db.execute("UPDATE sessions SET name='Independent work' WHERE session_id=?", (self.vendor,))
+            written.set()
+
+        with ThreadPoolExecutor(max_workers=2) as workers, patch.object(conversation_search, "messages", delayed):
+            routing = workers.submit(self.plan)
+            try:
+                self.assertTrue(entered.wait(5))
+                writer = workers.submit(write)
+                self.assertTrue(written.wait(2), "Dispatch retained writer admission during history parsing")
+                writer.result()
+            finally:
+                release.set()
+            self.assertTrue(routing.result().called)
 
     def test_busy_destination_queues_without_steering(self):
         self.sessions.send(self.vendor, {"message": "Build vendor page"})

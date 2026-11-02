@@ -9,7 +9,7 @@ def message_timeline(store, session_id, cwd=None):
     session = store.get_session(session_id)
     if not matches_workspace(session["cwd"], cwd):
         raise CoordinationError("Conversation not found in this workspace.")
-    with store._connection() as db:
+    with store.reading(), store._connection() as db:
         creations = {}
         if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
             for request in db.execute("""SELECT request_id, sender_session_id, thread_id, result_json
@@ -68,13 +68,13 @@ def message_timeline(store, session_id, cwd=None):
 
 
 def message_cursor(store):
-    with store._connection() as db:
+    with store.reading(), store._connection() as db:
         return db.execute("SELECT COALESCE(MAX(seq), 0) FROM message_changes").fetchone()[0]
 
 
 def message_sends(store, after=None, cwd=None):
     """Body-free live send events. Seed at the current ID on each connection."""
-    with store._connection() as db:
+    with store.reading(), store._connection() as db:
         latest = db.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
         if after is None or after >= latest:
             return latest, []
@@ -90,7 +90,7 @@ def message_sends(store, after=None, cwd=None):
 
 
 def message_changes(store, after, cwd=None):
-    with store._connection() as db:
+    with store.reading(), store._connection() as db:
         latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM message_changes").fetchone()[0]
         rows = db.execute("""SELECT DISTINCT s.session_id, s.cwd FROM sessions s
             JOIN message_changes c ON (s.session_id = c.sender_session_id OR s.session_id = c.recipient_session_id)

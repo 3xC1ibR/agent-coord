@@ -17,6 +17,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, TimeoutError
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +30,8 @@ from .thread_inventory import WAKE_PAUSES, has_table
 from .inventory_projection import entity_tag, list_card
 from .conversation_residency import Resident, releasable
 from .history_window import recent_view
+from .history_persistence import (HistoryPersistence, ensure_schema as ensure_history_schema,
+                                  prepare_history, publish_history, read_history, stage_history)
 from .browser_persistence import BrowserPersistence
 from .thread_usage import codex_totals
 from .app_agent_failures import notify_agent_failure
@@ -227,7 +230,8 @@ class BrowserSessions:
         self.dirty_histories: set[str] = set()
         self.history_revisions: dict[str, int] = {}
         self.usage_recovery_attempts: set[str] = set()
-        self.persistence = BrowserPersistence(context=lambda: self.store.connection_timeout(0))
+        self.persistence = BrowserPersistence(context=self._persistence_context)
+        self.history_persistence = HistoryPersistence(store)
         self.conversation_barrier = lambda identity: self.persistence.flush(key=identity)
         self.store.conversation_barrier = self.conversation_barrier
         self.history_lock = threading.Lock()
@@ -266,6 +270,7 @@ class BrowserSessions:
             connection.execute("""CREATE TABLE IF NOT EXISTS browser_history (
                 thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL
             )""")
+            ensure_history_schema(connection)
         self.navigation = NavigationStore(store)
         from .submission_receipts import SubmissionReceipts
         self.submissions = SubmissionReceipts(store)
@@ -277,7 +282,7 @@ class BrowserSessions:
         self.muse = muse_factory(store, self._event)
         # Upgrade browser conversations created before work threads existed.
         threads = self.store.threads
-        with self.store._connection() as connection:
+        with self.store.reading(), self.store._connection() as connection:
             previous = connection.execute("""SELECT b.*, t.thread_id AS existing_work_thread,
                 EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = b.thread_id) AS registered
                 FROM browser_sessions b LEFT JOIN work_threads t ON t.thread_id = b.thread_id""").fetchall()
@@ -314,12 +319,20 @@ class BrowserSessions:
         from .desktop_runtime import install_session_admission
         install_session_admission(self)
 
+    @contextmanager
+    def _persistence_context(self):
+        # A zero admission timeout continually forfeits the writer queue's
+        # fairness under foreground traffic. Keep this wait finite, while
+        # allowing accepted background work to take its scheduled turn.
+        with self.store.connection_timeout(100), self.store.database_operation("persistence", priority="background"):
+            yield
+
     def _thread_lock(self, thread_id: str):
         with self.lock:
             return self.thread_locks.setdefault(thread_id, threading.RLock())
 
     def _record(self, thread_id: str) -> dict:
-        with self.store._connection() as connection:
+        with self.store.reading(), self.store._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM browser_sessions WHERE thread_id = ?", (thread_id,)
             ).fetchone()
@@ -398,7 +411,7 @@ class BrowserSessions:
         # an assignment in progress whose protection must not lapse.
         conditions = ["EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = t.value AND (s.turn_active = 1 "
                       "OR (s.write_scope_json IS NOT NULL AND s.write_scope_json NOT IN ('', '[]'))))"]
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             if has_table(db, "delegations"):
                 conditions.append("EXISTS (SELECT 1 FROM delegations d WHERE d.child_session_id = t.value "
                                   "AND d.status IN ('launching', 'launched', 'attached'))")
@@ -468,6 +481,7 @@ class BrowserSessions:
                 self.loaded_clients.pop(thread_id, None)
                 self.last_used.pop(thread_id, None)
                 self.histories.pop(thread_id, None)
+                self.history_persistence.forget(thread_id)
             # Shown as saved, as after a runtime restart; opening resumes it.
             self.store.end_session(thread_id)
             self._publish("browser/changed", {"threadId": thread_id})
@@ -821,11 +835,10 @@ class BrowserSessions:
 
     def _history(self, thread_id: str) -> dict:
         if thread_id not in self.histories:
-            with self.store._connection() as connection:
-                row = connection.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
-            self.histories[thread_id] = json.loads(row[0]) if row else {"id": thread_id, "turns": []}
+            saved = read_history(self.store, thread_id)
+            self.histories[thread_id] = saved if saved is not None else {"id": thread_id, "turns": []}
             restore_timing(self.store, self.histories[thread_id])
-            if row is None:
+            if saved is None:
                 self._dirty_history(thread_id)
         return self.histories[thread_id]
 
@@ -845,9 +858,7 @@ class BrowserSessions:
                 return
             snapshot = copy.deepcopy(self._history(thread_id))
             revision = self.history_revisions[thread_id]
-        history = json.dumps(snapshot)
-        with self.store._connection() as connection:
-            connection.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (thread_id, history))
+        self.history_persistence.save(thread_id, snapshot)
         with self.lock:
             if self.history_revisions[thread_id] == revision:
                 self.dirty_histories.discard(thread_id)
@@ -1046,7 +1057,7 @@ class BrowserSessions:
     def completion_notification_allowed(self, completion_id: int) -> bool:
         if type(completion_id) is not int or completion_id <= 0:
             raise CoordinationError("Choose a valid turn completion.")
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             row = db.execute("SELECT * FROM turn_completions WHERE id = ?", (completion_id,)).fetchone()
             context = db.execute("SELECT * FROM turn_notification_context WHERE thread_id = ? AND turn_key = ?",
                                  (row["thread_id"], row["turn_key"])).fetchone() if row else None
@@ -1168,7 +1179,7 @@ class BrowserSessions:
             return True
 
     def list_workspaces(self) -> list[dict]:
-        with self.store._connection() as connection:
+        with self.store.reading(), self.store._connection() as connection:
             known = [row[0] for row in connection.execute(
                 "SELECT DISTINCT cwd FROM sessions UNION SELECT root FROM work_projects"
             )]
@@ -1211,7 +1222,7 @@ class BrowserSessions:
             return self.desktop_projects()
 
     def list_sessions(self, *, archived=False) -> list[dict]:
-        with self.store._connection() as connection:
+        with self.store.reading(), self.store._connection() as connection:
             rows = connection.execute(
                 """SELECT b.* FROM browser_sessions b JOIN work_threads t ON t.thread_id = b.thread_id
                    WHERE (t.attention = 'archived') = ? ORDER BY b.updated_at DESC""",
@@ -1242,7 +1253,7 @@ class BrowserSessions:
             if shared and cached and cached[0] == generation and time.monotonic() - cached[1] <= INVENTORY_REUSE_SECONDS:
                 return cached[2]
         if db is None:
-            with self.store._connection() as connection:
+            with self.store.reading(), self.store._connection() as connection:
                 creators = app_agent_creators(connection)
         else:
             creators = app_agent_creators(db)
@@ -1276,7 +1287,7 @@ class BrowserSessions:
         thread["orchestration_workspaces"] = thread["created_by"]["workspaces"] if thread["created_by"] else []
         if _inventory is None:
             from .supervision import relations
-            with self.store._connection() as db:
+            with self.store.reading(), self.store._connection() as db:
                 related = relations(db)
         else:
             related = _inventory.supervision
@@ -1284,7 +1295,7 @@ class BrowserSessions:
         thread.update(display_fields(thread_id, thread["created_by"], related))
         if _inventory is None:
             from .asks import AskStore
-            with self.store._connection() as db:
+            with self.store.reading(), self.store._connection() as db:
                 thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
                 owners = notification_policy.available_owners(db, self.store)
                 open_ask = AskStore.open_blocking(db, [thread_id]).get(thread_id)
@@ -1426,7 +1437,7 @@ class BrowserSessions:
                             else _inventory.titles[source_id])
             thread["forked_from"] = {"thread_id": source_id, "title": source_title}
         if _inventory is None:
-            with self.store._connection() as db:
+            with self.store.reading(), self.store._connection() as db:
                 thread["forked_sessions"] = [dict(row) for row in db.execute(
                     """SELECT thread_id, title, created_at, forked_from_turn_id FROM work_threads
                        WHERE forked_from_thread_id = ? ORDER BY created_at, thread_id""", (thread_id,))]
@@ -1445,7 +1456,7 @@ class BrowserSessions:
                     # changing; usage must never prevent opening a conversation.
                     pass
             thread["usage"] = usage
-            with self.store._connection() as db:
+            with self.store.reading(), self.store._connection() as db:
                 children = db.execute("SELECT DISTINCT d.child_session_id FROM delegations d JOIN work_threads t ON t.thread_id = d.child_session_id WHERE d.parent_session_id = ?", (thread_id,)).fetchall()
             thread["children"] = [self.store.threads.get(row["child_session_id"]) for row in children]
         if hasattr(self, "reviews"):
@@ -1455,7 +1466,7 @@ class BrowserSessions:
 
     def list_work_threads(self, *, archived=False) -> list[dict]:
         from .thread_inventory import ThreadInventory
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             inventory = ThreadInventory(self.store.threads, db, archived=archived)
             inventory.load_runtime(db)
             if hasattr(self, "reviews"):
@@ -1629,7 +1640,8 @@ class BrowserSessions:
                                             minimum_idle_seconds=self.store.stale_after_seconds)
                 history = {**native, **{key: value for key, value in result["thread"].items() if key != "turns"}}
                 restore_timing(self.store, history)
-                history_json = json.dumps(history)
+                prepared_history = prepare_history(history)
+                stage_history(self.store, prepared_history)
                 # No database writer lock spans a provider request. Recheck the
                 # registration and publish ownership, registration and history
                 # together so even a concurrent reader sees a complete thread.
@@ -1647,7 +1659,7 @@ class BrowserSessions:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (thread_id, thread["cwd"], thread["title"], result.get("model"), result.get("reasoningEffort"),
                          "fast" if tier == "priority" else tier, now, now))
-                    db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (thread_id, history_json))
+                    publish_history(db, thread_id, prepared_history)
                     db.execute("UPDATE sessions SET name = ?, last_seen_at = ?, ended_at = NULL WHERE session_id = ?",
                                (thread["title"], now, thread_id))
             except Exception:
@@ -2157,9 +2169,9 @@ class BrowserSessions:
             running = thread_id in self.active
             revision = self.turn_revisions.get(thread_id, 0)
         if thread is None:
-            with self.store._connection() as db:
-                row = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
-            thread = json.loads(row[0]) if row else {"id": thread_id, "turns": [], "historyUnavailable": True}
+            thread = read_history(self.store, thread_id)
+            if thread is None:
+                thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
         self._schedule_saved_completion(thread_id, thread, work_thread, revision)
         if not running and work_thread["status"] == "running":
             # A live lifecycle hook can precede the provider subscription.
@@ -2199,7 +2211,7 @@ class BrowserSessions:
         # the session-flag update checks it atomically again. No provider call
         # or prompt is needed to restore this exact saved terminal outcome.
         self._persist_event("turn/completed", params, set())
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             confirmed = db.execute("""SELECT 1 FROM work_threads t JOIN turn_completions c
                 ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
                 WHERE t.thread_id = ? AND t.turn_id = ?""", (thread_id, turn_id)).fetchone()
@@ -2252,7 +2264,8 @@ class BrowserSessions:
     def submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
         context = activity_context(body)
-        result = self._submit(thread_id, body, queued=queued)
+        with self.store._writer.measure_request("send.execution"):
+            result = self._submit(thread_id, body, queued=queued)
         command = result.get("command")
         turn_id = result.get("turnId") or (result.get("turn") or {}).get("id")
         # Dispatcher and reviewed requests have their own durable acceptance
@@ -2260,10 +2273,11 @@ class BrowserSessions:
         request_id = body.get("requestId")
         event_id = ("request:" + str(uuid.uuid5(uuid.NAMESPACE_URL, thread_id + ":" + request_id))
                     if request_id else None)
-        record_accepted(self.store, "decision_submitted" if command else "message_submitted", thread_id,
-            context=context, turn_id=turn_id, event_id=event_id,
-            details={"action": command.get("name") if isinstance(command, dict) else "message",
-                     "queued": bool(result.get("queued")), "request_id": result.get("id")})
+        with self.store._writer.measure_request("send.activity"):
+            record_accepted(self.store, "decision_submitted" if command else "message_submitted", thread_id,
+                context=context, turn_id=turn_id, event_id=event_id,
+                details={"action": command.get("name") if isinstance(command, dict) else "message",
+                         "queued": bool(result.get("queued")), "request_id": result.get("id")})
         return result
 
     def _submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
@@ -2297,7 +2311,8 @@ class BrowserSessions:
               preserve_text: bool, submission: dict) -> dict:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
-        self._await_persistence(thread_id)
+        with self.store._writer.measure_request("send.persistence_barrier"):
+            self._await_persistence(thread_id)
         message, images = message_images(body)
         if preserve_text or body.get("mentions"):
             message = body["message"]  # Selected ranges refer to the untrimmed composer text.

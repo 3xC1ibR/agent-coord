@@ -66,6 +66,24 @@ class StoreConnectionReuseTests(unittest.TestCase):
         self.assertEqual(other.execute("SELECT COUNT(*) FROM probe").fetchone()[0], 1)
         other.close()
 
+    def test_read_only_connections_reuse_separately_from_writers(self):
+        factory, calls = self.counted()
+        with patch.object(self.store, "_connect", side_effect=factory):
+            for _ in range(3):
+                with self.store.reading(), self.store._connection() as db:
+                    reader = db
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM probe").fetchone()[0], 0)
+            self.assertEqual(len(calls), 1)
+            with self.store._connection() as db:
+                self.assertIsNot(db, reader)
+                db.execute("INSERT INTO probe VALUES (1)")
+            with self.store.reading(), self.store._connection() as db:
+                self.assertIs(db, reader)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM probe").fetchone()[0], 1)
+                with self.assertRaises(sqlite3.OperationalError):
+                    db.execute("INSERT INTO probe VALUES (2)")
+            self.assertEqual(len(calls), 2)
+
     def test_failed_use_rolls_back_and_is_not_reused(self):
         factory, calls = self.counted()
         with patch.object(self.store, "_connect", side_effect=factory):

@@ -7,12 +7,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.cli import _parser, run
-from agent_coord.conversation_search import sync_messages
+from agent_coord import conversation_search
+from agent_coord.conversation_search import prepare_messages, publish_messages, refresh_messages, sync_messages
 from agent_coord.navigation import NavigationStore
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.thread_search import search_threads
@@ -235,6 +238,220 @@ class ConversationSearchTests(unittest.TestCase):
             cli = run(_parser().parse_args(["--db", str(self.store.database_path), "thread", "search", "jev", "--my-messages"]))
         self.assertEqual(cli, search_threads(self.store, "jev", my_messages=True))
         self.assertEqual(self.store.threads.get("thread", history=True), before)
+
+    def test_search_preparation_does_not_block_an_unrelated_writer(self):
+        self.create("thread", "Search preparation")
+        entered, release, written = threading.Event(), threading.Event(), threading.Event()
+        original = conversation_search.messages
+
+        def prepare(history):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("Preparation was not released")
+            return original(history)
+
+        def write():
+            with self.store._connection() as db:
+                db.execute("UPDATE sessions SET name='Independent write' WHERE session_id='thread'")
+            written.set()
+
+        with ThreadPoolExecutor(max_workers=2) as workers, patch.object(conversation_search, "messages", prepare):
+            search = workers.submit(search_threads, self.store, "preparation")
+            try:
+                self.assertTrue(entered.wait(5), "Search did not reach history preparation")
+                writer = workers.submit(write)
+                self.assertTrue(written.wait(2), "History preparation retained writer admission or a SQLite write lock")
+                writer.result()
+            finally:
+                release.set()
+            self.assertEqual([item["thread_id"] for item in search.result()["items"]], ["thread"])
+
+    def test_stale_preparation_cannot_publish_or_clear_a_newer_invalidation(self):
+        self.create("thread", "Original content")
+        refresh_messages(self.store)
+        self.save("thread", "Prepared content")
+        prepared = prepare_messages(self.store, "thread")
+        self.save("thread", "Newer content")
+        # An old installed runtime may independently drain its dirty queue.
+        with self.store._connection() as db:
+            sync_messages(db)
+        self.assertFalse(publish_messages(self.store, prepared))
+        self.assertEqual(conversation_search.search_metrics(self.store)["publish"]["discarded"], 1)
+        with self.store.reading(), self.store._connection() as db:
+            revision = db.execute("SELECT revision,indexed_revision FROM conversation_search_revisions").fetchone()
+            self.assertNotEqual(revision[0], revision[1])
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_message_index").fetchone()[0], "Original content")
+            self.assertIsNone(db.execute("SELECT 1 FROM conversation_search_routing_index").fetchone())
+        self.assertEqual(search_threads(self.store, "prepared")["items"], [])
+        self.assertEqual(search_threads(self.store, "newer")["items"][0]["thread_id"], "thread")
+
+    def test_delete_and_reinsert_cannot_reuse_a_prepared_revision(self):
+        self.create("thread", "Repeated content")
+        refresh_messages(self.store)
+        prepared = prepare_messages(self.store, "thread")
+        with self.store._connection() as db:
+            db.execute("DELETE FROM browser_history WHERE thread_id='thread'")
+        self.save("thread", "Repeated content")
+        self.assertFalse(publish_messages(self.store, prepared))
+        refresh_messages(self.store)
+        with self.store._connection() as db:
+            db.execute("DELETE FROM browser_history WHERE thread_id='thread'")
+        deletion = prepare_messages(self.store, "thread")
+        self.save("thread", "Restored content")
+        self.assertFalse(publish_messages(self.store, deletion))
+        self.assertEqual(search_threads(self.store, "restored")["items"][0]["thread_id"], "thread")
+
+    def test_large_conversation_stages_bounded_rows_and_bytes_before_atomic_visibility(self):
+        self.create("thread", "Original content")
+        refresh_messages(self.store)
+        # Include one oversized message and a match across the chunk boundary.
+        text = "𐐀" * (conversation_search._TEXT_CHARACTERS - 3) + "complete boundary" + "ß" * 180000
+        items = [{"id": f"message-{i}", "type": "agentMessage", "text": text if i == 0 else "Replacement " + "x" * 18000}
+                 for i in range(140)]
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_history SET history_json=? WHERE thread_id='thread'",
+                       (json.dumps({"turns": [{"id": "turn", "items": items}]}),))
+        stage = conversation_search._stage_batch
+        counts = []
+
+        def inspect_batch(store, generation, batch):
+            size = sum(sum(len(v.encode("utf-8")) if isinstance(v, str) else 8 for v in row) for _, row in batch)
+            counts.append((len(batch), size))
+            self.assertLessEqual(len(batch), conversation_search._STAGE_ROWS)
+            self.assertLessEqual(size, conversation_search._STAGE_BYTES)
+            result = stage(store, generation, batch)
+            with store.reading(), store._connection() as db:
+                self.assertEqual([r[0] for r in db.execute("SELECT text FROM conversation_search_message_index")],
+                                 ["Original content"], "A partial generation became visible")
+            return result
+
+        with patch.object(conversation_search, "_stage_batch", inspect_batch):
+            refresh_messages(self.store)
+        self.assertGreater(len(counts), 10)
+        metrics = conversation_search.search_metrics(self.store)
+        self.assertEqual(metrics["stage"]["max_rows"], max(count[0] for count in counts))
+        self.assertEqual(metrics["stage"]["max_bytes"], max(count[1] for count in counts))
+        self.assertEqual(metrics["publish"]["published"], 2)
+        hit = search_threads(self.store, "complete boundary")["items"][0]
+        self.assertEqual(hit["message_count"], 1)
+        self.assertIn("complete boundary", hit["matches"][0]["excerpt"])
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_search_message_index").fetchone()[0], 140)
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_message_index WHERE item_id='message-0'").fetchone()[0], text)
+
+    def test_interrupted_stage_is_invisible_and_recovered_after_restart(self):
+        self.create("thread", "Original content")
+        refresh_messages(self.store)
+        self.save("thread", "Replacement content " + "x" * 400000)
+        stage = conversation_search._stage_batch
+        staged = []
+
+        def interrupt(store, generation, batch):
+            result = stage(store, generation, batch)
+            staged.append((generation, batch))
+            raise RuntimeError("Simulated process interruption")
+
+        with patch.object(conversation_search, "_stage_batch", interrupt), self.assertRaisesRegex(RuntimeError, "interruption"):
+            refresh_messages(self.store)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_message_index").fetchone()[0], "Original content")
+            db.execute("UPDATE conversation_search_generations SET expires_at=0 WHERE state='staging'")
+        reopened = CoordinationStore(self.store.database_path)
+        conversation_search._cleanup_messages(reopened)
+        self.assertFalse(stage(reopened, *staged[0]), "An expired, partially collected generation resumed")
+        refresh_messages(reopened)
+        self.assertEqual(search_threads(reopened, "replacement")["items"][0]["thread_id"], "thread")
+        with reopened.reading(), reopened._connection() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM conversation_search_generations WHERE generation=?", (staged[0][0],)).fetchone())
+
+    def test_reader_snapshot_survives_publication_and_old_generation_cleanup(self):
+        self.create("thread", "Original content")
+        refresh_messages(self.store)
+        reader = sqlite3.connect(self.store.database_path)
+        self.addCleanup(reader.close)
+        reader.execute("BEGIN")
+        self.assertEqual(reader.execute("SELECT text FROM conversation_search_message_index").fetchone()[0], "Original content")
+        self.save("thread", "Replacement content")
+        refresh_messages(self.store)
+        self.assertEqual(reader.execute("SELECT text FROM conversation_search_message_index").fetchone()[0], "Original content")
+        reader.commit()
+        self.assertEqual(reader.execute("SELECT text FROM conversation_search_message_index").fetchone()[0], "Replacement content")
+
+    def test_refresh_does_not_chase_newly_arriving_histories(self):
+        self.create("thread", "Initial content")
+        prepare = conversation_search.prepare_messages
+
+        def arriving(store, identity):
+            prepared = prepare(store, identity)
+            self.create("later", "Arrived during preparation")
+            return prepared
+
+        with patch.object(conversation_search, "prepare_messages", side_effect=arriving) as preparation:
+            refresh_messages(self.store)
+        self.assertEqual(preparation.call_count, 1)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual([r[0] for r in db.execute("SELECT thread_id FROM conversation_search_heads")], ["thread"])
+        self.assertEqual(search_threads(self.store, "arrived")["items"][0]["thread_id"], "later")
+
+    def test_legacy_and_generation_projections_can_alternate(self):
+        self.create("thread", "Initial content")
+        refresh_messages(self.store)
+        with self.store._connection() as db:
+            sync_messages(db)
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_messages").fetchone()[0], "Initial content")
+        self.save("thread", "Modern content")
+        refresh_messages(self.store)
+        with self.store._connection() as db:
+            self.assertIsNotNone(db.execute("SELECT 1 FROM conversation_search_dirty").fetchone())
+            sync_messages(db)
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_messages").fetchone()[0], "Modern content")
+        self.save("thread", "Legacy content")
+        with self.store._connection() as db:
+            sync_messages(db)
+        refresh_messages(self.store)
+        self.assertEqual(search_threads(self.store, "legacy")["items"][0]["thread_id"], "thread")
+
+    def test_clean_legacy_projection_migrates_without_reparsing_history(self):
+        for index in range(4):
+            self.create(f"thread-{index}", "Migration needle " + str(index))
+        with self.store._connection() as db:
+            sync_messages(db)
+        with patch.object(conversation_search, "prepare_messages", side_effect=AssertionError("Clean legacy history reparsed")):
+            page = search_threads(self.store, "migration needle")
+        self.assertEqual(len(page["items"]), 4)
+        self.assertEqual(page["coverage"]["saved_histories"], 4)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_search_heads").fetchone()[0], 0)
+        self.save("thread-1", "Revised needle")
+        with patch.object(conversation_search, "prepare_messages", wraps=prepare_messages) as prepared:
+            page = search_threads(self.store, "needle")
+        self.assertEqual([call.args[1] for call in prepared.call_args_list], ["thread-1"])
+        self.assertEqual(len(page["items"]), 4)
+        self.assertEqual(search_threads(self.store, "revised")["items"][0]["thread_id"], "thread-1")
+
+    def test_migration_rebuilds_only_dirty_legacy_histories_and_retains_deletions(self):
+        for identity in ("clean", "dirty", "deleted"):
+            self.create(identity, identity + " needle")
+        with self.store._connection() as db:
+            sync_messages(db)
+            db.execute("DELETE FROM browser_history WHERE thread_id='deleted'")
+        self.save("dirty", "Revised needle")
+        with patch.object(conversation_search, "prepare_messages", wraps=prepare_messages) as prepared:
+            page = search_threads(self.store, "needle")
+        self.assertEqual({call.args[1] for call in prepared.call_args_list}, {"dirty", "deleted"})
+        self.assertEqual({item["thread_id"] for item in page["items"]}, {"clean", "dirty"})
+        with patch.object(conversation_search, "prepare_messages", side_effect=AssertionError("Indexed deletion repeated")):
+            self.assertEqual(len(search_threads(self.store, "needle")["items"]), 2)
+
+    def test_generation_view_upgrade_preserves_published_data(self):
+        self.create("thread", "Published needle")
+        refresh_messages(self.store)
+        with self.store._connection() as db:
+            db.execute("UPDATE conversation_search_projection_version SET version=1")
+            db.execute("DROP VIEW conversation_search_message_index")
+            db.execute("CREATE VIEW conversation_search_message_index AS SELECT * FROM conversation_search_messages")
+        with patch.object(conversation_search, "prepare_messages", side_effect=AssertionError("Published generation reparsed")):
+            self.assertEqual(search_threads(self.store, "needle")["items"][0]["thread_id"], "thread")
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for browser search tests")
     def test_browser_search(self):

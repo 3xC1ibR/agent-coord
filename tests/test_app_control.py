@@ -250,6 +250,11 @@ class AppControlTests(unittest.TestCase):
         self.assertIsNone(receipt["result"]["mode"])
         self.assertIsNone(self.sessions.work_thread(receipt["thread_id"])["creation_mode"])
 
+    def test_empty_pending_scan_needs_no_independent_write_transaction(self):
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.assertEqual(self.control.pending(), [])
+
     def test_creator_outside_workspace_remains_labelled_but_unavailable(self):
         other = self.root / "other"
         other.mkdir()

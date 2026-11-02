@@ -70,7 +70,7 @@ class EvaluationTests(unittest.TestCase):
 
     def test_direct_bypass_does_not_refresh_or_classify(self):
         self.submit(askDispatcher=True)
-        with patch("agent_coord.dispatch_runtime.sync_messages", side_effect=AssertionError("Refreshed bypass")):
+        with patch("agent_coord.dispatch_runtime.refresh_messages", side_effect=AssertionError("Refreshed bypass")):
             self.runtime.process_once()
         evidence = self.records()["records"][0]["evidence"]
         self.assertEqual(set(evidence["timings_ms"]), {"request_context"})

@@ -12,6 +12,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .conversation_search import routing_history
+from .history_persistence import decode_history
 
 
 def read_snapshot(database_path, *, now=None, cwd=None):
@@ -20,7 +21,7 @@ def read_snapshot(database_path, *, now=None, cwd=None):
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
-        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")}
         required = {"browser_sessions", "sessions", "work_threads", "thread_checkpoints"}
         if not required <= tables:
             raise ValueError("Database does not contain an app conversation inventory")
@@ -107,19 +108,21 @@ def read_snapshot(database_path, *, now=None, cwd=None):
 
         if "browser_history" in tables:
             triggers = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
-            cached = "conversation_search_routing" in tables and all(
+            routing = ("conversation_search_routing_index" if "conversation_search_routing_index" in tables
+                       else "conversation_search_routing")
+            cached = routing in tables and all(
                 "conversation_routing_" + event in triggers for event in ("insert", "update", "delete"))
             if cached:
-                histories = db.execute(eligible + """SELECT h.thread_id,r.evidence_json,
+                histories = db.execute(eligible + f"""SELECT h.thread_id,r.evidence_json,
                     CASE WHEN r.thread_id IS NULL THEN h.history_json END AS history_json
                     FROM browser_history h JOIN eligible e ON e.thread_id=h.thread_id
-                    LEFT JOIN conversation_search_routing r ON r.thread_id=h.thread_id""", params)
+                    LEFT JOIN {routing} r ON r.thread_id=h.thread_id""", params)
             else:
                 histories = batch("browser_history", "x.thread_id,NULL AS evidence_json,x.history_json")
             for row in histories:
                 try:
                     evidence = (json.loads(row["evidence_json"]) if row["evidence_json"] is not None
-                                else routing_history(json.loads(row["history_json"])))
+                                else routing_history(decode_history(row["history_json"], db=db)))
                 except (ValueError, TypeError, AttributeError):
                     evidence = {"messages": [], "history_status": "unavailable"}
                 inventory[row["thread_id"]].update(evidence)

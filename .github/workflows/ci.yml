@@ -59,6 +59,16 @@ jobs:
         run: node --test tests/*.js
       - name: Run Python tests
         run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
+      - name: Verify database latency and writer admission
+        run: python3 scripts/measure_database_contention.py --seconds 15 --writers 6 --check --output build/database-performance.json
+      - name: Retain database performance measurements
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: database-performance-${{ matrix.os }}-python-${{ matrix.python }}
+          path: build/database-performance.json
+          if-no-files-found: ignore
+          retention-days: 30
 
   macos-build:
     name: macOS standalone build (arm64)

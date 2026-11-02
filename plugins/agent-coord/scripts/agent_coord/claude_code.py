@@ -6,6 +6,8 @@ Each conversation owns its process; Claude owns the resumable native transcript.
 """
 from __future__ import annotations
 
+from .history_persistence import prepare_history, publish_history, read_history, stage_history
+
 import copy
 import json
 import logging
@@ -323,11 +325,12 @@ class ClaudeRPC:
                 raise CoordinationError("Cannot fork Claude history before its native transcript has been saved.")
             history["id"] = child_id
             try:
+                prepared_history = prepare_history(history)
+                stage_history(self.store, prepared_history)
                 with self.store._connection() as db:
                     db.execute("INSERT INTO claude_sessions (thread_id, fork_path, native_id) VALUES (?, ?, ?)",
                                (child_id, str(snapshot) if snapshot else None, child_id))
-                    db.execute("INSERT INTO browser_history (thread_id, history_json) VALUES (?, ?)",
-                               (child_id, json.dumps(history)))
+                    publish_history(db, child_id, prepared_history)
             except Exception:
                 if snapshot is not None:
                     snapshot.unlink(missing_ok=True)
@@ -336,9 +339,9 @@ class ClaudeRPC:
             return {"thread": history, "model": options["model"], "reasoningEffort": options["effort"]}
 
     def _read_history(self, thread_id):
-        with self.store._connection() as db:
-            row = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
-        history = json.loads(row[0]) if row else {"id": thread_id, "turns": []}
+        history = read_history(self.store, thread_id)
+        if history is None:
+            history = {"id": thread_id, "turns": []}
         active = self.turns.get(thread_id)
         if active:
             history["turns"] = [t for t in history.get("turns", []) if t["id"] != active["id"]] + [copy.deepcopy(active)]

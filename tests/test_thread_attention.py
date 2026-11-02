@@ -255,6 +255,7 @@ class ThreadAttentionTests(unittest.TestCase):
         })
         self.sessions._event({"id": 42, "method": "item/commandExecution/requestApproval",
                               "params": {"threadId": thread_id}})
+        self.assertTrue(self.sessions.persistence.flush(key=thread_id))
         pending = dict(self.sessions.requests)
         calls = list(self.sessions.rpc.calls)
         before = self.sessions.work_thread(thread_id)

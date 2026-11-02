@@ -18,6 +18,7 @@ sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
 from agent_coord.codex_app_server import BrowserBusyError, BrowserSessions, CodexRPC
 from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.history_persistence import read_history
 
 
 EMPTY_ROLLOUT_ERROR = (
@@ -1717,8 +1718,7 @@ class DatabaseContentionTests(unittest.TestCase):
         self.assertEqual(public[0][0], "item/completed")
         self.assertEqual(len(public[0][1]["item"]["text"]), 64000)
         self.assertEqual(public[1][0], "turn/completed")
-        with self.store._connection() as db:
-            saved = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0])
+        saved = read_history(self.store, identity)
         items = {item["id"]: item for item in saved["turns"][0]["items"]}
         self.assertEqual(items["tool"]["aggregatedOutput"], output)
         self.assertEqual(items["answer"]["text"], answer)

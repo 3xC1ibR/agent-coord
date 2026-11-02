@@ -8,34 +8,47 @@ from pathlib import Path
 from .store import CoordinationError
 
 UNSET = object()
+CREATION_MODE_SQL = """CASE WHEN json_valid(payload_json) THEN
+    CASE WHEN json_type(payload_json) = 'object'
+        AND json_extract(payload_json, '$.mode') = 'orchestration'
+        THEN 'orchestration' END END"""
 
 
 def app_agent_creators(db):
     """Read the first identified creation, including uncertain deliveries."""
-    if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
+    schema = {row[0] for row in db.execute("""SELECT name FROM sqlite_master
+        WHERE name IN ('app_control_requests', 'app_control_creator_metadata')""")}
+    if "app_control_requests" not in schema:
         return {}
-    rows = db.execute("""SELECT r.thread_id, r.sender_session_id, r.payload_json,
+    # A status index looks selective to SQLite with old snapshot statistics,
+    # but reads completed request bodies and sorts them on every refresh.
+    # This covering index stores the mode expression and creation order.
+    # Legacy initialization can precede AppControl's optional schema upgrade.
+    index = " INDEXED BY app_control_creator_metadata" if "app_control_creator_metadata" in schema else ""
+    # Aggregate in SQLite: fetching one Python row per creator repeatedly
+    # reacquires the GIL behind polling and provider threads. Only the small
+    # creation-mode field belongs in this projection, not the original prompt.
+    rows = json.loads(db.execute(f"""SELECT json_group_array(json_object(
+        'thread_id', thread_id, 'sender_session_id', sender_session_id,
+        'title', title, 'cwd', cwd, 'project_cwd', project_cwd, 'mode', mode))
+        FROM (SELECT r.thread_id, r.sender_session_id,
+        {CREATION_MODE_SQL} AS mode,
         COALESCE(t.title, s.name, r.sender_session_id) AS title, s.cwd,
         COALESCE(t.project_cwd, s.cwd) AS project_cwd
-        FROM app_control_requests r
+        FROM app_control_requests r{index}
         LEFT JOIN sessions s ON s.session_id = r.sender_session_id
         LEFT JOIN work_threads t ON t.thread_id = r.sender_session_id
         WHERE r.operation = 'create' AND r.thread_id IS NOT NULL
         AND r.status IN ('running', 'completed', 'uncertain')
-        ORDER BY r.created_at, r.request_id""").fetchall()
+        ORDER BY r.created_at, r.request_id)""").fetchone()[0])
     creators = {}
     for row in rows:
         if row["thread_id"] == row["sender_session_id"]:
             continue
-        try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, ValueError):
-            payload = {}
-        mode = payload.get("mode") if isinstance(payload, dict) else None
         creators.setdefault(row["thread_id"], {
             "thread_id": row["sender_session_id"], "title": row["title"], "cwd": row["cwd"],
             "project_cwd": row["project_cwd"],
-            "mode": "orchestration" if mode == "orchestration" else None,
+            "mode": row["mode"],
         })
     return creators
 

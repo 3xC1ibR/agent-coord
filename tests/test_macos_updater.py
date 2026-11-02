@@ -66,7 +66,7 @@ class UpdaterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sparkle.validate_runtime({**runtime, "ui_protocol_min": True})
             with self.assertRaises(ValueError):
-                sparkle.validate_runtime({**runtime, "runtime_schema_min": 2})
+                sparkle.validate_runtime({**runtime, "runtime_schema_min": runtime["runtime_schema_max"] + 1})
 
     def test_bundle_and_feed_share_runtime_constants_and_reject_drift(self):
         from agent_coord import desktop_runtime
@@ -79,7 +79,8 @@ class UpdaterTests(unittest.TestCase):
                 runtime = sparkle.runtime_metadata("1.2.3", "42")
                 self.assertEqual(runtime, desktop_runtime.compatibility_metadata("1.2.3+42"))
                 self.assertEqual(runtime["runtime_protocol"], 7)
-                self.assertEqual(runtime["runtime_schema_min"], 4)
+                self.assertEqual(runtime["runtime_schema_min"], 1)
+                self.assertEqual(runtime["runtime_schema_max"], 4)
                 info = {"CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "42", **runtime}
                 (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
                 config = resources / "backend.json"

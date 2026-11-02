@@ -11,6 +11,7 @@ import uuid
 from .navigation import NavigationStore
 from .app_agent_failures import notify_creation_failure
 from .store import CoordinationError
+from .organization import CREATION_MODE_SQL
 from .workspaces import matches_workspace
 
 LEASE_SECONDS = 60
@@ -21,10 +22,13 @@ SETTINGS = ("cwd", "model", "effort", "yolo")
 class AppControl:
     def __init__(self, store):
         self.store = store
-        with store._connection() as db:
-            if db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('app_control_requests','app_control_runtimes')").fetchone()[0] == 2:
+        with store.reading(), store._connection() as db:
+            if db.execute("""SELECT COUNT(*) FROM sqlite_master WHERE name IN
+                ('app_control_requests','app_control_runtimes','app_control_pending','app_control_creator_metadata',
+                 'app_control_sender_requests','app_control_thread_requests')""").fetchone()[0] == 6:
                 return
-            db.executescript("""
+        with store._connection() as db:
+            db.executescript(f"""
                 CREATE TABLE IF NOT EXISTS app_control_requests (
                     request_id TEXT PRIMARY KEY, operation TEXT NOT NULL,
                     sender_session_id TEXT NOT NULL, cwd TEXT NOT NULL,
@@ -35,11 +39,20 @@ class AppControl:
                 CREATE TABLE IF NOT EXISTS app_control_runtimes (
                     id TEXT PRIMARY KEY, heartbeat REAL NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS app_control_pending ON app_control_requests(status, updated_at);
+                CREATE INDEX IF NOT EXISTS app_control_sender_requests ON app_control_requests(
+                    sender_session_id, operation, status, created_at, request_id);
+                CREATE INDEX IF NOT EXISTS app_control_thread_requests ON app_control_requests(
+                    thread_id, operation, status, created_at, request_id, sender_session_id);
+                CREATE INDEX IF NOT EXISTS app_control_creator_metadata ON app_control_requests(
+                    created_at, request_id, thread_id, sender_session_id, {CREATION_MODE_SQL})
+                    WHERE operation = 'create' AND thread_id IS NOT NULL
+                    AND status IN ('running', 'completed', 'uncertain');
             """)
 
     def settings(self, thread_id):
         session = self.store.get_session(thread_id)
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             row = None
             if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'browser_sessions'").fetchone():
                 row = db.execute("SELECT * FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
@@ -50,7 +63,7 @@ class AppControl:
         result["archived"] = bool(result["archived"])
         result["session_id"] = thread_id
         from .execution_state import permission_settings
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             result["permissions"] = permission_settings(db, result, session["execution"])
         result["url"] = NavigationStore(self.store).link(thread=thread_id)["url"]
         return result
@@ -195,31 +208,34 @@ class AppControl:
                     (identifier, operation, sender_session_id, cwd, thread_id, json.dumps(payload, sort_keys=True), queued, now, now))
         return self.status(identifier)
 
-    def _reconcile(self, db):
-        if not db.in_transaction:
-            db.execute("BEGIN IMMEDIATE")
+    def _reconcile(self):
         cutoff = self.store.clock() - LEASE_SECONDS
         # Never replay provider creation or a possibly applied settings change.
-        stale = db.execute("""SELECT request_id FROM app_control_requests
+        condition = """
             WHERE status = 'running' AND updated_at < ? AND NOT EXISTS
-            (SELECT 1 FROM app_control_runtimes r WHERE r.id = app_control_requests.owner AND r.heartbeat >= ?)""",
-            (cutoff, cutoff)).fetchall()
-        db.execute("""UPDATE app_control_requests SET status = 'uncertain',
-            error = 'The app runtime stopped before confirming the result. Inspect the conversation before retrying.',
-            updated_at = ? WHERE status = 'running' AND updated_at < ? AND NOT EXISTS
-            (SELECT 1 FROM app_control_runtimes r WHERE r.id = app_control_requests.owner AND r.heartbeat >= ?)""",
-            (self.store.clock(), cutoff, cutoff))
+            (SELECT 1 FROM app_control_runtimes r WHERE r.id = app_control_requests.owner AND r.heartbeat >= ?)"""
+        with self.store.reading(), self.store._connection() as db:
+            stale = db.execute("SELECT request_id FROM app_control_requests " + condition,
+                               (cutoff, cutoff)).fetchall()
         for row in stale:
-            notify_creation_failure(self.store, db, db.execute(
-                "SELECT * FROM app_control_requests WHERE request_id = ?", (row["request_id"],)).fetchone())
+            # Discovery does not reserve the writer. Recheck each candidate
+            # atomically: a heartbeat or completed request may have won since.
+            with self.store.database_operation("app_control.reconcile", priority="background"), self.store._connection() as db:
+                changed = db.execute("""UPDATE app_control_requests SET status = 'uncertain',
+                    error = 'The app runtime stopped before confirming the result. Inspect the conversation before retrying.',
+                    updated_at = ? """ + condition + " AND request_id = ?",
+                    (self.store.clock(), cutoff, cutoff, row["request_id"])).rowcount
+                if changed:
+                    notify_creation_failure(self.store, db, db.execute(
+                        "SELECT * FROM app_control_requests WHERE request_id = ?", (row["request_id"],)).fetchone())
 
     def status(self, request_id, *, wait=0):
         if not isinstance(wait, (int, float)) or not 0 <= wait <= 30:
             raise CoordinationError("Wait must be between 0 and 30 seconds.")
         deadline = time.monotonic() + wait
         while True:
-            with self.store._connection() as db:
-                self._reconcile(db)
+            self._reconcile()
+            with self.store.reading(), self.store._connection() as db:
                 row = db.execute("SELECT * FROM app_control_requests WHERE request_id = ?", (request_id,)).fetchone()
             if not row:
                 raise CoordinationError("App request not found.")
@@ -248,8 +264,8 @@ class AppControl:
         return self.status(request_id)
 
     def pending(self):
-        with self.store._connection() as db:
-            self._reconcile(db)
+        self._reconcile()
+        with self.store.reading(), self.store._connection() as db:
             return [dict(row) for row in db.execute("""SELECT * FROM app_control_requests
                 WHERE status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
                 OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar')

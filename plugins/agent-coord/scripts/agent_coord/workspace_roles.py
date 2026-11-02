@@ -92,7 +92,7 @@ def held_role(db, session_id):
 
 def list_roles(store, workspace):
     _prepare(store)
-    with store._connection() as db:
+    with store.reading(), store._connection() as db:
         rows = db.execute("SELECT * FROM workspace_roles ORDER BY name COLLATE NOCASE, role_id").fetchall()
         return {"data": [_describe(db, row) for row in rows if _visible(row["workspace"], workspace)]}
 
@@ -267,20 +267,26 @@ def _sweep(store, workspace):
     """Once per store: supervisors retired before succession existed still pass on their open agents."""
     if getattr(store, "_workspace_roles_swept", False):
         return
-    with store._connection() as db:
-        db.execute("BEGIN IMMEDIATE")
+    candidates = []
+    with store.reading(), store._connection() as db:
+        db.execute("BEGIN")
         supervisors = set()
         if supervision._exists(db, "app_control_requests"):
             supervisors |= {row[0] for row in db.execute("""SELECT DISTINCT sender_session_id FROM app_control_requests
                 WHERE operation = 'create' AND status = 'completed' AND thread_id IS NOT NULL""")}
         supervisors |= {row[0] for row in db.execute(
             "SELECT DISTINCT supervisor_session_id FROM agent_supervisors WHERE supervisor_kind = 'session'")}
-        now = store.clock()
         for session_id in sorted(supervisors):
             row = db.execute("SELECT cwd FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
             if row and (not workspace or matches_workspace(row["cwd"], workspace)) and supervision.retired(db, session_id) \
                     and supervision.supervised_threads(db, session_id):
-                supervision.record_retirement(db, session_id, now)
+                candidates.append(session_id)
+    for session_id in candidates:
+        with store.database_operation("workspace_roles.retire", priority="background"), store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT cwd FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+            if row and (not workspace or matches_workspace(row["cwd"], workspace)) and supervision.retired(db, session_id):
+                supervision.record_retirement(db, session_id, store.clock())
     store._workspace_roles_swept = True
 
 
@@ -335,7 +341,7 @@ def process(store, workspace=None):
     """One succession and deferred-move pass; returns how many records changed supervision."""
     _prepare(store)
     _sweep(store, workspace)
-    with store._connection() as db:
+    with store.reading(), store._connection() as db:
         retirements = [row[0] for row in db.execute("SELECT session_id FROM supervisor_retirements ORDER BY retired_at")]
         pending = [row[0] for row in db.execute("SELECT thread_id FROM supervision_pending_moves ORDER BY created_at")]
     changed = 0

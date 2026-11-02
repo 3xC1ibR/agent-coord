@@ -30,14 +30,17 @@ import urllib.request
 import uuid
 
 PROTOCOL_VERSION = 1
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _OWNED_DATABASES = set()
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_OWNED_DATABASES.clear)
 
 
 def compatibility_metadata(version):
     return {"runtime_version": str(version), "runtime_protocol": PROTOCOL_VERSION,
             "ui_protocol_min": PROTOCOL_VERSION, "ui_protocol_max": PROTOCOL_VERSION,
-            "runtime_schema_min": SCHEMA_VERSION, "runtime_schema_max": SCHEMA_VERSION}
+            "runtime_schema_min": 1, "runtime_schema_max": SCHEMA_VERSION}
 
 
 def compatible(target):
@@ -153,8 +156,15 @@ def schema_access(database, *, read_only=False):
     # The runtime creates optional feature tables after the core migration.
     # Its matching clients trust that completed migration, without competing
     # for schema ownership when those additional tables change the cookie.
-    live_owner = (str(Path(database).resolve()) in _OWNED_DATABASES
-                  or not owns_database(database) and not owner_available(directory))
+    live_owner = str(Path(database).resolve()) in _OWNED_DATABASES
+    if not live_owner and not owns_database(database) and not owner_available(directory):
+        # Finite standalone operations hold the same kernel lock. Only an
+        # authenticated runtime may bypass the schema cookie check; otherwise
+        # a concurrent short write could hide a required migration.
+        try:
+            live_owner = discover(database, timeout=.1) is not None
+        except (OSError, RuntimeError, ValueError):
+            live_owner = False
     if previous and previous["fingerprint"] == fingerprint and schema_initialized(database, fingerprint, check_cookie=not (live_owner or read_only)):
         yield False
         return
@@ -460,11 +470,13 @@ class Runtime:
                 "payload": str(self.payload), "client_requests": 1}
 
     def status(self):
+        from .database_writer import performance_snapshot
         return {**self.identity(), "status": "serving",
                 "url": f"http://127.0.0.1:{self.server.server_port}/",
                 "pending": str(self.pending) if self.pending else None, "upgrade_error": self.error,
                 "paused": self.server.browser_sessions.admission.paused,
-                "busy": readiness(self.server.browser_sessions)}
+                "busy": readiness(self.server.browser_sessions),
+                "database_metrics": performance_snapshot(self.server.browser_sessions)}
 
     def dispatch(self, body):
         action = body.get("action")
@@ -664,6 +676,10 @@ class Runtime:
                     return 0
                 if child.poll() is not None:
                     os.close(ready_read)
+                    schema = read_json(self.directory / "schema.json")["schema"]
+                    if schema > SCHEMA_VERSION:
+                        raise RuntimeError("Candidate failed after advancing the database schema; "
+                                           "the retained runtime cannot restore it. Start a compatible runtime.")
                     # Only idle work crossed this boundary. Rebuild the retained
                     # old runtime and adopt only known queued (never sending) work.
                     self.instance = uuid.uuid4().hex

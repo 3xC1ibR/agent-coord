@@ -5,6 +5,8 @@ resumes a conversation, starts an agent, or changes a user's thread placement.
 """
 from __future__ import annotations
 
+from .history_persistence import read_history
+
 import http.client
 import json
 import math
@@ -329,10 +331,9 @@ def terminal_messages(thread):
 
 
 def context_for(store, thread):
-    with store._connection() as db:
-        row = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread["thread_id"],)).fetchone()
     try:
-        messages = history_messages(json.loads(row[0]), thread) if row else None
+        history = read_history(store, thread["thread_id"])
+        messages = history_messages(history, thread) if history is not None else None
     except (ValueError, TypeError, AttributeError, KeyError):
         messages = None
     if not messages:

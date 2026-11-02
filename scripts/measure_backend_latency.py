@@ -22,6 +22,7 @@ import argparse
 import copy
 import json
 import os
+import platform
 from pathlib import Path
 import random
 import shutil
@@ -108,9 +109,15 @@ class SyntheticProvider:
     def _history(self, thread_id):
         if self.stored_history:
             # The snapshot's saved transcript, as the provider would return it.
-            with self.store._connection() as connection:
-                row = connection.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
-            return json.loads(row[0]).get("turns", []) if row else []
+            try:
+                from agent_coord.history_persistence import read_history
+            except ImportError:  # Matched measurements of retained older backends.
+                with self.store.reading(), self.store._connection() as connection:
+                    row = connection.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
+                history = json.loads(row[0]) if row else None
+            else:
+                history = read_history(self.store, thread_id)
+            return (history or {}).get("turns", [])
         rng = random.Random(thread_id)
         turns, size = [], 0
         while size < self.history_kb * 1024:
@@ -215,12 +222,11 @@ class SyntheticProvider:
 class StackSampler(threading.Thread):
     """Python-level sampling profile of every thread (diagnostic only)."""
 
-    def __init__(self, path, interval=0.005):
+    def __init__(self, path, interval=0.02):
         super().__init__(daemon=True)
         self.path, self.interval, self.counts, self.samples = path, interval, {}, 0
 
     def run(self):
-        import traceback
         own = threading.get_ident()
         while True:
             time.sleep(self.interval)
@@ -228,8 +234,16 @@ class StackSampler(threading.Thread):
             for ident, frame in sys._current_frames().items():
                 if ident == own:
                     continue
-                stack = traceback.extract_stack(frame)[-7:]
-                key = " <- ".join(f"{Path(entry.filename).name}:{entry.name}:{entry.lineno}" for entry in reversed(stack))
+                # Read code metadata directly. traceback.extract_stack also
+                # resolves source lines, which dominated the old 200 Hz probe.
+                stack = []
+                for _ in range(7):
+                    if frame is None:
+                        break
+                    code = frame.f_code
+                    stack.append(f"{os.path.basename(code.co_filename)}:{code.co_name}:{frame.f_lineno}")
+                    frame = frame.f_back
+                key = " <- ".join(stack)
                 self.counts[key] = self.counts.get(key, 0) + 1
 
     def write(self):
@@ -260,10 +274,14 @@ def serve(arguments):
                                antigravity_factory=SyntheticProvider, kimi_factory=SyntheticProvider,
                                muse_factory=SyntheticProvider)
     server = ui.make_ui_server(store, port=0, cwd=workspace, browser_sessions=sessions)
+    if arguments.thread_switch_interval is not None:
+        sys.setswitchinterval(arguments.thread_switch_interval)
     sampler = StackSampler(arguments.profile) if arguments.profile else None
     if sampler:
         sampler.start()
-    print(json.dumps({"port": server.server_address[1], "pid": os.getpid()}), flush=True)
+    print(json.dumps({"port": server.server_address[1], "pid": os.getpid(),
+                      "thread_switch_interval": sys.getswitchinterval(),
+                      "source_fingerprint": desktop_runtime.schema_fingerprint()}), flush=True)
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     # A measurement whose driver was killed must not leave this backend
     # consuming CPU on a shared machine.
@@ -473,6 +491,8 @@ def main():
                         help="Comma-separated extra event methods the windows do not refresh the list for.")
     parser.add_argument("--source", help="Directory containing the agent_coord package to measure (default: this repository).")
     parser.add_argument("--profile", help="Write a Python stack sample profile of the backend to this file.")
+    parser.add_argument("--thread-switch-interval", type=float,
+                        help="Diagnostic override for the backend Python thread switch interval, in seconds.")
     arguments = parser.parse_args()
     if arguments.mode == "serve":
         return serve(arguments)
@@ -489,18 +509,25 @@ def main():
                                "--history-kb", str(arguments.history_kb), "--delta-rate", str(arguments.delta_rate)]
                               + (["--stored-history"] if arguments.stored_history else [])
                               + (["--profile", str(Path(arguments.profile).resolve())] if arguments.profile else [])
+                              + (["--thread-switch-interval", str(arguments.thread_switch_interval)]
+                                 if arguments.thread_switch_interval is not None else [])
                               + (["--source", str(Path(arguments.source).resolve())] if arguments.source else []),
                               stdout=subprocess.PIPE, stderr=open(root / "server.log", "w"), env=environment, text=True)
     hooks = []
     report = {"snapshot": arguments.snapshot, "source": arguments.source or str(SCRIPTS), "root": str(root), "target": target, "agents": len(busy),
+              "python": platform.python_version(), "sqlite": sqlite3.sqlite_version, "platform": platform.platform(),
               "windows": arguments.windows, "hook_rate": arguments.hook_rate, "delta_rate": arguments.delta_rate,
-              "history_kb": arguments.history_kb, "samples": {}}
+              "history_kb": arguments.history_kb, "stored_history": arguments.stored_history,
+              "profile_enabled": bool(arguments.profile), "samples": {}}
     stop = threading.Event()
     try:
         started = server.stdout.readline()
         if not started:
             raise RuntimeError("backend failed to start; see " + str(root / "server.log"))
-        port = json.loads(started)["port"]
+        identity = json.loads(started)
+        port = identity["port"]
+        report["source_fingerprint"] = identity.get("source_fingerprint")
+        report["thread_switch_interval"] = identity.get("thread_switch_interval")
         report["port"] = port
         client = Client(port)
         samples = report["samples"]
@@ -548,8 +575,17 @@ def main():
         if arguments.hold:
             print(json.dumps({"status": "holding", "port": port, "target": target, "seconds": arguments.hold}), flush=True)
             time.sleep(arguments.hold)
+    except Exception as error:
+        report["measurement_error"] = type(error).__name__ + ": " + str(error)
+        report["samples"].setdefault("errors", []).append(report["measurement_error"])
+        raise
     finally:
         stop.set()
+        if "port" in report:
+            try:
+                _, report["database_metrics"], _ = client.call("/api/browser/performance")
+            except Exception as error:
+                report["database_metrics_unavailable"] = str(error)
         for hook in hooks:
             hook.terminate()
         server.terminate()
@@ -560,12 +596,14 @@ def main():
         report["summary"] = {name: quantiles(values) for name, values in report["samples"].items() if name != "errors"}
         report["error_count"] = len(report["samples"].get("errors", []))
         report["budget_failures"] = check_budgets(report["summary"])
+        report["artifacts_retained"] = bool(report["budget_failures"] or report["error_count"] or report.get("load_start_failures"))
         report.pop("samples") if not arguments.output else None
         if arguments.output:
             Path(arguments.output).write_text(json.dumps(report, indent=1))
         print(json.dumps({k: v for k, v in report.items() if k != "samples"}, indent=1))
-        shutil.rmtree(root, ignore_errors=True)
-    if arguments.check and (report["budget_failures"] or report["error_count"]):
+        if not report["artifacts_retained"]:
+            shutil.rmtree(root, ignore_errors=True)
+    if arguments.check and (report["budget_failures"] or report["error_count"] or report.get("load_start_failures")):
         sys.exit(1)
 
 

@@ -429,7 +429,8 @@ class BrowserInboxWake:
 
     def process_once(self):
         # Read just pending recipients, not conversation histories, on each tick.
-        with self.store._connection() as db:
+        # Discovery is a snapshot; _claim revalidates eligibility atomically.
+        with self.store.reading(), self.store._connection() as db:
             rows = db.execute("""SELECT DISTINCT b.thread_id, b.cwd FROM messages m
                 JOIN browser_sessions b ON b.thread_id = m.recipient_session_id
                 LEFT JOIN message_wake_attempts a ON a.message_id = m.id

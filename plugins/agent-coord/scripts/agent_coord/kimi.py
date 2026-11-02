@@ -6,6 +6,8 @@ its own identity, display history and pending user decisions.
 """
 from __future__ import annotations
 
+from .history_persistence import read_history
+
 import copy
 import json
 import logging
@@ -107,9 +109,9 @@ class KimiRPC:
             logging.getLogger(__name__).warning("Could not capture Kimi context usage")
 
     def _history(self, thread_id):
-        with self.store._connection() as db:
-            row = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
-        history = json.loads(row[0]) if row else {"id": thread_id, "turns": []}
+        history = read_history(self.store, thread_id)
+        if history is None:
+            history = {"id": thread_id, "turns": []}
         with self.lock:
             active = self.turns.get(thread_id)
             latest = active or self.completed.get(thread_id)

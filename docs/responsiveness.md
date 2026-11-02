@@ -337,3 +337,203 @@ detail, and 2 / 474 ms for inventory. Search remained above its separate budget
 (373 / 1,207 ms); its index maintenance and context caching remain outside this
 contention repair. These are isolated backend measurements, not evidence that
 the installed runtime has activated the update.
+
+## November 2 writer admission and incremental persistence
+
+The history audit distinguishes the earlier repairs: `1f949aa` reduced connection
+and event-stream overhead, `31fda65` kept Claude turns alive during bookkeeping
+contention, and `c1255ef` routed mutations into the runtime owner. These repairs
+did not serialize that owner's writer threads or bound full-history rewrites
+and dirty search projection transactions. The runtime-owner fast path could
+still admit competing SQLite writers. Retries improved recovery without removing
+those causes. The exact holder of the original reported lock was not recorded;
+the reproduced structural failures and new per-operation metrics support this
+repair without claiming that missing incident detail.
+
+Finite writable store scopes now share one process-wide admission queue keyed
+by the canonical database path, including the runtime-owner fast path. Reads
+explicitly enter `store.reading()` and never join that queue. Nested independent
+connections are query-only, so they cannot wait for a write lock retained by
+an outer scope. Commit, rollback and cursor cleanup finish before admission is
+released. Forked processes must construct a new store and cannot inherit runtime
+ownership. Foreground work gets preference; waiting background work gets a turn
+after at most eight foreground admissions.
+Schema initialization distinguishes an authenticated runtime from a finite
+standalone writer holding the same kernel lock. A short write can no longer
+hide a required migration by suppressing the schema-cookie check.
+
+History snapshots larger than the inline threshold are represented by immutable
+SQLite chunks and a small published manifest. Preparation and hashing occur
+outside write scopes, unchanged chunks are reused, staging commits are bounded,
+and the root is published last. SQLite backups retain the complete snapshot.
+An item preparation cache avoids serializing and hashing unchanged items on
+every retry or save; it retains at most 16 conversations and 64 MiB of logical
+input, and is released when a conversation is evicted. Background persistence
+waits up to 100 ms for admission instead of repeatedly forfeiting its queue turn.
+Legacy inline histories remain readable. Schema epoch 2 prevents older code from
+silently treating a manifest as an empty history. The candidate reads epochs 1
+and 2 and migrates at a safe runtime handover. Immutable history chunks are
+retained; collection requires a separate reader/staging retention contract.
+
+Search prepares changed histories outside writable scopes and stages bounded
+generations before a revision-checked publication. An intervening history update
+cannot have its invalidation cleared by older prepared results. Generation
+staging also bounds transactions for one oversized conversation.
+Clean legacy projections remain available until their conversation receives a
+new generation. The migration therefore prepared only seven dirty histories on
+the 1,305-history snapshot, rather than rebuilding all 1.77 GB of saved JSON.
+Creator metadata uses an ordered covering expression index and one aggregated
+SQLite result, avoiding repeated payload parsing, transfers of original prompts,
+and per-row interpreter waits. The query explicitly selects that index when
+available: retained snapshot statistics otherwise selected the broad status
+index and sorted completed request bodies on each refresh. Legacy initialization
+continues to work before the optional metadata index has been created.
+Sender- and thread-specific request indexes keep conversation creation receipts
+and supervision checks from scanning unrelated completed requests. Timeline,
+message cursor and stream-change reads use query-only connections, so watching
+events does not join the writer queue.
+The reminder deadline poll uses a covering partial index rather than scanning
+large thread rows every 250 ms. Metrics exposed a 1,306 ms writer scope in that
+poll under mixed load; on the retained clone, its isolated cold query fell from
+135 ms to 0.03 ms. Inbox-recipient discovery also uses a read-only snapshot;
+the existing atomic claim still revalidates eligibility before dispatch.
+Read-only and writable connections have separate per-thread reuse slots. This
+preserves SQLite schema/page caches across successive reads without allowing a
+read-only handle to become a writer; cursors and snapshots still end at each
+scope boundary, and thread exit closes the retained handles.
+Stores bind their canonical database path once. A verified local runtime skips
+repeated filesystem ownership-path resolution, then enters the same shared
+writer gate; this optimization does not bypass admission or authorize another
+process. Inherited stores remain unusable after a fork.
+The HTTP server caps Python's interpreter thread-switch interval at 1 ms, while
+preserving a caller's shorter setting. A matched 5 ms/1 ms stored-history
+experiment reduced read p50 from 342 to 175 ms and search p50 from 471 to 254 ms
+at similar CPU utilization; this adjustment complements the indexed queries and
+bounded scopes. The interval is reported in runtime metrics and benchmark output.
+It is an interpreter timeslice target, not a hard latency guarantee; see
+[Python's scheduling documentation](https://docs.python.org/3.12/library/sys.html#sys.setswitchinterval).
+The harness's `--thread-switch-interval` override is diagnostic; acceptance uses
+the server's normal setting without an override.
+
+### Measurements agents must use
+
+Authenticated `GET /api/browser/performance` and the normal runtime status expose
+bounded, in-memory diagnostics. Collection adds no database writes and retains
+operation names and numeric measurements, never SQL, parameters or message text:
+
+- writer admission wait and scope duration: p50, p95, p99 and maximum;
+- queue depth, maximum queue depth, active operation and its elapsed time;
+- completed/failed scopes and admission timeouts;
+- per-operation counts, errors and recent duration samples;
+- request counts, errors and latency for sending, history, detail, list and search;
+- send execution, persistence-barrier and activity-recording phase latency;
+- history source/staged/reused bytes, chunks and publication totals;
+- search preparation, staging, publication, refresh and query durations, rows and bytes;
+- persistence backlog, retries, oldest pending age and failure count.
+
+Counters are lifetime-to-runtime; distributions use the most recent 2,048 samples
+(256 per database operation). Explicit operation names and inferred caller names
+each have 64 reserved categories, plus one shared overflow category, so startup
+constructors cannot crowd history and search measurements out of the report. HTTP measurements
+end before response-body transmission and therefore measure server processing;
+use the external harness for client-observed latency and cross-window delivery.
+
+Run the generated-state admission gate on every database-sensitive change:
+
+```bash
+python3 scripts/measure_database_contention.py --seconds 15 --writers 6 \
+  --check --output build/database-performance.json
+```
+
+CI runs this workload with six foreground writers, a bounded background writer
+and two independent readers. It fails on overlapping writable scopes, any error
+or admission timeout, missing durable receipts, inadequate foreground/background
+progress, foreground p95 above 100 ms or writer-scope p95 above 25 ms. Reports
+include the source fingerprint and remain downloadable as CI artifacts for 30
+days on both tested platforms. These admission budgets are separate from the
+HTTP acceptance budgets at the top of this
+document. The final local gate completed 3,394 foreground writes (226/second),
+1,063 background commits and 2,203 reads in 15.029 seconds, with no errors or
+timeouts and exactly one concurrent writable scope. Foreground p95 was 0.514 ms
+and writer-scope p95 was 0.391 ms. It used Python 3.12.7 / SQLite 3.51.0 and the
+same backend fingerprint as the final HTTP acceptance below. This is generated
+load, not a production HTTP result.
+
+For storage and indexing changes, also run `measure_backend_latency.py` on an
+isolated representative snapshot, with `--stored-history`, mixed active agents,
+concurrent windows, sustained sends and searches. It saves the runtime performance
+snapshot in its report. Its raw independent hook writer is deliberate external
+SQLite pressure, distinct from the production high-level runtime routing. State
+which pressure profile was used. Compare the same data, history sizes, duration
+and machine load, include cold paths and errors, and do not increase thresholds
+or discard slow samples to make a regression pass.
+
+Run acceptance without `--profile`. That optional diagnostic mode samples every
+Python thread's stack and can disturb the workload it observes. It now samples
+code metadata at 50 Hz; the former 200 Hz source-line extraction was particularly
+expensive. Reports record `profile_enabled`, Python and SQLite versions, and whether
+stored histories were used. Preserve diagnostic failures for attribution; measure
+acceptance with the normal runtime metrics enabled and stack sampling disabled.
+
+### Integrated result
+
+The final stored-history acceptance used the same 1.9 GB snapshot, its original
+saved transcripts, six streaming agents at six deltas/second, three windows,
+and three independent hook writes/second. It ran on Python 3.12.7 / SQLite
+3.51.0 with the normal 1 ms server thread interval, no diagnostic override,
+and no sampler. All 30 sends and 30 read/search cycles succeeded, and every
+existing budget passed, including the initial search migration:
+
+| Operation | p50 | p95 | Maximum |
+| --- | ---: | ---: | ---: |
+| Send acceptance | 28.7 ms | 122.4 ms | 141.6 ms |
+| Message visible in another window | 8.0 ms | 106.9 ms | 129.8 ms |
+| Conversation read | 13.5 ms | 31.1 ms | 39.9 ms |
+| Thread detail | 8.2 ms | 10.8 ms | 13.0 ms |
+| Thread list | 1.2 ms | 84.9 ms | 184.2 ms |
+| Search, including initial migration | 79.5 ms | 294.5 ms | 1,638.6 ms |
+
+Writer wait p95 was 0.793 ms and writable-scope p95 was 0.898 ms. Admission
+timeouts, persistence retries, permanent failures, and final backlog were all
+zero. The 98 history snapshots represented 174.0 MB of logical input, staged
+29.7 MB of blocks, reused 147.2 MB, and published 12.0 KB of roots. Backend
+CPU averaged 35.0% of one core during measurement. These are isolated backend
+results, not evidence that a pending installed payload has activated.
+
+The final backend source fingerprint was
+`f6caca164243d9bce72445817d8278ab65b1e1726a8b20d9115010a4788f6837`.
+The complete report is retained locally as
+`~/.local/state/agent-coord/diagnostics/database_contention_20261102/stored_history_final_acceptance.json`.
+Earlier failed runs remain beside it; no thresholds or cold samples were removed.
+Final regression validation passed 2,203 Python tests with seven optional skips,
+all 1,176 JavaScript tests, plugin layout validation, and Python compilation.
+The complete Python run used the same frozen backend as the performance reports.
+
+### Earlier generated-history comparison
+
+The November 2 run used the existing 1.9 GB snapshot with generated 1,500 KiB
+provider transcripts, six streaming agents at six deltas/second, three windows,
+and three independent
+SQLite hook writes/second. All 30 sends and 30 read/search cycles completed with
+zero request or load-start errors. Every existing latency budget passed:
+
+| Operation | p50 | p95 | Maximum |
+| --- | ---: | ---: | ---: |
+| Send acceptance | 60.6 ms | 256.6 ms | 319.8 ms |
+| Message visible in another window | 8.5 ms | 29.6 ms | 277.9 ms |
+| Conversation read | 88.6 ms | 248.6 ms | 266.4 ms |
+| Thread detail | 43.7 ms | 103.2 ms | 105.7 ms |
+| Thread list | 1.5 ms | 260.4 ms | 283.1 ms |
+| Search, including initial migration | 286.9 ms | 770.9 ms | 1,951.0 ms |
+
+Writer admission wait p95 was 2.573 ms; writable-scope p95 was 2.354 ms.
+Six background admission timeouts recovered through persistence retries; the
+final backlog and permanent failure count were both zero. These are distinct
+from user request failures. Across 162 history snapshots, 249.7 MB of logical
+input produced 23.8 MB of staged blocks and 19.8 KB of published roots. Retrying
+or resaving immutable blocks uses a bounded cache of confirmed digests.
+
+The backend source fingerprint was
+`ecdb9c1b3abc83e0b293fa2e212db51da443759944b36104c4ef98167e2932e8`.
+These are isolated backend measurements; runtime status must separately prove
+activation in an installed application.

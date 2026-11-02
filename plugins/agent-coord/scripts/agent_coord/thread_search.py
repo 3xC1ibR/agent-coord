@@ -17,13 +17,14 @@ import heapq
 import json
 import math
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from .organization import UNSET
 from .store import CoordinationError
 from .threads import project_root
-from .conversation_search import message_condition, sync_messages
+from .conversation_search import _measure, _operation, message_condition, refresh_messages
 
 # Separators of str.split(); none is above U+3000.
 _SPACE = "".join(chr(code) for code in range(0x3001) if chr(code).isspace())
@@ -253,6 +254,29 @@ def _save_context(db, overlay):
         db.execute(f"PRAGMA busy_timeout = {int(timeout)}")
 
 
+@contextmanager
+def _search_connection(store):
+    """Keep a warm search entirely outside writer admission."""
+    while True:
+        with store.reading(), store._connection() as db:
+            names, organization_missing = db.execute(f"""SELECT
+                (SELECT json_group_array(name) FROM sqlite_master WHERE name IN
+                 ('browser_sessions', 'browser_inbox_wake', {','.join('?' * len(_CONTEXT_SCHEMA))})),
+                EXISTS (SELECT 1 FROM work_threads t LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
+                        WHERE o.thread_id IS NULL)""", tuple(_CONTEXT_SCHEMA)).fetchone()
+            tables = set(json.loads(names))
+            missing = [statement for name, statement in _CONTEXT_SCHEMA.items() if name not in tables]
+            if not missing and not organization_missing:
+                yield db, tables
+                return
+        if organization_missing:
+            store.threads.organization.backfill()
+        if missing:
+            with _operation(store, "search.context_schema"), store._connection() as db:
+                for statement in missing:
+                    db.execute(statement)
+
+
 def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                    repository_id=UNSET, project_id=UNSET, app_only=False,
                    source="all", my_messages=False, thread_ids=None):
@@ -277,7 +301,6 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     fingerprint = hashlib.sha256(json.dumps(filters, sort_keys=True).encode()).hexdigest()
     after = _cursor(cursor, fingerprint) if cursor is not None else None
     after = (after["score"], after["time"], after["id"]) if after else None
-    store.threads.organization.backfill()
     # A literal phrase spans its keywords with a fixed gap; one keyword is its own phrase.
     closeness = max(0, 24 - max(0, len(phrase) - sum(map(len, terms))) // 8)
     single = " " not in phrase
@@ -298,15 +321,8 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     use_context, use_messages = source != "messages", source != "context"
     message_where = message_condition(terms, "user" if my_messages else None)
     message_relevance = _message_relevance_sql(single, closeness)
-    with store._connection() as db:
-        sync_messages(db)
-        db.commit()
-        tables = set(json.loads(db.execute(f"""SELECT json_group_array(name) FROM sqlite_master
-            WHERE name IN ('browser_sessions', 'browser_inbox_wake', {", ".join("?" * len(_CONTEXT_SCHEMA))})""",
-            tuple(_CONTEXT_SCHEMA)).fetchone()[0]))
-        for name, statement in _CONTEXT_SCHEMA.items():
-            if name not in tables:
-                db.execute(statement)
+    refresh_messages(store)
+    with _measure(store, "query"), _search_connection(store) as (db, tables):
         app = "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)" if "browser_sessions" in tables else "0"
         if app_only:
             where.append(app)
@@ -334,7 +350,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                 relevance = dict.fromkeys(_CONTEXT_WEIGHTS, "0")
             evidence = ("SELECT NULL AS thread_id, NULL AS certain, 0 AS uncertain WHERE 0" if not use_messages else
                         f"""SELECT thread_id, MAX(NULLIF(relevance, -1)) AS certain, MAX(relevance = -1) AS uncertain
-                            FROM (SELECT m.thread_id, {message_relevance} AS relevance FROM conversation_search_messages m
+                            FROM (SELECT m.thread_id, {message_relevance} AS relevance FROM conversation_search_message_index m
                                   WHERE m.thread_id IN (SELECT thread_id FROM scope) AND {message_where})
                             GROUP BY thread_id""")
             match = {"context": "context_match", "messages": "message_match"}.get(source, "(context_match OR message_match)")
@@ -349,7 +365,10 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
             if after:
                 params.update(after_score=after[0], after_time=after[1], after_id=after[2])
             params["floor"] = limit
-            candidates, coverage = db.execute(f"""WITH scope AS (
+            # SQLite otherwise expands this inventory into both projection
+            # branches, evidence aggregation, ranking, and coverage. Build it
+            # once so each branch reuses the same filtered thread identifiers.
+            candidates, coverage = db.execute(f"""WITH scope AS MATERIALIZED (
                     SELECT t.thread_id, t.created_at, t.turn_started_at FROM work_threads t
                     JOIN sessions s ON s.session_id = t.thread_id JOIN work_projects w ON w.id = t.project_id
                     JOIN thread_organization o ON o.thread_id = t.thread_id WHERE {' AND '.join(where) or '1'}),
@@ -381,7 +400,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                             OR (high, last_work_at, thread_id) >= (SELECT low, last_work_at, thread_id FROM floor))),
                        -- Coverage describes the searched inventory, before the keyword filter.
                        (SELECT json_array(COUNT(*), SUM(h.status = 'saved'), SUM(h.status = 'partial'))
-                        FROM scope s LEFT JOIN conversation_search_histories h ON h.thread_id = s.thread_id)""",
+                        FROM scope s LEFT JOIN conversation_search_history_index h ON h.thread_id = s.thread_id)""",
                 params).fetchone()
             threads, saved, partial = json.loads(coverage)
             coverage = {"threads": threads, "saved_histories": saved or 0, "partial_histories": partial or 0}
@@ -411,7 +430,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                 return found
 
             uncertain_messages = f"""SELECT json_group_array(json_array(m.thread_id, m.position, m.turn_id, m.item_id,
-                    m.role, {_number('m.timestamp')}, m.text)) FROM conversation_search_messages m
+                    m.role, {_number('m.timestamp')}, m.text)) FROM conversation_search_message_index m
                 WHERE m.thread_id IN (SELECT value FROM json_each(:measure)) AND {message_where}
                   AND instr(m.folded, :phrase) = 0"""
 
@@ -455,13 +474,13 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     {"LEFT JOIN browser_inbox_wake bw ON bw.thread_id = t.thread_id" if "browser_inbox_wake" in tables else ""}
                     WHERE t.thread_id IN (SELECT value FROM json_each(:page))),
                 (SELECT json_group_array(json_array(thread_id, total)) FROM (SELECT m.thread_id, COUNT(*) AS total
-                    FROM conversation_search_messages m WHERE :messages AND m.thread_id IN (SELECT value FROM json_each(:page))
+                    FROM conversation_search_message_index m WHERE :messages AND m.thread_id IN (SELECT value FROM json_each(:page))
                     AND {message_where} GROUP BY m.thread_id)),
                 (SELECT json_group_array(json_array(thread_id, relevance, position, turn_id, item_id, role,
                         {_number('timestamp')}, text)) FROM (
                     SELECT *, ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY relevance DESC, position DESC) AS place
                     FROM (SELECT m.thread_id, m.position, m.turn_id, m.item_id, m.role, m.timestamp, m.text,
-                                 {message_relevance} AS relevance FROM conversation_search_messages m
+                                 {message_relevance} AS relevance FROM conversation_search_message_index m
                           WHERE :messages AND m.thread_id IN (SELECT value FROM json_each(:page)) AND {message_where}))
                     WHERE relevance != -1 AND place <= 3),
                 ({uncertain_messages})""", {**params, "messages": use_messages,
@@ -469,7 +488,14 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     "measure": json.dumps([c.thread_id for c in page if c.uncertain and c.measured is None])}).fetchone()
         finally:
             db.commit()
-        _save_context(db, params["overlay"] if overlay else None)
+    if overlay:
+        from .browser_persistence import database_busy
+        try:
+            with _operation(store, "search.context"), store.connection_timeout(250), store._connection() as db:
+                _save_context(db, params["overlay"])
+        except sqlite3.OperationalError as error:
+            if not database_busy(error):
+                raise
     totals = dict(json.loads(counts))
     excerpts = {}
     for thread_id, relevance, position, turn_id, item_id, role, timestamp, text in json.loads(ranked):
@@ -543,7 +569,7 @@ def search_browser_threads(store, sessions, query):
         if phase:
             threads = [t for t in threads if (t["work_phase"] or "new") == phase]
     else:
-        with store._connection() as db:
+        with store.reading(), store._connection() as db:
             threads = listed_threads(store.threads, db, sessions.cwd)
         if scope == "current":
             threads = [t for t in threads if t["attention"] == placement]

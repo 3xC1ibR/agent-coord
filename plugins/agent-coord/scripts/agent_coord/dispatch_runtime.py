@@ -11,7 +11,7 @@ import time
 import uuid
 
 from .attention import load_config
-from .conversation_search import sync_messages
+from .conversation_search import refresh_messages
 from .dispatch_routing import route
 from .dispatch_snapshot import read_snapshot
 from .dispatch_evaluation import initialize_evaluation
@@ -263,8 +263,7 @@ class DispatchRuntime:
             result = {"decision": {"action": "dispatcher", "reason": "direct_request" if body["askDispatcher"] else "attachment_context_required"}}
         else:
             stage = time.perf_counter()
-            with self.store._connection() as db:
-                sync_messages(db, cwd=item["cwd"])
+            refresh_messages(self.store, cwd=item["cwd"])
             timings["index_refresh"] = round((time.perf_counter() - stage) * 1000, 1)
             stage = time.perf_counter()
             snapshot = read_snapshot(self.store.database_path, cwd=item["cwd"])

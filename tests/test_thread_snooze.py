@@ -161,6 +161,7 @@ class ThreadSnoozeTests(unittest.TestCase):
         self.finish()
         before = self.update(seen=True, attention="later")
         with self.store._connection() as db:
+            db.execute("DROP INDEX threads_snooze_deadline")
             db.execute("ALTER TABLE work_threads DROP COLUMN snoozed_until")
         upgraded = CoordinationStore(self.store.database_path, clock=lambda: self.now)
         thread = upgraded.threads.get("thread")

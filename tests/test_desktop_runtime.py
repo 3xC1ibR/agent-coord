@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
 from agent_coord import desktop_runtime as runtime
 from agent_coord.codex_app_server import BrowserBusyError, BrowserSessions
-from agent_coord.store import CoordinationStore
+from agent_coord.store import CoordinationError, CoordinationStore
 from test_codex_app_server import FakeCodex
 
 FAKE = r'''
@@ -382,6 +382,38 @@ def readiness(sessions):
         self.assertEqual(status["instance"], first["instance"])
         self.assertFalse(status["paused"])
 
+    def test_schema_one_runtime_stages_schema_two_until_idle_then_rejects_downgrade(self):
+        legacy = self.root / "Legacy/Contents/Resources"
+        shutil.copytree(self.resources, legacy)
+        source = legacy / "backend/agent_coord/desktop_runtime.py"
+        source.write_text(source.read_text().replace("SCHEMA_VERSION = 2", "SCHEMA_VERSION = 1"))
+        metadata = json.loads((legacy / "backend.json").read_text())
+        metadata["runtime_schema_max"] = 1
+        (legacy / "backend.json").write_text(json.dumps(metadata))
+        first = self.launch(legacy, paused=True)
+        record = runtime.discover(self.database)
+        self.assertEqual(record["schema"], 1)
+        candidate_metadata = json.loads((self.resources / "backend.json").read_text())
+        candidate_metadata["runtime_version"] = "2+2"
+        (self.resources / "backend.json").write_text(json.dumps(candidate_metadata))
+        second = self.launch()
+        self.assertEqual(second["instance"], first["instance"])
+        self.assertTrue(second["pending"])
+        self.assertEqual(runtime.read_json(runtime.runtime_directory(self.database) / "schema.json")["schema"], 1)
+        runtime.control(record, "resume")
+        def upgraded():
+            try:
+                current = runtime.discover(self.database)
+                return current if current and current["instance"] != first["instance"] else None
+            except (OSError, RuntimeError):
+                return None
+        current = self.wait(upgraded, timeout=20)
+        self.assertEqual(current["schema"], 2)
+        self.assertEqual(runtime.read_json(runtime.runtime_directory(self.database) / "schema.json")["schema"], 2)
+        with patch.object(runtime, "SCHEMA_VERSION", 1):
+            with self.assertRaisesRegex(CoordinationError, "downgrade is unsafe"):
+                CoordinationStore(self.database)
+
     def test_failed_candidate_start_restores_old_runtime_with_known_queue_owner(self):
         first = self.launch()
         record = runtime.discover(self.database)
@@ -404,6 +436,33 @@ def readiness(sessions):
         self.assertEqual(status["pid"], first["pid"])
         self.assertEqual(status["payload"], first["payload"])
         self.assertIn("retained runtime restored", status["upgrade_error"])
+
+    def test_failed_candidate_after_schema_advance_does_not_claim_rollback(self):
+        first = self.launch(paused=True)
+        record = runtime.discover(self.database)
+        new = self.root / "New/Contents/Resources"
+        shutil.copytree(self.resources, new)
+        source = new / "backend/agent_coord/desktop_runtime.py"
+        source.write_text(source.read_text().replace("SCHEMA_VERSION = 2", "SCHEMA_VERSION = 3"))
+        metadata = json.loads((new / "backend.json").read_text())
+        metadata.update(runtime_version="3+3", runtime_schema_max=3)
+        (new / "backend.json").write_text(json.dumps(metadata))
+        entry = new / "backend.py"
+        entry.write_text("import sys\nif '--runtime-serve' in sys.argv:\n"
+                         "    from pathlib import Path\n"
+                         "    from agent_coord import desktop_runtime\n"
+                         "    database = sys.argv[sys.argv.index('--db') + 1]\n"
+                         "    desktop_runtime._OWNED_DATABASES.add(str(Path(database).resolve()))\n"
+                         "    from agent_coord.store import CoordinationStore\n"
+                         "    CoordinationStore(database)\n"
+                         "    raise SystemExit(9)\n" +
+                         entry.read_text().replace("from __future__ import annotations", ""))
+        self.launch(new)
+        runtime.control(record, "resume")
+        self.wait(lambda: runtime.owner_available(runtime.runtime_directory(self.database)), timeout=20)
+        self.assertEqual(runtime.read_json(runtime.runtime_directory(self.database) / "schema.json")["schema"], 3)
+        self.assertIn("Candidate failed after advancing the database schema", self.log())
+        self.assertNotIn("retained runtime restored", self.log())
 
     def test_idle_handover_adopts_accepted_queued_work_once(self):
         first = self.launch()

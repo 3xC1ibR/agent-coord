@@ -8,6 +8,7 @@ import secrets
 import socket
 import socketserver
 import sqlite3
+import sys
 import threading
 import time
 import webbrowser
@@ -286,8 +287,28 @@ def _handler(
     provider_limits = provider_limits or (ProviderLimits(browser_sessions) if browser_sessions is not None else None)
 
     class Handler(BaseHTTPRequestHandler):
+        def _start_metrics(self, method):
+            path = urlparse(self.path).path
+            operation = None
+            if method == "POST" and path.endswith("/messages"):
+                operation = "send_acceptance"
+            elif path.endswith("/search"):
+                operation = "search"
+            elif method == "GET" and path == "/api/browser/threads":
+                operation = "thread_list"
+            elif method == "GET" and path.startswith("/api/browser/threads/"):
+                operation = "thread_detail"
+            elif method == "GET" and path.startswith("/api/browser/sessions/"):
+                operation = "conversation_read"
+            self._metric_operation = operation
+            self._metric_started = time.monotonic()
+
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None,
                   entity_tag: str | None = None) -> None:
+            operation = getattr(self, "_metric_operation", None)
+            if operation:
+                store._writer.record_request(operation, (time.monotonic() - self._metric_started) * 1000, int(status))
+                self._metric_operation = None
             try:
                 self.send_response(status.value)
                 self.send_header("Content-Type", content_type)
@@ -347,6 +368,7 @@ def _handler(
                 self.close_connection = True
 
         def do_GET(self) -> None:
+            self._start_metrics("GET")
             if not self._valid_host():
                 self._json(HTTPStatus.FORBIDDEN, {"error": "Invalid host."})
                 return
@@ -545,6 +567,9 @@ def _handler(
                                           "recurringSchedules": True,
                                           "remote": self._remote_request(),
                                           "completionCursor": store.threads.completion_cursor()})
+            elif route == "performance":
+                from .database_writer import performance_snapshot
+                self._json(HTTPStatus.OK, performance_snapshot(browser_sessions))
             elif route == "desktop-projects":
                 self._json(HTTPStatus.OK, browser_sessions.desktop_projects())
             elif route == "html-preview" or route.startswith("html-preview-content/"):
@@ -756,6 +781,7 @@ def _handler(
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def do_POST(self) -> None:
+            self._start_metrics("POST")
             with browser_sessions.admission.enter() as admitted:
                 if not admitted:
                     self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Runtime maintenance is pausing new work. Try again shortly."})
@@ -1265,6 +1291,11 @@ def make_ui_server(
     _validate_loopback(host)
     if not 0 <= port <= 65535:
         raise CoordinationError("Ribbon Field UI port must be between 0 and 65535.")
+    # This process serves interactive requests alongside Python inventory and
+    # provider work. Shorter interpreter timeslices reduce accumulated GIL
+    # handoff delays around short SQLite/socket operations. Preserve a caller's
+    # already shorter interval; this is not an OS scheduling guarantee.
+    sys.setswitchinterval(min(sys.getswitchinterval(), .001))
     server_type = LoopbackIPv6HTTPServer if ":" in host else LoopbackHTTPServer
     sessions = browser_sessions or BrowserSessions(store, cwd)
     if admission_paused:

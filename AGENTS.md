@@ -36,6 +36,26 @@ Run the test suite with:
 python3 -W error::ResourceWarning -m unittest discover -s tests -v
 ```
 
+## Database correctness and latency
+
+For database, persistence, search, provider-event or request-path changes, run
+`python3 scripts/measure_database_contention.py --check --output build/database-performance.json`.
+CI enforces this gate. Report errors, throughput, foreground p95, writer hold p95
+and admission timeouts with the workload and revision. Never raise budgets merely
+to make a change pass. Compare matched workloads before and after optimization.
+The integration harness and HTTP budgets are documented in `docs/responsiveness.md`;
+use large histories and sustained mixed traffic when changing storage/indexing.
+
+All coordination writes use `CoordinationStore._connection()`; finite write
+scopes are serialized across store instances. Use `store.reading()` for reads,
+and keep parsing, hashing, provider/network calls and waits outside write scopes.
+Independent nested connections are read-only; pass the existing connection when
+an operation must extend a transaction. Name important operations with
+`store.database_operation(name, priority="background"|"foreground")`.
+Runtime status and authenticated `GET /api/browser/performance` expose bounded,
+content-free latency metrics. Use them to identify queue delay versus scope time.
+Preserve receipt idempotency, revision checks and restart safety while optimizing.
+
 After changing a file under `plugins/agent-coord/`, follow [**Refresh installed
 plugins after changes**](docs/reference.md#refresh-installed-plugins-after-changes)
 before live testing. Use the documented cachebuster helper and reinstall commands. Do not hand-edit marketplace files

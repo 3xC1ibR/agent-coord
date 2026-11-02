@@ -411,6 +411,18 @@ class BrowserHTTPTests(unittest.TestCase):
                     self.assertIn("before sending again", result["error"])
                 self.assertEqual(call.call_count, 1)
 
+    def test_performance_reports_latency_and_errors_without_conversation_content(self):
+        private_message = "private message excluded from metrics"
+        with patch.object(self.sessions, "submit", side_effect=sqlite3.OperationalError("database is locked")):
+            self.assertEqual(self.request("/api/browser/sessions/example/messages", {"message": private_message})[0], 503)
+        status, metrics = self.request("/api/browser/performance")
+        self.assertLessEqual(metrics["thread_switch_interval_ms"], 1)
+        self.assertEqual(status, 200)
+        self.assertEqual(metrics["requests"]["send_acceptance"]["count"], 1)
+        self.assertEqual(metrics["requests"]["send_acceptance"]["errors"], 1)
+        self.assertIn("p95_ms", metrics["writer_hold"])
+        self.assertNotIn(private_message, json.dumps(metrics))
+
     def test_database_contention_closes_event_stream_without_second_http_response(self):
         with patch.object(self.sessions, "snooze_notifications", side_effect=sqlite3.OperationalError("database is locked")):
             with urllib.request.urlopen(self.url + "/api/browser/events", timeout=3) as response:

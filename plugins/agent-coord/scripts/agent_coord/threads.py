@@ -156,6 +156,12 @@ class ThreadStore:
                               (SELECT cwd FROM sessions WHERE session_id = thread_id)""")
             if "snoozed_until" not in columns:
                 db.execute("ALTER TABLE work_threads ADD COLUMN snoozed_until REAL")
+            # The lifecycle worker checks this every 250 ms. A covering index
+            # avoids reading every thread's large original request while it
+            # holds writer admission, even when no reminder is due.
+            db.execute("""CREATE INDEX IF NOT EXISTS threads_snooze_deadline
+                ON work_threads(snoozed_until, attention, thread_id)
+                WHERE snoozed_until IS NOT NULL""")
             if "deferred_at" not in columns:
                 db.execute("ALTER TABLE work_threads ADD COLUMN deferred_at REAL")
                 # Existing Later cards remain set aside; only future activity

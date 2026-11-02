@@ -5,6 +5,8 @@ isolates cancellation and the host-wide sandbox. No model API or SDK dependency.
 """
 from __future__ import annotations
 
+from .history_persistence import read_history
+
 import copy
 import json
 import logging
@@ -118,9 +120,9 @@ class MuseRPC:
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
 
     def _history(self, thread_id):
-        with self.store._connection() as db:
-            row = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
-        history = json.loads(row[0]) if row else {"id": thread_id, "turns": []}
+        history = read_history(self.store, thread_id)
+        if history is None:
+            history = {"id": thread_id, "turns": []}
         with self.lock:
             active = self.turns.get(thread_id)
             updates = dict(self.background_turns.get(thread_id, {}))
@@ -216,9 +218,7 @@ class MuseRPC:
         self.native[thread_id] = row["native_id"] if row else thread_id
         self.seen[thread_id] = set()
         self.items[thread_id] = {}
-        with self.store._connection() as db:
-            saved = db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()
-        history = json.loads(saved[0]) if saved else {}
+        history = read_history(self.store, thread_id) or {}
         self.terminal_turns[thread_id] = {t["id"] for t in history.get("turns", [])
                                           if t.get("status") != "inProgress"}
         profile = options["permission_mode"]

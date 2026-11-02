@@ -7,7 +7,10 @@ import random
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -75,7 +78,7 @@ def reference_search(store, query, *, source="all", my_messages=False):
             context = all(any(term in value for value in folded.values())
                           or any(term in link.casefold() for link in artifacts) for term in terms)
             messages = [row for row in db.execute(
-                "SELECT * FROM conversation_search_messages WHERE thread_id = ?", (identity,))
+                "SELECT * FROM conversation_search_message_index WHERE thread_id = ?", (identity,))
                 if all(term in row["folded"] for term in terms) and (not my_messages or row["role"] == "user")]
             if not {"context": context, "messages": bool(messages)}.get(source, context or messages):
                 continue
@@ -377,6 +380,41 @@ class SearchExecutionTests(unittest.TestCase):
             writer.execute("ROLLBACK")
         self.assertTrue(page["items"])
 
+    def test_current_indexes_bypass_store_writer_admission(self):
+        self.seed(8)
+        search_threads(self.store, "radio")
+        entered, release = threading.Event(), threading.Event()
+
+        def writer():
+            with self.store._connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("Writer was not released")
+
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            writing = workers.submit(writer)
+            try:
+                self.assertTrue(entered.wait(5))
+                page = workers.submit(search_threads, self.store, "radio").result(timeout=2)
+                self.assertTrue(page["items"])
+            finally:
+                release.set()
+            writing.result()
+
+    def test_context_search_without_history_does_not_reacquire_a_writer(self):
+        with self.store._connection() as db:
+            db.execute("DROP TABLE browser_history")
+        self.store.register(session_id="terminal", client="codex", cwd=str(self.root), name="Radio planning")
+        search_threads(self.store, "radio")
+        writer = sqlite3.connect(self.store.database_path, isolation_level=None)
+        self.addCleanup(writer.close)
+        writer.execute("BEGIN IMMEDIATE")
+        try:
+            self.assertEqual(search_threads(self.store, "radio")["items"][0]["thread_id"], "terminal")
+        finally:
+            writer.execute("ROLLBACK")
+
     def test_context_follows_other_writers_and_a_busy_writer_only_defers_the_cache(self):
         self.store.register(session_id="a", client="codex", cwd=str(self.root), name="Plain")
         self.store.threads.capture_request("a", "Nothing yet")
@@ -416,7 +454,7 @@ class SearchExecutionTests(unittest.TestCase):
             # Another runtime commits between this search's snapshot and its cache write.
             if overlay and not changed:
                 changed.append(True)
-                with sqlite3.connect(self.store.database_path) as other:
+                with closing(sqlite3.connect(self.store.database_path)) as other, other:
                     other.execute("UPDATE work_threads SET original_request = 'Dock survey' WHERE thread_id = 'a'")
             save(db, overlay)
 

@@ -1,6 +1,8 @@
 """Activity adapters and saved evidence; querying never starts a provider."""
 from __future__ import annotations
 
+from .history_persistence import decode_history
+
 import base64
 import hashlib
 import json
@@ -128,14 +130,14 @@ def read_activity_history(store, thread_id, *, start=None, end=None, limit=50, c
     if not (matches_workspace(thread["cwd"], allowed_cwd) and
             matches_workspace(thread.get("project_cwd") or thread["cwd"], allowed_cwd)):
         raise CoordinationError("Work thread not found in this workspace.")
-    with store._connection() as db:
+    with store.reading(), store._connection() as db:
         db.execute("BEGIN")
         exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_history'").fetchone()
         row = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone() if exists else None
         requests = _saved_requests(db, thread_id, allowed_cwd)
     raw = row[0] if row is not None else None
     try:
-        history = json.loads(raw) if raw is not None else None
+        history = decode_history(raw, database_path=store.database_path) if raw is not None else None
         if history is not None and not isinstance(history, dict):
             raise ValueError
     except (ValueError, TypeError):

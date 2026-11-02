@@ -203,8 +203,11 @@ class ThreadInventoryTests(unittest.TestCase):
         load = ThreadInventory.load_runtime
 
         def archive_then_load(inventory, db):
-            with self.store._connection() as writer:
-                writer.execute("UPDATE work_threads SET attention = 'archived', title = 'Changed' WHERE thread_id = 'moving'")
+            def archive():
+                with self.store._connection() as writer:
+                    writer.execute("UPDATE work_threads SET attention = 'archived', title = 'Changed' WHERE thread_id = 'moving'")
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(archive).result(timeout=2)
             load(inventory, db)
 
         with patch.object(ThreadInventory, "load_runtime", archive_then_load):
@@ -227,8 +230,11 @@ class ThreadInventoryTests(unittest.TestCase):
             data = base(inventory, db)
             if not changed:
                 changed = True
-                with self.store._connection() as writer:
-                    writer.execute("UPDATE work_threads SET title = 'New title' WHERE thread_id = 'legacy'")
+                def rename():
+                    with self.store._connection() as writer:
+                        writer.execute("UPDATE work_threads SET title = 'New title' WHERE thread_id = 'legacy'")
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    executor.submit(rename).result(timeout=2)
             return data
 
         with patch.object(ThreadInventory, "_base", write_after_snapshot), \

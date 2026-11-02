@@ -11,7 +11,7 @@ import time
 import uuid
 import weakref
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -318,7 +318,8 @@ class CoordinationStore:
         clock: Any = time.time,
         read_only: bool = False,
     ) -> None:
-        self.database_path = Path(database_path or default_database_path()).expanduser()
+        self.database_path = Path(database_path or default_database_path()).expanduser().resolve()
+        self._database_identity = str(self.database_path)
         configured_stale = os.environ.get("AGENT_COORD_STALE_AFTER_SECONDS")
         self.stale_after_seconds = stale_after_seconds or int(
             configured_stale or DEFAULT_STALE_AFTER_SECONDS
@@ -327,6 +328,9 @@ class CoordinationStore:
         self.read_only = read_only
         self._idle_connections = threading.local()
         self._connection_options = threading.local()
+        from .database_writer import writer_for
+        self._writer = writer_for(self.database_path)
+        self._process_id = os.getpid()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         from .desktop_runtime import schema_access
         from .browser_persistence import database_busy
@@ -407,9 +411,19 @@ class CoordinationStore:
 
     @contextmanager
     def _connection(self):
+        if os.getpid() != self._process_id:
+            raise CoordinationError("A CoordinationStore cannot be reused after a process fork; create a new store in the child.")
         from .runtime_requests import connection_ownership
         reading = self.read_only or getattr(self._connection_options, "reading", False)
         if reading:
+            with self._local_connection() as connection:
+                yield connection
+            return
+        from .desktop_runtime import _OWNED_DATABASES
+        if self._database_identity in _OWNED_DATABASES:
+            # Ownership is already verified in this process. Avoid repeated
+            # filesystem canonicalization on every scope; writer admission
+            # still applies across every runtime thread and store instance.
             with self._local_connection() as connection:
                 yield connection
             return
@@ -427,14 +441,64 @@ class CoordinationStore:
 
     @contextmanager
     def _local_connection(self):
+        if self.read_only or getattr(self._connection_options, "reading", False):
+            with self._ungated_connection() as connection:
+                yield connection
+            return
+        operation = getattr(self._connection_options, "operation", None)
+        named_operation = operation is not None
+        if operation is None:
+            import sys
+            frame = sys._getframe(1)
+            while frame and Path(frame.f_code.co_filename).stem in {"store", "contextlib"}:
+                frame = frame.f_back
+            operation = ((Path(frame.f_code.co_filename).stem + "." + frame.f_code.co_name)
+                         if frame else "database", "foreground")
+            del frame
+        milliseconds = getattr(self._connection_options, "timeout", None)
+        with self._writer.reserve(object(), timeout=5 if milliseconds is None else milliseconds / 1000,
+                                  operation=operation[0], priority=operation[1], named=named_operation) as nested:
+            # A separate nested connection cannot commit its caller's work or
+            # wait for a write lock held by that caller. SQLite enforces this
+            # for cached statements, CTEs, triggers and explicit cursors alike.
+            with (self.reading() if nested else nullcontext()), self._ungated_connection() as connection:
+                yield connection
+
+    @contextmanager
+    def database_operation(self, name, *, priority="foreground"):
+        """Name finite database work for diagnostics without storing its data."""
+        if not isinstance(name, str) or not name or len(name) > 100:
+            raise ValueError("Database operation name must contain 1–100 characters.")
+        if priority not in {"foreground", "background"}:
+            raise ValueError("Invalid database operation priority.")
+        previous = getattr(self._connection_options, "operation", None)
+        self._connection_options.operation = (name, priority)
+        try:
+            yield
+        finally:
+            self._connection_options.operation = previous
+
+    def database_metrics(self):
+        if os.getpid() != self._process_id:
+            raise CoordinationError("Create a new CoordinationStore after a process fork before reading metrics.")
+        return self._writer.snapshot()
+
+    @contextmanager
+    def _ungated_connection(self):
         # A new connection parses the whole schema, which dominated backend
         # CPU under concurrent polling. Reuse one idle connection per thread.
         # A nested use gets its own connection so an inner commit cannot end
         # the outer transaction.
+        reading = self.read_only or getattr(self._connection_options, "reading", False)
+        # Keep read-only handles separately: a mode=ro connection cannot serve
+        # a later write, but discarding it after every read repeatedly reparses
+        # the schema and loses SQLite's page cache during one request.
+        slot = "reader" if reading else "holder"
         idle = getattr(self, "_idle_connections", None)
-        holder = None if idle is None else getattr(idle, "holder", None)
+        holder = None if idle is None else getattr(idle, slot, None)
         if idle is not None and holder is None:
-            holder = idle.holder = _IdleConnection()
+            holder = _IdleConnection()
+            setattr(idle, slot, holder)
         factory = getattr(self._connect, "__func__", self._connect)
         nested = holder is None or holder.in_use
         connection = None
@@ -459,7 +523,6 @@ class CoordinationStore:
         timeout = getattr(self._connection_options, "timeout", None)
         if timeout is not None:
             connection.execute(f"PRAGMA busy_timeout = {timeout}")
-        reading = self.read_only or getattr(self._connection_options, "reading", False)
         connection.execute(f"PRAGMA query_only = {int(reading)}")
         reusable = False
         if not nested:
@@ -475,11 +538,6 @@ class CoordinationStore:
             if reusable:
                 try:
                     connection.end_statements()
-                    # A mode=ro connection cannot later become a writable one.
-                    # Do not retain a connection opened for a read boundary.
-                    if fresh and reading:
-                        connection.close()
-                        reusable = False
                     if fresh:
                         if reusable:
                             holder.keep(connection, factory)

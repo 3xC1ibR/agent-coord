@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import closing
@@ -68,6 +69,7 @@ class RuntimeSchemaTests(unittest.TestCase):
                 for local_owner in (False, True):
                     with self.subTest(local_owner=local_owner), \
                             patch.object(runtime, "_OWNED_DATABASES", {str(database.resolve())} if local_owner else set()), \
+                            patch.object(runtime, "discover", return_value={"instance": "verified-owner"}), \
                             patch.object(CoordinationStore, "_initialize", side_effect=AssertionError("Repeated live migration")) as initialize:
                         for read_only in (False, True):
                             reopened = CoordinationStore(database, read_only=read_only)
@@ -76,6 +78,34 @@ class RuntimeSchemaTests(unittest.TestCase):
                         initialize.assert_not_called()
             finally:
                 os.close(owner)
+
+    def test_finite_standalone_writer_does_not_hide_a_required_migration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "state.sqlite3"
+            original = CoordinationStore(database)
+            original.register(session_id="saved", client="codex", cwd=temporary)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("ALTER TABLE work_threads DROP COLUMN project_cwd")
+            entered, release = threading.Event(), threading.Event()
+            def hold():
+                with owner_operation(database):
+                    entered.set()
+                    release.wait(2)
+            worker = threading.Thread(target=hold)
+            worker.start()
+            self.assertTrue(entered.wait(1))
+            timer = threading.Timer(.1, release.set)
+            timer.start()
+            try:
+                with patch.object(CoordinationStore, "_initialize", autospec=True,
+                                  side_effect=CoordinationStore._initialize) as initialize:
+                    reopened = CoordinationStore(database)
+                initialize.assert_called_once()
+                self.assertEqual(reopened.threads.get("saved")["project_cwd"], str(Path(temporary).resolve()))
+            finally:
+                release.set()
+                worker.join()
+                timer.join()
 
     def test_request_ownership_is_reentrant_during_initialization(self):
         with tempfile.TemporaryDirectory() as temporary:

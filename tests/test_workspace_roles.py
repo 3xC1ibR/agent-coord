@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
@@ -247,6 +249,29 @@ class WorkspaceRoleTests(unittest.TestCase):
         store.threads.update("boss", attention="archived")
         store._workspace_roles_swept = True  # Only the recorded closure can trigger succession.
         self.assertEqual(workspace_roles.process(store, other.name), 1)
+
+    def test_retirement_discovery_does_not_reserve_the_writer(self):
+        workspace_roles._prepare(self.store)
+        retired = supervision.retired
+        checked = []
+
+        def discover(db, session_id):
+            if not checked:
+                completed = threading.Event()
+
+                def write():
+                    self.store.touch("other")
+                    completed.set()
+
+                worker = threading.Thread(target=write)
+                worker.start()
+                checked.append(completed.wait(1))
+                worker.join(1)
+            return retired(db, session_id)
+
+        with patch.object(supervision, "retired", side_effect=discover):
+            workspace_roles._sweep(self.store, str(self.root))
+        self.assertEqual(checked, [True])
 
     def test_changing_a_holders_role_vacates_its_former_role_and_keeps_its_agents(self):
         first = self.role("Lead", holder="lead")
