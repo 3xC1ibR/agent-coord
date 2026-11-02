@@ -96,3 +96,21 @@ test("a stale app-conversation hint uses the coordination timeline without an un
     assert.deepEqual(unhandled, []);
   } finally { process.off("unhandledRejection", record); }
 });
+
+test("an external conversation loads native history while retaining read-only ownership", async () => {
+  const c = setup(), detail = fixture("external", false);
+  detail.work_thread.can_read_history = true;
+  c.state.sessions = [detail.work_thread];
+  const opening = c.select("external", {refreshInventory: false, focus: false});
+  await settle();
+  assert.deepEqual(c.requests.map(request => request.path), ["sessions/external", "threads/external"]);
+  answer(c, "sessions/external", detail);
+  answer(c, "threads/external", detail.work_thread);
+  await settle();
+  c.requests.filter(request => request.path === "threads/external").at(-1).resolve({});
+  await opening;
+  assert.equal(c.state.detail.thread.turns[0].items[0].text, "Saved");
+  assert.equal(c.state.detail.work_thread.browser_session, false);
+  assert.equal(c.state.detailRefreshing, false);
+  assert.equal(c.requests.some(request => request.path.endsWith("/messages")), false);
+});

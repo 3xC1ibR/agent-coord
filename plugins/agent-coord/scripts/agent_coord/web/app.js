@@ -1242,10 +1242,10 @@ async function refreshDetail({markSeen = true} = {}) {
       // A known app conversation needs both reads; issue them together so
       // opening waits for the slower one, not their sum.
       const known = entry.detail?.work_thread || state.sessions?.find(thread => thread.thread_id === id);
-      const session = known?.browser_session ? api(sessionPath(id), undefined, sessionOptions) : null;
+      const session = known?.browser_session || known?.can_read_history ? api(sessionPath(id), undefined, sessionOptions) : null;
       session?.catch(() => {}); // Observed below, or superseded by the thread read's failure.
       work = await api(threadPath(id), undefined, options);
-      detail = work.browser_session ? await (session || api(sessionPath(id), undefined, sessionOptions)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
+      detail = work.browser_session || work.can_read_history ? await (session || api(sessionPath(id), undefined, sessionOptions)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
         coordinationMessages: (await api(threadPath(id) + "/messages", undefined, options)).data};
     } catch (error) {
       if (controller.signal.aborted) error = new Error("Refreshing this conversation timed out.");
@@ -1339,6 +1339,8 @@ async function refreshThread() {
     JSON.stringify([thread.forked_from, thread.forked_from_turn_id, thread.forked_sessions]);
   state.detail.work_thread = reconcileAttentionSnapshot(thread, revision); renderThread(); renderStatus();
   if (forksChanged) { conversationEntry(id).nodes = null; renderTimeline(); }
+  if (!thread.browser_session && thread.can_read_history &&
+      (previous.updated_at !== thread.updated_at || ["running", "needs input"].includes(thread.status))) scheduleDetail();
 }
 function renderThread() {
   const detail = state.detail, work = detail.work_thread, checkpoint = work.checkpoint;
@@ -2162,7 +2164,9 @@ function renderTimeline() {
       disclosureListeners.add(detail);
     }
   }
-  if (!el.childNodes.length) el.append(node("p", state.detail?.work_thread.browser_session ? "This is the beginning of your session. What would you like to work on?" : "This conversation is in a terminal session. Its checkpoint and related links are saved here." + (state.detail?.work_thread.client === "codex" ? " Close that session to continue it in the browser." : " Continue the conversation in Claude Code."), "empty"));
+  if (state.detail?.work_thread?.browser_session === false) el.append(node("p", state.detail?.thread.historyError ||
+    "Read-only conversation. Continue in its original app or terminal session, or use Continue in browser when available.", "empty"));
+  else if (!el.childNodes.length) el.append(node("p", "This is the beginning of your session. What would you like to work on?", "empty"));
   state.responseActions?.update();
   if (state.timelineScroll) state.timelineScroll.afterRender(atBottom);
   else if (atBottom) el.scrollTop = el.scrollHeight;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import sys
 import tempfile
@@ -9,7 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
-from agent_coord.session_close import _is_terminal_codex, is_external_codex_session, stop_terminal_session
+from agent_coord.session_close import (_is_terminal_codex, _is_owned_provider, is_external_codex_session,
+                                       stop_terminal_session, verify_terminal_handoff)
 from agent_coord.store import CoordinationError
 
 
@@ -83,6 +85,68 @@ class TerminalCloseTests(unittest.TestCase):
         stop_terminal_session({**self.session, "presence": "offline"})
         self.owners.assert_not_called()
         self.kill.assert_not_called()
+
+    def test_handoff_accepts_a_quiet_unowned_transcript_even_with_vscode_transport(self):
+        self.transcript.write_text(json.dumps({"type": "session_meta", "payload": {
+            "id": self.session["session_id"], "source": "vscode", "originator": "codex-tui"}}) + "\n")
+        os.utime(self.transcript, (1, 1))
+        self.owners.return_value = set()
+        verify_terminal_handoff({**self.session, "presence": "stale", "turn_active": False})
+        self.assertEqual(self.owners.call_count, 2)
+        self.kill.assert_not_called()
+
+    def test_handoff_rejects_recent_writes_live_or_ambiguous_owners_and_running_turns(self):
+        session = {**self.session, "presence": "stale", "turn_active": False}
+        with self.assertRaisesRegex(CoordinationError, "recent activity"):
+            verify_terminal_handoff(session)
+        os.utime(self.transcript, (1, 1))
+        for owners in [{43210}, {43210, 43211}]:
+            self.owners.return_value = owners
+            with self.assertRaises(CoordinationError):
+                verify_terminal_handoff(session)
+        self.owners.return_value = set()
+        for changes in [{"presence": "online"}, {"turn_active": True}]:
+            with self.assertRaises(CoordinationError):
+                verify_terminal_handoff({**session, **changes})
+        self.kill.assert_not_called()
+
+    def test_handoff_rechecks_for_new_owners_and_transcript_changes(self):
+        os.utime(self.transcript, (1, 1))
+        session = {**self.session, "presence": "stale", "turn_active": False}
+        self.owners.side_effect = [set(), {43210}]
+        with self.assertRaises(CoordinationError):
+            verify_terminal_handoff(session)
+        def append_event(_):
+            with self.transcript.open("a") as stream:
+                stream.write('{}\n')
+            return set()
+        self.owners.side_effect = append_event
+        with self.assertRaises(CoordinationError):
+            verify_terminal_handoff(session)
+        self.kill.assert_not_called()
+
+    def test_handoff_after_resume_permits_only_the_attached_provider(self):
+        self.owners.return_value = {43210}
+        session = {**self.session, "presence": "stale", "turn_active": False}
+        verify_terminal_handoff(session, permitted_owner=43210)
+        self.owners.return_value = {43210, 43211}
+        with self.assertRaises(CoordinationError):
+            verify_terminal_handoff(session, permitted_owner=43210)
+        self.kill.assert_not_called()
+
+    def test_native_app_server_child_is_owned_but_unrelated_or_reused_processes_are_not(self):
+        for replies, expected in [
+            (["/bin/codex app-server", "43210"], True),
+            (["/bin/codex app-server", "43209"], False),
+            (["/bin/codex app-server", "1"], False),
+            (["/bin/codex app-server", "43211"], False),
+            (["/bin/codex exec task"], False),
+            (["/bin/codex exec resume target-thread app-server"], False),
+            (["/bin/codex --model app-server resume target-thread"], False),
+            (["/bin/zsh"], False),
+        ]:
+            with self.subTest(replies=replies), patch("agent_coord.session_close._command", side_effect=replies):
+                self.assertEqual(_is_owned_provider(43211, 43210), expected)
 
     def test_non_exiting_process_reports_failure_without_forcing_it(self):
         with self.assertRaisesRegex(CoordinationError, "not exited"):

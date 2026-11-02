@@ -66,8 +66,9 @@ def _transcript(session: dict) -> tuple[Path, dict]:
 def is_external_codex_session(session: dict) -> bool:
     """Recognize desktop/IDE conversations from their own validated metadata.
 
-    Codex records these as `vscode`, including conversations kept open by its
-    shared app-server daemon. Missing or unknown metadata retains the terminal
+    Codex records these as `vscode`, including imported terminal conversations.
+    This is a transport classification, not proof of where a thread began.
+    Missing or unknown metadata retains the terminal
     ownership guard rather than assuming that closure is safe.
     """
     try:
@@ -75,6 +76,48 @@ def is_external_codex_session(session: dict) -> bool:
     except CoordinationError:
         return False
     return metadata.get("source") == "vscode"
+
+
+def _is_owned_provider(pid: int, transport_pid: int) -> bool:
+    """Recognize the native app-server child of an owned launcher (e.g. npm)."""
+    if pid == transport_pid:
+        return True
+    try:
+        command = shlex.split(_command(["ps", "-ww", "-p", str(pid), "-o", "args="]).strip())
+        if len(command) < 2 or Path(command[0]).name != "codex" or command[1] != "app-server":
+            return False
+        parent = _command(["ps", "-p", str(pid), "-o", "ppid="]).strip()
+        return parent.isdigit() and int(parent) == transport_pid
+    except (ValueError, CoordinationError):
+        return False
+
+
+def verify_terminal_handoff(session: dict, *, minimum_idle_seconds: float = 180,
+                            permitted_owner: int | None = None) -> None:
+    """Verify an orphaned registration without signalling any provider.
+
+    A quiet heartbeat alone cannot release an idle terminal. Its exact native
+    transcript must also be quiet and have no other open owner. After resume,
+    only our newly attached provider or its native launcher child may hold it open.
+    """
+    error = "This conversation still has an external owner or recent activity. Exit it there before continuing in Ribbon Field."
+    if session["presence"] != "stale" or session.get("turn_active"):
+        raise CoordinationError(error)
+    transcript, _ = _transcript(session)
+    try:
+        before = transcript.stat()
+        if permitted_owner is None and time.time() - before.st_mtime < minimum_idle_seconds:
+            raise CoordinationError(error)
+        for _ in range(2):
+            if any(permitted_owner is None or not _is_owned_provider(pid, permitted_owner)
+                   for pid in _owners(transcript)):
+                raise CoordinationError(error)
+        after = transcript.stat()
+    except OSError as exc:
+        raise CoordinationError("Cannot verify the saved conversation. Retry after its terminal exits.") from exc
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise CoordinationError(error)
 
 
 def stop_terminal_session(session: dict, *, timeout: float = 5) -> None:

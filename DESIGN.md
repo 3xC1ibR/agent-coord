@@ -120,3 +120,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-30 | Chat agent trees include fork lineage with dotted connectors | Show shared conversation origins without implying supervision ownership. |
 | 2026-10-30 | Agents group under their current supervisor; roles and Stop release use existing menu, designation and dialog patterns | Replace a lead without restarting its agents, and release many Stops in one action while supervisors decide what restarts. |
 | 2026-10-31 | Scheduled prompts include recurrence and quiet lifecycle actions in their existing form and list | Run recurring jobs without introducing another navigation surface or object. |
+| 2026-11-02 | External Codex threads use the existing conversation view with a read-only notice; Continue in browser verifies ownership when requested | Reading saved history does not require execution ownership or an ended-session hook. |

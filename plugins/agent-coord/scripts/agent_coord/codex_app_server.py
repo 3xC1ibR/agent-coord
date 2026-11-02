@@ -46,7 +46,7 @@ from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
 from .organization import app_agent_creators
 from . import notification_policy
-from .session_close import is_external_codex_session, stop_terminal_session
+from .session_close import is_external_codex_session, stop_terminal_session, verify_terminal_handoff
 from .session_defaults import session_defaults
 from .workspaces import matches_workspace, workspace_choices
 from .activity import ActivityStore
@@ -1409,7 +1409,12 @@ class BrowserSessions:
         if policy["quiet"] and not thread["snooze_due"]:
             thread.update(needs_attention=False, attention_reason=None, attention_key=None, attention_since=None,
                           can_handle_response=False)
-        thread["can_resume"] = bool(not thread["browser_session"] and thread["client"] == "codex" and session["presence"] == "offline")
+        thread["can_read_history"] = bool(thread["browser_session"] or thread["client"] == "codex")
+        # Stale registrations can request an explicit handoff. The action, not
+        # inventory projection, verifies native history and process ownership.
+        thread["can_resume"] = bool(not thread["browser_session"] and thread["client"] == "codex"
+                                    and (session["presence"] == "offline"
+                                         or session["presence"] == "stale" and not session["turn_active"]))
         fork_supported = thread["client"] == "codex" or (thread["client"] == "claude" and thread["browser_session"])
         thread["can_fork"] = bool(fork_supported and thread["attention"] != "archived"
                                   and thread["status"] in {"idle", "saved"}
@@ -1603,18 +1608,66 @@ class BrowserSessions:
             thread = self.work_thread(thread_id)
             if not thread["can_resume"] or thread["attention"] == "archived":
                 raise CoordinationError("Reopen the thread and close its terminal session before continuing in the browser.")
+            previous = self.store.get_session(thread_id)
+            if previous["presence"] not in {"offline", "stale"} or previous["turn_active"]:
+                raise BrowserBusyError("The conversation is active outside Ribbon Field. Exit it there before continuing.")
+            recovering = previous["presence"] == "stale"
+            # Stage complete history before publishing browser ownership. A
+            # failed native read leaves the original external thread intact.
+            native = self._stored_thread(thread_id)
+            if recovering:
+                latest = (native.get("turns") or [{}])[-1]
+                if native.get("status", {}).get("type") not in {"idle", "notLoaded"} or latest.get("status") == "inProgress":
+                    raise BrowserBusyError("The external conversation is still running or its execution state is unknown.")
+                verify_terminal_handoff(previous, minimum_idle_seconds=self.store.stale_after_seconds)
             record = {"thread_id": thread_id, "cwd": thread["cwd"], "name": thread["title"]}
             result = self.rpc.request("thread/resume", {"threadId": thread_id, "excludeTurns": True, **self._options(record)})
-            with self.store._connection() as db:
-                now = self.store.clock()
-                db.execute("INSERT INTO browser_sessions (thread_id, cwd, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                           (thread_id, thread["cwd"], thread["title"], now, now))
-            self._capture_settings(thread_id, result)
-            self.store.register(session_id=thread_id, client="codex", cwd=thread["cwd"], name=thread["title"])
+            try:
+                if recovering:
+                    process = getattr(self.rpc, "process", None)
+                    verify_terminal_handoff(previous, permitted_owner=process.pid if process else None,
+                                            minimum_idle_seconds=self.store.stale_after_seconds)
+                history = {**native, **{key: value for key, value in result["thread"].items() if key != "turns"}}
+                restore_timing(self.store, history)
+                history_json = json.dumps(history)
+                # No database writer lock spans a provider request. Recheck the
+                # registration and publish ownership, registration and history
+                # together so even a concurrent reader sees a complete thread.
+                with self.store._connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    row = db.execute("SELECT * FROM sessions WHERE session_id = ?", (thread_id,)).fetchone()
+                    current = self.store._row_to_session(row)
+                    if any(current[key] != previous[key] for key in
+                           ("started_at", "last_seen_at", "ended_at", "turn_active", "write_scope")):
+                        raise BrowserBusyError("The external conversation changed during handoff. Retry after it exits.")
+                    now = self.store.clock()
+                    tier = result.get("serviceTier")
+                    db.execute("""INSERT INTO browser_sessions
+                        (thread_id, cwd, name, model, effort, service_tier, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (thread_id, thread["cwd"], thread["title"], result.get("model"), result.get("reasoningEffort"),
+                         "fast" if tier == "priority" else tier, now, now))
+                    db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (thread_id, history_json))
+                    db.execute("UPDATE sessions SET name = ?, last_seen_at = ?, ended_at = NULL WHERE session_id = ?",
+                               (thread["title"], now, thread_id))
+            except Exception:
+                # Drop only this connection's idle subscription, never archive
+                # or stop a conversation that may have acquired another owner.
+                try:
+                    self.rpc.request("thread/unsubscribe", {"threadId": thread_id})
+                except Exception:
+                    logging.getLogger(__name__).warning("Could not detach rejected handoff for %s", thread_id)
+                raise
             with self.lock:
                 self.loaded.add(thread_id)
                 self.loaded_clients[thread_id] = "codex"
-                self._remember_thread(result["thread"])
+                self.histories[thread_id] = copy.deepcopy(history)
+            # Native settings are already saved. Permission observations are
+            # best-effort telemetry and must not strand a completed handoff.
+            try:
+                self._capture_settings(thread_id, result)
+            except Exception:
+                logging.getLogger(__name__).warning("Could not record handoff settings observation for %s", thread_id)
             self._publish("browser/changed", {"threadId": thread_id})
             return self.work_thread(thread_id)
 
@@ -2035,6 +2088,8 @@ class BrowserSessions:
 
     def read(self, thread_id: str, *, recent: bool = False, snapshot: bool = False) -> dict:
         """Read a conversation; ``recent`` returns only the view for opening it."""
+        if not self.store.threads.is_browser_session(thread_id):
+            return self._read_external_snapshot(self.work_thread(thread_id), recent=recent)
         if recent or snapshot:
             return self._read_snapshot(thread_id, recent=recent)
         with self._thread_lock(thread_id):
@@ -2066,6 +2121,23 @@ class BrowserSessions:
                     "dispatchSettings": self.dispatch.settings(thread_id),
                     "reviews": self.reviews.list(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
+
+    def _read_external_snapshot(self, work_thread: dict, *, recent: bool) -> dict:
+        """Read native history without acquiring execution or changing metadata."""
+        thread_id = work_thread["thread_id"]
+        thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
+        if work_thread["client"] == "codex":
+            try:
+                thread = self._stored_thread(thread_id)
+                thread["historyUnavailable"] = False
+            except (CoordinationError, OSError) as exc:
+                thread["historyError"] = "Saved conversation history could not be read: " + str(exc)
+        if recent:
+            thread = recent_view(thread)
+        return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
+                "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
+                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
     def _read_snapshot(self, thread_id: str, *, recent: bool = True) -> dict:
         """Open from saved history and received events, without provider admission.

@@ -1112,7 +1112,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["thread"]["turns"], turns)
         self.assertFalse(result["thread"]["historyUnavailable"])
         self.assertEqual(result["thread"]["status"], {"type": "idle"})
-        self.assertEqual(reader.calls, [("thread/read", {"threadId": thread_id, "includeTurns": True})])
+        self.assertEqual(reader.calls, [("thread/read", {"threadId": thread_id, "includeTurns": True})] * 2)
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
         with self.store._connection() as db:
             saved = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
@@ -1473,8 +1473,164 @@ class BrowserSessionTests(unittest.TestCase):
             self.sessions.resume_work_thread("terminal")
         self.store.end_session("terminal")
         self.sessions.rpc.threads["terminal"] = {"id": "terminal", "turns": []}
+        self.sessions.history_rpc = FakeCodex(self.store, lambda event: None)
+        self.sessions.history_rpc.threads = self.sessions.rpc.threads
         self.assertTrue(self.sessions.resume_work_thread("terminal")["browser_session"])
         self.assertEqual(self.sessions.read("terminal")["work_thread"]["original_request"], "Investigate something.")
+
+    def test_external_history_reads_online_stale_and_offline_without_owning_execution(self):
+        self.store.register(session_id="terminal", client="codex", cwd=str(self.root))
+        self.store.threads.start_turn("terminal", turn_id="external-turn", prompt="Read my conversation.")
+        self.store.touch("terminal", turn_active=True)
+        for summary in ["First result.", "Second result."]:
+            self.store.threads.checkpoint("terminal", {"phase": "investigation", "summary": summary})
+        native = {"id": "terminal", "turns": [{"id": "external-turn", "status": "inProgress", "items": [
+            {"id": "question", "type": "userMessage", "content": [{"type": "text", "text": "Read my conversation."}]},
+            {"id": "answer", "type": "agentMessage", "text": "A saved response."}]}]}
+        reader = self.sessions.history_rpc = FakeCodex(self.store, lambda event: None)
+        reader.threads["terminal"] = native
+        for presence in ["online", "stale", "offline"]:
+            if presence == "stale":
+                with self.store._connection() as db:
+                    db.execute("UPDATE sessions SET last_seen_at = ? WHERE session_id = 'terminal'",
+                               (self.store.clock() - 86400,))
+            elif presence == "offline":
+                self.store.end_session("terminal")
+            before = self.store.get_session("terminal")
+            for options in [{"snapshot": True}, {"recent": True}, {}]:
+                result = self.sessions.read("terminal", **options)
+                self.assertEqual(result["thread"]["turns"][0]["items"], native["turns"][0]["items"])
+                self.assertFalse(result["work_thread"]["browser_session"])
+                self.assertTrue(result["work_thread"]["can_read_history"])
+                self.assertEqual(len(result["work_thread"]["checkpoints"]), 2)
+                self.assertFalse(result["thread"]["historyUnavailable"])
+            self.assertEqual(self.store.get_session("terminal"), before)
+        self.assertNotIn("terminal", self.sessions.loaded)
+        self.assertNotIn("terminal", self.sessions.histories)
+        self.assertEqual(self.sessions.rpc.calls, [])
+        self.assertTrue(all(method == "thread/read" for method, _ in reader.calls))
+
+    def test_external_history_failure_preserves_the_thread_and_explains_missing_content(self):
+        self.store.register(session_id="terminal", client="codex", cwd=str(self.root))
+        with patch.object(self.sessions, "_stored_thread", side_effect=CoordinationError("Codex is unavailable.")):
+            result = self.sessions.read("terminal", snapshot=True)
+        self.assertTrue(result["thread"]["historyUnavailable"])
+        self.assertIn("Codex is unavailable", result["thread"]["historyError"])
+        self.assertFalse(result["work_thread"]["browser_session"])
+        self.assertEqual(self.sessions.rpc.calls, [])
+
+    def prepare_stale_terminal(self):
+        self.store.register(session_id="terminal", client="codex", cwd=str(self.root))
+        self.store.threads.start_turn("terminal", turn_id="saved", prompt="Preserve my original request.")
+        self.store.threads.finish_turn("terminal")
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET last_seen_at = ? WHERE session_id = 'terminal'", (self.store.clock() - 86400,))
+        native = {"id": "terminal", "status": {"type": "notLoaded"}, "turns": [{"id": "saved", "status": "completed",
+                  "items": [{"id": "answer", "type": "agentMessage", "text": "Preserved response."}]}]}
+        self.sessions.rpc.threads["terminal"] = native
+        return native
+
+    def test_stale_terminal_handoff_preserves_identity_and_checks_before_and_after_resume(self):
+        native = self.prepare_stale_terminal()
+        native["turns"][-1]["id"] = self.store.threads.get("terminal")["turn_id"]
+        self.assertTrue(self.sessions.work_thread("terminal", history=False)["can_resume"])
+        with patch.object(self.sessions, "_stored_thread", return_value=native), \
+                patch("agent_coord.codex_app_server.verify_terminal_handoff") as verify:
+            result = self.sessions.resume_work_thread("terminal")
+        self.assertEqual(verify.call_count, 2)
+        self.assertTrue(result["browser_session"])
+        self.assertEqual(result["thread_id"], "terminal")
+        self.assertEqual(result["original_request"], "Preserve my original request.")
+        self.assertEqual(self.sessions.read("terminal", snapshot=True)["thread"]["turns"][0]["items"][0]["text"],
+                         "Preserved response.")
+        self.assertIsNotNone(self.sessions.read("terminal", snapshot=True)["thread"]["turns"][0].get("startedAt"))
+        self.assertFalse(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))
+
+    def test_stale_terminal_with_live_execution_or_owner_cannot_resume(self):
+        native = self.prepare_stale_terminal()
+        native["turns"][-1]["status"] = "inProgress"
+        with patch.object(self.sessions, "_stored_thread", return_value=native), \
+                patch("agent_coord.codex_app_server.verify_terminal_handoff") as verify:
+            with self.assertRaisesRegex(BrowserBusyError, "still running"):
+                self.sessions.resume_work_thread("terminal")
+            verify.assert_not_called()
+        native["turns"][-1]["status"] = "completed"
+        with patch.object(self.sessions, "_stored_thread", return_value=native), \
+                patch("agent_coord.codex_app_server.verify_terminal_handoff", side_effect=CoordinationError("Owner is active.")):
+            with self.assertRaisesRegex(CoordinationError, "Owner is active"):
+                self.sessions.resume_work_thread("terminal")
+        self.assertEqual(self.sessions.rpc.calls, [])
+        self.assertFalse(self.store.threads.is_browser_session("terminal"))
+
+    def test_stale_handoff_native_failure_does_not_end_external_registration(self):
+        native = self.prepare_stale_terminal()
+        before = self.store.get_session("terminal")
+        with patch.object(self.sessions, "_stored_thread", return_value=native), \
+                patch("agent_coord.codex_app_server.verify_terminal_handoff"), \
+                patch.object(self.sessions.rpc, "request", side_effect=CoordinationError("Resume failed.")):
+            with self.assertRaisesRegex(CoordinationError, "Resume failed"):
+                self.sessions.resume_work_thread("terminal")
+        self.assertEqual(self.store.get_session("terminal"), before)
+        self.assertFalse(self.store.threads.is_browser_session("terminal"))
+
+    def test_handoff_settings_observation_failure_cannot_hide_saved_history(self):
+        native = self.prepare_stale_terminal()
+        with patch.object(self.sessions, "_stored_thread", return_value=native), \
+                patch("agent_coord.codex_app_server.verify_terminal_handoff"), \
+                patch.object(self.sessions, "_capture_settings", side_effect=CoordinationError("Observation failed.")):
+            with self.assertLogs("agent_coord.codex_app_server", "WARNING"):
+                self.assertTrue(self.sessions.resume_work_thread("terminal")["browser_session"])
+        self.sessions.histories.pop("terminal")
+        result = self.sessions.read("terminal", snapshot=True)
+        self.assertEqual(result["thread"]["turns"][0]["items"], native["turns"][0]["items"])
+        self.assertFalse(result["thread"].get("historyUnavailable", False))
+        self.assertEqual(self.sessions._record("terminal")["model"], "available-model")
+
+    def test_handoff_storage_failure_rolls_back_ownership_registration_and_history(self):
+        native = self.prepare_stale_terminal()
+        before = self.store.get_session("terminal")
+        with self.store._connection() as db:
+            db.execute("""CREATE TRIGGER reject_handoff BEFORE INSERT ON browser_history
+                BEGIN SELECT RAISE(ABORT, 'Storage failed.'); END""")
+        with patch.object(self.sessions, "_stored_thread", return_value=native), \
+                patch("agent_coord.codex_app_server.verify_terminal_handoff"):
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "Storage failed"):
+                self.sessions.resume_work_thread("terminal")
+        self.assertFalse(self.store.threads.is_browser_session("terminal"))
+        self.assertEqual(self.store.get_session("terminal"), before)
+        self.assertEqual([method for method, _ in self.sessions.rpc.calls], ["thread/resume", "thread/unsubscribe"])
+
+    def test_external_activity_during_handoff_detaches_only_our_subscription(self):
+        native = self.prepare_stale_terminal()
+        request = self.sessions.rpc.request
+        def resume_with_external_activity(method, params):
+            result = request(method, params)
+            if method == "thread/resume":
+                self.store.touch("terminal", turn_active=True)
+            return result
+        with patch.object(self.sessions, "_stored_thread", return_value=native), \
+                patch("agent_coord.codex_app_server.verify_terminal_handoff"), \
+                patch.object(self.sessions.rpc, "request", side_effect=resume_with_external_activity):
+            with self.assertRaisesRegex(BrowserBusyError, "changed during handoff"):
+                self.sessions.resume_work_thread("terminal")
+        self.assertFalse(self.store.threads.is_browser_session("terminal"))
+        self.assertTrue(self.store.get_session("terminal")["turn_active"])
+        self.assertEqual([method for method, _ in self.sessions.rpc.calls], ["thread/resume", "thread/unsubscribe"])
+
+    def test_external_activity_after_eligibility_projection_cannot_bypass_verification(self):
+        self.prepare_stale_terminal()
+        project = self.sessions.work_thread
+        def projection_with_external_activity(*args, **kwargs):
+            projected = project(*args, **kwargs)
+            self.store.touch("terminal", turn_active=True)
+            return projected
+        with patch.object(self.sessions, "work_thread", side_effect=projection_with_external_activity), \
+                patch("agent_coord.codex_app_server.verify_terminal_handoff") as verify:
+            with self.assertRaisesRegex(BrowserBusyError, "active outside"):
+                self.sessions.resume_work_thread("terminal")
+        verify.assert_not_called()
+        self.assertEqual(self.sessions.rpc.calls, [])
+        self.assertFalse(self.store.threads.is_browser_session("terminal"))
 
     def test_global_thread_list_covers_multiple_projects_and_isolated_mutations_fail(self):
         first = self.create()
