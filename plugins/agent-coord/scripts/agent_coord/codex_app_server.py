@@ -600,6 +600,8 @@ class BrowserSessions:
                 accepted_turn = params["turnId"]
                 self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, accepted_turn), key=thread_id)
             if "id" in message:
+                if hasattr(self, "runtime_update_requests"):
+                    self.runtime_update_requests.add(thread_id)
                 key = str(uuid.uuid4())
                 self.requests[key] = {**message, "key": key, "received_at": self.store.clock()}
                 self.execution.capture(thread_id)
@@ -780,7 +782,8 @@ class BrowserSessions:
             if turn.get("id") and (turn.get("termination") or {}).get("origin") == "user":
                 self.store.threads.request_stop(thread_id, turn["id"])
             user_stop = self.store.threads.stop_requested(thread_id, turn.get("id"))
-            deliberate = params.get("controlledShutdown", False) or user_stop
+            update_recovery = getattr(self, "runtime_recovery_turns", {}).get(thread_id) == turn.get("id")
+            deliberate = params.get("controlledShutdown", False) or user_stop or update_recovery
             unsuccessful = turn.get("status") in {"failed", "interrupted", "cancelled", "canceled"}
             status = turn.get("status", "completed")
             if (unsuccessful and user_stop) or status in {"cancelled", "canceled"}:
@@ -800,7 +803,7 @@ class BrowserSessions:
             if turn.get("status") == "completed":
                 self.queue.wake()
                 self.classifier.wake()
-            else:
+            elif not (getattr(self, "runtime_handover", False) or update_recovery) or user_stop:
                 self.queue.pause(thread_id, "The turn stopped or failed. Resume queued messages when ready.")
                 self.inbox_wake.pause(thread_id, "The turn stopped or failed. Send a message to continue.",
                                      kind="stop" if deliberate else "failure")
@@ -2291,12 +2294,12 @@ class BrowserSessions:
         return self.submissions.run(thread_id, body,
             lambda: self.queue.enqueue(thread_id, body) if queued else self.send(thread_id, body), queued=queued)
 
-    def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False, preserve_text: bool = False) -> dict:
+    def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False, preserve_text: bool = False, recovery=None) -> dict:
         with self._thread_lock(thread_id):
             submission = {"started": False}
             try:
                 return self._send(thread_id, body, start_only=start_only, automatic=automatic,
-                                  preserve_text=preserve_text, submission=submission)
+                                  preserve_text=preserve_text, submission=submission, recovery=recovery)
             except BrowserBusyError:
                 raise
             except Exception as exc:
@@ -2308,7 +2311,7 @@ class BrowserSessions:
                 raise
 
     def _send(self, thread_id: str, body: dict, *, start_only: bool, automatic: bool,
-              preserve_text: bool, submission: dict) -> dict:
+              preserve_text: bool, submission: dict, recovery=None) -> dict:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
         with self.store._writer.measure_request("send.persistence_barrier"):
@@ -2332,7 +2335,7 @@ class BrowserSessions:
                     raise BrowserBusyError("Inbox wake paused or the conversation is no longer idle.")
             elif self.store.threads.get(thread_id)["attention"] == "archived":
                 raise CoordinationError("Reopen this thread before sending a message.")
-            if not automatic and self.reviews.cancel(thread_id, reason="New input superseded this review.", state="superseded"):
+            if not automatic and not recovery and self.reviews.cancel(thread_id, reason="New input superseded this review.", state="superseded"):
                 expected_turn = None
             loaded = thread_id in self.loaded
             self._resume_thread(thread_id, record)
@@ -2344,6 +2347,8 @@ class BrowserSessions:
             if not loaded or believed_running:
                 self.read(thread_id)
             record = self._record(thread_id)
+            if recovery:
+                recovery()
             if automatic and not self.inbox_wake.can_submit(thread_id):
                 raise BrowserBusyError("Inbox wake paused or the conversation is no longer idle.")
             if automatic and self.store.threads.get(thread_id)["attention"] == "archived":
@@ -2398,7 +2403,7 @@ class BrowserSessions:
                 params["serviceTier"] = record["service_tier"]
             params.update(self._permission_options(record, turn=True))
             try:
-                context = (notification_policy.automatic_context(self.store, thread_id) if automatic else
+                context = (notification_policy.automatic_context(self.store, thread_id) if automatic or recovery else
                            {"origin": "user", "owner_thread_id": thread_id})
                 with self.lock:
                     self.starting_notification_context[thread_id] = context
@@ -2427,7 +2432,7 @@ class BrowserSessions:
                 self._capture_settings(thread_id, result)
             self.dispatch.confirm_context(thread_id, dispatch_context)
             # Some app-server versions omit input items from turn/started.
-            if not automatic:
+            if not automatic and not recovery:
                 self.store.threads.user_message(thread_id)
                 self.store.threads.capture_request(thread_id, message or "\n".join("[Image]" for _ in images))
                 self.inbox_wake.resume(thread_id)

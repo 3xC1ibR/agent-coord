@@ -31,6 +31,17 @@ lock = threading.RLock()
 approval = threading.Event()
 threads = {}
 counter = 0
+persist = os.environ.get('RIBBON_FAKE_PERSIST') == '1'
+history = root / 'native-history.json'
+if persist and history.exists():
+    threads = json.loads(history.read_text())
+    counter = sum(len(t['turns']) for t in threads.values())
+    for thread in threads.values():
+        for turn in thread['turns']:
+            if turn['status'] == 'inProgress': turn['status'] = 'interrupted'
+def save():
+    if persist:
+        with lock: history.write_text(json.dumps(threads))
 def emit(value):
     with lock:
         print(json.dumps(value), flush=True)
@@ -38,6 +49,7 @@ def record(value):
     with lock:
         with (root / 'calls.jsonl').open('a') as f: f.write(json.dumps(value) + '\n')
 def work(identity, turn, needs_approval):
+    if turn['items'][0]['content'][0].get('text') == 'held-work': return
     if needs_approval:
         for n in range(5):
             time.sleep(.1)
@@ -48,6 +60,7 @@ def work(identity, turn, needs_approval):
     item = {'id':'output','type':'agentMessage','text':'output while desktop disconnected'}
     turn['items'].append(item)
     turn['status'] = 'completed'
+    save()
     emit({'method':'item/completed','params':{'threadId':identity,'turnId':turn['id'],'item':item}})
     emit({'method':'turn/completed','params':{'threadId':identity,'turn':copy.deepcopy(turn)}})
 for line in sys.stdin:
@@ -70,6 +83,7 @@ for line in sys.stdin:
         counter += 1
         turn = {'id':'turn-'+str(counter),'status':'inProgress','items':[{'id':'user','type':'userMessage','content':p['input']}]}
         threads[identity]['turns'].append(turn)
+        save()
         result = {'turn':copy.deepcopy(turn)}
         emit({'id':req['id'],'result':result})
         emit({'method':'turn/started','params':{'threadId':identity,'turn':copy.deepcopy(turn)}})
@@ -308,6 +322,143 @@ Runtime.status = _status_with_barrier
         finally:
             (self.root / "release-locks").touch()
         self.assertEqual(runtime.control(record, "status")["instance"], first["instance"])
+
+    def prepare_requested_update(self, *, corrupt=False, message="one"):
+        first = self.launch()
+        record = runtime.discover(self.database)
+        thread = self.api(first["url"], "api/browser/sessions", {"cwd": str(self.root)})["session"]["thread_id"]
+        self.api(first["url"], f"api/browser/sessions/{thread}/messages", {"message": message})
+        self.wait(lambda: ("pending approvals or questions" if message == "one" else "active turns") in runtime.control(record, "status")["busy"])
+        new = self.root / "Candidate/Contents/Resources"
+        shutil.copytree(self.resources, new)
+        metadata = json.loads((new / "backend.json").read_text())
+        metadata["runtime_version"] = "2+2"
+        (new / "backend.json").write_text(json.dumps(metadata))
+        if corrupt:
+            source = new / "backend/agent_coord/desktop_runtime.py"
+            source.write_text(source.read_text() + "\n_original_serve = Runtime.serve\ndef fail_trial(self):\n    if self.commit_fd is not None:\n        with sqlite3.connect(self.database) as db: db.execute('CREATE TABLE trial_migration (id INTEGER)')\n        atomic_json(self.directory / 'schema.json', {'schema': 999, 'fingerprint': 'trial'})\n        raise RuntimeError('injected candidate failure')\n    return _original_serve(self)\nRuntime.serve = fail_trial\n")
+            if corrupt == "cancel":
+                source.write_text(source.read_text().replace("        raise RuntimeError('injected candidate failure')",
+                    "        (self.directory / 'trial-entered').touch()\n        while not (self.directory / 'release-trial').exists(): time.sleep(.01)\n        raise RuntimeError('injected candidate failure')"))
+        staged = self.launch(new)
+        return first, record, thread, staged, new
+
+    def wait_update(self, phase):
+        def ready():
+            try:
+                record = runtime.discover(self.database, timeout=1)
+                status = runtime.control(record, "status", timeout=1) if record else None
+                return status if status and status.get("update", {}).get("phase") == phase and status["status"] == "serving" else None
+            except (OSError, RuntimeError):
+                return None
+        return self.wait(ready, timeout=35)
+
+    def test_requested_update_restarts_busy_runtime_and_preserves_approval_gate(self):
+        first, record, thread, staged, _ = self.prepare_requested_update()
+        accepted = runtime.control(record, "activate-update", request_id="acceptance-update", payload=staged["pending"])
+        duplicate = runtime.control(record, "activate-update", request_id="acceptance-update", payload=staged["pending"])
+        self.assertEqual(accepted["update"]["id"], duplicate["update"]["id"])
+        current = self.wait_update("committed")
+        self.assertEqual(current["payload"], staged["pending"])
+        self.assertNotEqual(current["pid"], first["pid"])
+        import sqlite3
+        with sqlite3.connect(self.database) as db:
+            self.assertEqual(db.execute("SELECT state FROM runtime_update_recoveries WHERE thread_id=?", (thread,)).fetchone()[0], "skipped")
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
+        self.assertNotIn("ResourceWarning", self.log())
+
+    def test_requested_update_rolls_back_candidate_migration(self):
+        first, record, thread, staged, candidate = self.prepare_requested_update(corrupt=True)
+        runtime.control(record, "activate-update", request_id="rollback-update", payload=staged["pending"])
+        current = self.wait_update("rolled-back")
+        self.assertEqual(current["payload"], first["payload"])
+        import sqlite3
+        with sqlite3.connect(self.database) as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='trial_migration'").fetchone())
+        self.assertEqual(runtime.read_json(runtime.runtime_directory(self.database) / "schema.json")["schema"], runtime.SCHEMA_VERSION)
+        attached = self.launch(candidate)
+        self.assertEqual(attached["payload"], first["payload"])
+        self.assertEqual(attached["update"]["phase"], "rolled-back")
+        self.assertNotIn("ResourceWarning", self.log())
+
+    def test_requested_update_continues_native_conversation_once_and_stop_stays_stopped(self):
+        import sqlite3
+        from contextlib import closing
+        self.env["RIBBON_FAKE_PERSIST"] = "1"
+        first, record, thread, staged, candidate = self.prepare_requested_update(message="held-work")
+        provider = int((self.root / "provider.pid").read_text())
+        runtime.control(record, "activate-update", request_id="continue-update", payload=staged["pending"])
+        current = self.wait_update("committed")
+        self.wait(lambda: len([call for call in self.calls() if call.get("method") == "turn/start"]) == 2)
+        self.wait(lambda: not runtime.control(runtime.discover(self.database), "status")["busy"])
+        self.assertNotEqual(current["pid"], first["pid"])
+        self.assertNotEqual(provider, int((self.root / "provider.pid").read_text()))
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT state FROM runtime_update_recoveries WHERE thread_id=?", (thread,)).fetchone()[0], "continued")
+            self.assertEqual(db.execute("SELECT original_request FROM work_threads WHERE thread_id=?", (thread,)).fetchone()[0], "held-work")
+        turns = [call for call in self.calls() if call.get("method") == "turn/start"]
+        self.assertEqual([call["params"]["threadId"] for call in turns], [thread, thread])
+        runtime.control(runtime.discover(self.database), "stop")
+        self.wait(lambda: runtime.owner_available(runtime.runtime_directory(self.database)))
+        result = subprocess.run([sys.executable, "-B", str(candidate / "backend.py"), "--db", str(self.database),
+                                 "--runtime-command", "status", "--resources", str(candidate)], env=self.env,
+                                text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(runtime.owner_available(runtime.runtime_directory(self.database)))
+        self.launch(candidate)
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 2)
+        self.assertNotIn("ResourceWarning", self.log())
+
+    def test_stop_during_trial_rolls_back_without_restarting(self):
+        first, record, thread, staged, candidate = self.prepare_requested_update(corrupt="cancel")
+        runtime.control(record, "activate-update", request_id="cancel-update", payload=staged["pending"])
+        directory = runtime.runtime_directory(self.database)
+        self.wait(lambda: (directory / "trial-entered").exists(), timeout=20)
+        with subprocess.Popen([sys.executable, "-B", str(candidate / "backend.py"), "--db", str(self.database),
+                               "--runtime-command", "stop"], env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as helper:
+            try:
+                self.wait(lambda: (directory / "update-cancellation.json").exists())
+            finally:
+                (directory / "release-trial").touch()
+            stdout, stderr = helper.communicate(timeout=15)
+            self.assertEqual(helper.returncode, 0, stderr)
+            self.assertEqual(json.loads(stdout)["status"], "stopped")
+        self.assertTrue(runtime.owner_available(directory))
+        self.assertEqual(runtime.read_json(directory / "stop-proof.json")["instance"], first["instance"])
+        decision = subprocess.run([sys.executable, "-B", str(candidate / "backend.py"), "--db", str(self.database),
+                                   "--runtime-command", "decision"], env=self.env, text=True, capture_output=True,
+                                  input=json.dumps({"stopped_instance": first["instance"], "target": runtime.compatibility_metadata("2+2")}), timeout=10)
+        self.assertEqual(decision.returncode, 0, decision.stderr)
+        self.assertEqual(runtime.read_json(directory / "schema.json")["schema"], runtime.SCHEMA_VERSION)
+        from agent_coord import runtime_update
+        self.assertTrue(runtime_update.read(directory)["cancelled"])
+        self.assertEqual(runtime_update.read(directory)["phase"], "rolled-back")
+
+    def test_requested_update_prefers_queued_user_input_without_duplicate_continuation(self):
+        self.env["RIBBON_FAKE_PERSIST"] = "1"
+        first, record, thread, staged, _ = self.prepare_requested_update(message="held-work")
+        self.api(first["url"], f"api/browser/sessions/{thread}/queue", {"message": "user follow-up"})
+        runtime.control(record, "activate-update", request_id="queue-update", payload=staged["pending"])
+        self.wait_update("committed")
+        self.wait(lambda: len([call for call in self.calls() if call.get("method") == "turn/start"]) == 2)
+        self.wait(lambda: not runtime.control(runtime.discover(self.database), "status")["busy"])
+        turns = [call["params"]["input"][0]["text"] for call in self.calls() if call.get("method") == "turn/start"]
+        self.assertEqual(turns, ["held-work", "user follow-up"])
+
+    def test_incomplete_shutdown_keeps_all_work_paused_across_restart(self):
+        self.env["RIBBON_FAKE_PERSIST"] = "1"
+        source = self.resources / "backend/agent_coord/runtime_recovery.py"
+        source.write_text(source.read_text() + "\ndef fail_finalize(self, update_id):\n    raise RuntimeError('injected incomplete shutdown')\nRuntimeRecovery.finalize = fail_finalize\n")
+        first, record, thread, staged, candidate = self.prepare_requested_update(message="held-work")
+        runtime.control(record, "activate-update", request_id="incomplete-update", payload=staged["pending"])
+        current = self.wait_update("committed")
+        self.assertTrue(current["paused"])
+        self.assertTrue(current["update"]["requires_review"])
+        self.assertEqual(current["update"]["recovery"]["counts"], {"uncertain": 1})
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
+        runtime.control(runtime.discover(self.database), "stop")
+        self.wait(lambda: runtime.owner_available(runtime.runtime_directory(self.database)))
+        self.assertTrue(self.launch(candidate)["paused"])
 
     def test_busy_update_swaps_web_assets_then_activates_at_idle(self):
         # Hold the automatic idle probe while an approval is pending. The

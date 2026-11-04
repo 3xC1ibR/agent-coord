@@ -19,10 +19,84 @@ still advertised `0.1.2` and the alpha arm64 feed returned 404. Check current
 published manifests and feeds before claiming customer updates are operational;
 an installed app or a passing CI run alone does not establish publication.
 
-## Live backend rollout investigation
+## Coordinated backend restart and recovery
 
-The current implementation below still uses an idle boundary. Live backend
-replacement is being measured against a stronger contract: a compatible backend
+Runtimes advertising `runtime_updates: 1` support an explicit **Apply Backend
+Update… → Update and Continue** operation. A staged local build exposes it in the
+existing update menu, including builds without Sparkle. Signed installation
+authorization is bound to the live source instance and target release; attachment
+of the matching installed bundle requests the same operation. Passive attachment
+continues to use the existing idle handover. An already running older backend
+must reach its original idle boundary once to acquire this capability.
+
+The operation closes admissions and drains accepted requests, validates the
+candidate and available snapshot space, then records continuation intents. A
+retained supervisor inherits the database owner lock and waits for the old
+process to exit before taking a SQLite backup, including schema metadata. The
+candidate starts with every work admission closed, applies migrations, and
+signals readiness. Only a durable commit permits it to admit work. Startup failure
+terminates that owned trial process, restores the snapshot and prior schema, and
+boots the retained previous executable. A failed target does not automatically
+retry. Crashes before commit restore the previous snapshot on the next bootstrap;
+crashes after commit boot the committed payload. Later idle handovers supersede
+the transaction's boot choice.
+
+Recovery is a new turn in the saved native conversation, not uninterrupted
+execution. Before submitting it, check the exact source turn, native history,
+settings, completion, Stop, approvals, queued user input, and uncertain delivery
+receipts. Codex uses native turn history; Claude also verifies its native transcript
+and source input UUID, conservatively excluding ambiguous completion. Kimi,
+Antigravity and Muse currently require explicit continuation because their
+history adapters cannot establish native execution state. A stable receipt and
+durable submission claim prevent automatic replay after uncertain acceptance.
+No recovery prompt replaces the original assignment. The prompt requires checking
+external action outcomes before repeating them. Automatic workers remain paused
+until the recovery decisions finish.
+
+Stop cancels the transaction and recovery using an independent durable
+cancellation record. Status polling cannot undo Stop. If shutdown misses its
+deadline, the supervisor may terminate its verified parent runtime process group;
+provider processes in separate groups may remain alive. Such an update keeps
+**all admissions paused**, across commit, rollback and later bootstrap, and marks
+continuations uncertain. Inspect native execution and external tools before an
+explicit maintenance `resume`. Do not mistake backend activation for completed
+cleanup or resume uncertain actions blindly.
+
+Authenticated status includes `update.id`, `phase`, exact `target`, `error`,
+`requires_review` and `recovery` counts plus each conversation's state/reason.
+The terminal outcomes are `committed`, `rolled-back`, and `failed`. Verify the
+serving payload equals the committed target; the UI retains the update operation
+until that check succeeds. SQLite rollback covers coordination state, not external
+filesystem changes or tool side effects. Retained payloads and rollback files are
+private runtime state and must not be removed during an update.
+
+Source validation uses isolated process tests for successful continuation,
+approval exclusion, queued input, cancellation during candidate migration,
+SQLite/schema rollback, and Stop followed by status polling. Native macOS build,
+screenshots, and signed replacement acceptance must be rerun for this new flow;
+the October 28 evidence below applies to the earlier idle handover implementation.
+
+November 4 source validation ran 2,231 regression tests with 20 platform/optional
+skips. The only failure was a desktop isolation fixture that also failed on
+unchanged baseline `809e6b3`: it started two independent servers on one database.
+The fixture now uses separate databases; its 14-test file then passed with five
+macOS-only skips. The full suite was not repeated after that fixture-only repair.
+All 46 update lifecycle, recovery and transaction tests passed in the full run.
+Caller identity was cleared for the test process as documented in `AGENTS.md`.
+
+The required database gate passed on backend source fingerprint
+`386eecf37d2dab429f8ef04867c77a0f44342fc21c1a7cf3d99c28656b05fa9e`:
+15 seconds, six foreground writers, one background writer, two readers and 128 KiB
+chunks, with the regression suite also running. It produced 3,719 durable receipts
+in 15.011 seconds (**247.752 receipts/s**), **zero errors**, **zero admission
+timeouts**, foreground **p95 9.692 ms**, and writer-hold **p95 4.807 ms**.
+No running installation, plugin cache, or signed release was replaced by this
+source validation.
+
+## Uninterrupted backend rollout investigation
+
+Passive updates still use an idle boundary. Uninterrupted backend
+replacement remains a separate, stronger contract: a compatible backend
 must become active within 60 seconds with streaming turns, tools and approvals
 in progress, without signaling a provider or resuming a replacement turn. An
 active payload digest alone is insufficient if old coordination or adapter code
@@ -83,7 +157,8 @@ Primary precedents clarify the required boundaries:
 - Retain the running runtime's executable, Python dependencies, backend modules,
   and required resources across replacement of the application bundle.
 - Keep runtime and database upgrades pending until a safe transition is possible.
-  Do not interpret saved conversations as uninterrupted execution.
+  Explicitly authorized updates may perform the supervised restart described
+  above. Do not interpret saved conversations as uninterrupted execution.
 - A failure to prove compatibility or readiness defers activation. It must never
   silently fall back to killing agents or starting a competing database owner.
 - Preserve an explicit way for the user to stop work and quit completely.
@@ -178,7 +253,8 @@ connection after plugin refresh. The lightweight handshake requires both refresh
 entrypoints and a backend that supports `identity`; an older running backend still
 uses the fallback until its safe idle handover. Installing a new interface or
 refreshing plugins alone does not prove backend activation. Check runtime status
-after handover, and do not stop active agents to force it.
+after handover. Use the coordinated update operation when supported; do not
+manually stop agents to force it.
 
 ## Runtime maintenance controls
 

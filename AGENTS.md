@@ -36,6 +36,10 @@ Run the test suite with:
 python3 -W error::ResourceWarning -m unittest discover -s tests -v
 ```
 
+From an agent shell, prefix this command with
+`env -u AGENT_COORD_SESSION_ID -u CODEX_THREAD_ID` so fixture callers do not
+inherit the executing agent's identity.
+
 ## Database correctness and latency
 
 For database, persistence, search, provider-event or request-path changes, run
@@ -76,9 +80,11 @@ and the [runtime update contract](docs/runtime-updates.md).
   running runtime versions; explicitly choose a suitable newer version/build.
   The builder defaults to `0.1.0`/`1`, which is not an upgrade of newer installs.
 - Reopen the interface after installation. Compatible interface/web changes can
-  appear immediately; backend changes wait for a safe idle runtime handover.
-  Check runtime status before claiming that backend changes are active. Do not
-  stop agents just to force a pending backend update through.
+  appear immediately. Backend changes can wait for idle or use **Apply Backend
+  Update…** on runtimes advertising `runtime_updates: 1`. That operation owns
+  interruption, rollback and guarded continuation; do not manually stop agents
+  to force activation. Check the committed payload and recovery outcomes before
+  claiming that the backend update is active and work has resumed.
 - Ordinary local development builds are ad hoc signed and disable automatic
   updates. Use the existing release CI for signed, notarized, update-enabled
   builds; its Apple credentials and updater signing identity are already
