@@ -19,6 +19,30 @@ still advertised `0.1.2` and the alpha arm64 feed returned 404. Check current
 published manifests and feeds before claiming customer updates are operational;
 an installed app or a passing CI run alone does not establish publication.
 
+## Inbox recovery after a runtime exit
+
+A cold app conversation can retain an unfinished native turn after its runtime
+exits. Inbox polling permits provider reconciliation when execution evidence
+matches that exact turn and the recorded runtime has closed or its process no
+longer exists. An expired heartbeat alone is insufficient. Reconciliation runs
+before the stale active flag can block the conversation, without clearing that
+flag or submitting work on the strength of process evidence alone.
+
+Native completion restores normal inbox eligibility. A native interruption or
+failure is recorded and retains the normal explicit recovery requirement; a
+native active turn remains busy. Stop, uncertain submissions, queued user input,
+pending Close and live runtime ownership continue to take precedence. The final
+claim and submission checks still require an inactive turn.
+
+November 8 validation passed all 51 wake tests, 1,176 JavaScript tests and the
+isolated native quit/reconnect smoke check. The complete Python 3.12 run executed
+2,353 tests with 16 skips and one unrelated batching-budget assertion failure
+that reproduced identically on unchanged `4cb1832`: SQLite 3.51.0 uses the exact
+ordinary-row fallback, while that test expects native JSON batching. The matched
+15-second database admission gate passed with zero errors/timeouts, 250.516
+receipts/s, foreground p95 0.976 ms and writer-hold p95 0.387 ms. Independent wake
+review found no confirmed blocker.
+
 ## Coordinated backend restart and recovery
 
 Runtimes advertising `runtime_updates: 1` support an explicit **Apply Backend

@@ -362,7 +362,26 @@ class BrowserInboxWake:
             return {"session_id": thread_id, "resumed_after_turn_id": expected_turn_id, "state": "ready",
                     "resumed_by": requester, "reason": reason}
 
-    def _eligible(self, db, thread_id, *, submitting=False, cleanup=True):
+    def _orphaned_turn(self, db, thread_id):
+        """Permit a native read after a recorded owner exited, never a submit.
+
+        Silence and an expired heartbeat do not prove an owner has exited. A
+        cold conversation needs exact-turn ownership plus process-exit or close
+        evidence before its durable active flag may stop blocking that read.
+        """
+        from .execution_state import _alive
+        with self.sessions.lock:
+            if thread_id in self.sessions.active or thread_id in self.sessions.loaded:
+                return False
+        owner = db.execute("""SELECT r.pid, r.closed_at FROM execution_snapshots x
+            JOIN execution_runtimes r ON r.runtime_id = x.runtime_id
+            JOIN work_threads t ON t.thread_id = x.thread_id AND t.turn_id = x.turn_id
+            WHERE x.thread_id = ? AND t.turn_id IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM turn_stop_requests stop
+                WHERE stop.thread_id = t.thread_id AND stop.turn_id = t.turn_id)""", (thread_id,)).fetchone()
+        return bool(owner and (owner["closed_at"] is not None or not _alive(owner["pid"])))
+
+    def _eligible(self, db, thread_id, *, submitting=False, cleanup=True, reconciling=False):
         if self.stopped.is_set() or self.sessions.closed:
             return False
         if hasattr(self.sessions, "reviews") and not self.sessions.reviews.wake_allowed(db, thread_id):
@@ -376,7 +395,9 @@ class BrowserInboxWake:
             JOIN sessions s ON s.session_id = b.thread_id
             LEFT JOIN browser_inbox_wake w ON w.thread_id = b.thread_id
             WHERE b.thread_id = ?""", (thread_id,)).fetchone()
-        if (not row or row["turn_active"] or row["paused"] or (row["dispatching"] and not submitting)):
+        if not row or row["paused"] or (row["dispatching"] and not submitting):
+            return False
+        if row["turn_active"] and not (reconciling and self._orphaned_turn(db, thread_id)):
             return False
         if row["retry_at"] and row["retry_at"] > self.store.clock():
             return False
@@ -404,9 +425,12 @@ class BrowserInboxWake:
                 WHERE recipient_session_id=? AND delivered_at IS NULL
                   AND thread_id GLOB 'event:sidecar:*:intervention:*' LIMIT 1""", (thread_id,)).fetchone()
             if not intervention:
-                return self._eligible(db, thread_id, cleanup=False)
+                return self._eligible(db, thread_id, cleanup=False, reconciling=True)
         with self.store._connection() as db:
-            return self._eligible(db, thread_id)
+            from .sidecars import discard_stale_messages
+            discard_stale_messages(db, thread_id, self.store.clock())
+        with self.store.reading(), self.store._connection() as db:
+            return self._eligible(db, thread_id, cleanup=False, reconciling=True)
 
     def can_submit(self, thread_id):
         with self.store._connection() as db:

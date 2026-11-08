@@ -769,6 +769,107 @@ class BrowserWakeTests(unittest.TestCase):
         self.assertEqual(len(self.turns(thread)), 1)
         self.assertTrue(any(m == "thread/resume" for m, _ in self.sessions.rpc.calls))
 
+    def orphaned_turn(self, status="completed", *, closed=True):
+        thread = self.create()
+        self.sessions.send(thread, {"message": "Original assignment"})
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        turn = self.sessions.rpc.threads[thread]["turns"][-1]
+        turn["status"] = status  # Native history survived; its completion event did not.
+        runtime = "previous-runtime:" + thread
+        with self.store._connection() as db:
+            db.execute("INSERT INTO execution_runtimes VALUES (?, ?, ?, ?)",
+                       (runtime, 123456789, self.store.clock() - 3600,
+                        self.store.clock() - 1800 if closed else None))
+            db.execute("UPDATE execution_snapshots SET runtime_id = ? WHERE thread_id = ?",
+                       (runtime, thread))
+        with self.sessions.lock:
+            self.sessions.active.pop(thread, None)
+            self.sessions.loaded.discard(thread)
+            self.sessions.loaded_clients.pop(thread, None)
+        self.sessions.rpc.calls.clear()
+        return thread
+
+    def test_cold_orphaned_active_flag_reconciles_before_inbox_eligibility(self):
+        thread = self.orphaned_turn()
+        message = self.message(thread)
+        self.assertTrue(self.store.get_session(thread)["turn_active"])
+        self.sessions.inbox_wake.process_once()
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        methods = [method for method, _ in self.sessions.rpc.calls]
+        self.assertIn("thread/resume", methods)
+        self.assertLess(methods.index("thread/read"), methods.index("turn/start"))
+        self.assertEqual(len(self.sessions.rpc.threads[thread]["turns"]), 2)
+        self.assertEqual([a["message_id"] for a in self.attempts()], [message["id"]])
+        self.assertEqual(self.attempts()[0]["outcome"], "sent")
+
+    def test_cold_orphaned_interruption_is_recorded_without_replaying_work(self):
+        thread = self.orphaned_turn("interrupted")
+        self.message(thread)
+        self.sessions.inbox_wake.process_once()
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        self.assertFalse(self.store.get_session(thread)["turn_active"])
+        self.assertEqual(self.store.threads.get(thread)["turn_completion"]["status"], "interrupted")
+        with self.store.reading(), self.store._connection() as db:
+            wake = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id = ?", (thread,)).fetchone()
+        self.assertTrue(wake["paused"])
+        self.assertEqual(wake["pause_kind"], "failure")
+        self.assertEqual(len(self.sessions.rpc.threads[thread]["turns"]), 1)
+        self.assertEqual(self.attempts(), [])
+
+    def test_cold_active_flag_requires_proof_that_previous_runtime_exited(self):
+        thread = self.orphaned_turn(closed=False)
+        self.message(thread)
+        with patch("agent_coord.execution_state._alive", return_value=True):
+            self.sessions.inbox_wake.process_once()
+        self.assertEqual(self.sessions.rpc.calls, [])
+        with patch("agent_coord.execution_state._alive", return_value=False):
+            self.sessions.inbox_wake.process_once()
+        self.assertTrue(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))
+
+    def test_cold_orphan_reconciliation_preserves_stop_and_uncertain_wake(self):
+        thread = self.orphaned_turn()
+        message = self.message(thread)
+        for kind in ("stop", "unknown"):
+            with self.subTest(kind=kind):
+                self.sessions.inbox_wake.pause(thread, "Existing execution guard", kind=kind)
+                self.sessions.inbox_wake.process_once()
+                self.assertEqual(self.sessions.rpc.calls, [])
+        self.sessions.inbox_wake.resume(thread)
+        with self.store._connection() as db:
+            db.execute("INSERT INTO message_wake_attempts VALUES (?, ?, ?, 'claimed', 'Uncertain acceptance')",
+                       (message["id"], thread, self.store.clock()))
+            db.execute("UPDATE browser_inbox_wake SET dispatching = 1 WHERE thread_id = ?", (thread,))
+        self.message(thread)  # New unclaimed work cannot bypass the earlier claim.
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual(self.sessions.rpc.calls, [])
+
+    def test_cold_orphan_reconciliation_requires_matching_runtime_evidence(self):
+        for change in ("missing_snapshot", "missing_runtime", "different_turn", "user_stop"):
+            with self.subTest(change=change):
+                thread = self.orphaned_turn()
+                self.message(thread)
+                with self.store._connection() as db:
+                    if change == "missing_snapshot":
+                        db.execute("DELETE FROM execution_snapshots WHERE thread_id = ?", (thread,))
+                    elif change == "missing_runtime":
+                        db.execute("DELETE FROM execution_runtimes WHERE runtime_id = ?", ("previous-runtime:" + thread,))
+                    elif change == "different_turn":
+                        db.execute("UPDATE execution_snapshots SET turn_id = 'older-turn' WHERE thread_id = ?", (thread,))
+                    else:
+                        turn = self.store.threads.get(thread)["turn_id"]
+                        db.execute("INSERT INTO turn_stop_requests VALUES (?, ?, ?)", (thread, turn, self.store.clock()))
+                self.sessions.inbox_wake._dispatch(thread)
+                self.assertEqual(self.sessions.rpc.calls, [])
+
+    def test_cold_orphan_reconciliation_does_not_clear_native_active_turn(self):
+        thread = self.orphaned_turn("inProgress")
+        self.message(thread)
+        self.sessions.inbox_wake.process_once()
+        self.assertTrue(self.store.get_session(thread)["turn_active"])
+        self.assertIn(thread, self.sessions.active)
+        self.assertEqual(self.attempts(), [])
+        self.assertFalse(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))
+
     def test_stop_racing_with_provider_read_prevents_dispatch(self):
         thread = self.create()
         self.message(thread)
