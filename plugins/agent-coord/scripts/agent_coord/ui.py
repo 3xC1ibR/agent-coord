@@ -296,6 +296,8 @@ def _handler(
                 operation = "search"
             elif method == "GET" and path == "/api/browser/threads":
                 operation = "thread_list"
+            elif method == "GET" and path.startswith("/api/browser/threads/") and path.endswith("/sidecars"):
+                operation = "sidecar_status"
             elif method == "GET" and path.startswith("/api/browser/threads/"):
                 operation = "thread_detail"
             elif method == "GET" and path.startswith("/api/browser/sessions/"):
@@ -697,9 +699,7 @@ def _handler(
                 browser_sessions.work_thread(thread_id, history=False)
                 from .app_control import AppControl
                 control = AppControl(store)
-                with store._connection() as db:
-                    pending = [r["request_id"] for r in db.execute("SELECT request_id,payload_json FROM app_control_requests WHERE operation='sidecar' AND status NOT IN ('completed','cancelled')")
-                               if json.loads(r["payload_json"]).get("target_id") == thread_id]
+                pending = control.sidecar_request_ids(thread_id)
                 self._json(HTTPStatus.OK, {"watches": browser_sessions.sidecars.watches.list(thread_id),
                                          "requests": [control.status(key) for key in pending]})
             elif route.startswith("threads/") and route.endswith("/preview"):
@@ -1250,19 +1250,23 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     app_control: AppControlWorker | None = None
 
     def server_close(self) -> None:
-        if self.app_control is not None:
-            self.app_control.close()
-        if self.thread_control is not None:
-            self.thread_control.close()
-        if self.web_push is not None:
-            self.web_push.close()
-        if self.native_push is not None:
-            self.native_push.close()
-        if self.remote_access is not None:
-            self.remote_access.close()
-        if self.browser_sessions is not None:
-            self.browser_sessions.close()
-        super().server_close()
+        try:
+            if self.app_control is not None:
+                self.app_control.close()
+            if self.thread_control is not None:
+                self.thread_control.close()
+            if self.web_push is not None:
+                self.web_push.close()
+            if self.native_push is not None:
+                self.native_push.close()
+            if self.remote_access is not None:
+                self.remote_access.close()
+        finally:
+            try:
+                if self.browser_sessions is not None:
+                    self.browser_sessions.close()
+            finally:
+                super().server_close()
 
     def server_bind(self) -> None:
         # HTTPServer performs a reverse-DNS lookup only to populate a cosmetic
@@ -1323,18 +1327,24 @@ def make_ui_server(
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
     remote.restore(f"http://{target_host}:{bound_port}")
-    push.start()
-    native.start()
-    server.thread_control.start()
-    server.app_control.start()
-    sessions.schedules.start()
-    sessions.inbox_wake.start()
-    sessions.event_subscriptions.start()
-    sessions.sidecars.start()
-    sessions.reviews.start()
-    sessions.watchdog.start()
-    sessions.start_residency()
-    sessions.dispatch.wake()
+    try:
+        sessions.start_database_checkpoint()
+        sessions.start_search_index()
+        push.start()
+        native.start()
+        server.thread_control.start()
+        server.app_control.start()
+        sessions.schedules.start()
+        sessions.inbox_wake.start()
+        sessions.event_subscriptions.start()
+        sessions.sidecars.start()
+        sessions.reviews.start()
+        sessions.watchdog.start()
+        sessions.start_residency()
+        sessions.dispatch.wake()
+    except BaseException:
+        server.server_close()
+        raise
     return server
 
 

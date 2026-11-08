@@ -73,7 +73,7 @@ class ScheduledPrompts:
         return row
 
     def list(self):
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             rows = db.execute("SELECT * FROM scheduled_prompts ORDER BY run_at DESC, id").fetchall()
             latest = {row["schedule_id"]: dict(row) for row in db.execute("""SELECT r.* FROM scheduled_prompt_runs r
                 WHERE r.id = (SELECT MAX(p.id) FROM scheduled_prompt_runs p WHERE p.schedule_id = r.schedule_id)""")}
@@ -237,6 +237,10 @@ class ScheduledPrompts:
                 turn_id = excluded.turn_id, finished_at = excluded.finished_at""", (schedule_id,))
 
     def _advance_recurring(self):
+        with self.store.reading(), self.store._connection() as db:
+            if not db.execute("""SELECT 1 FROM scheduled_prompts WHERE recurrence_json IS NOT NULL
+                    AND state IN ('completed', 'failed', 'missed') LIMIT 1""").fetchone():
+                return
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute("""SELECT * FROM scheduled_prompts WHERE recurrence_json IS NOT NULL
@@ -322,7 +326,7 @@ class ScheduledPrompts:
                 else:
                     self._recover(row)
         self._advance_recurring()
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             due = db.execute("SELECT * FROM scheduled_prompts WHERE state = 'scheduled' AND run_at <= ? ORDER BY run_at, id", (self.store.clock(),)).fetchall()
         for row in due:
             if not matches_workspace(row["cwd"], self.sessions.cwd):
@@ -347,7 +351,7 @@ class ScheduledPrompts:
             self._changed()
             if not missed and not item["target_thread_id"]:
                 self._dispatch(item)
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             waiting = db.execute("SELECT * FROM scheduled_prompts WHERE state = 'waiting' AND owner = ? ORDER BY run_at, id", (self.owner,)).fetchall()
         for row in waiting:
             if matches_workspace(row["cwd"], self.sessions.cwd):

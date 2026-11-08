@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .store import CoordinationError
+from .sqlite_rows import read_rows
 
 COUNTERS = ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens",
             "cache_write_input_tokens", "reasoning_output_tokens")
@@ -362,13 +363,14 @@ class ThreadUsageStore:
             if not session:
                 raise CoordinationError("Work thread not found.")
             provider = provider or session["client"]
-            rows = db.execute("SELECT * FROM thread_usage_samples WHERE thread_id=? AND provider=?", (thread_id, provider)).fetchall()
+            rows = read_rows(db, "SELECT * FROM thread_usage_samples WHERE thread_id=? AND provider=?", (thread_id, provider))
             baselines = {r["native_id"]: json.loads(r["totals_json"]) if r["totals_json"] is not None else None
-                         for r in db.execute("SELECT * FROM thread_usage_baselines WHERE thread_id=? AND provider=?", (thread_id, provider))}
+                         for r in read_rows(db, "SELECT * FROM thread_usage_baselines WHERE thread_id=? AND provider=?", (thread_id, provider))}
             context = db.execute("SELECT * FROM thread_usage_context WHERE thread_id=? AND provider=? ORDER BY observed_at DESC LIMIT 1", (thread_id, provider)).fetchone()
-            notes = db.execute("SELECT * FROM thread_usage_notes WHERE thread_id=? AND provider=? ORDER BY observed_at DESC", (thread_id, provider)).fetchall()
+            notes = read_rows(db, "SELECT * FROM thread_usage_notes WHERE thread_id=? AND provider=? ORDER BY observed_at DESC", (thread_id, provider))
             fork = db.execute("SELECT forked_from_thread_id FROM work_threads WHERE thread_id=?", (thread_id,)).fetchone()
-            epochs = db.execute("SELECT native_id FROM thread_usage_epochs WHERE thread_id=? AND provider=? ORDER BY position", (thread_id, provider)).fetchall()
+            epochs = read_rows(db, "SELECT native_id FROM thread_usage_epochs WHERE thread_id=? AND provider=? ORDER BY position",
+                               (thread_id, provider), columns=("native_id",))
         streams = {}
         for row in rows:
             streams.setdefault((row["native_id"], row["scope"], row["source_key"], row["kind"]), []).append(row)

@@ -108,21 +108,36 @@ class KimiRPC:
         except Exception:
             logging.getLogger(__name__).warning("Could not capture Kimi context usage")
 
-    def _history(self, thread_id):
+    def _history(self, thread_id, *, include_turns=True):
+        if not include_turns:
+            with self.lock:
+                return {"id": thread_id, "turns": [],
+                        "status": {"type": "active" if thread_id in self.turns else "idle"}}
         history = read_history(self.store, thread_id)
         if history is None:
             history = {"id": thread_id, "turns": []}
+        return self.reconcile_history(thread_id, history)
+
+    def reconcile_history(self, thread_id, history):
+        """Reconcile a caller-owned mirror without reading persisted history."""
         with self.lock:
             active = self.turns.get(thread_id)
             latest = active or self.completed.get(thread_id)
             if latest:
-                history["turns"] = [t for t in history.get("turns", []) if t["id"] != latest["id"]] + [copy.deepcopy(latest)]
+                turns = history.setdefault("turns", [])
+                index = next((index for index, turn in enumerate(turns) if turn["id"] == latest["id"]), None)
+                if index is None:
+                    turns.append(copy.deepcopy(latest))
+                elif active or turns[index].get("status") not in {"completed", "failed", "interrupted"}:
+                    # A terminal mirror can include later events than the
+                    # retained completion. Use that cache only for recovery.
+                    turns[index] = copy.deepcopy(latest)
             if not active:
                 for turn in history.get("turns", []):
                     if turn.get("status") == "inProgress":
                         turn["status"] = "interrupted"
-        history["status"] = {"type": "active" if active else "idle"}
-        return history
+            history["status"] = {"type": "active" if active else "idle"}
+            return history
 
     @staticmethod
     def _options(params):
@@ -281,7 +296,8 @@ class KimiRPC:
             model, effort = self.settings[thread_id]
             return {"thread": self._history(thread_id), "model": model, "reasoningEffort": effort}
         if method in {"thread/resume", "thread/read"}:
-            return {"thread": self._history(thread_id)}
+            include_turns = not params.get("excludeTurns", False) if method == "thread/resume" else params.get("includeTurns", True)
+            return {"thread": self._history(thread_id, include_turns=include_turns)}
         if method in {"thread/archive", "thread/unarchive", "thread/name/set"}:
             if method == "thread/archive":
                 self._shutdown(thread_id)

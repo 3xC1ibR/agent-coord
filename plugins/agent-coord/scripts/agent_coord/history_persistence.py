@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import copy
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -30,6 +31,7 @@ CHUNK_BYTES = 64 * 1024
 STAGE_BYTES = 256 * 1024
 STAGE_CHUNKS = 32
 QUERY_CHUNKS = 128
+READ_CHUNKS = 32
 MARKER = "__agent_coord_history__"
 PREPARATION_CACHE_BYTES = 64 * 1024 * 1024
 PREPARATION_CACHE_THREADS = 16
@@ -46,6 +48,9 @@ class PreparedHistory:
     chunks: dict[str, bytes]
     source_bytes: int
     documents: dict = field(default_factory=dict)
+    durable_chunks: dict[str, int] = field(default_factory=dict)
+    cache_bytes: int = 0
+    encoded_document_bytes: int = 0
 
 
 @dataclass
@@ -54,6 +59,8 @@ class _Document:
     references: list[str]
     chunks: dict[str, bytes]
     source_bytes: int
+    fingerprint: bytes
+    committed: bool = False
 
 
 def _json(value):
@@ -64,20 +71,51 @@ def ensure_schema(db):
     db.execute("""CREATE TABLE IF NOT EXISTS browser_history_chunks (
         digest TEXT PRIMARY KEY, payload BLOB NOT NULL
     ) WITHOUT ROWID""")
+    # The primary B-tree also contains payloads. A compact covering index keeps
+    # existence checks from paging transcript contents into SQLite's cache.
+    db.execute("CREATE INDEX IF NOT EXISTS browser_history_chunk_digests ON browser_history_chunks(digest)")
+
+
+def _finish_steps(steps):
+    while True:
+        try:
+            next(steps)
+        except StopIteration as finished:
+            return finished.value
 
 
 def prepare_history(history, *, previous=None):
     """Serialize and hash outside every database write transaction."""
-    chunks, documents = {}, {}
+    return _finish_steps(prepare_history_steps(history, previous=previous))
+
+
+def prepare_history_steps(history, *, previous=None):
+    """Yield between documents so one archive does not monopolize saving."""
+    chunks, documents, durable_chunks = {}, {}, {}
     previous_documents = previous.documents if previous else {}
+    deadline = time.monotonic() + .002
+    encoded_document_bytes = 0
 
     def reference(value, key):
+        nonlocal encoded_document_bytes
         existing = previous_documents.get(key)
-        if existing is not None and existing.value == value:
+        content = None
+        if existing is not None and existing.committed:
+            content = _json(value).encode("utf-8")
+            encoded_document_bytes += len(content)
+            unchanged = hashlib.sha256(content).digest() == existing.fingerprint
+        else:
+            unchanged = existing is not None and existing.value == value
+        if unchanged:
             documents[key] = existing
             chunks.update(existing.chunks)
+            if existing.committed:
+                for index, digest in enumerate(existing.references):
+                    durable_chunks[digest] = min(CHUNK_BYTES, existing.source_bytes - index * CHUNK_BYTES)
             return existing.references, existing.source_bytes
-        content = _json(value).encode("utf-8")
+        if content is None:
+            content = _json(value).encode("utf-8")
+            encoded_document_bytes += len(content)
         result, blocks = [], {}
         for offset in range(0, len(content), CHUNK_BYTES):
             payload = content[offset:offset + CHUNK_BYTES]
@@ -85,7 +123,7 @@ def prepare_history(history, *, previous=None):
             blocks.setdefault(digest, payload)
             result.append(digest)
         chunks.update(blocks)
-        documents[key] = _Document(copy.deepcopy(value), result, blocks, len(content))
+        documents[key] = _Document(copy.deepcopy(value), result, blocks, len(content), hashlib.sha256(content).digest())
         return result, len(content)
 
     def array_size(sizes):
@@ -108,20 +146,45 @@ def prepare_history(history, *, previous=None):
             encoded = {"metadata": {key: value for key, value in turn.items() if key != "items"}}
             sizes = {}
             if "items" in turn:
-                items = [reference(item, (turn_index, item_index)) for item_index, item in enumerate(turn["items"])]
+                items = []
+                for item_index, item in enumerate(turn["items"]):
+                    items.append(reference(item, (turn_index, item_index)))
+                    if time.monotonic() >= deadline:
+                        yield
+                        deadline = time.monotonic() + .002
                 encoded["items"] = [item[0] for item in items]
                 sizes["items"] = array_size([item[1] for item in items])
             turn_sizes.append(object_size(encoded["metadata"], sizes))
             encoded_turns.append(reference(encoded, (turn_index,))[0])
+            if time.monotonic() >= deadline:
+                yield
+                deadline = time.monotonic() + .002
         metadata = {key: value for key, value in history.items() if key != "turns"}
         source_bytes = object_size(metadata, {"turns": array_size(turn_sizes)})
         root = reference({"metadata": metadata, "turns": encoded_turns}, ())[0]
     else:
         root, source_bytes = reference(history, ())
     if source_bytes <= INLINE_BYTES:
-        return PreparedHistory(_json(history), {}, source_bytes, documents)
+        return PreparedHistory(_json(history), {}, source_bytes, documents, durable_chunks,
+                               encoded_document_bytes=encoded_document_bytes)
     return PreparedHistory(_json({MARKER: 1, "layout": "turns" if structured else "raw", "root": root}),
-                           chunks, source_bytes, documents)
+                           chunks, source_bytes, documents, durable_chunks,
+                           encoded_document_bytes=encoded_document_bytes)
+
+
+def compact_history(prepared):
+    """Keep only fingerprints and references after every block has committed."""
+    if prepared.source_bytes <= INLINE_BYTES:
+        # Inline documents' blocks have not been staged. Retain their ordinary
+        # preparation so a later transition to chunked history writes them.
+        return PreparedHistory(prepared.serialized, {}, prepared.source_bytes, prepared.documents,
+                               cache_bytes=2 * prepared.source_bytes + 1024 * len(prepared.documents))
+    documents = {key: _Document(None, value.references, {}, value.source_bytes, value.fingerprint, True)
+                 for key, value in prepared.documents.items()}
+    # Charge conservative per-document/container and digest-reference overhead;
+    # logical transcript bytes remain a separate workload metric.
+    retained = len(prepared.serialized) + sum(640 + 128 * len(value.references) for value in documents.values())
+    return PreparedHistory(prepared.serialized, {}, prepared.source_bytes, documents, cache_bytes=retained)
 
 
 def _documents(db, references):
@@ -134,17 +197,23 @@ def _documents(db, references):
         digests.update(reference)
     digests = sorted(digests)
     blocks = {}
-    for offset in range(0, len(digests), QUERY_CHUNKS):
-        batch = digests[offset:offset + QUERY_CHUNKS]
+    for offset in range(0, len(digests), READ_CHUNKS):
+        batch = digests[offset:offset + READ_CHUNKS]
         try:
-            rows = db.execute("SELECT digest, payload FROM browser_history_chunks WHERE digest IN ("
-                              + ",".join("?" for _ in batch) + ")", batch).fetchall()
+            # One native aggregate avoids a GIL handoff for every tiny item.
+            # Hex preserves arbitrary corrupt bytes for the integrity check;
+            # typeof retains the distinction between stored BLOBs and TEXT.
+            # At most 32 * 64 KiB of valid payload enters one result (4 MiB hex).
+            packed = db.execute("""SELECT json_group_array(json_array(digest, typeof(payload), hex(payload)))
+                FROM browser_history_chunks WHERE digest IN ("""
+                + ",".join("?" for _ in batch) + ")", batch).fetchone()[0]
         except sqlite3.OperationalError as exc:
             if "no such table" not in str(exc):
                 raise
             raise HistoryUnavailableError("Saved conversation blocks are unavailable.") from exc
-        for digest, payload in rows:
-            if not isinstance(payload, bytes) or hashlib.sha256(payload).hexdigest() != digest:
+        for digest, kind, encoded in json.loads(packed):
+            payload = bytes.fromhex(encoded)
+            if kind != "blob" or hashlib.sha256(payload).hexdigest() != digest:
                 raise HistoryUnavailableError("Saved conversation block failed its integrity check.")
             blocks[digest] = payload
     if len(blocks) != len(digests):
@@ -225,15 +294,21 @@ def read_history(store, thread_id):
 
 def stage_history(store, prepared, *, on_commit=None, confirmed=()):
     """Stage only absent blocks, with a byte bound on every write transaction."""
-    present = prepared.chunks.keys() & set(confirmed)
+    return _finish_steps(stage_history_steps(store, prepared, on_commit=on_commit, confirmed=confirmed))
+
+
+def stage_history_steps(store, prepared, *, on_commit=None, confirmed=()):
+    """Yield after every bounded read or write, with no connection held."""
+    present = prepared.chunks.keys() & (set(confirmed) | prepared.durable_chunks.keys())
     digests = [digest for digest in prepared.chunks if digest not in present]
-    if digests:
-        with store.reading(), store._connection() as db:
-            for offset in range(0, len(digests), QUERY_CHUNKS):
-                batch = digests[offset:offset + QUERY_CHUNKS]
-                present.update(row[0] for row in db.execute(
-                    "SELECT digest FROM browser_history_chunks WHERE digest IN ("
-                    + ",".join("?" for _ in batch) + ")", batch))
+    for offset in range(0, len(digests), QUERY_CHUNKS):
+        batch = digests[offset:offset + QUERY_CHUNKS]
+        with store.database_operation("history.present", priority="background"), store.reading(), store._connection() as db:
+            packed = db.execute(
+                "SELECT json_group_array(digest) FROM browser_history_chunks INDEXED BY browser_history_chunk_digests WHERE digest IN ("
+                + ",".join("?" for _ in batch) + ")", batch).fetchone()[0]
+        present.update(json.loads(packed))
+        yield
     missing = [(digest, prepared.chunks[digest]) for digest in digests if digest not in present]
     batches, batch, size = [], [], 0
     for entry in missing:
@@ -257,9 +332,11 @@ def stage_history(store, prepared, *, on_commit=None, confirmed=()):
         written_bytes += batch_bytes
         if on_commit is not None:
             on_commit({"staged_chunks": batch_chunks, "staged_bytes": batch_bytes, "staging_transactions": 1})
+        yield
+    total_sizes = {**prepared.durable_chunks, **{key: len(value) for key, value in prepared.chunks.items()}}
     return {"staged_chunks": written_chunks, "staged_bytes": written_bytes,
-            "reused_chunks": len(prepared.chunks) - written_chunks,
-            "reused_bytes": sum(map(len, prepared.chunks.values())) - written_bytes,
+            "reused_chunks": len(total_sizes) - written_chunks,
+            "reused_bytes": sum(total_sizes.values()) - written_bytes,
             "staging_transactions": len(batches)}
 
 
@@ -280,15 +357,17 @@ def publish_history(db, thread_id, prepared):
 
 
 class HistoryPersistence:
-    def __init__(self, store):
+    def __init__(self, store, *, on_saved=None):
         self.store = store
+        self.on_saved = on_saved
         self.lock = threading.Lock()
         self.prepared = OrderedDict()
         self.confirmed = OrderedDict()
         self.prepared_bytes = 0
         self.metrics = {"snapshots": 0, "unchanged_snapshots": 0, "source_bytes": 0,
                         "staged_chunks": 0, "staged_bytes": 0, "reused_chunks": 0, "reused_bytes": 0,
-                        "staging_transactions": 0, "published_bytes": 0, "elapsed_seconds": 0.0, "failures": 0}
+                        "staging_transactions": 0, "published_bytes": 0, "encoded_document_bytes": 0,
+                        "elapsed_seconds": 0.0, "failures": 0, "search_seed_failures": 0}
 
     def _record(self, metrics):
         with self.lock:
@@ -296,27 +375,37 @@ class HistoryPersistence:
                 self.metrics[key] += value
 
     def save(self, thread_id, history):
+        return _finish_steps(self.save_steps(thread_id, history))
+
+    def save_steps(self, thread_id, history):
         started = time.monotonic()
         try:
             with self.lock:
                 previous = self.prepared.get(thread_id)
-            prepared = prepare_history(history, previous=previous)
+            with self.store._writer.measure_request("history.prepare"):
+                prepared = yield from prepare_history_steps(history, previous=previous)
+            self._record({"encoded_document_bytes": prepared.encoded_document_bytes})
             with self.lock:
-                previous = self.prepared.pop(thread_id, None)
-                self.prepared_bytes -= previous.source_bytes if previous else 0
-                if prepared.source_bytes <= PREPARATION_CACHE_BYTES:
-                    self.prepared[thread_id] = prepared
-                    self.prepared_bytes += prepared.source_bytes
-                while (self.prepared_bytes > PREPARATION_CACHE_BYTES
-                       or len(self.prepared) > PREPARATION_CACHE_THREADS):
-                    _, expired = self.prepared.popitem(last=False)
-                    self.prepared_bytes -= expired.source_bytes
                 confirmed = set(self.confirmed)
-            metrics = stage_history(self.store, prepared, on_commit=self._record, confirmed=confirmed)
+            with self.store._writer.measure_request("history.stage"):
+                metrics = yield from stage_history_steps(self.store, prepared, on_commit=self._record, confirmed=confirmed)
             # Only a complete staging pass confirms presence. Failed batches
             # never enter this cache; failed root publication is safe because
             # the immutable blocks have already committed independently.
             with self.lock:
+                # Never replace another save's newer generation, and never
+                # expose references until the complete staging pass commits.
+                if self.prepared.get(thread_id) is previous:
+                    compact = compact_history(prepared)
+                    self.prepared.pop(thread_id, None)
+                    self.prepared_bytes -= previous.cache_bytes if previous else 0
+                    if compact.cache_bytes <= PREPARATION_CACHE_BYTES:
+                        self.prepared[thread_id] = compact
+                        self.prepared_bytes += compact.cache_bytes
+                    while (self.prepared_bytes > PREPARATION_CACHE_BYTES
+                           or len(self.prepared) > PREPARATION_CACHE_THREADS):
+                        _, expired = self.prepared.popitem(last=False)
+                        self.prepared_bytes -= expired.cache_bytes
                 for digest in prepared.chunks:
                     self.confirmed.pop(digest, None)
                     self.confirmed[digest] = None
@@ -329,6 +418,14 @@ class HistoryPersistence:
                          "source_bytes": prepared.source_bytes,
                          "published_bytes": len(prepared.serialized.encode("utf-8")) if changed else 0}
             self._record(published)
+            if self.on_saved is not None:
+                try:
+                    self.on_saved(thread_id, prepared)
+                except Exception:
+                    # Search is a derived projection. Its fallback can rebuild
+                    # from this committed root; it must not reject a saved turn.
+                    self._record({"search_seed_failures": 1})
+                    logging.getLogger(__name__).exception("Could not schedule saved-history search preparation")
             return {**metrics, **published, "elapsed_seconds": time.monotonic() - started}
         except Exception:
             self._record({"failures": 1})
@@ -344,4 +441,4 @@ class HistoryPersistence:
     def forget(self, thread_id):
         with self.lock:
             prepared = self.prepared.pop(thread_id, None)
-            self.prepared_bytes -= prepared.source_bytes if prepared else 0
+            self.prepared_bytes -= prepared.cache_bytes if prepared else 0

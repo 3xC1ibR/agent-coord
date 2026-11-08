@@ -345,7 +345,9 @@ class SearchExecutionTests(unittest.TestCase):
         self.assertGreater(measured.call_count, 0, "The fixture must exercise proximity measurement")
 
     def test_search_uses_fixed_statements_without_python_callbacks(self):
+        from agent_coord import conversation_substrings
         self.seed(12)
+        supported = conversation_substrings.ensure_schema(self.store)
         statements = []
         connect = self.store._connect
 
@@ -355,14 +357,27 @@ class SearchExecutionTests(unittest.TestCase):
             return connection
 
         counts = {}
+        candidate_counts = {}
         with patch.object(_StoreConnection, "create_function", side_effect=AssertionError("Per-row Python callback")), \
                 patch.object(self.store, "_connect", traced):
             search_threads(self.store, "radio")
             for query in ("radio", "alarm", "x", "zzzz"):
                 statements.clear()
                 page = search_threads(self.store, query, limit=50)
-                counts[query, len(page["items"])] = len(statements)
-        # The statement count is independent of how many conversations and messages match.
+                # FTS emits internal trace entries prefixed with "--" while
+                # reading its segments; these do not cross the Python boundary.
+                caller_statements = [sql for sql in statements if not sql.lstrip().startswith("--")]
+                candidate_statements = [sql for sql in caller_statements if
+                    sql.startswith("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('conversation_substring_parts'")
+                    or sql.startswith("SELECT json_group_array(source),COUNT(*) FROM (")]
+                candidate_counts[query] = len(candidate_statements)
+                counts[query, len(page["items"])] = len(caller_statements) - len(candidate_statements)
+        # The indexed branch adds exactly one schema check and one batched
+        # candidate query. All other work retains the previous fixed bound,
+        # independent of how many conversations and messages match.
+        indexed_count = 2 if supported else 1
+        self.assertEqual(candidate_counts, {"radio": indexed_count, "alarm": indexed_count,
+                                            "x": 0, "zzzz": indexed_count})
         self.assertEqual(len(set(counts.values())), 1, counts)
         self.assertLessEqual(next(iter(counts.values())), 14, statements)
         self.assertNotIn("create_function", inspect.getsource(thread_search))

@@ -5,6 +5,7 @@ History triggers invalidate the projection even when an older runtime saves it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -13,6 +14,7 @@ import uuid
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from itertools import islice
 
 from .timeline_clock import seconds
 from .zellij_wake import WAKE_PROMPT
@@ -173,12 +175,32 @@ def sync_messages(db, *, cwd=None):
 # until a legacy reader rebuilds them; modern readers use the views below.
 _STAGE_ROWS = 64
 _STAGE_BYTES = 256 * 1024
+_DOCUMENT_STAGE_ROWS = 512
+# Smaller prose transactions reduce cold page/commit time. Preserve immutable
+# part numbering: one existing 16K-character part may exceed this target, but
+# still fits the original stage bound. Compact negative headers keep 512 rows.
+_DOCUMENT_STAGE_BYTES = 64 * 1024
+_STATEMENT_PARAMETERS = 999
 _TEXT_CHARACTERS = 16 * 1024
 _STAGE_LEASE_SECONDS = 300
 _CLEANUP_BATCHES = 8
 _METRICS_LOCK = threading.Lock()
 _METRICS = weakref.WeakKeyDictionary()
+_DOCUMENT_SCHEMA = {
+    "conversation_search_documents": """CREATE TABLE IF NOT EXISTS conversation_search_documents (
+        document TEXT PRIMARY KEY, item_id TEXT, role TEXT, timestamp REAL,
+        excerpt TEXT NOT NULL, text_length INTEGER NOT NULL)""",
+    "conversation_search_document_headers": """CREATE INDEX IF NOT EXISTS conversation_search_document_headers
+        ON conversation_search_documents(document,item_id,role,timestamp,text_length)""",
+    "conversation_search_document_text": """CREATE TABLE IF NOT EXISTS conversation_search_document_text (
+        document TEXT NOT NULL, part INTEGER NOT NULL, text TEXT NOT NULL, folded TEXT NOT NULL,
+        PRIMARY KEY (document, part))""",
+}
 _GENERATION_SCHEMA = {
+    **_DOCUMENT_SCHEMA,
+    "conversation_search_document_entries": """CREATE TABLE IF NOT EXISTS conversation_search_document_entries (
+        generation TEXT NOT NULL, position INTEGER NOT NULL, turn_id TEXT NOT NULL, item_id TEXT NOT NULL,
+        role TEXT NOT NULL, timestamp REAL, document TEXT NOT NULL, PRIMARY KEY (generation, position))""",
     "conversation_search_projection_version": """CREATE TABLE IF NOT EXISTS conversation_search_projection_version (
         id INTEGER PRIMARY KEY CHECK (id=1), version INTEGER NOT NULL)""",
     "conversation_search_revisions": """CREATE TABLE IF NOT EXISTS conversation_search_revisions (
@@ -198,6 +220,14 @@ _GENERATION_SCHEMA = {
     "conversation_search_routing_chunks": """CREATE TABLE IF NOT EXISTS conversation_search_routing_chunks (
         generation TEXT NOT NULL, part INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (generation, part))""",
     "conversation_search_message_index": """CREATE VIEW IF NOT EXISTS conversation_search_message_index AS
+        SELECT h.thread_id, e.turn_id, e.item_id, e.role, e.timestamp,
+            (SELECT group_concat(text, '') FROM (SELECT text FROM conversation_search_document_text c
+             WHERE c.document=e.document ORDER BY c.part)) AS text,
+            (SELECT group_concat(folded, '') FROM (SELECT folded FROM conversation_search_document_text c
+             WHERE c.document=e.document ORDER BY c.part)) AS folded,
+            e.position FROM conversation_search_heads h
+        JOIN conversation_search_document_entries e ON e.generation=h.generation
+        UNION ALL
         SELECT h.thread_id, e.turn_id, e.item_id, e.role, e.timestamp,
             (SELECT group_concat(text, '') FROM (SELECT text FROM conversation_search_text_chunks c
              WHERE c.generation=e.generation AND c.position=e.position ORDER BY c.part)) AS text,
@@ -273,7 +303,9 @@ def search_metrics(store):
             result[operation] = {key: value for key, value in values.items() if key != "samples_ms"}
             result[operation]["p50_ms"] = samples[(len(samples) - 1) // 2]
             result[operation]["p95_ms"] = samples[min(len(samples) - 1, int(len(samples) * .95))]
-        return result
+    from .conversation_substrings import metrics as substring_metrics
+    result["substring_index"] = substring_metrics(store)
+    return result
 
 
 def _ensure_generation_schema(db):
@@ -285,10 +317,10 @@ def _ensure_generation_schema(db):
     version = db.execute("SELECT version FROM conversation_search_projection_version WHERE id=1").fetchone()
     for name, statement in _GENERATION_SCHEMA.items():
         if statement.startswith("CREATE VIEW"):
-            if version is None or version[0] != 2:
+            if version is None or version[0] != 3:
                 db.execute(f"DROP VIEW IF EXISTS {name}")
             db.execute(statement)
-    db.execute("INSERT OR REPLACE INTO conversation_search_projection_version VALUES (1, 2)")
+    db.execute("INSERT OR REPLACE INTO conversation_search_projection_version VALUES (1, 3)")
     if available:
         # An outer history UPSERT overrides OR REPLACE inside an older trigger.
         # Explicit UPSERT has its own conflict policy and keeps legacy writes safe.
@@ -319,7 +351,7 @@ def _pending_messages(db, cwd):
     # refresh chasing its dirty queue, and no backlog-sized payload is decoded.
     ready, identities, garbage = db.execute(f"""SELECT
         (SELECT COUNT(*) FROM sqlite_master WHERE name IN ({','.join('?' * len(_GENERATION_NAMES))})) = ?
-            AND (SELECT version=2 FROM conversation_search_projection_version WHERE id=1),
+            AND (SELECT version=3 FROM conversation_search_projection_version WHERE id=1),
         (SELECT json_group_array(thread_id) FROM ({_PENDING}){scope}),
         EXISTS (SELECT 1 FROM conversation_search_generations
                 WHERE state='garbage' OR state='staging' AND expires_at<?)""",
@@ -334,13 +366,191 @@ class PreparedMessages:
     status: str | None
     records: tuple
     routing: str | None
+    document_records: tuple = ()
+
+
+def _document_key(references):
+    # Include the extraction policy version: a later policy must not reuse
+    # negative results (tool output or excluded provider context) from this one.
+    return hashlib.sha256(("prose-v1:" + json.dumps(references, separators=(",", ":"))).encode()).hexdigest()
+
+
+def _ensure_document_cache(store):
+    with store.reading(), store._connection() as db:
+        count = db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ("
+                           + ",".join("?" * len(_DOCUMENT_SCHEMA)) + ")",
+                           tuple(_DOCUMENT_SCHEMA)).fetchone()[0]
+    if count != len(_DOCUMENT_SCHEMA):
+        with _operation(store, "search.schema"), store._connection() as db:
+            for statement in _DOCUMENT_SCHEMA.values():
+                db.execute(statement)
+
+
+def _cached_documents(db, identities, *, metadata=True):
+    result = {}
+    identities = list(identities)
+    batch_rows = _DOCUMENT_STAGE_ROWS
+    for offset in range(0, len(identities), batch_rows):
+        batch = identities[offset:offset + batch_rows]
+        # Preserve the header shape, but load payload only after selecting the
+        # last 200 routing occurrences. The covering index excludes excerpts.
+        fields = "document,item_id,role,timestamp,NULL,text_length" if metadata else "document"
+        rows = db.execute("SELECT json_group_array(json_array(" + fields + "))"
+            " FROM conversation_search_documents INDEXED BY conversation_search_document_headers"
+            " WHERE document IN (" + ",".join("?" * len(batch)) + ")",
+            batch).fetchone()[0]
+        result.update((row[0], tuple(row)) for row in json.loads(rows))
+    return result
+
+
+def _cached_document_excerpts(db, identities):
+    result = {}
+    identities = list(identities)
+    for offset in range(0, len(identities), _STAGE_ROWS):
+        batch = identities[offset:offset + _STAGE_ROWS]
+        rows = db.execute("SELECT json_group_array(json_array(document,excerpt))"
+            " FROM conversation_search_documents WHERE document IN (" + ",".join("?" * len(batch)) + ")",
+            batch).fetchone()[0]
+        result.update(json.loads(rows))
+    return result
+
+
+def _document_rows(identity, item):
+    found = next(messages({"turns": [{"items": [item]}]}), None)
+    if found is None:
+        header = (identity, None, None, None, "", 0)
+        return header, ()
+    _, _, role, timestamp, text, folded = found
+    header = (identity, str(item["id"]) if item.get("id") else None,
+              role, timestamp, text[:6000], len(text))
+    chunks = tuple((identity, start // _TEXT_CHARACTERS, text[start:start + _TEXT_CHARACTERS],
+                    folded[start:start + _TEXT_CHARACTERS])
+                   for start in range(0, max(len(text), len(folded)), _TEXT_CHARACTERS))
+    return header, chunks
+
+
+def _document_stage_rows(documents):
+    for header, chunks in documents:
+        for row in chunks:
+            yield "conversation_search_document_text", row
+        # This row is the completion marker. It is committed only after all
+        # text chunks; interrupted staging is invisible and safely resumable.
+        yield "conversation_search_documents", header
+
+
+def _stage_document_steps(store, documents):
+    for batch in _stage_batches(_document_stage_rows(documents), max_rows=_DOCUMENT_STAGE_ROWS,
+                                max_bytes=_DOCUMENT_STAGE_BYTES):
+        grouped = {}
+        for table, row in batch:
+            grouped.setdefault(table, []).append(row)
+        statements = []
+        for table, rows in grouped.items():
+            # Several statements share one bounded transaction. Keep support
+            # for SQLite builds with the original 999-variable statement limit.
+            statement_rows = _STATEMENT_PARAMETERS // len(rows[0])
+            for offset in range(0, len(rows), statement_rows):
+                selected = rows[offset:offset + statement_rows]
+                statements.append((f"INSERT OR IGNORE INTO {table} VALUES " + ",".join(
+                    "(" + ",".join("?" * len(rows[0])) + ")" for _ in selected),
+                    tuple(value for row in selected for value in row)))
+        size = sum(sum(len(v.encode("utf-8")) if isinstance(v, str) else 8 for v in row) for _, row in batch)
+        with _measure(store, "documents") as measurement:
+            with _operation(store, "search.documents"), store._connection() as db:
+                for statement, parameters in statements:
+                    db.execute(statement, parameters)
+            measurement.update(rows=len(batch), bytes=size, max_rows=len(batch), max_bytes=size)
+        yield
+
+
+def seed_prepared_history_steps(store, prepared):
+    """Seed immutable prose during saving, before publishing the history root.
+
+    Only item documents with a materialized value need consideration. Reused
+    compact documents were seeded by their earlier save; search independently
+    handles cache misses from older runtimes. Every yield is outside DB scopes.
+    """
+    _ensure_document_cache(store)
+    yield
+    documents = (document for position, document in prepared.documents.items()
+                 if len(position) == 2 and document.value is not None)
+    while batch := list(islice(documents, _DOCUMENT_STAGE_ROWS)):
+        available = {_document_key(document.references): document.value for document in batch}
+        with store.reading(), store._connection() as db:
+            cached = _cached_documents(db, available, metadata=False)
+        yield
+        yield from _stage_document_steps(store, (_document_rows(identity, item)
+                                                for identity, item in available.items() if identity not in cached))
+        from .conversation_substrings import index_document_steps
+        yield from index_document_steps(store, available)
+
+
+def _prepare_document_messages(store, thread_id, revision, manifest):
+    from .history_persistence import _documents
+    _ensure_document_cache(store)
+    with _measure(store, "document_read") as measurement:
+        with store.reading(), store._connection() as db:
+            db.execute("BEGIN")
+            root = _documents(db, [manifest["root"]])[0]
+            metadata, turn_references = root["metadata"], root["turns"]
+            if not isinstance(metadata, dict) or not isinstance(turn_references, list):
+                raise ValueError("Invalid conversation manifest")
+            turns = _documents(db, turn_references)
+            references = {}
+            for turn in turns:
+                if not isinstance(turn.get("metadata"), dict) or not isinstance(turn.get("items", []), list):
+                    raise ValueError("Invalid conversation turn manifest")
+                for reference in turn.get("items", []):
+                    references[_document_key(reference)] = reference
+            cached = _cached_documents(db, references)
+            missing = [(identity, reference) for identity, reference in references.items() if identity not in cached]
+            documents = []
+            for offset in range(0, len(missing), _STAGE_ROWS):
+                batch = missing[offset:offset + _STAGE_ROWS]
+                items = _documents(db, [reference for _, reference in batch])
+                for (identity, _), item in zip(batch, items):
+                    document = _document_rows(identity, item)
+                    documents.append(document)
+                    cached[identity] = document[0]
+            measurement.update(decoded_documents=len(missing), reused_documents=len(references) - len(missing))
+        for _ in _stage_document_steps(store, documents):
+            pass
+    records, routing, count = {}, [], 0
+    for turn_index, turn in enumerate(turns):
+        turn_metadata = turn["metadata"]
+        turn_id = str(turn_metadata.get("id") or f"search-turn-{turn_index}")
+        for item_index, reference in enumerate(turn.get("items", [])):
+            document, item_id, role, timestamp, excerpt, text_length = cached[_document_key(reference)]
+            if role is None:
+                continue
+            item_id = item_id or f"search-item-{item_index}"
+            timestamp = timestamp or seconds(turn_metadata.get("startedAt"))
+            records[(turn_id, item_id)] = (count, turn_id, item_id, role, timestamp, document)
+            routing.append((document, {"turn_id": turn_id, "item_id": item_id, "role": role,
+                            "timestamp": timestamp, "text": excerpt, "truncated": text_length > 6000}))
+            if len(routing) > 200:
+                del routing[0]
+            count += 1
+    selected = {document for document, record in routing if record["text"] is None}
+    with _measure(store, "routing_read") as measurement:
+        excerpts = {}
+        if selected:
+            with store.reading(), store._connection() as db:
+                excerpts = _cached_document_excerpts(db, selected)
+        measurement.update(documents=len(excerpts), characters=sum(map(len, excerpts.values())))
+    for document, record in routing:
+        if record["text"] is None:
+            record["text"] = excerpts[document]
+    status = "partial" if metadata.get("historyUnavailable") else "saved"
+    evidence = {"history_status": status, "messages": [record for _, record in routing], "history_truncated": count > 200}
+    return PreparedMessages(thread_id, revision, status, (), json.dumps(evidence), tuple(records.values()))
 
 
 def prepare_messages(store, thread_id):
     """Read one source revision, then decode it outside all store scopes."""
     with _measure(store, "prepare") as measurement:
         result = _prepare_messages(store, thread_id)
-        measurement["messages"] = len(result.records)
+        measurement["messages"] = len(result.records) + len(result.document_records)
         return result
 
 
@@ -354,13 +564,17 @@ def _prepare_messages(store, thread_id):
     routing = {"messages": [], "history_status": "unavailable"}
     try:
         from .history_persistence import decode_history
+        manifest = json.loads(row["history_json"])
+        from .history_persistence import MARKER
+        if isinstance(manifest, dict) and manifest.get(MARKER) == 1 and manifest.get("layout") == "turns":
+            return _prepare_document_messages(store, thread_id, row["revision"], manifest)
         history = decode_history(row["history_json"], database_path=store.database_path)
         found = list(messages(history))
         routing = routing_history(history, found)
         if not isinstance(history, dict) or not isinstance(history.get("turns", []), list):
             raise ValueError("Invalid conversation history")
         status = "partial" if history.get("historyUnavailable") else "saved"
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, KeyError):
         found, status = [], "unavailable"
     # Search keeps the last duplicate ID; routing intentionally keeps them all.
     records = {(record[0], record[1]): (position, *record) for position, record in enumerate(found)}
@@ -368,6 +582,8 @@ def _prepare_messages(store, thread_id):
 
 
 def _stage_rows(prepared, generation):
+    for record in prepared.document_records:
+        yield "conversation_search_document_entries", (generation, *record)
     for position, turn_id, item_id, role, timestamp, text, folded in prepared.records:
         yield "conversation_search_entries", (generation, position, turn_id, item_id, role, timestamp)
         for start in range(0, max(len(text), len(folded)), _TEXT_CHARACTERS):
@@ -378,11 +594,11 @@ def _stage_rows(prepared, generation):
                                                      prepared.routing[start:start + _TEXT_CHARACTERS])
 
 
-def _stage_batches(rows):
+def _stage_batches(rows, *, max_rows=_STAGE_ROWS, max_bytes=_STAGE_BYTES):
     batch, size = [], 0
     for table, row in rows:
         length = sum(len(value.encode("utf-8")) if isinstance(value, str) else 8 for value in row)
-        if batch and (len(batch) >= _STAGE_ROWS or size + length > _STAGE_BYTES):
+        if batch and (len(batch) >= max_rows or size + length > max_bytes):
             yield batch
             batch, size = [], 0
         batch.append((table, row))
@@ -429,6 +645,11 @@ def _publish_messages(store, prepared):
         for batch in _stage_batches(_stage_rows(prepared, generation)):
             if not _stage_batch(store, generation, batch):
                 return False
+        from .conversation_substrings import index_document_steps, index_generation_steps
+        indexing = (index_document_steps(store, (record[-1] for record in prepared.document_records))
+                    if prepared.document_records else index_generation_steps(store, generation))
+        for _ in indexing:
+            pass
     with _measure(store, "publish") as measurement:
         result = _publish_head(store, prepared, generation)
         measurement["published" if result else "discarded"] = 1
@@ -468,7 +689,8 @@ def _publish_head(store, prepared, generation):
 
 def _cleanup_messages(store):
     """Bound garbage collection too; an expired stage can never resume midway."""
-    tables = ("conversation_search_text_chunks", "conversation_search_entries", "conversation_search_routing_chunks")
+    tables = ("conversation_search_text_chunks", "conversation_search_entries", "conversation_search_routing_chunks",
+              "conversation_search_document_entries")
     for _ in range(_CLEANUP_BATCHES):
         with store.reading(), store._connection() as db:
             row = db.execute("""SELECT generation FROM conversation_search_generations g
@@ -523,7 +745,16 @@ def _refresh_messages(store, cwd, measurement):
             _, identities, garbage = _pending_messages(db, cwd)
     measurement["pending_histories"] = len(identities)
     for thread_id in identities:
-        publish_messages(store, prepare_messages(store, thread_id))
+        for attempt in range(3):
+            if publish_messages(store, prepare_messages(store, thread_id)):
+                break
+            measurement["revision_conflicts"] = measurement.get("revision_conflicts", 0) + 1
+        else:
+            # Returning normally would let the query advertise an older head
+            # as fresh. Keep the initial identity inventory bounded, but never
+            # silently hide or substitute a source that changes during staging.
+            from .store import CoordinationError
+            raise CoordinationError("Conversation search changed repeatedly while indexing. Try again.")
     if identities or garbage:
         from .browser_persistence import database_busy
         try:

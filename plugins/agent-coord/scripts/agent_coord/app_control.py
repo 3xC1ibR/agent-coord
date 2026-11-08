@@ -25,7 +25,8 @@ class AppControl:
         with store.reading(), store._connection() as db:
             if db.execute("""SELECT COUNT(*) FROM sqlite_master WHERE name IN
                 ('app_control_requests','app_control_runtimes','app_control_pending','app_control_creator_metadata',
-                 'app_control_sender_requests','app_control_thread_requests')""").fetchone()[0] == 6:
+                 'app_control_sender_requests','app_control_thread_requests',
+                 'app_control_sidecar_requests')""").fetchone()[0] == 7:
                 return
         with store._connection() as db:
             db.executescript(f"""
@@ -40,6 +41,9 @@ class AppControl:
                     id TEXT PRIMARY KEY, heartbeat REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS app_control_pending ON app_control_requests(status, updated_at);
+                CREATE INDEX IF NOT EXISTS app_control_sidecar_requests ON app_control_requests(
+                    json_extract(payload_json, '$.target_id'), request_id)
+                    WHERE operation = 'sidecar' AND status NOT IN ('completed', 'cancelled');
                 CREATE INDEX IF NOT EXISTS app_control_sender_requests ON app_control_requests(
                     sender_session_id, operation, status, created_at, request_id);
                 CREATE INDEX IF NOT EXISTS app_control_thread_requests ON app_control_requests(
@@ -49,6 +53,18 @@ class AppControl:
                     WHERE operation = 'create' AND thread_id IS NOT NULL
                     AND status IN ('running', 'completed', 'uncertain');
             """)
+
+    def sidecar_request_ids(self, thread_id):
+        """Read only the selected conversation's unresolved sidecar requests.
+
+        This five-second UI poll must neither scan unrelated request payloads
+        nor reserve writer admission while discovering request identifiers.
+        """
+        with self.store.reading(), self.store._connection() as db:
+            return [row[0] for row in db.execute("""SELECT request_id
+                FROM app_control_requests INDEXED BY app_control_sidecar_requests
+                WHERE operation = 'sidecar' AND status NOT IN ('completed', 'cancelled')
+                AND json_extract(payload_json, '$.target_id') = ?""", (thread_id,))]
 
     def settings(self, thread_id):
         session = self.store.get_session(thread_id)

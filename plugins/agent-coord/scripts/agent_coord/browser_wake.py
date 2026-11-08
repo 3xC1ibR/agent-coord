@@ -16,6 +16,7 @@ from pathlib import Path
 from .workspaces import matches_workspace
 from .app_agent_failures import notify_agent_failure
 from .store import CoordinationError
+from .sqlite_rows import read_rows
 from .browser_persistence import database_busy
 
 
@@ -85,7 +86,7 @@ class BrowserInboxWake:
     def stopped_conversations(self):
         """Open conversations held by a deliberate Stop, for the user's release action."""
         from .supervision import effective_supervisor
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             rows = db.execute("""SELECT w.thread_id, w.error, w.paused_at, t.title, s.cwd FROM browser_inbox_wake w
                 JOIN work_threads t ON t.thread_id = w.thread_id JOIN sessions s ON s.session_id = w.thread_id
                 WHERE w.paused = 1 AND w.pause_kind = 'stop' AND t.attention != 'archived'
@@ -175,14 +176,14 @@ class BrowserInboxWake:
         checked, next_check = self.checked_pauses.get(thread_id, (0, 0))
         if checked >= 3 or next_check > self.store.clock():
             return
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             row = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id = ?", (thread_id,)).fetchone()
         if (not row or not row["paused"] or row["pause_kind"] != "failure"
                 or row["dispatching"] or row["reconciled_turn_id"]):
             return
         if self.store.threads.get(thread_id, history=False)["attention"] == "archived":
             return
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone() and db.execute(
                     "SELECT 1 FROM thread_close_requests WHERE thread_id = ? AND status IN ('queued', 'closing')", (thread_id,)).fetchone():
                 return
@@ -361,13 +362,14 @@ class BrowserInboxWake:
             return {"session_id": thread_id, "resumed_after_turn_id": expected_turn_id, "state": "ready",
                     "resumed_by": requester, "reason": reason}
 
-    def _eligible(self, db, thread_id, *, submitting=False):
+    def _eligible(self, db, thread_id, *, submitting=False, cleanup=True):
         if self.stopped.is_set() or self.sessions.closed:
             return False
         if hasattr(self.sessions, "reviews") and not self.sessions.reviews.wake_allowed(db, thread_id):
             return False
-        from .sidecars import discard_stale_messages
-        discard_stale_messages(db, thread_id, self.store.clock())
+        if cleanup:
+            from .sidecars import discard_stale_messages
+            discard_stale_messages(db, thread_id, self.store.clock())
         row = db.execute("""SELECT s.turn_active, t.attention,
                 w.paused, w.dispatching, w.retry_at
             FROM browser_sessions b JOIN work_threads t ON t.thread_id = b.thread_id
@@ -392,6 +394,19 @@ class BrowserInboxWake:
                     AND status IN ('queued', 'closing')""", (thread_id,)).fetchone():
                 return False
         return True
+
+    def _preview_eligibility(self, thread_id):
+        # Ordinary inbox polling only reads. Sidecar interventions may require
+        # durable suppression even while paused, so retain the original write
+        # boundary for every pending intervention, regardless of classification.
+        with self.store.reading(), self.store._connection() as db:
+            intervention = db.execute("""SELECT 1 FROM messages
+                WHERE recipient_session_id=? AND delivered_at IS NULL
+                  AND thread_id GLOB 'event:sidecar:*:intervention:*' LIMIT 1""", (thread_id,)).fetchone()
+            if not intervention:
+                return self._eligible(db, thread_id, cleanup=False)
+        with self.store._connection() as db:
+            return self._eligible(db, thread_id)
 
     def can_submit(self, thread_id):
         with self.store._connection() as db:
@@ -431,11 +446,11 @@ class BrowserInboxWake:
         # Read just pending recipients, not conversation histories, on each tick.
         # Discovery is a snapshot; _claim revalidates eligibility atomically.
         with self.store.reading(), self.store._connection() as db:
-            rows = db.execute("""SELECT DISTINCT b.thread_id, b.cwd FROM messages m
+            rows = read_rows(db, """SELECT DISTINCT b.thread_id, b.cwd FROM messages m
                 JOIN browser_sessions b ON b.thread_id = m.recipient_session_id
                 LEFT JOIN message_wake_attempts a ON a.message_id = m.id
                 WHERE m.delivered_at IS NULL AND m.classification = 'action_required'
-                AND a.message_id IS NULL""").fetchall()
+                AND a.message_id IS NULL""", columns=("thread_id", "cwd"))
         for row in rows:
             if self.stopped.is_set() or self.sessions.closed:
                 return
@@ -452,9 +467,10 @@ class BrowserInboxWake:
         with sessions._thread_lock(thread_id):
             sessions._await_persistence(thread_id)
             self._reconcile_pause(thread_id)
-            with self.store._connection() as db:
-                if not self._eligible(db, thread_id):
-                    return
+            # Advisory only: _claim and can_submit still clean up and
+            # revalidate under writer admission before accepting a wake.
+            if not self._preview_eligibility(thread_id):
+                return
             with sessions.lock:
                 if thread_id in sessions.active:
                     return
@@ -470,7 +486,7 @@ class BrowserInboxWake:
                 return
             turns = detail["thread"].get("turns", [])
             if turns and turns[-1].get("status") in {"interrupted", "failed"}:
-                with self.store._connection() as db:
+                with self.store.reading(), self.store._connection() as db:
                     recovery = db.execute("SELECT recovery_turn_id FROM browser_inbox_wake WHERE thread_id = ?",
                                           (thread_id,)).fetchone()
                 if not (recovery and recovery[0] == turns[-1].get("id")):
@@ -543,7 +559,7 @@ class BrowserInboxWake:
         self.sessions.persistence.submit(lambda: self._persist_failure(thread_id, error), key=thread_id)
 
     def _persist_failure(self, thread_id, error):
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             ids = [row[0] for row in db.execute("""SELECT id FROM messages
                 WHERE recipient_session_id = ? AND delivered_at IS NULL
                 AND classification = 'action_required' ORDER BY id""", (thread_id,))]

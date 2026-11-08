@@ -124,6 +124,59 @@ class SidecarTests(unittest.TestCase):
         with patch.object(self.runtime, "snapshot", side_effect=AssertionError("Idle watches must not copy history")):
             self.runtime.process_once()
 
+    def test_sidecar_request_lookup_is_bounded_and_does_not_wait_for_writer(self):
+        with self.store._connection() as db:
+            # Completed requests and other targets must not make this poll
+            # proportional to the accumulated request archive.
+            rows = [(f"archive-{i}", "create", "completed", "{}") for i in range(1500)]
+            rows += [(f"other-{i}", "sidecar", "queued_sidecar", json.dumps({"target_id": "other"}))
+                     for i in range(1500)]
+            rows += [(state, "sidecar", state, json.dumps({"target_id": self.target}))
+                     for state in ("queued_sidecar", "running", "failed", "uncertain", "completed", "cancelled")]
+            db.executemany("""INSERT INTO app_control_requests
+                (request_id, operation, sender_session_id, cwd, payload_json, status, created_at, updated_at)
+                VALUES (?, ?, 'owner', ?, ?, ?, ?, ?)""",
+                [(key, operation, str(self.root), payload, status, self.now, self.now)
+                 for key, operation, status, payload in rows])
+
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        result, failures = [], []
+        def hold_writer():
+            with self.store._connection():
+                entered.set()
+                release.wait(5)
+        def read():
+            try:
+                # The existing reader is reused by the lookup. Abort before
+                # 1,000 VM instructions: a full scan of either archive fails.
+                with self.store.reading(), self.store._connection() as db:
+                    # Load the schema before counting query work.
+                    db.execute("SELECT 1 FROM app_control_requests LIMIT 1").fetchone()
+                    db.set_progress_handler(lambda: 1, 1000)
+                try:
+                    result.extend(self.control.sidecar_request_ids(self.target))
+                finally:
+                    with self.store.reading(), self.store._connection() as connection:
+                        connection.set_progress_handler(None, 0)
+            except Exception as error:
+                failures.append(error)
+            finally:
+                finished.set()
+        writer = threading.Thread(target=hold_writer)
+        reader = threading.Thread(target=read)
+        writer.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            reader.start()
+            self.assertTrue(finished.wait(2), "Read-only sidecar discovery waited behind a writer")
+        finally:
+            release.set()
+            writer.join(5)
+            if reader.ident is not None:
+                reader.join(5)
+        self.assertEqual(failures, [])
+        self.assertEqual(set(result), {"queued_sidecar", "running", "failed", "uncertain"})
+
     def test_http_attachment_controls_and_workspace_isolation(self):
         server = make_ui_server(self.store, host="127.0.0.1", port=0, cwd=str(self.root), browser_sessions=self.sessions)
         for component in (server.app_control, self.sessions.inbox_wake, self.sessions.sidecars):
@@ -145,6 +198,8 @@ class SidecarTests(unittest.TestCase):
             queued = post({"purpose": "Verify checkout", "request_id": "http-watch"})
             self.assertEqual(queued["status"], "queued")
             self.assertEqual(get(path)["requests"][0]["request_id"], "http-watch")
+            metrics = get("/api/browser/performance")
+            self.assertGreater(metrics["requests"]["sidecar_status"]["count"], 0)
             self.worker.process_once()
             watch = get(path)["watches"][0]
             self.assertEqual(watch["target_id"], self.target)

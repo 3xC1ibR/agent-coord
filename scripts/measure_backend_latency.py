@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+from http import HTTPStatus
 import json
+import math
 import os
 import platform
 from pathlib import Path
@@ -38,6 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import weakref
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / "plugins/agent-coord/scripts"
@@ -51,8 +54,12 @@ BUDGETS = {
     "send_accepted": {"p50": 150, "p95": 400},
     "send_event_visible": {"p50": 150, "p95": 400},
     "list": {"p50": 300, "p95": 800},
+    "background_list": {"p50": 300, "p95": 800},
     "read_target": {"p50": 300, "p95": 800},
     "thread_target": {"p50": 100, "p95": 300},
+    "background_thread": {"p50": 100, "p95": 300},
+    "sidecar_status": {"p50": 100, "p95": 300},
+    "background_sidecar_status": {"p50": 100, "p95": 300},
     "search": {"p50": 300, "p95": 800},
 }
 
@@ -67,6 +74,263 @@ def check_budgets(summary):
     return failures
 
 
+def check_database_health(metrics):
+    """A fast response does not excuse failed or undrained persistence."""
+    if not isinstance(metrics, dict) or not metrics:
+        return ["Database performance metrics are unavailable"]
+    persistence = metrics.get("persistence") or {}
+    history = metrics.get("history") or {}
+    if not isinstance(persistence, dict) or not isinstance(history, dict):
+        return ["Database performance metrics are malformed"]
+    failures = []
+    for name, value in (("admission_timeouts", metrics.get("admission_timeouts")),
+                        ("persistence.retries", persistence.get("retries")),
+                        ("persistence.failure_count", persistence.get("failure_count")),
+                        ("persistence.optional_failure_count", persistence.get("optional_failure_count", 0)),
+                        ("persistence.pending", persistence.get("pending")),
+                        ("history.failures", history.get("failures")),
+                        ("history.search_seed_failures", history.get("search_seed_failures", 0))):
+        if value != 0:
+            failures.append(f"{name} must be zero, observed {value}")
+    search = metrics.get("search")
+    if search is not None:
+        if not isinstance(search, dict):
+            failures.append("Search metrics are malformed")
+        else:
+            for operation, values in search.items():
+                if not isinstance(values, dict) or values.get("failures", 0) != 0:
+                    failures.append(f"Search operation {operation} reported failures or malformed metrics")
+    index = search.get("substring_index") if isinstance(search, dict) else None
+    if not isinstance(index, dict):
+        failures.append("Substring index coverage metrics are unavailable")
+    elif (index.get("supported") is not True or index.get("state") != "complete"
+          or index.get("remaining_sources") != 0 or index.get("failures") != 0
+          or index.get("backfill_running") is not False
+          or index.get("backfill_completed") is not True):
+        failures.append("Substring index must complete without failures before acceptance")
+    checkpoint = metrics.get("checkpoint")
+    if checkpoint is not None:
+        if not isinstance(checkpoint, dict):
+            failures.append("Checkpoint metrics are malformed")
+        elif checkpoint.get("errors") != 0:
+            failures.append(f"checkpoint.errors must be zero, observed {checkpoint.get('errors')}")
+        elif checkpoint.get("state") not in {"running", "unsupported_sqlite"}:
+            failures.append(f"Checkpoint maintenance is not running: {checkpoint.get('state')}")
+    return failures
+
+
+def check_stream_workload(report):
+    """Verify the advertised streaming load was actually present and sustained."""
+    before, after = report.get("workload_before"), report.get("workload_after")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return ["Synthetic stream workload observations are unavailable"]
+    if not isinstance(before.get("threads"), dict) or not isinstance(after.get("threads"), dict):
+        return ["Synthetic stream workload observations are malformed"]
+    timestamps = before.get("observed_monotonic"), after.get("observed_monotonic")
+    if any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in timestamps):
+        return ["Synthetic stream workload observation timestamps are malformed"]
+    elapsed = timestamps[1] - timestamps[0]
+    if elapsed <= 0:
+        return ["Synthetic stream workload observation interval must be positive"]
+    expected = report.get("expected_stream_threads", [])
+    failures = []
+    if len(expected) != report.get("requested_agents"):
+        failures.append(f"Requested {report.get('requested_agents')} streaming agents but selected {len(expected)}")
+    rates = report["stream_rates_hz"] = {}
+    for thread in expected:
+        for name, snapshot in (("before", before), ("after", after)):
+            observed = snapshot["threads"].get(thread, {})
+            if not isinstance(observed, dict):
+                failures.append(f"Synthetic stream {thread} {name}: malformed worker statistics")
+                continue
+            if observed.get("active_streams") != 1:
+                failures.append(f"Synthetic stream {thread} {name}: expected one worker, observed {observed.get('active_streams')}")
+            if observed.get("stream_errors", 0):
+                failures.append(f"Synthetic stream {thread} {name}: {observed['stream_errors']} worker errors")
+        observations = [snapshot["threads"].get(thread, {}) for snapshot in (before, after)]
+        if any(not isinstance(observed, dict) or not isinstance(observed.get("delta_events", 0), int)
+               for observed in observations):
+            failures.append(f"Synthetic stream {thread}: malformed event counts")
+            continue
+        initial, final = [observed.get("delta_events", 0) for observed in observations]
+        rate = (final - initial) / elapsed
+        rates[thread] = round(rate, 3)
+        # Account for scheduling/encoding overhead without accepting a workload
+        # that silently emits substantially fewer events than requested.
+        if rate < report["delta_rate"] * .9:
+            failures.append(f"Synthetic stream {thread}: {rate:.3f} events/s is below 90% of {report['delta_rate']}")
+    return failures
+
+
+def drain_workload(client, threads, report, timeout=10, quiet_period=1):
+    """Stop only synthetic agents in the isolated clone, then bound the drain."""
+    report["drain_completed"] = False
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            report.setdefault("drain_errors", []).append("Synthetic agent stop deadline exceeded")
+            break
+        try:
+            client.call(f"/api/browser/sessions/{thread}/interrupt", {}, timeout=remaining)
+        except Exception as error:
+            report.setdefault("drain_errors", []).append(str(error))
+    quiet_since = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            report.setdefault("drain_errors", []).append("Persistence drain deadline exceeded")
+            return
+        try:
+            _, metrics, _ = client.call("/api/browser/performance", timeout=remaining)
+            report["database_metrics"] = metrics
+        except Exception as error:
+            report["database_metrics_unavailable"] = str(error)
+            report.setdefault("drain_errors", []).append("Persistence drain metrics failed: " + str(error))
+            return
+        now = time.monotonic()
+        if now >= deadline:
+            report.setdefault("drain_errors", []).append("Persistence drain deadline exceeded")
+            return
+        if not isinstance(metrics, dict) or not isinstance(metrics.get("persistence"), dict):
+            report.setdefault("drain_errors", []).append("Persistence drain metrics are malformed")
+            return
+        if metrics["persistence"].get("pending") == 0:
+            if quiet_since is None:
+                quiet_since = now
+            if now - quiet_since >= quiet_period:
+                report["drain_completed"] = True
+                return
+        else:
+            quiet_since = None
+        time.sleep(min(.1, deadline - now))
+
+
+def stop_process(process, label, report, timeout):
+    """Reap an owned measurement child even when orderly termination fails."""
+    if process is None:
+        return True
+    try:
+        if process.poll() is None:
+            process.terminate()
+    except ProcessLookupError:
+        pass
+    except Exception as error:
+        report.setdefault("cleanup_errors", []).append(f"{label} termination failed: {error}")
+    try:
+        process.wait(timeout=timeout)
+        return True
+    except Exception as error:
+        report.setdefault("cleanup_errors", []).append(f"{label} did not exit cleanly: {error}")
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    except Exception as error:
+        report.setdefault("cleanup_errors", []).append(f"{label} kill failed: {error}")
+    try:
+        process.wait(timeout=5)
+        return True
+    except Exception as error:
+        report.setdefault("cleanup_errors", []).append(f"{label} could not be reaped: {error}")
+        return False
+
+
+def cleanup_workload(server, hooks, client, threads, report, quiet_period):
+    """Keep diagnostics failures from abandoning the isolated backend."""
+    hooks_reaped = not hooks
+    report["children_reaped"] = False
+    try:
+        results = []
+        for index, hook in enumerate(hooks):
+            results.append(stop_process(hook, f"Hook writer {index + 1}", report, timeout=5))
+        hooks_reaped = all(results)
+        if client is None:
+            report["database_metrics_unavailable"] = "Measurement client initialization did not complete"
+            return
+        try:
+            _, report["workload_after"], _ = client.call("/api/measurement/workload", timeout=5)
+        except Exception as error:
+            report.setdefault("drain_errors", []).append("Synthetic stream observations failed: " + str(error))
+        try:
+            _, report["database_metrics_under_load"], _ = client.call("/api/browser/performance", timeout=5)
+        except Exception as error:
+            report["database_metrics_unavailable"] = str(error)
+        try:
+            drain_workload(client, threads, report, quiet_period=quiet_period)
+        except Exception as error:
+            report["drain_completed"] = False
+            report.setdefault("drain_errors", []).append("Persistence drain failed: " + str(error))
+    finally:
+        backend_reaped = stop_process(server, "Measurement backend", report, timeout=20)
+        report["children_reaped"] = hooks_reaped and backend_reaped
+
+
+def remove_workload_database(report, root, output):
+    """Keep small diagnostics, never retain an inactive database on test failure."""
+    root = Path(root).resolve()
+    destination = Path(output).resolve() if output else root / "report.json"
+    report["report_path"] = str(destination)
+    report["database_retained"] = True
+    if not report.get("children_reaped"):
+        report.setdefault("cleanup_errors", []).append("Database retained because owned child termination was not confirmed")
+        return destination
+    preserved = {root / "server.log", destination}
+    try:
+        # This invocation owns the entire temporary directory. The live
+        # database and the source snapshot are always outside it.
+        if root.exists():
+            for entry in root.iterdir():
+                if entry in preserved or entry in destination.parents:
+                    continue
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+        report["database_retained"] = False
+    except OSError as error:
+        report.setdefault("cleanup_errors", []).append("Workload database cleanup failed: " + str(error))
+    log = root / "server.log"
+    if log.exists():
+        report["server_log"] = str(log)
+        if root not in destination.parents:
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                saved_log = destination.with_suffix(".server.log")
+                shutil.copy2(log, saved_log)
+                log.unlink()
+                report["server_log"] = str(saved_log)
+            except OSError as error:
+                report.setdefault("cleanup_errors", []).append("Measurement log preservation failed: " + str(error))
+    try:
+        if root not in destination.parents and root.exists() and not any(root.iterdir()):
+            root.rmdir()
+    except OSError as error:
+        report.setdefault("cleanup_errors", []).append("Measurement directory cleanup failed: " + str(error))
+    return destination
+
+
+def finish_report(report, root, output):
+    """Persist failed measurements, including incomplete diagnostics and cleanup."""
+    destination = remove_workload_database(report, root, output)
+    report["summary"] = {name: quantiles(values) for name, values in report["samples"].items() if name != "errors"}
+    report["error_count"] = len(report["samples"].get("errors", []))
+    report["budget_failures"] = (check_budgets(report["summary"])
+                                 + check_database_health(report.get("database_metrics"))
+                                 + check_stream_workload(report)
+                                 + report.get("drain_errors", []) + report.get("cleanup_errors", []))
+    if "database_metrics_unavailable" in report:
+        report["budget_failures"].append("Database performance metrics unavailable: " + report["database_metrics_unavailable"])
+    if not report.get("drain_completed"):
+        report["budget_failures"].append("Persistence drain did not complete")
+    report["artifacts_retained"] = True
+    if not output:
+        report.pop("samples")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(report, indent=1))
+    print(json.dumps({k: v for k, v in report.items() if k != "samples"}, indent=1))
+
+
 def quantiles(values):
     ordered = sorted(values)
     if not ordered:
@@ -74,6 +338,11 @@ def quantiles(values):
     pick = lambda q: round(ordered[min(len(ordered) - 1, int(q * (len(ordered) - 1) + 0.5))], 1)
     return {"n": len(ordered), "p50": pick(.5), "p90": pick(.9), "p95": pick(.95), "max": round(ordered[-1], 1),
             "mean": round(statistics.fmean(ordered), 1)}
+
+
+def interrupt_measurement(signum, frame):
+    """Route ordinary process termination through owned-resource cleanup."""
+    raise KeyboardInterrupt(f"Measurement terminated by signal {signum}")
 
 
 # --------------------------------------------------------------------------
@@ -88,13 +357,60 @@ class SyntheticProvider:
     delta_rate = 8.0
     stream_seconds = 600.0
     short_turn_seconds = 1.5
+    instances = weakref.WeakSet()
+    instances_lock = threading.Lock()
 
     def __init__(self, store, callback):
         self.store = store
         self.callback = callback
         self.threads = {}
         self.lock = threading.Lock()
+        self.stream_lock = threading.Lock()
+        self.stream_workers = {}
+        self.stream_statistics = {}
         self.closed = False
+        with self.instances_lock:
+            self.instances.add(self)
+
+    @classmethod
+    def workload_snapshot(cls):
+        with cls.instances_lock:
+            instances = list(cls.instances)
+        threads = {}
+        for instance in instances:
+            with instance.stream_lock:
+                for thread, statistics in instance.stream_statistics.items():
+                    totals = threads.setdefault(thread, dict(active_streams=0, streams_started=0,
+                        streams_completed=0, delta_events=0, stream_errors=0))
+                    for name, value in statistics.items():
+                        totals[name] += value
+        return {"observed_monotonic": time.monotonic(), "threads": threads}
+
+    def _start_stream(self, thread_id, turn, duration):
+        key = thread_id, turn["id"]
+        with self.stream_lock:
+            if self.closed or key in self.stream_workers:
+                return
+            worker = threading.Thread(target=self._stream, args=(thread_id, turn, duration), daemon=True)
+            self.stream_workers[key] = worker
+            statistics = self.stream_statistics.setdefault(thread_id, dict(active_streams=0, streams_started=0,
+                streams_completed=0, delta_events=0, stream_errors=0))
+            statistics["active_streams"] += 1
+            statistics["streams_started"] += 1
+        worker.start()
+
+    def _stream(self, thread_id, turn, duration):
+        try:
+            self._stream_events(thread_id, turn, duration)
+        except Exception:
+            with self.stream_lock:
+                self.stream_statistics[thread_id]["stream_errors"] += 1
+            raise
+        finally:
+            with self.stream_lock:
+                self.stream_workers.pop((thread_id, turn["id"]), None)
+                self.stream_statistics[thread_id]["active_streams"] -= 1
+                self.stream_statistics[thread_id]["streams_completed"] += 1
 
     def _emit(self, message):
         if not self.closed:
@@ -160,7 +476,7 @@ class SyntheticProvider:
             text = " ".join(part.get("text", "") for part in params["input"])
             duration = self.stream_seconds if "[synthetic-load]" in text else self.short_turn_seconds
             self._emit({"method": "turn/started", "params": {"threadId": thread_id, "turn": turn}})
-            threading.Thread(target=self._stream, args=(thread_id, turn, duration), daemon=True).start()
+            self._start_stream(thread_id, turn, duration)
             return {"turn": copy.deepcopy(turn)}
         if method == "turn/steer":
             thread = self._thread(thread_id)
@@ -171,6 +487,11 @@ class SyntheticProvider:
             item = {"id": uuid.uuid4().hex, "type": "userMessage", "content": params["input"]}
             turn["items"].append(item)
             self._emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn["id"], "item": item}})
+            text = " ".join(part.get("text", "") for part in params["input"])
+            duration = self.stream_seconds if "[synthetic-load]" in text else self.short_turn_seconds
+            # A restored in-progress turn has no synthetic worker until its
+            # first steer. Subsequent steers must reuse that worker.
+            self._start_stream(thread_id, turn, duration)
             return {"turnId": turn["id"]}
         if method == "turn/interrupt":
             thread = self._thread(thread_id)
@@ -179,9 +500,11 @@ class SyntheticProvider:
             return {}
         return {}
 
-    def _stream(self, thread_id, turn, duration):
-        ends = time.monotonic() + duration
+    def _stream_events(self, thread_id, turn, duration):
+        started = time.monotonic()
+        ends = started + duration
         message = {"id": uuid.uuid4().hex, "type": "agentMessage", "text": ""}
+        turn["items"].append(message)
         self._emit({"method": "item/started", "params": {"threadId": thread_id, "turnId": turn["id"], "item": message}})
         sequence = 0
         while time.monotonic() < ends and not self.closed and turn["status"] == "inProgress":
@@ -190,6 +513,8 @@ class SyntheticProvider:
             message["text"] += delta
             self._emit({"method": "item/agentMessage/delta", "params": {
                 "threadId": thread_id, "turnId": turn["id"], "itemId": message["id"], "delta": delta}})
+            with self.stream_lock:
+                self.stream_statistics[thread_id]["delta_events"] += 1
             if sequence % 12 == 0:
                 # Live providers also report MCP server and thread status changes
                 # (about 2/s across a dozen agents); the web UI refreshes its list on them.
@@ -200,15 +525,18 @@ class SyntheticProvider:
                         "status": "inProgress"}
                 self._emit({"method": "item/started", "params": {"threadId": thread_id, "turnId": turn["id"], "item": tool}})
                 tool.update(status="completed", exitCode=0, aggregatedOutput="ok\n" * 200)
+                turn["items"].append(tool)
                 self._emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn["id"], "item": tool}})
                 self._emit({"method": "thread/tokenUsage/updated", "params": {"threadId": thread_id, "turnId": turn["id"],
                             "tokenUsage": {"total": {"inputTokens": 1000 * sequence, "outputTokens": 10 * sequence,
                                                      "totalTokens": 1010 * sequence}, "last": {"totalTokens": 900},
                                            "modelContextWindow": 400000}}})
-            time.sleep(1 / self.delta_rate)
+            # Maintain the offered rate while the backend processes events.
+            # Sleeping a full interval after each callback would silently
+            # reduce the workload as callbacks become slower.
+            time.sleep(max(0, started + sequence / self.delta_rate - time.monotonic()))
         if turn["status"] == "inProgress":
             turn["status"] = "completed"
-        turn["items"].append(copy.deepcopy(message))
         self._emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn["id"], "item": message}})
         self._emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": copy.deepcopy(turn)}})
 
@@ -217,6 +545,44 @@ class SyntheticProvider:
 
     def close(self):
         self.closed = True
+
+
+class NormalizedSyntheticProvider(SyntheticProvider):
+    """Model adapters whose saved transcript is owned by BrowserSessions."""
+
+    def _history(self, thread_id):
+        return []  # The adapter retains current execution, not a transcript copy.
+
+    def reconcile_history(self, thread_id, history):
+        with self.lock:
+            turns = self.threads.get(thread_id, {}).get("turns", [])
+            latest = copy.deepcopy(turns[-1]) if turns else None
+        active = latest and latest["status"] == "inProgress"
+        saved = next((turn for turn in history.get("turns", []) if latest and turn["id"] == latest["id"]), None)
+        if latest and (active or saved is None or saved.get("status") == "inProgress"):
+            history["turns"] = [turn for turn in history.get("turns", []) if turn["id"] != latest["id"]] + [latest]
+        if not active:
+            for turn in history.get("turns", []):
+                if turn.get("status") == "inProgress":
+                    turn["status"] = "interrupted"
+        history["status"] = {"type": "active" if active else "idle"}
+        return history
+
+    def request(self, method, params=None):
+        params = params or {}
+        if method not in {"thread/resume", "thread/read"}:
+            return super().request(method, params)
+        thread_id = params["threadId"]
+        metadata_only = params.get("excludeTurns") if method == "thread/resume" else not params.get("includeTurns", True)
+        if metadata_only:
+            with self.lock:
+                turns = self.threads.get(thread_id, {}).get("turns", [])
+                active = bool(turns and turns[-1]["status"] == "inProgress")
+            thread = {"id": thread_id, "turns": [], "status": {"type": "active" if active else "idle"}}
+        else:
+            from agent_coord.history_persistence import read_history
+            thread = self.reconcile_history(thread_id, read_history(self.store, thread_id) or {"id": thread_id, "turns": []})
+        return {"thread": thread, "model": "synthetic", "reasoningEffort": None}
 
 
 class StackSampler(threading.Thread):
@@ -251,6 +617,17 @@ class StackSampler(threading.Thread):
         Path(self.path).write_text(f"samples {self.samples}\n" + "\n".join(f"{count:7d} {key}" for key, count in ranked))
 
 
+def measurement_handler(handler):
+    """Extend the production HTTP handler only inside the isolated workload."""
+    class MeasurementHandler(handler):
+        def do_GET(self):
+            if urllib.parse.urlparse(self.path).path == "/api/measurement/workload" and self._authorized():
+                self._json(HTTPStatus.OK, SyntheticProvider.workload_snapshot())
+            else:
+                super().do_GET()
+    return MeasurementHandler
+
+
 def serve(arguments):
     # --source selects another backend tree, e.g. a retained runtime payload,
     # so the same workload measures the code a runtime is actually running.
@@ -270,10 +647,12 @@ def serve(arguments):
     owner = desktop_runtime.lock_file(desktop_runtime.runtime_directory(store.database_path) / "owner.lock")
     desktop_runtime._OWNED_DATABASES.add(str(store.database_path.resolve()))
     workspace = arguments.cwd or None
-    sessions = BrowserSessions(store, workspace, rpc_factory=SyntheticProvider, claude_factory=SyntheticProvider,
-                               antigravity_factory=SyntheticProvider, kimi_factory=SyntheticProvider,
-                               muse_factory=SyntheticProvider)
+    normalized = NormalizedSyntheticProvider if arguments.stored_history else SyntheticProvider
+    sessions = BrowserSessions(store, workspace, rpc_factory=SyntheticProvider, claude_factory=normalized,
+                               antigravity_factory=normalized, kimi_factory=normalized,
+                               muse_factory=normalized)
     server = ui.make_ui_server(store, port=0, cwd=workspace, browser_sessions=sessions)
+    server.RequestHandlerClass = measurement_handler(server.RequestHandlerClass)
     if arguments.thread_switch_interval is not None:
         sys.setswitchinterval(arguments.thread_switch_interval)
     sampler = StackSampler(arguments.profile) if arguments.profile else None
@@ -394,6 +773,7 @@ class Window(threading.Thread):
     def run(self):
         threading.Thread(target=self._stream, daemon=True).start()
         threading.Thread(target=self._poll, daemon=True).start()
+        threading.Thread(target=self._poll_sidecars, daemon=True).start()
         last = 0.0
         while not self.stop.is_set():
             if not self.wanted.wait(.5):
@@ -410,6 +790,15 @@ class Window(threading.Thread):
         while not self.stop.is_set():
             self.wanted.set()
             self._fetch(("thread", "/api/browser/threads/" + self.selected))
+            self.stop.wait(5)
+
+    def _poll_sidecars(self):
+        self.stop.wait(random.random() * 5)
+        while not self.stop.is_set():
+            # sidecars.js uses an independent setInterval: a slow response
+            # does not postpone the next request or the metadata poll.
+            threading.Thread(target=self._fetch, args=(("sidecar_status",
+                "/api/browser/threads/" + self.selected + "/sidecars"),), daemon=True).start()
             self.stop.wait(5)
 
     def _fetch(self, *requests):
@@ -494,33 +883,42 @@ def main():
     parser.add_argument("--thread-switch-interval", type=float,
                         help="Diagnostic override for the backend Python thread switch interval, in seconds.")
     arguments = parser.parse_args()
+    if not 0 < arguments.delta_rate < float("inf"):
+        parser.error("--delta-rate must be finite and greater than zero")
     if arguments.mode == "serve":
         return serve(arguments)
     if not arguments.snapshot:
         parser.error("--snapshot is required")
     root = Path(tempfile.mkdtemp(prefix="ribbon-latency-"))
     database = root / "state.sqlite3"
-    subprocess.run(["cp", "-c", arguments.snapshot, str(database)], check=True)
-    threads = pick_threads(database, arguments.agents + 1)
-    target, busy = threads[0], threads[1:]
-    environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith(("AGENT_COORD_", "RIBBON_")) and key not in {"CODEX_THREAD_ID", "CLAUDECODE"}}
-    server = subprocess.Popen([sys.executable, "-B", __file__, "serve", "--db", str(database), "--cwd", arguments.cwd,
-                               "--history-kb", str(arguments.history_kb), "--delta-rate", str(arguments.delta_rate)]
-                              + (["--stored-history"] if arguments.stored_history else [])
-                              + (["--profile", str(Path(arguments.profile).resolve())] if arguments.profile else [])
-                              + (["--thread-switch-interval", str(arguments.thread_switch_interval)]
-                                 if arguments.thread_switch_interval is not None else [])
-                              + (["--source", str(Path(arguments.source).resolve())] if arguments.source else []),
-                              stdout=subprocess.PIPE, stderr=open(root / "server.log", "w"), env=environment, text=True)
-    hooks = []
-    report = {"snapshot": arguments.snapshot, "source": arguments.source or str(SCRIPTS), "root": str(root), "target": target, "agents": len(busy),
+    server = server_log = client = None
+    hooks, busy = [], []
+    report = {"snapshot": arguments.snapshot, "source": arguments.source or str(SCRIPTS), "root": str(root), "target": None, "agents": 0,
+              "requested_agents": arguments.agents, "expected_stream_threads": [],
               "python": platform.python_version(), "sqlite": sqlite3.sqlite_version, "platform": platform.platform(),
               "windows": arguments.windows, "hook_rate": arguments.hook_rate, "delta_rate": arguments.delta_rate,
               "history_kb": arguments.history_kb, "stored_history": arguments.stored_history,
               "profile_enabled": bool(arguments.profile), "samples": {}}
     stop = threading.Event()
+    previous_termination = signal.signal(signal.SIGTERM, interrupt_measurement)
     try:
+        subprocess.run(["cp", "-c", arguments.snapshot, str(database)], check=True)
+        threads = pick_threads(database, arguments.agents + 1)
+        if not threads:
+            raise RuntimeError("The snapshot contains no eligible conversations")
+        target, busy = threads[0], threads[1:]
+        report.update(target=target, agents=len(busy), expected_stream_threads=busy)
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("AGENT_COORD_", "RIBBON_")) and key not in {"CODEX_THREAD_ID", "CLAUDECODE"}}
+        server_log = open(root / "server.log", "w")
+        server = subprocess.Popen([sys.executable, "-B", __file__, "serve", "--db", str(database), "--cwd", arguments.cwd,
+                                   "--history-kb", str(arguments.history_kb), "--delta-rate", str(arguments.delta_rate)]
+                                  + (["--stored-history"] if arguments.stored_history else [])
+                                  + (["--profile", str(Path(arguments.profile).resolve())] if arguments.profile else [])
+                                  + (["--thread-switch-interval", str(arguments.thread_switch_interval)]
+                                     if arguments.thread_switch_interval is not None else [])
+                                  + (["--source", str(Path(arguments.source).resolve())] if arguments.source else []),
+                                  stdout=subprocess.PIPE, stderr=server_log, env=environment, text=True)
         started = server.stdout.readline()
         if not started:
             raise RuntimeError("backend failed to start; see " + str(root / "server.log"))
@@ -549,6 +947,7 @@ def main():
         watcher.start()
         print(json.dumps({"status": "loaded", "port": port, "target": target}), flush=True)
         time.sleep(arguments.warmup)
+        _, report["workload_before"], _ = client.call("/api/measurement/workload", timeout=5)
         process_cpu_before = cpu_seconds(server.pid)
         measured_since = time.monotonic()
         for index in range(arguments.sends):
@@ -565,6 +964,7 @@ def main():
         for _ in range(arguments.reads):
             for name, path in (("read_target", f"/api/browser/sessions/{target}"),
                                ("thread_target", f"/api/browser/threads/{target}"),
+                               ("sidecar_status", f"/api/browser/threads/{target}/sidecars"),
                                ("list", "/api/browser/threads"),
                                ("search", "/api/browser/search?q=latency&scope=all")):
                 elapsed, _, size = client.call(path)
@@ -575,34 +975,29 @@ def main():
         if arguments.hold:
             print(json.dumps({"status": "holding", "port": port, "target": target, "seconds": arguments.hold}), flush=True)
             time.sleep(arguments.hold)
-    except Exception as error:
+    except BaseException as error:
         report["measurement_error"] = type(error).__name__ + ": " + str(error)
         report["samples"].setdefault("errors", []).append(report["measurement_error"])
         raise
     finally:
+        # A second ordinary termination must not interrupt child reaping and
+        # database deletion. SIGKILL remains an operating-system hard stop.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         stop.set()
-        if "port" in report:
-            try:
-                _, report["database_metrics"], _ = client.call("/api/browser/performance")
-            except Exception as error:
-                report["database_metrics_unavailable"] = str(error)
-        for hook in hooks:
-            hook.terminate()
-        server.terminate()
         try:
-            server.wait(20)
-        except subprocess.TimeoutExpired:
-            server.kill()
-        report["summary"] = {name: quantiles(values) for name, values in report["samples"].items() if name != "errors"}
-        report["error_count"] = len(report["samples"].get("errors", []))
-        report["budget_failures"] = check_budgets(report["summary"])
-        report["artifacts_retained"] = bool(report["budget_failures"] or report["error_count"] or report.get("load_start_failures"))
-        report.pop("samples") if not arguments.output else None
-        if arguments.output:
-            Path(arguments.output).write_text(json.dumps(report, indent=1))
-        print(json.dumps({k: v for k, v in report.items() if k != "samples"}, indent=1))
-        if not report["artifacts_retained"]:
-            shutil.rmtree(root, ignore_errors=True)
+            try:
+                cleanup_workload(server, hooks, client, busy, report,
+                                 quiet_period=max(SyntheticProvider.short_turn_seconds + .5, 2 / arguments.delta_rate))
+            finally:
+                for handle in (server.stdout if server is not None else None, server_log):
+                    if handle is not None:
+                        try:
+                            handle.close()
+                        except Exception as error:
+                            report.setdefault("cleanup_errors", []).append("Measurement stream close failed: " + str(error))
+                finish_report(report, root, arguments.output)
+        finally:
+            signal.signal(signal.SIGTERM, previous_termination)
     if arguments.check and (report["budget_failures"] or report["error_count"] or report.get("load_start_failures")):
         sys.exit(1)
 

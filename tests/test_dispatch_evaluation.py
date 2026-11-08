@@ -122,8 +122,22 @@ class EvaluationTests(unittest.TestCase):
     def test_threshold_replay_uses_saved_answer_without_any_provider_or_store_writes(self):
         self.captured()
         before = self.sessions.rpc.calls[:]
+
+        def persisted_state(db):
+            # Contentless FTS tables cannot be scanned by sqlite3.iterdump.
+            # Compare their schema and every physical backing table instead;
+            # the no-write assertion still covers all persisted search data.
+            schema = [tuple(row) for row in db.execute(
+                'SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master ORDER BY type,name')]
+            contents = {}
+            for kind, name, _, _, definition in schema:
+                if kind == 'table' and not (definition or '').lstrip().upper().startswith('CREATE VIRTUAL TABLE'):
+                    quoted = '"' + name.replace('"', '""') + '"'
+                    contents[name] = [tuple(row) for row in db.execute('SELECT * FROM ' + quoted)]
+            return schema, contents
+
         with self.store._connection() as db:
-            dump = list(db.iterdump())
+            saved_state = persisted_state(db)
         with patch("agent_coord.dispatch_evaluation.classify", side_effect=AssertionError("Network called")):
             baseline = evaluate(self.store.database_path, self.dispatcher)
             changed = evaluate(self.store.database_path, self.dispatcher, overrides={"min_confidence": .6, "min_probability": .65})
@@ -133,7 +147,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(changed["delivered_messages"], 0)
         self.assertEqual(self.sessions.rpc.calls, before)
         with self.store._connection() as db:
-            self.assertEqual(list(db.iterdump()), dump)
+            self.assertEqual(persisted_state(db), saved_state)
 
     def test_live_replay_uses_saved_question_or_explicit_prompt_override(self):
         self.captured()

@@ -64,7 +64,7 @@ class DispatchRuntime:
             initialize_evaluation(db)
 
     def settings(self, thread_id):
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             row = db.execute("SELECT * FROM dispatch_settings WHERE thread_id=?", (thread_id,)).fetchone()
         return {"enabled": bool(row and row["enabled"]),
                 "defaults": json.loads(row["defaults_json"]) if row else {}}
@@ -143,7 +143,7 @@ class DispatchRuntime:
         return self.receipt(row)
 
     def receipts(self, thread_id):
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             rows = db.execute("SELECT * FROM dispatch_requests WHERE dispatcher_id=? ORDER BY id", (thread_id,)).fetchall()
             result = [self.receipt(row) for row in rows]
             for item in result:

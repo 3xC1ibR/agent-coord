@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coor
 
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.thread_usage import backfill_codex
+from agent_coord import thread_usage
 
 
 def counts(total):
@@ -54,6 +55,30 @@ class ThreadUsageTests(unittest.TestCase):
         self.snapshot(200, observed_at=20, coverage="complete")
         self.assertEqual(self.usage.summary("one")["totals"], counts(200))
         self.assertEqual(self.usage.summary("one")["observed_at"], "1970-01-01T00:00:30+00:00")
+
+    def test_batched_summary_preserves_native_row_accounting_and_observation_times(self):
+        observed = 1793741954.3139312
+        with self.store._connection() as db:
+            db.executemany("INSERT INTO thread_usage_samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [
+                ("one", "codex", "first" if index < 50 else "second", "events", "direct", "delta",
+                 str(index), "model-a" if index % 2 else "model-b", json.dumps(counts(3)), None,
+                 "complete", observed + index / 10000) for index in range(100)])
+            db.executemany("INSERT INTO thread_usage_baselines VALUES (?,?,?,?)", [
+                ("one", "codex", "first", "{}"), ("one", "codex", "second", None)])
+            db.executemany("INSERT INTO thread_usage_epochs VALUES (?,?,?,?)", [
+                ("one", "codex", "first", 0), ("one", "codex", "second", 1)])
+            db.executemany("INSERT INTO thread_usage_notes VALUES (?,?,?,?,?)", [
+                ("one", "codex", "first", "Earlier observation", observed),
+                ("one", "codex", "second", "Latest observation 雪\x00tail", observed + .0001)])
+
+        def ordinary_rows(db, sql, parameters=(), **unused):
+            return [dict(row) for row in db.execute(sql, parameters).fetchall()]
+
+        with patch.object(thread_usage, "read_rows", ordinary_rows):
+            expected = self.usage.summary("one")
+        actual = self.usage.summary("one")
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual["totals"], {"input_tokens": 100, "output_tokens": 200, "total_tokens": 300})
 
     def test_deltas_deduplicate_after_crash_and_concurrent_replay(self):
         def record(_):

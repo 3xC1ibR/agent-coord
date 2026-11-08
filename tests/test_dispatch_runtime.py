@@ -8,6 +8,7 @@ import threading
 import urllib.request
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -64,6 +65,35 @@ class DispatchRuntimeTests(unittest.TestCase):
         self.sessions.submit(self.vendor, {"message": "Direct follow-up"})
         self.assertEqual(self.sessions.rpc.threads[self.vendor]["turns"][0]["items"][0]["content"], [{"type": "text", "text": "Direct follow-up"}])
         self.assertEqual(self.runtime.receipts(self.vendor), [])
+
+    def test_settings_and_receipts_are_query_only_and_do_not_wait_for_writer(self):
+        identity = self.submit()
+        self.plan()
+        self.assertTrue(self.sessions.persistence.flush())
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_message_queue SET state='paused', error='Review the destination' WHERE dispatch_id=?",
+                       (identity,))
+        expected = (self.runtime.settings(self.dispatcher), self.runtime.receipts(self.dispatcher))
+        self.assertEqual(expected[1][0]['target_title'], 'Vendor form')
+        self.assertEqual(expected[1][0]['state'], 'paused')
+        self.assertEqual(expected[1][0]['error'], 'Review the destination')
+        connection = self.store._connection
+
+        @contextmanager
+        def observed_connection():
+            with connection() as db:
+                self.assertEqual(db.execute('PRAGMA query_only').fetchone()[0], 1)
+                changes = db.total_changes
+                yield db
+                self.assertEqual(db.total_changes, changes)
+
+        def read():
+            return self.runtime.settings(self.dispatcher), self.runtime.receipts(self.dispatcher)
+
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            with self.store._writer.reserve(object(), operation='test.writer'):
+                with patch.object(self.store, '_connection', observed_connection):
+                    self.assertEqual(workers.submit(read).result(timeout=2), expected)
 
     def test_reuse_is_ordinary_user_input_and_receipt_is_not_completion(self):
         identity = self.submit()

@@ -172,6 +172,7 @@ class ClaudeRPC:
         self.connection_factory = connection_factory
         self.lock = threading.RLock()
         self.connections, self.options, self.turns, self.requests = {}, {}, {}, {}
+        self.completed = {}
         # Starting, reusing and releasing one conversation's process are
         # serialized per conversation, never across all of them.
         self.connection_locks = {}
@@ -269,8 +270,11 @@ class ClaudeRPC:
                 raise
         return current
 
-    def _history(self, thread_id):
+    def _history(self, thread_id, *, include_turns=True):
         with self.lock:
+            if not include_turns:
+                return {"id": thread_id, "turns": [],
+                        "status": {"type": "active" if thread_id in self.turns else "idle"}}
             return self._read_history(thread_id)
 
     def _fork(self, thread_id, params):
@@ -342,15 +346,35 @@ class ClaudeRPC:
         history = read_history(self.store, thread_id)
         if history is None:
             history = {"id": thread_id, "turns": []}
-        active = self.turns.get(thread_id)
-        if active:
-            history["turns"] = [t for t in history.get("turns", []) if t["id"] != active["id"]] + [copy.deepcopy(active)]
-        else:
-            for turn in history.get("turns", []):
-                if turn.get("status") == "inProgress":
-                    turn["status"] = "interrupted"
-        history["status"] = {"type": "active" if active else "idle"}
-        return history
+        return self.reconcile_history(thread_id, history)
+
+    def reconcile_history(self, thread_id, history):
+        """Reconcile a caller-owned mirror without reading persisted history."""
+        with self.lock:
+            active = self.turns.get(thread_id)
+            latest = active or self.completed.get(thread_id)
+            if latest:
+                turns = history.setdefault("turns", [])
+                index = next((index for index, turn in enumerate(turns) if turn["id"] == latest["id"]), None)
+                if index is None:
+                    turns.append(copy.deepcopy(latest))
+                elif active or turns[index].get("status") not in {"completed", "failed", "interrupted"}:
+                    # A terminal mirror can include later events than the
+                    # retained completion. Use that cache only for recovery.
+                    turns[index] = copy.deepcopy(latest)
+            if not active:
+                for turn in history.get("turns", []):
+                    if turn.get("status") == "inProgress":
+                        turn["status"] = "interrupted"
+            history["status"] = {"type": "active" if active else "idle"}
+            return history
+
+    def discard_persisted_completion(self, thread_id, terminal_turns):
+        """Release only the completion represented by a committed snapshot."""
+        with self.lock:
+            completed = self.completed.get(thread_id)
+            if completed is not None and terminal_turns.get(completed["id"]) == completed["status"]:
+                self.completed.pop(thread_id)
 
     @staticmethod
     def _options(params):
@@ -410,12 +434,12 @@ class ClaudeRPC:
         if method == "thread/resume":
             # Opening saved history does not need authentication or a running CLI.
             self.options[thread_id] = self._options(params)
-            return {"thread": self._history(thread_id), "model": self.options[thread_id]["model"],
+            return {"thread": self._history(thread_id, include_turns=not params.get("excludeTurns", False)), "model": self.options[thread_id]["model"],
                     "reasoningEffort": self.options[thread_id]["effort"]}
         if method == "thread/fork":
             return self._fork(thread_id, params)
         if method == "thread/read":
-            return {"thread": self._history(thread_id)}
+            return {"thread": self._history(thread_id, include_turns=params.get("includeTurns", True))}
         if method in {"thread/archive", "thread/unarchive", "thread/name/set"}:
             if method == "thread/archive":
                 connection = self.connections.pop(thread_id, None)
@@ -636,6 +660,9 @@ class ClaudeRPC:
                 item["status"] = "completed" if status == "completed" else status
         if error:
             turn["error"] = {"message": str(error)}
+        # A read can reconcile before the completion callback reaches the
+        # browser mirror. Retain its terminal outcome independently of disk.
+        self.completed[thread_id] = copy.deepcopy(turn)
         self.requests = {k: v for k, v in self.requests.items() if v[0] != thread_id}
         self.blocks.pop(thread_id, None)
         self.confirmed_blocks.pop(thread_id, None)

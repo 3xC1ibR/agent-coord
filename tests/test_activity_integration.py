@@ -86,6 +86,9 @@ class ActivityIntegrationTests(unittest.TestCase):
         self.assertEqual([e["kind"] for e in result["events"]], ["decision_submitted", "organization_changed"])
 
     def save_history(self, history):
+        # The fixture replaces persisted history directly. Finish creation's
+        # queued mirror save first so it cannot overwrite this saved transcript.
+        self.assertTrue(self.sessions.persistence.flush(key=self.thread))
         with self.store._connection() as db:
             db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (self.thread, json.dumps(history)))
 

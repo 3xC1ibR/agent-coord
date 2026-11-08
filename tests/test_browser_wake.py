@@ -63,6 +63,23 @@ class BrowserWakeTests(unittest.TestCase):
     def turns(self, thread_id):
         return self.sessions.read(thread_id)["thread"]["turns"]
 
+    def test_ordinary_wake_preview_does_not_wait_for_writer(self):
+        thread = self.create()
+        self.message(thread)
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            with self.store._writer.reserve(object(), operation='test.writer'):
+                self.assertTrue(workers.submit(self.sessions.inbox_wake._preview_eligibility, thread).result(timeout=2))
+        self.assertEqual(self.attempts(), [])
+
+    def test_paused_intervention_preview_still_performs_durable_cleanup(self):
+        from agent_coord.sidecars import discard_stale_messages
+        thread = self.create()
+        self.message(thread, classification='informational', thread_id='event:sidecar:watch:intervention:review')
+        self.sessions.inbox_wake.pause(thread, 'User paused delivery')
+        with patch('agent_coord.sidecars.discard_stale_messages', wraps=discard_stale_messages) as cleanup:
+            self.assertFalse(self.sessions.inbox_wake._preview_eligibility(thread))
+        cleanup.assert_called_once()
+
     def test_codex_and_claude_coalesce_actionable_messages_without_delivering_them(self):
         for client in ("codex", "claude"):
             with self.subTest(client=client):
@@ -100,6 +117,19 @@ class BrowserWakeTests(unittest.TestCase):
         self.sessions.inbox_wake.process_once()
         self.assertEqual(len(self.turns(thread)), 3)
         self.assertFalse(any(m == "turn/steer" for m, _ in self.sessions.rpc.calls))
+
+    def test_batched_discovery_preserves_distinct_pending_eligible_recipients(self):
+        first, second, attempted, informational = [self.create() for _ in range(4)]
+        self.message(first)
+        self.message(first)
+        self.message(second)
+        self.message(attempted)
+        self.message(informational, "informational")
+        self.assertTrue(self.sessions.inbox_wake._claim(attempted))
+        with patch.object(self.sessions.inbox_wake, "_dispatch") as dispatch:
+            self.sessions.inbox_wake.process_once()
+        self.assertEqual({call.args[0] for call in dispatch.call_args_list}, {first, second})
+        self.assertEqual(dispatch.call_count, 2)
 
     def test_reply_wakes_requester_and_is_delivered_without_another_reply_request(self):
         for client in ("codex", "claude"):

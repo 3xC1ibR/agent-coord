@@ -13,6 +13,7 @@ caused the October 2026 slowness, and the bottlenecks that remain.
 | Sent message reaches other windows | p50 ≤ 150 ms, p95 ≤ 400 ms | Load harness `--check` |
 | Thread list | p50 ≤ 300 ms, p95 ≤ 800 ms | Load harness `--check` |
 | Conversation read / thread detail | p50 ≤ 300 / 100 ms, p95 ≤ 800 / 300 ms | Load harness `--check` |
+| Sidecar status, explicit reads and independent window polls | p50 ≤ 100 ms, p95 ≤ 300 ms | Load harness `--check` |
 | Search | p50 ≤ 300 ms, p95 ≤ 800 ms | Load harness `--check` |
 
 Server budgets apply to the realistic profile below. A sent message shows
@@ -464,9 +465,21 @@ isolated representative snapshot, with `--stored-history`, mixed active agents,
 concurrent windows, sustained sends and searches. It saves the runtime performance
 snapshot in its report. Its raw independent hook writer is deliberate external
 SQLite pressure, distinct from the production high-level runtime routing. State
-which pressure profile was used. Compare the same data, history sizes, duration
+which pressure profile was used. Acceptance also requires available diagnostics,
+zero writer-admission timeouts, history failures, persistence retries or permanent
+failures, and a successfully drained save queue. Each requested streaming agent
+must have one observed worker and sustain at least 90% of its configured event
+rate. Missing workload observations, interrupted diagnostics or failed child
+cleanup invalidate the run. Compare the same data, history sizes, duration
 and machine load, include cold paths and errors, and do not increase thresholds
 or discard slow samples to make a regression pass.
+
+The current acceptance harness also requires supported substring indexing,
+complete source coverage, a completed backfill, and zero index failures after
+the persistence drain. Short queries and unindexable text still use exact
+search; index coverage is an acceleration invariant, not permission to omit
+messages. Missing coverage diagnostics fail acceptance rather than treating an
+unfinished migration as a successful performance result.
 
 Run acceptance without `--profile`. That optional diagnostic mode samples every
 Python thread's stack and can disturb the workload it observes. It now samples
@@ -475,10 +488,16 @@ expensive. Reports record `profile_enabled`, Python and SQLite versions, and whe
 stored histories were used. Preserve diagnostic failures for attribution; measure
 acceptance with the normal runtime metrics enabled and stack sampling disabled.
 
-### Integrated result
+### November 2 recorded result (superseded)
 
-The final stored-history acceptance used the same 1.9 GB snapshot, its original
-saved transcripts, six streaming agents at six deltas/second, three windows,
+The November 3 reproduction invalidated this run as acceptance for the live
+problem: it omitted independent sidecar polls, did not verify actual stream
+workers, and used older, smaller histories. The numbers below describe that
+earlier workload only. Backend activation also did not establish healthy live
+operation; the activation receipt already contained admission timeouts.
+
+The recorded stored-history run used the same 1.9 GB snapshot, its original
+saved transcripts, six requested streaming agents at six deltas/second, three windows,
 and three independent hook writes/second. It ran on Python 3.12.7 / SQLite
 3.51.0 with the normal 1 ms server thread interval, no diagnostic override,
 and no sampler. All 30 sends and 30 read/search cycles succeeded, and every
@@ -537,3 +556,196 @@ The backend source fingerprint was
 `ecdb9c1b3abc83e0b293fa2e212db51da443759944b36104c4ef98167e2932e8`.
 These are isolated backend measurements; runtime status must separately prove
 activation in an installed application.
+
+## November 3 recurrence and repair
+
+The newly active build still accumulated admission timeouts and rejected sends.
+Reproduction now uses the 2.8 GB November 3 snapshot, including saved histories
+of 15–29 MB, independently timed sidecar polling, and observed stream-worker
+counts and delta rates. Requested concurrency is insufficient evidence of load:
+restored in-progress synthetic turns previously had no worker until explicitly
+started. The harness now verifies every requested worker and its offered rate.
+Background list and detail polls use the same budgets as explicit requests.
+
+Measured causes and implementation changes:
+
+- Sidecar polling scanned all control-request payloads while holding writer
+  admission. An indexed target lookup now runs in a query-only scope.
+- History block existence checks used the payload-bearing primary B-tree. A
+  digest-only covering index reduced a matched 50-query microbenchmark from
+  approximately 95 ms warm to 9 ms; the initial unindexed pass took 1.63 s.
+- Full history saves monopolized the persistence worker and its preparation
+  cache retained only three of seven large conversations. Cooperative steps
+  release every connection and lock between batches. Committed preparation
+  retains fingerprints and references rather than duplicate values/payloads;
+  its existing 64 MiB limit held seven histories in approximately 34 MiB.
+  Canonical encoding still runs to detect changes, reported separately as
+  `history.encoded_document_bytes`; lower cache memory is not zero CPU cost.
+- Normalized provider resume/read ignored metadata-only flags, reloaded whole
+  histories and waited for a redundant save. Providers now honor those flags
+  and reconcile a caller-owned mirror against runtime execution state. Revision
+  checks protect newer events; mutation/lifecycle persistence barriers remain.
+- Search re-extracted and republished whole archives after small changes.
+  Policy-versioned immutable document results now share text across index
+  generations. Compact covering metadata reads avoid old excerpts; routing
+  fetches only its existing final-200-message window. All searchable prose
+  remains complete. Index publication checks source revision and retries
+  conflicts instead of silently returning an older head after a failed publish.
+- Search preparation is derived work. Browser saves publish their durable root
+  before queuing it under a separate persistence key. Search-cache failures
+  cannot turn a committed conversation into a rejected save; search can rebuild
+  missing entries from immutable history. Cache transactions allow 512 rows
+  within the existing 256 KiB bound, with SQL statements below 999 parameters.
+- Diagnostics captured a 1.93 s commit inside a history staging scope. A
+  runtime-owned PASSIVE checkpoint worker moves checkpoint I/O outside writer
+  admission while retaining FULL durability. Writable cached handles restore
+  automatic checkpointing when maintenance stops or fails. Pure review and
+  dispatcher reads also no longer reserve the writer.
+- Later measurements captured a 5.04 s connection open inside writer admission,
+  with only 5.6 ms of thread CPU across that scope. Connection acquisition now
+  precedes admission; commits, rollbacks, statement finalization and disposal
+  of unfinished handles remain inside it. Thread detail, list and domain reads
+  use query-only scopes; their existing snooze and organization projections
+  remain read-only, while explicit maintenance performs durable repairs.
+
+Concurrent checkpoint maintenance requires SQLite 3.51.3 or newer, or the
+documented 3.50.7/3.44.6 backports. Older libraries retain automatic checkpointing
+because of SQLite's [WAL-reset race](https://sqlite.org/wal.html#walreset).
+The locally available Python 3.13.5 uses SQLite 3.53.4; Python 3.12.7 uses the
+unpatched system SQLite 3.51.0. Record these versions and use matched runtimes
+for comparisons. [PASSIVE checkpoint semantics](https://sqlite.org/c3ref/wal_checkpoint_v2.html)
+permit reader/writer progress but do not remove disk or scheduling contention.
+
+### Diagnostics and acceptance
+
+The authenticated performance response retains the latest 32 slow database
+operations and the 16 longest writable scopes. Statement, transaction and scope
+records use bounded operation names and numeric identifiers, never SQL,
+parameters or transcript text. Phase durations are wall time and include
+waiting to resume Python; recorded phases cover calls of at least 50 ms and
+are not a complete timing breakdown. History preparation/staging durations
+include cooperative queue suspension and must not be called CPU time.
+Slow writable scopes also report thread CPU time and the remaining wall time;
+the remainder combines I/O, GIL and scheduling waits without attributing them.
+Connection opening is measured separately. Host load, logical CPU count and
+process peak resident memory provide context for interpreting each run.
+
+Checkpoint diagnostics include errors, duration, WAL frames/bytes, remaining
+backlog and last progress. Search reports decoded/reused documents, bounded
+staging bytes and excerpt retrieval. A small pending WAL suffix differs from
+the physical WAL file size, which SQLite can reuse without truncating.
+
+Acceptance requires every HTTP budget, zero request errors, zero admission
+timeouts or persistence failures/retries, successful derived-work scheduling,
+healthy checkpoint maintenance where supported, and a drained save queue.
+Optional persistence failures remain visible in `optional_failure_count` even
+though they do not reject a committed conversation save. Both this counter and
+search operation failures must remain zero in acceptance workloads.
+Retain cold samples and failed reports. Freeze source only after all writers
+confirm completion; one diagnostic copy taken during an edit contained an
+undefined helper and is explicitly invalid as search acceptance.
+The measurement harness removes its generated database and runtime files after
+owned children exit, including failed and interrupted runs. JSON reports and
+server logs remain. An unconfirmed child exit retains the directory and fails
+acceptance explicitly. Earlier failure retention left eight database copies
+accounting for about 18 GiB; all 31 inactive temporary directories were removed
+on November 3 after preserving their small diagnostics. The observed free-space
+increase was 644 MiB, distinct from the files' reported allocated size.
+
+The first expanded runs remain failed evidence, not deployment approval:
+`sidecar_poll_before_complete.json` reproduced HTTP 503; the digest-index-only
+run accepted all 30 sends but missed latency budgets, including search p95
+24.56 s. The initial integrated run failed during setup with save backlog.
+Host load subsequently exceeded 100 with more than 11 GiB swapped, so further
+performance measurements require a coordinated quiet interval. These reports
+are retained in the local `database_contention_20261102` diagnostics directory.
+Full regression, matched workload acceptance, installation and live health
+verification are separate outcomes; no activation receipt alone proves repair.
+
+Immutable history and search blocks are retained. Collection needs a separate
+contract for published roots, captured readers and in-progress staging; this
+repair does not delete conversation data to achieve a latency result.
+
+### November 8 completion validation
+
+The resumed investigation found remaining contention in ordinary read paths.
+A bounded admission-timeout record identified `history.publish` waiting behind
+`browser_wake._dispatch` for 135.7 ms. The holder occupied admission for 140.1 ms
+but used 1.17 ms of thread CPU. This establishes unnecessary scope occupancy;
+the remaining wall time includes interpreter scheduling and I/O and does not
+identify a slow SQL statement by itself. Timeout records now retain the waiting
+operation, priority, active operation/scope, elapsed times and queue depth, with
+a limit of 16 records and no statement text or parameters.
+
+Wake eligibility previews now use query-only connections when no pending
+sidecar intervention needs cleanup. Interventions retain durable suppression
+even while delivery is paused; final claims and submission checks still clean
+up and revalidate under writer admission. Review/list projections, schedule
+reads and empty recurring-schedule polls also avoid reserving the writer.
+
+SQLite result transfer was another source of interpreter contention. Native
+JSON aggregation transfers stored usage, message and checkpoint rows in batches
+while preserving scalar types and complete history. A matched 210-checkpoint
+experiment at the production 1 ms interpreter interval measured ordinary versus
+batched transfer at 36.7 versus 3.1 ms median with one CPU-bound Python thread
+(idle: 0.70 versus 1.71 ms). SQLite versions before the verified 3.53.4 conversion
+path retain ordinary transfer so extreme floating-point values stay exact;
+real zero also uses that path to preserve its sign.
+
+Substring search uses bounded, overlapping trigram candidates followed by the
+original exact matching and ranking. Incomplete coverage, short queries,
+unsupported tokenizers and unindexable text retain complete fallback search.
+Every nonempty indexing invocation performs a bounded merge, including small
+updates; otherwise disabling SQLite's automatic merges allowed segments to
+accumulate. Candidate folded text is materialized once for scoring. Search
+document staging targets 64 KiB while retaining the 512-row bound for compact
+headers. Existing immutable text parts keep their numbering and may individually
+exceed the smaller target, within the original transaction bound.
+
+Claude and Antigravity keep a completion snapshot until the same terminal turn
+ID and status are durably published, then release it. This preserves the race
+between provider completion and history persistence without retaining every
+conversation's last large turn after residency release.
+
+The final frozen workload used `live_state_20261103_complete.sqlite3`, all saved
+histories, six verified streams at six deltas/second, three polling windows and
+three independent hook writes/second. It ran on Python 3.13.5 / SQLite 3.53.4
+with the normal 1 ms interval and no profiler. All 30 sends and 30 read/search
+cycles completed. Request errors, admission timeouts, history failures, required
+and optional persistence failures, and retries were zero; the queue drained.
+All 47,061 legacy messages, 3,916 searchable documents and 2,173 generation
+messages had complete substring coverage. Generated database files were removed
+after every owned process exited; small reports and logs remain.
+
+| Operation | p50 | p95 | Maximum |
+| --- | ---: | ---: | ---: |
+| Send acceptance | 21.3 ms | 92.4 ms | 461.2 ms |
+| Message visible in another window | 8.3 ms | 51.4 ms | 429.5 ms |
+| Complete conversation read | 270.6 ms | 560.0 ms | 591.7 ms |
+| Thread detail | 46.7 ms | 284.7 ms | 321.3 ms |
+| Thread list | 3.8 ms | 444.1 ms | 483.3 ms |
+| Sidecar status | 9.8 ms | 43.7 ms | 94.8 ms |
+| Search | 270.7 ms | 627.6 ms | 4,431.1 ms |
+
+All foreground and background percentile budgets passed. The initial search
+refresh remains visible in the recorded 4.43 s maximum; cold samples were kept.
+Writer wait p95 was 0.727 ms and writable-scope p95 was 4.092 ms. The separate
+15-second contention gate completed 3,340 durable foreground writes
+(222/second), 1,031 background commits and 2,133 reads with no errors or
+timeouts. Foreground p95 was 1.584 ms and writer-scope p95 was 0.841 ms.
+
+Both gates used backend fingerprint
+`48b3fa81474ee5a0efdd6c7408655731775017c9231ca7ea8a1923db73e38617`.
+Reports are `materialized_search_acceptance_20261108.json` and
+`resumed_contention_gate_20261108.json` in the retained local diagnostics
+directory. Earlier November 8 failures remain alongside them, including the
+timeout attribution that exposed wake polling. These are isolated workload
+results; backend installation and activation require separate verification.
+
+Final regression validation completed 2,319 Python tests with seven optional
+skips, all 1,176 JavaScript tests, plugin layout validation and Python
+compilation. The complete Python run took 390.369 seconds, and all 404 reserved
+source inputs remained unchanged. One test fixture was updated to compare schema
+and physical backing tables because Python's SQL dump cannot scan a contentless
+FTS table; its assertion that evaluation performs no persisted writes remains.
+The backend fingerprint stayed identical to both passing performance gates.

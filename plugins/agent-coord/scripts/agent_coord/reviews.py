@@ -96,7 +96,7 @@ class ReviewRuntime:
         return run
 
     def list(self, thread_id):
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             return [self.describe(db, r) for r in db.execute(
                 "SELECT * FROM review_runs WHERE owner_id=? OR critic_id=? ORDER BY created_at", (thread_id, thread_id))]
 
@@ -234,7 +234,7 @@ class ReviewRuntime:
 
     def active(self, thread_id, db=None):
         if db is None:
-            with self.store._connection() as connection:
+            with self.store.reading(), self.store._connection() as connection:
                 return self.active(thread_id, connection)
         return bool(db.execute("SELECT 1 FROM review_runs WHERE (owner_id=? OR critic_id=?) AND state IN ('active','creating')", (thread_id, thread_id)).fetchone())
 
@@ -245,7 +245,7 @@ class ReviewRuntime:
             WHERE s.message_id=? AND r.state='active' AND r.phase=s.stage AND s.completed_at IS NULL""", (i,)).fetchone()]
 
     def wake_prompt(self, thread_id, ids):
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             if len(ids) == 1 and db.execute("SELECT 1 FROM review_steps WHERE actor_id=? AND message_id=?", (thread_id, ids[0])).fetchone():
                 return db.execute("SELECT body FROM messages WHERE id=?", (ids[0],)).fetchone()[0]
         return None
@@ -253,7 +253,7 @@ class ReviewRuntime:
     def stage_for(self, thread_id, turn_id, *, pending=False):
         if not thread_id or not turn_id:
             return None
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             row = db.execute("""SELECT s.* FROM review_steps s JOIN review_runs r ON r.id=s.run_id
                 WHERE s.actor_id=? AND (s.turn_id=? OR (? AND s.turn_id IS NULL
                 AND r.phase=s.stage AND EXISTS (SELECT 1 FROM message_wake_attempts a
@@ -493,7 +493,7 @@ class ReviewRuntime:
 
     def project(self, thread, *, waiting=False, inventory=None):
         if inventory is None:
-            with self.store._connection() as db:
+            with self.store.reading(), self.store._connection() as db:
                 inventory = self.inventory(db, thread["thread_id"])
         run = inventory.get(thread["thread_id"])
         if not run:

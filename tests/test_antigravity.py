@@ -511,17 +511,22 @@ class AntigravityDeliveryTests(unittest.TestCase):
         thread = self.create()
         connection = self.start(thread)
         self.update(thread, sessionUpdate='tool_call', toolCallId='tool', status='in_progress')
-        history = self.sessions.antigravity._history
+        reconcile = self.sessions.antigravity.reconcile_history
 
-        def complete_after_snapshot(identity):
-            stale = history(identity)
+        def complete_after_snapshot(identity, history):
+            # Reads now reconcile the browser's authoritative mirror instead
+            # of loading the adapter's older SQLite snapshot. Inject completion
+            # at that boundary so the stale returned turn still tests the race.
+            stale = reconcile(identity, history)
+            self.assertEqual(stale['turns'][-1]['status'], 'inProgress')
             self.update(thread, sessionUpdate='tool_call_update', toolCallId='tool', status='completed', rawOutput='contents')
             self.update(thread, sessionUpdate='agent_message_chunk', content={'type': 'text', 'text': 'Finished'})
             connection.future.set_result({'stopReason': 'end_turn'})
             return stale
 
-        with patch.object(self.sessions.antigravity, '_history', side_effect=complete_after_snapshot):
+        with patch.object(self.sessions.antigravity, 'reconcile_history', side_effect=complete_after_snapshot) as reading:
             detail = self.sessions.read(thread)
+        reading.assert_called_once()
         self.assertFalse(detail['running'])
         turn = detail['thread']['turns'][-1]
         self.assertEqual(turn['status'], 'completed')

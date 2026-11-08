@@ -453,6 +453,313 @@ class ConversationSearchTests(unittest.TestCase):
         with patch.object(conversation_search, "prepare_messages", side_effect=AssertionError("Published generation reparsed")):
             self.assertEqual(search_threads(self.store, "needle")["items"][0]["thread_id"], "thread")
 
+    def save_chunked(self, identity, history, *, previous=None, seed=False):
+        from agent_coord import history_persistence as storage
+        prepared = storage.prepare_history(history, previous=previous)
+        with self.store._connection() as db:
+            storage.ensure_schema(db)
+        storage.stage_history(self.store, prepared)
+        if seed:
+            for _ in conversation_search.seed_prepared_history_steps(self.store, prepared):
+                # Cooperative persistence must be able to yield after every
+                # batch without retaining writer admission or a transaction.
+                self.assertIsNone(self.store._writer.active_operation)
+        with self.store._connection() as db:
+            storage.publish_history(db, identity, prepared)
+        return prepared
+
+    def test_separate_small_substring_batches_keep_merging_between_calls(self):
+        from agent_coord import conversation_substrings as substrings
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        batches = 120
+        for index in range(batches):
+            rows = substrings._text_rows(str(index), "Searchable revision " + str(index))
+            for _ in substrings._stage_steps(self.store, rows):
+                self.assertIsNone(self.store._writer.active_operation)
+        metrics = conversation_search.search_metrics(self.store)
+        self.assertEqual(metrics["substring_stage"]["count"], batches)
+        self.assertEqual(metrics["substring_merge"]["count"], batches)
+        self.assertEqual(metrics["substring_merge"]["page_budget"], batches * substrings.MERGE_PAGES)
+        with self.store.reading(), self.store._connection() as db:
+            segments = db.execute("SELECT COUNT(DISTINCT segid) FROM conversation_substring_terms_idx").fetchone()[0]
+        self.assertLess(segments, batches // 4)
+
+    def test_substring_coverage_does_not_clear_backfill_failure(self):
+        from agent_coord import conversation_substrings as substrings
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        with patch.object(substrings, "_legacy_rows", side_effect=RuntimeError("Backfill interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "Backfill interrupted"):
+                list(substrings.backfill_steps(self.store))
+        substrings._coverage(self.store)
+        metrics = substrings.metrics(self.store)
+        self.assertEqual(metrics["remaining_sources"], 0)
+        self.assertEqual(metrics["state"], "failed")
+        self.assertEqual(metrics["failures"], 1)
+        self.assertFalse(metrics["backfill_running"])
+
+    def test_concurrent_substring_metrics_share_one_coverage_refresh(self):
+        from agent_coord import conversation_substrings as substrings
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        entered, release = threading.Event(), threading.Event()
+        coverage = substrings._coverage
+
+        def held_coverage(store):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            coverage(store)
+
+        with patch.object(substrings, "_coverage", side_effect=held_coverage) as refreshed, ThreadPoolExecutor() as executor:
+            first = executor.submit(substrings.metrics, self.store)
+            try:
+                self.assertTrue(entered.wait(5))
+                # A slow observation must remain shared even after its normal
+                # one-second refresh interval has elapsed.
+                later = substrings.time.monotonic() + 2
+                with patch.object(substrings.time, "monotonic", return_value=later):
+                    substrings.metrics(self.store)
+                self.assertEqual(refreshed.call_count, 1)
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=5)["remaining_sources"], 0)
+
+    def test_immutable_documents_reuse_large_items_and_only_stage_changed_text(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread")
+        text = "𐐀" * (conversation_search._TEXT_CHARACTERS - 3) + "complete boundary" + "ß" * 100000
+        history = {"turns": [{"id": "turn", "items": [
+            {"id": "large", "type": "agentMessage", "text": text},
+            {"id": "tool", "type": "commandExecution", "output": "excluded output " * 30000},
+            {"id": "changing", "type": "agentMessage", "text": "Initial prose"}]}]}
+        prepared = self.save_chunked("thread", history)
+        refresh_messages(self.store)
+        before = conversation_search.search_metrics(self.store)
+        history["turns"][0]["items"][-1]["text"] = "Replacement prose"
+        changed = self.save_chunked("thread", history, previous=storage.compact_history(prepared))
+        with patch.object(storage, "_documents", wraps=storage._documents) as documents:
+            refresh_messages(self.store)
+        requested = [reference for call in documents.call_args_list for reference in call.args[1]]
+        self.assertNotIn(prepared.documents[(0, 0)].references, requested)
+        self.assertNotIn(prepared.documents[(0, 1)].references, requested)
+        self.assertIn(changed.documents[(0, 2)].references, requested)
+        after = conversation_search.search_metrics(self.store)
+        self.assertEqual(after["document_read"]["decoded_documents"] - before["document_read"]["decoded_documents"], 1)
+        self.assertLess(after["documents"]["bytes"] - before["documents"]["bytes"], 1024)
+        self.assertLess(after["stage"]["bytes"] - before["stage"]["bytes"], 100000)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_message_index WHERE item_id='large'").fetchone()[0], text)
+        hit = search_threads(self.store, "complete boundary")["items"][0]
+        self.assertEqual(hit["message_count"], 1)
+        self.assertIn("complete boundary", hit["matches"][0]["excerpt"])
+        self.assertEqual(search_threads(self.store, "SSSS")["items"][0]["thread_id"], "thread")
+        self.assertEqual(search_threads(self.store, "excluded output")["items"], [])
+        self.assertEqual(search_threads(self.store, "replacement prose")["items"][0]["thread_id"], "thread")
+
+    def test_prepared_history_seeding_avoids_item_decode_on_first_search(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread")
+        history = {"turns": [{"items": [
+            {"type": "commandExecution", "output": "not prose " * 40000},
+            {"type": "agentMessage", "text": "Seeded searchable prose"}]}]}
+        prepared = self.save_chunked("thread", history, seed=True)
+        with patch.object(storage, "_documents", wraps=storage._documents) as documents:
+            hit = search_threads(self.store, "seeded searchable")["items"][0]
+        self.assertEqual(hit["thread_id"], "thread")
+        requested = [reference for call in documents.call_args_list for reference in call.args[1]]
+        for position, document in prepared.documents.items():
+            if len(position) == 2:
+                self.assertNotIn(document.references, requested)
+        self.assertEqual(conversation_search.search_metrics(self.store)["document_read"]["decoded_documents"], 0)
+
+    def test_document_cache_preserves_contextual_ids_timestamps_and_routing_duplicates(self):
+        self.create("thread")
+        item = {"type": "agentMessage", "text": "Repeated shared document"}
+        history = {"turns": [
+            {"startedAt": 42, "items": [
+                {"id": "duplicate", "type": "agentMessage", "text": "Discarded earlier prose"},
+                {"id": "duplicate", "type": "agentMessage", "text": "Retained later prose"}, item,
+                {"type": "commandExecution", "output": "z" * 300000}]},
+            {"startedAt": 99, "items": [item]}]}
+        self.save_chunked("thread", history, seed=True)
+        refresh_messages(self.store)
+        with self.store.reading(), self.store._connection() as db:
+            rows = [tuple(row) for row in db.execute("""SELECT turn_id,item_id,timestamp FROM
+                conversation_search_message_index WHERE text='Repeated shared document' ORDER BY position""")]
+            evidence = json.loads(db.execute("SELECT evidence_json FROM conversation_search_routing_index").fetchone()[0])
+        self.assertEqual(rows, [("search-turn-0", "search-item-2", 42), ("search-turn-1", "search-item-0", 99)])
+        self.assertEqual(len(evidence["messages"]), 4)
+        self.assertEqual(search_threads(self.store, "discarded earlier")["items"], [])
+        self.assertEqual(search_threads(self.store, "retained later")["items"][0]["thread_id"], "thread")
+
+    def test_interrupted_document_seeding_has_no_complete_header_and_resumes(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread", "Original content")
+        refresh_messages(self.store)
+        text = "Long replacement " + "ß" * 350000
+        prepared = storage.prepare_history({"turns": [{"items": [{"type": "agentMessage", "text": text}]}]})
+        with self.store._connection() as db:
+            storage.ensure_schema(db)
+        storage.stage_history(self.store, prepared)
+        steps = conversation_search.seed_prepared_history_steps(self.store, prepared)
+        next(steps)  # schema
+        next(steps)  # cache lookup
+        next(steps)  # first bounded batch, before completion header
+        steps.close()
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_search_documents").fetchone()[0], 0)
+            self.assertGreater(db.execute("SELECT COUNT(*) FROM conversation_search_document_text").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_message_index").fetchone()[0], "Original content")
+        reopened = CoordinationStore(self.store.database_path)
+        for _ in conversation_search.seed_prepared_history_steps(reopened, prepared):
+            pass
+        with reopened._connection() as db:
+            storage.publish_history(db, "thread", prepared)
+        refresh_messages(reopened)
+        with reopened.reading(), reopened._connection() as db:
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_message_index").fetchone()[0], text)
+        metrics = conversation_search.search_metrics(reopened)["documents"]
+        self.assertLessEqual(metrics["max_bytes"], conversation_search._STAGE_BYTES)
+        self.assertLessEqual(metrics["max_rows"], conversation_search._DOCUMENT_STAGE_ROWS)
+
+    def test_prose_staging_uses_smaller_transactions_without_truncating_text(self):
+        text = 'Complete prose ' * 30000
+        documents = [conversation_search._document_rows('document', {'id': 'answer', 'type': 'agentMessage', 'text': text})]
+        conversation_search._ensure_document_cache(self.store)
+        for _ in conversation_search._stage_document_steps(self.store, documents):
+            self.assertIsNone(self.store._writer.active_operation)
+        metrics = conversation_search.search_metrics(self.store)['documents']
+        self.assertLessEqual(metrics['max_bytes'], conversation_search._DOCUMENT_STAGE_BYTES)
+        with self.store.reading(), self.store._connection() as db:
+            restored = ''.join(row[0] for row in db.execute(
+                'SELECT text FROM conversation_search_document_text WHERE document=? ORDER BY part', ('document',)))
+        self.assertEqual(restored, text)
+
+    def test_negative_document_cache_uses_three_commits_for_1025_items_with_999_variable_limit(self):
+        from agent_coord import history_persistence as storage
+        history = {"turns": [{"items": [{"id": str(i), "type": "commandExecution", "output": "Tool result"}
+                                        for i in range(1025)]}]}
+        prepared = storage.prepare_history(history)
+        with self.store._connection() as db:
+            db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        for _ in conversation_search.seed_prepared_history_steps(self.store, prepared):
+            self.assertIsNone(self.store._writer.active_operation)
+        metrics = conversation_search.search_metrics(self.store)["documents"]
+        self.assertEqual(metrics["count"], 3)
+        self.assertEqual(metrics["rows"], 1025)
+        self.assertEqual(metrics["max_rows"], 512)
+        self.assertLessEqual(metrics["max_bytes"], conversation_search._STAGE_BYTES)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_search_documents WHERE role IS NULL").fetchone()[0], 1025)
+        # Retrying an already seeded source performs no additional commits.
+        for _ in conversation_search.seed_prepared_history_steps(self.store, prepared):
+            pass
+        self.assertEqual(conversation_search.search_metrics(self.store)["documents"]["count"], 3)
+
+    def test_document_cache_failure_rolls_back_all_statements_in_a_large_batch(self):
+        from agent_coord import history_persistence as storage
+        history = {"turns": [{"items": [{"id": str(i), "type": "commandExecution", "output": "Tool result"}
+                                        for i in range(1025)]}]}
+        prepared = storage.prepare_history(history)
+        failure = conversation_search._document_key(prepared.documents[(0, 800)].references)
+        conversation_search._ensure_document_cache(self.store)
+        with self.store._connection() as db:
+            db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+            db.execute("CREATE TABLE document_cache_failure (document TEXT PRIMARY KEY)")
+            db.execute("INSERT INTO document_cache_failure VALUES (?)", (failure,))
+            db.execute("""CREATE TRIGGER reject_document BEFORE INSERT ON conversation_search_documents
+                WHEN EXISTS (SELECT 1 FROM document_cache_failure WHERE document=NEW.document)
+                BEGIN SELECT RAISE(ABORT, 'interrupted document batch'); END""")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "interrupted document batch"):
+            for _ in conversation_search.seed_prepared_history_steps(self.store, prepared):
+                pass
+        with self.store._connection() as db:
+            # The first complete batch survives; statements preceding the
+            # failure in the second batch must all have rolled back together.
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_search_documents").fetchone()[0], 512)
+            db.execute("DROP TRIGGER reject_document")
+        for _ in conversation_search.seed_prepared_history_steps(self.store, prepared):
+            pass
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_search_documents").fetchone()[0], 1025)
+
+    def test_cached_headers_are_covering_and_only_final_routing_excerpts_are_loaded(self):
+        self.create("thread")
+        items = [{"id": f"message-{i}", "type": "agentMessage", "text": f"Message {i} " + "x" * 6100}
+                 if i % 2 else {"id": f"message-{i}", "type": "userMessage",
+                                "content": [{"type": "text", "text": f"Message {i} " + "x" * 6100}]}
+                 for i in range(240)]
+        items.insert(160, {"type": "commandExecution", "output": "Tool output " * 30000})
+        items.extend([items[-1], items[-1]])
+        history = {"turns": [{"startedAt": 42, "items": items}]}
+        prepared = self.save_chunked("thread", history, seed=True)
+        # Upgrade an already populated cache that predates the compact index.
+        with self.store._connection() as db:
+            db.execute("DROP INDEX conversation_search_document_headers")
+        headers = conversation_search._cached_documents
+
+        def compact_headers(db, identities, **options):
+            result = headers(db, identities, **options)
+            if options.get("metadata", True):
+                self.assertTrue(all(row[4] is None for row in result.values()))
+            return result
+
+        with patch.object(conversation_search, "_cached_documents", side_effect=compact_headers), patch.object(
+                conversation_search, "_cached_document_excerpts", wraps=conversation_search._cached_document_excerpts) as excerpts:
+            refresh_messages(self.store)
+        self.assertEqual(excerpts.call_count, 1)
+        requested = excerpts.call_args.args[1]
+        self.assertEqual(len(requested), 198)  # 200 occurrences, including two repeated documents.
+        self.assertNotIn(conversation_search._document_key(prepared.documents[(0, 0)].references), requested)
+        with self.store.reading(), self.store._connection() as db:
+            evidence = json.loads(db.execute("SELECT evidence_json FROM conversation_search_routing_index").fetchone()[0])
+            plan = db.execute("""EXPLAIN QUERY PLAN SELECT
+                json_group_array(json_array(document,item_id,role,timestamp,NULL,text_length))
+                FROM conversation_search_documents INDEXED BY conversation_search_document_headers
+                WHERE document IN (?)""", (next(iter(requested)),)).fetchall()
+        self.assertEqual(evidence, conversation_search.routing_history(history))
+        self.assertTrue(any("USING COVERING INDEX conversation_search_document_headers" in row[3] for row in plan), plan)
+        metrics = conversation_search.search_metrics(self.store)["routing_read"]
+        self.assertEqual(metrics["documents"], 198)
+        self.assertEqual(metrics["characters"], 198 * 6000)
+
+    def test_search_retries_revision_rejection_before_returning_results(self):
+        self.create("thread", "Original content")
+        refresh_messages(self.store)
+        self.save("thread", "Intermediate content")
+        publish = conversation_search.publish_messages
+        calls = []
+
+        def changed(store, prepared):
+            calls.append(prepared)
+            if len(calls) == 1:
+                self.save("thread", "Newest revision")
+            return publish(store, prepared)
+
+        with patch.object(conversation_search, "publish_messages", side_effect=changed):
+            page = search_threads(self.store, "newest revision")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(page["items"][0]["thread_id"], "thread")
+        self.assertEqual(conversation_search.search_metrics(self.store)["refresh"]["revision_conflicts"], 1)
+
+    def test_continuous_revision_rejection_never_returns_an_older_head_as_fresh(self):
+        self.create("thread", "Original content")
+        refresh_messages(self.store)
+        self.save("thread", "Changing content")
+        publish = conversation_search.publish_messages
+        calls = []
+
+        def changed(store, prepared):
+            calls.append(prepared)
+            self.save("thread", "Changing revision " + str(len(calls)))
+            return publish(store, prepared)
+
+        with patch.object(conversation_search, "publish_messages", side_effect=changed):
+            with self.assertRaisesRegex(CoordinationError, "changed repeatedly"):
+                search_threads(self.store, "original")
+        self.assertEqual(len(calls), 3)
+
     @unittest.skipUnless(shutil.which("node"), "Node is required for browser search tests")
     def test_browser_search(self):
         result = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_web_conversation_search.js"))],

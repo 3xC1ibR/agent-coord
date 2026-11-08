@@ -231,7 +231,7 @@ class BrowserSessions:
         self.history_revisions: dict[str, int] = {}
         self.usage_recovery_attempts: set[str] = set()
         self.persistence = BrowserPersistence(context=self._persistence_context)
-        self.history_persistence = HistoryPersistence(store)
+        self.history_persistence = HistoryPersistence(store, on_saved=self._seed_history_search)
         self.conversation_barrier = lambda identity: self.persistence.flush(key=identity)
         self.store.conversation_barrier = self.conversation_barrier
         self.history_lock = threading.Lock()
@@ -244,6 +244,8 @@ class BrowserSessions:
         self.last_used: dict[str, float] = {}
         self.residency_stopped = threading.Event()
         self.residency_worker = None
+        self.database_checkpoint = None
+        self.search_index_started = False
         self.history_rpc = None
         self.rpc_factory = rpc_factory
         self.permission_catalogs = {}
@@ -520,6 +522,27 @@ class BrowserSessions:
         if self.residency_worker is None:
             self.residency_worker = threading.Thread(target=self._run_residency, name="conversation-residency", daemon=True)
             self.residency_worker.start()
+
+    def start_database_checkpoint(self) -> None:
+        from .desktop_runtime import _OWNED_DATABASES
+        from .database_checkpoint import DatabaseCheckpoint
+        if (not self.closed and not self.store.read_only and self.database_checkpoint is None
+                and str(self.store.database_path) in _OWNED_DATABASES):
+            self.database_checkpoint = DatabaseCheckpoint(self.store.database_path)
+            self.database_checkpoint.start()
+
+    def start_search_index(self) -> bool:
+        """Schedule derived indexing after runtime checkpoint maintenance starts."""
+        from .desktop_runtime import _OWNED_DATABASES
+        with self.lock:
+            if (self.closed or self.store.read_only or self.search_index_started
+                    or str(self.store.database_path) not in _OWNED_DATABASES):
+                return False
+            from .conversation_substrings import backfill_steps
+            self.persistence.submit(lambda: backfill_steps(self.store),
+                                    key=("search_substrings",), required=False)
+            self.search_index_started = True
+            return True
 
     def _run_residency(self) -> None:
         while not self.residency_stopped.wait(RESIDENCY_INTERVAL_SECONDS):
@@ -851,17 +874,40 @@ class BrowserSessions:
         self.persistence.submit(lambda: self._persist_history(thread_id), key=thread_id, coalesce="history")
 
     def _persist_history(self, thread_id):
-        with self.lock:
+        with self.store._writer.measure_request("history.snapshot"), self.lock:
             # Several item completions may queue while SQLite is busy. The first
             # successful retry saves the latest mirror for all of them.
             if thread_id not in self.dirty_histories:
                 return
             snapshot = copy.deepcopy(self._history(thread_id))
             revision = self.history_revisions[thread_id]
-        self.history_persistence.save(thread_id, snapshot)
+        yield from self.history_persistence.save_steps(thread_id, snapshot)
         with self.lock:
             if self.history_revisions[thread_id] == revision:
                 self.dirty_histories.discard(thread_id)
+        terminal_turns = {turn["id"]: turn["status"] for turn in snapshot.get("turns", [])
+                          if turn.get("status") in {"completed", "failed", "interrupted"}}
+        # Completion callbacks precede the history commit. Preserve recovery
+        # until this terminal outcome is durable; acquire adapter locks outside
+        # self.lock so completion callbacks keep their existing lock order.
+        for provider in (self.claude, self.antigravity):
+            discard = getattr(provider, "discard_persisted_completion", None)
+            if discard is not None:
+                discard(thread_id, terminal_turns)
+
+    def _seed_history_search(self, thread_id, prepared):
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from .conversation_search import seed_prepared_history_steps
+        # Keep only new item values/references, never encoded archive payloads.
+        # A derived search cache cannot delay this conversation's save barrier.
+        documents = {position: replace(document, chunks={})
+                     for position, document in prepared.documents.items()
+                     if len(position) == 2 and not document.committed and document.value is not None}
+        if documents:
+            projection = SimpleNamespace(documents=documents)
+            self.persistence.submit(lambda: seed_prepared_history_steps(self.store, projection),
+                                    key=("history_search", thread_id), required=False)
 
     def _remember_thread(self, thread: dict) -> dict:
         with self.lock:
@@ -995,6 +1041,21 @@ class BrowserSessions:
     def _read_thread(self, thread_id: str) -> dict:
         provider = self._rpc(thread_id)
         if provider is not self.rpc:
+            reconcile = getattr(provider, "reconcile_history", None)
+            if callable(reconcile):
+                # This runtime already owns the authoritative event mirror.
+                # Adapter state supplies outcomes not yet delivered as events;
+                # reading its older SQLite copy would require an unnecessary
+                # save barrier and a second full transcript decode.
+                with self.lock:
+                    thread = copy.deepcopy(self._history(thread_id))
+                    revision = self.history_revisions.get(thread_id, 0)
+                thread = reconcile(thread_id, thread)
+                with self.lock:
+                    if revision != self.history_revisions.get(thread_id, 0):
+                        return copy.deepcopy(self._history(thread_id))
+                    thread["historyUnavailable"] = False
+                    return self._remember_thread(thread)
             # Normalized provider histories read our SQLite mirror. Flush this
             # conversation before that read so a completed live turn cannot be
             # replaced by its older saved in-progress version. Browser snapshot
@@ -2096,7 +2157,8 @@ class BrowserSessions:
             with self.lock:
                 self.loaded.add(thread_id)
                 self.loaded_clients[thread_id] = record["client"]
-            self._remember_thread(result["thread"])
+            if not callable(getattr(self._rpc(thread_id), "reconcile_history", None)):
+                self._remember_thread(result["thread"])
 
     def read(self, thread_id: str, *, recent: bool = False, snapshot: bool = False) -> dict:
         """Read a conversation; ``recent`` returns only the view for opening it."""
@@ -2109,8 +2171,11 @@ class BrowserSessions:
                 revision = self.turn_revisions.get(thread_id, 0)
                 self.last_used[thread_id] = time.monotonic()
             record = self._record(thread_id)
-            work_thread = self.work_thread(thread_id)
-            if record["archived"] or work_thread["attention"] == "archived":
+            # Admission needs only saved placement. Projecting the full card
+            # here duplicates usage, ownership, supervision and checkpoint
+            # reads; the response projects it after reconciliation below.
+            attention = self.store.threads.get(thread_id)["attention"]
+            if record["archived"] or attention == "archived":
                 thread = self._read_thread(thread_id)
             elif thread_id not in self.loaded:
                 self._resume_thread(thread_id, record)
@@ -2544,6 +2609,13 @@ class BrowserSessions:
                 return
             self.closed = True
             self.changed.notify_all()
+        try:
+            self._close_components()
+        finally:
+            if self.database_checkpoint is not None:
+                self.database_checkpoint.close()
+
+    def _close_components(self) -> None:
         self.residency_stopped.set()
         if self.residency_worker is not None:
             self.residency_worker.join(timeout=6)

@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from unittest.mock import patch
 from pathlib import Path
 
@@ -78,6 +79,55 @@ class ReviewTests(unittest.TestCase):
             self.sessions.reviews.process_once()
             self.sessions.inbox_wake.process_once()
         self.assertEqual(self.run_state(), run)
+
+    def test_review_projection_does_not_wait_for_writer(self):
+        run = self.start()
+        self.assertTrue(self.sessions.persistence.flush())
+        original = self.sessions.work_thread(self.owner, history=False)
+
+        def project():
+            result = copy.deepcopy(original)
+            self.sessions.reviews.project(result)
+            return result
+
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            with self.store._writer.reserve(object(), operation='test.writer'):
+                result = workers.submit(project).result(timeout=2)
+        self.assertEqual(result, original)
+        self.assertEqual(result['review']['id'], run['id'])
+
+    def test_stage_lookup_is_query_only_and_does_not_wait_for_writer(self):
+        run = self.start()
+        self.assertTrue(self.sessions.persistence.flush())
+        step = run['steps'][0]
+        connection = self.store._connection
+
+        @contextmanager
+        def observed_connection():
+            with connection() as db:
+                self.assertEqual(db.execute('PRAGMA query_only').fetchone()[0], 1)
+                changes = db.total_changes
+                yield db
+                self.assertEqual(db.total_changes, changes)
+
+        def lookup(pending):
+            return (self.sessions.reviews.stage_for(self.owner, 'review-turn', pending=pending),
+                    self.sessions.reviews.stage_for(self.owner, 'unrelated-turn'))
+
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                with connection() as db:
+                    db.execute('UPDATE review_steps SET turn_id=? WHERE run_id=? AND stage=?',
+                               (None if pending else 'review-turn', run['id'], step['stage']))
+                    db.execute('''INSERT OR REPLACE INTO message_wake_attempts
+                        (message_id, session_id, attempted_at, outcome) VALUES (?, ?, ?, 'claimed')''',
+                               (step['message_id'], self.owner, self.store.clock()))
+                    expected = dict(db.execute('SELECT * FROM review_steps WHERE run_id=? AND stage=?',
+                                               (run['id'], step['stage'])).fetchone())
+                with ThreadPoolExecutor(max_workers=1) as workers:
+                    with self.store._writer.reserve(object(), operation='test.writer'):
+                        with patch.object(self.store, '_connection', observed_connection):
+                            self.assertEqual(workers.submit(lookup, pending).result(timeout=2), (expected, None))
 
     def test_revision_rejection_and_targeted_recheck_are_bounded(self):
         self.start()

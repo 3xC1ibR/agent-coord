@@ -1,8 +1,55 @@
 """Read-only conversation projections of the durable coordination messages."""
 import json
 
+from .sqlite_rows import read_rows
 from .store import CoordinationError
 from .workspaces import matches_workspace
+
+
+TIMELINE_BATCH_ROWS = 128
+_TIMELINE_ROWS = """SELECT m.*, sender.client AS sender_client, recipient.client AS recipient_client,
+    COALESCE(st.title, sender.name, sender.session_id) AS sender_title,
+    COALESCE(rt.title, recipient.name, recipient.session_id) AS recipient_title,
+    sender.cwd AS sender_cwd, recipient.cwd AS recipient_cwd,
+    exchange.closed_at, a.outcome AS wake_outcome,
+    (SELECT r.id FROM messages r WHERE r.thread_id = m.thread_id AND r.id > m.id
+        AND r.sender_session_id = m.recipient_session_id
+        AND r.recipient_session_id = m.sender_session_id
+        AND (r.in_reply_to = m.id OR r.in_reply_to IS NULL)
+        AND r.classification != 'closure' ORDER BY r.id LIMIT 1) AS reply_id
+    FROM messages m JOIN sessions sender ON sender.session_id = m.sender_session_id
+    JOIN sessions recipient ON recipient.session_id = m.recipient_session_id
+    LEFT JOIN work_threads st ON st.thread_id = m.sender_session_id
+    LEFT JOIN work_threads rt ON rt.thread_id = m.recipient_session_id
+    LEFT JOIN message_threads exchange ON exchange.thread_id = m.thread_id
+    LEFT JOIN message_wake_attempts a ON a.message_id = m.id"""
+_TIMELINE_SELECT = _TIMELINE_ROWS + " WHERE (m.sender_session_id = ? OR m.recipient_session_id = ?)"
+
+
+def _timeline_rows(db, session_id):
+    """Transfer finite batches without one Python/SQLite handoff per message."""
+    rows, columns, after = [], None, None
+    while True:
+        # Page only IDs through the sender/recipient indexes. Applying LIMIT
+        # after the joined projection would repeat its work for later pages.
+        query = "SELECT id FROM messages WHERE (sender_session_id = ? OR recipient_session_id = ?)"
+        parameters = (session_id, session_id)
+        if after is not None:
+            query += " AND id > ?"
+            parameters += (after,)
+        packed = db.execute("SELECT json_group_array(id) FROM (" + query + " ORDER BY id LIMIT ?)",
+                            (*parameters, TIMELINE_BATCH_ROWS)).fetchone()[0]
+        identities = json.loads(packed)
+        if not identities:
+            return rows
+        batch = read_rows(db, _TIMELINE_ROWS + " WHERE m.id IN (SELECT value FROM json_each(?)) ORDER BY m.id",
+                          (packed,), columns=columns)
+        rows.extend(batch)
+        if batch:
+            columns = tuple(batch[0])
+        if len(identities) < TIMELINE_BATCH_ROWS:
+            return rows
+        after = identities[-1]
 
 
 def message_timeline(store, session_id, cwd=None):
@@ -10,6 +57,9 @@ def message_timeline(store, session_id, cwd=None):
     if not matches_workspace(session["cwd"], cwd):
         raise CoordinationError("Conversation not found in this workspace.")
     with store.reading(), store._connection() as db:
+        # Reply linkage, titles, creation receipts, and every batch belong to
+        # one observation, even if another connection publishes during a read.
+        db.execute("BEGIN")
         creations = {}
         if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
             for request in db.execute("""SELECT request_id, sender_session_id, thread_id, result_json
@@ -21,24 +71,7 @@ def message_timeline(store, session_id, cwd=None):
                     continue
                 if isinstance(receipt, dict) and type(receipt.get("message_id")) is int:
                     creations[(receipt["message_id"], request["sender_session_id"], request["thread_id"])] = request["request_id"]
-        rows = db.execute("""SELECT m.*, sender.client AS sender_client, recipient.client AS recipient_client,
-            COALESCE(st.title, sender.name, sender.session_id) AS sender_title,
-            COALESCE(rt.title, recipient.name, recipient.session_id) AS recipient_title,
-            sender.cwd AS sender_cwd, recipient.cwd AS recipient_cwd,
-            exchange.closed_at, a.outcome AS wake_outcome,
-            (SELECT r.id FROM messages r WHERE r.thread_id = m.thread_id AND r.id > m.id
-                AND r.sender_session_id = m.recipient_session_id
-                AND r.recipient_session_id = m.sender_session_id
-                AND (r.in_reply_to = m.id OR r.in_reply_to IS NULL)
-                AND r.classification != 'closure' ORDER BY r.id LIMIT 1) AS reply_id
-            FROM messages m JOIN sessions sender ON sender.session_id = m.sender_session_id
-            JOIN sessions recipient ON recipient.session_id = m.recipient_session_id
-            LEFT JOIN work_threads st ON st.thread_id = m.sender_session_id
-            LEFT JOIN work_threads rt ON rt.thread_id = m.recipient_session_id
-            LEFT JOIN message_threads exchange ON exchange.thread_id = m.thread_id
-            LEFT JOIN message_wake_attempts a ON a.message_id = m.id
-            WHERE m.sender_session_id = ? OR m.recipient_session_id = ? ORDER BY m.id""",
-            (session_id, session_id)).fetchall()
+        rows = _timeline_rows(db, session_id)
     result = []
     for row in rows:
         item = dict(row)

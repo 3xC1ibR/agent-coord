@@ -119,10 +119,18 @@ class MuseRPC:
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
 
-    def _history(self, thread_id):
+    def _history(self, thread_id, *, include_turns=True):
+        if not include_turns:
+            with self.lock:
+                return {"id": thread_id, "turns": [],
+                        "status": {"type": "active" if thread_id in self.turns else "idle"}}
         history = read_history(self.store, thread_id)
         if history is None:
             history = {"id": thread_id, "turns": []}
+        return self.reconcile_history(thread_id, history)
+
+    def reconcile_history(self, thread_id, history):
+        """Reconcile a caller-owned mirror without reading persisted history."""
         with self.lock:
             active = self.turns.get(thread_id)
             updates = dict(self.background_turns.get(thread_id, {}))
@@ -134,14 +142,15 @@ class MuseRPC:
                 index = next((i for i, turn in enumerate(turns) if turn["id"] == identity), None)
                 if index is None:
                     turns.append(copy.deepcopy(latest))
-                else:
+                elif (latest is active or identity in self.background_turns.get(thread_id, {})
+                      or turns[index].get("status") not in {"completed", "failed", "interrupted"}):
                     turns[index].update(copy.deepcopy(latest))
             if not active:
                 for turn in history.get("turns", []):
                     if turn.get("status") == "inProgress":
                         turn["status"] = "interrupted"
-        history["status"] = {"type": "active" if active else "idle"}
-        return history
+            history["status"] = {"type": "active" if active else "idle"}
+            return history
 
     @staticmethod
     def _options(params):
@@ -309,7 +318,8 @@ class MuseRPC:
             return {"thread": self._history(thread_id), "model": options["model"],
                     "reasoningEffort": options["effort"]}
         if method in {"thread/resume", "thread/read"}:
-            return {"thread": self._history(thread_id)}
+            include_turns = not params.get("excludeTurns", False) if method == "thread/resume" else params.get("includeTurns", True)
+            return {"thread": self._history(thread_id, include_turns=include_turns)}
         if method in {"thread/archive", "thread/unarchive", "thread/name/set"}:
             if method == "thread/archive":
                 self._shutdown(thread_id)

@@ -330,6 +330,12 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
         # One read snapshot keeps candidates, measurements and details consistent.
         db.execute("BEGIN")
         try:
+            from .conversation_substrings import candidates as substring_candidates, message_source
+            with _measure(store, "substring_query") as index_measurement:
+                indexed = substring_candidates(db, terms, index_measurement) if use_messages else None
+            params["substring_candidates"] = indexed
+            message_rows = message_source(include_text=True, indexed=indexed is not None)
+            folded_rows = message_source(include_text=False, indexed=indexed is not None)
             if use_context:
                 # Sources first, then the casefolded text that the search compares.
                 overlay = {row[0]: [*row[1:], *map(_normalize, row[1:])]
@@ -350,7 +356,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                 relevance = dict.fromkeys(_CONTEXT_WEIGHTS, "0")
             evidence = ("SELECT NULL AS thread_id, NULL AS certain, 0 AS uncertain WHERE 0" if not use_messages else
                         f"""SELECT thread_id, MAX(NULLIF(relevance, -1)) AS certain, MAX(relevance = -1) AS uncertain
-                            FROM (SELECT m.thread_id, {message_relevance} AS relevance FROM conversation_search_message_index m
+                            FROM (SELECT m.thread_id, {message_relevance} AS relevance FROM candidate_messages m
                                   WHERE m.thread_id IN (SELECT thread_id FROM scope) AND {message_where})
                             GROUP BY thread_id""")
             match = {"context": "context_match", "messages": "message_match"}.get(source, "(context_match OR message_match)")
@@ -372,6 +378,9 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     SELECT t.thread_id, t.created_at, t.turn_started_at FROM work_threads t
                     JOIN sessions s ON s.session_id = t.thread_id JOIN work_projects w ON w.id = t.project_id
                     JOIN thread_organization o ON o.thread_id = t.thread_id WHERE {' AND '.join(where) or '1'}),
+                candidate_messages AS MATERIALIZED (
+                    SELECT m.* FROM ({folded_rows}) m
+                    WHERE m.thread_id IN (SELECT thread_id FROM scope)),
                 evidence AS ({evidence}),
                 bounded AS MATERIALIZED (SELECT *, {fixed} + {spread} + {low} AS low,
                         {fixed} + 25 * ({spread}) + {high} AS high
@@ -430,7 +439,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                 return found
 
             uncertain_messages = f"""SELECT json_group_array(json_array(m.thread_id, m.position, m.turn_id, m.item_id,
-                    m.role, {_number('m.timestamp')}, m.text)) FROM conversation_search_message_index m
+                    m.role, {_number('m.timestamp')}, m.text)) FROM ({message_rows}) m
                 WHERE m.thread_id IN (SELECT value FROM json_each(:measure)) AND {message_where}
                   AND instr(m.folded, :phrase) = 0"""
 
@@ -474,13 +483,13 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     {"LEFT JOIN browser_inbox_wake bw ON bw.thread_id = t.thread_id" if "browser_inbox_wake" in tables else ""}
                     WHERE t.thread_id IN (SELECT value FROM json_each(:page))),
                 (SELECT json_group_array(json_array(thread_id, total)) FROM (SELECT m.thread_id, COUNT(*) AS total
-                    FROM conversation_search_message_index m WHERE :messages AND m.thread_id IN (SELECT value FROM json_each(:page))
+                    FROM ({folded_rows}) m WHERE :messages AND m.thread_id IN (SELECT value FROM json_each(:page))
                     AND {message_where} GROUP BY m.thread_id)),
                 (SELECT json_group_array(json_array(thread_id, relevance, position, turn_id, item_id, role,
                         {_number('timestamp')}, text)) FROM (
                     SELECT *, ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY relevance DESC, position DESC) AS place
                     FROM (SELECT m.thread_id, m.position, m.turn_id, m.item_id, m.role, m.timestamp, m.text,
-                                 {message_relevance} AS relevance FROM conversation_search_message_index m
+                                 {message_relevance} AS relevance FROM ({message_rows}) m
                           WHERE :messages AND m.thread_id IN (SELECT value FROM json_each(:page)) AND {message_where}))
                     WHERE relevance != -1 AND place <= 3),
                 ({uncertain_messages})""", {**params, "messages": use_messages,

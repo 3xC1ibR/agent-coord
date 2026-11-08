@@ -4,6 +4,8 @@ import json
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,6 +31,50 @@ class WorkThreadTests(unittest.TestCase):
             "phase": "investigation", "summary": "Two options remain.",
             "next_action": "Choose an approach.", "next_actor": "user", **changes,
         })
+
+    def test_thread_reads_project_due_snoozes_and_legacy_associations_without_writer_admission(self):
+        self.save(domain="research")
+        self.threads.update("conversation", snoozed_until=self.now + 10)
+        (self.root / ".git").mkdir()
+        with self.store._connection() as db:
+            db.execute("DELETE FROM thread_organization WHERE thread_id='conversation'")
+        self.now += 11
+
+        def read():
+            return (self.threads.get("conversation", history=True), self.threads.list(),
+                    self.threads.known_domains(str(self.root)))
+
+        expected = read()
+        self.assertEqual(expected[0]["attention"], "now")
+        self.assertTrue(expected[0]["snooze_due"])
+        self.assertEqual(expected[0]["repository_root"], str(self.root))
+        self.assertEqual(expected[1][0]["attention"], "now")
+        self.assertEqual(expected[1][0]["repository_id"], expected[0]["repository_id"])
+        self.assertEqual(expected[2], ["research"])
+        connection = self.store._connection
+
+        @contextmanager
+        def observed_connection():
+            with connection() as db:
+                self.assertEqual(db.execute("PRAGMA query_only").fetchone()[0], 1)
+                changes = db.total_changes
+                yield db
+                self.assertEqual(db.total_changes, changes)
+
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            with self.store._writer.reserve(object(), operation="test.writer"):
+                with patch.object(self.store, "_connection", observed_connection):
+                    self.assertEqual(workers.submit(read).result(timeout=2), expected)
+
+        with connection() as db:
+            self.assertEqual(db.execute("SELECT attention FROM work_threads WHERE thread_id='conversation'").fetchone()[0], "later")
+            self.assertIsNone(db.execute("SELECT 1 FROM thread_organization WHERE thread_id='conversation'").fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM snooze_notifications").fetchone())
+        self.threads.ensure("conversation")
+        self.assertEqual(len(self.threads.snooze_notifications()), 1)
+        with connection() as db:
+            self.assertEqual(db.execute("SELECT attention FROM work_threads WHERE thread_id='conversation'").fetchone()[0], "now")
+            self.assertIsNotNone(db.execute("SELECT 1 FROM thread_organization WHERE thread_id='conversation'").fetchone())
 
     def test_domain_is_optional_sticky_and_can_follow_a_new_assignment(self):
         thread = self.threads.get("conversation")

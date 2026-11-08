@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 from test_codex_app_server import FakeCodex, BrowserSessions, CoordinationStore, CoordinationError
 from agent_coord.claude_code import ClaudeRPC
+from agent_coord.codex_app_server import BrowserBusyError
+from agent_coord.history_persistence import read_history
 
 
 class FakeConnection:
@@ -316,17 +318,57 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual([t["status"] for t in saved], ["interrupted", "completed"])
         self.assertEqual(saved[-1]["items"][-1]["text"], "Resumed research")
 
-    def test_native_history_read_waits_for_pending_completion_without_blocking_snapshot(self):
+    def test_native_history_read_uses_current_mirror_while_completion_persistence_is_held(self):
+        thread = self.create()
+        self.start(thread)
+        self.emit(thread, {"type": "assistant", "message": {"content": [{"type": "text", "text": "Saved answer"}]}})
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def hold():
+            entered.set()
+            release.wait(2)
+
+        self.sessions.persistence.submit(hold, key=thread)
+        self.assertTrue(entered.wait(1))
+        self.emit(thread, {"type": "result", "subtype": "success"})
+        try:
+            self.assertIn(thread, self.sessions.claude.completed)
+            self.assertEqual(read_history(self.store, thread)['turns'][-1]['status'], 'inProgress')
+            with patch.object(self.sessions, "_await_persistence", side_effect=AssertionError("Read waited for persistence")), \
+                    patch("agent_coord.claude_code.read_history", side_effect=AssertionError("Read reloaded saved history")):
+                detail = self.sessions.read(thread)
+                snapshot = self.sessions.read(thread, snapshot=True)
+            self.assertFalse(detail["running"])
+            self.assertEqual(detail["thread"]["turns"][-1]["status"], "completed")
+            self.assertEqual(snapshot["thread"]["turns"][-1]["status"], "completed")
+            self.assertFalse(self.sessions.persistence.flush(timeout=0, key=thread))
+        finally:
+            release.set()
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        self.assertNotIn(thread, self.sessions.claude.completed)
+        self.assertEqual(self.sessions.claude._read_history(thread)['turns'][-1]['status'], 'completed')
+
+    def test_next_send_still_waits_for_pending_completion_persistence(self):
         thread = self.create()
         self.start(thread)
         self.assertTrue(self.sessions.persistence.flush(key=thread))
         entered, release, waiting = threading.Event(), threading.Event(), threading.Event()
         self.addCleanup(release.set)
-        reads = []
+        sent, errors = [], []
+        connection = self.sessions.claude.connections[thread]
+        writes = len(connection.writes)
 
         def hold():
             entered.set()
             release.wait(2)
+
+        def send():
+            try:
+                sent.append(self.sessions.send(thread, {"message": "Next turn"}))
+            except Exception as exc:
+                errors.append(exc)
 
         self.sessions.persistence.submit(hold, key=thread)
         self.assertTrue(entered.wait(1))
@@ -338,34 +380,113 @@ class ProviderTests(unittest.TestCase):
             await_persistence(identity)
 
         with patch.object(self.sessions, "_await_persistence", side_effect=observed_barrier):
-            reader = threading.Thread(target=lambda: reads.append(self.sessions.read(thread)))
-            reader.start()
-            self.assertTrue(waiting.wait(1))
-            self.assertEqual(reads, [])
-            snapshot = self.sessions.read(thread, snapshot=True)
-            self.assertEqual(snapshot["thread"]["turns"][-1]["status"], "completed")
-            release.set()
-            reader.join(2)
-        self.assertFalse(reader.is_alive())
-        self.assertEqual(reads[0]["thread"]["turns"][-1]["status"], "completed")
+            sender = threading.Thread(target=send)
+            sender.start()
+            try:
+                self.assertTrue(waiting.wait(1))
+                self.assertEqual(sent, [])
+                self.assertEqual(len(connection.writes), writes)
+            finally:
+                release.set()
+                sender.join(2)
+        self.assertFalse(sender.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(connection.writes), writes + 1)
 
     def test_completion_during_native_history_read_preserves_newer_mirror(self):
         thread = self.create()
         self.start(thread)
-        query = self.sessions._query_thread
+        reconcile = self.sessions.claude.reconcile_history
 
         def complete_after_query(*args, **kwargs):
-            stale = query(*args, **kwargs)
+            stale = reconcile(*args, **kwargs)
             self.assertEqual(stale["turns"][-1]["status"], "inProgress")
             self.emit(thread, {"type": "result", "subtype": "success"})
             return stale
 
-        with patch.object(self.sessions, "_query_thread", side_effect=complete_after_query):
+        with patch.object(self.sessions.claude, "reconcile_history", side_effect=complete_after_query):
             detail = self.sessions.read(thread)
         self.assertFalse(detail["running"])
         self.assertEqual(detail["thread"]["turns"][-1]["status"], "completed")
         self.assertTrue(self.sessions.persistence.flush(key=thread))
         self.assertEqual(self.sessions.read(thread, snapshot=True)["thread"]["turns"][-1]["status"], "completed")
+
+    def test_full_read_preserves_mirror_updates_newer_than_cached_completion(self):
+        thread = self.create()
+        self.start(thread)
+        self.emit(thread, {"type": "assistant", "message": {"content": [{"type": "text", "text": "Original answer"}]}})
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def hold():
+            entered.set()
+            release.wait(2)
+
+        self.sessions.persistence.submit(hold, key=thread)
+        self.assertTrue(entered.wait(1))
+        try:
+            self.emit(thread, {"type": "result", "subtype": "success"})
+            completed = self.sessions.claude.completed[thread]
+            answer = next(item for item in completed["items"] if item["type"] == "agentMessage")
+            self.sessions._event({"method": "item/completed", "params": {
+                "threadId": thread, "turnId": completed["id"], "item": {**answer, "text": "Later mirror update"}}})
+            detail = self.sessions.read(thread)
+            current = next(item for item in detail["thread"]["turns"][-1]["items"] if item["id"] == answer["id"])
+            self.assertEqual(current["text"], "Later mirror update")
+            self.assertEqual(answer["text"], "Original answer")
+        finally:
+            release.set()
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        self.assertNotIn(thread, self.sessions.claude.completed)
+
+    def test_read_recovers_actual_failure_after_provider_pop_before_browser_callback(self):
+        thread = self.create()
+        self.start(thread)
+        observed = []
+        callback = self.sessions.claude.on_event
+
+        def read_before_delivery(event):
+            if event["method"] == "turn/completed":
+                self.assertNotIn(thread, self.sessions.claude.turns)
+                observed.append(self.sessions.read(thread))
+            callback(event)
+
+        with patch.object(self.sessions.claude, "on_event", side_effect=read_before_delivery):
+            self.emit(thread, {"type": "result", "subtype": "error_during_execution",
+                               "is_error": True, "errors": ["Provider failed"]})
+        self.assertEqual(len(observed), 1)
+        self.assertFalse(observed[0]["running"])
+        self.assertEqual(observed[0]["thread"]["turns"][-1]["status"], "failed")
+        self.assertEqual(observed[0]["thread"]["turns"][-1]["error"]["message"], "Provider failed")
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
+        self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1]["status"], "failed")
+
+    def test_persistence_failure_still_blocks_lifecycle_mutations(self):
+        thread = self.create()
+
+        def fail():
+            raise RuntimeError("Required bookkeeping failed")
+
+        with self.assertLogs("agent_coord.browser_persistence", level="ERROR"):
+            self.sessions.persistence.submit(fail, key=thread)
+            self.assertFalse(self.sessions.persistence.flush(key=thread))
+        self.addCleanup(self.sessions.persistence.failures.pop, thread, None)
+        record = self.sessions._record(thread)
+        self.sessions.loaded.discard(thread)
+        actions = {
+            "send": lambda: self.sessions.send(thread, {"message": "Blocked"}),
+            "resume": lambda: self.sessions._resume_thread(thread, record),
+            "fork": lambda: self.sessions.fork_work_thread(thread),
+            "settings": lambda: self.sessions.update(thread, {"model": "sonnet"}),
+            "close": lambda: self.sessions.close_work_thread(thread),
+        }
+        with patch.object(self.sessions.claude, "request", wraps=self.sessions.claude.request) as request:
+            for name, action in actions.items():
+                with self.subTest(action=name), self.assertRaisesRegex(BrowserBusyError, "could not be saved"):
+                    action()
+            request.assert_not_called()
 
     def test_results_match_any_consumed_prompt_uuid(self):
         thread = self.create()

@@ -156,6 +156,7 @@ class AntigravityRPC:
     def __init__(self, store, on_event, *, connection_factory=AntigravityConnection):
         self.store, self.on_event, self.connection_factory = store, on_event, connection_factory
         self.connections, self.options, self.turns, self.requests, self.native = {}, {}, {}, {}, {}
+        self.completed = {}
         self.resolved_models = {}
         self.catalog = None
         self.permission_catalogs = {}
@@ -186,22 +187,45 @@ class AntigravityRPC:
         except Exception:
             logging.getLogger(__name__).warning("Could not capture Antigravity context usage")
 
-    def _history(self, thread_id):
+    def _history(self, thread_id, *, include_turns=True):
+        if not include_turns:
+            with self.lock:
+                return {"id": thread_id, "turns": [],
+                        "status": {"type": "active" if thread_id in self.turns else "idle"}}
         history = read_history(self.store, thread_id)
         if history is None:
             history = {"id": thread_id, "turns": []}
+        return self.reconcile_history(thread_id, history)
+
+    def reconcile_history(self, thread_id, history):
+        """Reconcile a caller-owned mirror without reading persisted history."""
         with self.lock:
             active = self.turns.get(thread_id)
-            if active:
-                history["turns"] = [t for t in history.get("turns", []) if t["id"] != active["id"]] + [copy.deepcopy(active)]
-            else:
+            latest = active or self.completed.get(thread_id)
+            if latest:
+                turns = history.setdefault("turns", [])
+                index = next((index for index, turn in enumerate(turns) if turn["id"] == latest["id"]), None)
+                if index is None:
+                    turns.append(copy.deepcopy(latest))
+                elif active or turns[index].get("status") not in {"completed", "failed", "interrupted"}:
+                    # A terminal mirror can include later events than the
+                    # retained completion. Use that cache only for recovery.
+                    turns[index] = copy.deepcopy(latest)
+            if not active:
                 for turn in history.get("turns", []):
                     if turn.get("status") == "inProgress":
                         turn["status"] = "interrupted"
                         turn["termination"] = {"origin": "runtime", "reason": "runtime_state_lost", "execution": "unknown"}
                     self._unconfirmed_tools(turn, "The session ended before Antigravity reported this tool's outcome.")
-        history["status"] = {"type": "active" if active else "idle"}
-        return history
+            history["status"] = {"type": "active" if active else "idle"}
+            return history
+
+    def discard_persisted_completion(self, thread_id, terminal_turns):
+        """Release only the completion represented by a committed snapshot."""
+        with self.lock:
+            completed = self.completed.get(thread_id)
+            if completed is not None and terminal_turns.get(completed["id"]) == completed["status"]:
+                self.completed.pop(thread_id)
 
     @staticmethod
     def _unconfirmed_tools(turn, reason):
@@ -354,9 +378,9 @@ class AntigravityRPC:
             return {"thread": self._history(thread_id), "model": self.resolved_models.get(thread_id), "reasoningEffort": None}
         if method == "thread/resume":
             self.options[thread_id] = self._options(params)
-            return {"thread": self._history(thread_id), "model": params.get("model"), "reasoningEffort": None}
+            return {"thread": self._history(thread_id, include_turns=not params.get("excludeTurns", False)), "model": params.get("model"), "reasoningEffort": None}
         if method == "thread/read":
-            return {"thread": self._history(thread_id)}
+            return {"thread": self._history(thread_id, include_turns=params.get("includeTurns", True))}
         if method in {"thread/archive", "thread/unarchive", "thread/name/set"}:
             if method == "thread/archive":
                 connection = self.connections.pop(thread_id, None)
@@ -498,6 +522,9 @@ class AntigravityRPC:
                 "The turn ended before Antigravity reported this tool's outcome.")
             if error:
                 turn["error"] = {"message": str(error)}
+            # Closing a failed connection can delay the browser callback. Reads
+            # must still see the actual outcome, not infer an interruption.
+            self.completed[thread_id] = copy.deepcopy(turn)
             self.requests = {k: v for k, v in self.requests.items() if v[0] != thread_id}
             # A live ACP wrapper does not imply a healthy inner agent. Retire
             # failed processes before publishing completion, so the next user

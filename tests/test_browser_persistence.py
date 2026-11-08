@@ -226,6 +226,8 @@ class BrowserPersistenceTests(unittest.TestCase):
             self.assertTrue(persistence.flush(timeout=1, key="conversation"))
         self.assertEqual(saved, ["complete"])
         self.assertIsNone(persistence.failure("conversation"))
+        self.assertEqual(persistence.status()["optional_failure_count"], 1)
+        self.assertEqual(persistence.status()["failures"], {})
 
     def test_context_is_entered_and_released_on_worker(self):
         observations = []
@@ -263,6 +265,177 @@ class BrowserPersistenceTests(unittest.TestCase):
         self.assertEqual(persistence.status()["pending"], 2)
         self.assertFalse(persistence.flush(timeout=0, key="conversation"))
         self.assertIn("capacity", persistence.failure("conversation"))
+
+    def test_generator_steps_rotate_keys_with_separate_contexts_and_keep_lifecycle_order(self):
+        saved, scopes = [], []
+        depth = [0]
+
+        @contextmanager
+        def context():
+            self.assertEqual(depth[0], 0)
+            depth[0] = 1
+            scopes.append("enter")
+            try:
+                yield
+            finally:
+                depth[0] = 0
+                scopes.append("exit")
+
+        def record(value):
+            self.assertEqual(depth[0], 1)
+            saved.append(value)
+
+        def history():
+            record("stage")
+            yield
+            record("publish")
+
+        persistence = BrowserPersistence(context=context)
+        self.addCleanup(persistence.close)
+        with persistence.condition:
+            persistence.submit(history, key="history")
+            persistence.submit(lambda: record("lifecycle"), key="history")
+            persistence.submit(lambda: record("independent"), key="other")
+        self.assertTrue(persistence.flush(timeout=1))
+        self.assertEqual(saved, ["stage", "independent", "publish", "lifecycle"])
+        self.assertEqual(scopes, ["enter", "exit"] * 4)
+        self.assertEqual(depth[0], 0)
+
+    def test_suspended_snapshot_is_not_replaced_by_coalescing(self):
+        persistence = BrowserPersistence()
+        self.addCleanup(persistence.close)
+        holding, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        saved = []
+
+        def history():
+            saved.append("original stage")
+            yield
+            saved.append("original publish")
+
+        def hold():
+            holding.set()
+            release.wait(2)
+
+        with persistence.condition:
+            persistence.submit(history, key="history", coalesce="history")
+            original = persistence.pending[0]
+            identity = (original.sequence, original.created_at)
+            persistence.submit(hold, key="other")
+        self.assertTrue(holding.wait(1))
+        for value in range(20):
+            persistence.submit(lambda value=value: saved.append(value), key="history", coalesce="history")
+        persistence.submit(lambda: saved.append("lifecycle"), key="history")
+        self.assertEqual(persistence.status(key="history")["pending"], 3)
+        self.assertEqual((original.sequence, original.created_at), identity)
+        self.assertFalse(persistence.flush(timeout=0, key="history"))
+        release.set()
+        self.assertTrue(persistence.flush(timeout=1))
+        self.assertEqual(saved, ["original stage", "original publish", 19, "lifecycle"])
+
+    def test_busy_generator_restarts_factory_without_satisfying_barrier_early(self):
+        persistence = BrowserPersistence(retry_delay=.01)
+        self.addCleanup(persistence.close)
+        failed, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        attempts, finalized, saved = [], [], []
+        blocks = set()
+
+        def history():
+            attempt = len(attempts)
+            attempts.append(attempt)
+            try:
+                blocks.add("immutable block")
+                yield
+                if not release.is_set():
+                    failed.set()
+                    raise sqlite3.OperationalError("database is locked")
+                saved.append("publish")
+            finally:
+                finalized.append(attempt)
+
+        persistence.submit(history, key="history")
+        persistence.submit(lambda: saved.append("lifecycle"), key="history")
+        self.assertTrue(failed.wait(1))
+        self.assertFalse(persistence.flush(timeout=0, key="history"))
+        self.assertEqual(saved, [])
+        release.set()
+        self.assertTrue(persistence.flush(timeout=2))
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertEqual(finalized, attempts)
+        self.assertEqual(blocks, {"immutable block"})
+        self.assertEqual(saved, ["publish", "lifecycle"])
+        self.assertGreaterEqual(persistence.status()["retries"], 1)
+
+    def test_permanent_generator_failure_closes_and_blocks_its_lifecycle(self):
+        persistence = BrowserPersistence()
+        self.addCleanup(persistence.close)
+        saved, closed = [], []
+
+        def invalid():
+            try:
+                yield
+                raise ValueError("invalid snapshot")
+            finally:
+                closed.append(True)
+
+        with self.assertLogs("agent_coord.browser_persistence", level="ERROR"):
+            with persistence.condition:
+                persistence.submit(invalid, key="failed")
+                persistence.submit(lambda: saved.append("must not run"), key="failed")
+                persistence.submit(lambda: saved.append("independent"), key="other")
+            self.assertTrue(persistence.flush(timeout=1, key="other"))
+            self.assertFalse(persistence.flush(timeout=1, key="failed"))
+        self.assertEqual(closed, [True])
+        self.assertEqual(saved, ["independent"])
+        self.assertIn("invalid snapshot", persistence.failure("failed"))
+
+    def test_shutdown_closes_suspended_generators_on_worker_outside_queue_and_context(self):
+        depth = [0]
+        closed = []
+
+        @contextmanager
+        def context():
+            depth[0] += 1
+            try:
+                yield
+            finally:
+                depth[0] -= 1
+
+        persistence = BrowserPersistence(context=context)
+        self.addCleanup(persistence.close)
+        holding, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def history():
+            try:
+                yield
+                self.fail("Shutdown must not resume suspended work")
+            finally:
+                closed.append((threading.get_ident(), depth[0], persistence.condition._is_owned()))
+
+        def hold():
+            holding.set()
+            release.wait(2)
+
+        with persistence.condition:
+            persistence.submit(history, key="history")
+            persistence.submit(hold, key="other")
+        self.assertTrue(holding.wait(1))
+        with patch.object(persistence, "flush", return_value=False):
+            with self.assertLogs("agent_coord.browser_persistence", level="WARNING"):
+                closer = threading.Thread(target=persistence.close)
+                closer.start()
+                try:
+                    with persistence.condition:
+                        self.assertTrue(persistence.condition.wait_for(lambda: persistence.stopped, timeout=1))
+                finally:
+                    release.set()
+                    closer.join(2)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(closed, [(persistence.worker.ident, 0, False)])
+        self.assertFalse(persistence.worker.is_alive())
+        self.assertFalse(persistence.flush(timeout=0, key="history"))
 
     def test_busy_codes_and_python_310_fallback(self):
         error = sqlite3.OperationalError("localized error")

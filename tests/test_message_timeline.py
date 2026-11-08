@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import json
+import math
+import sqlite3
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
 from agent_coord.message_timeline import message_changes, message_cursor, message_timeline, message_sends
 from agent_coord.store import CoordinationError
 from agent_coord.ui import make_ui_server
 from agent_coord.app_control import AppControl
+import agent_coord.message_timeline as timeline
 
 
 class MessageTimelineTests(unittest.TestCase):
@@ -104,6 +109,93 @@ class MessageTimelineTests(unittest.TestCase):
         self.assertEqual(messages[2]['status'], 'Queued for agent')
         self.store.inbox('sender')
         self.assertEqual(message_timeline(reopened, 'sender')[2]['status'], 'Delivered to agent')
+
+    def test_batched_rows_preserve_complete_fields_types_and_exact_float_values(self):
+        original = self.send()
+        control = AppControl(self.store)
+        request = control.request('create', 'sender', dict(cwd=str(self.root), prompt='Create an agent'))
+        control.claim(request['request_id'], 'test-runtime')
+        control.identified(request['request_id'], 'recipient')
+        count = timeline.TIMELINE_BATCH_ROWS * 2 + 3
+        values = (None, 2 ** 62 + 1, math.nextafter(1.0, math.inf), 'text\x00雪', b'\x00\xff')
+        stamp = math.nextafter(1793753480.570122, math.inf)
+        with self.store._connection() as db:
+            db.execute('ALTER TABLE messages ADD COLUMN extension')
+            db.execute("UPDATE app_control_requests SET status='completed', result_json=? WHERE request_id=?",
+                       (json.dumps({'message_id': original['id']}), request['request_id']))
+            db.executemany('''INSERT INTO messages
+                (sender_session_id, recipient_session_id, body, created_at, delivered_at,
+                 acknowledged_at, classification, thread_id, reply_required, in_reply_to,
+                 sender_turn_id, recipient_turn_id, wake_turn_id, suppressed_at, context_lifecycle_json, extension)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', [
+                ('sender' if i % 2 else 'recipient', 'recipient' if i % 2 else 'sender',
+                 f'Complete body {i}:\n' + '雪\\\x00' * 400, stamp,
+                 stamp if i % 3 == 0 else None, stamp if i % 7 == 0 else None,
+                 'closure' if i % 11 == 0 else 'action_required', original['thread_id'], i % 2,
+                 original['id'] if i % 3 == 0 else None, 'sender-turn', 'recipient-turn',
+                 'wake-turn' if i % 4 == 0 else None, stamp if i % 13 == 0 else None,
+                 '{"complete":true}', values[i % len(values)]) for i in range(count)])
+
+        def ordinary_rows(db, session_id):
+            return [dict(row) for row in db.execute(timeline._TIMELINE_SELECT + ' ORDER BY m.id',
+                                                  (session_id, session_id))]
+
+        with patch.object(timeline, '_timeline_rows', ordinary_rows):
+            expected = message_timeline(self.store, 'sender')
+        transferred = []
+        connect = self.store._connect
+
+        def observed_connection():
+            db = connect()
+            def row_factory(cursor, row):
+                transferred.append(1)
+                return sqlite3.Row(cursor, row)
+            db.row_factory = row_factory
+            return db
+
+        with patch.object(self.store, '_connect', observed_connection):
+            actual = message_timeline(self.store, 'sender')
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual[0]['creation_request_id'], request['request_id'])
+        self.assertEqual(len(actual), count + 1)
+        self.assertLess(len(transferred), 50, 'Timeline crossed into Python once per message')
+        for reference, row in zip(expected, actual):
+            self.assertEqual(set(row), set(reference))
+            for key, value in reference.items():
+                self.assertIs(type(row[key]), type(value), key)
+                if isinstance(value, float):
+                    self.assertEqual(row[key].hex(), value.hex(), key)
+
+    def test_timeline_batches_keep_one_snapshot_during_concurrent_updates(self):
+        with self.store._connection() as db:
+            db.executemany('''INSERT INTO messages
+                (sender_session_id, recipient_session_id, body, created_at, thread_id)
+                VALUES ('sender', 'recipient', ?, 1.0, 'snapshot')''',
+                [(f'Original {i}',) for i in range(timeline.TIMELINE_BATCH_ROWS + 1)])
+        expected = message_timeline(self.store, 'sender')
+        read_rows = timeline.read_rows
+        batches = 0
+
+        def change():
+            with self.store._connection() as db:
+                db.execute("UPDATE messages SET body='Changed' WHERE id=(SELECT MAX(id) FROM messages)")
+                db.execute("UPDATE work_threads SET title='Changed title' WHERE thread_id='recipient'")
+
+        def concurrent_read(db, query, parameters=(), **options):
+            nonlocal batches
+            rows = read_rows(db, query, parameters, **options)
+            batches += 1
+            if batches == 1:
+                with ThreadPoolExecutor(max_workers=1) as workers:
+                    workers.submit(change).result(timeout=2)
+            return rows
+
+        with patch.object(timeline, 'read_rows', concurrent_read):
+            self.assertEqual(message_timeline(self.store, 'sender'), expected)
+        self.assertGreater(batches, 1)
+        refreshed = message_timeline(self.store, 'sender')
+        self.assertEqual(refreshed[-1]['body'], 'Changed')
+        self.assertTrue(all(row['counterpart']['title'] == 'Changed title' for row in refreshed))
 
     def test_external_writes_and_delivery_emit_scoped_notifications(self):
         cursor = message_cursor(self.store)

@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
-from agent_coord.store import CoordinationStore
+from agent_coord.store import CoordinationStore, _StoreConnection
+from agent_coord import desktop_runtime
 
 
 class StoreConnectionReuseTests(unittest.TestCase):
@@ -150,6 +151,136 @@ class StoreConnectionReuseTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         with self.assertRaises(sqlite3.ProgrammingError):
             idle.execute("SELECT 1")
+
+    def test_delayed_open_does_not_hold_writer_admission(self):
+        opened, ready, proceed, release, completed = (threading.Event() for _ in range(5))
+        failures = []
+        connect = self.store._connect
+
+        def factory():
+            if threading.current_thread() is delayed:
+                opened.set()
+                if not release.wait(5):
+                    raise TimeoutError("Delayed connection was not released")
+            return connect()
+
+        def warm_writer():
+            try:
+                with self.store._connection() as db:
+                    db.execute("SELECT 1").fetchone()
+                ready.set()
+                if not proceed.wait(5):
+                    raise TimeoutError("Warm writer was not released")
+                with self.store._connection() as db:
+                    db.execute("INSERT INTO probe VALUES (1)")
+                completed.set()
+            except BaseException as error:
+                failures.append(error)
+
+        def delayed_writer():
+            try:
+                with self.store._connection() as db:
+                    db.execute("INSERT INTO probe VALUES (2)")
+            except BaseException as error:
+                failures.append(error)
+
+        warm = threading.Thread(target=warm_writer)
+        delayed = threading.Thread(target=delayed_writer)
+        with patch.object(self.store, "_connect", side_effect=factory), \
+                patch.object(desktop_runtime, "_OWNED_DATABASES", {self.store._database_identity}):
+            try:
+                warm.start()
+                self.assertTrue(ready.wait(3))
+                delayed.start()
+                self.assertTrue(opened.wait(3))
+                proceed.set()
+                self.assertTrue(completed.wait(2), "A cold open blocked an already connected writer")
+            finally:
+                proceed.set()
+                release.set()
+                warm.join(5)
+                if delayed.ident is not None:
+                    delayed.join(5)
+        self.assertFalse(warm.is_alive())
+        self.assertFalse(delayed.is_alive())
+        self.assertEqual(failures, [])
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM probe").fetchone()[0], 2)
+
+    def test_commit_and_rollback_retain_writer_admission(self):
+        transactions = []
+
+        def authorize(action, first, *unused):
+            if action == sqlite3.SQLITE_TRANSACTION and first in {"COMMIT", "ROLLBACK"}:
+                transactions.append((first, self.store._writer.owner == threading.get_ident()))
+            return sqlite3.SQLITE_OK
+
+        with self.store._connection() as db:
+            db.set_authorizer(authorize)
+            db.execute("INSERT INTO probe VALUES (1)")
+        with self.assertRaisesRegex(ValueError, "rollback"), self.store._connection() as db:
+            db.set_authorizer(authorize)
+            db.execute("INSERT INTO probe VALUES (2)")
+            raise ValueError("rollback")
+        self.assertEqual(transactions, [("COMMIT", True), ("ROLLBACK", True)])
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT value FROM probe").fetchall()[0][0], 1)
+
+    def test_autocommit_returning_statement_finishes_before_releasing_admission(self):
+        completion = []
+        finish = _StoreConnection.end_statements
+
+        def observed_finish(connection):
+            completion.append((connection.in_transaction, self.store._writer.owner == threading.get_ident()))
+            return finish(connection)
+
+        with patch.object(_StoreConnection, "end_statements", observed_finish):
+            with self.store._connection() as db:
+                cursor = db.execute("WITH values_to_add(value) AS (VALUES (1), (2), (3)) "
+                                    "INSERT INTO probe SELECT value FROM values_to_add RETURNING value")
+                self.assertEqual(cursor.fetchone()[0], 1)
+                self.assertFalse(db.in_transaction)
+                other = sqlite3.connect(self.path, timeout=0)
+                try:
+                    with self.assertRaises(sqlite3.OperationalError):
+                        other.execute("INSERT INTO probe VALUES (4)")
+                finally:
+                    other.close()
+        self.assertEqual(completion, [(False, True)])
+        with self.assertRaises(sqlite3.ProgrammingError):
+            cursor.fetchone()
+        other = sqlite3.connect(self.path, timeout=0)
+        try:
+            with other:
+                other.execute("INSERT INTO probe VALUES (4)")
+            self.assertEqual(other.execute("SELECT COUNT(*) FROM probe").fetchone()[0], 4)
+        finally:
+            other.close()
+
+    def test_failed_returning_scope_cannot_leave_a_write_lock_after_close(self):
+        completion = []
+        finish = _StoreConnection.end_statements
+
+        def observed_finish(connection):
+            completion.append(self.store._writer.owner == threading.get_ident())
+            return finish(connection)
+
+        with patch.object(_StoreConnection, "end_statements", observed_finish):
+            with self.assertRaisesRegex(ValueError, "stop"), self.store._connection() as db:
+                cursor = db.execute("WITH values_to_add(value) AS (VALUES (1), (2), (3)) "
+                                    "INSERT INTO probe SELECT value FROM values_to_add RETURNING value")
+                self.assertEqual(cursor.fetchone()[0], 1)
+                self.assertFalse(db.in_transaction)
+                raise ValueError("stop")
+        self.assertEqual(completion, [True])
+        with self.assertRaises(sqlite3.ProgrammingError):
+            cursor.fetchone()
+        other = sqlite3.connect(self.path, timeout=0)
+        try:
+            with other:
+                other.execute("INSERT INTO probe VALUES (4)")
+        finally:
+            other.close()
 
 
 if __name__ == "__main__":

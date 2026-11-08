@@ -6,6 +6,7 @@ import os
 import posixpath
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -15,6 +16,8 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from .database_writer import SLOW_DATABASE_THRESHOLD_MS
 
 ACTIVITIES = {
     "idle",
@@ -255,6 +258,59 @@ def scopes_overlap(left: str, right: str) -> bool:
     return False
 
 
+_DEFAULT_FETCH_SIZE = object()
+
+
+def _slow_read_operation():
+    """Read code identifiers only, with no source lookup or retained frames."""
+    frame = sys._getframe(1)
+    try:
+        for _ in range(16):
+            if frame is None:
+                break
+            module = os.path.splitext(os.path.basename(frame.f_code.co_filename))[0]
+            if module not in {"store", "contextlib"}:
+                return (module + "." + frame.f_code.co_name)[:100]
+            frame = frame.f_back
+        return "database.read"
+    finally:
+        del frame
+
+
+class _StoreCursor(sqlite3.Cursor):
+    """Time SQLite calls without tracing statements or timing every result row."""
+
+    def _timed(self, phase, method, *args):
+        started = time.perf_counter()
+        failed = error_code = 0
+        try:
+            return method(*args)
+        except BaseException as error:
+            failed = 1
+            error_code = getattr(error, "sqlite_errorcode", 0)
+            raise
+        finally:
+            duration = (time.perf_counter() - started) * 1000
+            if duration >= SLOW_DATABASE_THRESHOLD_MS:
+                self.connection._record_slow_phase(phase, duration, failed, error_code)
+
+    def execute(self, sql, parameters=(), /):
+        return self._timed("statement.execute", super().execute, sql, parameters)
+
+    def executemany(self, sql, parameters, /):
+        return self._timed("statement.executemany", super().executemany, sql, parameters)
+
+    def executescript(self, script, /):
+        return self._timed("statement.executescript", super().executescript, script)
+
+    def fetchall(self):
+        return self._timed("statement.fetchall", super().fetchall)
+
+    def fetchmany(self, size=_DEFAULT_FETCH_SIZE):
+        args = () if size is _DEFAULT_FETCH_SIZE else (size,)
+        return self._timed("statement.fetchmany", super().fetchmany, *args)
+
+
 class _StoreConnection(sqlite3.Connection):
     """A store connection that can end every statement before it is reused."""
 
@@ -262,8 +318,10 @@ class _StoreConnection(sqlite3.Connection):
         super().__init__(*args, **kwargs)
         self.open_cursors: weakref.WeakSet = weakref.WeakSet()
         self.settings: tuple[int, int] | None = None
+        self._diagnostic_context = None
+        self.automatic_checkpoint_pages = None
 
-    def cursor(self, factory: Any = sqlite3.Cursor) -> sqlite3.Cursor:
+    def cursor(self, factory: Any = _StoreCursor) -> sqlite3.Cursor:
         cursor = super().cursor(factory)
         self.open_cursors.add(cursor)
         return cursor
@@ -277,6 +335,51 @@ class _StoreConnection(sqlite3.Connection):
 
     def executescript(self, script: str, /) -> sqlite3.Cursor:
         return self.cursor().executescript(script)
+
+    def _record_slow_phase(self, phase, duration, failed, error_code, transaction_open=0):
+        if self._diagnostic_context is None:
+            return
+        writer, operation, reading, scope_id = self._diagnostic_context
+        try:
+            if reading and operation == "database.read":
+                operation = _slow_read_operation()
+            writer.record_slow_operation(phase, operation, duration, read_only=reading,
+                failed=failed, error_code=error_code, transaction_open=transaction_open,
+                connection_id=id(self), scope_id=scope_id, total_changes=self.total_changes)
+        except Exception:
+            # Diagnostics must never replace a SQLite failure or make a
+            # successfully committed transaction appear to have failed.
+            pass
+
+    def _timed_transaction(self, phase, method, *args):
+        try:
+            transaction_open = int(self.in_transaction)
+        except sqlite3.Error:
+            transaction_open = 0  # Let the real SQLite method report closure.
+        started = time.perf_counter()
+        failed = error_code = 0
+        try:
+            return method(*args)
+        except BaseException as error:
+            failed = 1
+            error_code = getattr(error, "sqlite_errorcode", 0)
+            raise
+        finally:
+            duration = (time.perf_counter() - started) * 1000
+            if duration >= SLOW_DATABASE_THRESHOLD_MS:
+                self._record_slow_phase(phase, duration, failed, error_code, transaction_open)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # SQLite's context manager includes commit-error rollback behavior.
+        # Delegate it intact; calling commit()/rollback() ourselves differs.
+        phase = "transaction.rollback" if exc_type is not None else "transaction.commit"
+        return self._timed_transaction(phase, super().__exit__, exc_type, exc_value, traceback)
+
+    def commit(self):
+        return self._timed_transaction("transaction.commit", super().commit)
+
+    def rollback(self):
+        return self._timed_transaction("transaction.rollback", super().rollback)
 
     def end_statements(self) -> None:
         # An unfinished SELECT would keep an old read snapshot for the next use.
@@ -380,12 +483,45 @@ class CoordinationStore:
         # by whichever thread releases the store.
         reading = self.read_only or getattr(self._connection_options, "reading", False)
         target = self.database_path.resolve().as_uri() + "?mode=ro" if reading else self.database_path
-        connection = sqlite3.connect(target, timeout=5.0, uri=reading,
-                                     factory=_StoreConnection, check_same_thread=False)
+        started = time.perf_counter()
+        connection = None
+        failed = error_code = 0
+        try:
+            connection = sqlite3.connect(target, timeout=5.0, uri=reading,
+                                         factory=_StoreConnection, check_same_thread=False)
+        except BaseException as error:
+            failed = 1
+            error_code = getattr(error, "sqlite_errorcode", 0)
+            raise
+        finally:
+            duration = (time.perf_counter() - started) * 1000
+            if duration >= SLOW_DATABASE_THRESHOLD_MS:
+                try:
+                    writer, operation, _, scope_id = self._connection_diagnostic_context(reading)
+                    if reading and operation == "database.read":
+                        operation = _slow_read_operation()
+                    writer.record_slow_operation("connection.open", operation, duration,
+                        read_only=reading, failed=failed, error_code=error_code,
+                        connection_id=id(connection) if connection is not None else 0, scope_id=scope_id)
+                except Exception:
+                    pass  # Diagnostics cannot replace an open result or error.
+        self._bind_connection_diagnostics(connection, reading)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
+
+    def _bind_connection_diagnostics(self, connection, reading):
+        if not isinstance(connection, _StoreConnection):
+            return
+        connection._diagnostic_context = self._connection_diagnostic_context(reading)
+
+    def _connection_diagnostic_context(self, reading):
+        operation = getattr(self._connection_options, "operation", None)
+        own_scope = self._writer.owner == threading.get_ident()
+        name = (operation[0] if operation else self._writer.active_operation if own_scope
+                else "database.read" if reading else "database.write")
+        return (self._writer, name, reading, self._writer.active_scope_id if own_scope else 0)
 
     @contextmanager
     def connection_timeout(self, milliseconds):
@@ -456,13 +592,44 @@ class CoordinationStore:
                          if frame else "database", "foreground")
             del frame
         milliseconds = getattr(self._connection_options, "timeout", None)
-        with self._writer.reserve(object(), timeout=5 if milliseconds is None else milliseconds / 1000,
-                                  operation=operation[0], priority=operation[1], named=named_operation) as nested:
-            # A separate nested connection cannot commit its caller's work or
-            # wait for a write lock held by that caller. SQLite enforces this
-            # for cached statements, CTEs, triggers and explicit cursors alike.
-            with (self.reading() if nested else nullcontext()), self._ungated_connection() as connection:
-                yield connection
+        # Opening a handle can wait on filesystem I/O or Python's GIL. It has
+        # no transaction to serialize and must not occupy writer admission.
+        # Decide nested read-only access before checkout: a second handle must
+        # not wait for the write lock held by its caller on this same thread.
+        nested = self._writer.owner == threading.get_ident()
+        with (self.reading() if nested else nullcontext()), self._ungated_connection(transaction=False) as connection:
+            with self._writer.reserve(object(), timeout=5 if milliseconds is None else milliseconds / 1000,
+                                      operation=operation[0], priority=operation[1], named=named_operation):
+                self._bind_connection_diagnostics(connection, nested)
+                try:
+                    with connection:
+                        yield connection
+                    if (isinstance(connection, _StoreConnection) and connection.settings is not None
+                            and not connection.in_transaction):
+                        try:
+                            # WITH ... INSERT ... RETURNING can retain a write
+                            # while in_transaction is false. Finish statements
+                            # before another writer may acquire admission.
+                            connection.end_statements()
+                        except (sqlite3.Error, TypeError):
+                            connection.settings = None
+                            connection.close()
+                    else:
+                        # Custom and nested handles cannot be retained. Close
+                        # them while any unfinished statement is still gated.
+                        if isinstance(connection, _StoreConnection):
+                            connection.settings = None
+                        connection.close()
+                except BaseException:
+                    # SQLite's context manager already attempted rollback;
+                    # close_v2 alone leaves referenced statements alive, so
+                    # finish tracked cursors before disposing the handle.
+                    try:
+                        if isinstance(connection, _StoreConnection):
+                            connection.end_statements()
+                    finally:
+                        connection.close()
+                    raise
 
     @contextmanager
     def database_operation(self, name, *, priority="foreground"):
@@ -484,7 +651,7 @@ class CoordinationStore:
         return self._writer.snapshot()
 
     @contextmanager
-    def _ungated_connection(self):
+    def _ungated_connection(self, *, transaction=True):
         # A new connection parses the whole schema, which dominated backend
         # CPU under concurrent polling. Reuse one idle connection per thread.
         # A nested use gets its own connection so an inner commit cannot end
@@ -505,6 +672,7 @@ class CoordinationStore:
         if not nested:
             if holder.connection is not None and holder.factory() is factory:
                 connection = holder.connection
+                self._bind_connection_diagnostics(connection, reading)
                 try:
                     # Start each use with the settings its factory produced.
                     connection.row_factory = sqlite3.Row
@@ -523,12 +691,19 @@ class CoordinationStore:
         timeout = getattr(self._connection_options, "timeout", None)
         if timeout is not None:
             connection.execute(f"PRAGMA busy_timeout = {timeout}")
+        if not reading:
+            from .database_checkpoint import automatic_checkpoint_pages
+            pages = automatic_checkpoint_pages(self._database_identity)
+            if getattr(connection, "automatic_checkpoint_pages", None) != pages:
+                connection.execute(f"PRAGMA wal_autocheckpoint = {pages}")
+                if isinstance(connection, _StoreConnection):
+                    connection.automatic_checkpoint_pages = pages
         connection.execute(f"PRAGMA query_only = {int(reading)}")
         reusable = False
         if not nested:
             holder.in_use = True
         try:
-            with connection:
+            with (connection if transaction else nullcontext()):
                 yield connection
             reusable = (not nested and isinstance(connection, _StoreConnection)
                         and connection.settings is not None and not connection.in_transaction)
@@ -537,7 +712,8 @@ class CoordinationStore:
                 holder.in_use = False
             if reusable:
                 try:
-                    connection.end_statements()
+                    if transaction:
+                        connection.end_statements()
                     if fresh:
                         if reusable:
                             holder.keep(connection, factory)

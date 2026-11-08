@@ -266,6 +266,7 @@ class ScheduledPromptTests(unittest.TestCase):
         self.sessions.close()
         self.now += 300
         restarted = self.runtime()
+        self.sessions, self.schedules = restarted, restarted.schedules
         restarted.rpc.threads = saved_threads
         restarted.schedules.process_once()
         self.assertEqual(self.item(item)["state"], "running")
@@ -526,6 +527,7 @@ class ScheduledPromptTests(unittest.TestCase):
         saved_threads[item["thread_id"]]["turns"][-1]["status"] = "completed"
         self.sessions.close()
         restarted = self.runtime()
+        self.sessions, self.schedules = restarted, restarted.schedules
         restarted.rpc.threads = saved_threads
         restarted.schedules.process_once()
         self.assertEqual(self.item(item)["state"], "completed")

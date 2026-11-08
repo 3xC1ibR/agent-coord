@@ -221,7 +221,7 @@ class ThreadStore:
 
     def known_domains(self, cwd: str) -> list[str]:
         """Bounded explicit vocabulary from open threads in this workspace."""
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             rows = db.execute("""SELECT t.domain, COUNT(*) AS uses FROM work_threads t
                                  JOIN sessions s ON s.session_id = t.thread_id
                                  WHERE s.cwd = ? AND t.attention != 'archived'
@@ -323,7 +323,9 @@ class ThreadStore:
         result["links"] = [dict(link) for link in (inventory.links[row["thread_id"]] if inventory is not None else
                            db.execute("SELECT * FROM thread_links WHERE thread_id = ? ORDER BY id", (row["thread_id"],)))]
         if history:
-            result["checkpoints"] = [context_lifecycle.checkpoint_record(cp) for cp in db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC", (row["thread_id"],))]
+            from .sqlite_rows import read_rows
+            result["checkpoints"] = [context_lifecycle.checkpoint_record(cp) for cp in read_rows(
+                db, "SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC", (row["thread_id"],))]
         if inventory is not None:
             return self.organization.describe(db, result, association=inventory.associations.get(row["thread_id"]))
         return self.organization.describe(db, result)
@@ -334,7 +336,7 @@ class ThreadStore:
                  JOIN sessions s ON s.session_id = t.thread_id"""
 
     def get(self, thread_id: str, *, history=False) -> dict:
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             row = db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone()
             if row is None:
                 raise CoordinationError("Work thread not found.")
@@ -367,7 +369,7 @@ class ThreadStore:
 
     def list(self, *, archived=False, cwd=None, repository_id=UNSET, project_id=UNSET) -> list[dict]:
         from .thread_inventory import ThreadInventory
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             inventory = ThreadInventory(self, db, archived=archived)
             root = project_root(cwd) if cwd is not None else None
             threads = [inventory.read(db, row) for row in inventory.rows if root is None or row["project_root"] == root]
