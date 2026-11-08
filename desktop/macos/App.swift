@@ -157,6 +157,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 guard let backend = self?.backend else { completion(Backend.failure("Runtime unavailable.")); return }
                 backend.preflight(target, completion: completion)
             })
+            updater.backendUpdateAvailable = { [weak self] in
+                self?.backend.supportsRuntimeUpdates == true && self?.backend.pendingUpdate != nil
+            }
+            updater.backendUpdateInProgress = { [weak self] in self?.backend.updateInProgress == true }
+            updater.applyBackendUpdate = { [weak self] completion in
+                guard let backend = self?.backend else { completion(Backend.failure("Runtime unavailable.")); return }
+                backend.applyUpdate(completion: completion)
+            }
+            updater.cancelBackendAuthorization = { [weak self] in self?.backend.cancelUpdateAuthorization() }
+            backend.updateStatus = { [weak self] message, failed in
+                guard let self = self else { return }
+                self.updater.backendUpdateNotice = message
+                if failed { NSApp.presentError(Backend.failure(message)) }
+                else if self.backend.updateInProgress { self.showStatus(message, failed: false) }
+            }
             makeMenu()
             sessionKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 let target = (event.window ?? NSApp.keyWindow) as? SessionWindow

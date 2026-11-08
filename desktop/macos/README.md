@@ -252,11 +252,15 @@ Use a working Python with `plistlib` and `sqlite3`; on the current development
 Mac, `/Users/walle/.pyenv/versions/3.12.7/bin/python3` is the verified builder.
 
 On reopening, a compatible interface attaches to the retained runtime and can
-serve the new web assets while agents continue. Backend code changes remain
-pending until the runtime is safely idle. Use the matching installed helper's
+serve the new web assets while agents continue. Backend code changes wait for
+idle, or choose **Ribbon Field → Apply Backend Update… → Update and Continue**
+to activate a staged backend while work is active. The coordinated operation
+interrupts execution, retains rollback state, and continues eligible saved
+conversations. Approvals, Stop, queued user input and uncertain submissions take
+precedence. Use the matching installed helper's
 [`--runtime-command status`](../../docs/runtime-updates.md#runtime-maintenance-controls)
 to check ownership, pending payload and busy reasons; while work continues,
-verify that its runtime instance remains unchanged. After the idle transition,
+verify that its runtime instance remains unchanged. After activation,
 verify that the selected backend payload is active before calling the backend
 change deployed. An incompatible update is deferred; do not force it by killing
 agents or deleting retained runtime state.
@@ -328,9 +332,20 @@ Local builds are ad hoc signed by the build command.
 Update-enabled release builds offer **Ribbon Field → Check for Updates…** and
 Sparkle's update notifications and preferences. Signed updates can be discovered
 and downloaded while agents run. A compatible interface update can install and
-relaunch while the existing runtime continues its work. Runtime replacement waits
-for a safe idle transition, preserving accepted queued work. An incompatible
-update or an unavailable runtime check defers installation.
+relaunch while the existing runtime continues its work. Install authorization
+allows the matching backend to perform a supervised restart when the new bundle
+attaches. Locally staged backends expose **Apply Backend Update…** in the same
+menu, including development builds without Sparkle. Passive staging still waits
+for idle. An incompatible update or unavailable runtime check defers installation.
+
+An explicit backend update retains the old executable and a SQLite rollback
+snapshot until the candidate is ready and durably committed. Saved conversations
+can continue after restart; running provider/tool processes are not preserved.
+Recovery checks native history for Codex and Claude. Other providers require
+explicit continuation until they supply an authoritative native recovery check.
+Runtime status includes per-conversation recovery outcomes and reasons. Failed
+or forced shutdown leaves work paused for review; Stop Work and Quit cancels
+recovery. See the contract for recovery and rollback limits.
 
 The runtime retains its Python, backend, dependencies, and resources outside the
 app bundle. Replacing the bundle therefore does not remove files still needed by
@@ -502,7 +517,8 @@ or Skip when a response cannot be sent from this window.
 Build without `--install` while the app and agents run. To install the local
 build, quit the native interface and rerun the build/install command. On versions
 with the independent runtime, ordinary Quit leaves agents running; backend
-changes activate when that runtime can safely become idle. The installer refuses
+changes activate at idle or through **Apply Backend Update…**. An older runtime
+must first reach its existing idle handover to acquire that capability. The installer refuses
 to replace a running executable, an unrelated
 application, or a symbolic link. The repository's plugin refresh workflow still
 applies whenever plugin sources change; the native app build is separate from

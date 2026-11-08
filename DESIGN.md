@@ -72,6 +72,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Inline title edit | Enter or focus leaving the title saves; Escape discards; failures remain visible beside the draft |
 | HTML output viewer | Existing file-link action opens a full-height preview using the auxiliary-page dialog pattern; closing preserves the conversation and draft underneath |
 | Native confirmation dialog | Clear local Activity history |
+| Native update action | The existing update menu stages and applies backend updates; reuse the native confirmation, progress screen and error presentation |
 | Thread options menu | Thread actions on sidebar cards and in the conversation header; the mobile sheet lists the header actions inline |
 | Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover |
 | Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
@@ -109,6 +110,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-04 | Apply staged backends through the existing native update menu | One operation owns restart, rollback and guarded continuation, with no new settings surface. |
 | 2026-10-28 | Document existing tokens and standalone page grammar | Preserve the current design while adding user-approved Activity. |
 | 2026-10-28 | Activity uses shared queries and a shell-owned visit recorder | Comparable reports without duplicated pane counts or inferred attention time. |
 | 2026-10-29 | Browser HTML links open an auxiliary output viewer | Let paired phones read agent output using existing typography, colors, and quiet controls. |

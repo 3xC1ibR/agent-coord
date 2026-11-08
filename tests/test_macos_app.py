@@ -89,7 +89,9 @@ class DesktopBackendTests(unittest.TestCase):
 
     def test_stopping_one_backend_does_not_stop_another(self):
         first, first_url = self.start()
-        second, second_url = self.start()
+        # Independent servers own different databases; sharing one would test
+        # the single-owner rejection rather than process-isolated shutdown.
+        second, second_url = self.start(db=self.root / "second-state.sqlite3")
         self.assertNotEqual(first_url, second_url)
         first.stdin.close()
         self.assertEqual(first.wait(timeout=6), 0)

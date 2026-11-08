@@ -41,6 +41,13 @@ final class Backend {
     var process: RuntimeProcess?
     var ready: ((URL) -> Void)?
     var exited: ((String) -> Void)?
+    var updateStatus: ((String, Bool) -> Void)?
+    private(set) var pendingUpdate: String?
+    private(set) var supportsRuntimeUpdates = false
+    var updateInProgress: Bool { expectedUpdate != nil }
+    private var expectedUpdate: (id: String, payload: String)?
+    private var reportedUpdate: String?
+    private var lastStatusFailure: String?
     private(set) var logURL: URL
     private var resources: URL?
     private var configuration: BackendConfiguration?
@@ -161,23 +168,64 @@ final class Backend {
     }
 
     private func accept(_ status: [String: Any]) throws {
+        var completedUpdate = false
+        var terminalUpdate: (key: String, message: String, failed: Bool)?
+        if let update = status["update"] as? [String: Any],
+           update["superseded_by"] == nil,
+           let identity = update["id"] as? String, let phase = update["phase"] as? String {
+            if status["status"] as? String == "preparing" {
+                if let target = update["target"] as? String { expectedUpdate = (identity, target) }
+                updateStatus?("Updating backend…", false)
+                return
+            }
+            if !["committed", "rolled-back", "failed"].contains(phase) {
+                if let target = update["target"] as? String { expectedUpdate = (identity, target) }
+                updateStatus?("Updating backend…", false)
+                if status["status"] as? String != "serving" { return }
+            } else if reportedUpdate != identity + phase {
+                let matches = phase == "committed" && status["status"] as? String == "serving"
+                    && update["cancelled"] as? Bool != true
+                    && status["payload"] as? String == update["target"] as? String
+                if let expected = expectedUpdate, expected.id != identity || (matches && expected.payload != status["payload"] as? String) {
+                    throw Self.failure("The active backend does not match the requested update.")
+                }
+                if phase == "committed" && status["payload"] as? String != update["target"] as? String {
+                    throw Self.failure("The active backend does not match the committed update.")
+                }
+                completedUpdate = expectedUpdate != nil
+                let review = update["requires_review"] as? Bool == true
+                let message = matches
+                    ? (review ? "Backend updated. Work remains paused; inspect native tools before resuming." : "Backend updated. Eligible conversations are continuing.")
+                    : (update["error"] as? String ?? "The backend update did not apply.")
+                terminalUpdate = (identity + phase, message, !matches || review)
+            }
+        }
+        if status["status"] as? String == "preparing" { return }
+        pendingUpdate = status["pending"] as? String
+        supportsRuntimeUpdates = (status["runtime_updates"] as? Int ?? 0) >= 1
         guard let value = status["url"] as? String, let url = URL(string: value),
               url.scheme == "http", url.host == "127.0.0.1", url.port != nil,
               url.user == nil, url.password == nil, url.path == "/",
               let pid = status["pid"] as? Int32, let instance = status["instance"] as? String,
               let payload = status["payload"] as? String else { throw Self.failure("Invalid runtime handshake.") }
-        let changed = self.instance != instance
-        self.instance = instance
-        process = RuntimeProcess(processIdentifier: pid)
-        failures = 0
+        let changed = self.instance != instance || completedUpdate
         // Use retained code even if Sparkle has already replaced the bundle.
         let retained = URL(fileURLWithPath: payload)
         let config = try JSONDecoder().decode(BackendConfiguration.self, from: Data(contentsOf: retained.appendingPathComponent("backend.json")))
+        self.instance = instance
+        process = RuntimeProcess(processIdentifier: pid)
+        failures = 0
+        lastStatusFailure = nil
         helperResources = retained
         python = config.pythonURL(resources: retained)
         if let database = database {
             let db = URL(fileURLWithPath: database).resolvingSymlinksInPath()
             logURL = db.deletingLastPathComponent().appendingPathComponent("." + db.lastPathComponent + ".runtime/runtime.log")
+        }
+        if let terminal = terminalUpdate {
+            reportedUpdate = terminal.key
+            expectedUpdate = nil
+            if completedUpdate { updateStatus?(terminal.message, terminal.failed) }
         }
         if changed { ready?(url) }
     }
@@ -187,8 +235,17 @@ final class Backend {
         polling = true
         worker.async {
             do {
-                let status = try self.command(["--runtime-command", "status"])
-                DispatchQueue.main.async { self.polling = false; try? self.accept(status) }
+                let status = try self.command(["--runtime-command", "status", "--resources", self.resources!.path])
+                DispatchQueue.main.async {
+                    self.polling = false
+                    do { try self.accept(status) }
+                    catch {
+                        if self.lastStatusFailure != error.localizedDescription {
+                            self.lastStatusFailure = error.localizedDescription
+                            self.updateStatus?(error.localizedDescription, true)
+                        }
+                    }
+                }
             } catch {
                 DispatchQueue.main.async {
                     self.polling = false
@@ -203,12 +260,38 @@ final class Backend {
         do { try validateCompatibility(target) } catch { completion(error); return }
         worker.async {
             do {
-                var input: [String: Any] = ["target": target]
+                var input: [String: Any] = ["target": target, "authorize_restart": true]
                 if let proof = self.stoppedInstance { input["stopped_instance"] = proof }
                 _ = try self.command(["--runtime-command", "decision"], input: input)
                 DispatchQueue.main.async { completion(nil) }
             } catch { DispatchQueue.main.async { completion(error) } }
         }
+    }
+
+    func applyUpdate(completion: @escaping (Error?) -> Void) {
+        guard supportsRuntimeUpdates, let payload = pendingUpdate else {
+            completion(Self.failure("No supported backend update is staged.")); return
+        }
+        let request = UUID().uuidString
+        expectedUpdate = (request, payload)
+        worker.async {
+            do {
+                let result = try self.command(["--runtime-command", "activate-update"],
+                    input: ["request_id": request, "payload": payload])
+                guard let update = result["update"] as? [String: Any], update["id"] as? String == request else {
+                    throw Self.failure("The runtime did not confirm the update request.")
+                }
+                DispatchQueue.main.async {
+                    self.pendingUpdate = nil
+                    self.updateStatus?("Updating backend…", false)
+                    completion(nil)
+                }
+            } catch { DispatchQueue.main.async { self.expectedUpdate = nil; completion(error) } }
+        }
+    }
+
+    func cancelUpdateAuthorization() {
+        worker.async { _ = try? self.command(["--runtime-command", "cancel-update-authorization"]) }
     }
 
     func stop(completion: @escaping (Error?) -> Void) {
@@ -224,7 +307,11 @@ final class Backend {
                     self.process = nil
                     completion(nil)
                 }
-            } catch { DispatchQueue.main.async { self.stopping = false; completion(error) } }
+            } catch { DispatchQueue.main.async {
+                self.stopping = false
+                self.timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.poll() }
+                completion(error)
+            } }
         }
     }
 

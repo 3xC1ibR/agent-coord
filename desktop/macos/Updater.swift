@@ -117,6 +117,11 @@ final class RibbonUpdateGate {
 
 final class RibbonUpdater: NSObject, NSMenuItemValidation {
     private let gate: RibbonUpdateGate
+    var backendUpdateAvailable: (() -> Bool)?
+    var backendUpdateInProgress: (() -> Bool)?
+    var applyBackendUpdate: ((@escaping (Error?) -> Void) -> Void)?
+    var cancelBackendAuthorization: (() -> Void)?
+    var backendUpdateNotice: String?
     private var deferredInstall: (() -> Void)?
     private var started = false
     private var checking = false
@@ -174,8 +179,18 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if backendUpdateInProgress?() == true {
+            menuItem.title = "Updating Backend…"
+            menuItem.toolTip = "Waiting for verified activation."
+            return false
+        }
+        if deferredInstall == nil && backendUpdateAvailable?() == true {
+            menuItem.title = "Apply Backend Update…"
+            menuItem.toolTip = "Restart the backend and continue eligible conversations. Running tools may be interrupted."
+            return !checking
+        }
         menuItem.title = deferredInstall == nil ? "Check for Updates…" : "Install Update and Relaunch…"
-        menuItem.toolTip = lastDeferral.map { ($0 as NSError).localizedRecoverySuggestion ?? $0.localizedDescription }
+        menuItem.toolTip = lastDeferral.map { ($0 as NSError).localizedRecoverySuggestion ?? $0.localizedDescription } ?? backendUpdateNotice
         #if canImport(Sparkle)
         return !checking && (deferredInstall != nil || controller?.updater.canCheckForUpdates == true)
         #else
@@ -185,6 +200,20 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
     }
 
     @objc private func checkForUpdates(_ sender: Any?) {
+        if deferredInstall == nil && backendUpdateAvailable?() == true, let apply = applyBackendUpdate {
+            let alert = NSAlert()
+            alert.messageText = "Apply backend update?"
+            alert.informativeText = "Running agents and tools will be interrupted. Eligible conversations continue automatically; approvals and uncertain actions wait for your review."
+            alert.addButton(withTitle: "Update and Continue")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            checking = true
+            apply { error in
+                self.checking = false
+                if let error = error { NSApp.presentError(error) }
+            }
+            return
+        }
         if deferredInstall != nil {
             resumeDeferredInstall(userInitiated: true)
             return
@@ -278,6 +307,7 @@ extension RibbonUpdater: SPUUpdaterDelegate {
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        cancelBackendAuthorization?()
         deferredInstall = nil
         resumeRequested = false
         resumeUserInitiated = false
