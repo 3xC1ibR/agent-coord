@@ -39,7 +39,10 @@ comparisons use tabular figures. Use readable sentence case and explicit labels.
 
 ## Layout
 The workspace has navigation, an overview or conversation, and optional context
-and pane regions. Auxiliary pages have a simple title, controls, and centered
+and pane regions. In the Mac app, a workspace window's header is its title bar: a
+40px band holds the window controls, project tabs and header actions, and its empty
+space moves the window. Settings and detached conversation windows keep the
+standard title bar. Auxiliary pages have a simple title, controls, and centered
 content. Activity uses a 1120px content maximum, 24px page spacing, 12px row spacing,
 and 8px control gaps. Declare additional module dimensions once as CSS properties.
 Narrow layouts stack controls and keep tables in labelled horizontal scroll areas.
@@ -78,6 +81,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
 | Role designation | A user-named role beside a conversation's metadata, muted 10px semibold, placed like the Dispatcher designation |
 | Stopped conversations | Quiet status-bar count of the user's Stops; a native dialog lists each with its supervising agent, all checked, before Release |
+| Title band | Mac workspace windows: native window controls centered on the project tab labels; the sidebar, a collapsed header and the compact header start clear of them |
 
 ## Do's and Don'ts
 Never use UI eyebrow labels. Do not invent percentages or time-spent estimates
@@ -123,3 +127,4 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-10-30 | Agents group under their current supervisor; roles and Stop release use existing menu, designation and dialog patterns | Replace a lead without restarting its agents, and release many Stops in one action while supervisors decide what restarts. |
 | 2026-10-31 | Scheduled prompts include recurrence and quiet lifecycle actions in their existing form and list | Run recurring jobs without introducing another navigation surface or object. |
 | 2026-11-02 | External Codex threads use the existing conversation view with a read-only notice; Continue in browser verifies ownership when requested | Reading saved history does not require execution ownership or an ended-session hook. |
+| 2026-11-09 | Mac workspace windows draw the project tabs in the title bar instead of a separate row | The native title only repeated the active project; tabs keep each project's attention badges visible while returning about 40px to the work. |

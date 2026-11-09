@@ -6,6 +6,8 @@ import Darwin
 
 private final class SessionWindow: NSWindow {
     var cycleSession: ((Bool) -> Bool)?
+    /// The press that a web title band drag request continues.
+    private(set) var lastMouseDown: NSEvent?
 
     func routeSessionShortcut(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.control, .shift, .command, .option])
@@ -22,6 +24,7 @@ private final class SessionWindow: NSWindow {
 
     override func sendEvent(_ event: NSEvent) {
         if routeSessionShortcut(event) { return }
+        if event.type == .leftMouseDown { lastMouseDown = event }
         super.sendEvent(event)
     }
 }
@@ -31,6 +34,10 @@ private final class DesktopWindow {
     var folderSlot = 0
     var isSettings = false
     var isConversationWindow = false
+    var integratedTitlebar = false
+    var titlebarLeading: CGFloat?
+    var titlebarObservers: [NSObjectProtocol] = []
+    var aligningTitlebar = false
     let window: NSWindow
     let webView: WKWebView
     let status: NSStackView
@@ -326,6 +333,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.tabbingMode = .disallowed
+        // Workspace windows show their project tabs in the title bar.
+        if !settings && !conversation { IntegratedTitlebar.configure(window) }
         if saved == nil && smokeReport == nil && (settings || windows.isEmpty) { window.setFrameAutosaveName(settings ? "AgentCoordSettings" : "AgentCoordWorkspace") }
         if settings {
             if smokeReport != nil || !window.setFrameUsingName("AgentCoordSettings") { window.center() }
@@ -393,6 +402,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             let chat = NSViewController()
             let content = window.contentView!
             chat.view = content
+            item.files.titlebarInset = IntegratedTitlebar.height
             item.split.addSplitViewItem(NSSplitViewItem(viewController: chat))
             let filePane = NSSplitViewItem(viewController: item.files)
             filePane.minimumThickness = 260; filePane.maximumThickness = 500
@@ -415,6 +425,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             if !settings && !conversation { item.split.splitView.setPosition(max(440, frame.width - 310), ofDividerAt: 0) }
         }
         windows.append(item)
+        if !settings && !conversation { installTitlebar(item) }
         if let destination = url ?? serverURL.map({ self.destination(for: item, base: $0) }) {
             if !settings, let serverURL = serverURL { item.files.connect(BackendWorkspaceFiles(baseURL: serverURL, local: true)) }
             configureScripts(webView)
@@ -430,6 +441,45 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func item(for view: WKWebView) -> DesktopWindow? { windows.first { $0.webView === view } }
+
+    /// Keeps the window controls inside the web title band. AppKit relayouts the
+    /// titlebar after resizing and full-screen changes, so frame changes realign it.
+    private func installTitlebar(_ item: DesktopWindow) {
+        item.integratedTitlebar = true
+        alignTitlebar(item)
+        let views = IntegratedTitlebar.controlTypes.compactMap { item.window.standardWindowButton($0) }
+            + [item.window.standardWindowButton(.closeButton)?.superview].compactMap { $0 }
+        for view in views {
+            view.postsFrameChangedNotifications = true
+            item.titlebarObservers.append(NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: view, queue: .main) { [weak self, weak item] _ in
+                guard let self = self, let item = item else { return }
+                self.alignTitlebar(item)
+            })
+        }
+    }
+
+    private func alignTitlebar(_ item: DesktopWindow) {
+        guard item.integratedTitlebar, !item.aligningTitlebar else { return }
+        item.aligningTitlebar = true
+        let leading = IntegratedTitlebar.align(item.window)
+        item.aligningTitlebar = false
+        guard leading != item.titlebarLeading else { return }
+        item.titlebarLeading = leading
+        if item.loaded { pushTitlebarState(item) }
+    }
+
+    private func pushTitlebarState(_ item: DesktopWindow) {
+        guard let state = titlebarState(item) else { return }
+        item.webView.callAsyncJavaScript("window.agentCoordDesktop?.titlebar?.(state)",
+            arguments: ["state": state], in: nil, in: .page) { _ in }
+    }
+
+    private func titlebarState(_ item: DesktopWindow) -> [String: Any]? {
+        guard item.integratedTitlebar else { return nil }
+        return ["height": IntegratedTitlebar.height, "leading": item.titlebarLeading ?? 0,
+                "controls": item.titlebarLeading != nil]
+    }
 
     private func localRoute(_ url: URL) -> String {
         guard let source = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return "/" }
@@ -706,7 +756,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     func windowDidMove(_ notification: Notification) { scheduleWindowSave() }
-    func windowDidResize(_ notification: Notification) { scheduleWindowSave() }
+    func windowDidResize(_ notification: Notification) {
+        if let item = windows.first(where: { $0.window === notification.object as? NSWindow }) { alignTitlebar(item) }
+        scheduleWindowSave()
+    }
+    func windowDidEnterFullScreen(_ notification: Notification) { windowDidResize(notification) }
+    func windowDidExitFullScreen(_ notification: Notification) { windowDidResize(notification) }
     func windowDidMiniaturize(_ notification: Notification) { scheduleWindowSave() }
     func windowDidDeminiaturize(_ notification: Notification) { scheduleWindowSave() }
 
@@ -732,6 +787,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         item.webView.removeFromSuperview()
         closing.contentView = nil
         closing.delegate = nil
+        item.titlebarObservers.forEach(NotificationCenter.default.removeObserver)
+        item.titlebarObservers = []
         windows.removeAll { $0 === item }
     }
 
@@ -906,6 +963,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             "__AGENT_COORD_PREFERENCES__": json, "__AGENT_COORD_WINDOW_STATE__": restoration,
             "__AGENT_COORD_FOLDER_SLOT__": String(item(for: webView)?.folderSlot ?? 0),
             "__AGENT_COORD_CONVERSATION_WINDOW__": item(for: webView)?.isConversationWindow == true ? "true" : "false",
+            "__AGENT_COORD_TITLEBAR__": item(for: webView).flatMap(titlebarState)
+                .flatMap { try? JSONSerialization.data(withJSONObject: $0) }
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "null",
             "__AGENT_COORD_WINDOW_ID__": item(for: webView)?.id ?? "",
         ])
         controller.addUserScript(WKUserScript(source: bridge,
@@ -943,6 +1003,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         item.status.isHidden = true
         item.spinner.stopAnimation(nil)
         item.loaded = true
+        pushTitlebarState(item)
         webView.isHidden = false
         if smokeReport != nil { checkSmoke(attempt: 0) }
     }
@@ -1199,6 +1260,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             if let value = body["value"] as? String, value.count <= 65536 { values[key] = value }
             else { values.removeValue(forKey: key) }
             preferences.set(values, forKey: "webPreferences")
+            replyHandler(true, nil)
+        case "windowDrag":
+            // The page reports a press on empty title band space; continue it as a window drag.
+            guard owner.integratedTitlebar else { replyHandler(false, nil); return }
+            smokeResults["titlebar_drag_requests"] = (smokeResults["titlebar_drag_requests"] as? Int ?? 0) + 1
+            guard let window = owner.window as? SessionWindow, let press = window.lastMouseDown,
+                  NSEvent.pressedMouseButtons & 1 == 1 else { replyHandler(false, nil); return }
+            window.performDrag(with: press)
+            // AppKit's drag loop consumes the release; finish WebKit's press so the page stops tracking it.
+            if let release = NSEvent.mouseEvent(with: .leftMouseUp, location: press.locationInWindow, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                    eventNumber: press.eventNumber, clickCount: press.clickCount, pressure: 0) {
+                owner.webView.mouseUp(with: release)
+            }
+            replyHandler(true, nil)
+        case "windowDoubleClick":
+            guard owner.integratedTitlebar else { replyHandler(false, nil); return }
+            smokeResults["titlebar_double_click_requests"] = (smokeResults["titlebar_double_click_requests"] as? Int ?? 0) + 1
+            if smokeReport == nil { IntegratedTitlebar.performDoubleClick(owner.window) }
             replyHandler(true, nil)
         default: replyHandler(nil, "Unknown desktop request.")
         }
@@ -1470,6 +1550,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if CommandLine.arguments.contains("--smoke-sessions-only") {
             try await smokeFocus(first)
             try await smokeSessionCycling(first)
+            finishSmoke(error: nil)
+            return
+        }
+        if CommandLine.arguments.contains("--smoke-titlebar-only") {
+            try await smokeTitlebar(first)
             finishSmoke(error: nil)
             return
         }
@@ -3124,6 +3209,130 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
             try smokeCheck("restore_duplicate_launch_keeps_window_set", windows.count == (stage == "verify" ? 5 : 4))
         }
+    }
+
+    /// Delivers a native press to the view that wins the window's hit test, as a
+    /// pointer click would arrive, without depending on the app becoming active.
+    /// Returns whether the press reached the web view rather than the titlebar.
+    @discardableResult private func smokeClick(_ item: DesktopWindow, page point: NSPoint) -> Bool {
+        let location = item.webView.convert(point, to: nil)
+        guard let frame = item.window.contentView?.superview, let target = frame.hitTest(location) else { return false }
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: item.window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else { continue }
+            if type == .leftMouseDown { target.mouseDown(with: event) } else { target.mouseUp(with: event) }
+        }
+        return target.isDescendant(of: item.webView)
+    }
+
+    @MainActor private func smokeTitlebarLayout(_ item: DesktopWindow) async throws -> [String: Any] {
+        try await smokeJS("""
+            const root = document.documentElement, header = document.querySelector('main > .workspace-bar');
+            const rect = header.getBoundingClientRect(), toggle = document.querySelector('#menu-toggle').getBoundingClientRect();
+            const tab = document.querySelector('.header-tabs .project-tab')?.getBoundingClientRect();
+            const empty = document.querySelector('.header-tabs .projects-bar')?.getBoundingClientRect();
+            return {native: root.classList.contains('native-titlebar'), controls: root.classList.contains('native-titlebar-controls'),
+                leading: parseFloat(root.style.getPropertyValue('--native-titlebar-leading')),
+                top: rect.top, height: rect.height, left: rect.left, paddingLeft: parseFloat(getComputedStyle(header).paddingLeft),
+                toggleX: toggle.left + toggle.width / 2, toggleY: toggle.top + toggle.height / 2, toggleLeft: toggle.left,
+                tabCenter: tab ? tab.top + tab.height / 2 : -1, emptyX: empty ? empty.right - 8 : rect.right - 60,
+                sidebarTop: parseFloat(getComputedStyle(document.querySelector('.sidebar')).paddingTop),
+                collapsed: document.body.classList.contains('sidebar-collapsed')};
+            """, in: item.webView) as? [String: Any] ?? [:]
+    }
+
+    @MainActor private func smokeTitlebar(_ item: DesktopWindow) async throws {
+        let band = IntegratedTitlebar.height, center = IntegratedTitlebar.controlCenter
+        let aligned = { (window: NSWindow) in
+            IntegratedTitlebar.controlCenters(window).count == 3
+                && IntegratedTitlebar.controlCenters(window).allSatisfy { abs($0 - center) <= 1 }
+        }
+        // Open two projects so the band shows its tabs.
+        let projects = ["Ribbon project", "Second project"].map {
+            smokeDirectory!.appendingPathComponent($0, isDirectory: true).resolvingSymlinksInPath().path
+        }
+        for path in projects { try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true) }
+        let paths = String(data: try JSONSerialization.data(withJSONObject: projects), encoding: .utf8)!
+        _ = try await smokeJS("""
+            const original = state.folderPicker.desktop;
+            try {
+              for (const path of \(paths)) {
+                state.folderPicker.desktop = {chooseFolder: async () => path};
+                await state.folderPicker.choose({navigate: false});
+              }
+            } finally { state.folderPicker.desktop = original; }
+            return true;
+            """, in: item.webView)
+        item.window.setFrame(NSRect(x: 80, y: 80, width: 1240, height: 820), display: true)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        smokeResults["titlebar_control_centers"] = IntegratedTitlebar.controlCenters(item.window).map(Double.init)
+        try smokeCheck("titlebar_controls_centered", aligned(item.window))
+        var layout = try await smokeTitlebarLayout(item)
+        if layout["collapsed"] as? Bool == true {
+            _ = try await smokeJS("document.querySelector('#menu-toggle').click(); return true;", in: item.webView)
+            layout = try await smokeTitlebarLayout(item)
+        }
+        smokeResults["titlebar_layout_expanded"] = layout
+        let leading = Double(item.titlebarLeading ?? -1)
+        try smokeCheck("titlebar_page_state", layout["native"] as? Bool == true && layout["controls"] as? Bool == true
+            && layout["leading"] as? Double == leading)
+        try smokeCheck("titlebar_header_in_band", layout["top"] as? Double == 0
+            && abs((layout["height"] as? Double ?? 0) - Double(band)) <= 1)
+        try smokeCheck("titlebar_sidebar_clears_controls", layout["sidebarTop"] as? Double == Double(band)
+            && (layout["left"] as? Double ?? 0) >= leading)
+        if let tab = layout["tabCenter"] as? Double, tab >= 0 {
+            try smokeCheck("titlebar_tabs_match_controls", abs(tab - Double(center)) <= 1.5)
+        }
+        // Native presses in the band must reach web controls; empty band space requests a window drag.
+        item.window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        smokeResults["titlebar_window_key"] = item.window.isKeyWindow
+        smokeResults["titlebar_app_active"] = NSApp.isActive
+        let toggle = NSPoint(x: layout["toggleX"] as? Double ?? 0, y: layout["toggleY"] as? Double ?? 0)
+        try smokeCheck("titlebar_band_hits_web_view", smokeClick(item, page: toggle))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let collapsed = try await smokeTitlebarLayout(item)
+        smokeResults["titlebar_layout_collapsed"] = collapsed
+        try smokeCheck("titlebar_band_click_reaches_page", collapsed["collapsed"] as? Bool == true)
+        try smokeCheck("titlebar_collapsed_header_clears_controls", collapsed["paddingLeft"] as? Double == leading
+            && (collapsed["toggleLeft"] as? Double ?? 0) >= leading)
+        try await smokeWindowImage(item, suffix: "titlebar-collapsed")
+        smokeClick(item, page: NSPoint(x: collapsed["toggleX"] as? Double ?? 0, y: collapsed["toggleY"] as? Double ?? 0))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        try await smokeWindowImage(item, suffix: "titlebar")
+        let before = smokeResults["titlebar_drag_requests"] as? Int ?? 0
+        smokeClick(item, page: NSPoint(x: layout["emptyX"] as? Double ?? 0, y: 12))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        try smokeCheck("titlebar_empty_band_requests_drag", smokeResults["titlebar_drag_requests"] as? Int == before + 1)
+        smokeClick(item, page: NSPoint(x: layout["emptyX"] as? Double ?? 0, y: Double(band) + 40))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        try smokeCheck("titlebar_content_press_ignored", smokeResults["titlebar_drag_requests"] as? Int == before + 1)
+        item.window.setFrame(NSRect(x: 120, y: 60, width: 980, height: 700), display: true)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        try smokeCheck("titlebar_controls_after_resize", aligned(item.window))
+        // The native file pane leaves the band to the window and starts its content below it.
+        item.filesItem?.isCollapsed = false
+        item.split.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let pane = item.files.view
+        let drag = pane.subviews.first { $0 is TitlebarDragView }
+        let content = pane.subviews.first { $0 is NSStackView }
+        let top = { (view: NSView) in item.window.frame.height - view.convert(view.bounds, to: nil).maxY }
+        smokeResults["titlebar_file_pane"] = ["drag_top": drag.map(top).map(Double.init) ?? -1,
+            "drag_height": Double(drag?.frame.height ?? -1), "content_top": content.map(top).map(Double.init) ?? -1]
+        try smokeCheck("titlebar_file_pane_band", drag.map(top) == 0 && drag?.frame.height == band
+            && (content.map(top) ?? 0) >= band)
+        // The narrower conversation area uses the compact header, which must also clear the controls.
+        let compact = try await smokeTitlebarLayout(item)
+        smokeResults["titlebar_layout_compact"] = compact
+        try smokeCheck("titlebar_compact_header_clears_controls", (compact["toggleLeft"] as? Double ?? 0) >= leading)
+        if let view = item.window.contentView, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: smokeReport!.appendingPathExtension("titlebar-files.png"))
+        }
+        item.filesItem?.isCollapsed = true
     }
 
     @MainActor private func smokeWindowImage(_ item: DesktopWindow, suffix: String) async throws {

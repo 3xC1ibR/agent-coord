@@ -55,6 +55,8 @@ private final class FileBrowserBackground: NSView {
     private var previewGeneration = UUID()
     private var timer: Timer?
     private var pendingPreview = false
+    /// Height of the window's title band above the pane, which moves the window.
+    var titlebarInset: CGFloat = 0
 
     override func loadView() {
         view = FileBrowserBackground()
@@ -115,10 +117,17 @@ private final class FileBrowserBackground: NSView {
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
+        let band = TitlebarDragView()
+        band.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(band)
         NSLayoutConstraint.activate([
+            band.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            band.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            band.topAnchor.constraint(equalTo: view.topAnchor),
+            band.heightAnchor.constraint(equalToConstant: titlebarInset),
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: titlebarInset > 0 ? titlebarInset : 12),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12),
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 110),
             previewScroll.heightAnchor.constraint(equalToConstant: 180),

@@ -277,7 +277,7 @@ def main() -> int:
         subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-O",
                         "-target", f"{args.arch}-apple-macosx12.0", str(HERE / "App.swift"),
                         str(HERE / "WorkspaceFiles.swift"), str(HERE / "FileBrowser.swift"),
-                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), str(HERE / "WindowRestoration.swift"), *linker_flags,
+                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), str(HERE / "WindowRestoration.swift"), str(HERE / "IntegratedTitlebar.swift"), *linker_flags,
                         "-o", str(binaries / EXECUTABLE_NAME)], check=True, env=environment)
         subprocess.run(["xcrun", "swift", str(HERE / "Icon.swift"), str(scratch / "AppIcon.iconset")], check=True)
         subprocess.run(["iconutil", "-c", "icns", str(scratch / "AppIcon.iconset"),

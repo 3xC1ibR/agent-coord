@@ -300,6 +300,10 @@ Local builds are ad hoc signed by the build command.
 
 ## Window and process behavior
 
+- Workspace windows show their project tabs in the title bar beside the window
+  controls. Drag empty title bar space to move the window; double-clicking it
+  follows the System Settings title bar action. Settings and detached
+  conversation windows keep the standard title bar.
 - **File → New Window** opens an independent workspace window. Use **Open
   Current View in New Window**, the conversation's ↗ button, or Command-click a
   thread to open it alongside the original. All windows share one backend and
@@ -537,6 +541,8 @@ python3 desktop/macos/smoke_test.py --sessions-only
 python3 desktop/macos/smoke_test.py --scratchpad-only
 # Focused notification and conversation link routing checks:
 python3 desktop/macos/smoke_test.py --notifications-only
+# Focused title bar checks: control placement, header clearance, band clicks and file pane:
+python3 desktop/macos/smoke_test.py --titlebar-only
 ```
 
 The native smoke mode uses a temporary database and preference domain, starts

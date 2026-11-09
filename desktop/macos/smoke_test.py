@@ -33,6 +33,7 @@ def main() -> int:
     parser.add_argument("--scratchpad-only", action="store_true", help="Run focused project scratchpad checks.")
     parser.add_argument("--notifications-only", action="store_true", help="Run focused notification and conversation link routing checks.")
     parser.add_argument("--attribution-only", action="store_true", help="Verify the native download-token handoff without sending telemetry.")
+    parser.add_argument("--titlebar-only", action="store_true", help="Run focused workspace title band checks.")
     parser.add_argument("--runtime-only", action="store_true", help="Quit and reconnect two native interfaces to the same detached runtime.")
     args = parser.parse_args()
     executable = args.app.expanduser().resolve() / "Contents/MacOS/Agent Coord"
@@ -54,6 +55,8 @@ def main() -> int:
         command.append("--smoke-attribution-only")
     if args.notifications_only:
         command.append("--smoke-notifications-only")
+    if args.titlebar_only:
+        command.append("--smoke-titlebar-only")
     if args.runtime_only:
         command += ["--smoke-runtime-only", "--smoke-preserve-runtime"]
     first = None
@@ -103,7 +106,11 @@ def main() -> int:
         report.write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result, indent=2))
         return 0
-    required = ("detach_normal_tab_click", "detach_escape_cancelled", "detach_reorder_preserved", "detach_window_created", "detach_state_restored", "detach_history_and_reading", "detach_window_focused", "detach_remaining_tabs",
+    titlebar = ("titlebar_controls_centered", "titlebar_page_state", "titlebar_header_in_band",
+                "titlebar_sidebar_clears_controls", "titlebar_band_hits_web_view", "titlebar_band_click_reaches_page",
+                "titlebar_collapsed_header_clears_controls", "titlebar_empty_band_requests_drag",
+                "titlebar_content_press_ignored", "titlebar_controls_after_resize", "titlebar_tabs_match_controls", "titlebar_file_pane_band", "titlebar_compact_header_clears_controls")
+    required = titlebar if args.titlebar_only else ("detach_normal_tab_click", "detach_escape_cancelled", "detach_reorder_preserved", "detach_window_created", "detach_state_restored", "detach_history_and_reading", "detach_window_focused", "detach_remaining_tabs",
                 "detach_inside_window_ignored", "detach_last_tab_overview", "detach_shared_backend", "detach_compact_host",
                 "detach_singleton_moves_window", "detach_drop_into_existing", "detach_repeat_moves_tab",
                 "detach_dock_back_closes_empty_host", "detach_host_survives_reload") if args.detach_only else (
@@ -162,6 +169,10 @@ def main() -> int:
     result["backend_exited_on_quit"] = True
     report.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
+    if args.titlebar_only:
+        print(f"Title band: {report}.titlebar.png")
+        print(f"Title band with collapsed sidebar: {report}.titlebar-collapsed.png")
+        return 0
     if not args.sessions_only and not args.scratchpad_only and not args.detach_only and not args.notifications_only:
         print(f"File browser: {report}.files.png")
         print(f"Collapsed file browser: {report}.files-collapsed.png")

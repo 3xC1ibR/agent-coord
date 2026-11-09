@@ -57,3 +57,25 @@ main:has(> .conversation:not([hidden])) > .projects-bar { display: none; }
   main:not(:has(> .welcome:not([hidden]))) .header-tabs .workspace-actions,
   .no-project .header-tabs .workspace-actions { display: none; }
 }
+
+/* Workspace windows in the Mac app draw this header in the title bar
+   (desktop/macos/IntegratedTitlebar.swift). The native window controls sit at its
+   leading edge, vertically centered on the tab labels, and occupy
+   --native-titlebar-leading; empty header space moves the window. */
+html.native-titlebar body > main > .workspace-bar,
+html.native-titlebar main:has(> .conversation:not([hidden])) > .workspace-bar {
+  min-height: var(--native-titlebar-height); padding-top: calc(var(--native-titlebar-height) - var(--native-titlebar-tab-height));
+}
+html.native-titlebar { --native-titlebar-tab-height: 32px; } /* drift-ok: tab height; tab centers fall at IntegratedTitlebar.controlCenter (40 - 32 / 2) */
+html.native-titlebar-controls .sidebar { padding-top: var(--native-titlebar-height); }
+/* The desktop bridge measures the header: it is inset where it meets the controls
+   in every layout, and the page starts below the band when the header is hidden. */
+html.native-titlebar-inset body > main > .workspace-bar { padding-left: var(--native-titlebar-inset) !important; } /* drift-ok: measured clearance outranks every layout's header padding */
+html.native-titlebar-uncovered body > main { padding-top: var(--native-titlebar-height); }
+@media (min-width: 721px) {
+  html.native-titlebar .header-tabs .projects-bar { align-self: stretch; }
+  html.native-titlebar .header-tabs .view-tabs { padding-top: 0; }
+  html.native-titlebar .header-tabs .project-tab { height: var(--native-titlebar-tab-height); }
+  html.native-titlebar .header-tabs .project-tab:has([aria-selected="true"]) { height: calc(var(--native-titlebar-tab-height) + 1px); }
+  html.native-titlebar .header-tabs #open-project-tab { margin-bottom: 1px; }
+}

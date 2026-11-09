@@ -15,6 +15,52 @@
     return location.pathname + (search ? "?" + search : "") + location.hash;
   };
   if (conversationWindow) document.documentElement?.classList.add("conversation-window");
+  // Workspace windows draw their tabs in the title bar. The native window
+  // controls occupy its leading edge; empty band space moves the window.
+  let titlebar = __AGENT_COORD_TITLEBAR__;
+  // Layouts move or hide the workspace header (sidebar, compact widths, expanded
+  // chat), so measure it: inset it where it meets the controls, and move the page
+  // below the band when the header is hidden.
+  const clearControls = () => {
+    const root = document.documentElement, header = document.querySelector("body > main > .workspace-bar");
+    if (!root || !titlebar) return;
+    const rect = titlebar.controls && header ? header.getBoundingClientRect() : null;
+    const inset = rect?.height && rect.top < titlebar.height ? Math.max(0, Math.ceil(titlebar.leading - rect.left)) : 0;
+    root.classList.toggle("native-titlebar-inset", inset > 0);
+    root.style.setProperty("--native-titlebar-inset", `${inset}px`);
+    root.classList.toggle("native-titlebar-uncovered", Boolean(header && titlebar.controls && !rect?.height));
+  };
+  const applyTitlebar = state => {
+    const root = document.documentElement;
+    if (!root || !state) return;
+    titlebar = state;
+    root.classList.add("native-titlebar");
+    root.classList.toggle("native-titlebar-controls", state.controls === true);
+    root.style.setProperty("--native-titlebar-height", `${state.height}px`);
+    root.style.setProperty("--native-titlebar-leading", `${state.leading}px`);
+    clearControls();
+  };
+  if (titlebar) {
+    applyTitlebar(titlebar);
+    document.addEventListener("DOMContentLoaded", () => {
+      const header = document.querySelector("body > main > .workspace-bar");
+      if (!header || typeof ResizeObserver !== "function") return;
+      const observer = new ResizeObserver(clearControls);
+      observer.observe(header); observer.observe(document.documentElement);
+      clearControls();
+    });
+    // Pages without their own title band layout start below it.
+    const fallback = document.createElement("style");
+    fallback.textContent = "html.native-titlebar body:not(:has(> #main)) { padding-top: var(--native-titlebar-height); }";
+    document.documentElement?.append(fallback);
+    const control = "a, button, input, select, textarea, summary, label, dialog, [role='tab'], [contenteditable], [tabindex]:not([tabindex='-1'])";
+    document.addEventListener("mousedown", event => {
+      if (event.button !== 0 || event.defaultPrevented || event.clientY >= titlebar.height) return;
+      if (!(event.target instanceof Element) || event.target.closest(control)) return;
+      event.preventDefault();
+      send({action: event.detail >= 2 ? "windowDoubleClick" : "windowDrag"}).catch(() => {});
+    });
+  }
   const preferences = __AGENT_COORD_PREFERENCES__;
   const savedKey = key => key.startsWith("agent-coord.") || key === "agent-coord-group-by";
   // The backend uses a fresh private port on every launch. Preserve UI choices
@@ -203,7 +249,7 @@
     }
     return true;
   }
-  window.agentCoordDesktop = Object.freeze({command, bindPane,
+  window.agentCoordDesktop = Object.freeze({command, bindPane, titlebar: applyTitlebar,
     insertPaths: (paths, expectedThread) => {
       try {
         const target = destination();

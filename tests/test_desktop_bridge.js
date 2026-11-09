@@ -10,7 +10,7 @@ const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thr
 const source = fs.readFileSync(require.resolve("../desktop/macos/bridge.js"), "utf8");
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture(preferences = {}, permission = "default", subframe = false, workspace = null) {
+function fixture(preferences = {}, permission = "default", subframe = false, workspace = null, titlebar = null) {
   const messages = [];
   const replies = {};
   const palettes = [];
@@ -27,13 +27,14 @@ function fixture(preferences = {}, permission = "default", subframe = false, wor
       super(); Object.assign(this, {id, hidden: false, disabled: false, value: "", textContent: "", dataset: {},
         maxLength: 100000, selectionStart: 0, selectionEnd: 0, clicks: 0, submits: 0, children: new Map()});
       const classes = new Set();
-      this.classList = {add: value => classes.add(value), remove: value => classes.delete(value),
+      this.classList = {add: value => classes.add(value), remove: value => classes.delete(value), contains: value => classes.has(value),
         toggle: (value, on) => on ? classes.add(value) : classes.delete(value)};
     }
     closest(selector) {
       if (selector === ".markdown a[href]") return this.markdownLink ? this : this.parent?.closest(selector) || null;
       if (selector === "[hidden]") return this.hidden ? this : this.parent?.closest(selector) || null;
       if (selector === "button[data-thread]") return this.dataset.thread ? this : this.parent?.closest(selector) || null;
+      if (selector.includes("[role='tab']")) return this.control ? this : this.parent?.closest(selector) || null;
       return null;
     }
     contains(element) { return element === this || element?.parent === this; }
@@ -65,7 +66,11 @@ function fixture(preferences = {}, permission = "default", subframe = false, wor
     "create-dialog", "permissions-dialog"]) nodes.set(id, new Element(id));
   nodes.get("error").hidden = true;
   nodes.get("sidebar-search").onclick = () => { nodes.get("search").focus(); nodes.get("search").select(); };
-  Object.assign(document, {visibilityState: "hidden", hasFocus: () => false, body: new Element(),
+  const root = new Element("root");
+  root.properties = {}; root.appended = [];
+  root.style = {setProperty: (name, value) => { root.properties[name] = value; }};
+  root.append = element => root.appended.push(element);
+  Object.assign(document, {visibilityState: "hidden", hasFocus: () => false, body: new Element(), documentElement: root,
     getElementById: id => nodes.get(id), createElement: () => new Element(),
     querySelector: selector => selector === "dialog[open]" ?
       [...nodes.values()].find(el => el.id.endsWith("-dialog") && el.open) || null : null});
@@ -76,7 +81,7 @@ function fixture(preferences = {}, permission = "default", subframe = false, wor
     constructor(type, options) { super(type, options); this.dataTransfer = options.dataTransfer; }
   }
   Object.assign(env, {
-    Event, EventTarget, Storage, crypto: {randomUUID}, localStorage: new Storage(), sessionStorage: new Storage(),
+    Event, EventTarget, Element, Storage, crypto: {randomUUID}, localStorage: new Storage(), sessionStorage: new Storage(),
     document, DataTransfer, DragEvent, queueMicrotask, URLSearchParams,
     MutationObserver: class { observe() {} disconnect() {} },
     DesktopCommandPalette: class {
@@ -105,8 +110,9 @@ function fixture(preferences = {}, permission = "default", subframe = false, wor
   if (workspace) env.agentCoordWorkspaceState = workspace.api;
   vm.runInContext(source.replace("__AGENT_COORD_PREFERENCES__", JSON.stringify(preferences))
     .replace("__AGENT_COORD_WINDOW_STATE__", JSON.stringify(workspace?.snapshot ?? null))
-    .replace("__AGENT_COORD_CONVERSATION_WINDOW__", "false"), vm.createContext(env));
-  return {env, messages, preferences, nodes, replies, palettes};
+    .replace("__AGENT_COORD_CONVERSATION_WINDOW__", "false")
+    .replace("__AGENT_COORD_TITLEBAR__", JSON.stringify(titlebar)), vm.createContext(env));
+  return {env, messages, preferences, nodes, replies, palettes, root, Element};
 }
 
 test("workspace bridge preloads before app boot and uses the page's lexical state at navigationReady", async () => {
@@ -781,4 +787,69 @@ test('a failed native commit restores the source draft and requests destination 
   await settle();
   assert.deepEqual(recovered, ['thread-one']); assert.deepEqual(discarded, []);
   assert.deepEqual(f.messages.filter(body => body.action === 'completeConversationTransfer').map(body => body.committed), [true, false]);
+});
+
+function pressTitlebar(f, target, {clientY = 12, button = 0, detail = 1} = {}) {
+  const event = new f.env.Event("mousedown", {bubbles: true, cancelable: true});
+  Object.defineProperty(event, "target", {value: target});
+  Object.assign(event, {clientY, button, detail});
+  f.env.document.dispatchEvent(event);
+  return event;
+}
+
+test("workspace title band exposes native control geometry to page styles", () => {
+  const f = fixture({}, "default", false, null, {height: 40, leading: 84, controls: true});
+  assert.ok(f.root.classList.contains("native-titlebar"));
+  assert.ok(f.root.classList.contains("native-titlebar-controls"));
+  assert.equal(f.root.properties["--native-titlebar-height"], "40px");
+  assert.equal(f.root.properties["--native-titlebar-leading"], "84px");
+  assert.equal(f.root.appended.length, 1, "pages without a title band layout receive a top inset");
+  f.env.agentCoordDesktop.titlebar({height: 40, leading: 0, controls: false});
+  assert.ok(!f.root.classList.contains("native-titlebar-controls"), "full screen hides the window controls");
+  assert.equal(f.root.properties["--native-titlebar-leading"], "0px");
+});
+
+test("empty title band space moves and zooms the window while controls keep their presses", async () => {
+  const f = fixture({}, "default", false, null, {height: 40, leading: 84, controls: true});
+  const band = new f.Element("workspace-bar"), tab = new f.Element("project-tab");
+  tab.control = true; tab.parent = band;
+  const drag = pressTitlebar(f, band);
+  assert.ok(drag.defaultPrevented, "a band press does not select page text");
+  pressTitlebar(f, band, {detail: 2});
+  pressTitlebar(f, tab);
+  pressTitlebar(f, band, {clientY: 40});
+  pressTitlebar(f, band, {button: 2});
+  await settle();
+  const actions = f.messages.map(message => message.action).filter(action => ["windowDrag", "windowDoubleClick"].includes(action));
+  assert.deepEqual(actions, ["windowDrag", "windowDoubleClick"]);
+});
+
+test("windows without a title band leave page presses alone", async () => {
+  const f = fixture();
+  assert.ok(!f.root.classList.contains("native-titlebar"));
+  pressTitlebar(f, new f.Element("workspace-bar"));
+  await settle();
+  assert.ok(!f.messages.some(message => ["windowDrag", "windowDoubleClick"].includes(message.action)));
+});
+
+test("the workspace header clears the window controls wherever the layout places it", () => {
+  const f = fixture({}, "default", false, null, {height: 40, leading: 84, controls: true});
+  let rect = {left: 254, top: 0, height: 40};
+  const header = new f.Element("workspace-bar");
+  header.getBoundingClientRect = () => rect;
+  const query = f.env.document.querySelector;
+  f.env.document.querySelector = selector => selector === "body > main > .workspace-bar" ? header : query(selector);
+  const state = {height: 40, leading: 84, controls: true};
+  f.env.agentCoordDesktop.titlebar(state);
+  assert.ok(!f.root.classList.contains("native-titlebar-inset"), "a visible sidebar already clears the controls");
+  rect = {left: 0, top: 0, height: 40};
+  f.env.agentCoordDesktop.titlebar(state);
+  assert.ok(f.root.classList.contains("native-titlebar-inset"));
+  assert.equal(f.root.properties["--native-titlebar-inset"], "84px");
+  rect = {left: 0, top: 0, height: 0};
+  f.env.agentCoordDesktop.titlebar(state);
+  assert.ok(!f.root.classList.contains("native-titlebar-inset"));
+  assert.ok(f.root.classList.contains("native-titlebar-uncovered"), "a hidden header moves the page below the band");
+  f.env.agentCoordDesktop.titlebar({...state, controls: false});
+  assert.ok(!f.root.classList.contains("native-titlebar-uncovered"), "full screen has no window controls to clear");
 });

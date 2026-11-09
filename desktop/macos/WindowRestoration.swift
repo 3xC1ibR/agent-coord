@@ -50,7 +50,7 @@ final class WindowRestorationStore {
     }
 
     static func script(_ source: String, values: [String: String]) -> String {
-        let pattern = "__AGENT_COORD_(?:PREFERENCES|WINDOW_STATE|FOLDER_SLOT|CONVERSATION_WINDOW|WINDOW_ID)__"
+        let pattern = "__AGENT_COORD_(?:PREFERENCES|WINDOW_STATE|FOLDER_SLOT|CONVERSATION_WINDOW|WINDOW_ID|TITLEBAR)__"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return source }
         var result = source
         // Replace original template tokens once; user drafts may themselves
