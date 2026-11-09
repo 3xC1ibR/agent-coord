@@ -72,7 +72,7 @@
   .conversation.agents-visible .context-panel { order: initial; max-height: none; border-left: 1px solid var(--line); border-bottom: 0; overflow: visible; }
   .conversation.agents-visible .agent-panel-resize { display: block; }
   .conversation.agents-visible .conversation-head { flex-wrap: wrap; gap: 8px; padding: 14px 20px; }
-  .conversation.agents-visible .timeline { padding-inline: 24px; }
+  .conversation.agents-visible :is(.timeline, .turn-elapsed) { padding-inline: 24px; } /* drift-ok: shares the existing agent-tree message inset. */
   .conversation.agents-visible .composer { padding-inline: 24px; }
   html.conversation-window .conversation.has-agent-tree:not(.context-collapsed) { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, var(--context-panel-width, 340px)); }
   html.conversation-window .conversation.has-agent-tree.agents-visible { grid-template-columns: minmax(300px, 1fr) minmax(0, var(--agent-panel-width, 52%)); }

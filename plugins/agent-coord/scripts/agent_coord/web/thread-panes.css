@@ -64,6 +64,7 @@ body.pane-document { display: block; height: 100dvh; }
 .pane-document .session-actions { flex-wrap: wrap; gap: 4px; }
 .pane-document .session-actions button { font-size: 10px; padding: 2px 5px; }
 .pane-document .timeline { padding: 12px; min-height: 0; overflow: auto; }
+.pane-document .turn-elapsed { padding-inline: 12px; } /* drift-ok: matches the existing pane message inset. */
 .pane-document .composer { margin: 0 10px 8px; }
 .pane-document .composer textarea { max-height: 100px; }
 .pane-document .composer-footer { gap: 4px; }

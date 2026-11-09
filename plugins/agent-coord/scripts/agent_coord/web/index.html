@@ -239,7 +239,6 @@
         <div class="conversation-heading">
           <h1 id="title-heading"><button id="session-name" class="thread-title" type="button" title="Rename thread"></button></h1>
           <p id="fork-origin" class="muted" hidden></p>
-          <span id="turn-elapsed" class="turn-elapsed" role="timer" aria-live="off" title="Time since the current turn started, including time waiting for input" hidden></span>
           <form id="rename-form" class="title-editor" hidden>
             <label class="sr-only" for="rename-name">Thread title</label>
             <input id="rename-name" required maxlength="160" autocomplete="off" aria-describedby="rename-hint">
@@ -258,6 +257,7 @@
       </header>
       <section id="thread-sidecars" class="thread-sidecars" aria-label="Attached sidecars" hidden></section>
       <div id="timeline" class="timeline" aria-label="Conversation" tabindex="-1"></div>
+      <span id="turn-elapsed" class="turn-elapsed" role="timer" aria-live="off" title="Time since the current turn started, including time waiting for input" hidden></span>
       <div id="requests" class="requests" aria-live="polite"></div>
       <div id="speech-player" class="speech-player" hidden><span id="speech-status" role="status"></span><button id="speech-play" class="quiet" type="button" hidden>Play</button><button id="speech-stop" class="quiet" type="button">Stop speech</button></div>
       </div>
