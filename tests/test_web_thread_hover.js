@@ -11,7 +11,11 @@ class Element {
   removeAttribute(key) { delete this.attributes[key]; }
   addEventListener(name, fn) { this.handlers[name] = fn; }
   contains(el) { return el === this || this.children.some(child => child.contains(el)); }
-  closest(selector) { if (selector === '[hidden], [aria-hidden="true"]') return null; return this.dataset.thread ? this : this.parent?.closest(selector); }
+  closest(selector) {
+    if (selector === '[hidden], [aria-hidden="true"]') return null;
+    if (selector === '[data-action="peek"]') return this.dataset.action === "peek" ? this : this.parent?.closest(selector);
+    return this.dataset.thread || this.dataset.threadTab !== undefined ? this : this.parent?.closest(selector);
+  }
   matches(selector) { return selector === ":hover" && !!this.hovered; }
   querySelectorAll() { return []; }
   getBoundingClientRect() { return {top: 600, right: 950, bottom: 720, left: 600}; }
@@ -19,26 +23,101 @@ class Element {
   get html() { return (this.innerHTML || "") + this.children.map(c => c.html).join("\n"); }
 }
 function setup() {
-  const overview = new Element(), document = new Element(), window = new Element();
+  const overview = new Element(), tabs = new Element(), document = new Element(), window = new Element();
   document.body = new Element(); document.createElement = () => new Element();
   window.innerWidth = 1000; window.innerHeight = 800;
   window.MutationObserver = class { constructor(callback) { window.mutation = callback; } observe() {} };
   const first = new Element(), second = new Element(); first.dataset.thread = "first"; second.dataset.thread = "second";
   overview.append(first, second);
   overview.querySelectorAll = () => overview.children;
+  tabs.querySelectorAll = () => tabs.children;
   let tasks = new Map(), sequence = 0, requests = [], opened = [];
   const threads = {};
-  const result = createThreadHover({overview, document, window,
+  const result = createThreadHover({overview, tabs, document, window,
     schedule: fn => { tasks.set(++sequence, fn); return sequence; }, cancel: id => tasks.delete(id),
-    getThread: id => threads[id] || ({thread_id: id, title: id, cwd: "/workspace", checkpoint: {summary: "Saved progress"}}),
+    getThread: id => !id || ["new-session", "project-scratchpad"].includes(id) ? null : threads[id] || ({thread_id: id, title: id, cwd: "/workspace", checkpoint: {summary: "Saved progress"}}),
     relativeTime: () => "Just now", select: id => opened.push(id),
     loadPreview: id => new Promise((resolve, reject) => requests.push({id, resolve, reject}))});
-  return {...result, overview, document, window, first, second, requests, threads, opened,
+  return {...result, overview, tabs, document, window, first, second, requests, threads, opened,
     async flush() { for (const [id, fn] of [...tasks]) if (tasks.delete(id)) fn(); await Promise.resolve(); },
     enter(target, type = "pointerover") { overview.handlers[type]({target, type, pointerType: "mouse"}); },
     leave(target) { overview.handlers.pointerout({target, relatedTarget: null}); }};
 }
 const response = id => ({thread: {title: id, client: "codex", checkpoint: {}}, latest_message: {role: "assistant", text: "<script>literal message</script>"}});
+
+test("inbox rows share the existing preview and its pinning and open action", async () => {
+  const s = setup(), row = new Element(), title = new Element();
+  row.className = "tl-row"; row.dataset.thread = "inbox"; row.append(title); s.overview.append(row);
+  s.enter(title); await s.flush();
+  assert.equal(s.requests[0].id, "inbox");
+  assert.equal(row.attributes["aria-describedby"], "thread-hover");
+  s.requests[0].resolve(response("Inbox conversation")); await Promise.resolve();
+  assert.match(s.panel.text, /Inbox conversation/);
+  s.panel.handlers.pointerdown(); s.leave(row); await s.flush();
+  assert.equal(s.panel.hidden, false);
+  find(s.panel, "hover-foot").children[0].onclick({stopPropagation() {}});
+  assert.deepEqual(s.opened, ["inbox"]); assert.equal(s.panel.hidden, true);
+});
+
+test("conversation tabs preview without activation, open below the strip and dismiss on navigation", async () => {
+  const s = setup(), tab = new Element(); tab.dataset.threadTab = "first"; s.tabs.append(tab);
+  tab.getBoundingClientRect = () => ({left: 300, right: 500, top: 40, bottom: 80});
+  s.tabs.handlers.pointerover({target: tab, type: "pointerover", pointerType: "mouse"}); await s.flush();
+  assert.equal(s.requests[0].id, "first"); assert.deepEqual(s.opened, []);
+  assert.equal(s.panel.style.left, "300px"); assert.equal(s.panel.style.top, "90px");
+  assert.equal(tab.attributes["aria-describedby"], "thread-hover");
+  s.tabs.handlers.click({target: tab}); assert.equal(s.panel.hidden, true);
+  s.tabs.handlers.focusin({target: tab, type: "focusin"}); await s.flush();
+  assert.equal(s.panel.hidden, false);
+  s.tabs.handlers.dragstart(); assert.equal(s.panel.hidden, true);
+});
+
+test("inbox keyboard focus keeps the preview open when the pointer leaves its row", async () => {
+  const s = setup(), row = new Element(), title = new Element();
+  row.dataset.thread = "inbox"; row.append(title); s.overview.append(row);
+  s.document.activeElement = title; s.enter(title, "focusin"); await s.flush();
+  s.leave(row); await s.flush(); assert.equal(s.panel.hidden, false);
+  s.document.activeElement = null; s.leave(title); await s.flush();
+  assert.equal(s.panel.hidden, true);
+});
+
+test("a tall tab preview fits below the strip in a short window", async () => {
+  const s = setup(), tab = new Element(); tab.dataset.threadTab = "first"; s.tabs.append(tab);
+  s.window.innerHeight = 500;
+  tab.getBoundingClientRect = () => ({left: 300, right: 500, top: 40, bottom: 80});
+  Object.defineProperty(s.panel, "offsetHeight", {get: () => Math.min(450, parseFloat(s.panel.style.maxHeight) || 450)});
+  s.tabs.handlers.pointerover({target: tab, type: "pointerover", pointerType: "mouse"}); await s.flush();
+  assert.equal(s.panel.style.top, "90px"); assert.equal(s.panel.style.maxHeight, "398px");
+  s.hide(); s.enter(s.first); await s.flush();
+  assert.equal(s.panel.style.maxHeight, "");
+});
+
+test("tab refresh stays on the same surface when the same thread also has a card", async () => {
+  const s = setup(), tab = new Element(); tab.dataset.threadTab = "first"; s.tabs.append(tab);
+  s.tabs.handlers.pointerover({target: tab, type: "pointerover", pointerType: "mouse"}); await s.flush();
+  s.panel.handlers.pointerdown();
+  const replacement = new Element(); replacement.dataset.threadTab = "first";
+  tab.isConnected = false; s.tabs.children[0] = replacement; s.window.mutation();
+  assert.equal(s.panel.hidden, false);
+  assert.equal(replacement.attributes["aria-describedby"], "thread-hover");
+  assert.equal(s.first.attributes["aria-describedby"], undefined);
+  s.requests[0].resolve(response("Refreshed conversation")); await Promise.resolve();
+  assert.match(s.panel.text, /Refreshed conversation/);
+  replacement.isConnected = false; s.tabs.children = []; s.window.mutation();
+  assert.equal(s.panel.hidden, true);
+});
+
+test("overview, scratchpad and draft tabs have no thread preview, and touch does not hover", async () => {
+  const s = setup();
+  for (const id of ["", "project-scratchpad", "new-session"]) {
+    const tab = new Element(); tab.dataset.threadTab = id; s.tabs.append(tab);
+    s.tabs.handlers.pointerover({target: tab, type: "pointerover", pointerType: "mouse"});
+    s.tabs.handlers.focusin({target: tab, type: "focusin"});
+  }
+  const tab = new Element(); tab.dataset.threadTab = "first"; s.tabs.append(tab);
+  s.tabs.handlers.pointerover({target: tab, type: "pointerover", pointerType: "touch"});
+  await s.flush(); assert.equal(s.panel.hidden, true); assert.equal(s.requests.length, 0);
+});
 
 test("brief hover makes no request; focus opens and Escape dismisses", async () => {
   const s = setup(); s.enter(s.first); s.leave(s.first); await s.flush();

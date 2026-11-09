@@ -1,10 +1,10 @@
 "use strict";
 
-// Kept separate from card rendering so list refreshes need no per-card listeners.
+// Shared by cards, inbox rows and conversation tabs, without per-thread listeners.
 // The hover preview doubles as a lens: what the agent is doing now, where it
 // stands, what comes next, what came before, its sub-agents, and the latest
 // message. Clicking inside pins it.
-function createThreadHover({overview, document, window, getThread, loadPreview, relativeTime,
+function createThreadHover({overview, tabs = null, document, window, getThread, loadPreview, relativeTime,
   markdown = typeof module !== "undefined" && module.exports ? require("./markdown.js") : globalThis.messageMarkdown,
   grouping = globalThis.threadGrouping, providerLogo = globalThis.providerLogo, select = null,
   schedule = setTimeout, cancel = clearTimeout, cacheMs = 3000}) {
@@ -12,7 +12,10 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   panel.id = "thread-hover"; panel.className = "thread-hover"; panel.hidden = true;
   panel.setAttribute("role", "tooltip"); panel.dataset.pinned = "false";
   document.body.append(panel);
-  let anchor = null, current = null, openTimer, closeTimer, request = 0, pointerInside = false, pinned = false, trail = [], pointer = null;
+  const surfaces = [overview, tabs].filter(Boolean);
+  const anchors = ".session[data-thread], .agent-row[data-thread], .tl-row[data-thread], .conversation-tab-select[data-thread-tab]";
+  const threadId = el => el.dataset.thread || el.dataset.threadTab;
+  let anchor = null, anchorSurface = null, current = null, openTimer, closeTimer, request = 0, pointerInside = false, pinned = false, trail = [], pointer = null;
   const cache = new Map();
   const PROVIDERS = {muse: "Muse Code", codex: "Codex", claude: "Claude", kimi: "Kimi", antigravity: "Antigravity"};
   const VERBS = {run: "Running", edit: "Editing", read: "Reading", tool: "Using"};
@@ -44,14 +47,14 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   function hide() {
     cancel(openTimer); cancel(closeTimer); request++;
     anchor?.removeAttribute("aria-describedby");
-    anchor = null; current = null; pointerInside = false; pinned = false; trail = [];
+    anchor = null; anchorSurface = null; current = null; pointerInside = false; pinned = false; trail = [];
     panel.hidden = true; panel.dataset.pinned = "false"; panel.setAttribute("role", "tooltip");
   }
   function restoreAnchor() {
     if (!anchor || anchor.isConnected) return !!anchor;
-    const id = anchor.dataset.thread;
-    const candidates = [...overview.querySelectorAll(".session[data-thread], .agent-row[data-thread]")]
-      .filter(el => el.dataset.thread === id && !el.closest('[hidden], [aria-hidden="true"]'));
+    const id = threadId(anchor);
+    const candidates = [...anchorSurface.querySelectorAll(anchors)]
+      .filter(el => threadId(el) === id && !el.closest('[hidden], [aria-hidden="true"]'));
     // :hover can still refer to the detached element until the next paint.
     const underPointer = pointer && document.elementFromPoint?.(pointer.x, pointer.y);
     const replacement = candidates.find(el => el.contains(underPointer) || el.matches(":hover") || el.contains(document.activeElement)) ||
@@ -65,9 +68,22 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   function position() {
     if (!restoreAnchor()) return;
     const rect = anchor.getBoundingClientRect(), gap = 10, margin = 12;
-    const width = panel.offsetWidth, height = panel.offsetHeight;
-    let left = rect.right + gap, top = rect.top;
-    if (left + width > window.innerWidth - margin) {
+    panel.style.maxHeight = "";
+    const width = panel.offsetWidth;
+    let height = panel.offsetHeight;
+    const tab = anchor.dataset.threadTab !== undefined;
+    let left = tab ? rect.left : rect.right + gap, top = tab ? rect.bottom + gap : rect.top;
+    if (tab) {
+      if (top + height > window.innerHeight - margin) {
+        const below = window.innerHeight - top - margin, above = rect.top - gap - margin;
+        if (height <= above) top = rect.top - height - gap;
+        else {
+          panel.style.maxHeight = Math.max(0, Math.max(below, above)) + "px";
+          height = panel.offsetHeight;
+          if (above > below) top = margin;
+        }
+      }
+    } else if (left + width > window.innerWidth - margin) {
       if (rect.left - width - gap >= margin) left = rect.left - width - gap;
       else { left = rect.left; top = rect.bottom + gap;
         if (top + height > window.innerHeight - margin) top = rect.top - height - gap; }
@@ -163,6 +179,7 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
   async function show(button, id, {thread: given} = {}) {
     if (!button?.isConnected) return;
     anchor = button; panel.hidden = false;
+    anchorSurface = surfaces.find(surface => surface.contains(button));
     anchor.setAttribute("aria-describedby", panel.id);
     const thread = given || getThread(id);
     if (!thread) { hide(); return; }
@@ -202,8 +219,9 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     render(fresh, saved?.data || null);
   }
   function target(event) {
-    const button = event.target.closest?.(".session[data-thread], .agent-row[data-thread]");
-    return button && overview.contains(button) ? button : null;
+    const button = event.target.closest?.(anchors);
+    // Overview, scratchpad and new-conversation tabs have no saved thread.
+    return button && surfaces.some(surface => surface.contains(button)) && getThread(threadId(button)) ? button : null;
   }
   function enter(event) {
     if (event.pointerType === "touch") return;
@@ -213,11 +231,11 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     cancel(closeTimer);
     if (button === anchor && !panel.hidden) return;
     if (pinned) return; // A pinned lens stays until it is closed or another one is opened.
-    hide(); anchor = button;
+    hide(); anchor = button; anchorSurface = surfaces.find(surface => surface.contains(button));
     // Avoid native tooltips covering the richer preview.
     button.removeAttribute("title");
     for (const el of button.querySelectorAll("[title]")) el.removeAttribute("title");
-    openTimer = schedule(() => { if (restoreAnchor()) show(anchor, anchor.dataset.thread); }, event.type === "focusin" ? 0 : 300);
+    openTimer = schedule(() => { if (restoreAnchor()) show(anchor, threadId(anchor)); }, event.type === "focusin" ? 0 : 300);
   }
   function leave(event) {
     if (pinned) return;
@@ -226,14 +244,17 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     cancel(openTimer);
     cancel(closeTimer);
     closeTimer = schedule(() => {
-      if (!pointerInside && document.activeElement !== anchor) hide();
+      if (!pointerInside && !anchor?.contains(document.activeElement)) hide();
     }, 180);
   }
-  overview.addEventListener("pointerover", enter);
-  overview.addEventListener("pointerout", leave);
-  overview.addEventListener("focusin", enter);
-  overview.addEventListener("focusout", leave);
-  overview.addEventListener("click", event => { if (event.target?.closest?.('[data-action="peek"]')) return; hide(); });
+  for (const surface of surfaces) {
+    surface.addEventListener("pointerover", enter);
+    surface.addEventListener("pointerout", leave);
+    surface.addEventListener("focusin", enter);
+    surface.addEventListener("focusout", leave);
+    surface.addEventListener("click", event => { if (event.target?.closest?.('[data-action="peek"]')) return; hide(); });
+    surface.addEventListener("dragstart", hide);
+  }
   document.addEventListener("pointermove", event => {
     if (event.pointerType !== "touch") pointer = {x: event.clientX, y: event.clientY};
   });
@@ -247,12 +268,12 @@ function createThreadHover({overview, document, window, getThread, loadPreview, 
     if (!anchor || anchor.isConnected) return;
     if (restoreAnchor() && !panel.hidden) position();
   });
-  observer.observe(overview, {childList: true, subtree: true});
+  for (const surface of surfaces) observer.observe(surface, {childList: true, subtree: true});
   return {hide, panel, open, pin, refresh, isPinned: () => pinned};
 }
 
 if (typeof module !== "undefined" && module.exports) module.exports = {createThreadHover};
-else globalThis.threadHover = createThreadHover({overview: document.getElementById("welcome"), document, window,
+else globalThis.threadHover = createThreadHover({overview: document.getElementById("welcome"), tabs: document.getElementById("conversation-tabs"), document, window,
   getThread: id => state.sessions.find(thread => thread.thread_id === id),
   loadPreview: id => api(threadPath(id) + "/preview"),
   relativeTime, select: id => action(() => select(id))});
