@@ -459,6 +459,30 @@ class CloseWhenDoneHTTPTests(unittest.TestCase):
     stop_server = _http.BrowserHTTPTests.stop_server
     request = _http.BrowserHTTPTests.request
 
+    def test_close_actions_keep_working_after_a_late_session_start_hook(self):
+        for action in ("close-when-done", "close"):
+            with self.subTest(action=action):
+                thread_id = self.sessions.create({"name": "Fix"})["session"]["thread_id"]
+                self.send(thread_id, {"message": "Fix it."})
+                turn_key = self.store.threads.get(thread_id)["turn_key"]
+                # The provider can acknowledge its turn before its startup
+                # hook arrives. That hook must not make running work idle.
+                with patch.dict("os.environ", {"AGENT_COORD_CLIENT": "codex"}):
+                    handle({"hook_event_name": "SessionStart", "session_id": thread_id,
+                            "cwd": str(self.root)}, self.store)
+                self.assertIn(thread_id, self.sessions.active)
+                path = "/api/browser/threads/" + thread_id + "/" + action
+                status, result = self.request(path, {"enabled": True} if action == "close-when-done" else {})
+                self.assertEqual(status, 200, result)
+                if action == "close-when-done":
+                    self.assertEqual(result["waiting_for"], "turn")
+                    self.assertEqual(result["turn_key"], turn_key)
+                    self.assertIn(thread_id, self.sessions.active)
+                    self.assertTrue(self.store.get_session(thread_id)["turn_active"])
+                else:
+                    self.assertEqual(result["attention"], "archived")
+                    self.assertNotIn(thread_id, self.sessions.active)
+
     def test_enable_read_and_cancel_without_submitting_a_model_message(self):
         thread_id = self.sessions.create({"name": "Fix"})["session"]["thread_id"]
         self.send(thread_id, {"message": "Fix it."})

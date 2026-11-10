@@ -364,7 +364,9 @@ def handle(
             shell_context_ready = persist_claude_environment(coordination.database_path, session_id)
             if shell_context_ready:
                 cli_path = "agent-coord"
-        coordination.touch(session_id, turn_active=False)
+        # App-server turn events can precede this hook. Only terminal startup
+        # owns the transition to idle; browser liveness belongs to the runtime.
+        coordination.touch(session_id, turn_active=None if browser else False)
         text = ""
         delegation_warning = None
         delegation_id = caller_environment().get("AGENT_COORD_DELEGATION_ID")
