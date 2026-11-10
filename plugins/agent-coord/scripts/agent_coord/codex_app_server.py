@@ -760,6 +760,15 @@ class BrowserSessions:
     def _persist_event(self, method, params, disconnected, disconnected_turns=None):
         """Idempotent bookkeeping only: never replay a streamed event or prompt."""
         thread_id = params.get("threadId")
+        if thread_id:
+            # Codex also broadcasts lifecycle and usage events for its native
+            # child agents. Those remain provider-owned; they are not app
+            # conversations and have no coordination session to update. Keep
+            # their in-memory activity/requests visible, but do this ownership
+            # lookup on the persistence worker, never the provider reader.
+            with self.store.reading(), self.store._connection() as db:
+                if not db.execute("SELECT 1 FROM browser_sessions WHERE thread_id=?", (thread_id,)).fetchone():
+                    return
         if method == "thread/tokenUsage/updated" and thread_id:
             usage = params.get("tokenUsage") or {}
             # The provider notification's total is cumulative, while last is

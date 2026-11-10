@@ -83,12 +83,30 @@ class RuntimeRecovery:
     def prepare(self, update_id):
         sessions = self.sessions
         if not sessions.persistence.flush():
-            raise RuntimeError("Conversation bookkeeping could not be saved; update deferred.")
+            persistence = sessions.persistence.status()
+            failures = persistence["failures"]
+            identities = ", ".join(sorted(failures)[:5])
+            raise RuntimeError("Conversation bookkeeping could not be saved; update deferred. "
+                               f"{len(failures)} failed conversation(s) [{identities}]; "
+                               f"{persistence['pending']} pending write(s). Inspect runtime diagnostics before retrying.")
         with sessions.lock:
             active = dict(sessions.active)
             # Requests arriving during shutdown are retained as recovery exclusions.
             sessions.runtime_update_requests = {
                 (value.get("params") or {}).get("threadId") for value in sessions.requests.values()}
+        # Native child-agent activity must still block an unverifiable restart:
+        # this runtime cannot issue an independent continuation for a thread it
+        # does not manage. Completed children have no recovery intent and must
+        # not permanently poison subsequent updates.
+        observed = set(active) | (sessions.runtime_update_requests - {None})
+        with self.store.reading(), self.store._connection() as db:
+            managed = {row[0] for row in db.execute("""SELECT thread_id FROM browser_sessions
+                WHERE thread_id IN (SELECT value FROM json_each(?))""", (json.dumps(list(observed)),))}
+        unmanaged = observed - managed
+        if unmanaged:
+            raise RuntimeError("Update deferred while provider-owned turns or requests remain active: "
+                               + ", ".join(sorted(unmanaged)[:5])
+                               + ". Let them finish; automatic continuation is unavailable for these threads.")
         for thread_id, turn_id in active.items():
             if not turn_id:
                 raise RuntimeError("A provider submission is still starting; update deferred.")

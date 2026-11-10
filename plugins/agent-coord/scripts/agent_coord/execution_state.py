@@ -184,12 +184,18 @@ class RuntimeExecution:
                 # Ignore late retries from a previous runtime after a new owner
                 # has supplied newer evidence. BrowserPersistence orders this
                 # runtime's own writes without replaying provider operations.
-                db.execute("""INSERT INTO execution_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                # Native provider children need not have an app session. Test
+                # registration atomically with the optional snapshot write;
+                # never create a session or fail a foreign-key constraint for
+                # an event that belongs to the provider's own conversation.
+                db.execute("""INSERT INTO execution_snapshots
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                    WHERE EXISTS (SELECT 1 FROM sessions WHERE session_id=?)
                     ON CONFLICT(thread_id) DO UPDATE SET runtime_id=excluded.runtime_id,
                     turn_id=excluded.turn_id, state=excluded.state, source=excluded.source,
                     observed_at=excluded.observed_at, pending_json=excluded.pending_json,
                     permissions_json=excluded.permissions_json
-                    WHERE execution_snapshots.observed_at <= excluded.observed_at""", payload)
+                    WHERE execution_snapshots.observed_at <= excluded.observed_at""", (*payload, thread_id))
         sessions.persistence.submit(persist, key=thread_id, coalesce="execution", required=False)
 
     def close(self):
