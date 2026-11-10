@@ -118,8 +118,11 @@ class ACPConnection:
             # Adapter callbacks can fail independently of the provider
             # process. Preserve the actual cause instead of reporting its
             # unrelated stderr tail as if the process had disconnected.
-            failure = f"{self.label} stream processing failed: {type(exc).__name__}: {str(exc)[-1000:]}"
-            logging.getLogger(__name__).exception("%s stream processing failed", self.label)
+            # Completion callbacks may explicitly close this same reader's
+            # stream. That is expected cleanup, not a second provider failure.
+            if not self.closed:
+                failure = f"{self.label} stream processing failed: {type(exc).__name__}: {str(exc)[-1000:]}"
+                logging.getLogger(__name__).exception("%s stream processing failed", self.label)
         finally:
             error = CoordinationError(failure or (f"{self.label} disconnected. " + "\n".join(self.errors)))
             self._fail(error)

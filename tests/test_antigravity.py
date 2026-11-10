@@ -17,6 +17,7 @@ from unittest.mock import patch
 from test_codex_app_server import FakeCodex, BrowserSessions, CoordinationStore, CoordinationError
 from agent_coord.antigravity import AntigravityConnection, AntigravityRPC, AUTH_PREFIX
 from agent_coord.antigravity_setup import install_runtime, provider_directory, resolve_runtime
+from agent_coord.antigravity_skills import prepare_skills
 from agent_coord.acp import ACPError
 
 
@@ -65,6 +66,10 @@ class AntigravityTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
+        self.skills = patch("agent_coord.antigravity.prepare_skills",
+                            side_effect=lambda store, cwd: prepare_skills(store, cwd, home=self.root))
+        self.skills.start()
+        self.addCleanup(self.skills.stop)
         self.store = CoordinationStore(self.root / "state.sqlite3")
         self.sessions = self.make_sessions()
 
@@ -121,7 +126,11 @@ class AntigravityTests(unittest.TestCase):
         prompt = provider.connections[thread].calls[-1][1]["prompt"]
         self.assertIn(thread, prompt[0]["text"])
         self.assertIn("AGENTS.md", prompt[0]["text"])
-        self.assertIn("skills/agent-coordination/SKILL.md", prompt[0]["text"])
+        skill = provider.skill_contexts[thread].coordination_skill
+        self.assertIn(str(skill), prompt[0]["text"])
+        self.assertTrue(skill.is_file())
+        self.assertTrue(skill.resolve().is_relative_to(provider_directory(self.store) / "profile/antigravity-acp"))
+        self.assertIn(str(skill.parent / "references/openui.md"), prompt[0]["text"])
         self.assertIn("never comma-join", prompt[0]["text"])
         self.assertEqual(prompt[-1], {"type": "image", "mimeType": "image/png", "data": "YQ=="})
 
@@ -133,9 +142,10 @@ class AntigravityTests(unittest.TestCase):
             self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": text})
         self.update(thread, sessionUpdate="tool_call", toolCallId="read", title="Read file", rawInput={"path": "x"}, status="in_progress")
         self.update(thread, sessionUpdate="tool_call_update", toolCallId="read", rawOutput="contents", status="completed")
+        self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Read finished"})
         connection.future.set_result({"stopReason": "end_turn"})
         before = self.sessions.read(thread)["thread"]["turns"]
-        self.assertEqual([i["type"] for i in before[0]["items"]], ["userMessage", "reasoning", "agentMessage", "mcpToolCall"])
+        self.assertEqual([i["type"] for i in before[0]["items"]], ["userMessage", "reasoning", "agentMessage", "mcpToolCall", "agentMessage"])
         self.assertEqual(before[0]["items"][2]["text"], "Hello back")
         self.assertEqual(before[0]["items"][3]["result"], "contents")
         native = self.sessions.antigravity.native[thread]
@@ -146,7 +156,8 @@ class AntigravityTests(unittest.TestCase):
         connection = self.start(thread)
         resume = next(p for m, p in connection.calls if m == "session/resume")
         self.assertEqual(resume["sessionId"], native)
-        self.assertIn("skills/agent-coordination/SKILL.md", connection.calls[-1][1]["prompt"][0]["text"])
+        self.assertIn(str(self.sessions.antigravity.skill_contexts[thread].coordination_skill),
+                      connection.calls[-1][1]["prompt"][0]["text"])
         selections = [p for m, p in connection.calls if m == "session/set_config_option"]
         self.assertIn({"sessionId": native, "configId": "model", "value": "gemini-test"}, selections)
 
@@ -327,17 +338,39 @@ class AntigravityTests(unittest.TestCase):
         self.sessions = self.make_sessions()
         self.assertEqual(self.sessions.read(thread)["thread"]["turns"][-1], turn)
 
-    def test_tool_only_completion_distinguishes_known_and_unknown_outcomes(self):
+    def test_tool_only_completion_fails_preserves_outcomes_and_resumes_on_next_input(self):
         for output, execution in (("saved result", "ended"), (None, "unknown")):
             with self.subTest(execution=execution):
                 thread = self.create()
                 connection = self.start(thread)
                 self.update(thread, sessionUpdate="tool_call", toolCallId="tool", status="completed", rawOutput=output)
+                native = self.sessions.antigravity.native[thread]
+                prompt_count = len([method for method, _ in connection.calls if method == "session/prompt"])
                 connection.future.set_result({"stopReason": "end_turn"})
                 turn = self.sessions.read(thread)["thread"]["turns"][-1]
-                self.assertEqual(turn["status"], "completed")
+                self.assertEqual(turn["status"], "failed")
                 self.assertEqual(turn["termination"], {"origin": "provider", "reason": "end_turn", "execution": execution})
-                self.assertFalse(connection.closed)
+                self.assertIn("without a response", turn["error"]["message"])
+                self.assertEqual(turn["items"][-1].get("result"), output)
+                self.assertTrue(connection.closed)
+                self.assertNotIn(thread, self.sessions.antigravity.connections)
+                self.assertEqual(len([m for m, _ in connection.calls if m == "session/prompt"]), prompt_count)
+                resumed = self.start(thread)
+                self.assertIsNot(resumed, connection)
+                self.assertEqual(self.sessions.antigravity.native[thread], native)
+                self.assertIn(("session/resume", {"cwd": str(self.root), "mcpServers": [], "sessionId": native}), resumed.calls)
+                self.complete(thread)
+
+    def test_commentary_before_tools_is_not_a_final_response(self):
+        thread = self.create()
+        connection = self.start(thread)
+        self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "I will read the skill."})
+        self.update(thread, sessionUpdate="tool_call", toolCallId="read", status="completed", rawOutput="skill contents")
+        connection.future.set_result({"stopReason": "end_turn"})
+        turn = self.sessions.read(thread)["thread"]["turns"][-1]
+        self.assertEqual(turn["status"], "failed")
+        self.assertTrue(connection.closed)
+        self.assertEqual(turn["items"][-1]["result"], "skill contents")
 
     def test_lost_runtime_history_is_not_user_cancellation(self):
         thread = self.create()
@@ -371,6 +404,8 @@ class AntigravityTests(unittest.TestCase):
                 native = self.sessions.antigravity.native[thread]
                 for chunk in [diagnostic[:12], diagnostic[12:]]:
                     self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": chunk})
+                # A trailing thinking notification must not hide a fatal diagnostic.
+                self.update(thread, sessionUpdate="agent_thought_chunk", content={"type": "text", "text": "Provider state"})
                 connection.future.set_result({"stopReason": "end_turn"})
                 turn = self.sessions.read(thread)["thread"]["turns"][-1]
                 self.assertEqual(turn["status"], "failed")
@@ -432,8 +467,11 @@ for line in sys.stdin:
         provider.on_event = on_event
         thread = self.create()
         connection = provider.connections[thread]
-        self.sessions.send(thread, {"message": "Hello"})
-        self.assertTrue(finished.wait(5), "Transport cleanup blocked turn completion")
+        with self.assertNoLogs("agent_coord.acp", level="ERROR"):
+            self.sessions.send(thread, {"message": "Hello"})
+            self.assertTrue(finished.wait(5), "Transport cleanup blocked turn completion")
+            connection.readers[0].join(5)
+            self.assertFalse(connection.readers[0].is_alive())
         self.assertTrue(connection.closed)
         self.assertIsNotNone(connection.process.poll())
         self.assertFalse(self.sessions.read(thread)["running"])

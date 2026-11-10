@@ -929,6 +929,25 @@ identity, the installed skill path, current scope state, and CLI examples are
 supplied at startup and resume. Codex, Claude, Kimi, and Antigravity use the same
 startup guidance and structured-write policy.
 
+Antigravity also receives an explicit skill catalog. Workspace `.agents/skills`
+and `.gemini/skills`, personal `~/.agents/skills`, native global
+`~/.gemini/config/skills`, and the bundled coordination skills are copied with
+their resources into immutable snapshots under the private profile's
+`antigravity-acp/skill-snapshots/` directory. The catalog and startup guidance
+point to those readable copies, including when a personal installation uses a
+symlink to another project. Workspace definitions take precedence over global
+definitions with the same skill name. New and reconnected native sessions
+refresh the snapshots; existing sessions retain their original resources.
+
+A prompt that ends after tool calls without an assistant answer is a failed
+turn, even if the provider returns `end_turn`. Earlier commentary does not count
+as an answer after the tools. Tool results remain saved, including unknown
+outcomes. The failed connection is retired, and the next explicit user message
+resumes the same native conversation in a fresh process. Failed prompts are never
+automatically replayed, because their tools may already have changed external
+state. This also prevents an empty turn from retaining an unhealthy inner agent
+until the next message reports a connection-rebuild error.
+
 Before a native conversation starts, the adapter installs a `PreToolUse` hook
 in the private ACP profile at `profile/config/hooks.json`. It preserves other
 hook entries. The hook uses the Ribbon Field session identity and checks file

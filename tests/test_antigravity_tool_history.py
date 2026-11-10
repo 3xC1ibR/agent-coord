@@ -124,6 +124,8 @@ class DeliveryToolHistoryTests(unittest.TestCase):
         self.deliver(thread)
         self.assertFalse(connection.writes)
         self.assertEqual(self.tools(thread)['pending']['status'], 'inProgress')
+        self.update(thread, sessionUpdate='agent_message_chunk', content={
+            'type': 'text', 'text': 'The confirmed result is saved; the pending tool outcome could not be confirmed.'})
         connection.future.set_result({'stopReason': 'end_turn'})
         self.deliver(thread)
         self.assertEqual(self.tools(thread)['confirmed']['status'], 'completed')

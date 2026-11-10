@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 from .acp import ACPConnection
 from .antigravity_setup import model_catalog, provider_directory, resolve_runtime
+from .antigravity_skills import prepare_skills
 from .context import client_environment, cli_path, coordination_bootstrap
 from .message_delivery import MessageDelivery
 from .store import CoordinationError
@@ -168,6 +169,7 @@ class AntigravityRPC:
         self.delivery_turns = {}
         self.last_activity = {}
         self.prompt_locks = {}
+        self.skill_contexts = {}
         with store._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS antigravity_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL)")
 
@@ -271,6 +273,7 @@ class AntigravityRPC:
             current = None
         if current:
             return current
+        skills = prepare_skills(self.store, options["cwd"])
         with self.store._connection() as db:
             row = db.execute("SELECT native_id FROM antigravity_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
         connection = None
@@ -334,6 +337,7 @@ class AntigravityRPC:
                 connection.request("session/set_mode", {"sessionId": native_id, "modeId": mode})
             self.effective_permissions[thread_id] = mode
             self.options[thread_id] = dict(options)
+            self.skill_contexts[thread_id] = skills
             return connection
         except Exception:
             self.connections.pop(thread_id, None)
@@ -393,7 +397,9 @@ class AntigravityRPC:
             if thread_id in self.turns:
                 raise CoordinationError("An Antigravity turn is already running.")
             connection = self._connection(thread_id, self._options(params))
-            prompt = [{"type": "text", "text": coordination_bootstrap(self.store, thread_id)}]
+            skills = self.skill_contexts[thread_id]
+            prompt = [{"type": "text", "text": coordination_bootstrap(
+                self.store, thread_id, skill_path=skills.coordination_skill) + "\n\n" + skills.instructions}]
             for part in params["input"]:
                 if part["type"] == "text":
                     prompt.append({"type": "text", "text": part["text"]})
@@ -445,6 +451,10 @@ class AntigravityRPC:
                 if turn.get("id") != turn_id:
                     return
                 items = turn.get("items", [])
+                last_tool = max((index for index, item in enumerate(items)
+                                 if item.get("type") == "mcpToolCall"), default=-1)
+                answered = any(item.get("type") == "agentMessage" and item.get("text", "").strip()
+                               for item in items[last_tool + 1:])
                 user_cancelled = self.delivery_turns.get(thread_id, {}).get("user_cancel_requested", False)
                 execution = "unknown" if any(i.get("type") == "mcpToolCall" and
                     i.get("status") in {"inProgress", "unknown"} for i in items) else "ended"
@@ -456,10 +466,11 @@ class AntigravityRPC:
             elif reason != "end_turn":
                 finish("failed", f"Antigravity stopped the prompt ({reason}). Review the response and native session before continuing.",
                        reason=reason, execution=execution)
-            elif not any((i.get("type") == "agentMessage" and i.get("text", "").strip())
-                         or i.get("type") == "mcpToolCall" for i in items):
-                finish("failed", "Antigravity ended the prompt without a response. Check Antigravity status and logs before continuing.",
-                       reason=reason)
+            elif not answered:
+                finish("failed", "Antigravity ended the prompt without a response after its tools. "
+                       "The connection has been reset. Send a message to continue in the same conversation; "
+                       "review saved tool outcomes before repeating any actions.", reason=reason,
+                       execution=execution if last_tool >= 0 else "unknown")
             else:
                 self._confirm_delivery(thread_id)
                 finish("completed", reason=reason, execution=execution)
@@ -472,9 +483,7 @@ class AntigravityRPC:
         # only its known diagnostic prefixes, after streaming chunks coalesce.
         with self.lock:
             items = self.turns.get(thread_id, {}).get("items", [])
-            item = items[-1] if items else {}
-            if item.get("type") != "agentMessage":
-                return None
+            item = next((item for item in reversed(items) if item.get("type") == "agentMessage"), {})
             text = item.get("text", "").strip()
         if text.startswith("Agent connection was lost and could not be re-established:"):
             return text

@@ -109,14 +109,14 @@ def command_prefix(database_path) -> str:
     return command
 
 
-def coordination_bootstrap(store, session_id, *, caller_context=True, command=None):
+def coordination_bootstrap(store, session_id, *, caller_context=True, command=None, skill_path=None):
     """The same actionable coordination contract for every provider and resume."""
     session = store.get_session(session_id)
     command = command or command_prefix(store.database_path)
     identity = ""
     if not caller_context and caller_session() != session_id:
         identity = " --session-id " + shlex.quote(session_id)
-    skill = cli_path().parent.parent / "skills/agent-coordination/SKILL.md"
+    skill = Path(skill_path) if skill_path is not None else cli_path().parent.parent / "skills/agent-coordination/SKILL.md"
     text = (
         f"This session is registered with agent-coord as {session_id}. "
         f"Use {command}; caller identity is inferred from AGENT_COORD_SESSION_ID or CODEX_THREAD_ID. "
