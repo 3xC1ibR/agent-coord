@@ -1,0 +1,65 @@
+{
+ "scored_at_utc": "2026-11-10T16:19:46Z",
+ "predictions_file": "held-out-predictions.json",
+ "predictions_sha256": "25dafad83b26fe3562d3964e27164db91606e2236f65f0af99af3bb0781567e9",
+ "commitment": "Hash recorded in analysis-plan.md amendment A5, commit bac2ead, before the held-out sagas were assigned to the independent coder.",
+ "coder": "independent_coder: Codex app agent (gpt-6-astra), thread 01a1c3ec-5d88-7170-ad3e-99457f746b1c; it delimited and coded both sagas from raw records and did not receive the predictions or derivation codes.",
+ "attempts": 22,
+ "non_terminal": 20,
+ "primary_codes": {
+  "S02": {
+   "narrower_scope": 15,
+   "incomplete_fix": 1,
+   "indeterminate": 2,
+   "verification_failure": 1,
+   "terminal_open": 1
+  },
+  "S07": {
+   "verification_failure": 1,
+   "terminal_resolved": 1
+  }
+ },
+ "i3": {
+  "S02": true,
+  "S07": true
+ },
+ "results": [
+  {
+   "id": "P1",
+   "pass": true,
+   "observed": "1 of 20 non-terminal attempts are wrong_diagnosis or incomplete_fix"
+  },
+  {
+   "id": "P2",
+   "pass": true,
+   "observed": "15 of 20 are narrower_scope, new_defect, delivery_failure or scope_decision (all narrower_scope)"
+  },
+  {
+   "id": "P3",
+   "pass": true,
+   "observed": "0 wrong_diagnosis"
+  },
+  {
+   "id": "P4",
+   "pass": false,
+   "observed": "no S02 attempt has delivery_failure as primary or flag"
+  },
+  {
+   "id": "P5",
+   "pass": true,
+   "observed": "dod_explicit = yes in 3 of 22 attempts"
+  },
+  {
+   "id": "P6",
+   "pass": false,
+   "observed": "weaker 4 + different 0 against matched 13 (not_applicable 2, unknown 1 excluded)"
+  },
+  {
+   "id": "P7",
+   "pass": true,
+   "observed": "2 of 20 verification_failure (S02-A18, S07-A1)"
+  }
+ ],
+ "passed": 5,
+ "of": 7
+}

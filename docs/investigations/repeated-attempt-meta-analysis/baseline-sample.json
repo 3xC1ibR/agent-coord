@@ -1,0 +1,800 @@
+{
+ "coded_at_utc": "2026-11-10T05:11:11Z",
+ "method": "Same-symptom rule: a later user-visible report of the same observable failure (root cause may differ) or a further attempt/reopen within 14 days after the acceptance claim, searched across thread titles/original requests, user messages, checkpoints, coordination messages, Beads issues and interactions.jsonl reopens, and commits. Acceptance timestamp = the attempt's completion report (finished/deployment checkpoint). Evidence types limited to: tests, live check, user confirmation, activation/install verified (includes plugin refresh verification), none.",
+ "records": [
+  {
+   "thread_id": "01a112b8-46a1-7520-9dee-ae6e19f61899",
+   "title": "Investigate empty Codex thread",
+   "created_at_utc": "2026-10-06T19:37:09Z",
+   "eligible": true,
+   "eligibility_reason": "Asks what caused a \"failed to read thread ... rollout is empty\" error shown in RF; user then asked for root-cause fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-06T20:03:44Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "max",
+   "recurrence": null,
+   "notes": "First turn was diagnosis only; fix requested at 19:49:03Z. Acceptance = checkpoint 185 (Bead agent-coord-zjr closed 20:03:12Z). Plugins refreshed and three fresh installed sessions recovered; main UI restart queued behind idle watcher. No empty-rollout/failed-to-read-thread report found in 14 days."
+  },
+  {
+   "thread_id": "01a1173b-4bae-7f92-a20b-b443874f535d",
+   "title": "Generate a title that will help the user recognize this T3 Code thread weeks later. Return JSON with",
+   "created_at_utc": "2026-10-07T16:38:49Z",
+   "eligible": false,
+   "eligibility_reason": "Title-generation prompt.",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "codex",
+   "model": null,
+   "effort": null,
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a117a9-b3e6-7c20-b981-12ee52172c06",
+   "title": "Fix session stop turn mismatch",
+   "created_at_utc": "2026-10-07T18:39:20Z",
+   "eligible": true,
+   "eligibility_reason": "Reports an error when stopping a running session (expected active turn id mismatch).",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-07T19:08:02Z",
+   "acceptance_evidence": [
+    "tests",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Implemented 18:47:09Z; finished checkpoint 420 after desktop rollout verified. No turn-mismatch/stop-session recurrence in 14 days."
+  },
+  {
+   "thread_id": "01a11827-be93-7f30-9239-ecd6a20c6a9d",
+   "title": "Fix excessive history updates",
+   "created_at_utc": "2026-10-07T20:57:00Z",
+   "eligible": true,
+   "eligibility_reason": "Asks cause and fix for history.replaceState() rate-limit error.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-07T21:02:54Z",
+   "acceptance_evidence": [
+    "tests",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Plugins refreshed and verified; desktop installation delegated to concurrent session 01a117e4. No replaceState recurrence in 14 days."
+  },
+  {
+   "thread_id": "01a11c38-17f3-7230-9674-e11862c0c128",
+   "title": "Mobile chat improvements",
+   "created_at_utc": "2026-10-08T15:53:20Z",
+   "eligible": true,
+   "eligibility_reason": "Mobile chat input focus zoom hides content; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-08T17:04:45Z",
+   "acceptance_evidence": [
+    "tests",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "medium",
+   "recurrence": null,
+   "notes": "First install attempt failed (17:02:34Z), retried and verified served 16px CSS. Later turns in thread (19:57Z) were a separate mobile layout feature. No input-zoom recurrence in RF within 14 days."
+  },
+  {
+   "thread_id": "01a11cc3-3976-7003-80ba-4fa3410f1925",
+   "title": "Fix app restart loop",
+   "created_at_utc": "2026-10-08T18:25:27Z",
+   "eligible": true,
+   "eligibility_reason": "App in a restart crash loop; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-08T18:27:19Z",
+   "acceptance_evidence": [
+    "live check"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Operational fix: removed repeating launchd deployment job and restart helper; 30-second stability observation. No restart-loop report in 14 days."
+  },
+  {
+   "thread_id": "01a11d1b-e679-7be3-8f7d-c207f1ab361c",
+   "title": "Slow session reopening",
+   "created_at_utc": "2026-10-08T20:02:10Z",
+   "eligible": true,
+   "eligibility_reason": "Reopening a session after returning to overview is slow; asks to investigate (fix requested 20:14Z).",
+   "outcome": "repeated",
+   "acceptance_timestamp_utc": "2026-10-08T20:34:51Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "xhigh",
+   "recurrence": {
+    "id": "user_message 01a12371-4d1a-7530-a99f-67aa1b4fe098 (thread 01a1236f-a36c-7500-a3d9-7f00019862c7)",
+    "timestamp_utc": "2026-10-10T01:32:58Z",
+    "quote": "why is the app bugging out? oppening a sessions take forever"
+   },
+   "notes": "Broad symptom match (session opening slow) 1.2 days later; diagnosed cause differed (SQLite database-is-locked contention, checkpoint 1660), not the reopen cache. A renewed \"very slow thread opening\" investigation in this thread on 2026-10-28 (checkpoint 10101) is outside 14 days."
+  },
+  {
+   "thread_id": "01a11d47-4a06-70a3-92de-527758719903",
+   "title": "Ribbon Field Claude credit errors",
+   "created_at_utc": "2026-10-08T20:49:33Z",
+   "eligible": true,
+   "eligibility_reason": "Asks why RF sessions give a low-credit error; durable fix requested 21:04Z.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-08T21:11:02Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": "Completion report said app update queued; installer failed its process check 21:26:58Z; installed state confirmed 2026-10-09T21:50:11Z (checkpoint 1555, Bead agent-coord-t5f closed). No credit-error recurrence in 14 days."
+  },
+  {
+   "thread_id": "01a11d8b-936e-7170-bc88-5a6e96901ddc",
+   "title": "Notify when snoozed threads return",
+   "created_at_utc": "2026-10-08T22:04:09Z",
+   "eligible": true,
+   "eligibility_reason": "iPhone notifications are generic and tapping does not open the thread; asks to fix.",
+   "outcome": "repeated",
+   "acceptance_timestamp_utc": "2026-10-08T22:21:05Z",
+   "acceptance_evidence": [
+    "tests",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": {
+    "id": "user_message 01a12c33-6049-7a80-9b02-5bbf97ddf615 (thread 01a12c33-4ef5-7b63-b915-116ae39844de)",
+    "timestamp_utc": "2026-10-11T18:22:06Z",
+    "quote": "on my iphone, with pwa, when i get notification, clicking them opens the app, but doesn’t open the corresponding thread."
+   },
+   "notes": "Mac app deployed and verified; physical-iPhone behaviour not verified at acceptance. Thread title reflects a later snooze-notification request in the same thread."
+  },
+  {
+   "thread_id": "01a11da7-0760-75d3-a2a2-1c6dd2f55275",
+   "title": "Agent dispatch workflow experiment",
+   "created_at_utc": "2026-10-08T22:34:08Z",
+   "eligible": false,
+   "eligibility_reason": "Dispatcher workflow experiment, not a defect report.",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a12166-1d30-7c72-816d-24df18921738",
+   "title": "Group orchestrated app agents",
+   "created_at_utc": "2026-10-09T16:01:42Z",
+   "eligible": false,
+   "eligibility_reason": "Feature/design request (group orchestrated app agents under parent in UI; \"Let's figure out how to do this\").",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a1236f-a36c-7500-a3d9-7f00019862c7",
+   "title": "App connection and loading",
+   "created_at_utc": "2026-10-10T01:33:03Z",
+   "eligible": true,
+   "eligibility_reason": "App bugging out: opening sessions slow, stuck on Reconnecting.",
+   "outcome": "no_acceptance",
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": [
+    "none"
+   ],
+   "running_at_acceptance": "unknown",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": "Investigation only: diagnosed database-lock contention; fix owned by other agents and deployment relayed to release specialist 01a11dfa. Thread ends in orchestrating checkpoints without a completion claim. Parallel Reconnecting investigation 01a12379 started 01:59Z."
+  },
+  {
+   "thread_id": "01a12415-16ee-7932-b244-f3429e7d4c57",
+   "title": "Simplify mobile dispatcher",
+   "created_at_utc": "2026-10-10T04:32:04Z",
+   "eligible": false,
+   "eligibility_reason": "UI simplification/design request (\"way too cluttered on mobile\"), relayed by dispatcher; not an error or broken behaviour.",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a124af-7679-7b63-b5ef-c6ca7d421907",
+   "title": "Stale blocked conversation status",
+   "created_at_utc": "2026-10-10T07:20:41Z",
+   "eligible": true,
+   "eligibility_reason": "Conversation shows Blocked while working; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-11T16:16:54Z",
+   "acceptance_evidence": [
+    "tests",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": "Work paused 2026-10-10 and resumed by user \"continue\" 2026-10-11. Plugins refreshed; desktop rebuild sent to release specialist (installed 16:43:17Z). Blocked-classification question 01a13165 (2026-10-12) concerned a different behaviour (classifier labelled a finished reply blocked, by policy)."
+  },
+  {
+   "thread_id": "01a12c33-4ef5-7b63-b915-116ae39844de",
+   "title": "iPhone notification thread navigation",
+   "created_at_utc": "2026-10-11T18:22:03Z",
+   "eligible": true,
+   "eligibility_reason": "iPhone PWA notification taps do not open the thread; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-11T18:36:15Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": "Itself the recurrence of 01a11d8b. Physical-device tap untested. A 2026-10-15 coordination message (id 5210) flagged a possible iframe/notification-navigation conflict in other work; not a user report of the symptom."
+  },
+  {
+   "thread_id": "01a12c74-22fb-7fa3-bc55-f135b8f0d1b8",
+   "title": "Claude empty messaging bug",
+   "created_at_utc": "2026-10-11T19:32:51Z",
+   "eligible": true,
+   "eligibility_reason": "Agent Coord messaging bug: Claude sends an empty message.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-11T19:55:33Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": "Fixed send/reply dash-stdin handling plus a separate Claude resume completion bug; installed CLI smoke tests passed; native app not rebuilt. Sibling defect seen 2026-10-13T14:12:06Z (checkpoint 2623: \"delegate does not expand \\\"-\\\" stdin\") in a different command; not counted as same symptom."
+  },
+  {
+   "thread_id": "01a1367a-a329-7863-82d1-4a3c46858a09",
+   "title": "Include subagents in groups",
+   "created_at_utc": "2026-10-13T18:16:09Z",
+   "eligible": true,
+   "eligibility_reason": "Saved view omits sub-agents of a grouped thread; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-13T18:26:06Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": "Live group data repaired via running app; code change committed 80a6275 at 18:27:34Z; app restart left to idle-gated installer. No recurrence in 14 days."
+  },
+  {
+   "thread_id": "01a13695-2bd0-7190-bd8b-9000c1fceffc",
+   "title": "Investigate Ribbon Field freeze",
+   "created_at_utc": "2026-10-13T18:45:20Z",
+   "eligible": true,
+   "eligibility_reason": "Ribbon Field app is frozen; asks to investigate.",
+   "outcome": "repeated",
+   "acceptance_timestamp_utc": "2026-10-13T19:12:19Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": null,
+   "effort": null,
+   "recurrence": {
+    "id": "thread 01a13b94-9dd4-7b12-acf6-7956501ddaf7 original_request",
+    "timestamp_utc": "2026-10-14T18:02:41Z",
+    "quote": "is the app stuck?"
+   },
+   "notes": "Broad symptom match (app frozen vs app stuck) 23 hours later; diagnosed cause differed (Codex event-reader thread crashed with sqlite3 database is locked, checkpoint 3091), not the renderer loop fixed here. Renderer patch was hot-applied at acceptance."
+  },
+  {
+   "thread_id": "01a13b94-9dd4-7b12-acf6-7956501ddaf7",
+   "title": "Ribbon Field connection failure",
+   "created_at_utc": "2026-10-14T18:02:41Z",
+   "eligible": true,
+   "eligibility_reason": "Asks whether the app is stuck (investigate apparent hang).",
+   "outcome": "no_acceptance",
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": [
+    "none"
+   ],
+   "running_at_acceptance": "unknown",
+   "client": "codex",
+   "model": null,
+   "effort": null,
+   "recurrence": null,
+   "notes": "Investigation only: one checkpoint diagnosing event-reader crash and recommending a restart; no fix claim. History coverage unavailable; model/effort null in threads.json."
+  },
+  {
+   "thread_id": "01a13b9f-3acd-71a3-a693-5eaad227de36",
+   "title": "Remember project Overview selection",
+   "created_at_utc": "2026-10-14T18:14:13Z",
+   "eligible": true,
+   "eligibility_reason": "Returning to a project tab opens last conversation instead of selected Overview; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-14T18:24:58Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": "Plugin caches refreshed; desktop app not rebuilt. Related but different project-restoration defect reported 2026-10-15T20:02:14Z in 01a14128 (Overview flashes before restoring the conversation, plus lag); not counted as same symptom."
+  },
+  {
+   "thread_id": "01a13fee-1bec-7e33-98ef-028490b9ab02",
+   "title": "Muse protocol compatibility error",
+   "created_at_utc": "2026-10-15T14:18:51Z",
+   "eligible": true,
+   "eligibility_reason": "Asks cause of \"Unsupported Muse protocol\" error; fix requested 15:18Z.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-15T15:26:33Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": null,
+   "notes": "Commit 8fdf9af (15:50:50Z). Native app not rebuilt. Oct 28-29 Muse mentions concern agent failures/stalls, not the protocol error."
+  },
+  {
+   "thread_id": "01a14048-1a1c-7d62-b6ca-e37688213557",
+   "title": "Generate a title that will help the user recognize this T3 Code thread weeks later. Return JSON with",
+   "created_at_utc": "2026-10-15T15:57:12Z",
+   "eligible": false,
+   "eligibility_reason": "Title-generation prompt.",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "codex",
+   "model": null,
+   "effort": null,
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a140ea-92e0-7f82-a2c0-8bb8217622e2",
+   "title": "Fable model selection error",
+   "created_at_utc": "2026-10-15T18:54:38Z",
+   "eligible": true,
+   "eligibility_reason": "Error \"Choose an available model\" when using Fable.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-15T19:07:21Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Plugin caches refreshed and installed-code probes passed; running desktop app unchanged (workaround: reload and reselect). Patch uncommitted at acceptance."
+  },
+  {
+   "thread_id": "01a14104-ca65-7e33-81e9-61be9735c408",
+   "title": "Settings keyboard revalidation",
+   "created_at_utc": "2026-10-15T19:23:15Z",
+   "eligible": false,
+   "eligibility_reason": "Validation-only assignment (independent revalidation, no product edits).",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a14131-9ade-7d62-9e03-5e8897e7401c",
+   "title": "Thread closure blocked incorrectly",
+   "created_at_utc": "2026-10-15T20:12:12Z",
+   "eligible": true,
+   "eligibility_reason": "Cannot close threads (\"Cannot safely stop this session from the UI\").",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-15T20:25:12Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Commit 2e82f6a at 20:28:35Z. Running app unchanged. No recurrence in 14 days."
+  },
+  {
+   "thread_id": "01a14142-6002-7581-a944-ae8912dcaf2d",
+   "title": "Project switch warning cause",
+   "created_at_utc": "2026-10-15T20:30:31Z",
+   "eligible": true,
+   "eligibility_reason": "Asks cause of project-switch warning (\"Wait for the current message or attachment to finish\").",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-15T21:04:41Z",
+   "acceptance_evidence": [
+    "tests",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "unknown",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Commit bc4e54b. Fork 01a14154 (created 20:50:47Z, before acceptance) worked in parallel on the refresh latency behind the warning and finished 21:26:03Z; treated as a concurrent attempt, not a post-acceptance recurrence. No later report in 14 days."
+  },
+  {
+   "thread_id": "3e8265bf-0ec9-4408-b40d-2120580aa98d",
+   "title": "Mobile overview header cleanup",
+   "created_at_utc": "2026-10-15T22:10:49Z",
+   "eligible": false,
+   "eligibility_reason": "Design discussion (\"how could we fix it?\" for a crowded mobile header; dropdown idea).",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "claude",
+   "model": "opus",
+   "effort": null,
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a14270-24ae-7dc2-a93e-cf090f3aaa68",
+   "title": "Preserve focus after permission commands",
+   "created_at_utc": "2026-10-16T02:00:08Z",
+   "eligible": true,
+   "eligibility_reason": "/permissions yolo removes focus from the input bar; asks to fix.",
+   "outcome": "repeated",
+   "acceptance_timestamp_utc": "2026-10-16T02:10:50Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": {
+    "id": "user_message 01a15aa6-0a67-7a20-afb5-f0d76450bb22 (thread 01a15aa5-84fe-7482-b118-698abc38abcc)",
+    "timestamp_utc": "2026-10-20T18:49:53Z",
+    "quote": "There's this really annoying bug when I open a new conversation and then press slash permissions and then slash yolo or slash default, I hit enter, and it removes the focus away from the input bar. Can you fix that?"
+   },
+   "notes": "Commit 2fdd8ce; native app not rebuilt at acceptance. Recurrence fix found the new-conversation draft path bypassed the earlier restoration (checkpoint 5042)."
+  },
+  {
+   "thread_id": "01a159c2-9156-7612-a5aa-73c94dde7a6d",
+   "title": "Automatic Task Thread Closure",
+   "created_at_utc": "2026-10-20T14:41:26Z",
+   "eligible": false,
+   "eligibility_reason": "Idea discussion (automatic thread closure); \"First, let's discuss\".",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "max",
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a15a15-5151-7231-b088-5e9df52e2734",
+   "title": "Conversation tab split behavior",
+   "created_at_utc": "2026-10-20T16:11:49Z",
+   "eligible": true,
+   "eligibility_reason": "Dragging a conversation tab to split creates a new tab section; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-20T16:18:20Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "unknown",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Commit 8b5a82d. Report does not state whether the running app was rebuilt."
+  },
+  {
+   "thread_id": "01a15a25-08bf-7ea0-ab79-7992359a141b",
+   "title": "Close thread when done",
+   "created_at_utc": "2026-10-20T16:28:59Z",
+   "eligible": false,
+   "eligibility_reason": "Feature request (close-thread-when-done button).",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a15a38-666f-7302-8f4f-296d0acfaae2",
+   "title": "In the conversation tabs, when a agent responds, we show a green dot to show tha",
+   "created_at_utc": "2026-10-20T16:50:08Z",
+   "eligible": true,
+   "eligibility_reason": "Unread green dot persists after viewing a live reply; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-20T16:58:52Z",
+   "acceptance_evidence": [
+    "tests",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Commit 7826fb3; desktop app not rebuilt."
+  },
+  {
+   "thread_id": "01a15aa5-84fe-7482-b118-698abc38abcc",
+   "title": "Preserve permission command focus",
+   "created_at_utc": "2026-10-20T18:49:19Z",
+   "eligible": true,
+   "eligibility_reason": "Permission slash commands in a new conversation remove input focus; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-20T19:00:46Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Itself the recurrence of 01a14270. Commit f7ef9b6; desktop awaits rebuild. No further focus-loss report in 14 days."
+  },
+  {
+   "thread_id": "e8e75ad9-9c03-474e-97ae-546276569fc6",
+   "title": "Focus overview tall cards",
+   "created_at_utc": "2026-10-20T19:16:16Z",
+   "eligible": true,
+   "eligibility_reason": "Focus overview cards render super long; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-20T19:27:36Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check"
+   ],
+   "running_at_acceptance": "no",
+   "client": "claude",
+   "model": "opus",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Commit 9b35f5b; verified in Playwright WebKit/Chromium; installed app still bundles old assets. Later turns in thread were unrelated UI edits."
+  },
+  {
+   "thread_id": "01a15f07-793a-7e00-911a-47d5d3a2e86a",
+   "title": "Recover stalled agent turns",
+   "created_at_utc": "2026-10-21T15:14:47Z",
+   "eligible": true,
+   "eligibility_reason": "Orchestrated agent stalled while marked active; asks to fix so it does not recur, with recovery and alerting.",
+   "outcome": "repeated",
+   "acceptance_timestamp_utc": "2026-10-21T15:36:02Z",
+   "acceptance_evidence": [
+    "tests",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "no",
+   "client": "codex",
+   "model": "gpt-6-astra",
+   "effort": "xhigh",
+   "recurrence": {
+    "id": "user_message 01a1853c-ede9-7d73-a1f0-142e0488a570 (thread 01a1853c-d7b4-71f1-b881-04eab04ebf0b)",
+    "timestamp_utc": "2026-10-29T01:18:45Z",
+    "quote": "The agent holding the design that later gave 1.629x stalled at 17:10, and its work sat unowned for 5.6 hours."
+   },
+   "notes": "Commits 7212b98, 9905515, 5c636f9; plugins verified; user took ownership of native install at 15:39Z (installation not confirmed). Earlier agent-authored record 2026-10-27T22:21:16Z (thread 01a17f74) also describes an agent \"stuck in an interrupted turn ... could not be resumed\". Recurrence investigation found interrupted turns received no failure alert (checkpoint 10840)."
+  },
+  {
+   "thread_id": "a553b064-ee3f-47d3-8eaa-ab619118dd86",
+   "title": "Fix checkpoint thread links",
+   "created_at_utc": "2026-10-21T15:37:11Z",
+   "eligible": false,
+   "eligibility_reason": "Request authored by dispatcher agent 01a15f15 (under user standing instruction to fix RF errors) about an agent-facing update_checkpoint MCP validation error; not a human report of a user-visible defect. Kimi ended mid-investigation with no checkpoint; reassigned to 76874b85.",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "kimi",
+   "model": "kimi-code/k3",
+   "effort": "high",
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "76874b85-90ef-4711-9a3f-cba8b10163be",
+   "title": "Fix checkpoint app-thread links",
+   "created_at_utc": "2026-10-21T15:40:22Z",
+   "eligible": false,
+   "eligibility_reason": "Dispatcher-authored reassignment of the same agent-facing checkpoint-link validation error; not a human report of a user-visible defect. (Finished 2026-10-21T15:59:39Z, commit 0c27de5.)",
+   "outcome": null,
+   "acceptance_timestamp_utc": null,
+   "acceptance_evidence": null,
+   "running_at_acceptance": null,
+   "client": "antigravity",
+   "model": "gemini-4-argon-high",
+   "effort": null,
+   "recurrence": null,
+   "notes": null
+  },
+  {
+   "thread_id": "01a178c0-76d3-7291-bc20-242ae0f769f7",
+   "title": "Fix new conversation errors",
+   "created_at_utc": "2026-10-26T15:07:21Z",
+   "eligible": true,
+   "eligibility_reason": "Opening a new conversation repeatedly shows \"Work thread not found\"; asks to fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-26T15:49:53Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Commit d93d80a. A user report of the same error text on 2026-10-21T15:56:44Z (dispatcher 01a15f15) predates this attempt. No recurrence in 14 days."
+  },
+  {
+   "thread_id": "01a179c8-3f62-7d93-8cd3-d896a914c337",
+   "title": "Fix tool IPC decoding",
+   "created_at_utc": "2026-10-26T19:55:29Z",
+   "eligible": true,
+   "eligibility_reason": "Tool IPC decode error (result_buffered_for_ns) in an RF-hosted Codex session; asks to investigate and fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-26T19:59:37Z",
+   "acceptance_evidence": [
+    "live check"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "Environment repair (npm Codex rolled back 0.164.0 -> 0.163.0 to match running RF server); no repository change. Same root cause recurred with a different symptom on 2026-10-28T00:45:35Z (message 9983: browser access failed because RF Codex 0.163.0 ran from an executable replaced by npm 0.164.0); not counted as same symptom."
+  },
+  {
+   "thread_id": "01a179ca-6ae1-79b1-9c21-e7959e79b554",
+   "title": "Intermittent workspace refresh error",
+   "created_at_utc": "2026-10-26T19:57:51Z",
+   "eligible": true,
+   "eligibility_reason": "Intermittent error in the web app during workspace refresh; asks to investigate and fix.",
+   "outcome": "accepted_once",
+   "acceptance_timestamp_utc": "2026-10-26T20:11:32Z",
+   "acceptance_evidence": [
+    "tests",
+    "live check",
+    "activation/install verified"
+   ],
+   "running_at_acceptance": "yes",
+   "client": "codex",
+   "model": "gpt-6.1-sol",
+   "effort": "high",
+   "recurrence": null,
+   "notes": "First turn blocked by IPC decode failure (01a179c8); retried. Commit 1f7979c; served app.js verified. Cause not captured (bounded retry added for safe reads)."
+  }
+ ],
+ "summary": {
+  "sampled": 40,
+  "eligible": 29,
+  "ineligible": 11,
+  "outcomes": {
+   "accepted_once": 22,
+   "repeated": 5,
+   "no_acceptance": 2,
+   "unclear": 0
+  },
+  "with_acceptance_claim": 27,
+  "held_rate_among_accepted": "22/27",
+  "repeated_broad_symptom_match_only": [
+   "01a11d1b-e679-7be3-8f7d-c207f1ab361c",
+   "01a13695-2bd0-7190-bd8b-9000c1fceffc"
+  ],
+  "held_rate_if_broad_matches_excluded": "24/27",
+  "running_at_acceptance_among_accepted": {
+   "no": 14,
+   "yes": 11,
+   "unknown": 2
+  },
+  "repeated_by_running_at_acceptance": {
+   "yes": 3,
+   "no": 2
+  },
+  "client_among_eligible": {
+   "codex": 28,
+   "claude": 1
+  },
+  "model_among_eligible": {
+   "gpt-6-astra": 11,
+   "gpt-6.1-sol": 15,
+   "None": 2,
+   "opus": 1
+  }
+ }
+}

@@ -1,0 +1,53 @@
+{
+ "applies_to": "held-out sagas S02 and S07, coded by an independent agent that does not receive these predictions",
+ "derivation_rates": {
+  "delivery_any": 9,
+  "dod_yes": "12/94",
+  "narrower_scope_new_defect_delivery_scope": 63,
+  "non_terminal": 79,
+  "verification_failure": 2,
+  "workload_weaker_or_different_vs_matched_non_terminal": "40 vs 29",
+  "wrong_diagnosis": 0,
+  "wrong_diagnosis_or_incomplete_fix": 12
+ },
+ "derived_from": "first-coder codes for the 94 derivation attempts in S01, S03-S06, S08, S09, S11, S13-S16 (before second-coder agreement)",
+ "predictions": [
+  {
+   "hypothesis": "H1 refuted",
+   "id": "P1",
+   "rule": "Among held-out non-terminal attempts, primary wrong_diagnosis + incomplete_fix is less than half."
+  },
+  {
+   "hypothesis": "H2/H3/H5 composite",
+   "id": "P2",
+   "rule": "Among held-out non-terminal attempts, primary narrower_scope + new_defect + delivery_failure + scope_decision is at least half."
+  },
+  {
+   "hypothesis": "H1",
+   "id": "P3",
+   "rule": "At most one held-out attempt has primary wrong_diagnosis."
+  },
+  {
+   "hypothesis": "H5",
+   "id": "P4",
+   "rule": "S02 has at least one attempt with delivery_failure as primary or flag."
+  },
+  {
+   "hypothesis": "H7 descriptive",
+   "id": "P5",
+   "rule": "dod_explicit = yes in at most 25% of held-out attempts."
+  },
+  {
+   "hypothesis": "H4 descriptive",
+   "id": "P6",
+   "rule": "Among held-out non-terminal attempts with workload_match in {matched, weaker, different}, weaker + different >= matched."
+  },
+  {
+   "hypothesis": "H4 primary",
+   "id": "P7",
+   "rule": "verification_failure is primary in at most 25% of held-out non-terminal attempts."
+  }
+ ],
+ "scoring": "Each rule scored pass/fail on the independent coder's codes. A non-terminal attempt is any attempt whose primary code is not terminal_*. If a held-out saga fails I3 under the independent coder, its attempts are still scored and the failure is reported.",
+ "written_at_utc": "2026-11-10T05:23:52.389323+00:00"
+}
