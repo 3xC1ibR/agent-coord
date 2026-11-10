@@ -1988,6 +1988,7 @@ function renderTimeline() {
   }
   const previousTools = conversation.toolNodes || new Map(), toolNodes = new Map();
   const previousMessages = conversation.messageNodes || new Map(), messageNodes = new Map();
+  let previousMessageMinute = null;
   const client = state.detail?.work_thread?.client;
   const disclosureListeners = conversation.disclosureListeners ||= new WeakSet();
   for (const entry of entries) {
@@ -2009,6 +2010,10 @@ function renderTimeline() {
       }
       if (messages.length && AgentMessages.isWakePrompt(item, turn, messages)) continue;
       if (item.type === "userMessage" || item.type === "agentMessage") {
+        const time = messageTimeLabel(item, turn);
+        const minute = time.dateTime?.slice(0, 16) ?? null;
+        time.hidden = minute !== null && minute === previousMessageMinute;
+        previousMessageMinute = minute;
         // A stream changes one message at a time. Rebuilding every message,
         // with its Markdown, for each chunk kept the main thread busy and
         // delayed typing in long conversations; reuse unchanged messages.
@@ -2019,8 +2024,7 @@ function renderTimeline() {
           if (reused.node.dataset.openuiKey)
             reused.node.dataset.openuiStreaming = String(!["completed", "failed", "interrupted"].includes(turn.status));
           const previousTime = reused.node.querySelector?.(":scope > .message-time");
-          const nextTime = messageTimeLabel(item, turn);
-          if (previousTime && previousTime.outerHTML !== nextTime.outerHTML) previousTime.replaceWith(nextTime);
+          if (previousTime && previousTime.outerHTML !== time.outerHTML) previousTime.replaceWith(time);
           messageNodes.set(key, reused);
           fragment.append(reused.node);
           continue;
@@ -2067,7 +2071,7 @@ function renderTimeline() {
           if (images.length) ChatImageAttachments.appendPreviews(document, body, images);
         }
         message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "muse" ? "Muse Code" : state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
-        message.append(body, messageTimeLabel(item, turn));
+        message.append(body, time);
         fragment.append(message);
       } else {
         const text = itemText(item);
