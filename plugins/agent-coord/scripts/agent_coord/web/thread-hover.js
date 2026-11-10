@@ -34,16 +34,21 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
     return {key, label: {running: "Working", waiting: "Needs you", failed: "Failed", idle: "Idle"}[key], phase: thread.checkpoint?.phase || ""};
   }
   function activityOf(thread, status) {
-    const tool = thread.last_tool;
-    if (status.key === "running") {
-      if (tool?.label || tool?.name) return {text: (VERBS[tool.kind] || "Using") + " " + (tool.label || tool.name), when: tool.at ? relativeTime(tool.at) : "", live: true};
-      return {text: "Working", when: thread.updated_at ? "since " + relativeTime(thread.updated_at) : "", live: true};
-    }
-    if (status.key === "waiting") return {text: "Paused until you answer", when: thread.updated_at ? relativeTime(thread.updated_at) : "", live: false};
-    if (status.key === "failed") return {text: "Stopped after a failure", when: thread.updated_at ? relativeTime(thread.updated_at) : "", live: false};
-    const last = tool?.at && thread.updated_at ? Math.max(tool.at, thread.updated_at) : tool?.at || thread.updated_at;
-    return {text: "Idle" + (status.phase ? " · " + status.phase : ""), when: last ? "since " + relativeTime(last) : "", live: false};
+    // The state line already names the status; activity adds only the live tool and the time.
+    const tool = thread.last_tool, last = Math.max(tool?.at || 0, thread.updated_at || 0);
+    const when = last ? relativeTime(last) : "";
+    if (status.key === "running" && (tool?.label || tool?.name))
+      return {text: (VERBS[tool.kind] || "Using") + " " + (tool.label || tool.name), when: tool.at ? relativeTime(tool.at) : when, live: true};
+    return {text: "", when, live: status.key === "running"};
   }
+  // Message excerpts are a glance, not a reading surface: Markdown syntax is dropped.
+  function plainText(text) {
+    return String(text || "")
+      .replace(/```[^\n]*\n?/g, "").replace(/!?\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1")
+      .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/gm, "").replace(/(\*\*|__|\*|_|`)(?=\S)([^]*?\S)\1/g, "$2")
+      .replace(/\s+/g, " ").trim();
+  }
+  function shortPath(path) { return String(path).replace(/^\/(Users|home)\/[^/]+/, "~"); }
   function hide() {
     cancel(openTimer); cancel(closeTimer); request++;
     anchor?.removeAttribute("aria-describedby");
@@ -97,7 +102,7 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
     const dot = element("span", "", "dot " + status.key); dot.setAttribute("aria-hidden", "true");
     const copy = element("span", "", "hover-agent-copy");
     copy.append(element("span", child.title, "hover-agent-title"),
-      element("small", activity.live ? activity.text : (status.label !== status.phase && status.label) || status.phase || activity.text, "hover-agent-status"));
+      element("small", activity.text || status.label || status.phase, "hover-agent-status"));
     button.append(dot, copy);
     button.setAttribute("aria-label", "Peek at " + child.title);
     button.onclick = event => { event?.stopPropagation?.(); if (current) trail.push(current.thread); pinned = true; show(anchor, child.thread_id, {thread: child}); };
@@ -115,6 +120,7 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
     const dot = element("span", "", "dot " + status.key); dot.setAttribute("aria-hidden", "true");
     state.append(dot, element("span", status.label, "hover-state-label"));
     if (status.phase && status.phase !== status.label) state.append(element("span", "· " + status.phase, "hover-state-phase"));
+    if (activity.when) state.append(element("span", "· " + activity.when, "hover-state-time"));
     if (trail.length) {
       const back = element("button", "← " + trail[trail.length - 1].title, "hover-back"); back.type = "button";
       back.onclick = event => { event?.stopPropagation?.(); const parent = trail.pop(); show(anchor, parent.thread_id, {thread: parent}); };
@@ -126,53 +132,56 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
       close.onclick = event => { event?.stopPropagation?.(); hide(); };
       panel.append(close);
     }
-    panel.append(element("h4", "Now"));
-    const now = element("p", activity.text + (activity.when ? " · " + activity.when : ""), "hover-now" + (activity.live ? "" : " idle"));
-    panel.append(now);
-    const facts = [thread.project_cwd && "Project: " + thread.project_cwd,
-      thread.project_name && "Group: " + thread.project_name,
-      thread.cwd && "Workspace: " + thread.cwd,
-      thread.updated_at && "Updated " + relativeTime(thread.updated_at)].filter(Boolean);
-    if (facts.length) panel.append(element("p", facts.join("\n"), "hover-facts"));
+    if (activity.text) panel.append(element("p", activity.text, "hover-activity"));
     if (thread.checkpoint?.summary) {
-      panel.append(element("h4", "Where things stand"), markdownBody(thread.checkpoint.summary, "hover-summary"));
+      panel.append(markdownBody(thread.checkpoint.summary, "hover-summary"));
       if (thread.checkpoint_stale) panel.append(element("small", "New activity since this checkpoint", "hover-muted"));
     }
     if (!thread.checkpoint_stale && thread.checkpoint?.next_action) {
-      const actor = {user: "Your next step", agent: "Agent’s next step", external: "Waiting on"}[thread.checkpoint.next_actor] || "Next step";
-      panel.append(element("h4", actor), markdownBody(thread.checkpoint.next_action, "hover-summary"));
+      const actor = thread.checkpoint.next_actor;
+      const next = element("div", "", "hover-next");
+      next.dataset.actor = actor || "";
+      next.append(element("small", {user: "Your next step", agent: "Agent’s next step", external: "Waiting on"}[actor] || "Next step", "hover-next-actor"),
+        markdownBody(thread.checkpoint.next_action, "hover-next-text"));
+      panel.append(next);
     }
+    // An earlier checkpoint from the same phase restates the current summary; show only a change of direction.
     const earlier = data?.previous_checkpoint;
-    if (earlier?.summary) {
-      const label = (grouping ? grouping.phaseLabel({checkpoint: {phase: earlier.phase}}) : earlier.phase) + (earlier.created_at ? " · " + relativeTime(earlier.created_at) : "");
-      panel.append(element("h4", "Earlier"), element("p", label + " — " + earlier.summary, "hover-earlier"));
+    const phaseOf = phase => grouping ? grouping.phaseLabel({checkpoint: {phase}}) : phase;
+    if (earlier?.summary && phaseOf(earlier.phase) !== phaseOf(thread.checkpoint?.phase)) {
+      const label = "Earlier, " + phaseOf(earlier.phase) + (earlier.created_at ? " " + relativeTime(earlier.created_at) : "");
+      panel.append(element("p", label + ": " + plainText(earlier.summary), "hover-earlier"));
     }
     const children = data?.children || [];
     if (children.length) {
-      panel.append(element("h4", "Agents · " + children.length));
       const list = element("ul", "", "hover-agents");
+      list.setAttribute("aria-label", children.length === 1 ? "1 agent" : children.length + " agents");
       for (const child of children) { const item = element("li", ""); item.append(agentRow(child)); list.append(item); }
       panel.append(list);
     }
     const section = element("section", "", "hover-message");
-    section.append(element("h4", "Most recent message"));
     const message = data?.latest_message;
     if (message) {
-      let speaker = message.role === "user" ? "You" : PROVIDERS[thread.client] || "Agent";
-      if (message.timestamp) {
-        const date = new Date(message.timestamp);
-        if (!Number.isNaN(date.getTime())) speaker += " · " + date.toLocaleString();
-      }
-      section.append(element("small", speaker, "hover-muted"),
-        markdownBody(message.text + (message.truncated ? "…" : ""), "hover-message-text"));
-      if (message.truncated) section.append(element("small", "Open the thread to read more.", "hover-muted"));
+      const speaker = message.role === "user" ? "You" : PROVIDERS[thread.client] || "Agent";
+      const body = element("p", "", "hover-message-text");
+      body.append(element("span", speaker + ": ", "hover-speaker"),
+        element("span", plainText(message.text) + (message.truncated ? "…" : ""), ""));
+      section.append(body);
     } else section.append(element("p", loading ? "Loading latest message…" : failed ? "Latest message unavailable. Open the thread to try again." : "No conversation message available yet.", "hover-muted"));
     panel.append(section);
-    if (select) {
+    const path = thread.cwd || thread.project_cwd;
+    const place = [thread.project_name, path && shortPath(path)].filter(Boolean).join(" · ");
+    if (place || select) {
       const foot = element("div", "", "hover-foot");
-      const open = element("button", "Open thread", "quiet"); open.type = "button";
-      open.onclick = event => { event?.stopPropagation?.(); const id = thread.thread_id; hide(); select(id); };
-      foot.append(open); panel.append(foot);
+      const where = element("small", place, "hover-path");
+      if (path) where.title = path;
+      foot.append(where);
+      if (select) {
+        const open = element("button", "Open thread", "quiet"); open.type = "button";
+        open.onclick = event => { event?.stopPropagation?.(); const id = thread.thread_id; hide(); select(id); };
+        foot.append(open);
+      }
+      panel.append(foot);
     }
     position();
   }
@@ -273,7 +282,9 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
 }
 
 if (typeof module !== "undefined" && module.exports) module.exports = {createThreadHover};
+// thread-groups.js declares a script-scoped const, which is not a globalThis property.
 else globalThis.threadHover = createThreadHover({overview: document.getElementById("welcome"), tabs: document.getElementById("conversation-tabs"), document, window,
+  grouping: typeof threadGrouping !== "undefined" ? threadGrouping : null,
   getThread: id => state.sessions.find(thread => thread.thread_id === id),
   loadPreview: id => api(threadPath(id) + "/preview"),
   relativeTime, select: id => action(() => select(id))});

@@ -55,7 +55,7 @@ test("inbox rows share the existing preview and its pinning and open action", as
   assert.match(s.panel.text, /Inbox conversation/);
   s.panel.handlers.pointerdown(); s.leave(row); await s.flush();
   assert.equal(s.panel.hidden, false);
-  find(s.panel, "hover-foot").children[0].onclick({stopPropagation() {}});
+  find(s.panel, "hover-foot").children.at(-1).onclick({stopPropagation() {}});
   assert.deepEqual(s.opened, ["inbox"]); assert.equal(s.panel.hidden, true);
 });
 
@@ -160,36 +160,33 @@ test("late responses cannot overwrite another card and raw HTML is escaped", asy
   assert.match(s.panel.text, /second/); assert.doesNotMatch(s.panel.text, /first/);
   assert.equal(s.panel.children[0].className, "hover-title");
   assert.equal(s.panel.children.some(el => el.className === "hover-status"), false);
-  assert.match(s.panel.html, /&lt;script&gt;literal message&lt;\/script&gt;/);
+  assert.match(find(s.panel, "hover-message-text").text, /<script>literal message<\/script>/); // textContent, never HTML
   assert.doesNotMatch(s.panel.html, /<script>/);
   assert.equal(s.panel.style.left, "170px"); assert.equal(s.panel.style.top, "388px");
 });
 
-test("checkpoint and message bodies render safe Markdown with truncation preserved", async () => {
+test("checkpoint bodies render safe Markdown; the message excerpt is plain text with truncation preserved", async () => {
   const s = setup(); s.enter(s.first); await s.flush();
   s.requests[0].resolve({
     thread: {title: "Preview", client: "claude", checkpoint: {
       summary: "## Progress\n\n**Ready** and *verified*.\n\n- First\n- Second",
       next_action: "Open [review](https://example.com) and run `check`.", next_actor: "user"
     }},
-    latest_message: {role: "assistant", text: "#### Details\n\n```js\nconst ready = true;\n```\n\n[unsafe](javascript:alert(1))", truncated: true}
+    latest_message: {role: "assistant", text: "#### Details\n\n**Bold** and `code`.\n\n```js\nconst ready = true;\n```\n\n[unsafe](javascript:alert(1))", truncated: true}
   });
   await Promise.resolve();
   const summary = s.panel.children.find(el => el.className === "hover-summary markdown");
   assert.match(summary.innerHTML, /<h2>Progress<\/h2>/);
   assert.match(summary.innerHTML, /<strong>Ready<\/strong> and <em>verified<\/em>/);
   assert.match(summary.innerHTML, /<ul><li><p>First<\/p><\/li><li><p>Second<\/p><\/li><\/ul>/);
-  const next = s.panel.children.filter(el => el.className === "hover-summary markdown")[1];
-  assert.match(next.innerHTML, /href="https:\/\/example.com"/);
-  assert.match(next.innerHTML, /<code>check<\/code>/);
-  const section = s.panel.children.find(el => el.className === "hover-message");
-  const body = section.children.find(el => el.className === "hover-message-text markdown");
-  assert.match(body.innerHTML, /<h4>Details<\/h4>/);
-  assert.match(body.innerHTML, /<pre><code>const ready = true;<\/code><\/pre>/);
-  assert.doesNotMatch(body.innerHTML, /javascript:/);
-  assert.match(body.innerHTML, /…/);
-  assert.match(section.text, /Claude/);
-  assert.match(section.text, /Open the thread to read more/);
+  const next = find(s.panel, "hover-next");
+  assert.equal(next.dataset.actor, "user");
+  assert.equal(find(next, "hover-next-actor").textContent, "Your next step");
+  assert.match(find(next, "hover-next-text").innerHTML, /href="https:\/\/example.com"/);
+  assert.match(find(next, "hover-next-text").innerHTML, /<code>check<\/code>/);
+  const body = find(s.panel, "hover-message-text");
+  assert.equal(body.text, "Claude: \nDetails Bold and code. const ready = true; unsafe…");
+  assert.doesNotMatch(s.panel.text, /Open the thread to read more|Most recent message|Where things stand/);
 });
 
 test("stale checkpoint requests are not presented as the current user next step", async () => {
@@ -254,9 +251,10 @@ test("the lens says what the agent is doing now, what came earlier, and lists it
     children: [{thread_id: "kid", title: "Explorer", client: "codex", status: "idle", response_state: "available", checkpoint: {summary: "Mapped the files.", phase: "finished"}, last_tool: null}]});
   await Promise.resolve();
   assert.equal(s.panel.children[0].className, "hover-title");
-  assert.match(s.panel.text, /Running python3 -m unittest · Just now/);
-  assert.match(s.panel.text, /Earlier/); assert.match(s.panel.text, /Planned the change/);
-  assert.match(s.panel.text, /Agents · 1/); assert.match(s.panel.text, /Explorer/);
+  assert.equal(find(s.panel, "hover-activity").textContent, "Running python3 -m unittest");
+  assert.equal(find(s.panel, "hover-state-time").textContent, "· Just now");
+  assert.equal(find(s.panel, "hover-earlier").textContent, "Earlier, planning Just now: Planned the change.");
+  assert.equal(find(s.panel, "hover-agents").attributes["aria-label"], "1 agent"); assert.match(s.panel.text, /Explorer/);
   assert.equal(s.isPinned(), false); assert.equal(s.panel.attributes.role, "tooltip");
   find(s.panel, "hover-agent").onclick({stopPropagation() {}});
   assert.equal(s.isPinned(), true); assert.equal(s.panel.attributes.role, "dialog");
@@ -289,6 +287,23 @@ test("clicking inside pins the lens, Peek opens it pinned, and a refresh re-rend
 test("Open thread hands off to the app and closes the lens", async () => {
   const s = setup(); s.enter(s.first); await s.flush(); s.requests[0].resolve(response("first")); await Promise.resolve();
   const foot = find(s.panel, "hover-foot"); assert.ok(foot);
-  foot.children[0].onclick({stopPropagation() {}});
+  assert.equal(foot.children[0].textContent, "/workspace");
+  foot.children.at(-1).onclick({stopPropagation() {}});
   assert.deepEqual(s.opened, ["first"]); assert.equal(s.panel.hidden, true);
+});
+
+test("the lens states status once and omits an earlier checkpoint from the same phase", async () => {
+  const s = setup(); s.enter(s.first); await s.flush();
+  s.requests[0].resolve({
+    thread: {title: "Idle thread", client: "codex", status: "idle", response_state: "available", updated_at: 1,
+      project_cwd: "/Users/someone/projects", cwd: "/Users/someone/projects", checkpoint: {phase: "discussion", summary: "Current direction."}},
+    previous_checkpoint: {phase: "discussion", summary: "Same direction, earlier draft.", created_at: 0},
+    latest_message: null});
+  await Promise.resolve();
+  assert.equal(findAll(s.panel, "hover-state-label").length, 1);
+  assert.equal(find(s.panel, "hover-activity"), undefined);
+  assert.equal(find(s.panel, "hover-earlier"), undefined);
+  assert.doesNotMatch(s.panel.text, /Project:|Workspace:|Updated/);
+  assert.equal(find(s.panel, "hover-path").textContent, "~/projects");
+  assert.equal(find(s.panel, "hover-path").title, "/Users/someone/projects");
 });
