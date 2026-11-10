@@ -969,6 +969,110 @@ class BrowserSessionTests(unittest.TestCase):
             self.sessions.send(thread_id, {"message": "Wrong turn", "expectedTurnId": turn["id"]})
         self.assertFalse(any(method == "turn/steer" for method, _ in self.sessions.rpc.calls))
 
+    def complete_turn(self, thread_id, status="completed"):
+        turn = self.sessions.rpc.threads[thread_id]["turns"][-1]
+        turn["status"] = status
+        self.sessions.rpc.callback({"method": "turn/completed", "params": {
+            "threadId": thread_id, "turn": copy.deepcopy(turn)}})
+
+    def test_composer_hands_completed_steering_to_next_turn_once(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Original task"})["turn"]
+        self.complete_turn(thread_id)
+        body = {"message": "> Tell me ready.\n\nready", "expectedTurnId": turn["id"],
+                "requestId": "completed-steering", "windowId": "b26e82ea-492a-47a2-a727-0e9bddcd983a",
+                "images": [{"name": "reference.png", "url": "data:image/png;base64,iVBORw0KGgo="}]}
+        result = self.sessions.submit(thread_id, body)
+        self.assertNotEqual(result["turn"]["id"], turn["id"])
+        self.assertEqual(self.sessions.submit(thread_id, body), result)
+        turns = self.sessions.rpc.threads[thread_id]["turns"]
+        self.assertEqual(len(turns), 2)
+        self.assertEqual(turns[-1]["items"][0]["content"], [{"type": "text", "text": body["message"]},
+                         {"type": "image", "url": body["images"][0]["url"]}])
+        self.assertEqual(self.store.threads.get(thread_id)["original_request"], "Original task")
+        self.assertEqual(self.sessions.navigation.origin(thread_id), body["windowId"])
+
+    def test_composer_handoff_reconciles_a_missed_completion(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Original task"})["turn"]
+        self.sessions.rpc.threads[thread_id]["turns"][-1]["status"] = "completed"
+        result = self.sessions.submit(thread_id, {"message": "Correction", "expectedTurnId": turn["id"]})
+        self.assertNotEqual(result["turn"]["id"], turn["id"])
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 2)
+
+    def test_composer_handoff_after_native_steering_rejects_completed_turn(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Original task"})["turn"]
+        request = self.sessions.rpc.request
+
+        def complete_before_steer(method, params=None):
+            if method == "turn/steer":
+                self.complete_turn(thread_id)
+                raise CoordinationError("no active turn to steer")
+            return request(method, params)
+
+        with patch.object(self.sessions.rpc, "request", side_effect=complete_before_steer):
+            result = self.sessions.submit(thread_id, {"message": "Correction", "expectedTurnId": turn["id"]})
+        self.assertNotEqual(result["turn"]["id"], turn["id"])
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 2)
+
+    def test_composer_handoff_requires_the_latest_successful_unstopped_turn(self):
+        for outcome in ("interrupted", "failed", "stop_requested", "newer_running", "newer_completed", "unknown"):
+            with self.subTest(outcome=outcome):
+                thread_id = self.create()
+                turn = self.sessions.send(thread_id, {"message": "Original task"})["turn"]
+                if outcome == "stop_requested":
+                    self.store.threads.request_stop(thread_id, turn["id"])
+                if outcome == "unknown":
+                    self.sessions.active.pop(thread_id)
+                else:
+                    self.complete_turn(thread_id, outcome if outcome in {"interrupted", "failed"} else "completed")
+                if outcome.startswith("newer_"):
+                    self.sessions.send(thread_id, {"message": "Another task"})
+                    if outcome == "newer_completed":
+                        self.complete_turn(thread_id)
+                count = len(self.sessions.rpc.threads[thread_id]["turns"])
+                with self.assertRaises(BrowserBusyError):
+                    self.sessions.submit(thread_id, {"message": "Late correction", "expectedTurnId": turn["id"]})
+                self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), count)
+                self.assertFalse(any(item.get("content") == [{"type": "text", "text": "Late correction"}]
+                                     for candidate in self.sessions.rpc.threads[thread_id]["turns"]
+                                     for item in candidate["items"]))
+
+    def test_composer_never_replays_steering_after_an_uncertain_result(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Original task"})["turn"]
+        request = self.sessions.rpc.request
+        body = {"message": "Correction", "expectedTurnId": turn["id"], "requestId": "uncertain-steering"}
+
+        def lose_steering_response(method, params=None):
+            result = request(method, params)
+            if method == "turn/steer":
+                self.complete_turn(thread_id)
+                raise CoordinationError("Codex app-server disconnected.")
+            return result
+
+        with patch.object(self.sessions.rpc, "request", side_effect=lose_steering_response):
+            with self.assertRaisesRegex(CoordinationError, "disconnected"):
+                self.sessions.submit(thread_id, body)
+        with self.assertRaisesRegex(CoordinationError, "unconfirmed outcome"):
+            self.sessions.submit(thread_id, body)
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
+        self.assertEqual(self.sessions.rpc.threads[thread_id]["turns"][0]["items"][-1]["content"],
+                         [{"type": "text", "text": "Correction"}])
+
+    def test_failed_handoff_reconciliation_retains_a_retryable_rejection(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Original task"})["turn"]
+        self.complete_turn(thread_id)
+        body = {"message": "Correction", "expectedTurnId": turn["id"], "requestId": "read-failure"}
+        with patch.object(self.sessions, "read", side_effect=CoordinationError("History unavailable")):
+            with self.assertRaisesRegex(BrowserBusyError, "History unavailable"):
+                self.sessions.submit(thread_id, body)
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
+        self.assertIn("turn", self.sessions.submit(thread_id, body))
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 2)
+
     def test_failed_steering_preserves_active_turn_and_can_retry(self):
         thread_id = self.create()
         turn = self.sessions.send(thread_id, {"message": "Start"})["turn"]

@@ -82,6 +82,24 @@ class ClaudeSteeringTests(unittest.TestCase):
         self.result(user_message_uuid=self.connection.writes[0]["uuid"])
         self.assertFalse(self.sessions.read(self.thread)["running"])
 
+    def test_composer_continues_when_claude_finishes_before_native_steering(self):
+        request = self.sessions.claude.request
+
+        def complete_before_steer(method, params=None):
+            if method == "turn/steer":
+                self.result(user_message_uuid=self.connection.writes[-1]["uuid"])
+            return request(method, params)
+
+        body = {"message": "ready", "expectedTurnId": self.turn_id, "requestId": "ready-after-completion"}
+        with patch.object(self.sessions.claude, "request", side_effect=complete_before_steer):
+            result = self.sessions.submit(self.thread, body)
+        self.assertNotEqual(result["turn"]["id"], self.turn_id)
+        self.assertEqual(self.sessions.submit(self.thread, body), result)
+        self.assertEqual(len(self.connection.writes), 2)
+        self.assertEqual(self.connection.writes[-1]["message"]["content"], [{"type": "text", "text": "ready"}])
+        turns = self.sessions.read(self.thread)["thread"]["turns"]
+        self.assertEqual([turn["status"] for turn in turns], ["completed", "inProgress"])
+
     def test_images_use_the_same_encoding_as_initial_messages(self):
         self.sessions.claude.request("turn/steer", {"threadId": self.thread, "expectedTurnId": self.turn_id,
             "input": [{"type": "text", "text": "Use this reference"},

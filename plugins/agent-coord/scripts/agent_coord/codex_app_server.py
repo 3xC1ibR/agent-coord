@@ -60,6 +60,10 @@ class BrowserBusyError(CoordinationError):
     """A browser mutation conflicts with an active turn."""
 
 
+class BrowserTurnChangedError(BrowserBusyError):
+    """Steering was rejected before submitting input to the expected turn."""
+
+
 class BrowserNotSubmittedError(CoordinationError):
     """Automatic input failed before the provider turn/start boundary."""
 
@@ -2366,14 +2370,36 @@ class BrowserSessions:
         if self.dispatch.settings(thread_id)["enabled"] and not (isinstance(message, str) and message.strip().startswith("/")):
             return self.dispatch.submit(thread_id, body)
         return self.submissions.run(thread_id, body,
-            lambda: self.queue.enqueue(thread_id, body) if queued else self.send(thread_id, body), queued=queued)
+            lambda: self.queue.enqueue(thread_id, body) if queued else self._send_composer(thread_id, body), queued=queued)
 
-    def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False, preserve_text: bool = False, recovery=None) -> dict:
+    def _send_composer(self, thread_id: str, body: dict) -> dict:
+        # Enter means deliver this user message. The visible turn can finish
+        # while reconciliation or native steering is in flight. Only a proven
+        # rejection permits one handoff; a lost response must never be replayed.
+        with self._thread_lock(thread_id):
+            try:
+                return self.send(thread_id, body)
+            except BrowserTurnChangedError:
+                expected_turn = body.get("expectedTurnId")
+                if not expected_turn:
+                    raise
+                try:
+                    self.read(thread_id)
+                    self._await_persistence(thread_id)
+                except Exception as error:
+                    # The original attempt was rejected, and no retry crossed
+                    # the native submission boundary. Retain a retryable receipt.
+                    raise BrowserTurnChangedError(str(error)) from error
+                return self.send(thread_id, body, start_only=True, completed_turn_id=expected_turn)
+
+    def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False,
+             preserve_text: bool = False, recovery=None, completed_turn_id: str | None = None) -> dict:
         with self._thread_lock(thread_id):
             submission = {"started": False}
             try:
                 return self._send(thread_id, body, start_only=start_only, automatic=automatic,
-                                  preserve_text=preserve_text, submission=submission, recovery=recovery)
+                                  preserve_text=preserve_text, submission=submission, recovery=recovery,
+                                  completed_turn_id=completed_turn_id)
             except BrowserBusyError:
                 raise
             except Exception as exc:
@@ -2385,7 +2411,7 @@ class BrowserSessions:
                 raise
 
     def _send(self, thread_id: str, body: dict, *, start_only: bool, automatic: bool,
-              preserve_text: bool, submission: dict, recovery=None) -> dict:
+              preserve_text: bool, submission: dict, recovery=None, completed_turn_id: str | None = None) -> dict:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
         with self.store._writer.measure_request("send.persistence_barrier"):
@@ -2432,6 +2458,15 @@ class BrowserSessions:
             command = self._command(thread_id, message, reconciled_session=record) if message and not images else None
             if command is not None:
                 return command
+            completion_handoff = False
+            if completed_turn_id is not None:
+                with self.store.reading():
+                    completed_turn = self.store.threads.get(thread_id, history=False)
+                    stopped = self.store.threads.stop_requested(thread_id, completed_turn_id)
+                completion = completed_turn["turn_completion"] or {}
+                completion_handoff = (expected_turn == completed_turn_id == completed_turn["turn_id"]
+                                      and not completed_turn["turn_active"] and not stopped
+                                      and completion.get("status") == "completed")
             with self.lock:
                 turn_id = self.active.get(thread_id)
                 if not automatic and turn_id and self.reviews.stage_for(thread_id, turn_id):
@@ -2439,7 +2474,8 @@ class BrowserSessions:
                 if (start_only or automatic) and thread_id in self.active:
                     raise BrowserBusyError("A turn is already running. The queued message was not sent as steering.")
                 if expected_turn is not None and expected_turn != turn_id:
-                    raise BrowserBusyError("The active turn changed or finished. Your draft was not sent; send it again to continue.")
+                    if not completion_handoff or thread_id in self.active:
+                        raise BrowserTurnChangedError("The active turn changed or finished. Your draft was not sent; send it again to continue.")
                 if thread_id in self.active and not turn_id:
                     raise BrowserBusyError("The turn is starting. Wait a moment before steering.")
                 if not turn_id:
@@ -2457,6 +2493,17 @@ class BrowserSessions:
                 try:
                     with self.navigation.sending(thread_id, source_window):
                         result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                except CoordinationError as error:
+                    # These provider responses explicitly mean no input was
+                    # submitted. Disconnects, timeouts and ambiguous native
+                    # acknowledgements retain their uncertain outcome.
+                    if str(error) in {
+                        "no active turn to steer",
+                        "The active Claude turn changed or finished. Your message was not sent.",
+                        "The active Muse turn changed or finished. Your message was not sent.",
+                    }:
+                        raise BrowserTurnChangedError(str(error)) from error
+                    raise
                 finally:
                     with self.lock:
                         self.starting_notification_context.pop(thread_id, None)
