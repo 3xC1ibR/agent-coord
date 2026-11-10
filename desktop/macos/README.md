@@ -265,7 +265,22 @@ verify that the selected backend payload is active before calling the backend
 change deployed. An incompatible update is deferred; do not force it by killing
 agents or deleting retained runtime state.
 
-This default local build is ad hoc signed and has automatic updates disabled.
+Local builds automatically use the unique valid **Developer ID Application**
+certificate in the login Keychain. This keeps the app's macOS privacy identity
+stable across rebuilds, so existing approvals continue to apply. If several
+identities are available, select the intended one with `--sign-identity`.
+Installation verifies that the candidate satisfies an existing certificate-signed
+app's designated requirement before replacing any files; an ad hoc build or a
+different team or certificate type cannot silently discard its approvals.
+
+Without a Developer ID certificate, a build-only candidate remains ad hoc signed.
+Installation then requires an explicit identity. `--sign-identity -` permits a
+temporary ad hoc installation over another ad hoc build, but each rebuild can
+require privacy approvals again. Moving from an ad hoc installation to Developer
+ID signing can require one final approval for the stable identity. Do not reset
+macOS privacy settings as part of a normal rebuild.
+
+Local builds have automatic updates disabled and are not notarized by default.
 To preserve the signed, notarized, update-enabled distribution, use
 [Release macOS CI](#automated-releases-to-cloudflare-r2), download and verify its
 artifact, then replace the app after ordinary Quit and reopen it. CI already
@@ -296,7 +311,7 @@ executable, tool PATH, and default coordination database so launching from Finde
 works without a shell. Use `--python /path/to/python3` or `--database /path/to/state.sqlite3`
 to override them. This is a local build for this Mac; rebuild if those paths
 move or to use a different Mac. Use the standalone build above for distribution.
-Local builds are ad hoc signed by the build command.
+The build command signs local builds using the identity selection above.
 
 ## Window and process behavior
 

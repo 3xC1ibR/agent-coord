@@ -48,6 +48,44 @@ def check_not_running(app: Path) -> None:
         raise ValueError(f"Quit the app before replacing it: {app}")
 
 
+def resolve_signing_identity(identity: str | None, *, install: bool) -> str:
+    """Prefer a certificate identity that survives changes to the executable."""
+    if identity is not None:
+        return identity
+    result = subprocess.run(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"],
+                            capture_output=True, text=True, check=True)
+    identities = sorted(set(re.findall(r'"(Developer ID Application: [^"\n]+)"', result.stdout)))
+    if len(identities) == 1:
+        return identities[0]
+    if len(identities) > 1:
+        raise ValueError("Multiple Developer ID identities are available; select --sign-identity explicitly.")
+    if install:
+        raise ValueError("Installing requires a stable --sign-identity to retain macOS privacy approvals. "
+                         "Use a Developer ID Application certificate, or explicitly select "
+                         "--sign-identity - for a temporary ad hoc installation that loses approvals on rebuild.")
+    return "-"
+
+
+def check_signing_continuity(source: Path, destination: Path) -> None:
+    """Refuse an installation that discards the existing privacy identity."""
+    if not (destination / "Contents/MacOS" / EXECUTABLE_NAME).is_file():
+        return
+    result = subprocess.run(["/usr/bin/codesign", "--display", "--verbose=2", "--requirements", "-",
+                             str(destination)], capture_output=True, text=True, check=True)
+    details = result.stdout + result.stderr
+    if "Signature=adhoc" in details:
+        return  # A certificate-signed replacement repairs this version-specific identity.
+    match = re.search(r"^designated => (.+)$", details, re.MULTILINE)
+    if not match:
+        raise ValueError(f"Cannot establish the installed signing identity: {destination}")
+    verified = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict",
+                               "--test-requirement", "=" + match[1], str(source)],
+                              capture_output=True, text=True)
+    if verified.returncode:
+        raise ValueError("Refusing to replace the installed app with a different signing identity; "
+                         "this would discard macOS privacy approvals. Use the same Developer ID team and certificate type.")
+
+
 def legacy_installation(destination: Path) -> Path | None:
     legacy = destination.with_name(LEGACY_BUNDLE_NAME)
     if destination.name == BUNDLE_NAME and (legacy.exists() or legacy.is_symlink()):
@@ -61,6 +99,9 @@ def replace_app(source: Path, destination: Path, *, legacy: Path | None = None) 
     if legacy is not None:
         check_destination(legacy)
         check_not_running(legacy)
+    check_signing_continuity(source, destination)
+    if legacy is not None:
+        check_signing_continuity(source, legacy)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".agent-coord-install-", dir=destination.parent) as scratch:
         staged = Path(scratch) / BUNDLE_NAME
@@ -156,7 +197,7 @@ def main() -> int:
     parser.add_argument("--standalone", action="store_true", help="Bundle Python and resolve user paths on launch.")
     parser.add_argument("--arch", choices=("arm64", "x86_64"), default=platform.machine())
     parser.add_argument("--dmg", type=Path, help="Create a drag-to-Applications disk image (requires --standalone).")
-    parser.add_argument("--sign-identity", default="-", help="Developer ID Application identity; defaults to ad hoc.")
+    parser.add_argument("--sign-identity", help="Signing identity; automatically selects a unique Developer ID Application certificate. Use - for explicit ad hoc signing.")
     parser.add_argument("--notary-profile", help="Notarytool keychain profile; sign, notarize, and staple the app and DMG.")
     parser.add_argument("--version", default="0.1.0")
     parser.add_argument("--build-number", default="1")
@@ -166,6 +207,12 @@ def main() -> int:
     parser.add_argument("--update-archive", type=Path, help="Create a signed update ZIP and appcast; requires notarization")
     parser.add_argument("--update-channel", choices=("alpha", "beta", "stable"), default="alpha")
     args = parser.parse_args()
+    if sys.platform != "darwin":
+        parser.error("Building the native app requires macOS and Xcode Command Line Tools.")
+    try:
+        args.sign_identity = resolve_signing_identity(args.sign_identity, install=args.install)
+    except (ValueError, subprocess.CalledProcessError) as exc:
+        parser.error(str(exc))
     from sparkle import configuration, runtime_metadata
     try:
         updater_info = configuration(args.update_feed, args.update_public_key,
@@ -177,8 +224,6 @@ def main() -> int:
     if args.update_private_key_file and not args.update_archive:
         parser.error("--update-private-key-file requires --update-archive")
     compatibility = runtime_metadata(args.version, args.build_number)
-    if sys.platform != "darwin":
-        parser.error("Building the native app requires macOS and Xcode Command Line Tools.")
     if args.dmg and not args.standalone:
         parser.error("--dmg requires --standalone; local bundles contain machine-specific paths.")
     if args.standalone and args.database:
@@ -305,6 +350,7 @@ def main() -> int:
                    profile=args.notary_profile, version=args.version, architecture=args.arch)
     print(json.dumps({"built": str(output), "installed": str(destination) if args.install else None,
                       "standalone": args.standalone, "architecture": args.arch,
+                      "signing_identity": args.sign_identity,
                       "dmg": str(args.dmg) if args.dmg else None,
                       "updates_enabled": bool(updater_info),
                       "update_archive": str(args.update_archive) if args.update_archive else None,

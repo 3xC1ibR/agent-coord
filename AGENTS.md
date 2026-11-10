@@ -85,9 +85,11 @@ and the [runtime update contract](docs/runtime-updates.md).
   interruption, rollback and guarded continuation; do not manually stop agents
   to force activation. Check the committed payload and recovery outcomes before
   claiming that the backend update is active and work has resumed.
-- Ordinary local development builds are ad hoc signed and disable automatic
-  updates. Use the existing release CI for signed, notarized, update-enabled
-  builds; its Apple credentials and updater signing identity are already
+- Local development builds select a unique Developer ID Application certificate
+  when available to preserve macOS privacy approvals; ad hoc installation requires
+  explicit `--sign-identity -` and cannot replace a certificate-signed app. Local
+  builds disable automatic updates. Use the existing release CI for notarized,
+  update-enabled builds; its Apple credentials and updater signing identity are already
   configured. Do not require local notarization setup or regenerate signing keys
   for that CI workflow.
 - Local installation, successful CI, and public publication are separate
