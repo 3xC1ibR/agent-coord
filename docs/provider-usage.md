@@ -5,7 +5,84 @@ reset times. The page also works at `/usage`, including on paired remote devices
 It opens over the workspace, preserving active conversations. Conversation token
 totals and context capacity remain in each thread's **Token usage** control.
 
-The first version reads Codex, Claude, and Antigravity. Kimi and Muse explicitly
+## Coordination measurements
+
+Choose **Usage → Coordination** to compare Agent Coord tool payloads over 7, 30,
+or 90 days with the preceding equal-length period. The page separates generated
+arguments/commands, returned tool payloads, and the lifecycle-report portion of
+checkpoint arguments. It shows daily totals, calls, observed turns, operation
+breakdowns and argument-size median/p95. A turn here means a native turn with a
+measured coordination call, not a completed user task or an independently judged
+outcome. Changes between periods are descriptive, not causal savings estimates.
+
+The first version indexes retained Codex `McpToolCall` records and literal,
+standalone `agent-coord` CLI commands. Other providers, compound shell commands,
+and inherited events from another native thread are excluded. Coverage reports
+missing, malformed, oversized, and unreadable records. No prompt or tool-result
+bodies are copied into the derived metrics database. Native histories and the
+coordination database are read-only sources.
+
+MCP arguments are serialized as compact, sorted JSON; CLI commands use their
+captured text, and responses count text content blocks. This provides a stable
+comparison measure rather than reconstructing the model's exact output format.
+Payload sizes are not billed input/output tokens: programmatic calls can filter
+or discard tool results, and execution-program wrappers, schemas, replayed
+context, cache behavior, and hidden reasoning have separate costs. Optional
+`tiktoken` measurements use a fixed
+`o200k_base` encoding; UTF-8 bytes remain available without that dependency.
+Unavailable token counts stay unknown. Changing the tokenizer identity rebuilds
+derived measurements, so byte and token methods are never silently mixed.
+
+Opening the page reads a bounded cached snapshot. Its initial empty state or an
+explicit Refresh starts one low-priority child process, with resumable byte/time
+budgets and a three-minute refresh limit. Repeated tabs share that work. The
+collector sleeps between work slices, stores offsets in a separate derived
+database, and never runs on provider-event or HTTP threads. GET requests do not
+start workers; the dashboard polls only while collection is running and the page
+is visible. A partial refresh can be continued with Refresh. Collection stops
+when the backend closes. It does not create agent turns or make model requests.
+On macOS, the worker also uses the system background scheduling and throttled
+disk-I/O policy so interactive app work takes precedence over history reads.
+
+`GET /api/browser/coordination-metrics?days=30` returns the cached report;
+authenticated `POST /api/browser/coordination-metrics/refresh` with `{}` requests
+a refresh. Both inherit the backend's workspace boundary. No request can choose
+an interpreter, database, or transcript path. Derived state lives beside the
+coordination database in `.<database-name>.coordination-metrics/` and can be
+recreated from retained source histories.
+
+The core runtime remains dependency-free. To enable reference-tokenizer counts
+for the default local database, an administrator can prepare the optional worker
+environment once:
+
+```bash
+metrics_dir="$HOME/.local/state/agent-coord/.state.sqlite3.coordination-metrics"
+python3 -m venv "$metrics_dir/python"
+"$metrics_dir/python/bin/python" -m pip install tiktoken==0.14.0
+TIKTOKEN_CACHE_DIR="$metrics_dir/tokenizer-cache" \
+  "$metrics_dir/python/bin/python" -c 'import tiktoken; tiktoken.get_encoding("o200k_base")'
+```
+
+The worker never installs packages or downloads missing tokenizer tables.
+`AGENT_COORD_METRICS_PYTHON` can select an existing absolute Python executable;
+`TIKTOKEN_CACHE_DIR` can select a prewarmed local vocabulary cache. Missing setup
+falls back to clearly labelled byte measurements. For a custom coordination
+database, use its adjacent derived directory instead of the default path above.
+
+For regression validation, `scripts/measure_coordination_metrics.py --snapshot
+<retained-database> --output <report.json> --check` runs the existing foreground
+latency workload with collection disabled/enabled against a disposable native
+history fixture. Use the same Python/SQLite version and frozen source for both
+runs, and keep failed baseline reports. `--workload database --fixture-mib 256
+--seconds 20` also compares the unchanged writer-admission gate with collection
+off/on and 20 cached snapshot reads per second. This isolated result does not
+replace large-history HTTP acceptance. The existing database contention gate remains required. Compare
+matched task sets and checkpoint usefulness separately when evaluating an actual
+token-reduction change.
+
+## Account limit sources
+
+Account limits are read from Codex, Claude, and Antigravity. Kimi and Muse explicitly
 show unavailable account limits. A provider can omit a window or its percentage;
 missing values never become zero or an unlimited allowance. A passed reset time
 does not imply the account has reset until the provider reports a new reading.

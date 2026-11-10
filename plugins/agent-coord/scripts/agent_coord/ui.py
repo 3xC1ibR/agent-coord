@@ -40,6 +40,7 @@ from .session_defaults import session_defaults
 from .speech import Speech, spoken_text
 from .jev_settings import JevSettings
 from .provider_limits import ProviderLimits
+from .coordination_metrics import CoordinationMetrics
 from . import launch_metrics
 
 DEFAULT_UI_HOST = "127.0.0.1"
@@ -279,12 +280,15 @@ def _handler(
     web_push: WebPush | None = None,
     native_push: NativePush | None = None,
     provider_limits: ProviderLimits | None = None,
+    coordination_metrics: CoordinationMetrics | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     views = ViewStore(store)
     navigation = NavigationStore(store)
     speech = Speech(store.database_path)
     jev = JevSettings(store.database_path)
     provider_limits = provider_limits or (ProviderLimits(browser_sessions) if browser_sessions is not None else None)
+    coordination_metrics = coordination_metrics or (CoordinationMetrics(store.database_path, browser_sessions.cwd)
+                                                    if browser_sessions is not None else None)
 
     class Handler(BaseHTTPRequestHandler):
         def _start_metrics(self, method):
@@ -296,6 +300,8 @@ def _handler(
                 operation = "search"
             elif method == "GET" and path == "/api/browser/threads":
                 operation = "thread_list"
+            elif method == "GET" and path == "/api/browser/coordination-metrics":
+                operation = "coordination_metrics"
             elif method == "GET" and path.startswith("/api/browser/threads/") and path.endswith("/sidecars"):
                 operation = "sidecar_status"
             elif method == "GET" and path.startswith("/api/browser/threads/"):
@@ -337,7 +343,7 @@ def _handler(
                                  if openui_frame else "")
                 embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
                             and ((parsed.path == "/" and query.get("pane") == ["1"])
-                                 or (parsed.path in {"/settings", "/usage", "/activity", "/html-preview"} and query.get("embedded") == ["1"]))
+                                 or (parsed.path in {"/settings", "/usage", "/usage/coordination", "/activity", "/html-preview"} and query.get("embedded") == ["1"]))
                             and self._authorized())
                 self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame or html_preview else "DENY")
                 self.send_header(
@@ -447,6 +453,13 @@ def _handler(
                 return
             if parsed.path == "/usage":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "provider-usage.html").read_bytes())
+                return
+            if parsed.path == "/usage/coordination":
+                self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "coordination-metrics.html").read_bytes())
+                return
+            if parsed.path in {"/coordination-metrics.js", "/coordination-metrics.css"}:
+                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
             if parsed.path == "/activity":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "activity.html").read_bytes())
@@ -597,6 +610,10 @@ def _handler(
                     self._json(HTTPStatus.OK, {"name": result["name"]})
             elif route == "provider-usage":
                 self._json(HTTPStatus.OK, provider_limits.snapshot())
+            elif route == "coordination-metrics":
+                if set(query) - {"days"} or any(len(value) != 1 for value in query.values()) or query.get("days", ["30"])[0] not in {"7", "30", "90"}:
+                    raise CoordinationError("Choose a 7, 30, or 90 day coordination period.")
+                self._json(HTTPStatus.OK, coordination_metrics.snapshot(int(query.get("days", ["30"])[0])))
             elif route == "workspaces":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_workspaces()})
             elif route in {"activity", "activity/settings", "activity/history"}:
@@ -790,7 +807,8 @@ def _handler(
                     self._admitted_POST()
                 finally:
                     # A user action can change any thread's card; the next list read rebuilds.
-                    browser_sessions.inventory_changed()
+                    if urlparse(self.path).path != "/api/browser/coordination-metrics/refresh":
+                        browser_sessions.inventory_changed()
 
         def _admitted_POST(self) -> None:
             path = urlparse(self.path).path
@@ -880,6 +898,11 @@ def _handler(
                     if set(body) != {"provider"}:
                         raise ValueError("Expected a usage provider.")
                     self._json(HTTPStatus.OK, provider_limits.refresh(body["provider"]))
+                    return
+                if route == ["api", "browser", "coordination-metrics", "refresh"]:
+                    if body:
+                        raise CoordinationError("Coordination refresh does not accept fields.")
+                    self._json(HTTPStatus.ACCEPTED, coordination_metrics.refresh())
                     return
                 if route in (["api", "browser", "launch-metrics"], ["api", "browser", "launch-metrics", "attribution"]):
                     if not self._local_request():
@@ -1248,9 +1271,12 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     native_push: NativePush | None = None
     thread_control: ThreadControlWorker | None = None
     app_control: AppControlWorker | None = None
+    coordination_metrics: CoordinationMetrics | None = None
 
     def server_close(self) -> None:
         try:
+            if self.coordination_metrics is not None:
+                self.coordination_metrics.close()
             if self.app_control is not None:
                 self.app_control.close()
             if self.thread_control is not None:
@@ -1308,9 +1334,11 @@ def make_ui_server(
     push = WebPush(store, sessions, remote)
     native = NativePush(store, sessions, remote)
     provider_limits = ProviderLimits(sessions)
+    coordination_metrics = CoordinationMetrics(store.database_path, sessions.cwd)
     try:
-        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native, provider_limits))
+        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics))
     except Exception:
+        coordination_metrics.close()
         push.close()
         native.close()
         sessions.close()
@@ -1319,6 +1347,7 @@ def make_ui_server(
     server.remote_access = remote
     server.web_push = push
     server.native_push = native
+    server.coordination_metrics = coordination_metrics
     server.thread_control = ThreadControlWorker(sessions)
     server.app_control = AppControlWorker(sessions, provider_limits)
     sessions.admission.wrap(server.thread_control, "process_once", automatic=True)

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script src="/theme.js"></script>
+  <title>Coordination usage — Ribbon Field</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/provider-usage.css">
+  <link rel="stylesheet" href="/coordination-metrics.css">
+  <script src="/coordination-metrics.js" defer></script>
+</head>
+<body class="usage-page coordination-page">
+  <header class="usage-header">
+    <div><h1>Usage</h1><p>Coordination calls and the text they exchange.</p></div>
+    <div class="usage-actions"><button id="refresh-coordination" type="button" disabled>Refresh</button><button id="close-coordination" type="button" class="quiet">Done</button></div>
+  </header>
+  <main class="usage-content">
+    <nav class="usage-sections" aria-label="Usage views"><a href="/usage?embedded=1">Account limits</a><a href="/usage/coordination?embedded=1" aria-current="page">Coordination</a></nav>
+    <div class="coordination-controls">
+      <label for="coordination-period">Period<select id="coordination-period"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select></label>
+      <p id="coordination-range" class="coordination-note">Compared with the preceding equal-length period.</p>
+    </div>
+    <p id="coordination-error" role="alert" hidden></p>
+    <p id="coordination-status" class="coordination-note" role="status">Loading coordination measurements…</p>
+    <p id="coordination-coverage-summary" class="coordination-note" hidden></p>
+    <div id="coordination-results" hidden>
+      <p id="coordination-measurement" class="coordination-note"></p>
+      <p class="coordination-note">Arguments / commands are model-generated. Returned text comes from tools. Lifecycle text is part of the arguments.</p>
+      <dl id="coordination-totals" class="coordination-totals" aria-label="Coordination totals"></dl>
+      <p id="coordination-turns" class="coordination-note"></p>
+      <p id="coordination-empty" class="coordination-empty" hidden>No coordination calls were measured in this period. Choose another period or refresh to read available records.</p>
+      <section class="coordination-section" id="coordination-daily-section" aria-labelledby="coordination-daily-title">
+        <div class="coordination-section-heading"><h2 id="coordination-daily-title">Daily payload</h2><div class="coordination-legend"><span><i class="argument-key" aria-hidden="true"></i>Arguments / commands</span><span><i class="return-key" aria-hidden="true"></i>Returned text</span></div></div>
+        <div id="coordination-chart" class="coordination-chart"></div>
+        <p class="coordination-note">Each payload is counted once. Later context replay and cache reuse are separate.</p>
+      </section>
+      <section class="coordination-section" id="coordination-tools-section" aria-labelledby="coordination-tools-title">
+        <div class="coordination-section-heading"><h2 id="coordination-tools-title">By operation</h2><span id="coordination-table-unit" class="coordination-note"></span></div>
+        <p class="coordination-scroll-hint coordination-note">Scroll horizontally to see all columns.</p>
+        <div class="coordination-table-scroll" role="region" aria-label="Coordination measurements by operation" tabindex="0">
+          <table class="coordination-table"><thead><tr><th scope="col">Operation</th><th scope="col">Calls</th><th scope="col">Arguments</th><th scope="col">Returned</th><th scope="col">Lifecycle</th><th scope="col"><abbr title="Median argument tokens per call">Median</abbr></th><th scope="col"><abbr title="95th percentile argument tokens per call">95th percentile</abbr></th></tr></thead><tbody id="coordination-tools"></tbody></table>
+        </div>
+      </section>
+      <details class="coordination-coverage">
+        <summary>Measurement and coverage</summary>
+        <p id="coordination-coverage-scope" class="coordination-note"></p>
+        <p class="coordination-note">An execution program may filter returned payloads before the model sees them.</p>
+        <p class="coordination-note">These measurements are not billed usage. They exclude model reasoning, tool definitions, skill reads, repeated context and cache effects. Retained Codex records are covered; compound CLI commands and unsupported providers are excluded.</p>
+        <ul id="coordination-coverage-notes" class="coordination-note"></ul>
+        <p class="coordination-note">Compare similar work across periods. Fewer calls or smaller payloads do not by themselves establish that task quality stayed the same.</p>
+      </details>
+    </div>
+  </main>
+</body>
+</html>

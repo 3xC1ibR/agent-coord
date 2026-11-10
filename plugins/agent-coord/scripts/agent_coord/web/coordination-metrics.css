@@ -1,0 +1,56 @@
+.coordination-page {
+  --coordination-gap-small: 8px; --coordination-gap-row: 12px; --coordination-gap-section: 24px; --coordination-gap-large: 32px; /* drift-ok: module dimensions use DESIGN.md spacing. */
+  --coordination-text: 13px; --coordination-meta: 12px; --coordination-heading: 17px; --coordination-number: 28px; /* drift-ok: module dimensions follow the existing Activity report. */
+  --coordination-line: 1px; --coordination-weight: 600; --coordination-leading: 1.6; --coordination-radius: 6px; /* drift-ok: existing report/control dimensions. */
+  --coordination-hit: 44px; --coordination-table-width: 760px; --coordination-chart-height: 210px; --coordination-key-width: 20px; /* drift-ok: local chart/table dimensions; shared theme unchanged. */
+  --coordination-chart-stroke: 2px; --coordination-chart-dash: 5px; /* drift-ok: local line chart geometry. */
+  --coordination-operation-mobile-width: 176px; --coordination-calls-mobile-width: 72px; /* drift-ok: preserves a complete operation and call-count column on narrow screens. */
+}
+.coordination-controls { display: flex; align-items: end; justify-content: space-between; gap: var(--coordination-gap-section); }
+.coordination-controls label { display: flex; flex-direction: column; gap: var(--coordination-gap-small); color: var(--muted); font-size: var(--coordination-meta); }
+.coordination-controls select { min-height: var(--coordination-hit); font-size: var(--coordination-text); }
+.coordination-note { color: var(--muted); font-size: var(--coordination-meta); line-height: var(--coordination-leading); margin: var(--coordination-gap-small) 0; overflow-wrap: anywhere; }
+#coordination-status { margin-top: var(--coordination-gap-section); }
+#coordination-error { border: var(--coordination-line) solid var(--line-strong); border-radius: var(--coordination-radius); color: var(--danger); background: var(--surface); padding: var(--coordination-gap-row); line-height: var(--coordination-leading); }
+.coordination-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--coordination-gap-section); margin: var(--coordination-gap-section) 0 var(--coordination-gap-row); }
+.coordination-totals > div { display: flex; flex-direction: column; gap: var(--coordination-gap-small); min-width: 0; }
+.coordination-totals dt { color: var(--muted); font-size: var(--coordination-meta); }
+.coordination-totals dd { margin: 0; font-size: var(--coordination-number); font-weight: var(--coordination-weight); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.coordination-totals small { color: var(--muted); font-size: var(--coordination-meta); line-height: var(--coordination-leading); }
+.coordination-section { margin-top: var(--coordination-gap-large); }
+.coordination-section-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--coordination-gap-row); margin-bottom: var(--coordination-gap-row); }
+.coordination-page h2 { font-size: var(--coordination-heading); font-weight: var(--coordination-weight); margin: 0; }
+.coordination-legend { display: flex; flex-wrap: wrap; gap: var(--coordination-gap-section); color: var(--muted); font-size: var(--coordination-meta); }
+.coordination-legend span { display: inline-flex; align-items: center; gap: var(--coordination-gap-small); }
+.coordination-legend i { display: inline-block; width: var(--coordination-key-width); border-top: var(--coordination-chart-stroke) solid var(--ink); }
+.coordination-legend .return-key { border-top-color: var(--muted); border-top-style: dashed; }
+.coordination-chart { height: var(--coordination-chart-height); width: 100%; }
+.coordination-chart svg { width: 100%; height: 100%; overflow: visible; }
+.coordination-chart text { fill: var(--muted); font-family: inherit; font-size: var(--coordination-meta); }
+.coordination-chart .chart-grid { stroke: var(--line); stroke-width: var(--coordination-line); }
+.coordination-chart .argument-line { fill: none; stroke: var(--ink); stroke-width: var(--coordination-chart-stroke); stroke-linejoin: round; }
+.coordination-chart .return-line { fill: none; stroke: var(--muted); stroke-width: var(--coordination-chart-stroke); stroke-dasharray: var(--coordination-chart-dash); stroke-linejoin: round; }
+.coordination-chart .chart-point { fill: var(--ink); }
+.coordination-table-scroll { overflow-x: auto; border-top: var(--coordination-line) solid var(--line); }
+.coordination-table { width: 100%; min-width: var(--coordination-table-width); border-collapse: collapse; font-size: var(--coordination-text); }
+.coordination-table th, .coordination-table td { padding: var(--coordination-gap-row) var(--coordination-gap-small); border-bottom: var(--coordination-line) solid var(--line); vertical-align: top; text-align: right; font-variant-numeric: tabular-nums; line-height: var(--coordination-leading); }
+.coordination-table th { font-size: var(--coordination-meta); font-weight: normal; color: var(--muted); white-space: nowrap; }
+.coordination-table th:first-child, .coordination-table td:first-child { text-align: left; }
+.coordination-table td:first-child { overflow-wrap: anywhere; }
+.coordination-table small { display: block; font-size: var(--coordination-meta); color: var(--muted); }
+.coordination-table abbr { text-decoration: none; }
+.coordination-scroll-hint { display: none; }
+.coordination-empty { margin: var(--coordination-gap-large) 0; line-height: var(--coordination-leading); color: var(--muted); }
+.coordination-coverage { border-top: var(--coordination-line) solid var(--line); margin-top: var(--coordination-gap-large); padding-top: var(--coordination-gap-section); }
+.coordination-coverage summary { cursor: pointer; min-height: var(--coordination-hit); font-size: var(--coordination-text); }
+.coordination-coverage ul { padding-left: var(--coordination-gap-section); }
+@media (max-width: 640px) { /* drift-ok: matches the existing Usage mobile breakpoint. */
+  .coordination-controls { align-items: start; flex-direction: column; gap: var(--coordination-gap-small); }
+  .coordination-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--coordination-gap-section); }
+  .coordination-section-heading { align-items: start; }
+  .coordination-legend { gap: var(--coordination-gap-row); }
+  .coordination-scroll-hint { display: block; }
+  .coordination-table { table-layout: fixed; }
+  .coordination-table th:first-child, .coordination-table td:first-child { width: var(--coordination-operation-mobile-width); max-width: var(--coordination-operation-mobile-width); }
+  .coordination-table th:nth-child(2), .coordination-table td:nth-child(2) { width: var(--coordination-calls-mobile-width); }
+}

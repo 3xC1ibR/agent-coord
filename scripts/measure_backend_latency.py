@@ -869,6 +869,8 @@ def main():
     parser.add_argument("--stored-history", action="store_true",
                         help="Serve each conversation's saved snapshot history instead of a synthetic one.")
     parser.add_argument("--sends", type=int, default=30)
+    parser.add_argument("--coordination-metrics", action="store_true",
+                        help="Refresh isolated coordination measurements during the foreground workload.")
     parser.add_argument("--reads", type=int, default=15)
     parser.add_argument("--warmup", type=float, default=15.0)
     parser.add_argument("--hold", type=float, default=0.0)
@@ -910,6 +912,10 @@ def main():
         report.update(target=target, agents=len(busy), expected_stream_threads=busy)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("AGENT_COORD_", "RIBBON_")) and key not in {"CODEX_THREAD_ID", "CLAUDECODE"}}
+        if arguments.coordination_metrics:
+            for name in ("AGENT_COORD_METRICS_PYTHON", "TIKTOKEN_CACHE_DIR"):
+                if name in os.environ:
+                    environment[name] = os.environ[name]
         server_log = open(root / "server.log", "w")
         server = subprocess.Popen([sys.executable, "-B", __file__, "serve", "--db", str(database), "--cwd", arguments.cwd,
                                    "--history-kb", str(arguments.history_kb), "--delta-rate", str(arguments.delta_rate)]
@@ -947,6 +953,9 @@ def main():
         watcher.start()
         print(json.dumps({"status": "loaded", "port": port, "target": target}), flush=True)
         time.sleep(arguments.warmup)
+        if arguments.coordination_metrics:
+            elapsed, result, _ = client.call("/api/browser/coordination-metrics/refresh", {})
+            report["coordination_metrics"] = {"refresh_ms": elapsed, "start": result.get("status")}
         _, report["workload_before"], _ = client.call("/api/measurement/workload", timeout=5)
         process_cpu_before = cpu_seconds(server.pid)
         measured_since = time.monotonic()
@@ -958,6 +967,11 @@ def main():
             seen = watcher.wait_for(marker)
             watcher.waiting.discard(marker)
             samples.setdefault("send_accepted", []).append(elapsed)
+            if arguments.coordination_metrics:
+                elapsed_metrics, result_metrics, _ = client.call("/api/browser/coordination-metrics?days=30")
+                samples.setdefault("coordination_metrics", []).append(elapsed_metrics)
+                report["coordination_metrics"].setdefault("observations", []).append({
+                    "status": result_metrics.get("status"), "calls": result_metrics.get("current", {}).get("calls")})
             if seen:
                 samples.setdefault("send_event_visible", []).append((seen - sent) * 1000)
             time.sleep(SyntheticProvider.short_turn_seconds + .7)
@@ -970,6 +984,12 @@ def main():
                 elapsed, _, size = client.call(path)
                 samples.setdefault(name, []).append(elapsed)
                 report.setdefault("bytes", {})[name] = size
+            if arguments.coordination_metrics:
+                elapsed, result, size = client.call("/api/browser/coordination-metrics?days=30")
+                samples.setdefault("coordination_metrics", []).append(elapsed)
+                report["coordination_metrics"]["last"] = result.get("status")
+                report["coordination_metrics"]["measurement"] = result.get("measurement")
+                report["coordination_metrics"]["bytes"] = size
         report["backend_cpu_percent"] = round(100 * (cpu_seconds(server.pid) - process_cpu_before) /
                                               (time.monotonic() - measured_since), 1)
         if arguments.hold:

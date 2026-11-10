@@ -1,4 +1,9 @@
 body.usage-page { display: block; height: auto; min-height: 100dvh; background: var(--paper); }
+.usage-page { --usage-navigation-gap: 24px; --usage-navigation-inset: 12px; --usage-navigation-text: 13px; --usage-navigation-line: 1px; --usage-navigation-hit: 44px; } /* drift-ok: shared Usage navigation dimensions follow DESIGN.md spacing and touch targets. */
+.usage-sections { display: flex; gap: var(--usage-navigation-gap); border-bottom: var(--usage-navigation-line) solid var(--line); margin-bottom: var(--usage-navigation-gap); }
+.usage-sections a { display: inline-flex; align-items: center; min-height: var(--usage-navigation-hit); padding: 0 0 var(--usage-navigation-inset); color: var(--muted); font-size: var(--usage-navigation-text); text-decoration: none; border-bottom: var(--usage-navigation-line) solid transparent; }
+.usage-sections a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); }
+.usage-sections a:hover { color: var(--accent); }
 .sidebar .usage-nav { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 6px; color: var(--sb-muted); font-size: 12px; text-decoration: none; }
 .sidebar .usage-nav:hover { color: var(--sb-ink); background: var(--sb-hover); }
 .usage-nav svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
