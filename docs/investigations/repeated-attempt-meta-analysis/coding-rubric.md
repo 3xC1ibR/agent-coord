@@ -1,7 +1,7 @@
 # Attempt coding rubric
 
-Version 1.0. Frozen with the [analysis plan](analysis-plan.md) before any saga
-is coded. Changes after the freeze are recorded in the plan's amendment log;
+Version 1.1 (amendment A1 adds `new_defect`; see the plan's amendment log).
+Frozen with the [analysis plan](analysis-plan.md) before any saga is coded. Changes after the freeze are recorded in the plan's amendment log;
 codes are never silently re-derived under a changed rubric.
 
 This file is self-contained so that a second coder can apply it without
@@ -55,6 +55,7 @@ a contributing flag.
 | 0 | `terminal_open` | Is this the latest attempt of a saga still unresolved at collection, without a later attempt to judge it by? |
 | 1 | `delivery_failure` | When the symptom was next reported, was this attempt's validated change absent from the running system: never delivered or activated, superseded by a build or configuration without it, or disabled by runtime or plugin drift? |
 | 2 | `scope_decision` | Did the user explicitly narrow, defer, pause or redirect the work, in recorded words, so that the next attempt or the recurrence concerns the deferred part? |
+| 2a | `new_defect` | Did the recurrence arise from a mechanism that did not exist, or was not triggered, when this attempt was accepted (a later change introduced it, or a later change broke this attempt's fix), while this attempt's change held for its own mechanism? Added by amendment A1. |
 | 3 | `wrong_diagnosis` | Did later evidence show that the mechanism this attempt targeted was not a material cause of the reported symptom? |
 | 4 | `verification_failure` | Did the attempt's acceptance record claim an outcome that later evidence shows was not met, where the acceptance evidence did not exercise the condition that failed (smaller or different workload, different environment, test not covering the path, measurement defect)? |
 | 5 | `incomplete_fix` | Did a later attempt rework the same mechanism or code path because this change was partial or defective, while this attempt did not claim more than its evidence established? |
@@ -80,6 +81,12 @@ a contributing flag.
   question it actually answers and set `agent_scope_limit`.
 - **Environment** is primary only when no product mechanism was identified.
   Otherwise set it as a flag.
+- **New defect versus narrower scope.** `new_defect` requires evidence that
+  the later mechanism was introduced or first triggered after this attempt's
+  acceptance (commit chronology, the later attempt's own diagnosis). When the
+  later mechanism already existed at the time of the complaint, use
+  `narrower_scope`. Set `regression_of_fix` when a later change removed or broke
+  this attempt's fix.
 - **Wrong diagnosis** requires later evidence that the target was not
   causal. A mechanism that was causal but not sufficient is `narrower_scope`
   or `incomplete_fix`.
@@ -87,12 +94,17 @@ a contributing flag.
 ## Contributing flags
 
 Set each that the record supports: `delivery_failure`, `scope_decision`,
-`wrong_diagnosis`, `verification_failure`, `incomplete_fix`, `narrower_scope`,
+`new_defect`, `regression_of_fix`, `wrong_diagnosis`, `verification_failure`, `incomplete_fix`, `narrower_scope`,
 `environment`, `misread_as_complete`, `agent_scope_limit`,
 `overclaim` (completion claimed beyond the evidence),
 `bundled_symptom` (the assignment's label covers two or more mechanisms later
 shown distinct), `architectural_bound` (the attempt or its evidence names a
-structural limit that a local change could not remove).
+structural limit that a local change could not remove), `parallel_duplicate`
+(the same request was sent to more than one conversation at once).
+
+Agents spawned by an attempt's executor for that assignment (implementers,
+reviewers, validators) belong to the same attempt. A new human assignment in
+the same thread after an acceptance claim starts a new attempt.
 
 ## Descriptors
 

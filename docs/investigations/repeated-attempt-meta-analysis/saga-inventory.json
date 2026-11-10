@@ -1,0 +1,1223 @@
+{
+ "version": 1,
+ "plan": "analysis-plan.md (frozen at commit 60dc5d6, amendments A1–A3)",
+ "collection": {
+  "scratch_extracted_at_utc": "2026-11-10T04:33:00Z",
+  "method": "collect_sources.py queries (read-only); screen_sagas.py for family matching",
+  "git_head_at_collection": "577a1d6bd775daa5371ae1de2975401d5f48df38"
+ },
+ "universe": {
+  "threads_all_workspaces": 1696,
+  "threads_screened": 806,
+  "threads_agent_coord_root": 641,
+  "threads_parent_root_referencing_ribbon_field": 165,
+  "beads_issues": 256,
+  "commits": 340,
+  "beads_reopened": [
+   "agent-coord-en8",
+   "agent-coord-ptt",
+   "agent-coord-tvez.1",
+   "agent-coord-w60",
+   "agent-coord-wgg7",
+   "agent-coord-z0kd"
+  ],
+  "beads_status_transitions": 237,
+  "beads_closed_to_reopened_transitions": 7,
+  "user_role_prose_messages_indexed": 4362,
+  "checkpoints": 18545,
+  "coordination_messages": 27524,
+  "activity_events": 8903,
+  "delegations": 189,
+  "git_refs": 33,
+  "reflog_only_commits": 3,
+  "saved_histories_indexed": 1526
+ },
+ "screening_method": "Candidate families were formed by reading every thread title in the Agent Coord workspace, all Beads titles, all commit subjects since Oct 6 and all user-role prose with recurrence wording, then matched with the regular expressions in screen_sagas.py. Inclusion criteria I1–I4 and exclusions E1–E4 from the plan were applied by the lead coder.",
+ "screening_limitations": [
+  "Families were formed by one coder; a symptom that recurred only in agent-to-agent messages, without a human report, title or issue, can be missed.",
+  "Human origin is recorded by activity events only from Oct 28; earlier user-role prose may include routed assignments.",
+  "Commits are frequently large batch commits that combine several attempts; commit-to-attempt attribution relies on timing, file overlap and executor reports."
+ ],
+ "retained": [
+  {
+   "saga_id": "S01",
+   "title": "Conversation and app responsiveness: slow open, refresh, send; busy errors; stalls",
+   "families": [
+    "F01_responsiveness"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "We’ve been having this issue over and over.",
+     "source": "thread 01a19db3-fbea-7e00-8a7c-7d0ce21a2e16 item 01a19db7-35c1-7d51-8f94-de0074c23d2c"
+    },
+    {
+     "quote": "opening up a conversation takes several seconds, which is just absolutely unacceptable.",
+     "source": "thread 01a185b0 original request"
+    }
+   ],
+   "inclusion_evidence": "Recurrence after claimed fixes recorded by the user (Nov 3: “why is not fully fixed?”); more than ten assignments Oct 7–Nov 10; Beads wgg7 reopened twice.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a117f0-c4f4-7493-8c45-5aeded71a58b",
+     "01a11827-be93-7f30-9239-ecd6a20c6a9d",
+     "01a118be-f458-7a61-bbb1-e215a255ecee",
+     "01a118c4-b285-76c2-a9a6-3e6a0e00b821",
+     "01a11a5d-8b4d-7303-aad0-5da989a9271d",
+     "01a11c16-b3ba-7d70-b1ac-2ba144619695",
+     "01a11cb1-8ae6-72f3-8e46-857052bfdd48",
+     "01a11d1b-e679-7be3-8f7d-c207f1ab361c",
+     "01a11d2b-e6fa-71a1-86ae-b0be73785cd6",
+     "01a11d38-1304-7cb2-87e2-7120dd5b704e",
+     "01a11dfa-2d86-7d53-afa3-c99fe6e72b03",
+     "01a11e9c-c8e0-7bb1-9e67-82a685f7bbd5",
+     "01a11ea2-8797-7e42-beae-60cd4ea4bb61",
+     "01a11eab-a4d1-7831-9c35-a0ca7b81795e",
+     "786fbe38-e60e-435f-8834-b26f1339bae4",
+     "01a12379-7e8a-7c73-93c5-89eb4fa962cd",
+     "01a123ac-796d-7e63-ab4f-5c7b44eb5cb7",
+     "01a123b4-2dd5-74d2-9300-76c88a32e0be",
+     "01a123b9-b81b-7a03-af46-bf114968b54e",
+     "01a123d8-bfdc-7bc1-9830-306482a0d643",
+     "01a12415-16ee-7932-b244-f3429e7d4c57",
+     "ebeb06d7-c917-42a5-9dc5-a449b491d244",
+     "68d46986-2dca-4a82-880c-68c3fc3f148f",
+     "01a1319a-0c14-7252-bb90-4703385aab75",
+     "a5385485-04e5-4565-a134-edccf0ec0057",
+     "01a1363c-faa0-7e30-8d53-0d873f65acb0",
+     "01a13668-d429-7900-bd8f-cdfc58b2dfa9",
+     "01a13695-2bd0-7190-bd8b-9000c1fceffc",
+     "01a13b1c-1c3c-78e0-80de-9994c7bda584",
+     "1ae18fe0-742d-4909-b6c8-c8c928a43513",
+     "66c1299d-aa3a-4d50-aa26-ee654688e5d9",
+     "9c510e26-355e-4847-8782-e0a5da8f54ca",
+     "7dd80968-83ce-4f6f-9d11-e33a15ce293b",
+     "1703988b-3e71-4a10-8a1d-da8a2cb7f04d",
+     "3fc7739d-656a-43c6-b621-9cfcb2740f32",
+     "01a13b4a-3277-7a93-ba9d-aa9657e2ad77",
+     "01a13b76-cc1f-7831-9e33-b9e3b56bd2a0",
+     "01a13b9d-c3dc-7bf1-ae30-536564408a92",
+     "01a13c09-95d0-7503-bbdf-28ed97871c0d",
+     "01a13c80-4d79-7b23-8398-9cc5167cff5f",
+     "01a13c80-8dbc-78d2-ace8-c88d09373a12",
+     "01a13fec-2aad-7d00-ae7e-f598f956adf8",
+     "01a14093-2a88-7fa3-8965-ff8a54ff443e",
+     "01a140fb-0daf-76d0-bc3e-0fcdbdfcdb29",
+     "01a140fd-2f11-7631-b15c-bb7dc5a8ecde",
+     "4b342519-0e78-4f56-a986-9bfad85f8199",
+     "01a14101-8fc6-7b01-8371-950dc291b6e9",
+     "01a1410e-4a0b-7e03-8011-2c2a8c5ba0d9",
+     "a0e1d362-6cbe-4648-b273-68b58f32f34e",
+     "01a14113-6930-7663-acde-01577ce16a08",
+     "01a14221-e113-7ec3-aaa6-e630e2b58c40",
+     "01a14225-b341-7d10-935c-318deae24a81",
+     "01a1424f-00c6-70e0-bb7b-e2769d9dce73",
+     "0b92ea54-2f6d-46d9-9b65-3e84ef780388",
+     "16ec7926-752d-4415-a26e-b3dcf74c93a0",
+     "ab3619e4-de06-4d72-b69b-6963eb49c785",
+     "a0db335a-1409-49b1-bfd3-b8f3c88d3807",
+     "01a1424f-3bdf-7b7b-bd1e-344d9ee975d4",
+     "01a1424f-4084-7da0-845d-8aec63a044b2",
+     "a7d65f73-b64c-425a-afb2-7364df079252",
+     "657167c0-bfd1-4c65-9fa1-7cf3d7a2fc08",
+     "01a1427f-8e37-7b61-9142-94076bfb856d",
+     "01a14284-18b8-7273-ae4d-84dd1478abcc",
+     "db2b0e4f-4bc9-4e1a-b449-27cbfbf68d36",
+     "b6372b1e-a365-4b3f-9e5e-0a73e0b0824f",
+     "917233c9-7dfd-401d-99c0-1feca567b090",
+     "74e0082f-830a-4c42-b91d-8d32a23d0577",
+     "01a14626-9e68-74c3-bf9c-a86975fa15ed",
+     "01a14626-a6c7-7702-9f27-8aa7bbb98840",
+     "01a146fb-5db8-7af2-820b-e72d0c2f70ab",
+     "01a159b3-d260-7641-8b8b-bf4fe9925a14",
+     "01a159c2-9156-7612-a5aa-73c94dde7a6d",
+     "01a159c6-1c99-7050-901d-3e57a1a14a11",
+     "01a15a4d-d5f8-7f92-9cc0-9dee24996900",
+     "01a15c9b-4b62-7fc2-8093-79c3ae8329e6",
+     "01a15f07-793a-7e00-911a-47d5d3a2e86a",
+     "7d724292-3c97-422a-8e38-ea0ef3c1a687",
+     "a553b064-ee3f-47d3-8eaa-ab619118dd86",
+     "bb6fa74d-3560-4c08-99c9-6960a96fa0f4",
+     "718bb5f2-5a76-4503-9c45-334b23375967",
+     "76874b85-90ef-4711-9a3f-cba8b10163be",
+     "c7424747-4619-4239-8945-aaecd37fb0a0",
+     "0974c2d1-4af0-4a3d-8df7-bbad579b7686",
+     "01a16bec-88ce-71e2-9c5d-abcb61e8a5c1",
+     "01a16ca9-7031-7bb0-898c-d0a16d7e594c",
+     "01a16f12-225b-7373-936e-7af83749e720",
+     "01a17c86-4bc4-7ce0-94d4-2b01c96883dc",
+     "01a17e2e-11bd-7330-ad3c-890013dabb9e",
+     "01a18072-2b3b-7ed0-9b9d-a81d1a522811",
+     "01a1838c-d862-7a71-b3d7-8894b2e83205",
+     "01a183ae-1d4e-7062-a6c6-f5180efe7bd8",
+     "ccd6297e-2414-4fb2-a654-b21fb378af6e",
+     "01a183d6-52dd-7142-bfad-d3fb2cce0604",
+     "01a183d6-64c1-7940-867b-1121bc76d673",
+     "5f9dcf76-c077-4b05-8ea8-359f8bd7f3c0",
+     "50805c88-4899-40b5-b146-20cd09820f4c",
+     "c6fcfb60-cb1f-4f84-8956-338aa030b3cc",
+     "5ffe2677-1f1f-4e8b-8928-1a141d364d27",
+     "01a18404-1f62-7da3-bfeb-05d6e9b6d1d9",
+     "01a18404-ca4b-7280-b519-0c6ea41e9cc6",
+     "01a18408-4625-7b21-9f39-ac8005e59d61",
+     "d12b889d-3a31-414a-973c-46452097287c",
+     "01a184b3-a61c-7fc0-b931-662a4eabe18d",
+     "01a184df-7e54-7c73-8a7b-0a6bbbd80400",
+     "01a184f5-1cf2-72e3-bc0b-7b2a6fd0fbb3",
+     "01a1853c-d7b4-71f1-b881-04eab04ebf0b",
+     "52aed1b1-0d0b-4655-8deb-6ae679066bed",
+     "904f9584-c9f2-467e-a131-197a2b12a1a8",
+     "c8653e0b-5a45-4084-a0b9-e6c1d91de0c2",
+     "01a1858a-b91e-7471-b841-f2272db62d46",
+     "806c35ac-e1cf-44b4-9b6b-10fd4acc1f5f",
+     "3a057fc0-297f-49c6-821b-88267bbcd60d",
+     "01a1858f-83d2-7341-9a38-bb11ee7e86f8",
+     "5b94fdc9-b95c-425a-b7a7-3d39be8f14f1",
+     "01a185b0-cfa0-71c0-b986-f803794bb456",
+     "01a185ba-5261-7fd0-ac7c-ecb42ec8ed87",
+     "01a185d0-d4cb-7f60-a49e-6730fcb0c2f6",
+     "ed695f49-366e-4612-8a51-81bebbf7e2ce",
+     "01a18885-47bb-7b50-ac7b-9cec989ed4b8",
+     "01a1888f-5b67-75e0-be05-aa07419d19b8",
+     "01a18891-5466-7e00-b883-38e89e356a3f",
+     "01a188d9-8d84-7cd2-a88a-b42a058ed139",
+     "01a188d9-92d0-7a41-8554-e46a05ea2ffa",
+     "3db5f295-6c89-4339-8bf8-1f40a75905cb",
+     "ad9c969d-e6e0-4f8a-b656-5ca95571b8ff",
+     "01a188da-f1ae-7162-b400-2426602b63f0",
+     "01a188dc-563d-7240-8a92-651bdceb3c04",
+     "01a18942-0841-7b32-83dd-304d6d718545",
+     "3fec0161-b6da-4789-8294-df03b7baf379",
+     "01a18953-88e2-7061-8cb3-a8b7daff6cab",
+     "01a18966-8b58-7f71-9a37-7cf1ce73d555",
+     "01a1896b-250d-7a32-b1d7-c28dee920dfc",
+     "ac3d9e3a-59ec-46f0-aae4-d61afe0ed12e",
+     "01a18e11-eea6-74a1-b9a1-d0731a209f6e",
+     "01a18e59-a01c-7420-807d-4c13280b8333",
+     "01a18f6e-be77-7123-a6e6-e6598ab3b476",
+     "01a18f75-7850-7a61-9873-3496c0d2739a",
+     "01a192b4-5833-7d20-8cb0-66f17f9724d6",
+     "01a192b5-1f51-7962-b5af-e768d00ef786",
+     "01a19db3-fbea-7e00-8a7c-7d0ce21a2e16",
+     "01a19dc3-993f-7210-8ec7-acee11f0376a",
+     "01a19dc3-d215-7b50-9eb8-449258926167",
+     "4039ed69-97b1-49d0-baa0-b10e4bc88bed",
+     "32efba4e-ab11-41ec-a057-dc7dad642f23",
+     "01a1c30c-b804-7171-b657-a955f9584ed3",
+     "01a1c315-e213-7e42-aa93-2b450429e8c2",
+     "01a1c325-f0c1-73f0-8f14-cc9171687ceb",
+     "192c7513-0daa-42ce-be55-03cb36572d54",
+     "b77b53fe-bf9a-4664-95dd-da45beb60e5c",
+     "f6f71498-d951-47fb-9c6f-eedf79f6da46",
+     "01a1c3b5-a439-711d-b9ca-d98f9ae0f471"
+    ],
+    "beads": [
+     "agent-coord-6z5.1",
+     "agent-coord-01bf",
+     "agent-coord-nax2",
+     "agent-coord-oklw",
+     "agent-coord-4j1y",
+     "agent-coord-wgg7",
+     "agent-coord-cgkq",
+     "agent-coord-dqo3",
+     "agent-coord-dylh",
+     "agent-coord-6z5.11",
+     "agent-coord-qd9",
+     "agent-coord-dtq",
+     "agent-coord-3vt",
+     "agent-coord-t5f",
+     "agent-coord-c65",
+     "agent-coord-6z5.2",
+     "agent-coord-jop",
+     "agent-coord-dl7",
+     "agent-coord-3kj",
+     "agent-coord-giy",
+     "agent-coord-j3t",
+     "agent-coord-zjr",
+     "agent-coord-lbs",
+     "agent-coord-6ha",
+     "agent-coord-t71.2",
+     "agent-coord-t71.1",
+     "agent-coord-g4j.2",
+     "agent-coord-g4j.1",
+     "agent-coord-c5j",
+     "agent-coord-xky0",
+     "agent-coord-jylh",
+     "agent-coord-42hb",
+     "agent-coord-zger",
+     "agent-coord-v74u",
+     "agent-coord-os6x",
+     "agent-coord-3u1c",
+     "agent-coord-81m1",
+     "agent-coord-4jzr",
+     "agent-coord-0jba",
+     "agent-coord-udh1.5",
+     "agent-coord-td0f",
+     "agent-coord-k7rh",
+     "agent-coord-5pkj",
+     "agent-coord-epgs",
+     "agent-coord-rox",
+     "agent-coord-c0j",
+     "agent-coord-lks",
+     "agent-coord-9ty",
+     "agent-coord-b5x",
+     "agent-coord-r79",
+     "agent-coord-a43",
+     "agent-coord-ez5",
+     "agent-coord-zrc",
+     "agent-coord-6g6",
+     "agent-coord-w19",
+     "agent-coord-5bg",
+     "agent-coord-inx",
+     "agent-coord-g8e",
+     "agent-coord-oob",
+     "agent-coord-6d0",
+     "agent-coord-7d8",
+     "agent-coord-emr.1",
+     "agent-coord-emr",
+     "agent-coord-3y7",
+     "agent-coord-cd6",
+     "agent-coord-ptt",
+     "agent-coord-e74",
+     "agent-coord-2y5",
+     "agent-coord-jqt",
+     "agent-coord-en8",
+     "agent-coord-eo7",
+     "agent-coord-7lt",
+     "agent-coord-6t5",
+     "agent-coord-oiy",
+     "agent-coord-7ai",
+     "agent-coord-9zi",
+     "agent-coord-pps",
+     "agent-coord-gqz",
+     "agent-coord-c75",
+     "agent-coord-jli"
+    ],
+    "commits": [
+     "577a1d6bd775daa5371ae1de2975401d5f48df38",
+     "fbcdef790783f6145537c2c6445d354db98610ea",
+     "556baa6368d2e551e87a141b6b7c51e3c96ee2d0",
+     "d8e2721ae8a95b895a40095e62099d0ec8861bed",
+     "3368b3b8719f4ab962acbfcc964a15b53fe57471",
+     "7ec4e8b576cb55a9eaa27d3ff423de54739f6457",
+     "8c806a73ce3ee66853c5f332c8503cdc62d19192",
+     "6739af17486b9128b2fc273d913b1f0536a248ee",
+     "91e808c18ce506fda86661b397567098394cbee8",
+     "9e8b87f3643e3409aaedca9370f8d57a380b452d",
+     "31fda657be9c80979898cbea321593da7a0a22f2",
+     "891f5d9652b5d6398ec1ab9432d71cc1b5b0ade1",
+     "097634cfe3778705c4d49218880f1ba4a6b3bef4",
+     "7955304e801db95638ec759f4b4a23dddddf7c07",
+     "a4d566eb83659085d44d44ea9210ba9d71a3c320",
+     "1f949aa879e5747f08ec1df08fe41a4c6d8c208f",
+     "8d311cb2b2a2878394fe035c4870c7eb30f35b9e",
+     "de983ec7b8d4dfc38b1a587045058dcafe7cc9fc",
+     "ddf996822b78d8e1549e872f81f01bca3d69b4fa",
+     "87c178c86a897bc686ff85933bb78e6dd79b3539",
+     "9905515be751ed0409f96a8f8d9a96e26594004e",
+     "1dcb5f3fd229119cb66d3cf8a994878d8e3ef9e6",
+     "2e9366d097903d2d5db48513489db8f45e817ddb",
+     "7622cffe16e5a50708b5dc60ac01367c744d7aa0"
+    ]
+   }
+  },
+  {
+   "saga_id": "S02",
+   "title": "Updating or rebuilding the app interrupts or stops running agents",
+   "families": [
+    "F02_update_interrupts_agents"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "I have a lot of agents running. Is there anyway to rebuild the app without interr[upting them]",
+     "source": "thread 01a183b1 original request"
+    }
+   ],
+   "inclusion_evidence": "Assignments Oct 6 (cd6), Oct 12, Oct 15, Oct 28, Oct 29, Nov 2, Nov 10; uninterrupted-upgrade work repeated after earlier rollout controllers.",
+   "held_out": true,
+   "matched_records": {
+    "threads": [
+     "01a112b8-46a1-7520-9dee-ae6e19f61899",
+     "01a1216b-0e18-7112-bf83-72ff95a88329",
+     "01a131aa-881d-70e3-99b0-82590fb3b8f5",
+     "01a131ab-6492-71b3-8031-2d387a624c2f",
+     "01a131ac-3cef-7fb1-84e2-c8d1a22b4f44",
+     "01a140f9-bc98-78c2-8af9-9c0c624daad8",
+     "01d4998b-ba6d-4eaa-90cb-ebed3ed9f24c",
+     "11835a11-b36b-41e8-bfc4-25ac830757df",
+     "01a1472a-b06f-7761-9978-31a287396aea",
+     "bb6fa74d-3560-4c08-99c9-6960a96fa0f4",
+     "76874b85-90ef-4711-9a3f-cba8b10163be",
+     "01a183b1-530e-7003-92fc-e221b6f8818f",
+     "01a183d6-52dd-7142-bfad-d3fb2cce0604",
+     "01a183d6-64c1-7940-867b-1121bc76d673",
+     "50805c88-4899-40b5-b146-20cd09820f4c",
+     "01a18404-1f62-7da3-bfeb-05d6e9b6d1d9",
+     "01a18404-ca4b-7280-b519-0c6ea41e9cc6",
+     "01a184b3-a61c-7fc0-b931-662a4eabe18d",
+     "01a184df-7e54-7c73-8a7b-0a6bbbd80400",
+     "01a184e0-eeef-79e3-b370-df3df8124a37",
+     "904f9584-c9f2-467e-a131-197a2b12a1a8",
+     "01a1858a-b91e-7471-b841-f2272db62d46",
+     "806c35ac-e1cf-44b4-9b6b-10fd4acc1f5f",
+     "3a057fc0-297f-49c6-821b-88267bbcd60d",
+     "01a1858f-83d2-7341-9a38-bb11ee7e86f8",
+     "5b94fdc9-b95c-425a-b7a7-3d39be8f14f1",
+     "ed695f49-366e-4612-8a51-81bebbf7e2ce",
+     "01a18891-5466-7e00-b883-38e89e356a3f",
+     "01a18942-0841-7b32-83dd-304d6d718545",
+     "3fec0161-b6da-4789-8294-df03b7baf379",
+     "01a1896b-250d-7a32-b1d7-c28dee920dfc",
+     "ac3d9e3a-59ec-46f0-aae4-d61afe0ed12e",
+     "97328b27-8730-4d1c-b40c-7248c854bbd4",
+     "1de3af46-7e98-4026-bb0b-467fa8684558",
+     "01a18dcb-fada-72d3-b9e2-d00c54bbd948",
+     "01a19d68-ec36-7723-bbfb-0324a46cf754",
+     "01a1c30c-b804-7171-b657-a955f9584ed3"
+    ],
+    "beads": [
+     "agent-coord-4gw5",
+     "agent-coord-01bf",
+     "agent-coord-oklw.2",
+     "agent-coord-oklw.1",
+     "agent-coord-oklw",
+     "agent-coord-jylh.1",
+     "agent-coord-dylh",
+     "agent-coord-cg5u",
+     "agent-coord-bz3o",
+     "agent-coord-mkw",
+     "agent-coord-r3l",
+     "agent-coord-zjr",
+     "agent-coord-3u1c",
+     "agent-coord-dvpe",
+     "agent-coord-81m1",
+     "agent-coord-4jzr",
+     "agent-coord-epgs",
+     "agent-coord-l8t",
+     "agent-coord-emr.1",
+     "agent-coord-2gw",
+     "agent-coord-cd6",
+     "agent-coord-3lf",
+     "agent-coord-29u"
+    ],
+    "commits": [
+     "a10995a0bb68f14795b9833bc55a1368d937ee10",
+     "6ed294cf91a568cccadce96217996d18065a075f",
+     "8a09b572d74034055d1f1cdab7f8e616b5e00d0f",
+     "5dcdce0f57ee8b91e6ee1bc47cb47c6b167bc423",
+     "35d9a72d8aa1417f1ae3a725cd568d6f128c77b5",
+     "8d311cb2b2a2878394fe035c4870c7eb30f35b9e",
+     "347ed4f549c5f733816209276ad8c718a874275f",
+     "e12978770f3f59cb2544b678c7b970db8132004d",
+     "b2475fccb56c43ffd90fed9ded4e647b80b68c89",
+     "2e82f6a3c766d05229563681438cd1b72316ca13"
+    ]
+   }
+  },
+  {
+   "saga_id": "S03",
+   "title": "Agents are not woken by coordination messages",
+   "families": [
+    "F03_wake_delivery"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "this agent was not able to be woken. can you figure out why",
+     "source": "thread 01a1bc76 original request"
+    }
+   ],
+   "inclusion_evidence": "Wake repairs Aug 31 (nb3, 1f7), Oct 8 (c65), Oct 9 (6v7), Oct 14, Oct 27, Oct 28, Oct 29 (udh1.2), Nov 8 (76f08df).",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a11d25-8d6f-7d30-b2a4-8b819bc38817",
+     "01a11dab-055a-7770-85b1-72190772fb4f",
+     "01a1216b-0e18-7112-bf83-72ff95a88329",
+     "01a121a9-4871-7cd3-a028-19795f29997f",
+     "01a12276-5aa9-7a11-acd5-a94e17e62e3a",
+     "01a12367-b08b-7280-a7d0-082f9ace3a9c",
+     "01a12367-f810-7a91-a003-a689b3c44d54",
+     "01a123d8-bfdc-7bc1-9830-306482a0d643",
+     "01a13185-984c-7272-952a-e32dbc34b958",
+     "01a13b7c-1a9b-7c00-b3b0-1c2098d6ab70",
+     "01a13c80-4d79-7b23-8398-9cc5167cff5f",
+     "01a13c80-8dbc-78d2-ace8-c88d09373a12",
+     "01a140f6-3aeb-7dd1-8419-44020f7a7c85",
+     "01a1410e-4a0b-7e03-8011-2c2a8c5ba0d9",
+     "a0e1d362-6cbe-4648-b273-68b58f32f34e",
+     "01a1415b-f16a-7361-bc5d-59dd6ab5b232",
+     "01a145df-2258-7531-9c63-720f447a426e",
+     "6ada507d-5c0e-4b89-88b7-dba8b2990ea3",
+     "bb6fa74d-3560-4c08-99c9-6960a96fa0f4",
+     "718bb5f2-5a76-4503-9c45-334b23375967",
+     "76874b85-90ef-4711-9a3f-cba8b10163be",
+     "0974c2d1-4af0-4a3d-8df7-bbad579b7686",
+     "01a16cdb-e9fc-7b92-aaca-cd5498a1fc67",
+     "01a17949-ede6-7831-8d07-a4565b00722c",
+     "01a17e49-0eef-73b0-9758-15f72bf774ae",
+     "50805c88-4899-40b5-b146-20cd09820f4c",
+     "01a184b3-a61c-7fc0-b931-662a4eabe18d",
+     "01a184df-7e54-7c73-8a7b-0a6bbbd80400",
+     "01a185d3-c8d9-73f2-8334-1b3d09f9832c",
+     "a9682ade-46f6-42d9-b36d-71da82a2e02a",
+     "01a1888f-a270-7133-bf0c-559338c91532",
+     "01a18dcb-fada-72d3-b9e2-d00c54bbd948",
+     "01a1bc76-8b20-7a63-841e-adeb20ac0a3e"
+    ],
+    "beads": [
+     "agent-coord-4tyt",
+     "agent-coord-udh1.2",
+     "agent-coord-i28m",
+     "agent-coord-dtq",
+     "agent-coord-7oo",
+     "agent-coord-2xm",
+     "agent-coord-c65",
+     "agent-coord-1f7",
+     "agent-coord-nb3",
+     "agent-coord-t71.3",
+     "agent-coord-t71.1",
+     "agent-coord-g4j",
+     "agent-coord-3lk",
+     "agent-coord-td0f",
+     "agent-coord-vzuk",
+     "agent-coord-rox",
+     "agent-coord-lks",
+     "agent-coord-9ty",
+     "agent-coord-i2h",
+     "agent-coord-6v7",
+     "agent-coord-stj",
+     "agent-coord-w87",
+     "agent-coord-6j8",
+     "agent-coord-j2j",
+     "agent-coord-67mp",
+     "agent-coord-s23"
+    ],
+    "commits": [
+     "76f08dfc6eeae4c620ce4b0addc0607cd53f64ac",
+     "24660df9ff187c176877a837da72592dae3d9728"
+    ]
+   }
+  },
+  {
+   "saga_id": "S04",
+   "title": "Displayed turn state contradicts what the agent is doing",
+   "families": [
+    "F04_turn_state_false"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "why does this show as blocked even though it working. fix it",
+     "source": "thread 01a124af original request"
+    }
+   ],
+   "inclusion_evidence": "mkw Oct 7, Oct 10, Oct 21 (7212b98), Oct 29 (i28m, ct5c), Nov 8 (76f08df).",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a12252-ccf1-77b3-931c-360f1894da8e",
+     "01a124af-7679-7b63-b5ef-c6ca7d421907",
+     "74e0082f-830a-4c42-b91d-8d32a23d0577",
+     "01a15f07-793a-7e00-911a-47d5d3a2e86a",
+     "bb6fa74d-3560-4c08-99c9-6960a96fa0f4",
+     "01a184b3-a61c-7fc0-b931-662a4eabe18d",
+     "01a1851a-c3ba-7653-a53a-553e9bb946f0",
+     "01a185d2-82ce-71a1-be7f-1c49b31e179d",
+     "01a18657-1d4d-7172-9b59-79aaeb1fdd6b",
+     "01a1888f-a270-7133-bf0c-559338c91532",
+     "a80f5bdb-e49e-4686-943f-632d3b36157c"
+    ],
+    "beads": [
+     "agent-coord-4gw5",
+     "agent-coord-i28m",
+     "agent-coord-bz3o",
+     "agent-coord-ct5c",
+     "agent-coord-mkw"
+    ],
+    "commits": [
+     "76f08dfc6eeae4c620ce4b0addc0607cd53f64ac",
+     "7212b9891ac086eb99fffe19846e8169ef01e99c"
+    ]
+   }
+  },
+  {
+   "saga_id": "S05",
+   "title": "Plugin refresh strands running sessions, hooks or interface assets",
+   "families": [
+    "F05_plugin_refresh_stranding"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "The documented Codex plugin refresh can remove the absolute cached hook executable loaded by an active session",
+     "source": "Beads agent-coord-46g description"
+    }
+   ],
+   "inclusion_evidence": "46g filed Aug 26 and still open; r3l recovery Oct 6; oob tooling Oct 7; udh1.4 Oct 29; recurrences recorded in later messages.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a118c4-b285-76c2-a9a6-3e6a0e00b821",
+     "01a11ecd-66d9-7b70-bd42-048d576fec42",
+     "01a14037-37cd-7833-a363-93c3da5da9d1",
+     "01a14104-ca65-7e33-81e9-61be9735c408",
+     "01a1410e-4a0b-7e03-8011-2c2a8c5ba0d9",
+     "a0e1d362-6cbe-4648-b273-68b58f32f34e",
+     "01a14113-6930-7663-acde-01577ce16a08",
+     "01a159b3-d260-7641-8b8b-bf4fe9925a14",
+     "7d724292-3c97-422a-8e38-ea0ef3c1a687",
+     "a553b064-ee3f-47d3-8eaa-ab619118dd86",
+     "bb6fa74d-3560-4c08-99c9-6960a96fa0f4",
+     "718bb5f2-5a76-4503-9c45-334b23375967",
+     "76874b85-90ef-4711-9a3f-cba8b10163be",
+     "01a1838d-c97b-7dc1-8744-2a533a498524",
+     "01a184b3-a61c-7fc0-b931-662a4eabe18d",
+     "01a185ba-5261-7fd0-ac7c-ecb42ec8ed87",
+     "01a188d9-8d84-7cd2-a88a-b42a058ed139",
+     "01a188d9-92d0-7a41-8554-e46a05ea2ffa",
+     "01a188dc-563d-7240-8a92-651bdceb3c04",
+     "01a1c30c-b804-7171-b657-a955f9584ed3"
+    ],
+    "beads": [
+     "agent-coord-w60",
+     "agent-coord-r3l",
+     "agent-coord-46g",
+     "agent-coord-t71.2",
+     "agent-coord-udh1.4",
+     "agent-coord-5pkj",
+     "agent-coord-dw4",
+     "agent-coord-zs1",
+     "agent-coord-oob",
+     "agent-coord-oiy",
+     "agent-coord-7ai",
+     "agent-coord-gqz",
+     "agent-coord-c75",
+     "agent-coord-jli"
+    ],
+    "commits": [
+     "d8e2721ae8a95b895a40095e62099d0ec8861bed",
+     "ea412da39ad8ceb48c6d805dab3d85f96b345612",
+     "9e8b87f3643e3409aaedca9370f8d57a380b452d",
+     "363be771a07641d5c4848f1b507f2f93861d5c87",
+     "5c636f90bec402d255f5bdc7c9c92942236435f5",
+     "273bb412dfdfa3b8ed6208240b6f9e90c0a72e21",
+     "9715f7979ad5e408cf923b738ff140a7ce2b7270",
+     "7e72a3ef836f85f0ffe89268e662181d652f6a0d",
+     "68c1c4b6a26cb93b4d944341a113de0699f51537",
+     "ce348ac9e46777ffc4bab2a40eb1fd119b3af8d0"
+    ]
+   }
+  },
+  {
+   "saga_id": "S06",
+   "title": "Open tabs and windows are not restored after relaunch",
+   "families": [
+    "F07_window_restoration",
+    "F28_mobile_tabs"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "when quitting and reopening a the app, we should restore the users tabs",
+     "source": "thread 01a13b4a original request"
+    },
+    {
+     "quote": "when if i like exit out of the app and then i reopen it, it does not keep my saved conversation [tabs]",
+     "source": "thread 01a17998 original request"
+    }
+   ],
+   "inclusion_evidence": "Oct 8 a0c1b73, Oct 14 request, Oct 26 e86c745 followed the same day by an iPad recurrence report, Oct 29 cancelled restoration then 86e7d3f/0ff902e, follow-ups afig/nrhc.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a13b4a-3277-7a93-ba9d-aa9657e2ad77",
+     "3fec0161-b6da-4789-8294-df03b7baf379",
+     "01a18953-88e2-7061-8cb3-a8b7daff6cab",
+     "01a1897a-b10a-7ae0-a6fa-de376457cd66",
+     "01a17998-4632-74b2-b233-d37c3edb7c4b"
+    ],
+    "beads": [
+     "agent-coord-dylh",
+     "agent-coord-cg5u",
+     "agent-coord-afig",
+     "agent-coord-nrhc"
+    ],
+    "commits": [
+     "0ff902e73e4535f108a28fde5c18b9045c0a7318",
+     "86e7d3f72e94a5f2fd3294e0ce061d10a4d3662c",
+     "4301c7ae5c46ac6e7bcdfa7cc4d8ae7e8b30f99f",
+     "351e11d6efb4bdee8175fd7471e00494899aeb28",
+     "e79bb83dd9429bcda182c7e5c2345ed7ae2e3eaf",
+     "8645b43a755062ba0b41af35c336d6f4046b705d",
+     "a0c1b7330ba2b859b2c6a336c3e5bdadebbe37f2",
+     "e86c745109f7ca0245d064b709cd9127724f78d1"
+    ]
+   }
+  },
+  {
+   "saga_id": "S07",
+   "title": "Composer loses focus after slash commands",
+   "families": [
+    "F08_composer_focus"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "it sets it to YOLO, but then it kicks m[e out of the input bar]",
+     "source": "thread 01a14270 original request"
+    }
+   ],
+   "inclusion_evidence": "43eb118 Oct 15, Oct 16 report and fix, Oct 20 recurrence report and f7ef9b6.",
+   "held_out": true,
+   "matched_records": {
+    "threads": [
+     "01a14270-24ae-7dc2-a93e-cf090f3aaa68",
+     "01a15aa5-84fe-7482-b118-698abc38abcc"
+    ],
+    "beads": [
+     "agent-coord-7yn"
+    ],
+    "commits": [
+     "f7ef9b652024331db0c3a363e65751ce65a07cc9",
+     "43eb1182f451187fe8ea540c00be34b1ed58761e",
+     "2fdd8ce2a9bdb9c836c25497ea1bb4648758116b"
+    ]
+   }
+  },
+  {
+   "saga_id": "S08",
+   "title": "Agents request permissions although the conversation is set to YOLO",
+   "families": [
+    "F09_permission_prompts"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "is asking for permissions even though I set the thread to yolo",
+     "source": "thread 01a18942 original request"
+    },
+    {
+     "quote": "why is this asking me for permissions even though it says it’s set to dangerously skip permissions.",
+     "source": "thread 01a192c6 original request"
+    }
+   ],
+   "inclusion_evidence": "Oct 29 regression fix, Oct 29 approval-wait visibility, Oct 31 recurrence on Claude.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a112ee-44b5-7761-9aaf-b447d3e4329f",
+     "01a14225-b341-7d10-935c-318deae24a81",
+     "01a18942-0841-7b32-83dd-304d6d718545",
+     "01a1896b-250d-7a32-b1d7-c28dee920dfc",
+     "01a192c6-ca86-7ff3-b778-9481e9b58efe"
+    ],
+    "beads": [
+     "agent-coord-gxu"
+    ],
+    "commits": []
+   }
+  },
+  {
+   "saga_id": "S09",
+   "title": "Attention badge counts disagree with visible attention",
+   "families": [
+    "F10_attention_indicators"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "this shows 2, but when i click on it there’s nothing in attention.",
+     "source": "thread 01a18a4a original request"
+    }
+   ],
+   "inclusion_evidence": "Oct 20 (two reports), Oct 27 fix c24ea14, Oct 30 recurrence; 8drs and 81m1 → 2734d00.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a15a1f-dd1e-7ae1-a524-88e55db4c7b4",
+     "01a15b0a-d6f7-71b1-8e92-bde53f275010",
+     "01a17f15-7cee-7c50-aa31-b71e5a0d09e7",
+     "01a18a4a-835a-7f81-aa3a-12277316f94e"
+    ],
+    "beads": [
+     "agent-coord-jop",
+     "agent-coord-81m1",
+     "agent-coord-8drs",
+     "agent-coord-9am",
+     "agent-coord-zr5u"
+    ],
+    "commits": [
+     "2734d003cddd4af186570aa01188025f8639fb56",
+     "c24ea14ed8cf0d09dc16a9b076bffaf93bf8178a",
+     "7826fb387abd6257f4ed1b9b2c9824555646f60c",
+     "33845e420e8ddd753848c905000320a0cebcc458"
+    ]
+   }
+  },
+  {
+   "saga_id": "S10",
+   "title": "Project switching is blocked by the pending-message warning",
+   "families": [
+    "F11_project_tabs"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "what’s causing this error? Wait for the current message or attachment to finish before switching projects.",
+     "source": "thread 01a14142 original request"
+    }
+   ],
+   "inclusion_evidence": "bc4e54b Oct 15 16:04, then reports at 20:30 and 20:50 (“Persistent switch warning regression”).",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a1222e-456f-78b3-b10c-9bca99100a14",
+     "01a13aa0-126e-7850-b42e-3d07540d3291",
+     "01a13b9f-3acd-71a3-a693-5eaad227de36",
+     "01a14128-461b-7b43-a44c-9aa8d269fe4e",
+     "01a14142-6002-7581-a944-ae8912dcaf2d",
+     "01a14154-ed81-75c3-a274-7a2ced7a0a19",
+     "01a15ab7-4d90-7c80-938a-b738335c098e",
+     "80db043c-5dbc-4820-aac5-b42e8b19c691"
+    ],
+    "beads": [],
+    "commits": [
+     "6cdd7fed5a5ec6d1962788ba446cc3cc8aad2dbb",
+     "a4d566eb83659085d44d44ea9210ba9d71a3c320",
+     "9ce72af6ee478b905d594dcd00aad1f1d49eb439",
+     "6eef390acc59e52c61af8cbc06777630ff53c588",
+     "0ac35c272b355d78be1d5330b56e074f5a4396fc",
+     "d80acde050b161bbd8e34cc9c67b97c2e7d3db78",
+     "bc4e54bd1cc3dc8f37f82918b520ffcad307a7df",
+     "7af96002d058ed3da619cdf5a381b388f9ee29a8",
+     "5bb594627fe7cb51ceeb02ba46910e93b0b065cd"
+    ]
+   }
+  },
+  {
+   "saga_id": "S11",
+   "title": "Wanted models are unavailable or rejected in the model selector",
+   "families": [
+    "F12_model_selection"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "when i type /model, only openai models are available. why is that?",
+     "source": "thread 01a14046 original request"
+    }
+   ],
+   "inclusion_evidence": "Oct 8 mobile Claude models, Oct 15 (three threads), Oct 29 new-thread model, Oct 31 Muse catalog; mechanism sharing to be confirmed in coding (A2).",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a11a35-0d2f-7251-8018-23355fcfbe79",
+     "01a12c3b-5a35-7d43-bea6-f45f95cbc89b",
+     "01a14046-70db-71c0-a655-6a93e67cd61f",
+     "01a140ea-92e0-7f82-a2c0-8bb8217622e2",
+     "01a140f0-ddfb-73c1-ac3a-c9b587d5b60c",
+     "01a18884-375a-7550-b6c7-f3b2e72b464a",
+     "01a18885-47bb-7b50-ac7b-9cec989ed4b8",
+     "01a18f9b-f8f8-7513-ad25-ca312ced8d85"
+    ],
+    "beads": [
+     "agent-coord-l1k",
+     "agent-coord-0r6"
+    ],
+    "commits": [
+     "197f70e3471586ecceb787935e9e7ca4bea058f0",
+     "d86b02bbcfc164db5c57c6e38c57e145154d5fb5",
+     "b8893286249e8497df12d324b954837a3f9df74a"
+    ]
+   }
+  },
+  {
+   "saga_id": "S12",
+   "title": "Expand Chat fails while the context sidebar is open",
+   "families": [
+    "F17_chat_expansion"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "if the side bar is expanded in the chat view, clicking expand chat doesn’t work at all. fix it. it’s broken.",
+     "source": "thread 01a189ed original request"
+    }
+   ],
+   "inclusion_evidence": "d99687c committed 18:21 Oct 29; user report 23:10; Beads z0kd reopened.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "df6a294b-d0ef-4a10-8738-109f1dca63c1",
+     "01a189ed-fd4b-78e0-9fae-7d0de9b2b3b5"
+    ],
+    "beads": [
+     "agent-coord-z0kd",
+     "agent-coord-1ws"
+    ],
+    "commits": [
+     "d99687c08d3374c86580f42f18a2e66498a92e93"
+    ]
+   }
+  },
+  {
+   "saga_id": "S13",
+   "title": "Clicking a notification does not open its thread",
+   "families": [
+    "F18_notification_routing"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "clicking them opens the app, but doesn’t open the corresponding thread.",
+     "source": "thread 01a12c33 original request"
+    }
+   ],
+   "inclusion_evidence": "dl7 Oct 7, 3vt Oct 8 claimed verified, Oct 11 recurrence on iPhone, Oct 29 desktop window routing.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a118be-f458-7a61-bbb1-e215a255ecee",
+     "01a118c4-b285-76c2-a9a6-3e6a0e00b821",
+     "01a12c33-4ef5-7b63-b915-116ae39844de",
+     "c8653e0b-5a45-4084-a0b9-e6c1d91de0c2",
+     "01a1888f-a270-7133-bf0c-559338c91532"
+    ],
+    "beads": [
+     "agent-coord-3vt",
+     "agent-coord-dl7",
+     "agent-coord-0d3w",
+     "agent-coord-26e"
+    ],
+    "commits": [
+     "363be771a07641d5c4848f1b507f2f93861d5c87",
+     "e71033d767af2e4d8fa996885f9779a9268b6f88"
+    ]
+   }
+  },
+  {
+   "saga_id": "S14",
+   "title": "The app fails to start or load",
+   "families": [
+    "F22_connection_failure"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "the app is in a restart crash loop can you fix.",
+     "source": "thread 01a11cc3 original request"
+    },
+    {
+     "quote": "the app isn't loading",
+     "source": "thread 01a189b9 original request"
+    }
+   ],
+   "inclusion_evidence": "Oct 7, Oct 8, Oct 14, Oct 29 (35d9a72), Oct 29, Oct 30 reports.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a11486-194a-7501-a949-00b0218c1a35",
+     "01a117b6-5511-7860-8131-a06f8509300d",
+     "01a11cc3-3976-7003-80ba-4fa3410f1925",
+     "01a13b94-9dd4-7b12-acf6-7956501ddaf7",
+     "01a13b96-fe3e-7d40-bc68-9242bc3c4c99",
+     "01a15c7c-26f2-7c82-83f5-0917bade0a16",
+     "01a189b9-7525-7980-9baa-5436827be0b4",
+     "01a18e59-a01c-7420-807d-4c13280b8333"
+    ],
+    "beads": [],
+    "commits": [
+     "35d9a72d8aa1417f1ae3a725cd568d6f128c77b5"
+    ]
+   }
+  },
+  {
+   "saga_id": "S15",
+   "title": "Non-Codex provider agents fail, stall or end prematurely",
+   "families": [
+    "F13_provider_kimi",
+    "F14_provider_antigravity",
+    "F15_provider_muse"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "Non-Codex agents kept dying. 6 of the 7 Gemini, Kimi and Muse agents failed or stalled.",
+     "source": "thread 01a1853c original request"
+    }
+   ],
+   "inclusion_evidence": "Antigravity 39cc781 Oct 16, 23329d1 Oct 20, eaef5b5 Oct 29; Kimi Oct 21 (62fbbfc); Muse Oct 31–Nov 1; Nov 10 Gemini failure report.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "68d46986-2dca-4a82-880c-68c3fc3f148f",
+     "01a13129-c7fe-7cb3-84f1-9aba1c6eb80c",
+     "01a1339b-5dbc-7d73-bf0f-f377deba83fc",
+     "01a135aa-2aac-7241-8458-e363fb7b7992",
+     "01a1363c-faa0-7e30-8d53-0d873f65acb0",
+     "01a13c86-46bb-7123-91c8-abe7b6f189b9",
+     "a7d65f73-b64c-425a-afb2-7364df079252",
+     "792c11b4-2906-4163-a392-26b7820bb4b4",
+     "01a14264-6e30-7e19-b985-fdfcc3e82c19",
+     "01a1429c-9537-7d83-9b1d-607b2d14948f",
+     "01a142c2-d901-7ea1-9e47-f757d35ddfa0",
+     "01a142f6-4f6d-7d73-8bbc-4a94244a750f",
+     "01a14626-a6c7-7702-9f27-8aa7bbb98840",
+     "01a157c8-c0a7-71c1-a35a-f329d12bae3e",
+     "01a157d1-e343-76a2-882c-6d9eb7192962",
+     "01a159b3-d260-7641-8b8b-bf4fe9925a14",
+     "01a15c11-2e4b-7582-a823-9cde5ca311f5",
+     "a553b064-ee3f-47d3-8eaa-ab619118dd86",
+     "bb6fa74d-3560-4c08-99c9-6960a96fa0f4",
+     "718bb5f2-5a76-4503-9c45-334b23375967",
+     "76874b85-90ef-4711-9a3f-cba8b10163be",
+     "c7424747-4619-4239-8945-aaecd37fb0a0",
+     "0974c2d1-4af0-4a3d-8df7-bbad579b7686",
+     "bb09190d-e20a-495a-8610-b510e28ceed1",
+     "01a18072-2b3b-7ed0-9b9d-a81d1a522811",
+     "d12b889d-3a31-414a-973c-46452097287c",
+     "01a18409-1407-7e80-ae84-3d302134ac3d",
+     "95021148-c2d8-45be-9b9f-ea8a007e94ab",
+     "01a18432-990f-7b32-8ba1-99395d9b9f19",
+     "01a1853c-d7b4-71f1-b881-04eab04ebf0b",
+     "01a12c40-c5e2-7440-8147-fda2d35e5ea3",
+     "ebeb06d7-c917-42a5-9dc5-a449b491d244",
+     "68d46986-2dca-4a82-880c-68c3fc3f148f",
+     "01a131d8-672f-7ba1-85bd-4646ff09f0c9",
+     "8f3d6a50-d988-4083-84f7-82d0f782de68",
+     "517eaeee-65f1-41af-9d08-080220dc0afc",
+     "01a1339b-5dbc-7d73-bf0f-f377deba83fc",
+     "01a135aa-2aac-7241-8458-e363fb7b7992",
+     "01a135e3-1c6c-70b1-803e-2bfc06400512",
+     "01a135fd-c4eb-7be3-8636-b93b5a0e039b",
+     "01a13b1c-1c3c-78e0-80de-9994c7bda584",
+     "1ae18fe0-742d-4909-b6c8-c8c928a43513",
+     "66c1299d-aa3a-4d50-aa26-ee654688e5d9",
+     "9c510e26-355e-4847-8782-e0a5da8f54ca",
+     "7dd80968-83ce-4f6f-9d11-e33a15ce293b",
+     "1703988b-3e71-4a10-8a1d-da8a2cb7f04d",
+     "3fc7739d-656a-43c6-b621-9cfcb2740f32",
+     "01a13c86-46bb-7123-91c8-abe7b6f189b9",
+     "01a1429c-9537-7d83-9b1d-607b2d14948f",
+     "01a142c2-d901-7ea1-9e47-f757d35ddfa0",
+     "01a142f6-4f6d-7d73-8bbc-4a94244a750f",
+     "74e0082f-830a-4c42-b91d-8d32a23d0577",
+     "b4cbb8c2-f6f3-4549-9054-2df1763eeb3f",
+     "01a14626-a6c7-7702-9f27-8aa7bbb98840",
+     "01a157d4-acb9-7a43-a981-38c47467080d",
+     "01a159b3-d260-7641-8b8b-bf4fe9925a14",
+     "76874b85-90ef-4711-9a3f-cba8b10163be",
+     "01a18072-2b3b-7ed0-9b9d-a81d1a522811",
+     "c6fcfb60-cb1f-4f84-8956-338aa030b3cc",
+     "d12b889d-3a31-414a-973c-46452097287c",
+     "01a18409-1407-7e80-ae84-3d302134ac3d",
+     "95021148-c2d8-45be-9b9f-ea8a007e94ab",
+     "01a18432-990f-7b32-8ba1-99395d9b9f19",
+     "01a184b3-a61c-7fc0-b931-662a4eabe18d",
+     "01a1853c-d7b4-71f1-b881-04eab04ebf0b",
+     "01a1888f-a270-7133-bf0c-559338c91532",
+     "01a1c3b4-ec67-7843-a8a2-4b05b49dd564",
+     "01a13bbb-6c68-75d2-9bcb-42185fd76781",
+     "01a13c80-4d79-7b23-8398-9cc5167cff5f",
+     "01a13c80-8dbc-78d2-ace8-c88d09373a12",
+     "01a13d01-1bc7-729b-852e-1c2735ab9f7d",
+     "01a13fee-1bec-7e33-98ef-028490b9ab02",
+     "3608f8c4-7ada-46a8-b3cd-fa368e6ae151",
+     "01a14264-6e30-7e19-b985-fdfcc3e82c19",
+     "01a1429c-9537-7d83-9b1d-607b2d14948f",
+     "01a142b2-25bc-7ef4-a6f8-5a977ead3d50",
+     "01a142c2-d901-7ea1-9e47-f757d35ddfa0",
+     "01a142f6-4f6d-7d73-8bbc-4a94244a750f",
+     "01a14343-9f38-7f51-97d0-882d35d75720",
+     "01a14626-9e68-74c3-bf9c-a86975fa15ed",
+     "01a159b3-d260-7641-8b8b-bf4fe9925a14",
+     "01a15a42-e9b8-7882-b4c0-ad801cdb1235",
+     "01a15a4c-1c96-7762-a8b5-593ad0e3c210",
+     "01a164cc-4429-7200-bbda-5de6d66a4297",
+     "01a18072-2b3b-7ed0-9b9d-a81d1a522811",
+     "c6fcfb60-cb1f-4f84-8956-338aa030b3cc",
+     "d12b889d-3a31-414a-973c-46452097287c",
+     "01a18409-1407-7e80-ae84-3d302134ac3d",
+     "95021148-c2d8-45be-9b9f-ea8a007e94ab",
+     "01a18432-990f-7b32-8ba1-99395d9b9f19",
+     "01a1853c-d7b4-71f1-b881-04eab04ebf0b",
+     "01a18f9b-f8f8-7513-ad25-ca312ced8d85",
+     "01a1c186-630d-7e12-8392-42aa9854f895"
+    ],
+    "beads": [
+     "agent-coord-qnjz",
+     "agent-coord-v74u",
+     "agent-coord-0ijn"
+    ],
+    "commits": [
+     "62fbbfc108e3d481e239c4ced2204c8931da430f",
+     "89f27f204116c8faba32e4212b176b0accd36cee",
+     "eaef5b5eb1646200c6c37064687f24f080c9930e",
+     "23329d1f2fbadf1220a18bcb63d9d365f12b7152",
+     "39cc781fde03f443456b31f523363b1b8866d03e",
+     "f23468f546cc0a7a01aa6fdd93e5459f3d59bcd3",
+     "ea0315715f48699ea06f0903b223b6fa994318b6",
+     "ff0c27d011648c53b36b6fbcf57b68b7bce1b278",
+     "8fdf9afec18c4676757f51be08d64e59613610a5",
+     "4a9dfc419fb0e79be4ff44b6411b2d1b7a0ce42d"
+    ]
+   }
+  },
+  {
+   "saga_id": "S16",
+   "title": "Agents must supply, or misattribute, their own session identity",
+   "families": [
+    "F29_coordination_session_identity"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "does an agent need to know it’s own session id to create a checkpoint? ... can we make it so that agents don’t have to pass that in?",
+     "source": "thread 01a1368b original request"
+    }
+   ],
+   "inclusion_evidence": "54c46da Oct 8, 6572455 Oct 13, udh1.4 and d0aa572 Oct 29; mechanism sharing to be confirmed in coding (A2).",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a11dab-055a-7770-85b1-72190772fb4f",
+     "01a1368b-52d4-75c3-8d5f-ba995ab24429",
+     "01a14626-9e68-74c3-bf9c-a86975fa15ed"
+    ],
+    "beads": [
+     "agent-coord-udh1.4",
+     "agent-coord-1sq"
+    ],
+    "commits": [
+     "d0aa5720c71859d04c897347dda994c63d2f9b96",
+     "65724551f76c848e0703a9b95cfcc73e8134c93e",
+     "54c46da4553dcd3585b76788a2231c1fb2ffa1bd"
+    ]
+   }
+  },
+  {
+   "saga_id": "S17",
+   "title": "macOS privacy prompts repeat after approval",
+   "families": [
+    "F30_macos_access_prompts"
+   ],
+   "symptom_statements": [
+    {
+     "quote": "I keep on getting this notifcation (and other similar access prompts) even after approving them the first time around.",
+     "source": "thread 01a1c304 original request"
+    }
+   ],
+   "inclusion_evidence": "033db19 Nov 9 19:24 claimed preservation of approvals; user recurrence report Nov 10 01:13. Observation window censored.",
+   "held_out": false,
+   "matched_records": {
+    "threads": [
+     "01a1c304-2037-7681-8981-08e12d21b8d7"
+    ],
+    "beads": [],
+    "commits": [
+     "033db19c25a1cafc0da53960c49dde3db43eef05"
+    ]
+   }
+  }
+ ],
+ "excluded": [
+  {
+   "candidate_id": "X01",
+   "family": "F06_native_smoke",
+   "criterion": "I3",
+   "reason": "Four native smoke failures (pps, uyy, 9zi, 0jba) were filed as separate open issues; the record holds no fix attempt or completion claim. Recurrence without attempts is noted as a tracking finding."
+  },
+  {
+   "candidate_id": "X02",
+   "family": "F16_checkpoint_links",
+   "criterion": "I3",
+   "reason": "Two parallel same-minute attempts (Kimi a553b064, Antigravity 76874b85) on one link-validation bug, fixed by 0c27de55 with no later recurrence. gq3 remains open after the fix."
+  },
+  {
+   "candidate_id": "X03",
+   "family": "F19_history_missing",
+   "criterion": "E1",
+   "reason": "Distinct symptoms: missing messages (lbs, zjr, fixed Oct 6), retention questions, Claude messaging, terminal handoff."
+  },
+  {
+   "candidate_id": "X04",
+   "family": "F20_tests_ci",
+   "criterion": "E1/E4",
+   "reason": "Test runtime and CI failures are not one user-visible symptom; dqo3 and 4duf have no attempt."
+  },
+  {
+   "candidate_id": "X05",
+   "family": "F21_source_drift",
+   "criterion": "I3",
+   "reason": "One reconciliation attempt (Oct 29). Used as delivery evidence when coding other sagas."
+  },
+  {
+   "candidate_id": "X06",
+   "family": "F23_scheduled_continue",
+   "criterion": "I3",
+   "reason": "One fix (a9b29eb6); td0f remains open after it."
+  },
+  {
+   "candidate_id": "X07",
+   "family": "F24_skill_autocomplete",
+   "criterion": "I3",
+   "reason": "Feature (94711588) then one defect fix (61888236); no recurrence after the fix."
+  },
+  {
+   "candidate_id": "X08",
+   "family": "F25_thread_close",
+   "criterion": "E1/E2",
+   "reason": "Different close features and defects across seven weeks."
+  },
+  {
+   "candidate_id": "X09",
+   "family": "F26_duplicate_tabs",
+   "criterion": "E1",
+   "reason": "Lexical match on 'duplicate' across unrelated defects."
+  },
+  {
+   "candidate_id": "X10",
+   "family": "F27_hover_preview",
+   "criterion": "E2",
+   "reason": "Feature iteration; one flicker defect fix (b632f7c1)."
+  },
+  {
+   "candidate_id": "X11",
+   "family": "F11_project_tabs (misplaced tab)",
+   "criterion": "I3",
+   "reason": "Three commits within 22 minutes on Oct 28–29 (6eef390a, 9ce72af6, a4d566eb) form one attempt."
+  },
+  {
+   "candidate_id": "X12",
+   "family": "other workspaces",
+   "criterion": "E3",
+   "reason": "Threads rooted in other repositories (all except 641 Agent Coord threads and 167 parent-directory threads that reference Ribbon Field)."
+  },
+  {
+   "candidate_id": "X13",
+   "family": "routine operations",
+   "criterion": "E2",
+   "reason": "Repeated deploy, rebuild and commit requests ('deploy again', 'Rebuild Ribbon Field app', 'Commit and push changes') are routine operations, not repeated repairs. Rebuild failures are coded in S02 or S14."
+  },
+  {
+   "candidate_id": "X14",
+   "family": "hide empty Agents tab",
+   "criterion": "I3",
+   "reason": "Two parallel same-minute implementations (Kimi 7d724292, Antigravity 718bb5f2) of one feature request."
+  }
+ ],
+ "held_out_draw": {
+  "rule": "random.Random(20261109).sample(sorted retained saga IDs except S01, 2)",
+  "population": [
+   "S02",
+   "S03",
+   "S04",
+   "S05",
+   "S06",
+   "S07",
+   "S08",
+   "S09",
+   "S10",
+   "S11",
+   "S12",
+   "S13",
+   "S14",
+   "S15",
+   "S16",
+   "S17"
+  ],
+  "drawn": [
+   "S02",
+   "S07"
+  ],
+  "contamination_disclosure": "Before the draw, the lead coder read the refresh-timeout README, whose section 5 describes the latest S02 attempts (agent-coord-jylh, jylh.1, oklw). Predictions are therefore stated as rules computed from the derivation set, and S02 and S07 are coded by an independent agent that does not receive the predictions."
+ },
+ "screening_family_matches": "Regenerate with screen_sagas.py; the matched record lists above are the regex matches, a superset of the attempts coded."
+}

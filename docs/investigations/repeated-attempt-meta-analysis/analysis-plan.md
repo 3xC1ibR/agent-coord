@@ -192,4 +192,6 @@ protocol.
 
 | Time (UTC) | Change | Reason |
 | --- | --- | --- |
-| — | — | — |
+| 2026-11-10 05:05 | **A1.** Rubric 1.1 adds primary code `new_defect` (order 2a) and flag `regression_of_fix`. For the hypotheses, `new_defect` counts as support for H2 (distinct defects under one label) and against H1. | During screening, before any attempt was coded, recurring symptoms such as "the app will not start" were found to arise from defects introduced after an earlier fix had held. Version 1.0 had no code for that case and would have forced it into `narrower_scope` or `incomplete_fix`. |
+| 2026-11-10 05:05 | **A2.** A saga retained at screening that fails I3 once its attempts are delimited during coding is moved to excluded, with the reason logged in `saga-inventory.json`. | Screening relies on titles, requests and issue records; attempt boundaries are fixed only during coding. |
+| 2026-11-10 05:05 | **A3.** Attempt boundaries for orchestrated work: agents spawned by an attempt's executor for that assignment (implementers, reviewers, validators) belong to the same attempt. A new human assignment in the same thread after an acceptance claim starts a new attempt. When the user sends one request to several conversations, each conversation is a parallel attempt and is flagged `parallel_duplicate`. | Clarifies the rubric's boundary rule for app-agent orchestration before coding. |
