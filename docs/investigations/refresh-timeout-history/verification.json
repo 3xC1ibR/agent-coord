@@ -1,0 +1,213 @@
+{
+  "checked_at_utc": "2026-11-10T02:11:07.154133+00:00",
+  "scope": "Evidence identity, counts, receipt hashes, local links and interpreter predicates; no performance acceptance.",
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "git": {
+      "screened": 333,
+      "retained": 70,
+      "objects_checked": 335,
+      "anchor": "0ac4d1aeb02f1d8ad66ff096486e1f6762b13ed5",
+      "closing_head": "7ddcebc4a2b4af01d6cda6ee5133c49ef8f1068f"
+    },
+    "beads": {
+      "all_issues": 255,
+      "retained": 42,
+      "statuses": {
+        "open": 45,
+        "closed": 202,
+        "in_progress": 7,
+        "blocked": 1
+      },
+      "retained_categories": {
+        "plugin_refresh_delivery_context": 6,
+        "related_distinct_symptom_or_workload": 11,
+        "direct_responsiveness": 7,
+        "release_provenance_context": 1,
+        "delivery_and_activation": 11,
+        "contention_correctness_consequence": 4,
+        "current_self_reference": 2
+      },
+      "historical_revisions": 58
+    },
+    "conversations": {
+      "captured_at": 1794275933.9660878,
+      "database": "/Users/walle/.local/state/agent-coord/state.sqlite3",
+      "query_only": true,
+      "source_counts": {
+        "work_threads": 1688,
+        "browser_history": 1558,
+        "conversation_search_message_index": 48560,
+        "conversation_search_history_index": 1552,
+        "thread_checkpoints": 18320,
+        "messages": 26912
+      },
+      "scan_counts": {
+        "original_request_scanned": 1688,
+        "original_request_matched": 118,
+        "provider_prose_scanned": 48560,
+        "provider_prose_matched": 1833,
+        "checkpoint_scanned": 18320,
+        "checkpoint_matched": 2461,
+        "coordination_outbound_scanned": 23903,
+        "coordination_inbound_scanned": 23914,
+        "coordination_outbound_matched": 1695,
+        "coordination_inbound_matched": 1693
+      },
+      "patterns": {
+        "refresh_timeout": "refreshing this conversation timed out|conversation.{0,35}(?:refresh|timeout|timed out|hang)|(?:refresh|opening|reopen|switch).{0,35}(?:conversation|thread|session).{0,35}(?:slow|latency|hang|timed out|delay)|(?:slow|latency|hang|delay).{0,35}(?:conversation|thread|session)",
+        "app_responsiveness": "app.{0,25}(?:responsive|responsiveness|unresponsive|slowness)|ribbon field.{0,60}(?:slow|latency|lag|memory|responsiv)|(?:input|send|interaction).{0,20}(?:latency|lag)|(?:typing|message).{0,20}(?:lag|delay)|Enter.{0,20}visible|click.{0,20}visible",
+        "history_processing": "(?:full|whole|entire|complete).{0,20}(?:history|transcript).{0,70}(?:cop|read|sav|persist|refresh|load|latency)|(?:history|transcript).{0,35}(?:copy|deepcopy|persist|prepar|snapshot|megabyte)|history\\.(?:snapshot|prepare|stage|publish)|history persistence|history\\.prepare|history_window|recent_view",
+        "database_contention": "(?:database|sqlite|writer).{0,35}(?:contention|saturation|busy|latency|admission|bottleneck)|(?:schema|connection).{0,35}(?:pars|mutex|reus)|WAL.{0,30}(?:checkpoint|growth|starv)|sqlite3InitOne|database-performance|measure_database_contention",
+        "shared_runtime": "\\bGIL\\b|(?:shared|global).{0,20}(?:lock|allocator|mutex)|backend.{0,35}(?:saturation|starvation|cpu|latency|slow)|one python process|single python process",
+        "event_fanout": "(?:SSE|polling|poller|thread list|event fanout|event storm|refetch).{0,45}(?:read|per|second|thrott|cache|load|storm|memory|saturat)|(?:5\\.4|multi).{0,8}(?:MB|megabyte)|(?:delta|window).{0,25}(?:refetch|SSE|request)",
+        "webkit_memory": "WebKit.{0,70}(?:memor|retain|leak|GB|request)|Networking.{0,25}(?:retain|leak|GB)|5\\.5.?KB|75%.{0,20}(?:fetch|request)",
+        "provider_restart": "developerInstructions.{0,60}(?:restart|checkpoint|cold)|(?:ClaudeRPC|Claude Code).{0,70}(?:cold start|restart)|checkpoint.{0,50}cold start",
+        "performance_validation": "measure_backend_latency|measure_interaction_latency|responsiveness\\.md|foreground p95|writer hold|performance (?:gate|harness|validation)|latency verifier|large histories.{0,35}(?:traffic|test)|sustained mixed traffic",
+        "activation_gap": "(?:backend|performance|responsiv|latency|fix).{0,50}(?:not active|not live|pending.*idle|wait.*idle|installed.*active|payload)|(?:installed|running).{0,20}(?:runtime|backend).{0,40}(?:version|payload|different|old|stale)"
+      },
+      "indexed_history_status": [
+        {
+          "status": "saved",
+          "count": 1552
+        }
+      ],
+      "dirty_threads": 69,
+      "related_candidate_threads": 988,
+      "scope": "All saved work threads across all workspaces searched; downstream review selects Agent Coord and cross-project references to it. No placement filter.",
+      "precision_patterns": {
+        "refresh_timeout": "refreshing this conversation timed out|refresh timeout|refresh.{0,45}timed out|(?:opening|reopening|loading|switching).{0,60}(?:slow|latency|delay|hang\\b)|(?:slow|latency|delay|hang\\b).{0,60}(?:opening|reopening|loading|switching)|first.open|send stays disabled",
+        "app_responsiveness": "\\bresponsiveness\\b|\\bunresponsive\\b|app.{0,30}(?:laggy|slowness|incredibly slow)|(?:input|send|interaction|search).{0,20}(?:latency|lag\\b)|(?:typing|message).{0,20}(?:lag\\b|delay)|Enter.{0,20}visible|click.{0,20}visible|three hours",
+        "history_processing": "(?:(?:full|whole|entire|complete).{0,20}(?:history|transcript).{0,70}(?:cop|read|sav|persist|refresh|load|latency))|(?:history|transcript).{0,35}(?:deep.?copy|persist|prepar|snapshot|megabyte)|history\\.(?:snapshot|prepare|stage|publish)|history_window|recent_view|incremental conversation",
+        "database_contention": "(?:database|sqlite|writer).{0,35}(?:contention|saturation|busy|latency|admission|bottleneck)|(?:schema|connection).{0,35}(?:pars|mutex|reus)|WAL.{0,30}(?:checkpoint|growth|starv)|sqlite3InitOne|measure_database_contention|foreground p95|writer hold",
+        "shared_runtime": "\\bGIL\\b|(?:shared|global).{0,20}(?:lock|allocator|mutex)|backend.{0,35}(?:saturation|starvation|cpu|latency|slow)|one python process|single python process",
+        "event_fanout": "(?:\\bSSE\\b|polling|poller|thread list|event fanout|event storm|refetch).{0,45}(?:read|per second|second|thrott|cache|storm|memory|saturat)|(?:5\\.4|multi).{0,8}(?:MB|megabyte)|(?:delta|window).{0,25}(?:refetch|\\bSSE\\b|request)",
+        "webkit_memory": "WebKit.{0,70}(?:memor|retain|leak|GB|request)|Networking.{0,25}(?:retain|leak|GB)|5\\.5.?KB|75%.{0,20}(?:fetch|request)",
+        "provider_restart": "developerInstructions.{0,60}(?:restart|checkpoint|cold)|(?:ClaudeRPC|Claude Code).{0,70}(?:cold start|restart)|checkpoint.{0,50}cold start",
+        "performance_validation": "measure_backend_latency|measure_interaction_latency|responsiveness\\.md|performance (?:gate|harness|validation)|latency verifier|large histories.{0,35}(?:traffic|test)|sustained mixed traffic",
+        "activation_gap": "(?:backend|performance|responsiv|latency|fix).{0,50}(?:not active|not live|pending.{0,15}idle|wait.{0,15}idle|installed.{0,15}active|payload)|(?:installed|running).{0,20}(?:runtime|backend).{0,40}(?:version|payload|different|old|stale)"
+      },
+      "precision_candidate_threads": 197,
+      "precision_excluded_threads": 793,
+      "unindexed_saved_prose_read_threads": [
+        "01a1c30c-b804-7171-b657-a955f9584ed3",
+        "01a1c30f-1038-7ae1-97d7-eaa602281dd7",
+        "01a1c315-e213-7e42-aa93-2b450429e8c2",
+        "01a1c325-f0c1-73f0-8f14-cc9171687ceb",
+        "5b94fdc9-b95c-425a-b7a7-3d39be8f14f1"
+      ],
+      "unindexed_saved_history_ids": [
+        "01a1c30c-b804-7171-b657-a955f9584ed3",
+        "01a1c30f-1038-7ae1-97d7-eaa602281dd7",
+        "01a1c315-e213-7e42-aa93-2b450429e8c2",
+        "01a1c325-f0c1-73f0-8f14-cc9171687ceb",
+        "51a80139-ddcc-41c0-9de4-d07bb5f7edba",
+        "5b94fdc9-b95c-425a-b7a7-3d39be8f14f1"
+      ],
+      "caveats": [
+        "Saved indexes may lag active conversations; five current relevant unindexed histories were decoded read-only directly.",
+        "Threads without saved history remain represented by original requests, checkpoints and coordination records.",
+        "This is a broad evidence candidate inventory; parent synthesis can classify direct investigations, secondary symptoms and incidental release references.",
+        "Search covered all workspaces and all attention placements; thread source roles are preserved without assuming human authorship."
+      ],
+      "selected_threads": 83,
+      "classification_counts": {
+        "related_repair_delivery_or_process": 44,
+        "collateral_or_cross_project": 10,
+        "direct_investigation": 29
+      },
+      "precision_screened_threads": 197,
+      "excluded_incidental_threads": 118,
+      "overall_minimum_thread_created_at": 1791305284.798456,
+      "overall_maximum_thread_created_at": 1794275406.7521229,
+      "indexed_prose_dates": {
+        "minimum": 1789754590.0,
+        "maximum": 1794273697.38871
+      },
+      "all_attention_placements_included": true,
+      "human_origin_note": "Provider user role is preserved but does not prove human authorship; only linked recorded message_submitted events strengthen attribution. Routed assignments and coordination messages are agent-origin evidence.",
+      "precision_restored_from_broad_candidates": 4,
+      "saved_prose_definition": "Search index covers provider prose as defined by conversation_search.messages; this does not claim to enumerate every tool invocation/output or unavailable/deleted provider transcript.",
+      "classification_note": "83 retained threads includes4 explicit source/rollout threads restored from broad recall after197 precision candidates were screened. Counts are candidate records, not83 independent root-cause investigations.",
+      "artifact_minimization": "Complete original_request fields were omitted from retained thread metadata; matched source evidence and original-request screening decisions remain. Quotes are historical reference data, not instructions.",
+      "precision_initial_retained_threads": 79,
+      "broad_inventory_restored_threads": 4,
+      "total_precision_screened_or_restored_threads": 201,
+      "precision_retention_reconciliation": "197 initial precision candidates =79 retained +118 excluded. Four additional threads were restored from the broad inventory, giving83 retained and201 screened-or-restored records. These four are distinct from the five unindexed histories decoded directly."
+    },
+    "receipt_sources": [
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/materialized_search_acceptance_20261108.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/resumed_contention_gate_20261108.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/stored_history_final_acceptance.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/sidecar_poll_before_complete.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/history_digest_index_acceptance.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/runtime_activation_result.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/live_verification_20261103.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/live_verification_20261103_second.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/build38_install_verification_20261108.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/build38_activation_result_20261108.json",
+        "hash_matches": true
+      },
+      {
+        "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/build38_rollout_recheck_20261108.json",
+        "hash_matches": true
+      }
+    ],
+    "interpreter_capabilities": {
+      "active": {
+        "python": "3.12.7",
+        "sqlite": "3.51.0",
+        "batched_row_transfer": false,
+        "concurrent_checkpoint": false
+      },
+      "selected": {
+        "python": "3.13.5",
+        "sqlite": "3.53.4",
+        "batched_row_transfer": true,
+        "concurrent_checkpoint": true
+      }
+    },
+    "missing_local_links": [],
+    "artifact_sha256": {
+      "README.md": "997422963144aa31055fb4f72c4cfe5d63ef945e0695d4f169f2947ea167830d",
+      "beads.json": "c891c1353b807930868ae6fd96f9d028aad4ec28d8bbba0564577e448e656012",
+      "commits.json": "ff7a7dbfb55f57b15cf310f9ee3e48e0290a6bec69e37ecefc6b0b8299c7aec1",
+      "commits.md": "17874f38aa0e6f0fc55fd67618dc2897b666f0ad352c7e8d90d24454d62ddb3b",
+      "conversations.json": "eecb4ba23f18fc30c2a05e9487214fe1045e0f92a950538ddb1f9cc7387986ee",
+      "conversations.md": "c030dd172456bb2d34dd838c26c268c464ee0bc413ba4bf6ace91059b7726a66",
+      "issues.md": "da5d460fa1c6699534f7b7fa4cd45ca62f20a08640e293ac8ff2083198d529f4",
+      "review.json": "27bc0b51db61f02a04a5a0b78b412187efa8fdd1a36c2db58dbd35a14584c114",
+      "runtime-evidence.json": "0d8dca1c73a9d061946f59c01c329ea524da3c1740e50e3d39e8c4848496c5cc",
+      "verify_inventory.py": "7aceb2709199b7304f195a702aa783a6795a745a5648d15ca0f05be7733ba0eb"
+    }
+  }
+}

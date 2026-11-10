@@ -1,0 +1,2313 @@
+{
+  "observed_at": "2026-11-10T01:58:38.535165+00:00",
+  "runtime_status": {
+    "database": "/Users/walle/.local/state/agent-coord/state.sqlite3",
+    "instance": "ad801beb7a054b8a8283ce37df79d26a",
+    "protocol": 1,
+    "schema": 2,
+    "pid": 49958,
+    "payload": "/Users/walle/.local/state/agent-coord/.state.sqlite3.runtime/payloads/a945946fd799bf5693d47dd8295eb305491811c8d1b0a3ba5c7e9df68de4bb80",
+    "client_requests": 1,
+    "runtime_updates": 1,
+    "status": "serving",
+    "url": "http://127.0.0.1:49207/",
+    "pending": "/Users/walle/.local/state/agent-coord/.state.sqlite3.runtime/payloads/5fe1cc546988d8b49249069256194fc76fc7bed2c6d0d34d5405f22611d05815",
+    "upgrade_error": null,
+    "paused": false,
+    "busy": [
+      "admitted operations",
+      "active turns",
+      "pending provider bookkeeping"
+    ],
+    "update": {
+      "id": "d3f1c6be-f20c-4a1e-a4fe-215fe1590f9e",
+      "phase": "failed",
+      "previous": "/Users/walle/.local/state/agent-coord/.state.sqlite3.runtime/payloads/a945946fd799bf5693d47dd8295eb305491811c8d1b0a3ba5c7e9df68de4bb80",
+      "target": "/Users/walle/.local/state/agent-coord/.state.sqlite3.runtime/payloads/fe78d46ace5b47a30e94145278979f1623ff6af904d2e7ad7258c35f96224852",
+      "source_instance": "ad801beb7a054b8a8283ce37df79d26a",
+      "database": "/Users/walle/.local/state/agent-coord/state.sqlite3",
+      "created_at": 1794271583.79953,
+      "error": "Conversation bookkeeping could not be saved; update deferred.",
+      "updated_at": 1794271585.328906,
+      "recovery": {
+        "counts": {},
+        "conversations": []
+      }
+    }
+  },
+  "runtime_payloads": [
+    {
+      "payload": "e10b2f3cc92f886aa9b222e3055d9aa663c6f63842ee72b20682c6696424b796",
+      "runtime_version": "0.1.3+5",
+      "python": "runtime/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-28T23:23:23+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "5df365eea17cee0379e2990ebeb707ff9305e130eb0e8b57ea2f1a38d532dedf",
+      "runtime_version": "0.1.3+7",
+      "python": "runtime/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T01:54:14.930644+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "3800bbb978c31b541748ac822122aad43677c80a2033bcc2d60abd73c95f1981",
+      "runtime_version": "0.1.3+8",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T02:55:33.765068+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "0510b54a411618d8452a0fea9ad2f838eee677004fc455798c596a7cfcc9f30f",
+      "runtime_version": "0.1.3+9",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T03:06:55.031444+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "6b590466e5b2213b67f0293f6ebf4fd06833eb98ddf11919c5961675b7464508",
+      "runtime_version": "0.1.3+10",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T03:54:06.951038+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "a50be6405e77faababe009bc687f29ec8959948a2966ff8e2bdb15c7862cadc3",
+      "runtime_version": "0.1.3+11",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T04:05:43.531829+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "8cb3129c1fb8f5d97aab064cf6068cd38874aa5d53f9a726e5c4bb92b8d52e89",
+      "runtime_version": "0.1.3+12",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T05:31:25.821805+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "cc435ec350207720a430bad2340de4089b9e83dc88ed24e6a867c4650ac76c99",
+      "runtime_version": "0.1.3+13",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T05:41:39.460505+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "e2006ebb9f6ffb868cbff30faab21ae3be82c3c15b5c254ae3ecc1361a9c2b04",
+      "runtime_version": "0.1.3+14",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T05:57:17.829952+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "af753fb7b5ba8674da1bf16df7e0522705da74a15eea6e4ffa4f751a19892756",
+      "runtime_version": "0.1.3+15",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T06:00:09.485970+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "852d522c9bc136fcac334385acaa2841b93a59ff3d143b7b8bcc4a7f0b23a5b7",
+      "runtime_version": "0.1.3+16",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T06:21:06.073550+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "46cfe859f04d044a88e6727641ea71e2b42b8851a863f3ddb22f16d624e5f098",
+      "runtime_version": "0.1.3+17",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T06:52:31.735286+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "8065b77913795f2a99a04be96275cc99793fe975fd5aa758c65e4889e0f04d6d",
+      "runtime_version": "0.1.3+18",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T17:36:48.343705+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "39ca4495697d5870821262366d7e224768e4899f8562f233a992c80ef171fe7f",
+      "runtime_version": "0.1.4+19",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T21:18:11.343585+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "cb9e296d1b2813adb58f289ff486252fbe71f29170da7d2be81218e2675dc7e9",
+      "runtime_version": "0.1.4+20",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T21:42:34.112532+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "96bd49406cd59a33a7ff09dafd07cf6965e0c3255f020f903df4fc689c5d65a1",
+      "runtime_version": "0.1.4+21",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T22:11:38.738092+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "583699bca83ba9befb91c293357a80de20e4a12acf4ff8d9171ada26b5380996",
+      "runtime_version": "0.1.4+22",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T22:15:20.265240+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "234fa4e833527cc018031d55c571a094c245bb621e0857e68ab2adf2aef42f0f",
+      "runtime_version": "0.1.4+23",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T22:55:59.586631+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "9cca60b2f51310b57476d8d10daa582ddd389d0853b54b5eb4721d74bd4f043c",
+      "runtime_version": "0.1.4+24",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-29T23:22:51.147324+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "c4489ac3f51f29052b9fc632eeda65d597a3a2f278685684bef581cc305b26b4",
+      "runtime_version": "0.1.4+25",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-30T00:59:53.860962+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "cedbca46a848470f6e68351e92f20841796d529afd5f5a7a5eff725730f21fa1",
+      "runtime_version": "0.1.4+26",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-30T01:18:04.223112+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "8c1e811816233d54b2d560f23405e487e170f8ecadf379bbeaef0661e02da992",
+      "runtime_version": "0.1.4+27",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-30T19:38:25.554431+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "fe035df1e3e7cf3f0fd934f783cd11765353bbe59eb747446df65251c807bdc8",
+      "runtime_version": "0.1.4+28",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-30T19:51:31.958240+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "32fb4800544772afaa1938ded1b3751fd745117db9bdfc1d1c42e78d8da69f64",
+      "runtime_version": "0.1.4+29",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-30T20:18:56.106528+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "71c835edff94abbebebebb154ae125b6d86b0a8b29f602807028c61e0967f836",
+      "runtime_version": "0.1.4+30",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-30T20:39:31.619920+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "91bfaffadacadc1303bc4d6727f0c53f7397aa0ce3499104bd1cfce0bfdbe3a1",
+      "runtime_version": "0.1.4+31",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-31T01:52:19.013527+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "2b33b0fd8ffb26b1ec25e2188f1c9b545c3f9cf120f6bed0ce7e032f967ec9a5",
+      "runtime_version": "0.1.4+32",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-31T16:44:12.019917+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "af1eee6e4446a3b6136e7580e901ac88a1e4bdf1e66affb864b1c57c7eb2d664",
+      "runtime_version": "0.1.4+33",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-10-31T17:25:39.519629+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "bff842a28c401d8a7b673f672422d2740d23a18dae4b1c46d8cf70896162af5a",
+      "runtime_version": "0.1.4+34",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-11-01T18:50:51.286764+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "1888b0d476a37278892953d4baee4ca51be9b4af2dc19beed0f8a501514cd89a",
+      "runtime_version": "0.1.5+35",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-11-02T18:00:00.067657+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "f5f58594a9b0259f57a6b407ab29152c36ec46cdbe3156ecc0a86a26002397ce",
+      "runtime_version": "0.1.5+36",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-11-02T19:35:11.110270+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "806ba4471a543c16b20ee4dbd1eb41d8ced576af634c6ca874a9e29bda071b61",
+      "runtime_version": "0.1.5+37",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-11-02T21:16:05.461841+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "d6966f1f06bcb6dbf343591324a2480f0c16667acd5bcb9b4b61b6cd4a88727b",
+      "runtime_version": "0.1.5+38",
+      "python": "/opt/homebrew/bin/python3.13",
+      "retained_directory_mtime_utc": "2026-11-08T18:06:03.136815+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "3c3c30e80d62c7f3eab5119e2f7c3163dc07ed2dd26c8f583c63fa69f098dd7a",
+      "runtime_version": "0.1.5+39",
+      "python": "/opt/homebrew/bin/python3.13",
+      "retained_directory_mtime_utc": "2026-11-08T18:57:02.821882+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "72a6cdfe6c879f731e3c0d424cbf5e72c645e8be9e2f3c2f2b436426d3d48af0",
+      "runtime_version": "0.1.5+40",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-11-08T19:06:10.440959+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "a945946fd799bf5693d47dd8295eb305491811c8d1b0a3ba5c7e9df68de4bb80",
+      "runtime_version": "0.1.6+41",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-11-09T18:51:40.524274+00:00",
+      "active": true,
+      "selected": false
+    },
+    {
+      "payload": "de444f80974539158eec4678690d5f86a59d3166a320c4f39e0c2276b493818f",
+      "runtime_version": "0.1.7+42",
+      "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+      "retained_directory_mtime_utc": "2026-11-09T22:03:19.827153+00:00",
+      "active": false,
+      "selected": false
+    },
+    {
+      "payload": "5fe1cc546988d8b49249069256194fc76fc7bed2c6d0d34d5405f22611d05815",
+      "runtime_version": "0.1.7+43",
+      "python": "/opt/homebrew/bin/python3.13",
+      "retained_directory_mtime_utc": "2026-11-10T00:41:08.909365+00:00",
+      "active": false,
+      "selected": true
+    },
+    {
+      "payload": "fe78d46ace5b47a30e94145278979f1623ff6af904d2e7ad7258c35f96224852",
+      "runtime_version": "0.1.7+43",
+      "python": "/opt/homebrew/bin/python3.13",
+      "retained_directory_mtime_utc": "2026-11-10T00:41:08.909365+00:00",
+      "active": false,
+      "selected": false
+    }
+  ],
+  "reports": [
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/materialized_search_acceptance_20261108.json",
+      "sha256": "b26550d90dc9d179134af4337621f8dacef8b805307c0a6554101a4739975a24",
+      "record": {
+        "source_fingerprint": "48b3fa81474ee5a0efdd6c7408655731775017c9231ca7ea8a1923db73e38617",
+        "python": "3.13.5",
+        "sqlite": "3.53.4",
+        "agents": 6,
+        "requested_agents": 6,
+        "windows": 3,
+        "delta_rate": 6.0,
+        "hook_rate": 3.0,
+        "stored_history": true,
+        "error_count": 0,
+        "budget_failures": [],
+        "drain_completed": true,
+        "stream_rates_hz": {
+          "01a1a34d-9229-7ea0-abbe-cdf3793181de": 5.993,
+          "01a1947a-ea08-7320-bd8b-f29d2147db59": 6.004,
+          "01a19db3-fbea-7e00-8a7c-7d0ce21a2e16": 6.004,
+          "01a19474-d67f-7a23-bd0b-8bdc34b2a76b": 5.993,
+          "01a19985-9b3e-7fc2-b4d8-132167cc9f40": 5.993,
+          "01a19338-943e-7b73-bb86-6c25f025a69b": 6.004
+        },
+        "summary": {
+          "background_list": {
+            "n": 783,
+            "p50": 18.1,
+            "p90": 273.1,
+            "p95": 457.5,
+            "max": 1020.7,
+            "mean": 98.9
+          },
+          "background_organization": {
+            "n": 783,
+            "p50": 15.1,
+            "p90": 34.7,
+            "p95": 64.9,
+            "max": 255.8,
+            "mean": 21.3
+          },
+          "background_views": {
+            "n": 783,
+            "p50": 8.2,
+            "p90": 15.4,
+            "p95": 19.6,
+            "max": 160.3,
+            "mean": 10.4
+          },
+          "background_asks": {
+            "n": 783,
+            "p50": 8.1,
+            "p90": 14.4,
+            "p95": 17.4,
+            "max": 150.2,
+            "mean": 9.1
+          },
+          "background_schedules": {
+            "n": 783,
+            "p50": 7.5,
+            "p90": 15.5,
+            "p95": 24.3,
+            "max": 120.8,
+            "mean": 9.4
+          },
+          "background_thread": {
+            "n": 66,
+            "p50": 42.7,
+            "p90": 159.2,
+            "p95": 293.0,
+            "max": 412.4,
+            "mean": 73.0
+          },
+          "background_sidecar_status": {
+            "n": 66,
+            "p50": 18.1,
+            "p90": 101.6,
+            "p95": 136.6,
+            "max": 298.7,
+            "mean": 45.0
+          },
+          "send_accepted": {
+            "n": 30,
+            "p50": 21.3,
+            "p90": 63.7,
+            "p95": 92.4,
+            "max": 461.2,
+            "mean": 45.6
+          },
+          "send_event_visible": {
+            "n": 30,
+            "p50": 8.3,
+            "p90": 45.6,
+            "p95": 51.4,
+            "max": 429.5,
+            "mean": 31.6
+          },
+          "read_target": {
+            "n": 30,
+            "p50": 270.6,
+            "p90": 445.0,
+            "p95": 560.0,
+            "max": 591.7,
+            "mean": 290.6
+          },
+          "thread_target": {
+            "n": 30,
+            "p50": 46.7,
+            "p90": 160.6,
+            "p95": 284.7,
+            "max": 321.3,
+            "mean": 73.2
+          },
+          "sidecar_status": {
+            "n": 30,
+            "p50": 9.8,
+            "p90": 35.2,
+            "p95": 43.7,
+            "max": 94.8,
+            "mean": 18.9
+          },
+          "list": {
+            "n": 30,
+            "p50": 3.8,
+            "p90": 302.8,
+            "p95": 444.1,
+            "max": 483.3,
+            "mean": 100.4
+          },
+          "search": {
+            "n": 30,
+            "p50": 270.7,
+            "p90": 496.0,
+            "p95": 627.6,
+            "max": 4431.1,
+            "mean": 434.1
+          }
+        },
+        "raw_sample_counts": {
+          "background_list": 783,
+          "background_organization": 783,
+          "background_views": 783,
+          "background_asks": 783,
+          "background_schedules": 783,
+          "background_thread": 66,
+          "background_sidecar_status": 66,
+          "send_accepted": 30,
+          "send_event_visible": 30,
+          "read_target": 30,
+          "thread_target": 30,
+          "sidecar_status": 30,
+          "list": 30,
+          "search": 30
+        }
+      },
+      "metrics": {
+        "failed_scopes": 12,
+        "admission_timeouts": 0,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.002,
+          "p95_ms": 0.727,
+          "p99_ms": 6.1,
+          "max_ms": 72.169
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.233,
+          "p95_ms": 4.092,
+          "p99_ms": 11.689,
+          "max_ms": 154.533
+        },
+        "requests": {
+          "send.persistence_barrier": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 0.006,
+            "p95_ms": 0.009,
+            "p99_ms": 0.012,
+            "max_ms": 0.012
+          },
+          "send.execution": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 12.095,
+            "p95_ms": 2277.884,
+            "p99_ms": 2985.129,
+            "max_ms": 2985.129
+          },
+          "send.activity": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 6.486,
+            "p95_ms": 54.258,
+            "p99_ms": 81.426,
+            "max_ms": 81.426
+          },
+          "send_acceptance": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 22.038,
+            "p95_ms": 2359.38,
+            "p99_ms": 2991.758,
+            "max_ms": 2991.758
+          },
+          "history.snapshot": {
+            "count": 171,
+            "errors": 0,
+            "samples": 171,
+            "p50_ms": 24.664,
+            "p95_ms": 181.824,
+            "p99_ms": 194.679,
+            "max_ms": 224.198
+          },
+          "history.prepare": {
+            "count": 171,
+            "errors": 0,
+            "samples": 171,
+            "p50_ms": 107.412,
+            "p95_ms": 460.671,
+            "p99_ms": 809.444,
+            "max_ms": 896.614
+          },
+          "history.stage": {
+            "count": 171,
+            "errors": 0,
+            "samples": 171,
+            "p50_ms": 3.394,
+            "p95_ms": 26.031,
+            "p99_ms": 401.942,
+            "max_ms": 474.024
+          },
+          "thread_list": {
+            "count": 813,
+            "errors": 0,
+            "samples": 813,
+            "p50_ms": 0.037,
+            "p95_ms": 424.433,
+            "p99_ms": 731.124,
+            "max_ms": 997.391
+          },
+          "thread_detail": {
+            "count": 96,
+            "errors": 0,
+            "samples": 96,
+            "p50_ms": 40.552,
+            "p95_ms": 292.23,
+            "p99_ms": 410.057,
+            "max_ms": 410.057
+          },
+          "sidecar_status": {
+            "count": 96,
+            "errors": 0,
+            "samples": 96,
+            "p50_ms": 13.369,
+            "p95_ms": 113.357,
+            "p99_ms": 187.431,
+            "max_ms": 187.431
+          },
+          "conversation_read": {
+            "count": 30,
+            "errors": 0,
+            "samples": 30,
+            "p50_ms": 211.581,
+            "p95_ms": 553.211,
+            "p99_ms": 580.513,
+            "max_ms": 580.513
+          },
+          "search": {
+            "count": 30,
+            "errors": 0,
+            "samples": 30,
+            "p50_ms": 267.922,
+            "p95_ms": 626.046,
+            "p99_ms": 4430.192,
+            "max_ms": 4430.192
+          }
+        },
+        "checkpoint": {
+          "mode": "PASSIVE",
+          "sqlite_version": "3.53.4",
+          "state": "running",
+          "enabled": true,
+          "attempts": 467,
+          "busy": 3,
+          "errors": 0,
+          "last_error": null,
+          "last_attempt_at": 1794159925.582546,
+          "last_success_at": 1794159925.582546,
+          "last_progress_at": 1794159925.582546,
+          "last_progress_age_seconds": 0.05489299999999275,
+          "log_frames": 6,
+          "checkpointed_frames": 6,
+          "backlog_frames": 0,
+          "backlog_bytes": 0,
+          "backlog_age_seconds": 0,
+          "wal_file_bytes": 385866872,
+          "sample_capacity": 256,
+          "sample_count": 256,
+          "duration_ms": {
+            "last": 0.24095799972201348,
+            "p95": 17.78962499975023,
+            "maximum": 816.6597920003369
+          }
+        },
+        "persistence": {
+          "pending": 0,
+          "retries": 0,
+          "optional_failure_count": 0,
+          "oldest_age_seconds": 0,
+          "draining": false,
+          "stopped": false,
+          "failure_count": 0
+        },
+        "host": {
+          "logical_cpu_count": 10,
+          "load_average": {
+            "one_minute": 6.539,
+            "five_minutes": 5.977,
+            "fifteen_minutes": 10.186
+          }
+        },
+        "process": {
+          "cpu_seconds": 110.078304,
+          "peak_resident_memory_bytes": 1224523776
+        }
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/resumed_contention_gate_20261108.json",
+      "sha256": "396b889f1e0ee17a553778ec64fa08bce7b8e5388940f985ce4c6d7bc88355c5",
+      "record": {
+        "source_fingerprint": "48b3fa81474ee5a0efdd6c7408655731775017c9231ca7ea8a1923db73e38617",
+        "python": "3.13.5",
+        "sqlite": "3.53.4",
+        "error_count": 0,
+        "budget_failures": []
+      },
+      "metrics": {
+        "failed_scopes": 0,
+        "admission_timeouts": 0,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.018,
+          "p95_ms": 0.741,
+          "p99_ms": 1.425,
+          "max_ms": 4.219
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.148,
+          "p95_ms": 0.841,
+          "p99_ms": 1.528,
+          "max_ms": 6.543
+        },
+        "requests": {}
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/stored_history_final_acceptance.json",
+      "sha256": "65aca8555933871dc999f4c01265f804473e722cb5f6b45bdcc69fc494cbb01e",
+      "record": {
+        "source_fingerprint": "f6caca164243d9bce72445817d8278ab65b1e1726a8b20d9115010a4788f6837",
+        "python": "3.12.7",
+        "sqlite": "3.51.0",
+        "agents": 6,
+        "windows": 3,
+        "delta_rate": 6.0,
+        "hook_rate": 3.0,
+        "stored_history": true,
+        "error_count": 0,
+        "budget_failures": [],
+        "summary": {
+          "background_list": {
+            "n": 480,
+            "p50": 79.8,
+            "p90": 449.9,
+            "p95": 482.1,
+            "max": 808.5,
+            "mean": 137.4
+          },
+          "background_organization": {
+            "n": 480,
+            "p50": 10.7,
+            "p90": 21.6,
+            "p95": 25.0,
+            "max": 209.6,
+            "mean": 12.5
+          },
+          "background_views": {
+            "n": 480,
+            "p50": 2.9,
+            "p90": 8.8,
+            "p95": 10.8,
+            "max": 130.6,
+            "mean": 4.7
+          },
+          "background_asks": {
+            "n": 480,
+            "p50": 2.6,
+            "p90": 4.5,
+            "p95": 5.9,
+            "max": 69.0,
+            "mean": 3.4
+          },
+          "background_schedules": {
+            "n": 480,
+            "p50": 2.8,
+            "p90": 5.2,
+            "p95": 6.5,
+            "max": 54.7,
+            "mean": 3.6
+          },
+          "background_thread": {
+            "n": 53,
+            "p50": 21.2,
+            "p90": 117.4,
+            "p95": 158.5,
+            "max": 183.5,
+            "mean": 47.8
+          },
+          "send_accepted": {
+            "n": 30,
+            "p50": 28.7,
+            "p90": 74.2,
+            "p95": 122.4,
+            "max": 141.6,
+            "mean": 38.5
+          },
+          "send_event_visible": {
+            "n": 30,
+            "p50": 8.0,
+            "p90": 41.2,
+            "p95": 106.9,
+            "max": 129.8,
+            "mean": 22.4
+          },
+          "read_target": {
+            "n": 30,
+            "p50": 13.5,
+            "p90": 23.1,
+            "p95": 31.1,
+            "max": 39.9,
+            "mean": 16.2
+          },
+          "thread_target": {
+            "n": 30,
+            "p50": 8.2,
+            "p90": 10.6,
+            "p95": 10.8,
+            "max": 13.0,
+            "mean": 8.6
+          },
+          "list": {
+            "n": 30,
+            "p50": 1.2,
+            "p90": 1.7,
+            "p95": 84.9,
+            "max": 184.2,
+            "mean": 12.5
+          },
+          "search": {
+            "n": 30,
+            "p50": 79.5,
+            "p90": 103.4,
+            "p95": 294.5,
+            "max": 1638.6,
+            "mean": 140.2
+          }
+        },
+        "raw_sample_counts": {
+          "background_list": 480,
+          "background_organization": 480,
+          "background_views": 480,
+          "background_asks": 480,
+          "background_schedules": 480,
+          "background_thread": 53,
+          "send_accepted": 30,
+          "send_event_visible": 30,
+          "read_target": 30,
+          "thread_target": 30,
+          "list": 30,
+          "search": 30
+        }
+      },
+      "metrics": {
+        "failed_scopes": 11,
+        "admission_timeouts": 0,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.001,
+          "p95_ms": 0.793,
+          "p99_ms": 4.08,
+          "max_ms": 37.947
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.126,
+          "p95_ms": 0.898,
+          "p99_ms": 3.014,
+          "max_ms": 36.324
+        },
+        "requests": {
+          "send.persistence_barrier": {
+            "count": 38,
+            "errors": 0,
+            "samples": 38,
+            "p50_ms": 0.007,
+            "p95_ms": 0.034,
+            "p99_ms": 0.12,
+            "max_ms": 0.12
+          },
+          "send.execution": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 14.827,
+            "p95_ms": 642.44,
+            "p99_ms": 1077.312,
+            "max_ms": 1077.312
+          },
+          "send.activity": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 6.656,
+            "p95_ms": 54.05,
+            "p99_ms": 62.875,
+            "max_ms": 62.875
+          },
+          "send_acceptance": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 30.134,
+            "p95_ms": 649.199,
+            "p99_ms": 1092.942,
+            "max_ms": 1092.942
+          },
+          "thread_list": {
+            "count": 510,
+            "errors": 0,
+            "samples": 510,
+            "p50_ms": 0.15,
+            "p95_ms": 467.871,
+            "p99_ms": 606.293,
+            "max_ms": 779.049
+          },
+          "thread_detail": {
+            "count": 83,
+            "errors": 0,
+            "samples": 83,
+            "p50_ms": 12.316,
+            "p95_ms": 140.236,
+            "p99_ms": 182.495,
+            "max_ms": 182.495
+          },
+          "conversation_read": {
+            "count": 30,
+            "errors": 0,
+            "samples": 30,
+            "p50_ms": 12.294,
+            "p95_ms": 29.868,
+            "p99_ms": 38.82,
+            "max_ms": 38.82
+          },
+          "search": {
+            "count": 30,
+            "errors": 0,
+            "samples": 30,
+            "p50_ms": 78.251,
+            "p95_ms": 293.097,
+            "p99_ms": 1637.756,
+            "max_ms": 1637.756
+          }
+        },
+        "persistence": {
+          "pending": 0,
+          "retries": 0,
+          "oldest_age_seconds": 0,
+          "draining": false,
+          "stopped": false,
+          "failure_count": 0
+        }
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/sidecar_poll_before_complete.json",
+      "sha256": "fe9cf6360b36f3067cbc15f69148be0d62170b2d8ee693f0aa2c3c750a819920",
+      "record": {
+        "source_fingerprint": "f6caca164243d9bce72445817d8278ab65b1e1726a8b20d9115010a4788f6837",
+        "python": "3.12.7",
+        "sqlite": "3.51.0",
+        "agents": 6,
+        "windows": 3,
+        "delta_rate": 6.0,
+        "hook_rate": 3.0,
+        "stored_history": true,
+        "error_count": 6,
+        "budget_failures": [
+          "send_accepted p50 None ms exceeds 150 ms",
+          "send_accepted p95 None ms exceeds 400 ms",
+          "send_event_visible p50 None ms exceeds 150 ms",
+          "send_event_visible p95 None ms exceeds 400 ms",
+          "list p50 None ms exceeds 300 ms",
+          "list p95 None ms exceeds 800 ms",
+          "read_target p50 None ms exceeds 300 ms",
+          "read_target p95 None ms exceeds 800 ms",
+          "thread_target p50 None ms exceeds 100 ms",
+          "thread_target p95 None ms exceeds 300 ms",
+          "sidecar_status p50 None ms exceeds 100 ms",
+          "sidecar_status p95 None ms exceeds 300 ms",
+          "background_sidecar_status p50 5414.7 ms exceeds 100 ms",
+          "background_sidecar_status p95 8527.2 ms exceeds 300 ms",
+          "search p50 None ms exceeds 300 ms",
+          "search p95 None ms exceeds 800 ms",
+          "admission_timeouts must be zero, observed 68",
+          "persistence.retries must be zero, observed 44",
+          "persistence.pending must be zero, observed 11",
+          "history.failures must be zero, observed 17",
+          "400 /api/browser/sessions/c795baf8-9630-4db3-96ef-43bc7c06a0ec/interrupt: b'{\"error\": \"This session has no running turn to stop yet.\"}'",
+          "Persistence drain deadline exceeded"
+        ],
+        "measurement_error": "RuntimeError: 503 /api/browser/sessions/c795baf8-9630-4db3-96ef-43bc7c06a0ec/messages: b'{\"error\": \"Ribbon Field is busy. Check the conversation before sending again.\"}'",
+        "summary": {
+          "background_thread": {
+            "n": 16,
+            "p50": 466.5,
+            "p90": 646.3,
+            "p95": 646.3,
+            "max": 647.4,
+            "mean": 459.1
+          },
+          "background_list": {
+            "n": 22,
+            "p50": 1561.0,
+            "p90": 2681.5,
+            "p95": 2719.4,
+            "max": 2751.2,
+            "mean": 1423.0
+          },
+          "background_organization": {
+            "n": 22,
+            "p50": 22.9,
+            "p90": 37.6,
+            "p95": 55.0,
+            "max": 68.2,
+            "mean": 22.9
+          },
+          "background_views": {
+            "n": 22,
+            "p50": 3.6,
+            "p90": 5.3,
+            "p95": 6.4,
+            "max": 7.0,
+            "mean": 3.7
+          },
+          "background_asks": {
+            "n": 22,
+            "p50": 3.6,
+            "p90": 5.6,
+            "p95": 5.7,
+            "max": 5.8,
+            "mean": 3.6
+          },
+          "background_schedules": {
+            "n": 19,
+            "p50": 1959.4,
+            "p90": 4367.3,
+            "p95": 4368.8,
+            "max": 4368.9,
+            "mean": 2084.2
+          },
+          "background_sidecar_status": {
+            "n": 16,
+            "p50": 5414.7,
+            "p90": 8527.2,
+            "p95": 8527.2,
+            "max": 10738.8,
+            "mean": 5638.5
+          }
+        },
+        "raw_sample_counts": {
+          "background_thread": 16,
+          "background_list": 22,
+          "background_organization": 22,
+          "background_views": 22,
+          "background_asks": 22,
+          "background_schedules": 19,
+          "background_sidecar_status": 16,
+          "errors": 6
+        }
+      },
+      "metrics": {
+        "failed_scopes": 13,
+        "admission_timeouts": 68,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.005,
+          "p95_ms": 1703.558,
+          "p99_ms": 3502.328,
+          "max_ms": 4902.552
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.33,
+          "p95_ms": 12.174,
+          "p99_ms": 127.35,
+          "max_ms": 2244.866
+        },
+        "requests": {
+          "send.persistence_barrier": {
+            "count": 7,
+            "errors": 0,
+            "samples": 7,
+            "p50_ms": 0.01,
+            "p95_ms": 0.026,
+            "p99_ms": 0.026,
+            "max_ms": 0.026
+          },
+          "send.execution": {
+            "count": 7,
+            "errors": 1,
+            "samples": 7,
+            "p50_ms": 7285.878,
+            "p95_ms": 13010.906,
+            "p99_ms": 13010.906,
+            "max_ms": 13010.906
+          },
+          "send.activity": {
+            "count": 6,
+            "errors": 0,
+            "samples": 6,
+            "p50_ms": 39.306,
+            "p95_ms": 117.349,
+            "p99_ms": 117.349,
+            "max_ms": 117.349
+          },
+          "send_acceptance": {
+            "count": 7,
+            "errors": 1,
+            "samples": 7,
+            "p50_ms": 7341.072,
+            "p95_ms": 13011.119,
+            "p99_ms": 13011.119,
+            "max_ms": 13011.119
+          },
+          "thread_detail": {
+            "count": 34,
+            "errors": 2,
+            "samples": 34,
+            "p50_ms": 1919.707,
+            "p95_ms": 10737.328,
+            "p99_ms": 11223.522,
+            "max_ms": 11223.522
+          },
+          "thread_list": {
+            "count": 22,
+            "errors": 0,
+            "samples": 22,
+            "p50_ms": 1542.038,
+            "p95_ms": 2675.233,
+            "p99_ms": 2678.184,
+            "max_ms": 2678.184
+          }
+        },
+        "persistence": {
+          "pending": 11,
+          "retries": 44,
+          "oldest_age_seconds": 45.54477941599907,
+          "draining": true,
+          "stopped": false,
+          "failure_count": 0
+        }
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/history_digest_index_acceptance.json",
+      "sha256": "f34136d9db31f60731b33d4b7c608f43047f29c8e0dad765269f59b12bf6b260",
+      "record": {
+        "source_fingerprint": "7608683a54ef68c393784643182b3fd1cef7508aec3b5b49d7a91c94d5bbe65c",
+        "python": "3.12.7",
+        "sqlite": "3.51.0",
+        "agents": 6,
+        "requested_agents": 6,
+        "windows": 3,
+        "delta_rate": 6.0,
+        "hook_rate": 3.0,
+        "stored_history": true,
+        "error_count": 1,
+        "budget_failures": [
+          "send_accepted p95 738.7 ms exceeds 400 ms",
+          "send_event_visible p95 780.2 ms exceeds 400 ms",
+          "list p95 856.5 ms exceeds 800 ms",
+          "read_target p50 1111.1 ms exceeds 300 ms",
+          "read_target p95 1826.6 ms exceeds 800 ms",
+          "thread_target p50 101.3 ms exceeds 100 ms",
+          "thread_target p95 1284.3 ms exceeds 300 ms",
+          "background_sidecar_status p50 107.6 ms exceeds 100 ms",
+          "background_sidecar_status p95 729.7 ms exceeds 300 ms",
+          "search p50 9052.5 ms exceeds 300 ms",
+          "search p95 24559.6 ms exceeds 800 ms",
+          "admission_timeouts must be zero, observed 3",
+          "persistence.retries must be zero, observed 2",
+          "history.failures must be zero, observed 1"
+        ],
+        "measurement_error": "KeyboardInterrupt: ",
+        "drain_completed": true,
+        "stream_rates_hz": {
+          "01a1a34d-9229-7ea0-abbe-cdf3793181de": 5.999,
+          "01a1947a-ea08-7320-bd8b-f29d2147db59": 5.999,
+          "01a19db3-fbea-7e00-8a7c-7d0ce21a2e16": 5.999,
+          "01a19474-d67f-7a23-bd0b-8bdc34b2a76b": 5.999,
+          "01a19985-9b3e-7fc2-b4d8-132167cc9f40": 5.999,
+          "01a19338-943e-7b73-bb86-6c25f025a69b": 6.002
+        },
+        "summary": {
+          "background_thread": {
+            "n": 225,
+            "p50": 344.1,
+            "p90": 1165.4,
+            "p95": 1311.4,
+            "max": 1681.1,
+            "mean": 492.6
+          },
+          "background_list": {
+            "n": 1613,
+            "p50": 24.7,
+            "p90": 1375.8,
+            "p95": 1732.4,
+            "max": 9249.6,
+            "mean": 396.0
+          },
+          "background_organization": {
+            "n": 1613,
+            "p50": 17.3,
+            "p90": 90.6,
+            "p95": 204.0,
+            "max": 514.8,
+            "mean": 42.1
+          },
+          "background_views": {
+            "n": 1613,
+            "p50": 4.2,
+            "p90": 23.1,
+            "p95": 34.4,
+            "max": 374.1,
+            "mean": 11.1
+          },
+          "background_asks": {
+            "n": 1613,
+            "p50": 3.4,
+            "p90": 16.6,
+            "p95": 24.0,
+            "max": 360.7,
+            "mean": 7.9
+          },
+          "background_schedules": {
+            "n": 1613,
+            "p50": 4.4,
+            "p90": 57.7,
+            "p95": 84.6,
+            "max": 572.3,
+            "mean": 20.2
+          },
+          "background_sidecar_status": {
+            "n": 246,
+            "p50": 107.6,
+            "p90": 608.5,
+            "p95": 729.7,
+            "max": 1468.1,
+            "mean": 214.7
+          },
+          "send_accepted": {
+            "n": 30,
+            "p50": 107.5,
+            "p90": 530.6,
+            "p95": 738.7,
+            "max": 2739.2,
+            "mean": 257.5
+          },
+          "send_event_visible": {
+            "n": 30,
+            "p50": 100.7,
+            "p90": 579.7,
+            "p95": 780.2,
+            "max": 2726.3,
+            "mean": 254.1
+          },
+          "read_target": {
+            "n": 27,
+            "p50": 1111.1,
+            "p90": 1718.3,
+            "p95": 1826.6,
+            "max": 1833.6,
+            "mean": 1122.9
+          },
+          "thread_target": {
+            "n": 27,
+            "p50": 101.3,
+            "p90": 847.1,
+            "p95": 1284.3,
+            "max": 1384.6,
+            "mean": 292.5
+          },
+          "sidecar_status": {
+            "n": 27,
+            "p50": 18.8,
+            "p90": 57.4,
+            "p95": 155.4,
+            "max": 242.2,
+            "mean": 35.8
+          },
+          "list": {
+            "n": 27,
+            "p50": 215.7,
+            "p90": 718.6,
+            "p95": 856.5,
+            "max": 1027.3,
+            "mean": 295.7
+          },
+          "search": {
+            "n": 26,
+            "p50": 9052.5,
+            "p90": 14309.0,
+            "p95": 24559.6,
+            "max": 28562.3,
+            "mean": 10361.9
+          }
+        },
+        "raw_sample_counts": {
+          "background_thread": 225,
+          "background_list": 1613,
+          "background_organization": 1613,
+          "background_views": 1613,
+          "background_asks": 1613,
+          "background_schedules": 1613,
+          "background_sidecar_status": 246,
+          "send_accepted": 30,
+          "send_event_visible": 30,
+          "read_target": 27,
+          "thread_target": 27,
+          "sidecar_status": 27,
+          "list": 27,
+          "search": 26,
+          "errors": 1
+        }
+      },
+      "metrics": {
+        "failed_scopes": 12,
+        "admission_timeouts": 3,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.002,
+          "p95_ms": 23.279,
+          "p99_ms": 68.843,
+          "max_ms": 109.272
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.251,
+          "p95_ms": 6.374,
+          "p99_ms": 22.369,
+          "max_ms": 229.776
+        },
+        "requests": {
+          "send.persistence_barrier": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 0.009,
+            "p95_ms": 58.557,
+            "p99_ms": 644.781,
+            "max_ms": 644.781
+          },
+          "history.snapshot": {
+            "count": 448,
+            "errors": 0,
+            "samples": 448,
+            "p50_ms": 55.162,
+            "p95_ms": 347.869,
+            "p99_ms": 501.015,
+            "max_ms": 685.586
+          },
+          "history.prepare": {
+            "count": 448,
+            "errors": 0,
+            "samples": 448,
+            "p50_ms": 344.187,
+            "p95_ms": 995.319,
+            "p99_ms": 1267.741,
+            "max_ms": 1627.06
+          },
+          "history.stage": {
+            "count": 448,
+            "errors": 0,
+            "samples": 448,
+            "p50_ms": 65.411,
+            "p95_ms": 690.844,
+            "p99_ms": 1104.593,
+            "max_ms": 2775.905
+          },
+          "send.execution": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 71.59,
+            "p95_ms": 3569.129,
+            "p99_ms": 4266.793,
+            "max_ms": 4266.793
+          },
+          "send.activity": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 9.41,
+            "p95_ms": 48.851,
+            "p99_ms": 80.874,
+            "max_ms": 80.874
+          },
+          "send_acceptance": {
+            "count": 36,
+            "errors": 0,
+            "samples": 36,
+            "p50_ms": 106.41,
+            "p95_ms": 3604.442,
+            "p99_ms": 4275.358,
+            "max_ms": 4275.358
+          },
+          "thread_detail": {
+            "count": 252,
+            "errors": 0,
+            "samples": 252,
+            "p50_ms": 266.87,
+            "p95_ms": 1292.468,
+            "p99_ms": 1543.717,
+            "max_ms": 1679.906
+          },
+          "thread_list": {
+            "count": 1640,
+            "errors": 0,
+            "samples": 1640,
+            "p50_ms": 0.047,
+            "p95_ms": 1657.85,
+            "p99_ms": 2620.876,
+            "max_ms": 9223.685
+          },
+          "sidecar_status": {
+            "count": 273,
+            "errors": 0,
+            "samples": 273,
+            "p50_ms": 68.794,
+            "p95_ms": 688.77,
+            "p99_ms": 1102.114,
+            "max_ms": 1466.784
+          },
+          "conversation_read": {
+            "count": 27,
+            "errors": 0,
+            "samples": 27,
+            "p50_ms": 1060.958,
+            "p95_ms": 1810.296,
+            "p99_ms": 1812.626,
+            "max_ms": 1812.626
+          },
+          "search": {
+            "count": 26,
+            "errors": 0,
+            "samples": 26,
+            "p50_ms": 8824.201,
+            "p95_ms": 24545.343,
+            "p99_ms": 28547.661,
+            "max_ms": 28547.661
+          }
+        },
+        "persistence": {
+          "pending": 0,
+          "retries": 2,
+          "oldest_age_seconds": 0,
+          "draining": false,
+          "stopped": false,
+          "failure_count": 0
+        }
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/runtime_activation_result.json",
+      "sha256": "a536e42a2b1c60407aa2c40bd0d4644d92eaa928962673895a16454e72909be1",
+      "record": {
+        "state": "active",
+        "observed_at": "2026-11-03T21:39:14.412263+00:00"
+      },
+      "metrics": {
+        "failed_scopes": 9,
+        "admission_timeouts": 36,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.002,
+          "p95_ms": 17.446,
+          "p99_ms": 996.836,
+          "max_ms": 1282.842
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.233,
+          "p95_ms": 4.903,
+          "p99_ms": 19.278,
+          "max_ms": 1281.825
+        },
+        "requests": {
+          "thread_list": {
+            "count": 7,
+            "errors": 0,
+            "samples": 7,
+            "p50_ms": 796.573,
+            "p95_ms": 2133.345,
+            "p99_ms": 2133.345,
+            "max_ms": 2133.345
+          },
+          "thread_detail": {
+            "count": 16,
+            "errors": 0,
+            "samples": 16,
+            "p50_ms": 135.046,
+            "p95_ms": 2632.569,
+            "p99_ms": 2632.569,
+            "max_ms": 2632.569
+          },
+          "conversation_read": {
+            "count": 5,
+            "errors": 0,
+            "samples": 5,
+            "p50_ms": 495.567,
+            "p95_ms": 1159.379,
+            "p99_ms": 1159.379,
+            "max_ms": 1159.379
+          }
+        },
+        "persistence": {
+          "pending": 0,
+          "retries": 0,
+          "oldest_age_seconds": 0,
+          "draining": false,
+          "stopped": false,
+          "failure_count": 0
+        }
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/live_verification_20261103.json",
+      "sha256": "4df6aee8f50fe62df80f9017fcd1b7695e7a96fbab38afdb5d7b6e023ec602cc",
+      "record": {
+        "observed_at": "2026-11-03T21:45:18.922503+00:00"
+      },
+      "metrics": {
+        "failed_scopes": 351,
+        "admission_timeouts": 803,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 1.463,
+          "p95_ms": 213.202,
+          "p99_ms": 1035.509,
+          "max_ms": 4907.874
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.386,
+          "p95_ms": 12.582,
+          "p99_ms": 51.236,
+          "max_ms": 10345.152
+        },
+        "requests": {
+          "thread_list": {
+            "count": 208,
+            "errors": 0,
+            "samples": 208,
+            "p50_ms": 680.652,
+            "p95_ms": 2653.198,
+            "p99_ms": 5863.08,
+            "max_ms": 7496.353
+          },
+          "thread_detail": {
+            "count": 875,
+            "errors": 8,
+            "samples": 875,
+            "p50_ms": 723.228,
+            "p95_ms": 2998.076,
+            "p99_ms": 5648.96,
+            "max_ms": 11198.546
+          },
+          "conversation_read": {
+            "count": 46,
+            "errors": 0,
+            "samples": 46,
+            "p50_ms": 161.749,
+            "p95_ms": 1159.379,
+            "p99_ms": 2785.307,
+            "max_ms": 2785.307
+          },
+          "send.persistence_barrier": {
+            "count": 9,
+            "errors": 1,
+            "samples": 9,
+            "p50_ms": 0.009,
+            "p95_ms": 5105.869,
+            "p99_ms": 5105.869,
+            "max_ms": 5105.869
+          },
+          "send.execution": {
+            "count": 3,
+            "errors": 0,
+            "samples": 3,
+            "p50_ms": 1653.908,
+            "p95_ms": 3621.255,
+            "p99_ms": 3621.255,
+            "max_ms": 3621.255
+          },
+          "send.activity": {
+            "count": 3,
+            "errors": 0,
+            "samples": 3,
+            "p50_ms": 12.876,
+            "p95_ms": 26.467,
+            "p99_ms": 26.467,
+            "max_ms": 26.467
+          },
+          "send_acceptance": {
+            "count": 3,
+            "errors": 0,
+            "samples": 3,
+            "p50_ms": 1666.971,
+            "p95_ms": 3648.12,
+            "p99_ms": 3648.12,
+            "max_ms": 3648.12
+          }
+        },
+        "persistence": {
+          "pending": 15,
+          "retries": 121,
+          "oldest_age_seconds": 35.96147779200692,
+          "draining": true,
+          "stopped": false,
+          "failure_count": 0
+        }
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/live_verification_20261103_second.json",
+      "sha256": "116dc652b96a956de83e6528eb1f7c64df3a6a67c735e6fab0bd36d88a8fe808",
+      "record": {
+        "observed_at": "2026-11-03T21:48:19.676034+00:00"
+      },
+      "metrics": {
+        "failed_scopes": 553,
+        "admission_timeouts": 1100,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.003,
+          "p95_ms": 5.751,
+          "p99_ms": 27.404,
+          "max_ms": 79.761
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.221,
+          "p95_ms": 3.061,
+          "p99_ms": 11.204,
+          "max_ms": 84.763
+        },
+        "requests": {
+          "thread_list": {
+            "count": 331,
+            "errors": 0,
+            "samples": 331,
+            "p50_ms": 681.174,
+            "p95_ms": 2346.211,
+            "p99_ms": 3531.866,
+            "max_ms": 7496.353
+          },
+          "thread_detail": {
+            "count": 1265,
+            "errors": 13,
+            "samples": 1265,
+            "p50_ms": 739.934,
+            "p95_ms": 3757.076,
+            "p99_ms": 6037.442,
+            "max_ms": 11198.546
+          },
+          "conversation_read": {
+            "count": 60,
+            "errors": 0,
+            "samples": 60,
+            "p50_ms": 152.192,
+            "p95_ms": 1038.197,
+            "p99_ms": 2785.307,
+            "max_ms": 2785.307
+          },
+          "send.persistence_barrier": {
+            "count": 11,
+            "errors": 1,
+            "samples": 11,
+            "p50_ms": 0.009,
+            "p95_ms": 5105.869,
+            "p99_ms": 5105.869,
+            "max_ms": 5105.869
+          },
+          "send.execution": {
+            "count": 3,
+            "errors": 0,
+            "samples": 3,
+            "p50_ms": 1653.908,
+            "p95_ms": 3621.255,
+            "p99_ms": 3621.255,
+            "max_ms": 3621.255
+          },
+          "send.activity": {
+            "count": 3,
+            "errors": 0,
+            "samples": 3,
+            "p50_ms": 12.876,
+            "p95_ms": 26.467,
+            "p99_ms": 26.467,
+            "max_ms": 26.467
+          },
+          "send_acceptance": {
+            "count": 3,
+            "errors": 0,
+            "samples": 3,
+            "p50_ms": 1666.971,
+            "p95_ms": 3648.12,
+            "p99_ms": 3648.12,
+            "max_ms": 3648.12
+          }
+        },
+        "persistence": {
+          "pending": 2,
+          "retries": 153,
+          "oldest_age_seconds": 0.21115824999287724,
+          "draining": true,
+          "stopped": false,
+          "failure_count": 1
+        }
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/build38_install_verification_20261108.json",
+      "sha256": "ebcab6f8012d65c5d6f4c406eae14d247b46ff3d7d130eee46f220cc2b4e94e8",
+      "record": {
+        "expected_fingerprint": "48b3fa81474ee5a0efdd6c7408655731775017c9231ca7ea8a1923db73e38617"
+      },
+      "metrics": {}
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/build38_activation_result_20261108.json",
+      "sha256": "5eb4a0a64d6e3628945d12f31b427de7245c18af0ead1b6e5fa2d3c366ed9fa1",
+      "record": {
+        "state": "active_and_verified",
+        "observed_at": "2026-11-08T18:12:40.585387+00:00",
+        "identity": {
+          "database": "/Users/walle/.local/state/agent-coord/state.sqlite3",
+          "instance": "91ae2e7a98d14d23bb4442f9e4b5ba11",
+          "protocol": 1,
+          "schema": 2,
+          "pid": 46349,
+          "payload": "/Users/walle/.local/state/agent-coord/.state.sqlite3.runtime/payloads/d6966f1f06bcb6dbf343591324a2480f0c16667acd5bcb9b4b61b6cd4a88727b",
+          "client_requests": 1
+        },
+        "expected_fingerprint": "48b3fa81474ee5a0efdd6c7408655731775017c9231ca7ea8a1923db73e38617",
+        "samples": 7,
+        "observation_seconds": 60.13078754200069,
+        "health_failures": []
+      },
+      "metrics": {
+        "failed_scopes": 64,
+        "admission_timeouts": 0,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.001,
+          "p95_ms": 0.016,
+          "p99_ms": 0.265,
+          "max_ms": 2.917
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.087,
+          "p95_ms": 0.885,
+          "p99_ms": 2.254,
+          "max_ms": 7.534
+        },
+        "requests": {
+          "thread_list": {
+            "count": 2,
+            "errors": 0,
+            "samples": 2,
+            "p50_ms": 363.744,
+            "p95_ms": 381.865,
+            "p99_ms": 381.865,
+            "max_ms": 381.865
+          },
+          "thread_detail": {
+            "count": 3,
+            "errors": 0,
+            "samples": 3,
+            "p50_ms": 42.984,
+            "p95_ms": 47.015,
+            "p99_ms": 47.015,
+            "max_ms": 47.015
+          },
+          "conversation_read": {
+            "count": 1,
+            "errors": 0,
+            "samples": 1,
+            "p50_ms": 48.41,
+            "p95_ms": 48.41,
+            "p99_ms": 48.41,
+            "max_ms": 48.41
+          },
+          "sidecar_status": {
+            "count": 1,
+            "errors": 0,
+            "samples": 1,
+            "p50_ms": 25.786,
+            "p95_ms": 25.786,
+            "p99_ms": 25.786,
+            "max_ms": 25.786
+          }
+        },
+        "checkpoint": {
+          "mode": "PASSIVE",
+          "sqlite_version": "3.53.4",
+          "state": "running",
+          "enabled": true,
+          "attempts": 240,
+          "busy": 0,
+          "errors": 0,
+          "last_error": null,
+          "last_attempt_at": 1794161559.4851682,
+          "last_success_at": 1794161559.4851682,
+          "last_progress_at": 1794161559.4851682,
+          "last_progress_age_seconds": 0.22910254099952,
+          "log_frames": 5,
+          "checkpointed_frames": 5,
+          "backlog_frames": 0,
+          "backlog_bytes": 0,
+          "backlog_age_seconds": 0,
+          "wal_file_bytes": 62282072,
+          "sample_capacity": 256,
+          "sample_count": 240,
+          "duration_ms": {
+            "last": 0.5080000000816653,
+            "p95": 4.535041000053752,
+            "maximum": 32.558791999690584
+          }
+        },
+        "persistence": {
+          "pending": 0,
+          "retries": 0,
+          "optional_failure_count": 0,
+          "oldest_age_seconds": 0,
+          "draining": false,
+          "stopped": false,
+          "failure_count": 0
+        },
+        "host": {
+          "logical_cpu_count": 10,
+          "load_average": {
+            "one_minute": 4.636,
+            "five_minutes": 4.453,
+            "fifteen_minutes": 5.188
+          }
+        },
+        "process": {
+          "cpu_seconds": 22.590942,
+          "peak_resident_memory_bytes": 205373440
+        }
+      }
+    },
+    {
+      "source": "/Users/walle/.local/state/agent-coord/diagnostics/database_contention_20261102/build38_rollout_recheck_20261108.json",
+      "sha256": "4c9bdf3799bd7bcf1707635d96396a96c17f615ed66d9c97da0187290d0173c7",
+      "record": {
+        "identity": {
+          "database": "/Users/walle/.local/state/agent-coord/state.sqlite3",
+          "instance": "91ae2e7a98d14d23bb4442f9e4b5ba11",
+          "protocol": 1,
+          "schema": 2,
+          "pid": 46349,
+          "payload": "/Users/walle/.local/state/agent-coord/.state.sqlite3.runtime/payloads/d6966f1f06bcb6dbf343591324a2480f0c16667acd5bcb9b4b61b6cd4a88727b",
+          "client_requests": 1
+        },
+        "health": {
+          "admission_timeouts": 0,
+          "persistence_retries": 0,
+          "persistence_failures": 0,
+          "optional_failures": 0,
+          "history_failures": 0,
+          "search_seed_failures": 0,
+          "checkpoint_errors": 0,
+          "search_index_state": "complete",
+          "search_index_failures": 0,
+          "search_remaining": 0,
+          "pending": 0
+        }
+      },
+      "metrics": {
+        "failed_scopes": 313,
+        "admission_timeouts": 0,
+        "writer_wait": {
+          "samples": 2048,
+          "p50_ms": 0.002,
+          "p95_ms": 0.102,
+          "p99_ms": 0.48,
+          "max_ms": 9.836
+        },
+        "writer_hold": {
+          "samples": 2048,
+          "p50_ms": 0.105,
+          "p95_ms": 0.687,
+          "p99_ms": 1.887,
+          "max_ms": 15.061
+        },
+        "requests": {
+          "thread_list": {
+            "count": 44,
+            "errors": 0,
+            "samples": 44,
+            "p50_ms": 136.89,
+            "p95_ms": 490.584,
+            "p99_ms": 670.392,
+            "max_ms": 670.392
+          },
+          "thread_detail": {
+            "count": 61,
+            "errors": 0,
+            "samples": 61,
+            "p50_ms": 38.682,
+            "p95_ms": 172.158,
+            "p99_ms": 721.195,
+            "max_ms": 721.195
+          },
+          "conversation_read": {
+            "count": 14,
+            "errors": 0,
+            "samples": 14,
+            "p50_ms": 159.378,
+            "p95_ms": 1950.943,
+            "p99_ms": 1950.943,
+            "max_ms": 1950.943
+          },
+          "sidecar_status": {
+            "count": 28,
+            "errors": 0,
+            "samples": 28,
+            "p50_ms": 26.515,
+            "p95_ms": 57.888,
+            "p99_ms": 72.759,
+            "max_ms": 72.759
+          },
+          "send.persistence_barrier": {
+            "count": 2,
+            "errors": 0,
+            "samples": 2,
+            "p50_ms": 0.006,
+            "p95_ms": 0.012,
+            "p99_ms": 0.012,
+            "max_ms": 0.012
+          },
+          "send.execution": {
+            "count": 2,
+            "errors": 0,
+            "samples": 2,
+            "p50_ms": 318.536,
+            "p95_ms": 1009.668,
+            "p99_ms": 1009.668,
+            "max_ms": 1009.668
+          },
+          "send.activity": {
+            "count": 2,
+            "errors": 0,
+            "samples": 2,
+            "p50_ms": 5.573,
+            "p95_ms": 5.862,
+            "p99_ms": 5.862,
+            "max_ms": 5.862
+          },
+          "send_acceptance": {
+            "count": 2,
+            "errors": 0,
+            "samples": 2,
+            "p50_ms": 324.27,
+            "p95_ms": 1015.675,
+            "p99_ms": 1015.675,
+            "max_ms": 1015.675
+          },
+          "history.snapshot": {
+            "count": 23,
+            "errors": 0,
+            "samples": 23,
+            "p50_ms": 24.802,
+            "p95_ms": 52.106,
+            "p99_ms": 54.754,
+            "max_ms": 54.754
+          },
+          "history.prepare": {
+            "count": 23,
+            "errors": 0,
+            "samples": 23,
+            "p50_ms": 85.338,
+            "p95_ms": 131.098,
+            "p99_ms": 137.073,
+            "max_ms": 137.073
+          },
+          "history.stage": {
+            "count": 23,
+            "errors": 0,
+            "samples": 23,
+            "p50_ms": 3.556,
+            "p95_ms": 33.129,
+            "p99_ms": 59.871,
+            "max_ms": 59.871
+          }
+        },
+        "checkpoint": {
+          "mode": "PASSIVE",
+          "sqlite_version": "3.53.4",
+          "state": "running",
+          "enabled": true,
+          "attempts": 1218,
+          "busy": 0,
+          "errors": 0,
+          "last_error": null,
+          "last_attempt_at": 1794161810.259089,
+          "last_success_at": 1794161810.259089,
+          "last_progress_at": 1794161810.259089,
+          "last_progress_age_seconds": 0.21482375000050524,
+          "log_frames": 6,
+          "checkpointed_frames": 6,
+          "backlog_frames": 0,
+          "backlog_bytes": 0,
+          "backlog_age_seconds": 0,
+          "wal_file_bytes": 62282072,
+          "sample_capacity": 256,
+          "sample_count": 256,
+          "duration_ms": {
+            "last": 0.428207999902952,
+            "p95": 2.8293750001466833,
+            "maximum": 32.558791999690584
+          }
+        },
+        "persistence": {
+          "pending": 0,
+          "retries": 0,
+          "optional_failure_count": 0,
+          "oldest_age_seconds": 0,
+          "draining": false,
+          "stopped": false,
+          "failure_count": 0
+        },
+        "host": {
+          "logical_cpu_count": 10,
+          "load_average": {
+            "one_minute": 5.82,
+            "five_minutes": 5.248,
+            "fifteen_minutes": 5.33
+          }
+        },
+        "process": {
+          "cpu_seconds": 96.929207,
+          "peak_resident_memory_bytes": 326860800
+        }
+      }
+    }
+  ],
+  "sources": [
+    {
+      "path": "docs/responsiveness.md",
+      "sha256": "0480ee706860cbcc09aacc75303f1da4d0388f79a3dcb6cabe569e9d498f87a0"
+    },
+    {
+      "path": "docs/runtime-updates.md",
+      "sha256": "cfb9f1a0fae9506204941b2de8704ff3b47fd5c6fe95c73adbf9d4f2851788a0"
+    },
+    {
+      "path": "docs/runtime-bookkeeping-recovery.md",
+      "sha256": "20e7e4684fc4f1b526224defb5005778bf57bc0fad87d48004c14d9e7cf5b20f"
+    }
+  ],
+  "active": {
+    "payload": "a945946fd799bf5693d47dd8295eb305491811c8d1b0a3ba5c7e9df68de4bb80",
+    "runtime_version": "0.1.6+41",
+    "python": "/Users/walle/.pyenv/versions/3.12.7/bin/python3",
+    "source_fingerprint": "07cf0b9213b4fb74787dd90b6c269bd949c3ef0cd72a91c78adac4a688bdfd87"
+  },
+  "selected": {
+    "payload": "5fe1cc546988d8b49249069256194fc76fc7bed2c6d0d34d5405f22611d05815",
+    "runtime_version": "0.1.7+43",
+    "python": "/opt/homebrew/bin/python3.13",
+    "source_fingerprint": "c734c0b222211a814bc28b15dcf87aed1c9a74c02a43b77402075e5297c414e4"
+  },
+  "active_selected_file_differences": [
+    "agent_coord/coordination_metrics.py",
+    "agent_coord/coordination_metrics_worker.py",
+    "agent_coord/ui.py",
+    "agent_coord/web/coordination-metrics.css",
+    "agent_coord/web/coordination-metrics.html",
+    "agent_coord/web/coordination-metrics.js",
+    "agent_coord/web/folders.css",
+    "agent_coord/web/provider-usage.css",
+    "agent_coord/web/provider-usage.html"
+  ],
+  "relevant_file_comparison": [
+    {
+      "file": "sqlite_rows.py",
+      "active_sha256": "8764bbaa5288fbcc7869b55bdb57b95b9e5bf1cb1883a472272cb43f90db9810",
+      "selected_sha256": "8764bbaa5288fbcc7869b55bdb57b95b9e5bf1cb1883a472272cb43f90db9810",
+      "repository_sha256": "8764bbaa5288fbcc7869b55bdb57b95b9e5bf1cb1883a472272cb43f90db9810"
+    },
+    {
+      "file": "database_writer.py",
+      "active_sha256": "0eae9c1d2ae4a9bd62d27461e6229fc4bcecb5e614ff19d52c6c616a8f1971ba",
+      "selected_sha256": "0eae9c1d2ae4a9bd62d27461e6229fc4bcecb5e614ff19d52c6c616a8f1971ba",
+      "repository_sha256": "0eae9c1d2ae4a9bd62d27461e6229fc4bcecb5e614ff19d52c6c616a8f1971ba"
+    },
+    {
+      "file": "database_checkpoint.py",
+      "active_sha256": "e262293dc36f2ad34b2fd1993bf644b262ea38d56d6b261baa4c56785057a338",
+      "selected_sha256": "e262293dc36f2ad34b2fd1993bf644b262ea38d56d6b261baa4c56785057a338",
+      "repository_sha256": "e262293dc36f2ad34b2fd1993bf644b262ea38d56d6b261baa4c56785057a338"
+    },
+    {
+      "file": "history_persistence.py",
+      "active_sha256": "5b4ebd0f5b98d71c2c46420f1b459014354baff1d04f7973053ebe01c2ec6803",
+      "selected_sha256": "5b4ebd0f5b98d71c2c46420f1b459014354baff1d04f7973053ebe01c2ec6803",
+      "repository_sha256": "5b4ebd0f5b98d71c2c46420f1b459014354baff1d04f7973053ebe01c2ec6803"
+    },
+    {
+      "file": "conversation_substrings.py",
+      "active_sha256": "ee5a8bad0c15e8a8907a498c0b7b8fc113a97145ed6047dad14450a7145a8f8b",
+      "selected_sha256": "ee5a8bad0c15e8a8907a498c0b7b8fc113a97145ed6047dad14450a7145a8f8b",
+      "repository_sha256": "ee5a8bad0c15e8a8907a498c0b7b8fc113a97145ed6047dad14450a7145a8f8b"
+    },
+    {
+      "file": "browser_wake.py",
+      "active_sha256": "af08dc77a19bd9477e0b5cdfa9211b7223da164f557d896dccf367ec056ddc6f",
+      "selected_sha256": "af08dc77a19bd9477e0b5cdfa9211b7223da164f557d896dccf367ec056ddc6f",
+      "repository_sha256": "af08dc77a19bd9477e0b5cdfa9211b7223da164f557d896dccf367ec056ddc6f"
+    },
+    {
+      "file": "store.py",
+      "active_sha256": "84db6719170f1c07df56565cbda43f117510a98b72dfbba5736df39d5f788e7c",
+      "selected_sha256": "84db6719170f1c07df56565cbda43f117510a98b72dfbba5736df39d5f788e7c",
+      "repository_sha256": "84db6719170f1c07df56565cbda43f117510a98b72dfbba5736df39d5f788e7c"
+    }
+  ],
+  "original_incident_observation": {
+    "source": "/tmp/conversation-refresh-performance.json",
+    "sha256": "2f6aca1811b1d48bae0e00b1f8062f6c9cd372bf72aa3cc05a6f884e7569719b",
+    "metrics": {
+      "admission_timeouts": 692,
+      "writer_wait": {
+        "samples": 2048,
+        "p50_ms": 0.002,
+        "p95_ms": 0.698,
+        "p99_ms": 6.067,
+        "max_ms": 43.578
+      },
+      "writer_hold": {
+        "samples": 2048,
+        "p50_ms": 0.128,
+        "p95_ms": 1.872,
+        "p99_ms": 6.815,
+        "max_ms": 64.815
+      },
+      "requests": {
+        "thread_list": {
+          "count": 5922,
+          "errors": 0,
+          "samples": 2048,
+          "p50_ms": 344.74,
+          "p95_ms": 2873.232,
+          "p99_ms": 7720.161,
+          "max_ms": 30968.162
+        },
+        "thread_detail": {
+          "count": 6959,
+          "errors": 0,
+          "samples": 2048,
+          "p50_ms": 166.204,
+          "p95_ms": 2602.459,
+          "p99_ms": 6401.747,
+          "max_ms": 24606.963
+        },
+        "conversation_read": {
+          "count": 646,
+          "errors": 0,
+          "samples": 646,
+          "p50_ms": 217.244,
+          "p95_ms": 4134.132,
+          "p99_ms": 11211.565,
+          "max_ms": 33315.499
+        },
+        "sidecar_status": {
+          "count": 7587,
+          "errors": 0,
+          "samples": 2048,
+          "p50_ms": 26.282,
+          "p95_ms": 457.666,
+          "p99_ms": 1334.54,
+          "max_ms": 4181.902
+        },
+        "search": {
+          "count": 11,
+          "errors": 0,
+          "samples": 11,
+          "p50_ms": 33.572,
+          "p95_ms": 356.914,
+          "p99_ms": 356.914,
+          "max_ms": 356.914
+        },
+        "send.persistence_barrier": {
+          "count": 183,
+          "errors": 0,
+          "samples": 183,
+          "p50_ms": 0.009,
+          "p95_ms": 0.053,
+          "p99_ms": 482.091,
+          "max_ms": 1059.618
+        },
+        "send.execution": {
+          "count": 49,
+          "errors": 2,
+          "samples": 49,
+          "p50_ms": 110.361,
+          "p95_ms": 4497.282,
+          "p99_ms": 6984.792,
+          "max_ms": 6984.792
+        },
+        "send.activity": {
+          "count": 47,
+          "errors": 0,
+          "samples": 47,
+          "p50_ms": 10.997,
+          "p95_ms": 48.001,
+          "p99_ms": 109.164,
+          "max_ms": 109.164
+        },
+        "send_acceptance": {
+          "count": 48,
+          "errors": 2,
+          "samples": 48,
+          "p50_ms": 115.449,
+          "p95_ms": 4497.399,
+          "p99_ms": 6984.91,
+          "max_ms": 6984.91
+        },
+        "history.snapshot": {
+          "count": 12188,
+          "errors": 0,
+          "samples": 2048,
+          "p50_ms": 23.399,
+          "p95_ms": 357.65,
+          "p99_ms": 592.609,
+          "max_ms": 2605.577
+        },
+        "history.prepare": {
+          "count": 12170,
+          "errors": 0,
+          "samples": 2048,
+          "p50_ms": 132.489,
+          "p95_ms": 2716.344,
+          "p99_ms": 8197.913,
+          "max_ms": 60552.436
+        },
+        "history.stage": {
+          "count": 12169,
+          "errors": 44,
+          "samples": 2048,
+          "p50_ms": 20.795,
+          "p95_ms": 239.914,
+          "p99_ms": 547.561,
+          "max_ms": 2756.544
+        }
+      },
+      "checkpoint": {
+        "mode": "PASSIVE",
+        "sqlite_version": "3.51.0",
+        "state": "unsupported_sqlite",
+        "enabled": false,
+        "attempts": 0,
+        "busy": 0,
+        "errors": 0,
+        "last_error": null,
+        "last_attempt_at": null,
+        "last_success_at": null,
+        "last_progress_at": null,
+        "last_progress_age_seconds": null,
+        "log_frames": null,
+        "checkpointed_frames": null,
+        "backlog_frames": null,
+        "backlog_bytes": null,
+        "backlog_age_seconds": 0,
+        "wal_file_bytes": 0,
+        "sample_capacity": 256,
+        "sample_count": 0,
+        "duration_ms": {
+          "last": null,
+          "p95": null,
+          "maximum": 0.0
+        }
+      },
+      "persistence": {
+        "pending": 3,
+        "retries": 255,
+        "optional_failure_count": 20,
+        "oldest_age_seconds": 0.03602724999655038,
+        "draining": true,
+        "stopped": false,
+        "failure_count": 19
+      },
+      "host": {
+        "logical_cpu_count": 10,
+        "load_average": {
+          "one_minute": 60.427,
+          "five_minutes": 50.04,
+          "fifteen_minutes": 33.194
+        }
+      },
+      "process": {
+        "cpu_seconds": 9373.236561,
+        "peak_resident_memory_bytes": 894074880
+      },
+      "history": {
+        "snapshots": 12047,
+        "unchanged_snapshots": 532,
+        "source_bytes": 174579546450,
+        "staged_chunks": 42468,
+        "staged_bytes": 243677244,
+        "reused_chunks": 74118074,
+        "reused_bytes": 180001537489,
+        "staging_transactions": 11420,
+        "published_bytes": 63000160,
+        "encoded_document_bytes": 180533567510,
+        "elapsed_seconds": 3930.682589418262,
+        "failures": 122,
+        "search_seed_failures": 0,
+        "preparation_cache_bytes": 47578339,
+        "preparation_cache_threads": 16,
+        "confirmed_chunks": 16384
+      }
+    }
+  },
+  "installed_interface": {
+    "CFBundleShortVersionString": "0.1.7",
+    "CFBundleVersion": "43",
+    "CFBundleIdentifier": "com.agentcoord.desktop"
+  }
+}

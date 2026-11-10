@@ -1,0 +1,216 @@
+{
+  "reviewed_at": "2026-11-10T02:06:05.345452+00:00",
+  "reviewed_document": "/opt/projects/agent-coord/docs/investigations/refresh-timeout-history/README.md",
+  "review_scope": [
+    "causal attribution",
+    "source/installation/activation/health distinctions",
+    "issue closure qualifiers",
+    "UTC dates",
+    "build38 to40/41 interpreter capability change",
+    "latest individual timeout attribution"
+  ],
+  "verdict": "Corrections requested; central causal qualifications and runtime-capability finding are supported.",
+  "findings": [
+    {
+      "severity": "P2",
+      "location": "README.md:76",
+      "claim": "Build38 activation had zero admission timeouts/retries/failures.",
+      "problem": "Generic zero failures is broader than the receipt. It contains64 failed writable scopes at activation and313 at the later recheck, although all specified persistence failure/retry counters and admission timeouts are zero. Those failed scopes are not proved user-facing failures either.",
+      "evidence": [
+        "runtime-evidence.json#/reports/9/metrics/failed_scopes = 64",
+        "runtime-evidence.json#/reports/9/metrics/persistence/failure_count = 0",
+        "runtime-evidence.json#/reports/10/metrics/failed_scopes = 313",
+        "runtime-evidence.json#/reports/10/record/health records zero persistence and other named health errors"
+      ],
+      "correction": "Replace zero admission timeouts/retries/failures with zero admission timeouts, persistence retries and persistence failures. Either retain the failed_scopes totals with their unexplained/possibly expected rollback status or avoid a broad failure-free claim."
+    },
+    {
+      "severity": "P2",
+      "location": "README.md:29-31",
+      "claim": "Residual history/resource/provider-separation work was retained as further work.",
+      "problem": "The prose omits the controlling user direction. czye explicitly says performance investigation was separated from approved reliability delivery by user instruction and that provider process-split/live-swap research remained user-paused and unauthorized. Omitting this can turn an explicit decision into an apparent agent omission.",
+      "evidence": [
+        "beads.json issue agent-coord-czye raw_issue.description",
+        "beads.json issue agent-coord-udh1.5 raw_issue.notes",
+        "beads.json issue agent-coord-udh1.6 raw_issue.notes"
+      ],
+      "correction": "Add: This separation followed explicit user instruction to proceed with the approved reliability delivery; provider process-split/live-swap research remained user-paused and was not authorized by the residual investigation."
+    },
+    {
+      "severity": "P3",
+      "location": "README.md:107",
+      "claim": "October26\u201328 row includes commit1f949aa8.",
+      "problem": "The document declares chronology dates UTC. This commit is2026-10-28T21:58:30-05:00, hence2026-10-29T02:58:30Z.",
+      "evidence": [
+        "git show -s --format=%cI 1f949aa8 => 2026-10-28T21:58:30-05:00"
+      ],
+      "correction": "Move1f949aa8 connection-reuse repair into October29 row, or expand the row period through October29. Keep the UTC convention consistent."
+    }
+  ],
+  "claims_checked_and_supported": [
+    "No particular lock holder, SQL operation or interpreter fallback is asserted as the proved cause of the original individual timeout; the report repeatedly preserves this limit.",
+    "Live retained backend.json files select /opt/homebrew/bin/python3.13 for build38/39, Python3.12.7 for40/41/42, and Python3.13 for selected43. Build38 activation receipt confirms SQLite3.53.4; serving41 observation confirms3.51.0.",
+    "sqlite_rows.read_rows falls back wholesale to ordinary transfer before SQLite3.53.4; concurrent checkpoint worker requires repaired WAL-reset library and reports unsupported_sqlite for3.51.0. Loss of these capabilities follows the selected execution environment while source remains present.",
+    "Runtime status at collection distinguishes serving41 from selected/pending43, and failed update target fe78d46a differs from selected5fe1cc54; draft accurately retains this distinction.",
+    "Build38 active_and_verified proves activation and a limited clean named-counter observation, not sustained latency acceptance; draft correctly reports later small-sample latency exceptions.",
+    "The Beads closure interpretation matches exact source-only assignments and the two actual wgg7 reopenings. cgkq lacks recorded outcome; czye remains open.",
+    "docs/responsiveness.md explicitly supersedes November2 acceptance and names omitted sidecar polling, unverified workers and older/smaller histories.",
+    "Native-child persistence poisoning and plugin/source drift are classified as separate delivery/correctness obstacles instead of being asserted to cause every slow read."
+  ],
+  "coverage_additions": [
+    {
+      "issue": "agent-coord-oklw.2",
+      "classification": "delivery_and_activation",
+      "status": "in_progress",
+      "reason": "Independent isolated upgrade and failure-recovery validation belongs with oklw/.1."
+    },
+    {
+      "issue": "agent-coord-6z5.10",
+      "classification": "release_provenance_context",
+      "status": "open",
+      "reason": "Documents historical release source drift; causal connection to current refresh incident remains unestablished."
+    }
+  ],
+  "methods": [
+    "Read draft and retained runtime-evidence.json",
+    "Read actual retained backend.json files for builds38 through43",
+    "Read sqlite_rows.py and database_checkpoint.py version predicates and desktop build.py interpreter selection",
+    "Read docs/responsiveness.md correction/acceptance contract",
+    "Cross-checked live Beads audit with full issue records and deduplicated histories",
+    "Checked exact commit timestamps with Git"
+  ],
+  "changes": "No repository or runtime mutations; only requested temporary review and expanded Beads audit artifacts written.",
+  "load_tests": "None; no provider resumed and no performance workload rerun.",
+  "lead_resolution": {
+    "all_reported_corrections_applied": true,
+    "changes": [
+      "Qualified build38 failure claims as persistence-specific and reported failed_scope counts separately.",
+      "Preserved explicit user-directed residual-work split and provider/live-swap pause.",
+      "Moved1f949aa8 to October29UTC."
+    ]
+  },
+  "conversation_source_check": {
+    "verdict": "No material factual overstatement found in the README conversation-derived claims checked. One coverage clarification is needed; direct human attribution can be strengthened with activity-event evidence.",
+    "corrections": [
+      {
+        "kind": "coverage_clarification",
+        "target": "Conversation coverage197 precision screened /83 retained /118 excluded",
+        "replacement": "197 precision candidates were screened:79 retained and118 excluded. Four additional conversations were explicitly restored from the original broad-recall inventory, yielding83 final retained conversations. These four are separate from the five relevant unindexed histories decoded directly.",
+        "restored_ids": [
+          "01a1858a-b91e-7471-b841-f2272db62d46",
+          "01a185bd-3ace-7e70-b17a-6cdb48b582dc",
+          "3db5f295-6c89-4339-8bf8-1f40a75905cb",
+          "ad9c969d-e6e0-4f8a-b656-5ca95571b8ff"
+        ],
+        "formula": "197 =79 +118;83 =79 +4; unique reviewed precision-or-restored records =201."
+      },
+      {
+        "kind": "attribution_strengthening",
+        "target": "November2/3 repeated user requirements",
+        "replacement": "The three quoted requests are supported by matching thread and turn identities in actor=human/source=app/message_submitted events, not solely a provider user role. Activity events14396,14431 and16371 precede their corresponding prose by0.884s,0.305s and1.097s.",
+        "evidence": [
+          {
+            "prose": {
+              "item_id": "01a19db7-35c1-7d51-8f94-de0074c23d2c",
+              "turn_id": "01a19db4-05d4-7a81-98dc-a5e0e9389945",
+              "timestamp": 1793647392.20216,
+              "timestamp_utc": "2026-11-02T19:23:12.202160+00:00",
+              "role": "user",
+              "origin": "recorded_human_submission_turn",
+              "text": "> The error specifically means Ribbon Field hit a database lock timeout. \nLook at our commit history. We\u2019ve been having this issue over and over. Can you figure out: \n- what\u2019s causing\n- why the previous \u201cfixes\u201d didn\u2019t work\n- how do we actually solve this"
+            },
+            "human_activity": {
+              "sequence": 14396,
+              "event_id": "request:a2409ba3-87e2-50aa-9e0d-9f8ea700a00e",
+              "kind": "message_submitted",
+              "thread_id": "01a19db3-fbea-7e00-8a7c-7d0ce21a2e16",
+              "occurred_at": 1793647391.318624,
+              "received_at": 1793647391.318624,
+              "actor": "human",
+              "source": "app",
+              "turn_id": "01a19db4-05d4-7a81-98dc-a5e0e9389945",
+              "details_json": "{\"action\":\"message\",\"queued\":false,\"request_id\":null}"
+            },
+            "delay_seconds": 0.8835358619689941
+          },
+          {
+            "prose": {
+              "item_id": "01a19dc2-b936-78b2-bf29-9bd0cdc9e557",
+              "turn_id": "01a19dc2-b6fd-7472-8b1e-65f92903b3a0",
+              "timestamp": 1793648146.75185,
+              "timestamp_utc": "2026-11-02T19:35:46.751850+00:00",
+              "role": "user",
+              "origin": "recorded_human_submission_turn",
+              "text": "Okay, fully and robustly fix it. make sure that we have performance/latency metrics so that agents optimize for optimal performance"
+            },
+            "human_activity": {
+              "sequence": 14431,
+              "event_id": "request:4c285a7a-c0c6-53d3-80c0-d278c8dbf1e4",
+              "kind": "message_submitted",
+              "thread_id": "01a19db3-fbea-7e00-8a7c-7d0ce21a2e16",
+              "occurred_at": 1793648146.446839,
+              "received_at": 1793648146.446839,
+              "actor": "human",
+              "source": "app",
+              "turn_id": "01a19dc2-b6fd-7472-8b1e-65f92903b3a0",
+              "details_json": "{\"action\":\"message\",\"queued\":false,\"request_id\":null}"
+            },
+            "delay_seconds": 0.3050107955932617
+          },
+          {
+            "prose": {
+              "item_id": "01a1a373-c416-78b3-9ae3-0558825a0490",
+              "turn_id": "01a1a373-bf95-7371-a9eb-600110cfdf5e",
+              "timestamp": 1793743635.53242,
+              "timestamp_utc": "2026-11-03T22:07:15.532420+00:00",
+              "role": "user",
+              "origin": "recorded_human_submission_turn",
+              "text": "Okay ***why*** is not fully fixed? I cannot keep on having these issues. Why did you fail."
+            },
+            "human_activity": {
+              "sequence": 16371,
+              "event_id": "request:3f907b7a-8954-5ec7-85b7-4a59d8a09071",
+              "kind": "message_submitted",
+              "thread_id": "01a19db3-fbea-7e00-8a7c-7d0ce21a2e16",
+              "occurred_at": 1793743634.434976,
+              "received_at": 1793743634.434976,
+              "actor": "human",
+              "source": "app",
+              "turn_id": "01a1a373-bf95-7371-a9eb-600110cfdf5e",
+              "details_json": "{\"action\":\"message\",\"queued\":false,\"request_id\":null}"
+            },
+            "delay_seconds": 1.0974438190460205
+          }
+        ]
+      }
+    ],
+    "checked_claims": [
+      {
+        "claim": "Build40 fallback",
+        "status": "accurate_and_appropriately_qualified",
+        "source_thread": "01a1bc76-8b20-7a63-841e-adeb20ac0a3e",
+        "item_ids": [
+          "msg_02a4c7cfe2a306ac016af0c598bae887d0bbb137b1ee98450c",
+          "msg_02a4c7cfe2a306ac016af0c8675bcc87d0975123cc4b0c8563"
+        ],
+        "note": "Exact wording switches the test suite to documentedPython3.12.7 after HomebrewPython3.14 XML import failure; a later message says build40 rebuilt. The prose alone does not prove the packaged builder interpreter; README correctly relies on retained payload metadata for that conclusion."
+      },
+      {
+        "claim": "October31 same-deadline investigation",
+        "status": "verified_checkpoint_evidence",
+        "source_thread": "01a192b4-5833-7d20-8cb0-66f17f9724d6",
+        "checkpoint_ids": [
+          14482,
+          14502
+        ],
+        "note": "14482 records15sdeadline, eight open conversations16\u2013198ms, and24-request burst/nonreproduction;14502 records142percentCPU during renewed stall. These prove earlier investigation/findings as recorded, not the causal lock holder of today\u2019s timeout."
+      },
+      {
+        "claim": "Narrative distinguishing real repairs, deferred scope, acceptance shortcomings, interpreter/runtime activation and distinct power/WebKit causes",
+        "status": "appropriately_qualified",
+        "note": "No correction requested to those conversation-derived portions of README."
+      }
+    ],
+    "scope": "Read-only source check; no repository/runtime mutations. Did not re-audit Git/Beads or runtime metadata already owned by other reviewers."
+  }
+}
