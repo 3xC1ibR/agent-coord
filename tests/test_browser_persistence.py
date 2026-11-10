@@ -1,17 +1,114 @@
+import errno
 import sqlite3
 import sys
 import threading
+import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
-from agent_coord.browser_persistence import BrowserPersistence, database_busy
+from agent_coord.browser_persistence import BrowserPersistence, database_busy, storage_full
 
 
 class BrowserPersistenceTests(unittest.TestCase):
+    def test_real_storage_full_recovers_without_losing_or_reordering_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "history.sqlite3")
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, payload BLOB)")
+                db.commit()
+                pages = db.execute("PRAGMA page_count").fetchone()[0]
+            persistence = BrowserPersistence(storage_retry_delay=.01)
+            self.addCleanup(persistence.close)
+            capacity = threading.Event()
+            self.addCleanup(capacity.set)
+            failed = threading.Event()
+            saved = []
+
+            def history():
+                with closing(sqlite3.connect(path)) as db, db:
+                    db.execute(f"PRAGMA max_page_count = {100 if capacity.is_set() else pages}")
+                    try:
+                        db.execute("INSERT INTO history VALUES (1, zeroblob(16384))")
+                    except sqlite3.OperationalError as error:
+                        self.assertTrue(storage_full(error))
+                        failed.set()
+                        raise
+                saved.append("history")
+
+            try:
+                with self.assertLogs("agent_coord.browser_persistence", level="WARNING"):
+                    persistence.submit(history, key="full")
+                    persistence.submit(lambda: saved.append("completed"), key="full")
+                    self.assertTrue(failed.wait(1))
+                    persistence.submit(lambda: saved.append("independent"), key="other")
+                    self.assertTrue(persistence.flush(timeout=1, key="other"))
+                    self.assertFalse(persistence.flush(timeout=0, key="full"))
+                    self.assertIsNone(persistence.failure("full"))
+                    self.assertEqual(saved, ["independent"])
+                    capacity.set()
+                    self.assertTrue(persistence.flush(timeout=2))
+                self.assertEqual(saved, ["independent", "history", "completed"])
+                with closing(sqlite3.connect(path)) as db:
+                    self.assertEqual(db.execute("SELECT count(*), length(payload) FROM history").fetchone(), (1, 16384))
+            finally:
+                capacity.set()
+                persistence.close()
+
+    def test_storage_full_retries_back_off_without_failing_the_conversation(self):
+        persistence = BrowserPersistence()
+        self.addCleanup(persistence.close)
+        clock = [0.0]
+        attempts = []
+        completed = threading.Event()
+        real_wait = persistence.condition.wait
+
+        def advance_wait(timeout=None):
+            if threading.current_thread() is persistence.worker and timeout is not None:
+                clock[0] += timeout
+                return False
+            return real_wait(timeout)
+
+        def history():
+            attempts.append(clock[0])
+            if len(attempts) <= 7:
+                raise sqlite3.OperationalError("database or disk is full")
+            completed.set()
+
+        with patch("agent_coord.browser_persistence.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(persistence.condition, "wait", side_effect=advance_wait):
+            persistence.submit(history, key="conversation")
+            self.assertTrue(completed.wait(1))
+            self.assertTrue(persistence.flush(timeout=1))
+        self.assertEqual([b - a for a, b in zip(attempts, attempts[1:])], [1, 2, 4, 8, 16, 30, 30])
+        self.assertIsNone(persistence.failure("conversation"))
+
+    def test_storage_full_generator_restarts_before_its_following_lifecycle(self):
+        persistence = BrowserPersistence(storage_retry_delay=.01)
+        self.addCleanup(persistence.close)
+        attempts, finalized, saved = [], [], []
+
+        def history():
+            attempt = len(attempts)
+            attempts.append(attempt)
+            try:
+                yield
+                if attempt == 0:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+                saved.append("publish")
+            finally:
+                finalized.append(attempt)
+
+        persistence.submit(history, key="history")
+        persistence.submit(lambda: saved.append("completed"), key="history")
+        self.assertTrue(persistence.flush(timeout=2))
+        self.assertEqual(attempts, [0, 1])
+        self.assertEqual(finalized, attempts)
+        self.assertEqual(saved, ["publish", "completed"])
+
     def test_retries_in_order_and_stops_its_worker(self):
         persistence = BrowserPersistence(retry_delay=.01)
         self.addCleanup(persistence.close)
@@ -444,3 +541,18 @@ class BrowserPersistenceTests(unittest.TestCase):
         error.sqlite_errorcode = 10  # SQLITE_IOERR is not retryable contention.
         self.assertFalse(database_busy(error))
         self.assertTrue(database_busy(sqlite3.OperationalError("database is locked")))
+
+    def test_storage_full_codes_and_python_310_fallback(self):
+        error = sqlite3.OperationalError("localized error")
+        error.sqlite_errorcode = 13
+        self.assertTrue(storage_full(error))
+        error.sqlite_errorcode = 13 | (1 << 8)
+        self.assertTrue(storage_full(error))
+        error.sqlite_errorcode = 10
+        self.assertFalse(storage_full(error))
+        self.assertTrue(storage_full(sqlite3.OperationalError("database or disk is full")))
+        self.assertFalse(storage_full(sqlite3.OperationalError("database is locked")))
+        self.assertTrue(storage_full(OSError(errno.ENOSPC, "localized error")))
+        self.assertTrue(storage_full(OSError(errno.EDQUOT, "localized error")))
+        self.assertFalse(storage_full(OSError(errno.EIO, "I/O error")))
+        self.assertFalse(storage_full(ValueError("database or disk is full")))

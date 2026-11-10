@@ -1,6 +1,7 @@
 """Ordered, isolated retries for bookkeeping; never replay provider operations."""
 from __future__ import annotations
 
+import errno
 import logging
 import sqlite3
 import threading
@@ -19,6 +20,15 @@ def database_busy(error):
     if code is not None:
         return code & 255 in {5, 6}
     return str(error).lower() in {"database is locked", "database table is locked", "database is busy"}
+
+
+def storage_full(error):
+    if isinstance(error, sqlite3.OperationalError):
+        code = getattr(error, "sqlite_errorcode", None)
+        if code is not None:
+            return code & 255 == 13  # SQLITE_FULL, including extended codes.
+        return str(error).lower() == "database or disk is full"
+    return isinstance(error, OSError) and error.errno in {errno.ENOSPC, errno.EDQUOT}
 
 
 @dataclass
@@ -46,9 +56,11 @@ class BrowserPersistence:
     idempotent callback factory; it never resumes an iterator after an exception.
     Required permanent failures fail that key's barriers and stop its sequence.
     Optional telemetry failures are logged and do not prevent later lifecycle work.
+    Storage exhaustion retains the idempotent write and retries with a longer
+    backoff, so restoring capacity recovers without resubmitting provider work.
     """
 
-    def __init__(self, *, retry_delay=0.25, context=nullcontext, max_pending_per_key=1024):
+    def __init__(self, *, retry_delay=0.25, storage_retry_delay=30, context=nullcontext, max_pending_per_key=1024):
         self.condition = threading.Condition()
         self.queues = {}
         self.order = deque()
@@ -58,6 +70,7 @@ class BrowserPersistence:
         self.stopped = False
         self.worker = None
         self.retry_delay = retry_delay
+        self.storage_retry_delay = storage_retry_delay
         self.context = context
         self.max_pending_per_key = max_pending_per_key
         self.retries = 0
@@ -181,21 +194,29 @@ class BrowserPersistence:
                     self._close_steps(write)
                 except Exception as exc:
                     error = exc
+            busy = isinstance(error, sqlite3.OperationalError) and database_busy(error)
+            full = storage_full(error)
             if error is not None:
-                if not isinstance(error, sqlite3.OperationalError) or not database_busy(error):
+                if not busy and not full:
                     logging.getLogger(__name__).error("Browser bookkeeping failed for %s", write.key,
                         exc_info=(type(error), error, error.__traceback__))
             with self.condition:
                 self.in_flight = None
-                if isinstance(error, sqlite3.OperationalError) and database_busy(error):
+                if busy or full:
                     if not write.attempts:
-                        logging.getLogger(__name__).warning("Database busy; deferring browser bookkeeping for %s", write.key)
+                        if full:
+                            logging.getLogger(__name__).warning("Storage full; retaining browser bookkeeping for %s until capacity is restored", write.key)
+                        else:
+                            logging.getLogger(__name__).warning("Database busy; deferring browser bookkeeping for %s", write.key)
                     write.attempts += 1
                     self.retries += 1
                     # Most zero-timeout collisions end with a short foreground
                     # transaction. Retry those promptly, then back off to the
                     # configured ceiling during sustained contention.
-                    delay = min(self.retry_delay, .01 * 2 ** min(write.attempts - 1, 30))
+                    if full:
+                        delay = min(self.storage_retry_delay, 2 ** min(write.attempts - 1, 30))
+                    else:
+                        delay = min(self.retry_delay, .01 * 2 ** min(write.attempts - 1, 30))
                     write.due_at = time.monotonic() + delay
                 elif complete or error is not None:
                     queue = self.queues[write.key]
