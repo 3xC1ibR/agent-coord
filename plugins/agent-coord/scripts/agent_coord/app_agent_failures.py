@@ -9,6 +9,7 @@ from .workspaces import matches_workspace
 
 
 FOLLOWUP_SECONDS = 600
+QUEUED_WORK_ALERT_SECONDS = 1800
 
 
 def _track_followup(store, db, request, turn_id):
@@ -18,7 +19,8 @@ def _track_followup(store, db, request, turn_id):
     db.execute("""CREATE TABLE IF NOT EXISTS app_agent_followups (
         thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, request_id TEXT NOT NULL,
         created_at REAL NOT NULL, due_at REAL NOT NULL, escalated_at REAL,
-        resolved_at REAL, resolution TEXT, PRIMARY KEY(thread_id, turn_id)
+        resolved_at REAL, resolution TEXT, queued_alerted_at REAL, queued_alert_message_id INTEGER,
+        PRIMARY KEY(thread_id, turn_id)
     )""")
     db.execute("""CREATE INDEX IF NOT EXISTS app_agent_followups_due ON app_agent_followups(due_at)
         WHERE resolved_at IS NULL AND escalated_at IS NULL""")
@@ -28,13 +30,98 @@ def _track_followup(store, db, request, turn_id):
         (request["thread_id"], turn_id, request["request_id"], now, now + FOLLOWUP_SECONDS))
 
 
+def _ensure_queued_work_columns(db):
+    """Columns added after the table first shipped; older databases gain them in place."""
+    present = {row[1] for row in db.execute("PRAGMA table_info(app_agent_followups)")}
+    for name, kind in (("queued_alerted_at", "REAL"), ("queued_alert_message_id", "INTEGER")):
+        if name not in present:
+            db.execute(f"ALTER TABLE app_agent_followups ADD COLUMN {name} {kind}")
+
+
+def _resolution(db, row):
+    """Return why a failure deadline no longer applies, or None while the agent is still unrecovered."""
+    tid, turn = row["thread_id"], row["turn_id"]
+    current = db.execute("SELECT turn_key, attention FROM work_threads WHERE thread_id = ?", (tid,)).fetchone()
+    wake = db.execute("SELECT paused, pause_kind FROM browser_inbox_wake WHERE thread_id = ?", (tid,)).fetchone()
+    if not current or current["attention"] == "archived":
+        return "closed"
+    if current["turn_key"] != turn:
+        return "new_turn"
+    if wake and wake["paused"] and wake["pause_kind"] == "stop":
+        return "user_stop"
+    if db.execute("SELECT 1 FROM handoffs WHERE sender_session_id = ? AND created_at >= ?",
+                  (tid, row["created_at"])).fetchone():
+        return "handoff"
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone() and db.execute(
+            "SELECT 1 FROM thread_close_requests WHERE thread_id = ? AND status IN ('queued', 'closing')", (tid,)).fetchone():
+        return "closing"
+    return None
+
+
+def _report_queued_work(store, db, row, now):
+    """Tell the supervisor when new actionable work waits behind an unrecovered failure.
+
+    A paused wake never delivers this work, and the overdue reminder is sent
+    once. Without this report, work routed later waits with no further signal.
+    """
+    tid, turn = row["thread_id"], row["turn_id"]
+    wake = db.execute("SELECT paused, pause_kind FROM browser_inbox_wake WHERE thread_id = ?", (tid,)).fetchone()
+    if not wake or not wake["paused"] or wake["pause_kind"] != "failure":
+        return
+    boundary = row["queued_alerted_at"] or row["escalated_at"]
+    if now - boundary < QUEUED_WORK_ALERT_SECONDS:
+        return
+    pending = db.execute("""SELECT m.id, m.created_at, m.reply_required, s.name AS sender_name FROM messages m
+        LEFT JOIN sessions s ON s.session_id = m.sender_session_id
+        WHERE m.recipient_session_id = ? AND m.sender_session_id != ? AND m.delivered_at IS NULL
+        AND m.acknowledged_at IS NULL AND m.suppressed_at IS NULL AND m.classification = 'action_required'
+        AND m.thread_id NOT LIKE 'event:%' AND m.created_at >= ? ORDER BY m.id""",
+        (tid, tid, row["created_at"])).fetchall()
+    reported = row["queued_alert_message_id"] or 0
+    if not any(p["id"] > reported and p["created_at"] > boundary for p in pending):
+        return  # Only work queued after the last report starts another one.
+    newest = pending[-1]
+    request = db.execute("SELECT * FROM app_control_requests WHERE request_id = ?", (row["request_id"],)).fetchone()
+    if not request:
+        return
+    replies = sum(1 for p in pending if p["reply_required"])
+    _notify(store, db, request, event_key=["queued_work", turn, newest["id"]], stage="queued_work", turn_id=turn,
+            error=(f"{len(pending)} actionable message(s), {replies} requiring a reply, are queued for this agent, "
+                   f"which has not run since its failed turn. Newest: #{newest['id']} from "
+                   f"{newest['sender_name'] or 'an unnamed session'}."),
+            event="app_agent_work_queued", guidance=
+            "These messages will not wake the agent. Recover it with a fresh actionable continuation and "
+            "agent-coord thread resume, or hand its scope to an available worker. Acknowledging this alert is "
+            "not recovery. This report repeats at most every 30 minutes, and only when new work is queued; "
+            "no reply is required.")
+    db.execute("""UPDATE app_agent_followups SET queued_alerted_at = ?, queued_alert_message_id = ?
+        WHERE thread_id = ? AND turn_id = ?""", (now, newest["id"], tid, turn))
+
+
 def process_failure_followups(store, cwd=None):
-    """Escalate unresolved work once, without running or transferring it."""
+    """Escalate unresolved work without running or transferring it.
+
+    The overdue reminder is sent once. Later actionable work queued behind the
+    same failure is reported separately, at most every 30 minutes.
+    """
     with store._connection() as db:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_agent_followups'").fetchone():
             return
         now = store.clock()
         db.execute("BEGIN IMMEDIATE")
+        _ensure_queued_work_columns(db)
+        escalated = db.execute("""SELECT f.*, b.cwd FROM app_agent_followups f
+            JOIN browser_sessions b ON b.thread_id = f.thread_id
+            WHERE f.resolved_at IS NULL AND f.escalated_at IS NOT NULL""").fetchall()
+        for row in escalated:
+            if not matches_workspace(row["cwd"], cwd):
+                continue
+            resolution = _resolution(db, row)
+            if resolution:
+                db.execute("UPDATE app_agent_followups SET resolved_at = ?, resolution = ? WHERE thread_id = ? AND turn_id = ?",
+                           (now, resolution, row["thread_id"], row["turn_id"]))
+                continue
+            _report_queued_work(store, db, row, now)
         rows = db.execute("""SELECT f.*, b.cwd FROM app_agent_followups f
             JOIN browser_sessions b ON b.thread_id = f.thread_id
             WHERE f.resolved_at IS NULL AND f.escalated_at IS NULL AND f.due_at <= ?""", (now,)).fetchall()
@@ -42,21 +129,7 @@ def process_failure_followups(store, cwd=None):
             if not matches_workspace(row["cwd"], cwd):
                 continue
             tid, turn = row["thread_id"], row["turn_id"]
-            current = db.execute("SELECT turn_key, attention FROM work_threads WHERE thread_id = ?", (tid,)).fetchone()
-            wake = db.execute("SELECT paused, pause_kind FROM browser_inbox_wake WHERE thread_id = ?", (tid,)).fetchone()
-            resolution = None
-            if not current or current["attention"] == "archived":
-                resolution = "closed"
-            elif current["turn_key"] != turn:
-                resolution = "new_turn"
-            elif wake and wake["paused"] and wake["pause_kind"] == "stop":
-                resolution = "user_stop"
-            elif db.execute("SELECT 1 FROM handoffs WHERE sender_session_id = ? AND created_at >= ?",
-                            (tid, row["created_at"])).fetchone():
-                resolution = "handoff"
-            elif db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone() and db.execute(
-                    "SELECT 1 FROM thread_close_requests WHERE thread_id = ? AND status IN ('queued', 'closing')", (tid,)).fetchone():
-                resolution = "closing"
+            resolution = _resolution(db, row)
             if resolution:
                 db.execute("UPDATE app_agent_followups SET resolved_at = ?, resolution = ? WHERE thread_id = ? AND turn_id = ?",
                            (now, resolution, tid, turn))

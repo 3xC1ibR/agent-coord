@@ -3128,7 +3128,41 @@ class CoordinationStore:
                 "idempotent": not inserted,
             }
         )
+        notice = self.recipient_wake_notice(recipient["session_id"])
+        if notice:
+            result["recipient_wake"] = notice
         return result
+
+    def recipient_wake_notice(self, recipient_session_id: str) -> dict[str, Any] | None:
+        """Describe a paused automatic wake, so a sender knows its message will wait.
+
+        A queued message cannot wake an app agent whose wake is paused. Without
+        this notice, a sender cannot tell that send from an ordinary delivery.
+        """
+        with self.reading(), self._connection() as connection:
+            if not connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'browser_inbox_wake'").fetchone():
+                return None
+            found = connection.execute(
+                "SELECT * FROM browser_inbox_wake WHERE thread_id = ? AND paused = 1",
+                (recipient_session_id,)).fetchone()
+        if found is None:
+            return None
+        # Older wake tables predate the pause kind and time columns.
+        row = {key: found[key] for key in found.keys()}
+        kind = row.get("pause_kind") or "unknown"
+        if kind in {"failure", "released"}:
+            guidance = ("The recipient's last turn failed or was stopped, so its automatic wake is paused. "
+                        "This message is queued and will not wake it. Its supervisor must recover it with "
+                        "agent-coord thread resume, or hand its scope to another worker.")
+        elif kind == "stop":
+            guidance = ("The user stopped the recipient. This message is queued until the user continues "
+                        "that conversation.")
+        else:
+            guidance = ("The recipient's automatic wake is paused. This message is queued and will not wake it "
+                        "until the pause is cleared.")
+        return {"paused": True, "kind": kind, "reason": row.get("error"), "paused_at": row.get("paused_at"),
+                "guidance": guidance}
 
     def reply_message(
         self, *, sender_session_id: str, message_id: int, body: str
@@ -3199,6 +3233,9 @@ class CoordinationStore:
             recipient_bead_id=recipient["bead_id"],
             idempotent=False,
         )
+        notice = self.recipient_wake_notice(recipient_id)
+        if notice:
+            result["recipient_wake"] = notice
         return result
 
     def inbox(

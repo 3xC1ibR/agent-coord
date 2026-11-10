@@ -774,6 +774,14 @@ It never replays the failed prompt or resets an uncertain submission. Direct
 user input remains the recovery path for Stop or older, untyped pause records.
 This command requires an updated running app backend.
 
+An `app_agent_failed`, `app_agent_recovery_overdue` or `app_agent_work_queued`
+report means the agent's automatic wake is paused, not just that one assignment
+failed. Later messages, including your own, are queued and do not wake it until
+you recover it or hand off its scope. Acknowledging the report is not recovery.
+A `send` or `reply` receipt includes `recipient_wake` (also printed as a warning
+on stderr) whenever the recipient's wake is paused. Read an agent's run state
+from `execution.state` in `thread list` or `thread show`.
+
 Route later requests with `send --session <agent-id> --classification
 action_required --no-reply-required`. Request a reply only when coordination
 requires one. Messages can reach busy agents through tool hooks; automatic

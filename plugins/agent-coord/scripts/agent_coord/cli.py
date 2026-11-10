@@ -1172,7 +1172,8 @@ def mutation_receipt(arguments, result):
     if isinstance(result, dict):
         fields = ("session_id", "thread_id", "id", "activity", "bead_id", "write_scope", "lease_mode",
                   "title", "attention", "project_id", "repository_id", "recipient_session_id",
-                  "classification", "reply_required", "in_reply_to", "acknowledged_at", "acknowledged", "message_ids", "sender_session_id")
+                  "classification", "reply_required", "in_reply_to", "acknowledged_at", "acknowledged", "message_ids", "sender_session_id",
+                  "recipient_wake")
         receipt.update({key: result[key] for key in fields if key in result})
     elif isinstance(result, list):
         receipt["count"] = len(result)
@@ -1239,6 +1240,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2
     print(json.dumps(mutation_receipt(arguments, result), indent=2, sort_keys=True))
+    if isinstance(result, dict) and isinstance(result.get("recipient_wake"), dict):
+        # Also on stderr, so a receipt filtered through tail or grep cannot hide it.
+        print("warning: recipient wake paused: " + result["recipient_wake"]["guidance"], file=sys.stderr)
     return 0
 
 

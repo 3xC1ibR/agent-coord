@@ -399,3 +399,83 @@ class AppAgentFailureTests(unittest.TestCase):
         self.finish(child, error="Still no credits")
         later = json.loads(self.reports()[1]["body"])
         self.assertIsNone(later["context_lifecycle"])
+
+    def test_send_and_reply_to_failure_paused_agent_report_the_paused_wake(self):
+        from types import SimpleNamespace
+        from agent_coord.cli import mutation_receipt
+        child = self.overdue_child()
+        sent = self.store.send_message(sender_session_id=self.parent, recipient_session_id=child,
+                                       body="Apply the runner fix.", reply_required=True)
+        self.assertEqual(sent["recipient_wake"]["kind"], "failure")
+        self.assertTrue(sent["recipient_wake"]["paused"])
+        self.assertIn("thread resume", sent["recipient_wake"]["guidance"])
+        receipt = mutation_receipt(SimpleNamespace(command="send", full=False), sent)
+        self.assertEqual(receipt["recipient_wake"], sent["recipient_wake"])
+        request = self.store.send_message(sender_session_id=child, recipient_session_id=self.parent,
+                                          body="Which branch?", reply_required=True)
+        self.assertNotIn("recipient_wake", request)  # The supervisor's own wake is not paused.
+        reply = self.store.reply_message(sender_session_id=self.parent, message_id=request["id"], body="Use main.")
+        self.assertEqual(reply["recipient_wake"]["kind"], "failure")
+        self.sessions.inbox_wake.pause(self.parent, "User stopped", kind="stop")
+        stopped = self.store.send_message(sender_session_id=child, recipient_session_id=self.parent,
+                                          body="Result ready.", reply_required=False)
+        self.assertEqual(stopped["recipient_wake"]["kind"], "stop")
+        self.assertNotIn("thread resume", stopped["recipient_wake"]["guidance"])
+
+    def test_work_queued_behind_unrecovered_failure_reports_again_at_bounded_intervals(self):
+        child = self.overdue_child()
+        self.wall += 600
+        process_failure_followups(self.store)
+        events = lambda: [json.loads(m["body"])["event"] for m in self.reports()]
+        self.assertEqual(events(), ["app_agent_failed", "app_agent_recovery_overdue"])
+        escalated = self.wall
+        self.wall += 60
+        first = self.store.send_message(sender_session_id=self.parent, recipient_session_id=child,
+                                        body="Apply the runner fix.", reply_required=True)
+        self.wall = escalated + 1799
+        process_failure_followups(self.store)
+        self.assertEqual(len(events()), 2)  # Within the interval after the overdue reminder.
+        self.wall = escalated + 1800
+        process_failure_followups(self.store)
+        self.assertEqual(events()[-1], "app_agent_work_queued")
+        report = json.loads(self.reports()[-1]["body"])
+        self.assertEqual(report["stage"], "queued_work")
+        self.assertIn(f"#{first['id']}", report["error"])
+        self.assertIn("1 requiring a reply", report["error"])
+        self.wall += 3600
+        process_failure_followups(self.store)
+        self.assertEqual(len(events()), 3)  # No new work, no new report.
+        second = self.store.send_message(sender_session_id=self.parent, recipient_session_id=child,
+                                         body="Also update the README.", reply_required=False)
+        process_failure_followups(self.store)
+        self.assertEqual(len(events()), 4)
+        self.assertIn(f"#{second['id']}", json.loads(self.reports()[-1]["body"])["error"])
+        self.assertEqual(len(self.sessions.rpc.threads[child]["turns"]), 1)  # Nothing was run.
+
+    def test_escalated_failure_resolves_after_recovery_and_stops_reporting(self):
+        child = self.overdue_child()
+        self.wall += 600
+        process_failure_followups(self.store)
+        self.send(child, {"message": "Checked prior native results; continue"})
+        self.store.send_message(sender_session_id=self.parent, recipient_session_id=child,
+                                body="Apply the runner fix.", reply_required=True)
+        before = len(self.reports())
+        self.wall += 3600
+        process_failure_followups(self.store)
+        self.assertEqual(len(self.reports()), before)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT resolution FROM app_agent_followups WHERE thread_id=?",
+                                        (child,)).fetchone()[0], "new_turn")
+
+    def test_queued_work_columns_are_added_to_an_existing_deadline_table(self):
+        self.overdue_child()
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("ALTER TABLE app_agent_followups DROP COLUMN queued_alerted_at")
+            db.execute("ALTER TABLE app_agent_followups DROP COLUMN queued_alert_message_id")
+        self.wall += 600
+        process_failure_followups(self.store)
+        with self.store._connection() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(app_agent_followups)")}
+        self.assertTrue({"queued_alerted_at", "queued_alert_message_id"} <= columns)
+        self.assertEqual(json.loads(self.reports()[-1]["body"])["event"], "app_agent_recovery_overdue")
