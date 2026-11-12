@@ -254,7 +254,13 @@ Mac, `/Users/walle/.pyenv/versions/3.12.7/bin/python3` is the verified builder.
 On reopening, a compatible interface attaches to the retained runtime and can
 serve the new web assets while agents continue. Backend code changes wait for
 idle, or choose **Ribbon Field → Apply Backend Update… → Update and Continue**
-to activate a staged backend while work is active. The coordinated operation
+to activate a staged backend while work is active. New runtimes also offer a native
+**Install / Skip for Now** dialog for locally staged versions. Skipping suppresses
+repeat dialogs for that version until the next interface launch; the update menu
+remains available. The staged backend stays inactive until explicitly installed.
+Signed releases use the same two choices while retaining Sparkle's verified
+download, progress, and installation checks. Development builds still do not
+check production release feeds. The coordinated operation
 interrupts execution, retains rollback state, and continues eligible saved
 conversations. Approvals, Stop, queued user input and uncertain submissions take
 precedence. Use the matching installed helper's

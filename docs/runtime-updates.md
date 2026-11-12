@@ -45,6 +45,21 @@ review found no confirmed blocker.
 
 ## Coordinated backend restart and recovery
 
+Native available-update alerts offer **Install** and **Skip for Now**. Local
+desktop attachment requests `--runtime-confirm-updates`; runtimes advertising
+`runtime_update_prompts: 1` hold that exact pending payload without closing work
+admissions or performing an idle handover. Status reports `pending_confirmation`.
+Reattaching the same payload cannot clear the hold; selecting the current payload
+cancels it. An explicit guarded update or an existing signed installation
+authorization permits activation. Older runtimes retain their original first
+handover behavior and are not shown a skip choice they cannot enforce.
+
+The native interface offers each pending payload once per launch while active.
+Skip retains the update in the menu, and a newer payload is eligible for a new
+prompt. Install rechecks the payload identity after the dialog, preserving the
+existing activation, rollback and recovery checks. Signed release prompts use
+Sparkle's temporary dismiss choice, rather than permanently skipping a version.
+
 Runtimes advertising `runtime_updates: 1` support an explicit **Apply Backend
 Update… → Update and Continue** operation. A staged local build exposes it in the
 existing update menu, including builds without Sparkle. Signed installation

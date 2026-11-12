@@ -168,11 +168,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 self?.backend.supportsRuntimeUpdates == true && self?.backend.pendingUpdate != nil
             }
             updater.backendUpdateInProgress = { [weak self] in self?.backend.updateInProgress == true }
+            updater.backendUpdateIdentifier = { [weak self] in self?.backend.pendingUpdate }
+            updater.backendUpdateVersion = { [weak self] in self?.backend.pendingUpdateVersion }
+            updater.backendUpdateRequiresConfirmation = { [weak self] in self?.backend.pendingUpdateRequiresConfirmation == true }
             updater.applyBackendUpdate = { [weak self] completion in
                 guard let backend = self?.backend else { completion(Backend.failure("Runtime unavailable.")); return }
                 backend.applyUpdate(completion: completion)
             }
             updater.cancelBackendAuthorization = { [weak self] in self?.backend.cancelUpdateAuthorization() }
+            backend.updateAvailable = { [weak self] in
+                guard let self = self, self.smokeReport == nil, !self.quitting, NSApp.isActive else { return }
+                self.updater.notifyBackendUpdate()
+            }
             backend.updateStatus = { [weak self] message, failed in
                 guard let self = self else { return }
                 self.updater.backendUpdateNotice = message

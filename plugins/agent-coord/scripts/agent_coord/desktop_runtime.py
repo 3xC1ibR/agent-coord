@@ -412,7 +412,7 @@ def discover(database, *, timeout=25):
             "client_requests": status.get("client_requests")}
 
 
-def bootstrap(database, resources, *, start_paused=False):
+def bootstrap(database, resources, *, start_paused=False, require_confirmation=False):
     database = str(Path(database).expanduser().resolve())
     directory = runtime_directory(database)
     launcher = lock_file(directory / "launch.lock", blocking=True)
@@ -425,7 +425,7 @@ def bootstrap(database, resources, *, start_paused=False):
             if record:
                 if start_paused and not control(record, "status")["paused"]:
                     raise RuntimeError("A runtime is already admitting work. Pause it explicitly before maintenance.")
-                return control(record, "attach", payload=str(payload))
+                return control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
             try:
                 owner_fd = lock_file(directory / "owner.lock")
                 break
@@ -482,6 +482,7 @@ class Runtime:
         self.instance = uuid.uuid4().hex
         self.token = secrets.token_urlsafe(32)
         self.pending = None
+        self.pending_confirmation = False
         self.selected = self.payload
         self.error = None
         self.mutex = threading.RLock()
@@ -497,7 +498,8 @@ class Runtime:
         """Immutable owner identity; independent of readiness and session locks."""
         return {"database": self.database, "instance": self.instance,
                 "protocol": PROTOCOL_VERSION, "schema": SCHEMA_VERSION, "pid": os.getpid(),
-                "payload": str(self.payload), "client_requests": 1, "runtime_updates": 1}
+                "payload": str(self.payload), "client_requests": 1, "runtime_updates": 1,
+                "runtime_update_prompts": 1}
 
     def status(self):
         from .database_writer import performance_snapshot
@@ -508,7 +510,8 @@ class Runtime:
             update["recovery"] = status(self.server.browser_sessions.store, update["id"])
         return {**self.identity(), "status": "preparing" if self.trial else "serving",
                 "url": f"http://127.0.0.1:{self.server.server_port}/",
-                "pending": str(self.pending) if self.pending else None, "upgrade_error": self.error,
+                "pending": str(self.pending) if self.pending else None,
+                "pending_confirmation": bool(self.pending and self.pending_confirmation), "upgrade_error": self.error,
                 "paused": self.server.browser_sessions.admission.paused,
                 "busy": readiness(self.server.browser_sessions),
                 "update": update,
@@ -625,10 +628,17 @@ class Runtime:
                 if self.update_requested and candidate != self.pending:
                     raise RuntimeError("A backend update is already in progress.")
                 self.selected = candidate
+                previous_pending = self.pending
                 current_version = version_key(read_json(self.payload / "backend.json"))
                 candidate_version = version_key(metadata)
                 self.pending = (candidate if candidate != self.payload and current_version is not None
                                 and candidate_version is not None and candidate_version >= current_version else None)
+                if not self.pending:
+                    self.pending_confirmation = False
+                elif self.pending != previous_pending:
+                    self.pending_confirmation = body.get("require_confirmation") is True
+                elif body.get("require_confirmation") is True:
+                    self.pending_confirmation = True
                 self.error = None
                 # Each attach selects the installed desktop, so rollback to the
                 # old desktop cancels a previously staged newer runtime.
@@ -775,6 +785,8 @@ class Runtime:
             while not self.stopping.wait(.5):
                 with self.mutex:
                     if not self.pending or self.maintenance:
+                        continue
+                    if self.pending_confirmation and not self.update_requested:
                         continue
                     last_update = runtime_update.read(self.directory)
                     if (not self.update_requested and last_update and last_update["target"] == str(self.pending)
@@ -1070,6 +1082,7 @@ def main(argv=None):
     parser.add_argument("--runtime-serve", action="store_true")
     parser.add_argument("--runtime-probe", action="store_true")
     parser.add_argument("--runtime-start-paused", action="store_true")
+    parser.add_argument("--runtime-confirm-updates", action="store_true")
     parser.add_argument("--runtime-command", choices=("status", "pause", "resume", "stop", "decision", "activate-update", "cancel-update-authorization"))
     parser.add_argument("--inherit-owner-fd", type=int)
     parser.add_argument("--ready-fd", type=int)
@@ -1086,7 +1099,8 @@ def main(argv=None):
     if not args.db:
         parser.error("--db is required")
     if args.runtime_bootstrap:
-        print(json.dumps(bootstrap(args.db, args.resources, start_paused=args.runtime_start_paused)), flush=True)
+        print(json.dumps(bootstrap(args.db, args.resources, start_paused=args.runtime_start_paused,
+                                   require_confirmation=args.runtime_confirm_updates)), flush=True)
         return 0
     if args.runtime_command:
         from . import runtime_update

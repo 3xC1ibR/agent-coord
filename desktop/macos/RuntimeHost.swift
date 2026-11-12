@@ -42,7 +42,10 @@ final class Backend {
     var ready: ((URL) -> Void)?
     var exited: ((String) -> Void)?
     var updateStatus: ((String, Bool) -> Void)?
+    var updateAvailable: (() -> Void)?
     private(set) var pendingUpdate: String?
+    private(set) var pendingUpdateVersion: String?
+    private(set) var pendingUpdateRequiresConfirmation = false
     private(set) var supportsRuntimeUpdates = false
     var updateInProgress: Bool { expectedUpdate != nil }
     private var expectedUpdate: (id: String, payload: String)?
@@ -156,7 +159,7 @@ final class Backend {
         stoppedInstance = nil
         worker.async {
             do {
-                let status = try self.command(["--runtime-bootstrap", "--resources", resources.path])
+                let status = try self.command(["--runtime-bootstrap", "--resources", resources.path, "--runtime-confirm-updates"])
                 DispatchQueue.main.async {
                     self.starting = false
                     do { try self.accept(status) }
@@ -201,8 +204,6 @@ final class Backend {
             }
         }
         if status["status"] as? String == "preparing" { return }
-        pendingUpdate = status["pending"] as? String
-        supportsRuntimeUpdates = (status["runtime_updates"] as? Int ?? 0) >= 1
         guard let value = status["url"] as? String, let url = URL(string: value),
               url.scheme == "http", url.host == "127.0.0.1", url.port != nil,
               url.user == nil, url.password == nil, url.path == "/",
@@ -212,6 +213,18 @@ final class Backend {
         // Use retained code even if Sparkle has already replaced the bundle.
         let retained = URL(fileURLWithPath: payload)
         let config = try JSONDecoder().decode(BackendConfiguration.self, from: Data(contentsOf: retained.appendingPathComponent("backend.json")))
+        let pending = status["pending"] as? String
+        if pending != pendingUpdate {
+            pendingUpdateVersion = pending.flatMap { path in
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("backend.json")),
+                      let metadata = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                return metadata["runtime_version"] as? String
+            }
+        }
+        pendingUpdate = pending
+        supportsRuntimeUpdates = (status["runtime_updates"] as? Int ?? 0) >= 1
+        pendingUpdateRequiresConfirmation = (status["runtime_update_prompts"] as? Int ?? 0) >= 1
+            && status["pending_confirmation"] as? Bool == true
         self.instance = instance
         process = RuntimeProcess(processIdentifier: pid)
         failures = 0
@@ -228,6 +241,7 @@ final class Backend {
             if completedUpdate { updateStatus?(terminal.message, terminal.failed) }
         }
         if changed { ready?(url) }
+        updateAvailable?()
     }
 
     private func poll() {

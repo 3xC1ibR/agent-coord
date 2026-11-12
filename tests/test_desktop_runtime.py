@@ -152,10 +152,11 @@ class RuntimeTests(unittest.TestCase):
             pass
         self.fail("Condition did not become true before timeout\n" + detail)
 
-    def launch(self, resources=None, *, paused=False):
+    def launch(self, resources=None, *, paused=False, confirm_updates=False):
         resources = resources or self.resources
         result = subprocess.run([sys.executable, "-B", str(resources / "backend.py"), "--runtime-bootstrap",
-                                 "--resources", str(resources), "--db", str(self.database)] + (["--runtime-start-paused"] if paused else []), env=self.env,
+                                 "--resources", str(resources), "--db", str(self.database)] + (["--runtime-start-paused"] if paused else [])
+                                + (["--runtime-confirm-updates"] if confirm_updates else []), env=self.env,
                                 text=True, capture_output=True, timeout=40)
         self.assertEqual(result.returncode, 0, result.stderr + self.log())
         self.assertNotIn("ResourceWarning", result.stderr)
@@ -336,7 +337,7 @@ Runtime.status = _status_with_barrier
         (new / "backend.json").write_text(json.dumps(metadata))
         if corrupt:
             source = new / "backend/agent_coord/desktop_runtime.py"
-            source.write_text(source.read_text() + "\n_original_serve = Runtime.serve\ndef fail_trial(self):\n    if self.commit_fd is not None:\n        with sqlite3.connect(self.database) as db: db.execute('CREATE TABLE trial_migration (id INTEGER)')\n        atomic_json(self.directory / 'schema.json', {'schema': 999, 'fingerprint': 'trial'})\n        raise RuntimeError('injected candidate failure')\n    return _original_serve(self)\nRuntime.serve = fail_trial\n")
+            source.write_text(source.read_text() + "\nfrom contextlib import closing\n_original_serve = Runtime.serve\ndef fail_trial(self):\n    if self.commit_fd is not None:\n        with closing(sqlite3.connect(self.database)) as db: db.execute('CREATE TABLE trial_migration (id INTEGER)')\n        atomic_json(self.directory / 'schema.json', {'schema': 999, 'fingerprint': 'trial'})\n        raise RuntimeError('injected candidate failure')\n    return _original_serve(self)\nRuntime.serve = fail_trial\n")
             if corrupt == "cancel":
                 source.write_text(source.read_text().replace("        raise RuntimeError('injected candidate failure')",
                     "        (self.directory / 'trial-entered').touch()\n        while not (self.directory / 'release-trial').exists(): time.sleep(.01)\n        raise RuntimeError('injected candidate failure')"))
@@ -352,6 +353,41 @@ Runtime.status = _status_with_barrier
             except (OSError, RuntimeError):
                 return None
         return self.wait(ready, timeout=35)
+
+    def test_update_confirmation_holds_an_idle_runtime_until_install(self):
+        first = self.launch()
+        record = runtime.discover(self.database)
+        new = self.root / "Candidate/Contents/Resources"
+        shutil.copytree(self.resources, new)
+        metadata = json.loads((new / "backend.json").read_text())
+        metadata["runtime_version"] = "2+2"
+        (new / "backend.json").write_text(json.dumps(metadata))
+        staged = self.launch(new, confirm_updates=True)
+        self.assertTrue(staged["pending_confirmation"])
+        self.assertEqual(staged["runtime_update_prompts"], 1)
+        time.sleep(1.2)  # More than two idle-handover polling intervals.
+        status = runtime.control(record, "status")
+        self.assertEqual(status["instance"], first["instance"])
+        self.assertFalse(status["paused"])
+        self.assertEqual(status["busy"], [])
+        # A legacy attachment must not silently undo the user's deferral.
+        self.assertTrue(self.launch(new)["pending_confirmation"])
+        runtime.control(record, "activate-update", request_id="confirmed-install", payload=staged["pending"])
+        current = self.wait_update("committed")
+        self.assertEqual(current["payload"], staged["pending"])
+        self.assertFalse(current["pending_confirmation"])
+
+    def test_selecting_current_payload_clears_a_deferred_update(self):
+        first = self.launch()
+        new = self.root / "Candidate/Contents/Resources"
+        shutil.copytree(self.resources, new)
+        (new / "notification-test").write_text("new payload")
+        staged = self.launch(new, confirm_updates=True)
+        self.assertTrue(staged["pending_confirmation"])
+        selected = self.launch()
+        self.assertEqual(selected["instance"], first["instance"])
+        self.assertIsNone(selected["pending"])
+        self.assertFalse(selected["pending_confirmation"])
 
     def test_requested_update_restarts_busy_runtime_and_preserves_approval_gate(self):
         first, record, thread, staged, _ = self.prepare_requested_update()

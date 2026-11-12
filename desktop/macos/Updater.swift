@@ -3,6 +3,44 @@ import Cocoa
 import Sparkle
 #endif
 
+enum RibbonUpdatePrompt {
+    static func alert(version: String?, restartingAgents: Bool) -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "A new version of Ribbon Field is available"
+        let release = version.map { value -> String in
+            let parts = value.split(separator: "+", maxSplits: 1)
+            let display = parts.count == 2 ? "\(parts[0]) (build \(parts[1]))" : value
+            return "Version \(display) is ready to install."
+        } ?? "An update is ready to install."
+        alert.informativeText = release + "\n\n" + (restartingAgents
+            ? "Installing restarts running agents and tools. Eligible conversations continue automatically; approvals and uncertain actions wait for your review."
+            : "Install the update and relaunch Ribbon Field when it is ready.")
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Skip for Now").keyEquivalent = "\u{1b}"
+        return alert
+    }
+}
+
+#if canImport(Sparkle)
+final class RibbonUpdateUserDriver: SPUStandardUserDriver {
+    var presentUpdate: (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }
+    override func showUpdateFound(with appcastItem: SUAppcastItem, state: SPUUserUpdateState,
+                                  reply: @escaping (SPUUserUpdateChoice) -> Void) {
+        guard !appcastItem.isInformationOnlyUpdate else {
+            super.showUpdateFound(with: appcastItem, state: state, reply: reply)
+            return
+        }
+        // Close the manual-check progress window before presenting our alert;
+        // the standard driver still owns all download and installation UI.
+        super.dismissUpdateInstallation()
+        let version = appcastItem.displayVersionString == appcastItem.versionString
+            ? appcastItem.displayVersionString : appcastItem.displayVersionString + "+" + appcastItem.versionString
+        let alert = RibbonUpdatePrompt.alert(version: version, restartingAgents: false)
+        reply(presentUpdate(alert) == .alertFirstButtonReturn ? .install : .dismiss)
+    }
+}
+#endif
+
 /// Discovery checks trust and static compatibility only. Live decisions belong
 /// to installation: compatible desktop replacement may leave a busy runtime alive.
 final class RibbonUpdateGate {
@@ -119,6 +157,9 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
     private let gate: RibbonUpdateGate
     var backendUpdateAvailable: (() -> Bool)?
     var backendUpdateInProgress: (() -> Bool)?
+    var backendUpdateIdentifier: (() -> String?)?
+    var backendUpdateVersion: (() -> String?)?
+    var backendUpdateRequiresConfirmation: (() -> Bool)?
     var applyBackendUpdate: ((@escaping (Error?) -> Void) -> Void)?
     var cancelBackendAuthorization: (() -> Void)?
     var backendUpdateNotice: String?
@@ -128,9 +169,13 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
     private var resumeRequested = false
     private var resumeUserInitiated = false
     private var decision = 0
+    private var notifiedBackendUpdates = Set<String>()
+    private var presentingBackendUpdate = false
+    private let presentUpdate: (NSAlert) -> NSApplication.ModalResponse
     private(set) var lastDeferral: Error?
     #if canImport(Sparkle)
-    private var controller: SPUStandardUpdaterController?
+    private var sparkleUpdater: SPUUpdater?
+    private var sparkleUserDriver: RibbonUpdateUserDriver?
     #endif
     #if RIBBON_UPDATER_TESTING
     // Only isolated harness builds expose observation. No alternate trust path.
@@ -138,8 +183,10 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
     #endif
 
     init(compatibility: @escaping ([String: Any]) throws -> Void = { _ in },
+         presentUpdate: @escaping (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() },
          preflight: @escaping RibbonUpdateGate.Preflight) {
         gate = RibbonUpdateGate(compatibility: compatibility, preflight: preflight)
+        self.presentUpdate = presentUpdate
         super.init()
     }
 
@@ -148,8 +195,12 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
         started = true
         #if canImport(Sparkle)
         guard Self.acceptsConfiguration(Bundle.main.infoDictionary ?? [:]) else { return }
-        controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil)
-        controller?.startUpdater()
+        let driver = RibbonUpdateUserDriver(hostBundle: Bundle.main, delegate: nil)
+        let updater = SPUUpdater(hostBundle: Bundle.main, applicationBundle: Bundle.main, userDriver: driver, delegate: self)
+        sparkleUserDriver = driver
+        sparkleUpdater = updater
+        do { try updater.start() }
+        catch { NSApp.presentError(error) }
         #endif
     }
 
@@ -192,7 +243,7 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
         menuItem.title = deferredInstall == nil ? "Check for Updates…" : "Install Update and Relaunch…"
         menuItem.toolTip = lastDeferral.map { ($0 as NSError).localizedRecoverySuggestion ?? $0.localizedDescription } ?? backendUpdateNotice
         #if canImport(Sparkle)
-        return !checking && (deferredInstall != nil || controller?.updater.canCheckForUpdates == true)
+        return !checking && (deferredInstall != nil || sparkleUpdater?.canCheckForUpdates == true)
         #else
         menuItem.toolTip = "Updates are not configured for this development build."
         return false
@@ -200,18 +251,8 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
     }
 
     @objc private func checkForUpdates(_ sender: Any?) {
-        if deferredInstall == nil && backendUpdateAvailable?() == true, let apply = applyBackendUpdate {
-            let alert = NSAlert()
-            alert.messageText = "Apply backend update?"
-            alert.informativeText = "Running agents and tools will be interrupted. Eligible conversations continue automatically; approvals and uncertain actions wait for your review."
-            alert.addButton(withTitle: "Update and Continue")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            checking = true
-            apply { error in
-                self.checking = false
-                if let error = error { NSApp.presentError(error) }
-            }
+        if deferredInstall == nil && backendUpdateAvailable?() == true {
+            offerBackendUpdate()
             return
         }
         if deferredInstall != nil {
@@ -219,8 +260,41 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
             return
         }
         #if canImport(Sparkle)
-        controller?.checkForUpdates(sender)
+        sparkleUpdater?.checkForUpdates()
         #endif
+    }
+
+    func notifyBackendUpdate() {
+        guard started, deferredInstall == nil, backendUpdateAvailable?() == true,
+              backendUpdateRequiresConfirmation?() == true,
+              let identifier = backendUpdateIdentifier?(),
+              !notifiedBackendUpdates.contains(identifier) else { return }
+        offerBackendUpdate()
+    }
+
+    private func offerBackendUpdate() {
+        guard !checking, !presentingBackendUpdate, NSApp.modalWindow == nil,
+              backendUpdateInProgress?() != true, let apply = applyBackendUpdate else { return }
+        let identifier = backendUpdateIdentifier?()
+        if let identifier = identifier { notifiedBackendUpdates.insert(identifier) }
+        presentingBackendUpdate = true
+        let alert = RibbonUpdatePrompt.alert(version: backendUpdateVersion?(), restartingAgents: true)
+        if backendUpdateRequiresConfirmation?() != true {
+            // Older runtimes may still activate passively at idle. Preserve
+            // their manual-restart choices instead of promising a deferral.
+            alert.messageText = "Apply backend update?"
+            alert.buttons[0].title = "Update and Continue"
+            alert.buttons[1].title = "Cancel"
+        }
+        let response = presentUpdate(alert)
+        presentingBackendUpdate = false
+        guard response == .alertFirstButtonReturn, backendUpdateAvailable?() == true,
+              backendUpdateIdentifier?() == identifier, backendUpdateInProgress?() != true else { return }
+        checking = true
+        apply { error in
+            self.checking = false
+            if let error = error { NSApp.presentError(error) }
+        }
     }
 
     private func resumeDeferredInstall(userInitiated: Bool) {
