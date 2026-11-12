@@ -66,7 +66,7 @@
 /* List overview: full-width rows with a constant title column; shared tabs own groups. */
 .thread-list {
   --tl-row: 36px; --tl-title: clamp(200px, 24vw, 360px); --tl-label: 112px; --tl-phase: 104px; --tl-time: 44px;
-  --tl-mark: 8px; --tl-logo: 16px; --tl-indent: 28px;
+  --tl-mark: 8px; --tl-logo: 16px; --tl-indent: 28px; /* drift-ok: existing list-local dimensions; depth is per row. */
   width: 100%; padding: 4px 0 32px;
 }
 .thread-list[hidden] { display: none; }
@@ -89,7 +89,6 @@
 .thread-list .tl-open { min-width: 0; border: 0; background: none; padding: 0; text-align: left; font: inherit; font-weight: 400; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .thread-list .tl-open:focus-visible { outline: none; }
 .thread-list .tl-unread .tl-open { font-weight: 600; }
-.thread-list .tl-crumb { color: var(--muted); font-weight: 400; }
 .thread-list .tl-summary { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; }
 .thread-list .tl-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .thread-list .tl-agents { flex: none; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 0 6px; font-size: 12px; line-height: 18px; color: var(--muted); }
@@ -107,12 +106,12 @@
 .thread-list .tl-action { border: 0; border-radius: 6px; background: none; padding: 3px 8px; font-size: 12px; line-height: 18px; color: var(--ink); }
 .thread-list .tl-action:hover { background: var(--surface); }
 .thread-list .tl-icon { min-width: 26px; padding: 3px 6px; font-size: 14px; }
-.thread-list .tl-agent { padding-left: calc(12px + var(--tl-indent)); grid-template-columns: var(--tl-mark) var(--tl-logo) calc(var(--tl-title) - var(--tl-indent)) minmax(0, 1fr) var(--tl-label) var(--tl-phase) var(--tl-time); }
+.thread-list .tl-agent { padding-left: calc(12px + var(--tl-indent) * var(--tl-depth)); grid-template-columns: var(--tl-mark) var(--tl-logo) max(0px, calc(var(--tl-title) - var(--tl-indent) * var(--tl-depth))) minmax(0, 1fr) var(--tl-label) var(--tl-phase) var(--tl-time); } /* drift-ok: preserve existing row padding and columns, scaled by hierarchy depth. */
 .thread-list .tl-agent .tl-time { font-weight: 400; color: var(--muted); }
 .thread-list .tl-more { margin-top: 8px; }
 @media (max-width: 720px) {
   .thread-list .tl-row, .thread-list .tl-agent { grid-template-columns: var(--tl-mark) var(--tl-logo) minmax(0, 1fr) auto auto; grid-template-rows: auto auto; row-gap: 2px; padding-top: 6px; padding-bottom: 6px; }
-  .thread-list .tl-agent { padding-left: calc(12px + var(--tl-indent) / 2); }
+  .thread-list .tl-agent { padding-left: calc(12px + var(--tl-indent) * var(--tl-depth) / 2); } /* drift-ok: preserve existing compact row padding, scaled by hierarchy depth. */
   .thread-list .tl-open { grid-column: 3; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .thread-list .tl-time { grid-column: 4; grid-row: 1; }
   .thread-list .tl-summary { grid-column: 3 / 6; grid-row: 2; }

@@ -346,10 +346,14 @@ const WorkingSet = (() => {
   // Until the payload carries the user's last message, the latest turn start stands in for it.
   const engagedAt = t => t.last_user_message_at || t.turn_started_at || t.created_at || 0;
   const arrivedAt = t => t.attention_since || t.turn_completion?.completed_at || t.checkpoint?.created_at || t.updated_at || t.created_at || 0;
-  const creatorOf = (t, byId) => t.creation_mode === "orchestration" && byId.get(t.created_by_thread_id) || null;
+  const parentOf = (t, byId) => {
+    const id = Object.hasOwn(t, "supervisor_thread_id") ? t.supervisor_thread_id
+      : t.creation_mode === "orchestration" ? t.created_by_thread_id : null;
+    return id !== t.thread_id && byId.get(id) || null;
+  };
   function rootOf(t, byId) {
     const seen = new Set([t.thread_id]);
-    for (let creator = creatorOf(t, byId); creator && !seen.has(creator.thread_id); creator = creatorOf(t, byId)) { seen.add(creator.thread_id); t = creator; }
+    for (let parent = parentOf(t, byId); parent && !seen.has(parent.thread_id); parent = parentOf(t, byId)) { seen.add(parent.thread_id); t = parent; }
     return t;
   }
   function requestOf(t) {
@@ -367,12 +371,12 @@ const WorkingSet = (() => {
     const unread = request === "needs-you" ? t.unread || t.unread_result : !request && t.unread_result;
     return !!unread && now - arrivedAt(t) < DAY;
   }
-  function placementOf(t, byId, now, workingRoots = new Set()) {
+  function placementOf(t, byId, now, workingRoots = new Set(), nested = !!parentOf(t, byId)) {
     if (t.attention === "archived") return null;
     const request = requestOf(t);
+    // A visible parent owns the row; its family's requests promote that parent.
+    if (nested) return "nested";
     if (request === "approval" || request === "question") return "attention";
-    // An orchestrator owns its agents' replies and failures; only their requests reach you.
-    if (creatorOf(t, byId)) return request === "needs-you" && unreadNow(t, request, now) ? "attention" : "nested";
     if (request === "reminder") return "attention";
     if (t.attention === "later" || t.snoozed) return "later";
     if (request === "failed") return "attention";
@@ -381,19 +385,50 @@ const WorkingSet = (() => {
     return workingRoots.has(t.thread_id) ? "working" : "idle";
   }
   function listSections(threads, {dimension = "group", workspace = "all", pageKey = ALL, view = "active", now = Date.now() / 1000} = {}) {
-    const byId = new Map(threads.map(t => [t.thread_id, t])), agents = new Map(), workingRoots = new Set();
-    for (const t of threads) {
-      if (!creatorOf(t, byId)) continue;
-      const root = rootOf(t, byId);
-      if (!agents.has(root.thread_id)) agents.set(root.thread_id, []);
-      agents.get(root.thread_id).push(t);
+    const inventory = new Map(threads.map(t => [t.thread_id, t]));
+    const descriptor = t => groupFor(dimension === "group" && !t.project_id && !t.project_name ? rootOf(t, inventory) : t,
+      new Map(), dimension, workspace);
+    // List grouping already resolved supervision; creation provenance must not reattach released agents.
+    // Filter before nesting: a missing parent must not hide a matching agent.
+    const visible = threads.filter(t => pageKey === ALL || descriptor(t).key === pageKey);
+    const byId = new Map(visible.map(t => [t.thread_id, t])), parents = new Map();
+    for (const t of visible) {
+      const parent = parentOf(t, byId);
+      if (parent) parents.set(t.thread_id, parent.thread_id);
+    }
+    // Break historical cycles deterministically and retain every conversation.
+    for (const id of [...byId.keys()].sort()) {
+      const seen = new Set([id]);
+      let next = parents.get(id);
+      while (next && !seen.has(next)) { seen.add(next); next = parents.get(next); }
+      if (next) parents.delete(id);
+    }
+    const rootFor = t => {
+      while (parents.has(t.thread_id)) t = byId.get(parents.get(t.thread_id));
+      return t;
+    };
+    const agents = new Map(), workingRoots = new Set(), attentionRoots = new Map();
+    const attentionOrder = (a, b) => Number(interrupts(requestOf(b))) - Number(interrupts(requestOf(a))) ||
+      arrivedAt(b) - arrivedAt(a) || a.thread_id.localeCompare(b.thread_id);
+    for (const t of visible) {
+      const parent = parents.get(t.thread_id);
+      if (!parent) continue;
+      const root = rootFor(t);
+      if (!agents.has(parent)) agents.set(parent, []);
+      agents.get(parent).push(t);
       if (running(t)) workingRoots.add(root.thread_id);
+      const request = requestOf(t);
+      if (["approval", "question"].includes(request) || request === "needs-you" && unreadNow(t, request, now)) {
+        const previous = attentionRoots.get(root.thread_id);
+        if (!previous || attentionOrder(t, previous) < 0) attentionRoots.set(root.thread_id, t);
+      }
     }
     const parked = ["later", "archived"].includes(view);
     const rows = [];
-    for (const t of threads) {
-      const place = parked ? (creatorOf(t, byId) ? "nested" : "idle") : placementOf(t, byId, now, workingRoots);
-      if (place && place !== "nested" && place !== "later") rows.push({thread: t, place, group: groupFor(t, byId, dimension, workspace)});
+    for (const t of visible) {
+      if (parents.has(t.thread_id)) continue;
+      const place = parked ? "idle" : attentionRoots.has(t.thread_id) ? "attention" : placementOf(t, byId, now, workingRoots, false);
+      if (place && place !== "later") rows.push({thread: t, place, group: descriptor(t)});
     }
     const groups = new Map();
     for (const {thread, place, group} of rows) {
@@ -410,8 +445,11 @@ const WorkingSet = (() => {
       const empty = place === "idle" && !thread.checkpoint && !thread.turn_completion && !agents.has(thread.thread_id);
       sections[empty ? "empty" : place].push(thread);
     }
-    const urgency = t => Number(interrupts(requestOf(t)));
-    sections.attention.sort((a, b) => urgency(b) - urgency(a) || arrivedAt(b) - arrivedAt(a) || a.thread_id.localeCompare(b.thread_id));
+    const attentionSource = t => {
+      const child = attentionRoots.get(t.thread_id);
+      return child && attentionOrder(child, t) < 0 ? child : t;
+    };
+    sections.attention.sort((a, b) => attentionOrder(attentionSource(a), attentionSource(b)));
     for (const key of ["working", "idle", "empty"])
       sections[key].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id));
     // Agents waiting on you lead their orchestrator's list, then the ones still working.
@@ -432,12 +470,15 @@ const WorkingSet = (() => {
       return b;
     };
     let host, source = [], options = {}, context = "", pageKey = ALL, signature = "";
-    const expanded = new Set(), shown = new Set();
-    function row(t, data, {agent = false} = {}) {
-      const time = now(), request = requestOf(t), place = agent ? "nested" : placementOf(t, data.byId, time, data.workingRoots);
+    const collapsed = new Set(), shown = new Set();
+    function row(t, data, depth = 0) {
+      const agent = depth > 0;
+      const time = now(), request = requestOf(t), place = placementOf(t, data.byId, time, data.workingRoots, false);
       const unread = !!(t.unread_result || request === "needs-you" && t.unread);
       const li = el("li", "tl-row");
       li.dataset.thread = t.thread_id;
+      li.setAttribute("aria-level", String(depth + 1));
+      li.style.setProperty("--tl-depth", String(depth));
       li.classList.toggle("tl-unread", unread);
       li.classList.toggle("tl-request", !!request && (interrupts(request) || unread));
       li.classList.toggle("tl-reply", unread && !request);
@@ -447,26 +488,25 @@ const WorkingSet = (() => {
       li.append(el("span", "tl-mark"));
       const logo = globalThis.providerLogo?.(t.client, PROVIDERS[t.client]) || el("span", "provider-logo");
       const mark = el("span", "tl-logo"); mark.append(logo); li.append(mark);
-      const root = creatorOf(t, data.byId) && !agent ? rootOf(t, data.byId) : null;
-      const open = button("", "tl-open", () => onOpen?.(t.thread_id));
+      const open = button(t.title, "tl-open", () => onOpen?.(t.thread_id));
       open.dataset.thread = t.thread_id; open.dataset.action = "open";
-      if (root) open.append(el("span", "tl-crumb", root.title + " › "));
-      open.append(document.createTextNode(t.title));
-      open.title = (root ? root.title + " › " : "") + t.title;
+      open.title = t.title;
       li.append(open);
       const summary = el("span", "tl-summary");
-      const children = agent ? [] : data.agents.get(t.thread_id) || [];
+      const children = data.agents.get(t.thread_id) || [];
       if (children.length) {
-        const working = children.filter(running).length, waiting = children.filter(c => ["approval", "question", "needs-you"].includes(requestOf(c))).length;
-        const failed = children.filter(c => requestOf(c) === "failed").length, isOpen = expanded.has(t.thread_id);
-        const toggle = button("", "tl-agents", () => { isOpen ? expanded.delete(t.thread_id) : expanded.add(t.thread_id); paint(); });
+        const descendants = [...children];
+        for (let i = 0; i < descendants.length; i++) descendants.push(...data.agents.get(descendants[i].thread_id) || []);
+        const working = descendants.filter(running).length, waiting = descendants.filter(c => ["approval", "question", "needs-you"].includes(requestOf(c))).length;
+        const failed = descendants.filter(c => requestOf(c) === "failed").length, isOpen = !collapsed.has(t.thread_id);
+        const toggle = button("", "tl-agents", () => { isOpen ? collapsed.add(t.thread_id) : collapsed.delete(t.thread_id); paint(); });
         toggle.dataset.thread = t.thread_id; toggle.dataset.action = "agents";
         toggle.setAttribute("aria-expanded", String(isOpen));
-        toggle.append(children.length + (children.length === 1 ? " agent" : " agents"));
+        toggle.append(descendants.length + (descendants.length === 1 ? " agent" : " agents"));
         if (working) toggle.append(" · " + working + " working");
         if (waiting) toggle.append(" · ", el("span", "tl-warm", waiting + " need you"));
         if (failed) toggle.append(" · ", el("span", "tl-warm", failed + " failed"));
-        toggle.setAttribute("aria-label", "Agents created by " + t.title + ": " + toggle.textContent);
+        toggle.setAttribute("aria-label", "Agents supervised by " + t.title + ": " + toggle.textContent);
         summary.append(toggle);
       }
       if (request) summary.append(el("span", "tl-inline-label", REQUEST_LABELS[request]));
@@ -503,10 +543,11 @@ const WorkingSet = (() => {
       const heading = el("h3", "tl-heading", label); heading.append(el("span", "tl-count", String(items.length))); node.append(heading);
       if (!items.length) { node.append(el("p", "tl-empty", empty)); return node; }
       const list = el("ul", "tl-rows"), all = name !== "idle" || shown.has(name);
-      for (const t of all ? items : items.slice(0, IDLE_CAP)) {
-        list.append(row(t, data));
-        if (expanded.has(t.thread_id)) for (const agent of data.agents.get(t.thread_id) || []) list.append(row(agent, data, {agent: true}));
-      }
+      const append = (t, depth = 0) => {
+        list.append(row(t, data, depth));
+        if (!collapsed.has(t.thread_id)) for (const child of data.agents.get(t.thread_id) || []) append(child, depth + 1);
+      };
+      for (const t of all ? items : items.slice(0, IDLE_CAP)) append(t);
       node.append(list);
       if (items.length > IDLE_CAP && name === "idle")
         node.append(button(all ? "Show recent" : "Show all " + items.length, "quiet tl-more", () => { all ? shown.delete(name) : shown.add(name); paint(); }));
@@ -549,7 +590,7 @@ const WorkingSet = (() => {
         const nextSignature = JSON.stringify([nextContext, next.selectedGroup, next.revision]);
         // The app's list revision changes whenever thread data changes, and once a minute for relative times.
         if (signature === nextSignature && next.revision !== undefined) return;
-        if (context !== nextContext) { context = nextContext; expanded.clear(); shown.clear(); }
+        if (context !== nextContext) { context = nextContext; collapsed.clear(); shown.clear(); }
         // Shared group tabs and Filters own selection; old List preferences must
         // not retain a second, invisible filter after its navigation is removed.
         pageKey = next.selectedGroup == null ? ALL : "group:" + next.selectedGroup;

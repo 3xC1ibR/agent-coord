@@ -35,12 +35,14 @@ const threadViews = (() => {
       // Group pages retain the other groups so orchestration children inherit
       // their owner's group exactly as they do in the List overview.
       const visible = threads.filter(thread => matches(thread, group ? {...f, project: ""} : f));
-      const {sections} = overview.listSections(visible, {workspace, now, view: f.show,
+      const {sections, agents} = overview.listSections(visible, {workspace, now, view: f.show,
         pageKey: group ? "group:" + group : "overview:all"});
+      const attention = [...sections.attention];
+      for (let i = 0; i < attention.length; i++) attention.push(...agents.get(attention[i].thread_id) || []);
       return {attention: sections.attention.length,
-        action: sections.attention.some(t => needsAction(t) || ["approval", "question", "needs-you", "failed"].includes(overview.requestOf(t))),
+        action: attention.some(t => needsAction(t) || ["approval", "question", "needs-you", "failed"].includes(overview.requestOf(t))),
         active: sections.working.length > 0,
-        completed: sections.attention.some(t => t.unread_result || t.unread)};
+        completed: attention.some(t => t.unread_result || t.unread)};
     }
     const visible = threads.filter(thread => matches(thread, values));
     const visibleIds = new Set(visible.map(thread => thread.thread_id));

@@ -78,7 +78,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Native update action | The existing update menu stages and applies backend updates; reuse the native confirmation, progress screen and error presentation |
 | Available update dialog | Native alert with Install and Skip for Now; show each staged version once per launch, keep skipped updates available from the update menu, and require consent before restarting work |
 | Thread options menu | Thread actions on sidebar cards and in the conversation header; the mobile sheet lists the header actions inline |
-| Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover |
+| Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover. App agents start expanded beneath their current supervisor at each depth; a descendant request puts the family in Attention once |
 | Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
 | Role designation | A user-named role beside a conversation's metadata, muted 10px semibold, placed like the Dispatcher designation |
 | Stopped conversations | Quiet status-bar count of the user's Stops; a native dialog lists each with its supervising agent, all checked, before Release |
@@ -115,6 +115,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-12 | List inbox shows app agents beneath their immediate supervisor, expanded by default | Keep parent-child context visible and bring descendant requests to Attention without duplicate rows. |
 | 2026-11-08 | Offer available updates through a native Install / Skip for Now dialog | Make updates discoverable while keeping installation explicit and deferral temporary. |
 | 2026-11-04 | Apply staged backends through the existing native update menu | One operation owns restart, rollback and guarded continuation, with no new settings surface. |
 | 2026-10-28 | Document existing tokens and standalone page grammar | Preserve the current design while adding user-approved Activity. |

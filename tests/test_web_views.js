@@ -87,8 +87,19 @@ test("List badge counts match the visible rows across groups, requests, and filt
     }
   }
   const group = threadViews.badges(input, {project: "migration"}, {...options, group: "migration"});
-  assert.equal(group.attention, 5, "inherited requests count, nested findings and Later replies do not");
+  assert.equal(group.attention, 4, "agent requests share one parent family; Later replies do not count");
   assert.equal(group.action, true);
+});
+
+test("List action and unread badges include nested descendants of an attention family", () => {
+  const now = 200000, options = {layout: "list", now};
+  const records = [thread("lead", {response_state: "available", needs_attention: false}),
+    thread("worker", {supervisor_thread_id: "lead", response_state: "available", needs_attention: false}),
+    thread("approval", {supervisor_thread_id: "worker", status: "needs input", response_state: "input", needs_attention: true, unread_result: true})];
+  const badges = threadViews.badges(records, {}, options);
+  assert.equal(badges.attention, 1);
+  assert.equal(badges.action, true);
+  assert.equal(badges.completed, true);
 });
 
 test("active-work badges follow the view's filters and ignore waiting or closed work", () => {

@@ -502,7 +502,7 @@ test("list placement keeps requests, drains read replies, and leaves agent repli
       checkpoint: {id: 2, next_actor: "user", next_action: "Approve the plan"}})];
   const expected = {approval: "attention", question: "attention", failed: "attention", reply: "attention", read: "idle", aged: "idle",
     asks: "attention", asked: "idle", handled: "idle", running: "working", later: "later", closed: null,
-    "agent-reply": "nested", "agent-failed": "nested", "agent-approval": "attention", "agent-asks": "attention"};
+    "agent-reply": "nested", "agent-failed": "nested", "agent-approval": "nested", "agent-asks": "nested"};
   for (const [id, place] of Object.entries(expected)) assert.equal(placed(threads, id), place, id);
   assert.equal(WorkingSet.requestOf(threads.find(t => t.thread_id === "asks")), "needs-you");
   assert.equal(WorkingSet.requestOf(threads.find(t => t.thread_id === "stale") || listThread("stale", {checkpoint_stale: true,
@@ -549,7 +549,8 @@ test("list groups count Attention per group, filter by the chosen group, and sho
 function listSetup({data = new Map()} = {}) {
   const doc = {activeElement: null};
   class Node {
-    constructor(tag) { Object.assign(this, {tagName: tag, children: [], attrs: {}, dataset: {}, className: "", textContent: ""}); }
+    constructor(tag) { Object.assign(this, {tagName: tag, children: [], attrs: {}, dataset: {}, className: "", textContent: "",
+      style: {setProperty(key, value) { this[key] = value; }}}); }
     get classList() { const read = () => new Set(this.className.split(/\s+/).filter(Boolean)); return {
       add: n => { const s = read(); s.add(n); this.className = [...s].join(" "); },
       toggle: (n, on) => { const s = read(); if (on ?? !s.has(n)) s.add(n); else s.delete(n); this.className = [...s].join(" "); },
@@ -590,17 +591,89 @@ test("list rows open, read, close and open the thread menu without opening the r
   row.onclick({target: row.children[0]}); row.onclick({target: c.control("quiet", "more")});
   assert.deepEqual(c.calls, [["read", "reply"], ["menu", "reply", "more"], ["close", "reply"], ["open", "reply"], ["open", "quiet"]]);
 });
-test("list agents expand under their orchestrator, and a waiting agent names its orchestrator in Attention", () => {
+test("list agents start expanded beneath their parent and keep requests in one Attention family", () => {
   const c = listSetup();
   const agent = (id, extra) => listThread(id, {creation_mode: "orchestration", created_by_thread_id: "lead", ...extra});
   c.render([listThread("lead", {title: "Lead", checkpoint: {id: 1}}), agent("worker", {unread_result: true, checkpoint: {id: 2}}),
-    agent("blocked", {status: "needs input", title: "Blocked agent"})]);
-  assert.deepEqual(c.rows("attention"), ["blocked"]); assert.deepEqual(c.rows("idle"), ["lead"]);
-  assert.equal(c.control("blocked", "open").text, "Lead › Blocked agent");
-  const toggle = c.control("lead", "agents"); assert.equal(toggle.attrs["aria-expanded"], "false");
+    agent("blocked", {status: "needs input", title: "Blocked agent", attention_since: NOW - 120})]);
+  assert.deepEqual(c.rows("attention"), ["lead", "blocked", "worker"]); assert.deepEqual(c.rows("idle"), []);
+  assert.equal(c.control("blocked", "open").text, "Blocked agent");
+  assert.equal(c.host.querySelectorAll(".tl-row").find(row => row.dataset.thread === "blocked").querySelectorAll(".tl-time")[0].textContent, "2m");
+  const toggle = c.control("lead", "agents"); assert.equal(toggle.attrs["aria-expanded"], "true");
+  c.control("blocked", "more").onclick({stopPropagation() {}});
+  c.control("worker", "open").onclick({stopPropagation() {}});
+  assert.deepEqual(c.calls, [["menu", "blocked", "more"], ["open", "worker"]]);
   toggle.onclick({stopPropagation() {}});
-  assert.deepEqual(c.rows("idle"), ["lead", "blocked", "worker"]);
-  assert.equal(c.control("lead", "agents").attrs["aria-expanded"], "true");
+  assert.deepEqual(c.rows("attention"), ["lead"]);
+  assert.equal(c.control("lead", "agents").attrs["aria-expanded"], "false");
+});
+test("list preserves immediate parents at every depth and remembers collapsed branches through refresh", () => {
+  const c = listSetup();
+  const records = [listThread("lead", {checkpoint: {id: 1}}),
+    listThread("worker", {creation_mode: "orchestration", created_by_thread_id: "lead", checkpoint: {id: 2}}),
+    listThread("validator", {creation_mode: "orchestration", created_by_thread_id: "worker", status: "running", response_state: "working"})];
+  c.render(records);
+  assert.deepEqual(c.rows("working"), ["lead", "worker", "validator"]);
+  assert.deepEqual(c.host.querySelectorAll(".tl-row").map(row => row.attrs["aria-level"]), ["1", "2", "3"]);
+  c.control("worker", "agents").onclick({stopPropagation() {}});
+  c.render(records.map(t => ({...t, updated_at: NOW})));
+  assert.deepEqual(c.rows("working"), ["lead", "worker"]);
+  assert.equal(c.control("worker", "agents").attrs["aria-expanded"], "false");
+  c.control("worker", "agents").onclick({stopPropagation() {}});
+  assert.deepEqual(c.rows("working"), ["lead", "worker", "validator"]);
+});
+test("list uses the current supervisor, respects release to the user and leaves dispatch provenance independent", () => {
+  const c = listSetup();
+  c.render([listThread("old", {project_id: "old-group", checkpoint: {id: 1}}), listThread("current", {project_id: "current-group", checkpoint: {id: 2}}),
+    listThread("moved", {creation_mode: "orchestration", created_by_thread_id: "old", supervisor_thread_id: "current"}),
+    listThread("released", {creation_mode: "orchestration", created_by_thread_id: "old", supervisor_thread_id: null, checkpoint: {id: 3}}),
+    listThread("dispatch", {created_by_thread_id: "old", checkpoint: {id: 4}})]);
+  assert.deepEqual(c.rows("idle"), ["current", "moved", "dispatch", "old", "released"]);
+  assert.equal(c.control("old", "agents"), undefined);
+  assert.equal(c.control("current", "agents").attrs["aria-expanded"], "true");
+  const records = [listThread("old", {project_id: "old-group", checkpoint: {id: 1}}),
+    listThread("released", {creation_mode: "orchestration", created_by_thread_id: "old", supervisor_thread_id: null, checkpoint: {id: 2}})];
+  c.render(records, {selectedGroup: "old-group"});
+  assert.deepEqual(c.rows("idle"), ["old"], "released agents no longer inherit the creator group");
+});
+test("list keeps matching agents visible when search or group selection excludes their parent", () => {
+  const c = listSetup(), child = listThread("child", {creation_mode: "orchestration", created_by_thread_id: "parent",
+    supervisor_thread_id: "parent", project_id: "child-group", project_name: "Child group", checkpoint: {id: 1}});
+  c.render([listThread("parent", {project_id: "parent-group", checkpoint: {id: 2}}), child], {selectedGroup: "child-group"});
+  assert.deepEqual(c.rows("idle"), ["child"]);
+  c.render([child]);
+  assert.deepEqual(c.rows("idle"), ["child"]);
+  c.control("child", "open").onclick({stopPropagation() {}});
+  assert.deepEqual(c.calls, [["open", "child"]]);
+});
+test("list shows historical cycles, self links and missing parents exactly once without mutating records", () => {
+  const c = listSetup();
+  const records = [listThread("a", {supervisor_thread_id: "b"}), listThread("b", {supervisor_thread_id: "a"}),
+    listThread("deep", {supervisor_thread_id: "b"}), listThread("missing", {supervisor_thread_id: "absent", checkpoint: {id: 1}}),
+    listThread("self", {supervisor_thread_id: "self", checkpoint: {id: 2}})];
+  const before = JSON.stringify(records);
+  c.render(records);
+  assert.deepEqual(c.rows("idle").sort(), ["a", "b", "deep", "missing", "self"]);
+  assert.equal(JSON.stringify(records), before);
+});
+test("descendant requests promote their entire family and drain once resolved", () => {
+  const c = listSetup();
+  const records = [listThread("lead", {checkpoint: {id: 1}}), listThread("worker", {supervisor_thread_id: "lead"}),
+    listThread("question", {supervisor_thread_id: "worker", open_ask: {id: 1, question: "Which target?"}}),
+    listThread("reply", {unread_result: true, attention_since: NOW - 5})];
+  c.render(records);
+  assert.deepEqual(c.rows("attention"), ["lead", "worker", "question", "reply"]);
+  c.render(records.map(t => t.thread_id === "question" ? {...t, open_ask: null} : t));
+  assert.deepEqual(c.rows("attention"), ["reply"]);
+  assert.deepEqual(c.rows("idle"), ["lead", "worker", "question"]);
+});
+test("Later and Closed retain nested families without adding active sections", () => {
+  for (const attention of ["later", "archived"]) {
+    const c = listSetup();
+    c.render([listThread("parent", {attention}), listThread("child", {attention, supervisor_thread_id: "parent"})], {placement: attention});
+    assert.deepEqual(c.rows("parked"), ["parent", "child"]);
+    assert.deepEqual(c.rows("attention"), []);
+  }
 });
 test("list follows shared group selection without restoring a second group filter", () => {
   const key = 'agent-coord.thread-list:v1:["/work","groups","active"]';
