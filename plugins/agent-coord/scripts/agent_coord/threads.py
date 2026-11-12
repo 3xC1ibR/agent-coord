@@ -792,29 +792,26 @@ class ThreadStore:
         if session_id and not caller_context and caller_session() != session_id:
             identity = " --session-id " + shlex.quote(session_id)
         text = (
-            "Maintain the Agent Coord work-thread checkpoint before returning control to the user, "
-            "at a phase change, or after a significant result. Prefer the update_checkpoint tool when available. "
+            "Update the Agent Coord work-thread checkpoint only when saved assignment state materially changes: "
+            "a new objective, decision, constraint, substantial result, actual phase transition, blocker, required next action, or handoff. "
+            "Ending a reply is not a checkpoint trigger. Skip routine explanations, clarifications, reformatting, "
+            "acknowledgments, and unchanged state. Do not rewrite the summary to describe each answer. "
+            "Runtime activity and turn completion provide recency without a checkpoint. "
+            "Prefer the update_checkpoint tool when available. "
             "Run " + command + " checkpoint" + identity + " --json '<object>' as the CLI fallback. "
-            'Send only changed fields; omitted fields keep their saved values. The first checkpoint requires phase and summary. '
+            'Send only changed fields; omissions preserve saved values. The first checkpoint requires phase and summary. '
             'Fields are phase (discussion, investigation, planning, orchestrating, implementation, validation, deployment, finished), '
-            'summary (1–2 factual sentences), next_step ({"actor":"user|agent|external","action":"required action"}, or null to clear), '
-            'optional title (a concise 3–6 word thread name), optional domain (a short assignment category), and optional links [{"kind":"document","label":"Design","target":"docs/design.md"}]. '
-            'If the MCP tool has no bound caller identity, use the CLI from your current tool shell instead of supplying an ID from history. Success returns only status and checkpoint_id. '
-            "Set title at the first meaningful checkpoint when title_source is auto. "
-            "Keep established conversation names stable across assignments: omit title on later checkpoints. Use thread update --title only for a deliberate rename. "
-            "User-chosen titles (title_source user) take precedence and cannot be overwritten by agent checkpoints. "
-            "Set domain once per assignment and omit it on later checkpoints until the work moves; reuse a workspace domain unless the work is clearly elsewhere, and preserve a user-chosen domain (domain_source user). "
-            "Use summary for the changing current/latest work, keeping its first sentence concise and descriptive. Update it when a new assignment starts; describe completed or failed results as outcomes, never as ongoing work. Preserve useful progress detail in the following sentence. Distinguish proposals, implemented changes, validation, and deployment. "
-            'Set next_step.actor to user only when progress or completion requires a specific user answer, approval, decision, or action; describe it in next_step.action. '
-            "Keep optional advice, invitations to continue, and nonblocking reminders in summary. "
-            'Use phase for the underlying activity, not whether you finished replying: an answered investigation stays investigation, and a completed plan stays planning. '
-            'Use orchestrating for ongoing routing and coordination of specialist agents, including while a specialist implements or deploys; it does not itself require user action. '
-            'Use finished only after actually delivering the requested implementation or execution, including validation/deployment if requested, with nothing remaining; clear next_step with null. '
-            'For a status question during deployment, keep deployment. Required user review belongs in validation with next_step.actor user. '
-            "If work remains, keep its actual phase and assign any required next step to its actual owner. Ending an agent turn does not create a required user action. "
-            "Record unresolved decisions without inventing follow-up work. Skip unchanged checkpoints. "
-            "Use exact artifact references; link kinds are pull_request, document, issue, bead, branch, other. "
-            "Preserve the original request; only move Now/Later/Archived when the user requests it. "
+            'summary (1–2 factual sentences about durable assignment state), next_step ({"actor":"user|agent|external","action":"required action"}, or null to clear), '
+            'and optional title, domain, links [{"kind":"document","target":"docs/design.md"}]. '
+            'Use the current tool shell CLI if MCP has no bound caller; never copy a caller ID from history. Returns only status and checkpoint_id. '
+            "Name an auto title at the first meaningful checkpoint; omit title on later checkpoints and preserve user choices. "
+            "Set domain once per assignment, reuse workspace domains, and preserve user choices. "
+            "Describe completed or failed results as outcomes. Distinguish proposals, implementation, validation, and deployment. "
+            "Keep the underlying phase; use orchestrating for coordination, including while a specialist implements or deploys. "
+            "Use finished only for delivered implementation or execution with nothing remaining. Required user review belongs in validation. "
+            "Set next_step.actor to user only for a required answer, approval, decision, or action; clear next_step with null when none remains. "
+            "Ending a turn does not require user action. Do not invent follow-up work. "
+            "Preserve the original request; change Now/Later/Archived only at the user's request. "
             "Beads is optional for this thread."
         )
         if session_id:

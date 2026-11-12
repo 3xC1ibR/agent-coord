@@ -70,7 +70,8 @@ def read_activity_history(arguments, *, store=None):
 TOOL = {
     "name": "update_checkpoint",
     "description": (
-        "Create or update your work-thread checkpoint. Send only changed fields; omissions preserve saved values. "
+        "Create or update your work-thread checkpoint only for material assignment changes or handoffs, "
+        "not routine discussion or each reply. Send only changed fields; omissions preserve saved values. "
         "The first checkpoint requires phase and summary. Set next_step to null to clear it. "
         "Returns only status and checkpoint_id. Caller identity must be bound by the host; "
         "use the agent-coord CLI from your current tool shell if it is unavailable."

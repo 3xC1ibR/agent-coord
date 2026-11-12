@@ -37,17 +37,16 @@ CHECKPOINT_SCHEMA = {
 }
 
 REPORTING_INSTRUCTIONS = (
-    "At meaningful task completion or handoff, including blocked or failed work, save context_lifecycle in "
-    "your normal checkpoint before returning control or sending a requested result reply. Include "
-    "assignment_message_id when reporting on an agent's delivered assignment; omit it for direct user work. Include recommendation "
-    "(reuse, fresh, or either), reason (observed evidence), reuse_for and fresh_for (types of follow-up work), "
-    "and handover with confirmed_facts, constraints, tried_and_failed, and open_questions arrays. Capture "
-    "concrete findings and failed approaches needed by a replacement. Each array accepts up to 8 strings of "
-    "400 characters; reason accepts 500 characters, and the complete serialized report accepts 6000 characters. "
-    "Use existing checkpoint links for artifacts. Do not invent token counts or noise ratios. Omission "
-    "preserves the report only within this turn; null clears it. Automatic completion events and requested "
-    "replies carry a matching report snapshot where already subscribed or requested. Do not send a separate assessment message or reply where none "
-    "was requested. This advice does not close the conversation or prevent direct user follow-ups and peer coordination."
+    "Add context_lifecycle only at a substantial milestone or actual handoff when another agent or replacement "
+    "needs recovery information, including substantive blocked or failed work. Omit it for routine discussion, "
+    "clarification, simple answers, and ordinary turn completion; a checkpoint does not itself require a handover. "
+    "Include assignment_message_id for an agent assignment; omit it for direct user work. "
+    "Report recommendation (reuse, fresh, either), reason, reuse_for, fresh_for, and handover arrays "
+    "confirmed_facts, constraints, tried_and_failed, open_questions. Keep only useful recovery facts; link artifacts. "
+    "Limits: 8 strings of 400 characters per array, reason 500 characters, report 6000 serialized characters. "
+    "Omission preserves a report within the same turn only; null clears it. Matching completion events and "
+    "requested replies carry the report when available; missing reports do not block delivery. "
+    "Do not send a separate assessment message or unrequested reply."
 )
 
 
