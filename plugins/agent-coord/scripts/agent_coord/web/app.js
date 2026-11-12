@@ -1773,9 +1773,28 @@ function messageTimeLabel(item, turn) {
 }
 function forkRelations(work) {
   const relations = [];
-  if (work?.forked_from) relations.push({label: "Forked from", thread: work.forked_from, turnId: work.forked_from_turn_id});
-  for (const thread of work?.forked_sessions || []) relations.push({label: "Forked session", thread, turnId: thread.forked_from_turn_id});
+  if (work?.forked_from) relations.push({label: "Forked from", thread: work.forked_from, turnId: work.forked_from_turn_id, createdAt: work.created_at});
+  for (const thread of work?.forked_sessions || []) relations.push({label: "Forked session", thread, turnId: thread.forked_from_turn_id, createdAt: thread.created_at});
   return relations;
+}
+function forkBoundary(relation, turns) {
+  if (!relation.turnId) return -1;
+  const index = turns.findIndex(turn => turn.id === relation.turnId);
+  if (index >= 0) return index;
+  // Native history can restore different turn IDs. The child's creation time
+  // still separates inherited history from turns started after the fork.
+  const timestamp = value => {
+    if (value == null || value === "" || typeof value === "boolean") return NaN;
+    return typeof value === "number" ? (value > 1e12 ? value / 1000 : value) : Date.parse(value) / 1000;
+  };
+  const created = timestamp(relation.createdAt);
+  if (Number.isFinite(created)) {
+    const starts = turns.map(turn => timestamp(turn.startedAt ?? turn.started_at));
+    const next = starts.findIndex(start => start > created);
+    if (next >= 0) return next - 1;
+    if (starts.some(Number.isFinite)) return turns.length - 1;
+  }
+  return null;
 }
 function forkLink(thread) {
   const link = node("a", thread.title);
@@ -1963,13 +1982,14 @@ function renderTimeline() {
   const turns = globalThis.DispatchUI && (state.detail?.work_thread?.dispatcher || state.detail?.dispatchRequests?.length)
     ? DispatchUI.turns(sourceTurns, state.detail.dispatchRequests || []) : sourceTurns;
   const allEntries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
-  const pendingForks = new Set(forkRelations(state.detail?.work_thread));
-  const appendForks = (turnId, remaining = false) => {
-    for (const relation of pendingForks) if (remaining || (relation.turnId || null) === turnId) {
+  const turnIndexes = new Map(turns.map((turn, index) => [turn, index]));
+  const pendingForks = new Set(forkRelations(state.detail?.work_thread).map(relation =>
+    ({...relation, boundary: forkBoundary(relation, turns)})));
+  const appendForks = (boundary, remaining = false) => {
+    for (const relation of pendingForks) if (remaining || relation.boundary === boundary) {
       fragment.append(forkMarker(relation)); pendingForks.delete(relation);
     }
   };
-  appendForks(null);
   const workGroups = new Map();
   const conversation = conversationEntry(state.selected);
   // A long conversation first renders its latest turns: rendering every message
@@ -1983,9 +2003,15 @@ function renderTimeline() {
   const firstShown = windowed ? Math.max(0, allEntries.findIndex(entry => entry.turn === turns[hidden])) : 0;
   const entries = firstShown > 0 ? allEntries.slice(firstShown) : allEntries;
   if (windowed) {
-    for (const turn of turns.slice(0, hidden)) appendForks(turn.id);
+    // Markers belong to their history, including when that history is hidden
+    // or has not been loaded. The context panel retains every fork link.
+    for (const relation of pendingForks) {
+      if (relation.boundary !== null && relation.boundary < hidden || omitted > 0 && relation.boundary === null)
+        pendingForks.delete(relation);
+    }
     fragment.append(earlierTurnsControl(omitted + hidden));
   }
+  appendForks(-1);
   const previousTools = conversation.toolNodes || new Map(), toolNodes = new Map();
   const previousMessages = conversation.messageNodes || new Map(), messageNodes = new Map();
   let previousMessageMinute = null;
@@ -2132,7 +2158,7 @@ function renderTimeline() {
     if (!entry.item && turn.error) fragment.append(node("p", turn.error.message || "This turn failed.", "empty"));
     if (!entry.item && turn.status === "interrupted") fragment.append(node("p",
       turn !== turns.at(-1) || state.detail?.running ? "Earlier turn stopped." : "Turn stopped.", "empty"));
-    if (!entry.item) appendForks(turn.id);
+    if (!entry.item) appendForks(turnIndexes.get(turn));
   }
   // Retain navigation even when the provider cannot return the boundary turn.
   appendForks(null, true);

@@ -77,6 +77,59 @@ test("coordination message entries do not duplicate or move the fork boundary", 
   assert.equal(c.timeline.children[2].tag, "article");
 });
 
+test("a fork in unloaded history stays with earlier turns instead of the latest response", () => {
+  const c = harness({forked_sessions: [fork("child", {created_at: 25})]},
+    [{...turn("recent"), startedAt: 30, completedAt: 40}]);
+  c.state.detail.thread.earlierTurns = 80;
+  c.renderTimeline();
+  assert.equal(markers(c).length, 0);
+  assert.match(text(c.timeline.children[0]), /Show 80 earlier turns/);
+  c.state.detail.thread.earlierTurns = 0;
+  c.state.detail.thread.turns.unshift(turn("original"));
+  c.renderTimeline();
+  assert.equal(markers(c).length, 1);
+  assert.equal(c.timeline.children[1].className, "fork-marker");
+});
+
+test("locally hidden fork boundaries appear only when earlier turns are shown", () => {
+  const c = harness({forked_sessions: [fork("child")]},
+    [turn("original"), ...Array.from({length: 41}, (_, i) => turn("later-" + i))]);
+  c.renderTimeline();
+  assert.equal(markers(c).length, 0);
+  c.conversationEntry().allTurns = true;
+  c.renderTimeline();
+  assert.equal(markers(c).length, 1);
+  assert.equal(c.timeline.children[1].className, "fork-marker");
+});
+
+test("restored turn IDs fall back to the recorded fork time", () => {
+  for (const created_at of [25, 1700000025000, "2023-11-14T22:13:45Z"]) {
+    const base = created_at === 25 ? 0 : 1700000000;
+    const c = harness({forked_sessions: [fork("child", {forked_from_turn_id: "native-original", created_at})]},
+      [{...turn("restored-original"), startedAt: base + 10, completedAt: base + 20},
+        {...turn("later"), startedAt: base + 30, completedAt: base + 40}]);
+    c.renderTimeline();
+    assert.equal(markers(c).length, 1);
+    assert.equal(c.timeline.children[1].className, "fork-marker");
+    assert.equal(c.timeline.children[2].tag, "article");
+  }
+});
+
+test("fork origins use the child's creation time when inherited turn IDs differ", () => {
+  const c = harness({forked_from: {thread_id: "parent", title: "Source"},
+    forked_from_turn_id: "native-original", created_at: 25},
+    [{...turn("restored-original"), startedAt: 10, completedAt: 20},
+      {...turn("later"), startedAt: 30, completedAt: 40}]);
+  c.renderTimeline();
+  assert.match(text(c.timeline.children[1]), /Forked from Source/);
+});
+
+test("fork turn IDs take precedence over timestamps", () => {
+  const c = harness({forked_sessions: [fork("child", {created_at: 100})]});
+  c.renderTimeline();
+  assert.equal(c.timeline.children[1].className, "fork-marker");
+});
+
 test("sidebar relationships contain origin and every direct fork with current titles", () => {
   const c = harness(), work = {forked_from: {thread_id: "parent", title: "Renamed source"},
     forked_sessions: [fork("child"), fork("closed-child")]};
