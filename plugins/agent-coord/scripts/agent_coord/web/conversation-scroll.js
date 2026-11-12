@@ -10,10 +10,11 @@ class ConversationScroll {
     const scrolled = event => {
       if (event.target !== this.scroller() || this.initial) return;
       const top = this.position();
-      // A queued scroll event from our own jump may arrive after the composer
-      // changes height. Only scrolling upward should detach a following view.
-      if (top < this.lastTop) this.following = false;
-      else if (top > this.lastTop && this.distance() < 2 && !this.selecting()) this.following = true;
+      // WebKit can clamp scrollTop downward when the viewport grows or content
+      // shrinks, before ResizeObserver runs. Staying at the bottom still means
+      // following; only movement away from it should detach the reader.
+      if (this.distance() < 2 && !this.selecting()) this.following = true;
+      else if (top < this.lastTop) this.following = false;
       this.lastTop = top;
       if (!this.following) this.captureAnchor();
       this.updateButton();

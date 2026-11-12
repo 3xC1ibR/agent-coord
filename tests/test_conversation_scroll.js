@@ -61,6 +61,31 @@ for (const mobile of [false, true]) {
     assert.equal(scroller.scrollTop, 0, "saved pane position at the top must survive layout changes");
     assert.equal(controller.beforeRender(), false);
   });
+  test(`${layout}: browser clamping at the bottom preserves following across repeated layout changes`, () => {
+    const {controller, scroller} = setup(mobile);
+    controller.afterRender(controller.beforeRender());
+    for (const change of [() => scroller.clientHeight += 40, () => scroller.scrollHeight -= 60]) {
+      change();
+      // WebKit delivers this clamped scroll event before ResizeObserver.
+      scroller.scrollTop = scroller.scrollHeight;
+      scroller.fire("scroll");
+      assert.equal(controller.beforeRender(), true, "layout clamping must not look like reading upward");
+      controller.resize.fire();
+      scroller.scrollHeight += 80;
+      controller.afterRender(controller.beforeRender());
+      assert.equal(controller.distance(), 0, "new output must remain visible");
+    }
+  });
+  test(`${layout}: fractional movement at the bottom does not detach following`, () => {
+    const {controller, scroller} = setup(mobile);
+    controller.afterRender(controller.beforeRender());
+    scroller.scrollTop -= 0.5;
+    scroller.fire("scroll");
+    assert.equal(controller.beforeRender(), true);
+    scroller.scrollHeight += 40;
+    controller.resize.fire();
+    assert.equal(controller.distance(), 0);
+  });
   test(`${layout}: short conversations never need a jump button`, () => {
     const {controller, scroller, button} = setup(mobile);
     scroller.scrollHeight = scroller.clientHeight;
@@ -84,4 +109,21 @@ test("reading just above the latest message remains detached until scrolling to 
   assert.equal(controller.beforeRender(), false, "restoring a nearby reading position must not follow");
   scroller.scrollTop = scroller.scrollHeight; scroller.fire("scroll");
   assert.equal(controller.beforeRender(), true);
+});
+
+test("a text selection at the bottom keeps its reading position during layout changes", () => {
+  const {controller, scroller, timeline} = setup();
+  controller.afterRender(controller.beforeRender());
+  const selected = {};
+  timeline.contains = node => node === selected;
+  controller.view.getSelection = () => ({isCollapsed: false, anchorNode: selected, focusNode: selected});
+  assert.equal(controller.beforeRender(), false);
+  scroller.clientHeight += 40;
+  scroller.scrollTop = scroller.scrollHeight;
+  scroller.fire("scroll");
+  assert.equal(controller.beforeRender(), false);
+  const top = scroller.scrollTop;
+  scroller.scrollHeight += 80;
+  controller.afterRender(false);
+  assert.equal(scroller.scrollTop, top);
 });
