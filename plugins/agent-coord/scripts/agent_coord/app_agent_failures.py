@@ -74,7 +74,7 @@ def _report_queued_work(store, db, row, now):
     pending = db.execute("""SELECT m.id, m.created_at, m.reply_required, s.name AS sender_name FROM messages m
         LEFT JOIN sessions s ON s.session_id = m.sender_session_id
         WHERE m.recipient_session_id = ? AND m.sender_session_id != ? AND m.delivered_at IS NULL
-        AND m.acknowledged_at IS NULL AND m.suppressed_at IS NULL AND m.classification = 'action_required'
+        AND m.suppressed_at IS NULL AND m.classification = 'action_required'
         AND m.thread_id NOT LIKE 'event:%' AND m.created_at >= ? ORDER BY m.id""",
         (tid, tid, row["created_at"])).fetchall()
     reported = row["queued_alert_message_id"] or 0
@@ -91,7 +91,7 @@ def _report_queued_work(store, db, row, now):
                    f"{newest['sender_name'] or 'an unnamed session'}."),
             event="app_agent_work_queued", guidance=
             "These messages will not wake the agent. Recover it with a fresh actionable continuation and "
-            "agent-coord thread resume, or hand its scope to an available worker. Acknowledging this alert is "
+            "agent-coord thread resume, or hand its scope to an available worker. Receiving this alert is "
             "not recovery. This report repeats at most every 30 minutes, and only when new work is queued; "
             "no reply is required.")
     db.execute("""UPDATE app_agent_followups SET queued_alerted_at = ?, queued_alert_message_id = ?
@@ -142,7 +142,7 @@ def process_failure_followups(store, cwd=None):
                         "Inspect the native agent and existing tool/job results, then recover with fresh instructions or "
                         "record a scope handoff to an available worker. For a usage limit, choose an available provider "
                         "or an authorized continuation after quota resets; do not repeatedly retry the exhausted provider. "
-                        "Acknowledging this alert is not recovery. No prompt was replayed and no scope was released. "
+                        "Receiving this alert is not recovery. No prompt was replayed and no scope was released. "
                         "This reminder is sent once; no reply is required.")
                 db.execute("UPDATE app_agent_followups SET escalated_at = ? WHERE thread_id = ? AND turn_id = ?", (now, tid, turn))
 

@@ -541,8 +541,11 @@ class MuseSetupTests(unittest.TestCase):
                               "tool_input": {"path": "src/file"}}, self.store)
             self.assertEqual(allowed, {})
             delivered = handle({**payload, "session_id": "parent", "cwd": str(self.root),
-                                "hook_event_name": "PostToolUse"}, self.store)
+                                "hook_event_name": "PostToolUse", "turn_id": "parent-turn"}, self.store)
             self.assertIn("ROOT_ONLY_TASK", delivered["hookSpecificOutput"]["additionalContext"])
+            self.assertTrue(self.store.inbox("parent", mark_delivered=False))
+            handle({**payload, "session_id": "parent", "cwd": str(self.root),
+                    "hook_event_name": "Stop", "turn_id": "parent-turn"}, self.store)
         self.assertFalse(self.store.inbox("parent"))
 
     def test_transport_fingerprint_warning_and_nonblocking_notifications(self):

@@ -70,7 +70,7 @@ class ThreadTitleAPITests(unittest.TestCase):
         instructions = options["developerInstructions"]
         self.assertIn("optional title", instructions)
         self.assertIn("first meaningful checkpoint", instructions)
-        self.assertIn("cannot be overwritten", instructions)
+        self.assertIn("preserve user choices", instructions)
 
 
 if __name__ == "__main__":

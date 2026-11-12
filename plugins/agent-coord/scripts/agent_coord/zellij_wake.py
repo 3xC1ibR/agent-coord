@@ -17,7 +17,8 @@ from .store import WAKEABLE_ACTIVITIES, CoordinationError, CoordinationStore
 DEFAULT_WAKE_POLL_SECONDS = 0.5
 DEFAULT_WAKE_VERIFY_ATTEMPTS = 5
 DEFAULT_WAKE_VERIFY_INTERVAL_SECONDS = 0.05
-WAKE_PROMPT = "Check and handle your unread agent-coord messages."
+WAKE_PROMPT = ("Automatic agent-message delivery. Handle the coordination messages supplied with this turn. "
+               "If their bodies are missing, retrieve them with agent-coord inbox --unread.")
 PROMPT_EMPTY = "empty"
 PROMPT_SELF_WAKE = "self-wake"
 PROMPT_OCCUPIED = "occupied"

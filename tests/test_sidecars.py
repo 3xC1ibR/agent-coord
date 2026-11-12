@@ -237,9 +237,12 @@ class SidecarTests(unittest.TestCase):
         self.sessions.inbox_wake.process_once()
         self.assertIn(self.target, self.sessions.active)
         self.sessions.persistence.flush()
-        received = self.store.inbox(self.target)
+        self.assertEqual(self.store.inbox(self.target), [])
+        prompt = self.sessions.read(self.target)['thread']['turns'][-1]['items'][0]['content'][0]['text']
+        self.assertIn("Run the payment tests", prompt)
+        received = self.store.inbox(self.target, include_delivered=True, mark_delivered=False)
         self.assertEqual(len(received), 1)
-        self.assertIn("Run the payment tests", received[0]["body"])
+        self.assertIsNotNone(received[0]['delivered_at'])
 
     def test_queued_intervention_is_discarded_after_new_user_task_or_detach(self):
         for change in ("new-task", "detach", "stop"):

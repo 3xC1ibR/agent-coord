@@ -32,15 +32,14 @@ class MessageDeliveryTests(unittest.TestCase):
         self.assertIsNone(self.delivery.read('sender', ident)['delivered_at'])
         self.delivery.attempted('turn1', batch)
         self.assertIsNone(self.delivery.prepare('recipient', 'turn1'))
-        self.assertEqual(self.delivery.read('sender', ident)['delivery']['state'], 'submitting')
+        self.assertEqual(self.delivery.read('sender', ident)['delivery']['state'], 'unconfirmed')
         self.delivery.submitted('recipient', 'turn1', batch)
-        self.assertEqual(self.delivery.read('sender', ident)['delivery']['state'], 'submitted')
+        self.assertEqual(self.delivery.read('sender', ident)['delivery']['state'], 'delivered')
         self.assertIsNone(self.delivery.read('sender', ident)['acknowledged_at'])
         reopened = MessageDelivery(CoordinationStore(self.store.database_path))
         self.assertIsNone(reopened.prepare('recipient', 'turn1'))
-        self.assertEqual(reopened.prepare('recipient', 'turn2')['ids'], [ident])
-        self.store.acknowledge('recipient', ident)
-        self.assertEqual(reopened.read('sender', ident)['delivery']['state'], 'acknowledged')
+        self.assertIsNone(reopened.prepare('recipient', 'turn2'))
+        self.assertEqual(reopened.read('sender', ident)['delivery']['state'], 'delivered')
         self.assertIsNone(reopened.prepare('recipient', 'turn2'))
 
     def test_reply_stops_redelivery_of_original_but_delivers_response(self):
@@ -50,7 +49,7 @@ class MessageDeliveryTests(unittest.TestCase):
         self.delivery.submitted('recipient', 'turn1', batch)
         reply = self.store.reply_message(sender_session_id='recipient', message_id=ident, body='Answer')
         reopened = MessageDelivery(CoordinationStore(self.store.database_path))
-        self.assertEqual(reopened.read('sender', ident)['delivery']['state'], 'acknowledged')
+        self.assertEqual(reopened.read('sender', ident)['delivery']['state'], 'delivered')
         self.assertIsNone(reopened.prepare('recipient', 'turn2'))
         self.assertEqual(reopened.prepare('sender', 'turn2')['ids'], [reply['id']])
 
@@ -67,7 +66,7 @@ class MessageDeliveryTests(unittest.TestCase):
         self.delivery.failed('turn', second, 'Later prompt failed')
         reopened = MessageDelivery(CoordinationStore(self.store.database_path))
         receipt = reopened.read('sender', accepted)
-        self.assertEqual(receipt['delivery']['state'], 'submitted')
+        self.assertEqual(receipt['delivery']['state'], 'delivered')
         self.assertEqual(receipt['delivery']['submitted_at'], submitted)
         self.assertIsNone(receipt['delivery']['error'])
         self.assertIsNone(receipt['acknowledged_at'])
@@ -109,15 +108,15 @@ class MessageDeliveryTests(unittest.TestCase):
         self.assertEqual(self.delivery.read('sender', ident)['delivery']['state'], 'body_required')
         rebuilt, offset = '', 0
         while offset is not None:
-            page = self.delivery.read('recipient', ident, offset=offset)
+            page = self.delivery.read('recipient', ident, offset=offset, consume=True)
             self.assertLessEqual(len(page['body']), 8000)
             rebuilt += page['body']
             offset = page['next_offset']
         self.assertEqual(rebuilt, body)
-        self.assertIsNone(page['delivered_at'])
+        self.assertIsNotNone(page['delivered_at'])
         self.assertIsNone(page['acknowledged_at'])
 
-    def test_uncertain_attempt_is_visible_and_can_retry_in_later_turn(self):
+    def test_uncertain_attempt_is_visible_and_does_not_replay_in_later_turn(self):
         ident = self.send()
         batch = self.delivery.prepare('recipient', 'turn')
         self.delivery.attempted('turn', batch)
@@ -126,7 +125,7 @@ class MessageDeliveryTests(unittest.TestCase):
         self.assertEqual(status['state'], 'uncertain')
         self.assertIn('timed out', status['error'])
         self.assertGreaterEqual(status['pending_seconds'], 0)
-        self.assertEqual(self.delivery.prepare('recipient', 'next')['ids'], [ident])
+        self.assertIsNone(self.delivery.prepare('recipient', 'next'))
 
     def test_nonactionable_and_superseded_messages_do_not_interrupt(self):
         self.send(classification='informational')

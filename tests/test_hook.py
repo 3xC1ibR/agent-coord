@@ -229,7 +229,8 @@ class HookTests(unittest.TestCase):
         result = handle(self.payload("SessionStart"), self.store)
 
         context = result["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("preserve this message", context)
+        self.assertNotIn("preserve this message", context)
+        self.assertIn("preserve this message", handle(self.payload("UserPromptSubmit"), self.store)["hookSpecificOutput"]["additionalContext"])
         self.assertIn("Zellij wake could not start", context)
 
     def test_solo_write_without_work_declaration_is_allowed(self) -> None:
@@ -575,7 +576,7 @@ class HookTests(unittest.TestCase):
     def test_actionable_messages_precede_large_bootstrap_and_remain_recoverable(self):
         handle(self.payload("SessionStart"), self.store)
         self.store.register(session_id="peer", client="claude", cwd=str(self.root))
-        for event in ("SessionStart", "UserPromptSubmit"):
+        for event in ("UserPromptSubmit",):
             with self.subTest(event=event):
                 body = "URGENT: scoped handoff " + "complete body " * 500 + "END-OF-REQUEST"
                 sent = self.store.send_message(sender_session_id="peer", recipient_session_id="codex-one",
@@ -654,9 +655,10 @@ class HookTests(unittest.TestCase):
         self.assertIn("Please validate", context)
         self.assertNotIn("FYI only", context)
         self.assertNotIn("Thread complete", context)
-        self.assertIn("thread thread-c", context)
-        self.assertIn("reply_required=false", context)
-        self.assertIn("only where reply_required=true", context)
+        self.assertIn('"thread_id": "thread-c"' , context)
+        self.assertIn('"reply_required": false' , context)
+        self.assertIn("only when reply_required=true", context)
+        handle(self.payload("Stop"), self.store)
         self.assertEqual(
             self.store.inbox("codex-one", mark_delivered=False),
             [

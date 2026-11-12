@@ -364,8 +364,8 @@ class ReviewRuntime:
             return
         now = self.store.clock()
         db.execute("UPDATE review_runs SET state=?,error=?,finished_at=? WHERE id=?", (state, error, now, run["id"]))
-        db.execute("""UPDATE messages SET suppressed_at=?,acknowledged_at=?,delivered_at=COALESCE(delivered_at,?) WHERE acknowledged_at IS NULL
-            AND id IN (SELECT message_id FROM review_steps WHERE run_id=?)""", (now, now, now, run["id"]))
+        db.execute("""UPDATE messages SET suppressed_at=?,delivered_at=COALESCE(delivered_at,?) WHERE suppressed_at IS NULL
+            AND id IN (SELECT message_id FROM review_steps WHERE run_id=?)""", (now, now, run["id"]))
         if state in {"complete", "incomplete"}:
             key = "review:" + run["id"]
             db.execute("INSERT OR IGNORE INTO turn_completions(thread_id,turn_key,status,completed_at) VALUES (?,?,?,?)",
@@ -442,8 +442,8 @@ class ReviewRuntime:
                             result = self._validate(run, step, answer(turn), json.loads(first[0]) if first and first[0] else None)
                             db.execute("UPDATE review_steps SET result_json=?,completed_at=? WHERE run_id=? AND stage=?",
                                        (json.dumps(result), self.store.clock(), run_id, step["stage"]))
-                            db.execute("UPDATE messages SET acknowledged_at=?,delivered_at=COALESCE(delivered_at,?) WHERE id=?",
-                                       (self.store.clock(), self.store.clock(), step["message_id"]))
+                            db.execute("UPDATE messages SET delivered_at=COALESCE(delivered_at,?) WHERE id=?",
+                                       (self.store.clock(), step["message_id"]))
                             if step["stage"] in {"draft", "revise"}:
                                 draft = result["draft"]
                                 db.execute("UPDATE review_runs SET draft=?,draft_hash=? WHERE id=?", (draft, digest(draft), run_id))

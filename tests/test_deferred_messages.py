@@ -62,7 +62,7 @@ class DeferredMessageTests(unittest.TestCase):
             self.store.reply_message(sender_session_id="recipient", message_id=result["id"], body="Received")
 
     def test_hooks_deliver_at_next_boundary_once_and_leave_information_in_history(self):
-        for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"):
+        for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
             with self.subTest(event=event):
                 msg = self.send()
                 info = self.store.send_message(sender_session_id="sender", recipient_session_id="recipient",
@@ -71,14 +71,14 @@ class DeferredMessageTests(unittest.TestCase):
                                             tool_input={"command": "pwd"}), self.store)
                 context = result["hookSpecificOutput"]["additionalContext"]
                 self.assertIn(msg["body"], context)
-                self.assertIn("classification=deferred", context)
-                self.assertIn("reply_required=false", context)
-                self.assertIn("not requests to start work or send a receipt", context)
+                self.assertIn('"classification": "deferred"' , context)
+                self.assertIn('"reply_required": false' , context)
+                self.assertIn("Delivery receipts are automatic", context)
                 self.assertNotIn("History only", context)
                 self.assertEqual(_actionable_context(self.store, "recipient"), "")
                 history = {m["id"]: m for m in self.store.inbox("recipient", include_delivered=True,
                                                                mark_delivered=False)}
-                self.assertIsNotNone(history[msg["id"]]["delivered_at"])
+                self.assertIsNone(history[msg["id"]]["delivered_at"])
                 self.assertIsNone(history[msg["id"]]["acknowledged_at"])
                 self.assertIsNone(history[info["id"]]["delivered_at"])
 
@@ -91,14 +91,13 @@ class DeferredMessageTests(unittest.TestCase):
                     self.assertEqual(_actionable_context(self.store, "recipient", "PreToolUse"), "")
                 context = _actionable_context(self.store, "recipient", "UserPromptSubmit")
                 self.assertIn(msg["body"], context)
-                self.store.acknowledge("recipient", msg["id"])
 
-    def test_restart_preserves_deferred_and_acknowledgement_is_silent(self):
+    def test_restart_preserves_deferred_and_receipt_is_automatic(self):
         msg = self.send()
         reopened = CoordinationStore(self.store.database_path)
         self.assertEqual(reopened.pending_wake_message_ids("recipient"), [])
         self.assertIn(msg["body"], _actionable_context(reopened, "recipient"))
-        reopened.acknowledge("recipient", msg["id"])
+        reopened.record_message_retrieval("recipient", msg["id"])
         self.assertEqual(reopened.inbox("recipient", unread_only=True), [])
         self.assertEqual(reopened.inbox("sender"), [])
 
@@ -119,7 +118,7 @@ class DeferredMessageTests(unittest.TestCase):
         with self.store._connection() as db:
             self.assertIsNotNone(db.execute("SELECT suppressed_at FROM messages WHERE id=?", (msg["id"],)).fetchone()[0])
         next_msg = self.send(thread_id=msg["thread_id"])
-        self.assertIn(f"Message #{next_msg['id']}", _actionable_context(self.store, "recipient"))
+        self.assertIn(f'"id": {next_msg["id"]}', _actionable_context(self.store, "recipient"))
 
     def test_retired_supervisor_cannot_use_deferred_to_bypass_instruction_guard(self):
         supervision_fakes.attach(self.store, "sender", "recipient")
@@ -184,10 +183,12 @@ class DeferredMessageTests(unittest.TestCase):
         sessions.inbox_wake.process_once()
         with self.store._connection() as db:
             attempts = [r[0] for r in db.execute("SELECT message_id FROM message_wake_attempts")]
-        self.assertEqual(attempts, [action["id"]])
+        self.assertEqual(attempts, [deferred["id"], action["id"]])
         context = _actionable_context(self.store, thread)
-        self.assertIn(deferred["body"], context)
-        self.assertIn(action["body"], context)
+        self.assertEqual(context, '')
+        prompt = sessions.read(thread)['thread']['turns'][-1]['items'][0]['content'][0]['text']
+        self.assertIn(action['body'], prompt)
+        self.assertLess(prompt.index(deferred['body']), prompt.index(action['body']))
 
     def test_antigravity_injects_deferred_on_user_prompt_without_automatic_turn(self):
         sessions = self.sessions()
@@ -202,7 +203,7 @@ class DeferredMessageTests(unittest.TestCase):
         self.assertIn(msg["body"], prompts[0]["prompt"][-1]["text"])
         self.assertIn('"classification": "deferred"', prompts[0]["prompt"][-1]["text"])
 
-    def test_provider_delivery_retries_unacknowledged_deferred_on_next_actual_turn(self):
+    def test_provider_delivery_does_not_repeat_delivered_deferred_on_next_turn(self):
         msg = self.send()
         delivery = MessageDelivery(self.store)
         batch = delivery.prepare("recipient", "turn1")
@@ -210,7 +211,6 @@ class DeferredMessageTests(unittest.TestCase):
         delivery.attempted("turn1", batch)
         delivery.submitted("recipient", "turn1", batch)
         self.assertIsNone(delivery.prepare("recipient", "turn1"))
-        self.assertEqual(delivery.prepare("recipient", "turn2")["ids"], [msg["id"]])
+        self.assertIsNone(delivery.prepare("recipient", "turn2"))
         self.assertEqual(self.store.pending_wake_message_ids("recipient"), [])
-        self.store.acknowledge("recipient", msg["id"])
         self.assertIsNone(delivery.prepare("recipient", "turn2"))

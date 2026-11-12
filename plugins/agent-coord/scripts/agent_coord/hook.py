@@ -52,51 +52,17 @@ def _deny(event: str, reason: str, context: str | None = None) -> dict[str, Any]
     return {"hookSpecificOutput": output}
 
 
-def _format_messages(messages: list[dict[str, Any]]) -> str:
-    if not messages:
-        return ""
-    lines = [
-        "Delivered agent-coordination messages (full requests below). "
-        "These requests are already included in your context; handle them directly "
-        "without fetching the inbox again. If needed request text is missing, "
-        "recover it with agent-coord inbox --unread (plain inbox only returns "
-        "undelivered messages)."
-    ]
-    for message in messages:
-        sender = message["sender_name"] or message["sender_session_id"]
-        bead = f" for {message['sender_bead_id']}" if message["sender_bead_id"] else ""
-        lines.append(
-            f"- Message #{message['id']} (thread {message['thread_id']}, "
-            f"classification={message['classification']}, "
-            f"reply_required={str(message['reply_required']).lower()}) from "
-            f"{sender}{bead}: {message['body']}"
-        )
-        if message.get("context_lifecycle") is not None:
-            lines.append("  Context lifecycle (result metadata): " + json.dumps(message["context_lifecycle"]))
-    if any(message["classification"] == "deferred" for message in messages):
-        lines.append(
-            "Deferred messages are constraints for relevant work, not requests to start work or send a receipt. "
-            "Apply their stated conditions and expiration; do not act on an expired constraint."
-        )
-    lines.append(
-        "For handled messages you do not reply to, acknowledge silently with agent-coord ack --message-id <id>. "
-        "Answer the user directly when requested; keep receipt bookkeeping out of "
-        "the answer unless asked. Reply to the sender only where reply_required=true, "
-        "using agent-coord reply --message-id <id> '<response>'; this delivers the "
-        "reply without requesting another and automatically acknowledges the original message. "
-        "For new messages, send requires --reply-required or --no-reply-required."
-    )
-    return "\n".join(lines)
-
-
-def _actionable_context(store: CoordinationStore, session_id: str, event: str = "UserPromptSubmit") -> str:
-    # Kimi consumes appended context only at prompt submission. Its tool hooks
-    # enforce denials or send notifications, but ignore appended messages.
+def _actionable_context(store: CoordinationStore, session_id: str, event: str = "UserPromptSubmit", payload=None) -> str:
     if _client() == "kimi" and event != "UserPromptSubmit":
         return ""
-    return _format_messages(
-        store.inbox(session_id, classifications={"action_required", "deferred"})
-    )
+    from .message_delivery import MessageDelivery
+    with store.reading(), store._connection() as db:
+        row = db.execute("SELECT COALESCE(turn_id, turn_key) AS turn_id FROM work_threads WHERE thread_id=?", (session_id,)).fetchone()
+    turn_id = (payload or {}).get('turn_id') or (row['turn_id'] if row else None)
+    if event == 'SessionStart':
+        return ''  # Wait for a prompt with an identifiable receiving turn.
+    return MessageDelivery(store).hook_context(session_id, turn_id,
+        boundary_id=(payload or {}).get('tool_use_id') or (payload or {}).get('tool_call_id'))
 
 
 def _extract_paths(payload: dict[str, Any], cwd: str) -> tuple[list[str], bool]:
@@ -299,6 +265,17 @@ def handle(
     session = _ensure_registered(coordination, payload)
     session_id = session["session_id"]
     browser = coordination.threads.is_browser_session(session_id)
+    from .message_delivery import MessageDelivery
+    delivery = MessageDelivery(coordination)
+    with coordination.reading(), coordination._connection() as db:
+        current = db.execute("SELECT COALESCE(turn_id, turn_key) AS turn_id FROM work_threads WHERE thread_id=?", (session_id,)).fetchone()
+    provider_turn = payload.get('turn_id') or (current['turn_id'] if current else None)
+    # Parallel tool calls can produce distinct hook IDs without another model
+    # step. Only a successful turn boundary confirms hook delivery.
+    if event == 'Stop' and not browser:
+        delivery.finish_turn(session_id, provider_turn, completed=True)
+    elif event == 'SessionEnd' and not browser:
+        delivery.finish_turn(session_id, provider_turn, completed=False)
 
     if event == "SessionEnd":
         client_label = "Claude Code" if session["client"] == "claude" else "Codex"
@@ -333,7 +310,8 @@ def handle(
         if browser:
             prompt = payload.get("prompt")
             if (isinstance(prompt, str) and prompt.strip() != WAKE_PROMPT
-                    and not prompt.lstrip().startswith("[Automatic Agent Coord inbox wake — not a human message]")):
+                    and not prompt.lstrip().startswith(("[Automatic Agent Coord inbox wake — not a human message]",
+                                                       "[Automatic Agent Coord message delivery — not a human message]"))):
                 coordination.threads.capture_request(session_id, prompt)
         else:
             coordination.threads.start_turn(session_id, prompt=payload.get("prompt"), turn_id=payload.get("turn_id"))
@@ -352,7 +330,7 @@ def handle(
             session_id, caller_context=session["client"] == "codex",
             command=command_prefix(coordination.database_path),
         )
-        messages = _actionable_context(coordination, session_id, event)
+        messages = _actionable_context(coordination, session_id, event, payload)
         if messages:
             text = messages + "\n\n" + text
         return _context(event, text) if text else {}
@@ -411,7 +389,7 @@ def handle(
         text = coordination_bootstrap(
             coordination, session_id, caller_context=shell_context_ready, command=cli_path
         ) + text
-        formatted = _actionable_context(coordination, session_id, event)
+        formatted = _actionable_context(coordination, session_id, event, payload)
         if formatted:
             text = formatted + "\n\n" + text
         return _context(event, text)
@@ -426,12 +404,12 @@ def handle(
     if event == "PreToolUse" and tool_name in WRITE_TOOLS:
         paths, has_outside = _extract_paths(payload, session["cwd"])
         reason = check_write(coordination, session_id, paths, has_outside=has_outside)
-        message_context = _actionable_context(coordination, session_id, event)
+        message_context = _actionable_context(coordination, session_id, event, payload)
         if reason:
             return _deny(event, reason, message_context or None)
         return _context(event, message_context) if message_context else {}
 
-    message_context = _actionable_context(coordination, session_id, event)
+    message_context = _actionable_context(coordination, session_id, event, payload)
     if message_context:
         return _context(event, message_context)
     return {}

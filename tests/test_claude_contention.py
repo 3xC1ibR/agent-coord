@@ -36,9 +36,8 @@ for line in sys.stdin:
     elif message.get("type") == "user":
         prompt = message["uuid"]
         text = "\\n".join(p.get("text", "") for p in message["message"]["content"])
-        if text == WAKE_PROMPT:
-            store = CoordinationStore(os.environ["AGENT_COORD_DB"])
-            messages = store.inbox(os.environ["AGENT_COORD_SESSION_ID"])
+        if text.startswith(WAKE_PROMPT):
+            messages = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
             emit({"type": "assistant", "message": {"content": [
                 {"type": "text", "text": "\\n".join(m["body"] for m in messages)}]}})
             emit({"type": "result", "subtype": "success"})
@@ -106,7 +105,7 @@ class ClaudeContentionTests(unittest.TestCase):
         self.assertEqual(history["turns"][0]["status"], "completed")
         self.assertEqual([i["text"] for i in history["turns"][0]["items"] if i["type"] == "agentMessage"], ["Finished once"])
         self.sessions.inbox_wake.process_once()
-        # The provider consumes the inbox before acknowledging this control.
+        # The provider processes the supplied message before answering this control.
         self.connection.control("barrier", timeout=3)
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
         self.sessions.inbox_wake.process_once()

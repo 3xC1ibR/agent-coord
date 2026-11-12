@@ -75,7 +75,7 @@ class EventSubscriptions:
             (identifier, message["sender_session_id"], owner["cwd"],
              "Read the app agent's result and checkpoint, evaluate any context_lifecycle advice, "
              "and continue the original task. A turn ending does not establish assignment success. "
-             "Acknowledge this event after handling it; no reply is required.",
+             "Delivery receipts are automatic; no reply is required.",
              json.dumps({"assignment_message_id": message["id"]}), now, now))
         db.execute("""INSERT INTO event_subscription_items
             (subscription_id, id, kind, session_id, assignment_message_id)
@@ -280,7 +280,7 @@ class EventSubscriptions:
             continuation = ("The turns marked termination.origin=user were stopped by the user. "
                             "This is not an agent failure. Do not retry, resume, or replace their work "
                             "without a new user instruction. Native tools may still be running; "
-                            "inspect their state before any recovery. Acknowledge this event; no reply is required.")
+                            "inspect their state before any recovery. Delivery receipts are automatic; no reply is required.")
             if len(user_stops) < len(outcomes):
                 continuation += " For the other outcomes only: " + subscription["continuation"]
         body = json.dumps({"event": "subscription_timeout" if timeout else "subscription_matched",

@@ -16,7 +16,6 @@ from agent_coord.checkpoint_mcp import update_checkpoint
 from agent_coord.cli import _parser, run
 from agent_coord.context_lifecycle import (MAX_REPORT_CHARS, REPORTING_INSTRUCTIONS,
                                           snapshot_for_assignment, validate_report)
-from agent_coord.hook import _format_messages
 from agent_coord.message_delivery import MessageDelivery
 from agent_coord.store import CoordinationError, CoordinationStore
 
@@ -131,7 +130,7 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertEqual(response["context_lifecycle"], expected)
         self.assertFalse(response["reply_required"])
         self.assertEqual(response["in_reply_to"], self.assignment["id"])
-        self.assertIsNotNone(MessageDelivery(self.store).read("owner", self.assignment["id"])["acknowledged_at"])
+        self.assertIsNotNone(MessageDelivery(self.store).read("owner", self.assignment["id"])["delivered_at"])
         changed = self.report()
         changed["recommendation"] = "fresh"
         self.save(changed)
@@ -139,10 +138,9 @@ class ContextLifecycleTests(unittest.TestCase):
         inbox = reopened.inbox("owner", mark_delivered=False)
         self.assertEqual(len(inbox), 1)
         self.assertEqual(inbox[0]["context_lifecycle"], expected)
-        lifecycle_line = next(line for line in _format_messages(inbox).splitlines()
-                              if line.startswith("  Context lifecycle (result metadata): "))
-        self.assertEqual(json.loads(lifecycle_line.split(": ", 1)[1]), expected)
         delivery = MessageDelivery(reopened)
+        payload = json.loads(delivery.prepare("owner", "parent-turn")["text"].splitlines()[-1])
+        self.assertEqual(payload['context_lifecycle'], expected)
         self.assertIn('"context_lifecycle"', delivery.prepare("owner", "parent-turn")["text"])
         self.assertEqual(delivery.read("owner", response["id"])["context_lifecycle"], expected)
         self.assertEqual(reopened.threads.get("worker")["attention"], "now")

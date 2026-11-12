@@ -51,9 +51,10 @@ class EventRuntimeTests(unittest.TestCase):
                 self.finish(subscriber)
                 self.sessions.inbox_wake.process_once()
                 self.assertEqual(len(self.turns(subscriber)), 2)
-                context = _actionable_context(self.store, subscriber)
+                self.assertEqual(_actionable_context(self.store, subscriber), '')
+                context = self.turns(subscriber)[-1]['items'][0]['content'][0]['text']
                 self.assertIn("Review the worker result", context)
-                self.assertIn("reply_required=false", context)
+                self.assertIn('"reply_required": false' , context)
                 self.finish(subscriber)
                 self.sessions.event_subscriptions.process_once()
                 self.sessions.inbox_wake.process_once()

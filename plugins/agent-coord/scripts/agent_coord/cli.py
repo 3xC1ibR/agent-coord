@@ -409,6 +409,7 @@ def _parser() -> argparse.ArgumentParser:
         "--no-reply-required", dest="reply_required", action="store_false",
         help="Deliver the message without requesting a conversational reply.",
     )
+    send.add_argument("--request-id", help="Stable ID for retrying this exact send without duplicates.")
     send.add_argument("--thread-id")
     send.add_argument("message", help="Message body; use - to read stdin.")
 
@@ -433,6 +434,7 @@ def _parser() -> argparse.ArgumentParser:
     reply = subcommands.add_parser("reply", help="Answer a message without requesting another reply.")
     reply.add_argument("--from-session", help="Sender; defaults to the current caller session.")
     reply.add_argument("--message-id", type=int, required=True, help="Message being answered; recipient and thread are derived from it.")
+    reply.add_argument("--request-id", help="Stable ID for retrying this exact reply without duplicates.")
     reply.add_argument("message", help="Reply body; use - to read stdin.")
 
     handoff = subcommands.add_parser(
@@ -461,7 +463,7 @@ def _parser() -> argparse.ArgumentParser:
     inbox_mode.add_argument(
         "--unread",
         action="store_true",
-        help="Show compact unacknowledged messages, including delivered messages.",
+        help="Show messages still awaiting delivery, including uncertain delivery attempts.",
     )
     inbox.add_argument("--peek", action="store_true")
     inbox.add_argument(
@@ -484,8 +486,12 @@ def _parser() -> argparse.ArgumentParser:
     message.add_argument("--message-id", type=int, required=True)
     message.add_argument("--offset", type=int, default=0)
     message.add_argument("--limit", type=int, default=8000)
+    message.add_argument("--peek", action="store_true", help="Inspect without consuming recipient delivery.")
 
-    acknowledge = subcommands.add_parser("ack", help="Acknowledge a message.")
+    metrics = subcommands.add_parser("message-metrics", help="Inspect bounded, content-free delivery measurements.")
+    metrics.add_argument("--session-id", help="Recipient session; defaults to the current caller.")
+
+    acknowledge = subcommands.add_parser("ack", help="Obsolete compatibility command; receipts are automatic.")
     acknowledge.add_argument("--session-id", help="Caller session; defaults to AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
     acknowledge_target = acknowledge.add_mutually_exclusive_group(required=True)
     acknowledge_target.add_argument("--message-id", type=int)
@@ -974,6 +980,7 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
             classification=arguments.classification,
             thread_id=arguments.thread_id,
             reply_required=arguments.reply_required,
+            request_id=arguments.request_id,
         )
     if command == "ask":
         return run_ask(store, arguments)
@@ -982,6 +989,7 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
             sender_session_id=arguments.from_session,
             message_id=arguments.message_id,
             body=read_input() if arguments.message == "-" else arguments.message,
+            request_id=arguments.request_id,
         )
     if command == "handoff":
         sender = store.get_session(arguments.from_session)
@@ -1021,15 +1029,17 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
             mark_delivered=not arguments.peek,
             unread_only=arguments.unread,
         )
+    if command == "message-metrics":
+        from .message_delivery import MessageDelivery
+        return MessageDelivery(store).metrics(arguments.session_id)
     if command == "message":
         from .message_delivery import MessageDelivery
         return MessageDelivery(store).read(arguments.session_id, arguments.message_id,
-                                           offset=arguments.offset, limit=arguments.limit)
+                                           offset=arguments.offset, limit=arguments.limit, consume=not arguments.peek)
     if command == "ack":
-        if arguments.all_unread:
-            return store.acknowledge_all_unread(arguments.session_id)
-        assert arguments.message_id is not None
-        return store.acknowledge(arguments.session_id, arguments.message_id)
+        # Compatibility for already-running clients. Never let an old receipt
+        # command discard queued work or fabricate delivery confirmation.
+        return {"status": "obsolete", "message": "Delivery receipts are automatic; ack is no longer required."}
     if command == "delegate":
         return delegate_work(
             store,
@@ -1166,6 +1176,8 @@ def mutation_receipt(arguments, result):
     """Keep reads and rich workflow results intact; summarize routine writes."""
     if not hasattr(arguments, "full") or arguments.full or arguments.command == "ask":
         return result
+    if arguments.command == "ack":
+        return result
     if arguments.command == "checkpoint":
         return {"status": "ok", "checkpoint_id": result["checkpoint"]["id"]}
     receipt = {"status": "ok", "command": arguments.command}
@@ -1173,7 +1185,7 @@ def mutation_receipt(arguments, result):
         fields = ("session_id", "thread_id", "id", "activity", "bead_id", "write_scope", "lease_mode",
                   "title", "attention", "project_id", "repository_id", "recipient_session_id",
                   "classification", "reply_required", "in_reply_to", "acknowledged_at", "acknowledged", "message_ids", "sender_session_id",
-                  "recipient_wake")
+                  "recipient_wake", "request_id", "idempotent")
         receipt.update({key: result[key] for key in fields if key in result})
     elif isinstance(result, list):
         receipt["count"] = len(result)
@@ -1192,7 +1204,7 @@ def bind_command_caller(arguments):
         "register", "set-activity", "checkpoint", "begin-work", "end-work",
         "unregister", "ack", "subscribe",
     }
-    owns_session |= arguments.command == "inbox" and not arguments.peek
+    owns_session |= arguments.command in {"inbox", "message"} and not arguments.peek
     owns_session |= arguments.command == "job" and arguments.job_command in {"start", "cancel"}
     owns_session |= arguments.command == "subscription" and arguments.subscription_command == "cancel"
     owns_session |= arguments.command == "delegation" and arguments.delegation_command == "finish"

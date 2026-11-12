@@ -514,7 +514,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.assertIsNone(self.store.inbox(thread, mark_delivered=False)[0]['delivered_at'])
         self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Received"})
         receipt = self.sessions.antigravity.delivery.read('sender', ident)
-        self.assertEqual(receipt['delivery']['state'], 'submitted')
+        self.assertEqual(receipt['delivery']['state'], 'delivered')
         self.assertIsNone(receipt['acknowledged_at'])
         self.deliver(thread)
         self.assertFalse(connection.writes)
@@ -614,7 +614,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         connection.future.set_exception(CoordinationError('Provider quota exhausted'))
         self.assertFalse(self.sessions.read(thread)['running'])
         self.assertTrue(self.sessions.persistence.flush(key=thread))
-        self.assertEqual(self.sessions.antigravity.delivery.read('sender', initial)['delivery']['state'], 'submitted')
+        self.assertEqual(self.sessions.antigravity.delivery.read('sender', initial)['delivery']['state'], 'delivered')
         receipt = self.sessions.antigravity.delivery.read('sender', later)
         self.assertEqual(receipt['delivery']['state'], 'queued')
         self.assertIsNone(receipt['delivery']['attempted_at'])
@@ -655,7 +655,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.deliver(thread)
         self.assertFalse(connection.writes)
 
-    def test_restart_retries_unacknowledged_delivery_without_new_identity(self):
+    def test_restart_preserves_delivery_without_ack_or_new_identity(self):
         thread = self.create()
         ident = self.send_correction(thread)
         connection = self.start(thread)
@@ -667,8 +667,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.assertNotIn(thread, self.sessions.antigravity.connections)
         connection = self.start(thread)
         self.assertEqual(self.sessions.antigravity.native[thread], native)
-        self.assertIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][-1]['text'])
-        self.store.acknowledge(thread, ident)
+        self.assertNotIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][-1]['text'])
         self.complete(thread)
         self.assertNotIn('Coordination messages from other agents', str(self.start(thread).calls[-1]))
 

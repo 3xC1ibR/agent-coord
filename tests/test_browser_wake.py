@@ -80,7 +80,7 @@ class BrowserWakeTests(unittest.TestCase):
             self.assertFalse(self.sessions.inbox_wake._preview_eligibility(thread))
         cleanup.assert_called_once()
 
-    def test_codex_and_claude_coalesce_actionable_messages_without_delivering_them(self):
+    def test_codex_and_claude_deliver_actual_messages_without_hook_duplicates(self):
         for client in ("codex", "claude"):
             with self.subTest(client=client):
                 thread = self.create(client)
@@ -89,7 +89,11 @@ class BrowserWakeTests(unittest.TestCase):
                 self.sessions.inbox_wake.process_once()
                 turns = self.turns(thread)
                 self.assertEqual(len(turns), 1)
-                self.assertEqual(turns[0]["items"][0]["content"][0]["text"], WAKE_PROMPT)
+                content = turns[0]["items"][0]["content"][0]["text"]
+                self.assertTrue(content.startswith(WAKE_PROMPT))
+                self.assertIn(first['body'], content)
+                self.assertEqual(content.count(first['body']), 2)
+                self.assertEqual(_actionable_context(self.store, thread), '')
                 rows = [a for a in self.attempts() if a["session_id"] == thread]
                 self.assertEqual([a["message_id"] for a in rows], [first["id"], second["id"]])
                 self.assertTrue(all(a["outcome"] == "sent" for a in rows))
@@ -97,10 +101,71 @@ class BrowserWakeTests(unittest.TestCase):
                 self.assertTrue(all(card["started_turn"] for card in cards))
                 self.assertTrue(all(card["turn_id"] == turns[0]["id"] for card in cards))
                 with self.store._connection() as db:
-                    self.assertEqual(db.execute("SELECT count(*) FROM messages WHERE recipient_session_id = ? AND delivered_at IS NULL AND acknowledged_at IS NULL", (thread,)).fetchone()[0], 2)
+                    self.assertEqual(db.execute("SELECT count(*) FROM messages WHERE recipient_session_id = ? AND delivered_at IS NULL AND acknowledged_at IS NULL", (thread,)).fetchone()[0], 0 if client == 'codex' else 2)
                 self.finish(thread)
                 self.sessions.inbox_wake.process_once()
                 self.assertEqual(len(self.turns(thread)), 1)
+
+    def test_bounded_idle_batches_drain_without_manual_receipts(self):
+        thread = self.create()
+        expected = [self.message(thread, reply_required=False)['id'] for _ in range(21)]
+        received = []
+        for _ in range(6):
+            self.sessions.inbox_wake.process_once()
+            if thread not in self.sessions.active:
+                break
+            prompt = self.turns(thread)[-1]['items'][0]['content'][0]['text']
+            self.assertLessEqual(len(prompt), 16000)
+            entries = [json.loads(line) for line in prompt.splitlines() if line.startswith('{')]
+            self.assertLessEqual(len(entries), 8)
+            received.extend(entry['id'] for entry in entries)
+            # Active hook delivery can drain another batch, with no duplicate
+            # of the prompt. This fixture has no tool calls, so finish directly.
+            self.finish(thread)
+        self.assertEqual(received, expected)
+        self.assertEqual(len(self.turns(thread)), 3)
+        self.assertEqual(self.store.inbox(thread, unread_only=True, mark_delivered=False), [])
+
+    def test_streamed_output_records_one_confirmation_for_the_batch(self):
+        thread = self.create('claude')
+        self.message(thread, reply_required=False)
+        self.sessions.inbox_wake.process_once()
+        turn = self.sessions.active[thread]
+        with patch.object(self.sessions.message_delivery, 'submitted',
+                          wraps=self.sessions.message_delivery.submitted) as submitted:
+            for _ in range(20):
+                self.sessions._event({'method': 'item/agentMessage/delta', 'params': {
+                    'threadId': thread, 'turnId': turn, 'itemId': 'streamed-result', 'delta': 'text'}})
+            self.finish(thread)
+            self.assertEqual(submitted.call_count, 1)
+
+    def test_suppressed_messages_cannot_fill_the_next_batch(self):
+        thread = self.create()
+        for _ in range(9):
+            message = self.message(thread, reply_required=False)
+            with self.store._connection() as db:
+                db.execute('UPDATE messages SET suppressed_at=? WHERE id=?',
+                           (self.store.clock(), message['id']))
+        expected = self.message(thread, reply_required=False)
+        self.sessions.inbox_wake.process_once()
+        prompt = self.turns(thread)[-1]['items'][0]['content'][0]['text']
+        entries = [json.loads(line) for line in prompt.splitlines() if line.startswith('{')]
+        self.assertEqual([entry['id'] for entry in entries], [expected['id']])
+
+    def test_size_overflow_does_not_remain_claimed_without_delivery(self):
+        thread = self.create()
+        expected = [self.store.send_message(sender_session_id='sender', recipient_session_id=thread,
+                    body=('Long instruction ' * 300) + str(i), reply_required=False)['id'] for i in range(9)]
+        received = []
+        for _ in range(10):
+            self.sessions.inbox_wake.process_once()
+            if thread not in self.sessions.active:
+                break
+            prompt = self.turns(thread)[-1]['items'][0]['content'][0]['text']
+            self.assertLessEqual(len(prompt), 16000)
+            received.extend(json.loads(line)['id'] for line in prompt.splitlines() if line.startswith('{'))
+            self.finish(thread)
+        self.assertEqual(received, expected)
 
     def test_busy_waits_and_new_message_after_wake_gets_a_later_turn(self):
         thread = self.create()
@@ -140,11 +205,10 @@ class BrowserWakeTests(unittest.TestCase):
                 reply = self.store.reply_message(sender_session_id="sender", message_id=original["id"], body="Received")
                 self.sessions.inbox_wake.process_once()
                 self.assertEqual(len(self.turns(thread)), 1)
-                context = _actionable_context(self.store, thread)
+                context = self.turns(thread)[0]['items'][0]['content'][0]['text']
                 self.assertIn("Received", context)
-                self.assertIn("reply_required=false", context)
-                self.assertIn("agent-coord reply --message-id", context)
-                self.store.acknowledge(thread, reply["id"])
+                self.assertIn('"reply_required": false', context)
+                self.assertEqual(_actionable_context(self.store, thread), '')
                 self.finish(thread)
                 self.sessions.inbox_wake.process_once()
                 self.assertEqual(len(self.turns(thread)), 1)
@@ -204,7 +268,7 @@ class BrowserWakeTests(unittest.TestCase):
         # Releasing never restarts the conversation, even with queued actionable messages.
         self.sessions.inbox_wake.process_once()
         self.assertEqual(len(self.turns(worker)), 1)
-        notices = [m for m in self.store.inbox(supervisor, mark_delivered=False) if m["thread_id"].startswith("stop-release:")]
+        notices = [m for m in self.store.inbox(supervisor, include_delivered=True, mark_delivered=False) if m["thread_id"].startswith("stop-release:")]
         self.assertEqual([json.loads(m["body"])["thread_ids"] for m in notices], [[worker]])
         self.assertEqual(notices[0]["classification"], "action_required")
         # Its supervisor may now recover it after inspection with a fresh continuation.
@@ -406,7 +470,7 @@ class BrowserWakeTests(unittest.TestCase):
 
     def test_automatic_wake_prompt_explicitly_identifies_runtime_provenance(self):
         self.assertIn("not a human message", WAKE_PROMPT)
-        self.assertIn("generated by the runtime", WAKE_PROMPT)
+        self.assertIn("Automatic Agent Coord message delivery", WAKE_PROMPT)
 
     def test_native_claude_false_disconnect_requires_matching_prompt_and_successful_stop(self):
         for proof in ("complete", "wrong_prompt", "wrong_uuid", "prevented", "tool_still_running", "later_prompt", "partial_tail", "late_tool_result"):
@@ -680,7 +744,8 @@ class BrowserWakeTests(unittest.TestCase):
         reply = self.store.reply_message(sender_session_id="sender", message_id=original["id"], body="Confirmed")
         self.assertEqual(self.store.threads.get(thread)["attention"], "now")
         self.sessions.inbox_wake.process_once()
-        self.assertIn("Confirmed", _actionable_context(self.store, thread))
+        self.assertIn("Confirmed", self.turns(thread)[-1]['items'][0]['content'][0]['text'])
+        self.assertEqual(_actionable_context(self.store, thread), '')
         self.finish(thread)
         self.sessions.close_work_thread(thread)
         for _ in range(2):

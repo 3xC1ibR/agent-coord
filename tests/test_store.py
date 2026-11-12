@@ -584,7 +584,7 @@ class CoordinationStoreTests(unittest.TestCase):
         self.assertEqual(second, [])
         self.assertEqual(len(self.store.inbox("two", include_delivered=True)), 1)
         acknowledged = self.store.acknowledge("two", message["id"])
-        self.assertIsNotNone(acknowledged["acknowledged_at"])
+        self.assertEqual(acknowledged["status"], "obsolete")
 
     def test_message_classification_thread_closure_and_reopen(self) -> None:
         self.register("one")
@@ -729,7 +729,7 @@ class CoordinationStoreTests(unittest.TestCase):
                                     body="History only", classification=classification, reply_required=False)
         self.store.send_message(sender_session_id="successor", recipient_session_id="worker", body="Current instruction")
 
-    def test_reply_is_actionable_and_acknowledges_only_its_original_request(self) -> None:
+    def test_reply_is_actionable_and_records_receipt_only_for_original(self) -> None:
         self.register("one")
         self.register("two", "claude")
         original = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Please confirm")
@@ -746,7 +746,7 @@ class CoordinationStoreTests(unittest.TestCase):
         self.assertIsNone(reply["acknowledged_at"])
         reopened = CoordinationStore(self.store.database_path, clock=self.clock)
         original_record, other_record = reopened.inbox("two", include_delivered=True, mark_delivered=False)
-        self.assertEqual(original_record["acknowledged_at"], reply["created_at"])
+        self.assertIsNone(original_record["acknowledged_at"])
         self.assertEqual(original_record["delivered_at"], reply["created_at"])
         self.assertIsNone(other_record["acknowledged_at"])
         self.assertIsNone(other_record["delivered_at"])
@@ -769,18 +769,18 @@ class CoordinationStoreTests(unittest.TestCase):
                 with self.store._connection() as db:
                     record = db.execute("SELECT delivered_at, acknowledged_at FROM messages WHERE id = ?", (original["id"],)).fetchone()
                 self.assertEqual(record["delivered_at"], self.clock.now - 10)
-                self.assertEqual(record["acknowledged_at"], self.clock.now - 10 if acknowledge_first else self.clock.now)
+                self.assertIsNone(record["acknowledged_at"])
 
-    def test_reply_and_acknowledgment_roll_back_together(self) -> None:
+    def test_reply_and_receipt_roll_back_together(self) -> None:
         self.register("one")
         self.register("two")
         original = self.store.send_message(sender_session_id="one", recipient_session_id="two", body="Question")
         with self.store._connection() as db:
             db.execute("""
-                CREATE TRIGGER reject_ack BEFORE UPDATE OF acknowledged_at ON messages
-                BEGIN SELECT RAISE(ABORT, 'ack failed'); END
+                CREATE TRIGGER reject_receipt BEFORE UPDATE OF delivered_at ON messages
+                BEGIN SELECT RAISE(ABORT, 'receipt failed'); END
             """)
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "ack failed"):
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "receipt failed"):
             self.store.reply_message(sender_session_id="two", message_id=original["id"], body="Answer")
         self.assertEqual(self.store.inbox("one", include_delivered=True, mark_delivered=False), [])
         pending = self.store.inbox("two", unread_only=True, mark_delivered=False)
@@ -910,10 +910,10 @@ class CoordinationStoreTests(unittest.TestCase):
         self.store.inbox("two")
 
         unread = self.store.inbox("two", unread_only=True, mark_delivered=False)
-        self.assertEqual([message["id"] for message in unread], [first["id"], second["id"]])
+        self.assertEqual(unread, [])
         acknowledged = self.store.acknowledge_all_unread("two")
 
-        self.assertEqual(acknowledged["message_ids"], [first["id"], second["id"]])
+        self.assertEqual(acknowledged["status"], "obsolete")
         self.assertEqual(self.store.inbox("two", unread_only=True), [])
         self.assertEqual(
             len(self.store.inbox("two", include_delivered=True, mark_delivered=False)),

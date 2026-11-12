@@ -159,7 +159,7 @@ For later messages that need an answer, use `send --reply-required` and have
 the recipient answer the original message with
 `agent-coord reply --message-id <id>`. Explicit requested replies also carry a
 matching saved lifecycle snapshot. Completion events need no conversational
-reply; acknowledge handled events silently. Preserve any explicit reply
+reply; runtime delivery receipts are automatic. Preserve any explicit reply
 contract already chosen for an assignment.
 
 Apply the chosen reporting contract to initial creation assignments

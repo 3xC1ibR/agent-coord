@@ -420,7 +420,7 @@ def _ask_wait_poll(store, ask_id, session_id):
     if current["status"] == "open":
         store.touch(session_id)
     elif current["status"] == "answered" and current["answer_message_id"]:
-        store.acknowledge(session_id, current["answer_message_id"])
+        store.record_message_retrieval(session_id, current["answer_message_id"])
     return current
 
 

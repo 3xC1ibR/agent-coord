@@ -197,7 +197,8 @@ class CliContextTests(unittest.TestCase):
                 if event == "SessionStart":
                     self.assertIn("begin-work --scope", text)
                     self.assertIn("inbox --unread", text)
-                    self.assertIn("ack --message-id", text)
+                    self.assertNotIn("ack --message-id", text)
+                    self.assertIn("receipts are automatic", text)
 
     def test_bootstrap_preserves_explicit_identity_without_shell_context(self):
         with patch.dict(os.environ, {"AGENT_COORD_CLIENT": "claude"}, clear=True):

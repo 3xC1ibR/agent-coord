@@ -42,7 +42,7 @@ def discard_stale_messages(db, recipient, now):
         submitting = row["wake_outcome"] == "claimed"
         stale = json.loads(row["evidence_json"])["target_turn_id"] != row["turn_key"] and not (accepted or submitting)
         if row["state"] != "active" or Sidecars.blocked(db, recipient, delivery=True) or stale:
-            db.execute("UPDATE messages SET suppressed_at=?,acknowledged_at=?,delivered_at=? WHERE id=?", (now, now, now, row["id"]))
+            db.execute("UPDATE messages SET suppressed_at=?,delivered_at=? WHERE id=?", (now, now, row["id"]))
 
 
 class Sidecars:
@@ -233,12 +233,12 @@ class Sidecars:
             db.execute("UPDATE sidecar_watches SET state=?, finding=CASE WHEN ?='active' THEN '' ELSE finding END WHERE id=?", (state, state, watch_id))
             # Invalidating reviews also prevents a running reviewer acting after pause/detach.
             now = self.store.clock()
-            db.execute("""UPDATE messages SET suppressed_at=?, acknowledged_at=?, delivered_at=? WHERE id IN
+            db.execute("""UPDATE messages SET suppressed_at=?, delivered_at=? WHERE id IN
                 (SELECT message_id FROM sidecar_reviews WHERE watch_id=? AND completed_at IS NULL)
-                AND delivered_at IS NULL""", (now, now, now, watch_id))
+                AND delivered_at IS NULL""", (now, now, watch_id))
             prefix = f"event:sidecar:{watch_id}:intervention:"
-            db.execute("""UPDATE messages SET suppressed_at=?,acknowledged_at=?,delivered_at=?
-                WHERE substr(thread_id,1,?)=? AND delivered_at IS NULL""", (now, now, now, len(prefix), prefix))
+            db.execute("""UPDATE messages SET suppressed_at=?,delivered_at=?
+                WHERE substr(thread_id,1,?)=? AND delivered_at IS NULL""", (now, now, len(prefix), prefix))
             db.execute("UPDATE sidecar_reviews SET completed_at=? WHERE watch_id=? AND completed_at IS NULL", (now, watch_id))
             if action == "resume":
                 db.execute("UPDATE sidecar_watches SET last_review_at=NULL WHERE id=?", (watch_id,))
@@ -294,7 +294,7 @@ class Sidecars:
             state = "attention" if verdict == "attention" else "complete" if verdict == "complete" and not watch["continuous"] else "active"
             db.execute("UPDATE sidecar_reviews SET report_json=?, completed_at=? WHERE id=?", (payload, now, review_id))
             db.execute("UPDATE sidecar_watches SET state=?,finding=? WHERE id=?", (state, finding, watch_id))
-            db.execute("UPDATE messages SET acknowledged_at=?,delivered_at=COALESCE(delivered_at,?) WHERE id=?", (now, now, review["message_id"]))
+            db.execute("UPDATE messages SET delivered_at=COALESCE(delivered_at,?) WHERE id=?", (now, review["message_id"]))
             return self.describe(db, self._get(db, watch_id))
 
 

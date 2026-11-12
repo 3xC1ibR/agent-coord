@@ -80,8 +80,13 @@ class AppControlTests(unittest.TestCase):
 
     def deliver(self, thread_id):
         with patch.dict(os.environ, {"AGENT_COORD_CLIENT": self.control.settings(thread_id)["client"]}):
-            return handle({"hook_event_name": "UserPromptSubmit", "session_id": thread_id, "cwd": str(self.root),
-                           "prompt": "Check your Agent Coord inbox."}, self.store)
+            prompt = self.sessions.read(thread_id)['thread']['turns'][-1]['items'][0]['content'][0]['text']
+            result = handle({"hook_event_name": "UserPromptSubmit", "session_id": thread_id, "cwd": str(self.root),
+                             "prompt": prompt}, self.store)
+            # The model sees the native prompt plus hook context. Idle peer
+            # delivery now travels in the prompt itself, without a duplicate hook.
+            result['hookSpecificOutput']['additionalContext'] = prompt + '\n' + result['hookSpecificOutput']['additionalContext']
+            return result
 
     def test_both_providers_answer_directly_then_accept_revision_and_later_dispatch(self):
         for client in ("codex", "claude"):
@@ -89,8 +94,8 @@ class AppControlTests(unittest.TestCase):
                 thread = self.create(client)
                 self.sessions.inbox_wake.process_once()
                 context = self.deliver(thread)
-                self.assertIn("Answer the user directly", str(context))
-                self.assertIn("reply_required=false", str(context))
+                self.assertIn("Explain the release process.", str(context))
+                self.assertIn('"reply_required": false' , str(context))
                 self.finish(thread)
                 detail = self.sessions.read(thread)
                 self.assertTrue(detail["work_thread"]["browser_session"])
@@ -129,8 +134,8 @@ class AppControlTests(unittest.TestCase):
                 self.assertNotIn("does not require a reply", initial["body"])
                 self.sessions.inbox_wake.process_once()
                 context = str(self.deliver(thread))
-                self.assertIn("reply_required=true", context)
-                self.assertIn("agent-coord reply --message-id", context)
+                self.assertIn('"reply_required": true' , context)
+                self.assertIn("Reply only when reply_required=true", context)
                 self.finish(thread, "Findings available")
                 self.assertFalse(self.store.inbox(creator, mark_delivered=False))
 
@@ -165,7 +170,7 @@ class AppControlTests(unittest.TestCase):
                                         body="Answer this later question directly for the user.", reply_required=False)
                 self.sessions.inbox_wake.process_once()
                 context = str(self.deliver(thread))
-                self.assertIn("reply_required=false", context)
+                self.assertIn('"reply_required": false' , context)
                 self.assertNotIn("Return the requested result to the creating agent", context)
                 self.finish(thread, "Later direct answer")
                 self.assertFalse(self.store.inbox(creator, mark_delivered=False))

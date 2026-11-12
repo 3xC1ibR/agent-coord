@@ -363,8 +363,8 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
   input is rejected without sending a message.
 - Answer a requested reply with `agent-coord reply --message-id <id> '<response>'`.
   It derives the recipient and thread from that message, records exactly which
-  request it answers, sets `reply_required=false`, and atomically acknowledges
-  the original message. No separate `ack` is needed after a successful reply.
+  request it answers and sets `reply_required=false`. Delivery receipts are
+  runtime-owned; no acknowledgment command or receipt-only reply is needed.
   The response still enters hook context and wakes an idle recipient. Do not use generic `send` for a
   confirmation or answer, and do not reply to a message that requests no reply.
 - Continue a conversation by passing its `--thread-id`. Threads permit the same
@@ -379,7 +379,7 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
   context-capable hooks. They do not interrupt a running command or enforce a
   scheduler lock. State which work is affected and any absolute expiry in the
   body; expired conditions must be ignored. Withdraw an undelivered constraint
-  with `closure` on its message thread. Acknowledge silently when handled.
+  with `closure` on its message thread. Delivery receipts are automatic.
 - `--no-reply-required` alone still permits wake: `send` defaults to
   `action_required`. Choose `deferred` explicitly for delivery on later work;
   `informational` is history-only. Omit updates that merely repeat a constraint
@@ -387,7 +387,7 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
 - If `send --help` does not list `deferred`, the selected runtime is too old.
   Refreshing plugins alone may leave the active backend unchanged. Report the
   pending backend update; do not silently substitute a wake-capable message.
-- Read the compact unacknowledged inbox with `agent-coord inbox --unread`. Use `--all` only for complete history.
+- Read messages awaiting delivery with `agent-coord inbox --unread`. Use `--all` only for complete history.
 - Block for a peer handoff without polling with
   `agent-coord inbox --wait`. It returns immediately if a
   message is undelivered, otherwise it polls the local store and
@@ -395,9 +395,15 @@ incumbent scope, deny edits outside declared scopes, and deny overlaps.
   Add `--timeout <seconds>` to bound the wait; on timeout it exits with
   status `5`. `--timeout` alone (without `--wait`) is rejected, and `--wait`
   cannot be combined with `--all`.
-- For messages handled without replying, acknowledge with `agent-coord ack --message-id <message-id>`, or acknowledge the current unread set with
-  `--all-unread`. Acknowledgement is a silent transport update and never sends
-  a conversational receipt.
+- Delivery receipts are automatic. Do not call `ack` or send receipt-only replies.
+- Use a stable `--request-id <key>` on `send` and `reply`; reuse it with the exact
+  arguments after a lost response. A different body with the same key is rejected.
+  New work, even with identical text, uses a new key.
+- Inspect delivery with `message --message-id <id>` and bounded content-free
+  measurements with `message-metrics`. Unconfirmed/uncertain submissions are
+  retained for inspection, never automatically replayed. `inbox --unread` recovers
+  undelivered bodies; `inbox --all` preserves complete history. Receipt does not
+  satisfy a requested reply or prove task completion.
 
 ## Ask the user a decision
 
@@ -506,7 +512,7 @@ or `--job-id` when retrying a request. Busy recipients retain events; Stop pause
 wakes, and Closed conversations wait for explicit reopening. An uncertain wake
 is retained for review rather than blindly resubmitted. Events require no reply:
 read their outcomes and continuation, act within the original user request,
-and acknowledge the event message after handling it.
+without sending receipt-only responses; delivery receipts are automatic.
 
 ## Atomic handoff and thread closure
 
@@ -561,25 +567,26 @@ registered pane, watcher PID, last error, and recent attempts. Use
 
 The watcher sends one generic prompt only for undelivered `action_required`
 messages, when the model turn is inactive and the visible Claude or Codex prompt
-has no typed input. It does not deliver or acknowledge messages itself; the
+has no typed input. It does not deliver message bodies itself; the
 resulting prompt hook performs normal inbox delivery. Deferred messages wait for
 the next supported context boundary without waking; informational and closure
 messages remain in history. Do not manually inject
 input into another pane as a substitute for this guard.
 
-Hook-delivered messages include their ID, thread and `reply_required` value. Reply
-conversationally only when `reply_required=true`, using `reply --message-id`, which
-also acknowledges the original message. Use `ack` for messages handled without
-replying. Never reply to or acknowledge an acknowledgement; acknowledgements do
-not create messages.
+Hook-delivered messages include their ID, sender, thread and `reply_required` value.
+Reply only when `reply_required=true`, using `reply --message-id` with a stable
+`--request-id`. Runtime delivery records prevent duplicate automatic delivery;
+no manual acknowledgment is needed. A required reply and task completion remain
+separate from delivery.
 
 ## Wake idle app conversations
 
 While Ribbon Field is running, open and closed app conversations automatically start a
 turn for undelivered `action_required` messages. This works for both Codex and
 Claude, including conversations not currently displayed. Pending messages are
-combined into one generic inbox prompt; normal hooks deliver the durable bodies
-and thread metadata. Deferred, informational and closure messages do not wake
+delivered directly in bounded prompts with an automatic-delivery label. The
+runtime reserves each batch before submission, so hooks cannot duplicate its
+bodies. Overflow remains eligible for subsequent hooks or idle turns. Deferred, informational and closure messages do not wake
 recipients. Deferred constraints enter context when work next runs; informational
 and closure messages remain history-only.
 

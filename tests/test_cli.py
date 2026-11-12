@@ -480,7 +480,7 @@ class CliTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 2, result.stderr)
 
-    def test_explicit_unread_inbox_and_ack_all_unread(self) -> None:
+    def test_explicit_unread_inbox_and_obsolete_ack(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "state.sqlite3"
             for session_id, client in (("one", "codex"), ("two", "claude")):
@@ -522,8 +522,8 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertEqual(unread.returncode, 0, unread.stderr)
-        self.assertEqual(len(json.loads(unread.stdout)), 2)
-        self.assertEqual(json.loads(acknowledged.stdout)["acknowledged"], 2)
+        self.assertEqual(json.loads(unread.stdout), [])
+        self.assertEqual(json.loads(acknowledged.stdout)["status"], "obsolete")
         self.assertEqual(json.loads(empty.stdout), [])
 
     def test_send_json_exposes_reply_required_and_accepts_opt_out_flag(self) -> None:

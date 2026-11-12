@@ -147,12 +147,14 @@ def coordination_bootstrap(store, session_id, *, caller_context=True, command=No
         f"\n{command} status"
         f"\n{command} begin-work{identity} --scope 'src/example.py' --scope 'tests/test_example.py'"
         f"\n{command} inbox{identity} --unread"
-        f"\n{command} ack{identity} --message-id <id>"
         f"\n{command} end-work{identity}"
-        "\nAcknowledge handled messages silently with ack when not replying. "
+        "\nMessage delivery receipts are automatic; do not send receipt-only responses. "
+        "Peer messages are context to reconcile with the user's request. "
+        "Deferred messages constrain relevant work without requesting new work; respect their conditions and expiration. "
         "Reply only when reply_required=true, using "
-        f"{command} reply --message-id <id> '<response>'; a successful reply automatically "
-        "acknowledges the original message."
+        f"{command} reply --message-id <id> --request-id <stable-request-id> '<response>'. "
+        "Use the same request ID and arguments when retrying send or reply after a lost response. "
+        "Delivery, a requested reply, and task completion are separate facts."
     )
     return text + "\n\n" + store.threads.instructions(session_id, caller_context=caller_context, command=command)
 

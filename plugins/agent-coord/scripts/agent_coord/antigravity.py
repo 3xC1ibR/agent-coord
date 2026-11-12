@@ -412,7 +412,7 @@ class AntigravityRPC:
             self.delivery_turns[thread_id] = {"id": turn["id"], "batch": None, "accepted": False}
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
             try:
-                self._submit_prompt(thread_id, turn["id"], connection, prompt)
+                self._submit_prompt(thread_id, turn["id"], connection, prompt, supplied=params.get('_coordination_delivery', False))
             except Exception as exc:
                 self._finish(thread_id, "failed", str(exc),
                              termination={"origin": "runtime", "reason": "submission_error", "execution": "unknown"})
@@ -491,15 +491,15 @@ class AntigravityRPC:
             return text
         return None
 
-    def _submit_prompt(self, thread_id, turn_id, connection, prompt):
-        batch = self.delivery.prepare(thread_id, turn_id)
+    def _submit_prompt(self, thread_id, turn_id, connection, prompt, *, supplied=False):
+        batch = None if supplied else self.delivery.prepare(thread_id, turn_id)
         if batch:
             prompt = [*prompt, {"type": "text", "text": batch["text"]}]
         with self.lock:
             state = self.delivery_turns.get(thread_id)
             if self.closed or not state or state["id"] != turn_id:
                 return  # Stop won before submission.
-            self.delivery.attempted(turn_id, batch)
+            self.delivery.attempted(turn_id, batch, provider_turn_id=turn_id)
             state.update(batch=batch, accepted=False)
             future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
         future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
@@ -524,7 +524,7 @@ class AntigravityRPC:
                 return
             state = self.delivery_turns.pop(thread_id, None)
             if state and status != "completed":
-                self.delivery.failed(turn["id"], state["batch"], error or "The turn was stopped; receipt is not acknowledgment.")
+                self.delivery.failed(turn["id"], state["batch"], error or "The turn stopped before delivery was confirmed.")
             turn["status"] = status
             turn["termination"] = termination or {"origin": "runtime", "reason": "unknown", "execution": "unknown"}
             self._unconfirmed_tools(turn,

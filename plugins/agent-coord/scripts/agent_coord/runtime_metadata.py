@@ -21,7 +21,7 @@ STORE_MUTATIONS = frozenset({
     "clear_wake_watcher_pid", "record_wake_check", "register_zellij_wake",
     "disable_zellij_wake", "set_zellij_watcher_pid", "clear_zellij_watcher_pid",
     "record_zellij_check", "claim_wake_messages", "complete_wake_attempts",
-    "send_message", "reply_message", "inbox", "acknowledge", "acknowledge_all_unread",
+    "send_message", "reply_message", "inbox", "record_message_retrieval", "acknowledge", "acknowledge_all_unread",
 })
 STORE_READS = frozenset({"get_delegation", "get_wake_target", "get_session",
                          "pending_wake_message_ids", "get_zellij_wake"})

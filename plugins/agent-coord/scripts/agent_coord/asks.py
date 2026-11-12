@@ -268,7 +268,7 @@ class AskStore:
     def wait(self, ask_id: int, session_id: str, *, timeout_seconds: float | None = None,
              poll_interval_seconds: float = DEFAULT_POLL_SECONDS,
              sleep: Callable[[float], None] | None = None) -> dict[str, Any]:
-        """Block until the ask leaves the open state; the direct answer acknowledges its message."""
+        """Block until the ask leaves the open state; the direct answer records message delivery."""
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise CoordinationError("Wait timeout must be a positive number of seconds.")
         sleep = time.sleep if sleep is None else sleep
@@ -287,5 +287,5 @@ class AskStore:
                 sleep(poll_interval_seconds)
             current = self.get(ask_id)
         if current["status"] == "answered" and current["answer_message_id"]:
-            self.store.acknowledge(session_id, current["answer_message_id"])
+            self.store.record_message_retrieval(session_id, current["answer_message_id"])
         return {**current, "timed_out": False}

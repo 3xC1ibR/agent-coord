@@ -35,6 +35,7 @@ from .history_persistence import (HistoryPersistence, ensure_schema as ensure_hi
 from .browser_persistence import BrowserPersistence
 from .thread_usage import codex_totals
 from .app_agent_failures import notify_agent_failure
+from .message_delivery import MessageDelivery
 from .browser_wake import BrowserInboxWake
 from .message_timeline import message_timeline
 from .timeline_clock import preserve_timing, restore_timing, set_time, seconds
@@ -311,6 +312,8 @@ class BrowserSessions:
                     self.store.threads.capture_request(row["thread_id"], "\n".join(c.get("text", "") for c in first.get("content", [])))
         self.classifier = AttentionClassifier(self)
         self.schedules = ScheduledPrompts(self)
+        self.message_delivery = MessageDelivery(self.store)
+        self.delivery_inflight = {}
         self.inbox_wake = BrowserInboxWake(self)
         from .event_subscriptions import EventSubscriptions
         self.event_subscriptions = EventSubscriptions(store, cwd=self.cwd)
@@ -612,6 +615,24 @@ class BrowserSessions:
                 return
             if hasattr(self, "watchdog"):
                 self.watchdog.observe(method, params)
+            pending_delivery = getattr(self, 'delivery_inflight', {}).get(thread_id)
+            if pending_delivery:
+                incoming_turn = params.get('turnId') or params.get('turn', {}).get('id')
+                if method == 'turn/started':
+                    pending_delivery['turn_id'] = incoming_turn
+                evidence = (method == 'item/agentMessage/delta'
+                            or method in {'item/started', 'item/completed'} and params.get('item', {}).get('type') in
+                               {'agentMessage', 'reasoning', 'commandExecution', 'toolCall'}
+                            or method == 'turn/completed' and params.get('turn', {}).get('status') == 'completed')
+                if (evidence and incoming_turn and incoming_turn == pending_delivery['turn_id']
+                        and not pending_delivery.get('confirmation_queued')):
+                    token, batch = pending_delivery['token'], pending_delivery['batch']
+                    self.persistence.submit(lambda token=token, batch=batch, incoming_turn=incoming_turn:
+                        self.message_delivery.submitted(thread_id, token, batch,
+                            evidence='provider_output', provider_turn_id=incoming_turn), key=thread_id)
+                    pending_delivery['confirmation_queued'] = True
+                if method == 'turn/completed':
+                    self.delivery_inflight.pop(thread_id, None)
             if thread_id and method in {"turn/started", "turn/completed", "thread/closed"}:
                 self.turn_revisions[thread_id] = self.turn_revisions.get(thread_id, 0) + 1
             if method == "bridge/disconnected":
@@ -824,6 +845,7 @@ class BrowserSessions:
             status = turn.get("status", "completed")
             if (unsuccessful and user_stop) or status in {"cancelled", "canceled"}:
                 status = "interrupted"
+            self.message_delivery.finish_turn(thread_id, turn.get('id'), completed=status == 'completed')
             self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=status,
                                            occurred_at=params.get("turn_observed_at"))
             session = self.store.get_session(thread_id)
@@ -2393,16 +2415,25 @@ class BrowserSessions:
                 return self.send(thread_id, body, start_only=True, completed_turn_id=expected_turn)
 
     def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False,
-             preserve_text: bool = False, recovery=None, completed_turn_id: str | None = None) -> dict:
+             preserve_text: bool = False, recovery=None, completed_turn_id: str | None = None,
+             coordination_delivery=None) -> dict:
         with self._thread_lock(thread_id):
             submission = {"started": False}
             try:
                 return self._send(thread_id, body, start_only=start_only, automatic=automatic,
                                   preserve_text=preserve_text, submission=submission, recovery=recovery,
-                                  completed_turn_id=completed_turn_id)
+                                  completed_turn_id=completed_turn_id, coordination_delivery=coordination_delivery)
             except BrowserBusyError:
                 raise
             except Exception as exc:
+                if coordination_delivery:
+                    token, batch = coordination_delivery
+                    with self.lock:
+                        pending = self.delivery_inflight.get(thread_id)
+                        if pending and pending['token'] == token:
+                            self.delivery_inflight.pop(thread_id, None)
+                    if submission['started']:
+                        self.message_delivery.failed(token, batch, str(exc))
                 if automatic and not submission["started"]:
                     with self.lock:
                         if self.active.get(thread_id) is None:
@@ -2411,7 +2442,8 @@ class BrowserSessions:
                 raise
 
     def _send(self, thread_id: str, body: dict, *, start_only: bool, automatic: bool,
-              preserve_text: bool, submission: dict, recovery=None, completed_turn_id: str | None = None) -> dict:
+              preserve_text: bool, submission: dict, recovery=None, completed_turn_id: str | None = None,
+              coordination_delivery=None) -> dict:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
         with self.store._writer.measure_request("send.persistence_barrier"):
@@ -2530,8 +2562,21 @@ class BrowserSessions:
                     self.starting_notification_context[thread_id] = context
                 with self.navigation.sending(thread_id, source_window):
                     rpc = self._rpc(thread_id)
+                    if coordination_delivery:
+                        token, batch = coordination_delivery
+                        self.message_delivery.attempted(token, batch)
+                        if record['client'] == 'antigravity':
+                            params['_coordination_delivery'] = True
+                        with self.lock:
+                            self.delivery_inflight[thread_id] = {'token': token, 'batch': batch, 'turn_id': None}
                     submission["started"] = True
                     result = rpc.request("turn/start", params)
+                    if coordination_delivery:
+                        native_turn = result.get('turn', {}).get('id')
+                        self.message_delivery.bind(token, native_turn)
+                        if record['client'] == 'codex':
+                            self.message_delivery.submitted(thread_id, token, batch,
+                                evidence='turn_start_response', provider_turn_id=native_turn)
                 if record["client"] == "codex":
                     # Codex accepts these explicit sticky permission overrides
                     # with the turn, or rejects admission with a native error.

@@ -770,6 +770,26 @@ class CoordinationStore:
                 CREATE INDEX IF NOT EXISTS messages_recipient_idx
                     ON messages(recipient_session_id, delivered_at, acknowledged_at);
 
+                CREATE TABLE IF NOT EXISTS message_requests (
+                    sender_session_id TEXT NOT NULL, request_id TEXT NOT NULL,
+                    operation TEXT NOT NULL, arguments_json TEXT NOT NULL,
+                    message_id INTEGER NOT NULL REFERENCES messages(id),
+                    PRIMARY KEY(sender_session_id, request_id)
+                );
+                CREATE TABLE IF NOT EXISTS message_delivery_attempts (
+                    message_id INTEGER NOT NULL, turn_id TEXT NOT NULL,
+                    attempted_at REAL NOT NULL, submitted_at REAL, error TEXT,
+                    full_body INTEGER NOT NULL,
+                    channel TEXT NOT NULL DEFAULT 'prompt', provider_turn_id TEXT,
+                    boundary_id TEXT, evidence TEXT,
+                    PRIMARY KEY(message_id, turn_id)
+                );
+                CREATE TABLE IF NOT EXISTS message_body_reads (
+                    message_id INTEGER NOT NULL, start_offset INTEGER NOT NULL,
+                    end_offset INTEGER NOT NULL,
+                    PRIMARY KEY(message_id, start_offset)
+                );
+
                 CREATE TABLE IF NOT EXISTS zellij_wake_targets (
                     session_id TEXT PRIMARY KEY,
                     zellij_session TEXT NOT NULL,
@@ -857,6 +877,12 @@ class CoordinationStore:
                     WHERE child_session_id IS NOT NULL;
                 """
             )
+            delivery_columns = {row['name'] for row in connection.execute('PRAGMA table_info(message_delivery_attempts)')}
+            for column, definition in (("channel", "TEXT NOT NULL DEFAULT 'prompt'"),
+                                       ("provider_turn_id", "TEXT"), ("boundary_id", "TEXT"), ("evidence", "TEXT")):
+                if column not in delivery_columns:
+                    connection.execute(f"ALTER TABLE message_delivery_attempts ADD COLUMN {column} {definition}")
+            connection.execute("CREATE INDEX IF NOT EXISTS message_delivery_turn_idx ON message_delivery_attempts(provider_turn_id, channel)")
             session_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(sessions)")
             }
@@ -916,6 +942,7 @@ class CoordinationStore:
                     connection.execute(f"ALTER TABLE messages ADD COLUMN {column} {definition}")
             connection.executescript("""
                 CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_session_id, id);
+                CREATE INDEX IF NOT EXISTS messages_recipient_sequence_idx ON messages(recipient_session_id, id);
                 CREATE INDEX IF NOT EXISTS messages_exchange_idx ON messages(thread_id, id);
                 -- Thread lists find agent-woken turns on every build.
                 CREATE INDEX IF NOT EXISTS messages_wake_turn_idx
@@ -1542,11 +1569,11 @@ class CoordinationStore:
             """
             UPDATE messages
             SET delivered_at = COALESCE(delivered_at, ?),
-                acknowledged_at = COALESCE(acknowledged_at, ?)
+                suppressed_at = COALESCE(suppressed_at, ?)
             WHERE recipient_session_id = ?
               AND classification = 'action_required'
               AND thread_id LIKE ?
-              AND acknowledged_at IS NULL
+              AND suppressed_at IS NULL
             """,
             (now, now, session_id, f"{SCOPE_REQUEST_THREAD_PREFIX}%"),
         )
@@ -3058,6 +3085,26 @@ class CoordinationStore:
                     f"{recipient} is now supervised by {supervisor}; send through the current supervisor."
                 )
 
+    @staticmethod
+    def _message_request(db, sender, request_id, operation, arguments):
+        if request_id is None:
+            return None
+        if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
+            raise CoordinationError("Request ID must be a nonempty string of at most 200 characters.")
+        previous = db.execute("SELECT * FROM message_requests WHERE sender_session_id=? AND request_id=?",
+                              (sender, request_id)).fetchone()
+        if previous is None:
+            return None
+        if previous['operation'] != operation or previous['arguments_json'] != arguments:
+            raise CoordinationError("Request ID was already used with different message arguments.")
+        return db.execute("SELECT * FROM messages WHERE id=?", (previous['message_id'],)).fetchone()
+
+    @staticmethod
+    def _save_message_request(db, sender, request_id, operation, arguments, message_id):
+        if request_id is not None:
+            db.execute("INSERT INTO message_requests VALUES (?, ?, ?, ?, ?)",
+                       (sender, request_id, operation, arguments, message_id))
+
     def send_message(
         self,
         *,
@@ -3068,6 +3115,7 @@ class CoordinationStore:
         classification: str = "action_required",
         thread_id: str | None = None,
         reply_required: bool | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         if bool(recipient_session_id) == bool(recipient_bead_id):
             raise CoordinationError("Specify exactly one recipient session or bead.")
@@ -3079,6 +3127,13 @@ class CoordinationStore:
             )
         if reply_required is not None and not isinstance(reply_required, bool):
             raise CoordinationError("Message reply_required must be a boolean.")
+        arguments = json.dumps([recipient_session_id, recipient_bead_id, body.strip(), classification,
+                                thread_id, reply_required], ensure_ascii=False)
+        # A completed request remains retryable after the original recipient goes offline.
+        with self.reading(), self._connection() as db:
+            previous = self._message_request(db, sender_session_id, request_id, "send", arguments)
+        if previous is not None:
+            return {**self._row_to_message(previous), "idempotent": True, "request_id": request_id}
         sender = self.get_session(sender_session_id)
         recipient: dict[str, Any]
         if recipient_session_id:
@@ -3109,6 +3164,9 @@ class CoordinationStore:
         )
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            previous = self._message_request(connection, sender_session_id, request_id, "send", arguments)
+            if previous is not None:
+                return {**self._row_to_message(previous), "idempotent": True, "request_id": request_id}
             self._guard_message(connection, sender_session_id, recipient["session_id"], classification)
             row, inserted = self._insert_message(
                 connection,
@@ -3120,9 +3178,11 @@ class CoordinationStore:
                 reply_required=should_reply,
                 now=now,
             )
+            self._save_message_request(connection, sender_session_id, request_id, "send", arguments, row['id'])
         result = self._row_to_message(row)
         result.update(
             {
+                "request_id": request_id,
                 "recipient_name": recipient["name"],
                 "recipient_bead_id": recipient["bead_id"],
                 "idempotent": not inserted,
@@ -3165,9 +3225,9 @@ class CoordinationStore:
                 "guidance": guidance}
 
     def reply_message(
-        self, *, sender_session_id: str, message_id: int, body: str
+        self, *, sender_session_id: str, message_id: int, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        """Atomically answer and acknowledge one request without another reply obligation."""
+        """Atomically answer one request without another reply obligation."""
         from .context_lifecycle import reply_snapshot
         from .supervision import passing_from, report_recipient
         if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
@@ -3175,8 +3235,12 @@ class CoordinationStore:
         if not body.strip():
             raise CoordinationError("Message body must not be empty.")
         self.get_session(sender_session_id)
+        arguments = json.dumps([message_id, body.strip()], ensure_ascii=False)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            previous = self._message_request(connection, sender_session_id, request_id, "reply", arguments)
+            if previous is not None:
+                return {**self._row_to_message(previous), "idempotent": True, "request_id": request_id}
             original = connection.execute(
                 "SELECT m.*, t.closed_at, s.name AS recipient_name, s.bead_id AS recipient_bead_id "
                 "FROM messages m JOIN message_threads t ON t.thread_id = m.thread_id "
@@ -3218,20 +3282,14 @@ class CoordinationStore:
                 context_lifecycle_json=reply_snapshot(connection, sender_session_id, message_id),
                 now=now,
             )
-            connection.execute(
-                """
-                UPDATE messages
-                SET delivered_at = COALESCE(delivered_at, ?),
-                    acknowledged_at = COALESCE(acknowledged_at, ?)
-                WHERE id = ?
-                """,
-                (now, now, message_id),
-            )
+            self._save_message_request(connection, sender_session_id, request_id, "reply", arguments, row['id'])
+            connection.execute("UPDATE messages SET delivered_at = COALESCE(delivered_at, ?) WHERE id = ?",
+                               (now, message_id))
         result = self._row_to_message(row)
         result.update(
             recipient_name=recipient["name"],
             recipient_bead_id=recipient["bead_id"],
-            idempotent=False,
+            idempotent=False, request_id=request_id,
         )
         notice = self.recipient_wake_notice(recipient_id)
         if notice:
@@ -3261,7 +3319,7 @@ class CoordinationStore:
         clauses = ["messages.recipient_session_id = ?"]
         values: list[Any] = [session_id]
         if unread_only:
-            clauses.append("messages.acknowledged_at IS NULL")
+            clauses.append("messages.delivered_at IS NULL AND messages.suppressed_at IS NULL")
         elif not include_delivered:
             if wait_started_at is None:
                 clauses.append("messages.delivered_at IS NULL")
@@ -3271,7 +3329,7 @@ class CoordinationStore:
                     (
                         messages.delivered_at IS NULL
                         OR (
-                            messages.acknowledged_at IS NULL
+                            messages.suppressed_at IS NULL
                             AND (
                                 messages.id > ?
                                 OR messages.delivered_at > ?
@@ -3388,64 +3446,21 @@ class CoordinationStore:
                 raise InboxTimeoutError(session_id, timeout_seconds)
             sleep(min(poll_interval_seconds, remaining))
 
-    def acknowledge(self, session_id: str, message_id: int) -> dict[str, Any]:
+    def record_message_retrieval(self, session_id: str, message_id: int) -> dict[str, Any]:
+        """Runtime receipt for a full body returned by an owned API operation."""
         now = self.clock()
-        with self._connection() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE messages
-                SET delivered_at = COALESCE(delivered_at, ?),
-                    acknowledged_at = COALESCE(acknowledged_at, ?)
-                WHERE id = ? AND recipient_session_id = ?
-                """,
-                (now, now, message_id, session_id),
-            )
+        with self._connection() as db:
+            cursor = db.execute("UPDATE messages SET delivered_at=COALESCE(delivered_at, ?) WHERE id=? AND recipient_session_id=?",
+                                (now, message_id, session_id))
             if cursor.rowcount != 1:
-                raise CoordinationError(
-                    f"Message {message_id} is not addressed to session {session_id}."
-                )
-            row = connection.execute(
-                "SELECT * FROM messages WHERE id = ?", (message_id,)
-            ).fetchone()
-        assert row is not None
-        return {
-            "id": row["id"],
-            "recipient_session_id": row["recipient_session_id"],
-            "acknowledged_at": _iso(row["acknowledged_at"]),
-        }
+                raise CoordinationError(f"Message {message_id} is not addressed to session {session_id}.")
+            row = db.execute("SELECT delivered_at FROM messages WHERE id=?", (message_id,)).fetchone()
+        return {"id": message_id, "recipient_session_id": session_id, "delivered_at": _iso(row['delivered_at'])}
+
+    def acknowledge(self, session_id: str, message_id: int) -> dict[str, Any]:
+        """Legacy client compatibility only; manual receipts cannot discard work."""
+        return {"status": "obsolete", "id": message_id, "recipient_session_id": session_id}
 
     def acknowledge_all_unread(self, session_id: str) -> dict[str, Any]:
-        self.get_session(session_id)
-        now = self.clock()
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = list(
-                connection.execute(
-                    """
-                    SELECT id FROM messages
-                    WHERE recipient_session_id = ? AND acknowledged_at IS NULL
-                    ORDER BY id
-                    """,
-                    (session_id,),
-                )
-            )
-            message_ids = [int(row["id"]) for row in rows]
-            if message_ids:
-                connection.executemany(
-                    """
-                    UPDATE messages
-                    SET delivered_at = COALESCE(delivered_at, ?),
-                        acknowledged_at = COALESCE(acknowledged_at, ?)
-                    WHERE id = ? AND recipient_session_id = ?
-                    """,
-                    [
-                        (now, now, message_id, session_id)
-                        for message_id in message_ids
-                    ],
-                )
-        return {
-            "session_id": session_id,
-            "acknowledged": len(message_ids),
-            "message_ids": message_ids,
-            "acknowledged_at": _iso(now) if message_ids else None,
-        }
+        """Legacy client compatibility only; delivery is runtime-owned."""
+        return {"status": "obsolete", "session_id": session_id}

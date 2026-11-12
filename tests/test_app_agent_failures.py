@@ -147,12 +147,12 @@ class AppAgentFailureTests(unittest.TestCase):
         self.finish(child, status="interrupted")
         return child
 
-    def test_unresolved_failure_escalates_once_after_ten_minutes_even_when_acknowledged(self):
+    def test_unresolved_failure_escalates_once_after_ten_minutes_even_when_delivered(self):
         child = self.overdue_child()
-        self.store.acknowledge(self.parent, self.reports()[0]["id"])
+        self.store.inbox(self.parent)
         self.wall += 599
         process_failure_followups(self.store)
-        self.assertEqual(len(self.reports()), 0)  # Acknowledged reports leave the unread inbox.
+        self.assertEqual(len(self.reports()), 0)  # Delivered reports leave the pending inbox.
         self.wall += 1
         self.sessions.watchdog.process_once()
         self.assertEqual(len(self.reports()), 1)
@@ -382,7 +382,7 @@ class AppAgentFailureTests(unittest.TestCase):
     def test_failure_snapshot_contains_only_this_turns_assignment_report(self):
         child = self.create(mode="orchestration")
         self.dispatch(child)
-        message = self.store.inbox(child)[0]
+        message = self.store.inbox(child, include_delivered=True)[0]
         self.store.threads.checkpoint(child, {
             "phase": "implementation", "summary": "Provider failed during the requested work.",
             "context_lifecycle": {

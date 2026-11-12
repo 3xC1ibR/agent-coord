@@ -12,6 +12,8 @@ _TIMELINE_ROWS = """SELECT m.*, sender.client AS sender_client, recipient.client
     COALESCE(rt.title, recipient.name, recipient.session_id) AS recipient_title,
     sender.cwd AS sender_cwd, recipient.cwd AS recipient_cwd,
     exchange.closed_at, a.outcome AS wake_outcome,
+    d.attempted_at AS delivery_attempted_at, d.submitted_at AS delivery_submitted_at,
+    d.error AS delivery_error, d.evidence AS delivery_evidence,
     (SELECT r.id FROM messages r WHERE r.thread_id = m.thread_id AND r.id > m.id
         AND r.sender_session_id = m.recipient_session_id
         AND r.recipient_session_id = m.sender_session_id
@@ -22,7 +24,9 @@ _TIMELINE_ROWS = """SELECT m.*, sender.client AS sender_client, recipient.client
     LEFT JOIN work_threads st ON st.thread_id = m.sender_session_id
     LEFT JOIN work_threads rt ON rt.thread_id = m.recipient_session_id
     LEFT JOIN message_threads exchange ON exchange.thread_id = m.thread_id
-    LEFT JOIN message_wake_attempts a ON a.message_id = m.id"""
+    LEFT JOIN message_wake_attempts a ON a.message_id = m.id
+    LEFT JOIN message_delivery_attempts d ON d.rowid =
+        (SELECT rowid FROM message_delivery_attempts WHERE message_id=m.id ORDER BY attempted_at DESC, rowid DESC LIMIT 1)"""
 _TIMELINE_SELECT = _TIMELINE_ROWS + " WHERE (m.sender_session_id = ? OR m.recipient_session_id = ?)"
 
 
@@ -84,6 +88,9 @@ def message_timeline(store, session_id, cwd=None):
         item["turn_id"] = item["sender_turn_id"] if outgoing else item["wake_turn_id"] or item["recipient_turn_id"]
         item["started_turn"] = not outgoing and bool(item["wake_turn_id"])
         item["reply_required"] = bool(item["reply_required"])
+        item['reply_status'] = ('received' if item['reply_id'] else
+                                'closed' if item['closed_at'] is not None or item['suppressed_at'] is not None else
+                                'awaiting_reply') if item['reply_required'] else 'not_requested'
         if item["classification"] == "closure" or item["closed_at"] is not None:
             item["status"] = "Exchange closed"
         elif item["suppressed_at"] is not None:
@@ -92,6 +99,10 @@ def message_timeline(store, session_id, cwd=None):
             item["status"] = "Reply received"
         elif item["delivered_at"] is not None:
             item["status"] = "Delivered to agent"
+        elif item['delivery_submitted_at'] is not None:
+            item['status'] = 'Message body required'
+        elif item['delivery_attempted_at'] is not None:
+            item['status'] = 'Delivery uncertain' if item['delivery_error'] else 'Delivery unconfirmed'
         else:
             item["status"] = "Queued for agent" if item["classification"] == "action_required" else "Sent"
         for key in ("sender_cwd", "recipient_cwd"):

@@ -90,7 +90,7 @@ Child launches clear inherited parent identity. Without inherited context,
 hooks retain explicit executable, database, and identity fallbacks.
 
 Routine writes (`register`, `set-activity`, `checkpoint`, `thread update`,
-`begin-work`, `end-work`, `unregister`, `send`, `ack`) return compact JSON
+`begin-work`, `end-work`, `unregister`, `send`, `reply`) return compact JSON
 receipts. Add `--full` to retain the previous complete output; read commands
 such as `status` and `thread show` still return complete state.
 Checkpoint writes return only `status` and `checkpoint_id` by default.
@@ -223,14 +223,20 @@ agent-coord inbox --unread
 agent-coord inbox --all
 agent-coord inbox --wait
 agent-coord inbox --wait --timeout 120
-agent-coord reply --message-id <message-id> 'Received, thanks!'
-agent-coord ack --message-id <message-id>
-agent-coord ack --all-unread
+agent-coord reply --message-id <message-id> --request-id <stable-key> 'Tests passed.'
+agent-coord message-metrics
 agent-coord end-work
 ```
 
-Messages stay in SQLite until the recipient reads them. Delivery and explicit
-acknowledgement have separate timestamps. Addressing by Beads issue succeeds
+Messages remain in SQLite as history. The runtime owns delivery receipts; models
+never need to acknowledge messages. The legacy `ack` CLI is an obsolete no-op for
+already-running clients and cannot discard queued work.
+
+Use a stable `--request-id` on `send` and `reply`. A retry with the same sender,
+key, operation and arguments returns the original message; changed arguments
+are rejected. Keys are not derived from message text, so repeated intentional
+requests remain distinct. Receipt IDs survive restart. Delivery, requested
+replies and task completion are separate facts. Addressing by Beads issue succeeds
 only when exactly one live session declares that issue.
 
 Messages are classified as `action_required`, `deferred`, `informational`, or
@@ -242,8 +248,7 @@ no conversational reply, as with an atomic handoff. Every CLI `send` must choose
 `--reply-required` or `--no-reply-required`; an omitted or contradictory choice
 is rejected before a message is created. Use `--no-reply-required` for
 deferred, informational and closure messages. Deferred messages reject
-`--reply-required`. Transport acknowledgement is silent and
-never creates another message.
+`--reply-required`. Delivery receipts never create another message.
 
 Use deferred delivery for a constraint that matters when the recipient next
 works, without starting a turn or reopening a closed conversation:
@@ -263,16 +268,19 @@ instructions in the body, not scheduler enforcement or automatic relevance
 matching. Recipients apply them only to the stated work and ignore expired
 conditions. Use a `closure` message on the same `--thread-id` to withdraw a
 pending constraint before delivery. Once delivered, a changed constraint needs
-a new update. Acknowledgement stays silent.
+a new update. Delivery receipts are automatic.
 The selected runtime's `send --help` must list `deferred`. A plugin refresh alone
 does not upgrade an already-running retained backend; activate the matching
 backend through the normal safe update procedure before using this mode there.
 
-At session start and prompt submission, actionable and deferred bodies precede the
-longer coordination guidance so they appear early in hook previews. The full body
-is preserved, delivery remains once per message, and acknowledgement is still
-explicit. If a client truncates the preview, recover unacknowledged requests with
-`agent-coord inbox --unread`. Labelled automatic browser inbox wakes are excluded
+At prompt submission and supported tool hooks, actionable and deferred bodies
+precede the longer coordination guidance so they appear early in hook previews.
+Session-start hooks leave delivery to the receiving turn. Delivery batches are
+bounded by eight messages and 16,000 serialized characters.
+Oversized bodies have an explicit paged retrieval reference; bodies are never
+silently truncated. Recover pending bodies with `agent-coord inbox --unread`.
+Idle app turns carry the actual message batch, reserved before submission so
+prompt hooks cannot supply it twice. Overflow remains eligible for later delivery. Labelled automatic browser inbox wakes are excluded
 from the thread's original human request.
 
 SQLite startup contention is retried only during idempotent store initialization,
@@ -286,18 +294,38 @@ records that message ID as `in_reply_to`, and sets `reply_required=false`.
 Replies remain `action_required` so they enter hook context and wake the
 recipient to process the answer. Only the original recipient can reply; replies
 to messages requesting no reply, closed exchanges, or superseded requests are
-rejected. A successful reply also acknowledges the original message in the same
-transaction; no separate `ack` is needed. Use `ack` for messages handled without
-replying. Starting new work or asking a follow-up question uses `send`
+rejected. A successful reply records receipt of the original message in the same
+transaction. Delivery otherwise belongs to the runtime; no receipt command is needed. Starting new work or asking a follow-up question uses `send`
 with an explicit reply choice.
 
 After an explicit supervisor transfer, a worker's reply addressed to its retired
 supervisor reaches the current supervisor. It keeps `in_reply_to` pointing to the
-original assignment and acknowledges that assignment atomically, but uses a new
+original assignment and records its receipt atomically, but uses a new
 two-participant exchange; the original exchange and creator provenance stay
 unchanged. A retired supervisor cannot send actionable or deferred instructions
 or actionable replies to the transferred worker. Informational and closure messages remain
 available, and ordinary messaging is unchanged when no transfer exists.
+
+### Delivery evidence and measurements
+
+`message --message-id <id>` reports delivery state and evidence independently of
+replies. Codex idle prompts are confirmed by its native turn-start response;
+other app adapters confirm through native output. Hook batches are reserved
+before their output is returned, and confirmed by successful turn completion.
+These are transport observations, not proof of model comprehension. Parallel
+tool hooks cannot establish that the model received a previous hook's output.
+If the process disappears before confirmation, its reservation remains visible
+and prevents speculative replay. Explicit inbox/body retrieval records retrieval,
+which is weaker evidence than a provider receipt.
+
+`agent-coord message-metrics --session-id <id>` reports the most recent 1,024
+message-attempt observations without bodies: queued, delivered, unconfirmed,
+uncertain and body-required counts, oldest unconfirmed age, and p95 delivery
+latency separated by hook/prompt/retrieval. Hook and prompt represent delivery
+paths, not an inferred idle/busy classification. Run
+`python3 scripts/measure_message_delivery.py --check --output build/message-delivery.json`
+for a deterministic mixed delivery/failure workload and receipt-only model-call
+count. Database contention remains subject to the existing performance gate.
 
 ### Supervision, roles and succession
 
@@ -360,9 +388,8 @@ turn. A later explicit `action_required` message on the same thread reopens it
 for a material state change.
 
 The default `inbox` returns undelivered messages. `inbox --unread` is the compact
-unacknowledged view, including messages already delivered by a hook; use
-`inbox --all` only for complete history. `ack --all-unread` performs silent
-transport acknowledgement in one operation.
+pending-delivery view, including uncertain attempts; use `inbox --all` for complete
+history. Reading the inbox returns full bodies and records their retrieval.
 
 `inbox --wait` blocks without model-token use until a message arrives,
 polling the local SQLite store and refreshing session liveness on each check.
@@ -991,13 +1018,14 @@ command instead of a partial body. Use `agent-coord message --message-id <id>`
 to read up to 8,000 characters. Use its `next_offset` with `--offset` to read the
 next page. The sender and recipient can use this command to inspect submission
 state, pending age, delivery errors, wake blockers, and recipient activity.
-Reading a page does not acknowledge the message. A successful explicit reply
-acknowledges its original message; otherwise, the agent must acknowledge each
-read message by ID with `ack`. Submission is evidence of transport, not task completion.
-An accepted submission remains submitted even when a later provider turn fails;
-only attempts without receipt evidence become uncertain.
-Unacknowledged messages can be delivered again on a later user turn. Stable IDs
-prevent repeated delivery attempts within one app turn. Native output and tool
+Recipient page retrieval is tracked automatically; complete contiguous coverage
+records delivery. Sender inspection never consumes recipient delivery. No `ack`
+is needed. Submission evidence is transport evidence, not task completion.
+An accepted delivery remains delivered even when a later provider turn fails.
+Attempts without receipt evidence remain unconfirmed or uncertain across restarts
+and are never automatically replayed. Only proven pre-submission rejection permits
+an automatic retry. Recovery can inspect `message` status and retrieve pending
+bodies explicitly, then decide whether unfinished work should continue. Native output and tool
 events refresh the agent's activity timestamp.
 
 The integration follows [T3 Code's Antigravity ACP support](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/acp/AntigravityAcpSupport.ts)
@@ -1175,7 +1203,7 @@ is the default, with the most recently active parent groups and children first;
 parent activity includes activity by its children. Selecting a parent shows
 clickable child cards with status, task, and recent output. Selecting a child
 shows its bounded recent output, complete received-message history (including
-delivered and acknowledged state), and activity metadata. Snapshot reads do
+delivery state), and activity metadata. Snapshot reads do
 not deliver or acknowledge messages.
 
 For a live Zellij delegation, snapshot reads also capture the pane's rendered
@@ -1710,7 +1738,7 @@ agent-coord ask --withdraw <ask-id>
 
 A non-blocking ask requires `--context` stating the default. `--wait` applies to
 blocking asks; on timeout the receipt includes `timed_out: true` and the ask
-stays open. A direct answer received while waiting is acknowledged automatically.
+stays open. A direct answer received while waiting records delivery automatically.
 `--supersedes <id>` withdraws an earlier open ask atomically.
 
 The UI reads `GET /api/browser/asks` and answers with

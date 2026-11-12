@@ -297,7 +297,7 @@ class OperatorUITests(unittest.TestCase):
             [message["id"] for message in child["messages"]],
             [first["id"], second["id"]],
         )
-        self.assertEqual(child["unacknowledged_message_count"], 1)
+        self.assertEqual(child["pending_delivery_count"], 1)
         pending = self.store.inbox("child", mark_delivered=False)
         self.assertEqual([message["id"] for message in pending], [second["id"]])
 
