@@ -805,6 +805,7 @@ class ThreadStore:
             'and optional title, domain, links [{"kind":"document","target":"docs/design.md"}]. '
             'Use the current tool shell CLI if MCP has no bound caller; never copy a caller ID from history. Returns only status and checkpoint_id. '
             "Name an auto title at the first meaningful checkpoint; omit title on later checkpoints and preserve user choices. "
+            "User titles cannot be overwritten. "
             "Set domain once per assignment, reuse workspace domains, and preserve user choices. "
             "Describe completed or failed results as outcomes. Distinguish proposals, implementation, validation, and deployment. "
             "Keep the underlying phase; use orchestrating for coordination, including while a specialist implements or deploys. "
