@@ -99,9 +99,14 @@ repositories. They do not require Beads. A thread's Now/Later/Closed placement
 is the user's choice; checkpoints and activity do not change placement. Routing
 new actionable work to a closed app conversation automatically moves it into Now.
 
-Before returning control to the user, at a phase change, or after a significant
-result, save a short factual checkpoint with the `update_checkpoint` tool when
-available. Send fields directly, such as `{"phase":"validation"}`. MCP writes
+Save a short factual checkpoint only when saved assignment state materially
+changes: a new objective, decision, constraint, substantial result, actual phase
+transition, blocker, required next action, or handoff. Ending a reply is not a
+checkpoint trigger. Skip routine explanations, clarifications, reformatting,
+acknowledgments, and unchanged state. Do not rewrite the summary to describe
+each answer. Runtime activity and turn completion provide recency and unread
+results without a checkpoint. Prefer `update_checkpoint` when available.
+Send fields directly, such as `{"phase":"validation"}`. MCP writes
 require host-supplied request identity or an inherited caller environment; an
 explicit argument cannot establish identity. If the MCP process has no bound
 caller, use the CLI from your current tool shell:
@@ -182,10 +187,11 @@ reporting again. The checkpoint editor offers the same override and reset.
 User-authored checkpoints may reset with `"domain": null`; agents must omit the
 field instead of sending null. Domain metadata does not change thread placement.
 
-Use `summary` as the separate changing current/latest-work description. Its first
-sentence should concisely say what is being done now or what was delivered; use
-the second sentence for useful progress detail. Save an updated checkpoint when
-starting another assignment in the same conversation. For example, the title
+Use `summary` for durable assignment state, not a log of individual replies. Its
+first sentence should concisely describe the objective or substantial result;
+use the second sentence for useful progress detail. Update it when starting a
+new assignment or when that state materially changes. Ordinary discussion can
+leave it unchanged across several turns. For example, the title
 "Chat interface" stays the same while summaries change from "Adding thread
 mentions." to "Making unread responses clearer." and then "Implemented clear
 read/unread response cards." Describe failures as failed results. Do not leave
@@ -253,15 +259,20 @@ app-server. When that cannot be verified, exit the terminal session first.
 
 ## Context lifecycle for app agents
 
-All app agents report context lifecycle advice at meaningful task completion
-or handoff, including user-created and ordinary dispatch conversations.
+App agents report context lifecycle advice at substantial milestones or actual
+handoffs when another agent or replacement needs recovery information, including
+substantive blocked or failed work. Routine discussion, clarification, simple
+answers, and ordinary turn completion need no report. A checkpoint does not
+itself require a handover. This policy also applies to user-created and
+ordinary dispatch conversations.
 Terminal delegates keep their existing behavior. Reporting is passive metadata;
 it does not change creation mode, ownership, notifications, or conversation lifecycle.
 Independent peer coordination and direct user follow-ups remain available.
 
-When returning a meaningful task result, including blocked or failed work, add
-`context_lifecycle` to the normal checkpoint before returning control or sending
-any requested reply. The runtime binds it to the current turn. Include
+When a milestone or handoff warrants recovery information, add
+`context_lifecycle` to that checkpoint before transferring the work or sending
+a requested substantive result reply. Keep only useful recovery facts and
+failed approaches. The runtime binds the report to the current turn. Include
 `assignment_message_id` for an agent assignment; omit it for direct user work:
 
 ```json

@@ -63,8 +63,10 @@ This removes the reply obligation, not the request to do the work.
 Creation also subscribes you to the created agent's initial assignment turn
 completion without imposing a result-reply obligation. Handle completion events
 without conversational acknowledgements. Consume a matching context lifecycle
-envelope when one is available. All app agents save advice at meaningful task
-completion or handoff, including ordinary dispatch and user-created conversations.
+envelope when one is available. App agents save advice at substantial milestones
+or actual handoffs when recovery information is useful, including substantive
+blocked or failed work. Routine answers and ordinary turn completion need no
+report, including in dispatch and user-created conversations.
 Use `--no-subscribe` when the creation should not report its completion to you.
 
 Have the app agent answer the user directly in its own conversation

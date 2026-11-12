@@ -453,8 +453,11 @@ Workflow findings collection is off by default; enable it only with an explicit
 request for that dispatch or orchestration conversation.
 Normal task tracking, checkpoints, and result reporting remain in use.
 
-All app agents, including user-created and ordinary dispatch conversations, save
-a `context_lifecycle` envelope at meaningful task completion or handoff.
+App agents, including user-created and ordinary dispatch conversations, save
+a `context_lifecycle` envelope at substantial milestones or actual handoffs when
+a replacement needs recovery information, including substantive blocked or failed
+work. Routine discussion and ordinary turn completion need no report; a checkpoint
+does not itself require a handover.
 It recommends `reuse`, `fresh`, or `either`, explains what follow-up work would
 benefit from retained context, and provides confirmed facts, constraints,
 tried-and-failed approaches, and open questions for a replacement. Creation's
@@ -1653,7 +1656,12 @@ Next-step actors are `user`, `agent`, and `external`; `null` means no next step.
 Stored snapshots retain `next_actor` and `next_action` for existing readers.
 `--json -` reads stdin.
 Hooks and browser launch instructions ask agents to save a factual checkpoint
-before returning control, when the phase changes, or after a significant result.
+only when assignment state materially changes: a new objective, decision,
+constraint, substantial result, actual phase transition, blocker, required next
+action, or handoff. Ending a reply is not a checkpoint trigger. Routine
+explanations, clarifications, reformatting, acknowledgments, and unchanged state
+need no checkpoint. Runtime activity, turn completion, and unread results remain
+current independently of checkpoint updates.
 Starting another turn marks an older checkpoint as potentially out of date.
 Ending a turn or process never implies that the work is finished. Parking a
 thread does not stop its agent or release its write scope.
@@ -1663,9 +1671,11 @@ specific, short name at the first meaningful checkpoint, then omit it from
 later checkpoints, including new assignments. Checkpoints can name only an
 automatic title; established agent and user names stay unchanged. Use
 `thread update --title` or the app's Rename action for a deliberate rename.
-The separate checkpoint `summary` describes current/latest work: lead with a
-concise sentence, then preserve useful progress detail. Update it at the start
-of each assignment and describe completed/failed results as outcomes. The
+The separate checkpoint `summary` describes durable assignment state: lead with
+a concise objective or substantial result, then preserve useful progress detail.
+Update it at the start of each assignment or when that state materially changes;
+ordinary discussion can leave it unchanged across several turns. Describe
+completed/failed results as outcomes. The
 title appears on the overview; the original request remains in the detail
 view. Hook context includes the current title and its source (`auto`, `agent`,
 or `user`). User renames take precedence and survive agent checkpoints and

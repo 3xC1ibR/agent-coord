@@ -167,9 +167,11 @@ as well as later messages. Follow-up communication can start a new
 request when needed; a previous completion does not end collaboration.
 
 Ask agents to return useful results, artifact references, relevant
-validation, and unresolved limitations. All app agents also save
+validation, and unresolved limitations. At substantial milestones or actual
+handoffs where recovery information is useful, app agents add
 the [context lifecycle report](../agent-coordination/SKILL.md#context-lifecycle-for-app-agents)
-in their normal result checkpoint. Intermediate findings are worth sharing
+to the checkpoint. Routine answers and ordinary turn completion need no report.
+Intermediate findings are worth sharing
 when they change another agent's work. For an explicit reply-required request,
 a final response in the agent's own conversation does not replace its requested reply.
 
