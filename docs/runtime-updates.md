@@ -101,6 +101,12 @@ continuations uncertain. Inspect native execution and external tools before an
 explicit maintenance `resume`. Do not mistake backend activation for completed
 cleanup or resume uncertain actions blindly.
 
+After inspecting tool outcomes, authenticated maintenance `resume` records the
+review decision durably and clears the runtime's pause warning before reopening
+admissions. A later restart preserves that decision. Uncertain conversation
+recovery records remain uncertain and are never automatically replayed by resume
+or restart; continue those conversations only after their outcomes are known.
+
 Authenticated status includes `update.id`, `phase`, exact `target`, `error`,
 `requires_review` and `recovery` counts plus each conversation's state/reason.
 The terminal outcomes are `committed`, `rolled-back`, and `failed`. Verify the

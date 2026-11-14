@@ -666,6 +666,15 @@ class Runtime:
             elif action == "resume":
                 if self.upgrading:
                     raise RuntimeError("Runtime handover is in progress.")
+                from . import runtime_update
+                update = runtime_update.read(self.directory)
+                if update and update["phase"] in runtime_update.TERMINAL and update.get("requires_review"):
+                    # Explicit authenticated resume follows review of external
+                    # tool outcomes. Persist that decision before opening work
+                    # admission, but retain recovery_uncertain so neither this
+                    # resume nor a later boot replays unverified submissions.
+                    runtime_update.write(self.directory, update, requires_review=False, reviewed_at=time.time())
+                    self.error = None
                 self.maintenance = False
                 self.resume_work()
             elif action == "stop":

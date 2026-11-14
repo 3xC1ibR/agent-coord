@@ -496,6 +496,34 @@ Runtime.status = _status_with_barrier
         self.wait(lambda: runtime.owner_available(runtime.runtime_directory(self.database)))
         self.assertTrue(self.launch(candidate)["paused"])
 
+    def test_reviewed_resume_is_durable_without_replaying_uncertain_work(self):
+        self.env["RIBBON_FAKE_PERSIST"] = "1"
+        source = self.resources / "backend/agent_coord/runtime_recovery.py"
+        source.write_text(source.read_text() + "\ndef fail_finalize(self, update_id):\n    raise RuntimeError('injected incomplete shutdown')\nRuntimeRecovery.finalize = fail_finalize\n")
+        _, record, _, staged, candidate = self.prepare_requested_update(message="held-work")
+        runtime.control(record, "activate-update", request_id="reviewed-update", payload=staged["pending"])
+        current = self.wait_update("committed")
+        self.assertTrue(current["paused"])
+        self.assertFalse(current["update"].get("cancelled", False))
+        # Explicit resume acknowledges the operator's review durably. It must
+        # not retry uncertain provider submissions, including on the next boot.
+        record = runtime.discover(self.database)
+        resumed = runtime.control(record, "resume")
+        self.assertFalse(resumed["paused"])
+        self.assertFalse(resumed["update"]["requires_review"])
+        self.assertTrue(resumed["update"]["recovery_uncertain"])
+        self.assertIsNone(resumed["upgrade_error"])
+        reviewed_at = resumed["update"]["reviewed_at"]
+        self.assertGreater(reviewed_at, resumed["update"]["created_at"])
+        self.assertEqual(runtime.control(record, "resume")["update"]["reviewed_at"], reviewed_at)
+        self.assertEqual(resumed["update"]["recovery"]["counts"], {"uncertain": 1})
+        runtime.control(record, "stop")
+        self.wait(lambda: runtime.owner_available(runtime.runtime_directory(self.database)))
+        restarted = self.launch(candidate)
+        self.assertFalse(restarted["paused"])
+        self.assertFalse(restarted["update"]["requires_review"])
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
+
     def test_busy_update_swaps_web_assets_then_activates_at_idle(self):
         # Hold the automatic idle probe while an approval is pending. The
         # accepted turn must remain answerable throughout this busy check.
