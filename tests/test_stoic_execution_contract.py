@@ -267,10 +267,11 @@ class StoicExecutionContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_policy_rejects_unapproved_full_access_before_provider(self):
         self.connector.configure({"allowed_permission_modes": {"codex": ["workspace-write"]}})
         await self.synchronize()
-        await self.synchronize()
-        remote = (await self.fixture.client.get("/api/execution/runs?status=failed")).json()["runs"]
+        await asyncio.to_thread(self.connector.process_once)
+        self.assertIn("permission mode", self.connector.last_error)
+        remote = (await self.fixture.client.get("/api/execution/runs?status=pending")).json()["runs"]
         self.assertEqual(len(remote), 1)
-        self.assertIn("permission mode", remote[0]["error"])
+        self.assertIsNone(remote[0]["runner_id"])
         self.assertEqual(self.work.list(), [])
         self.assertFalse(any(method in {"thread/start", "turn/start"} for method, _ in self.sessions.rpc.calls))
 

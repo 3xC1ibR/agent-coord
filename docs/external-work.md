@@ -115,6 +115,10 @@ execution. Full access requires adding `full-access` for Codex or
 `bypassPermissions` for Claude locally. A provider listed in `allowed_models`
 is restricted to those model IDs; omitted providers have no extra model filter.
 RF still verifies that every requested model and effort is available.
+Policy is checked before claiming a run. A disallowed offer remains pending in
+Stoic, and RF reports the local policy error without consuming the occurrence.
+Connection status includes the denied count and up to 20 run IDs with reasons.
+Discovery cycles through pending pages so denied work cannot hide later offers.
 
 These settings authorize the connected Stoic account to submit work with the
 listed permissions. Allowed roots constrain the starting directory; they do not
@@ -169,6 +173,8 @@ RF prepends an occurrence-context JSON object with `run_id`, `source`,
 text. Jobs can therefore use the scheduled date after a delayed start. The
 context contains no authentication material. Stoic reserves 2,000 characters
 for this envelope within RF's 100,000-character submission limit.
+The connector saves the full assembled submission with the claim receipt, so
+recovery uses the same text.
 
 A lost claim response repeats the saved claim ID. A lost result response repeats
 the saved result receipt. Lease expiration does not authorize reassignment and
@@ -193,8 +199,12 @@ service. The machine must be awake and the runtime must be available. The Stoic
 ledger retains work while RF is offline. The source scheduler determines how
 missed occurrences are combined or skipped.
 
-Deploy Stoic's additive execution migration and API/scheduler changes before
-enabling the connector. Then deploy the RF runtime, verify its active payload,
+Before replacing either Stoic API or scheduler image, run the candidate migration
+`python -m src.scripts.migrate_external_execution --check`, then `--apply`, then
+require `--check` to exit zero. New ORM mappings require the additive columns to
+exist before the new image serves any requests. Rehearse on isolated PostgreSQL
+and verify the production backup before this sequence. Then replace the Stoic
+API/scheduler images. Deploy the RF runtime, verify its active payload,
 and enable the connection. A staged RF application is not proof that the new
 backend is active. Keep existing jobs on internal execution until the complete
 external path has passed a bounded live validation.

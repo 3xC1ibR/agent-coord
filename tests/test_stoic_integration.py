@@ -8,6 +8,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.store import CoordinationError, CoordinationStore
@@ -66,7 +67,10 @@ class FakeStoic:
                 raise StoicRequestError("Cursor expired", self.feed_error)
             return {"events": [], "next_cursor": "42", "has_more": False}
         if path.startswith("/api/execution/runs?"):
-            return {"runs": [run for key, run in self.runs.items() if key not in self.claims]}
+            offset = int(parse_qs(urlsplit(path).query).get("offset", [0])[0])
+            return {"runs": [run for key, run in self.runs.items() if key not in self.claims][offset:offset + 100]}
+        if method == "GET" and path.startswith("/api/execution/runs/"):
+            return copy.deepcopy(self.runs[path.split("/")[-1]])
         run_id, action = path.split("?")[0].split("/")[-2:]
         if action == "claim":
             prior = self.claims.setdefault(run_id, copy.deepcopy(body))
@@ -289,8 +293,14 @@ class StoicIntegrationTests(unittest.TestCase):
         self.connector.process_once()
         self.connector.process_once()
         self.assertEqual(self.engine.launches, 0)
-        self.assertEqual(self.remote.results["run-1"]["status"], "failed")
-        self.assertIn("local Stoic execution policy", self.remote.results["run-1"]["error"])
+        self.assertEqual(self.remote.results, {})
+        self.assertEqual(self.remote.claims, {})
+        self.assertIn("local Stoic execution policy", self.connector.last_error)
+        self.assertEqual(self.connector.status()["runs"], {"denied": 1})
+        self.assertEqual(self.connector.status()["denied_runs"][0]["run_id"], "run-1")
+        self.enable()
+        self.connector.process_once()
+        self.assertEqual(self.engine.launches, 1)
 
     def test_policy_enforces_provider_permissions_models_and_resolved_paths(self):
         settings = self.remote.runs["run-1"]["settings"]
@@ -329,6 +339,29 @@ class StoicIntegrationTests(unittest.TestCase):
         self.assertEqual(self.engine.launches, 0)
         self.assertEqual(self.remote.results["run-1"]["status"], "failed")
         self.assertIn("did not start", self.remote.results["run-1"]["error"])
+
+    def test_disallowed_offers_do_not_use_capacity_for_allowed_work(self):
+        allowed = copy.deepcopy(self.remote.runs["run-1"])
+        self.remote.runs["run-1"]["settings"]["cwd"] = "/outside"
+        self.remote.runs["run-2"] = {**copy.deepcopy(self.remote.runs["run-1"]), "id": "run-2"}
+        self.remote.runs["run-3"] = {**allowed, "id": "run-3"}
+        self.launch()
+        self.assertEqual(self.engine.launches, 1)
+        self.assertEqual(set(self.remote.claims), {"run-3"})
+
+    def test_discovery_pages_past_denied_offers(self):
+        allowed = copy.deepcopy(self.remote.runs["run-1"])
+        denied = {**allowed, "settings": {**allowed["settings"], "cwd": "/outside"}}
+        self.remote.runs = {f"denied-{index}": {**denied, "id": f"denied-{index}"} for index in range(100)}
+        self.remote.runs["allowed"] = {**allowed, "id": "allowed"}
+        self.launch()
+        self.assertEqual(self.engine.launches, 0)
+        self.connector.next_scan = 0
+        self.connector.process_once()
+        self.now += 1
+        self.connector.process_once()
+        self.connector.process_once()
+        self.assertEqual(set(self.remote.claims), {"allowed"})
 
     def test_disable_defers_an_owned_run_not_yet_submitted(self):
         self.enable()

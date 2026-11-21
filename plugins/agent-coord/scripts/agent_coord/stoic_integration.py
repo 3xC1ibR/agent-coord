@@ -80,6 +80,7 @@ class StoicIntegration:
         self.worker = None
         self.processing = threading.Lock()
         self.next_scan = 0.0
+        self.scan_offset = 0
         self.last_error = None
         self.last_connected_at = None
         with self.store._connection() as db:
@@ -117,6 +118,8 @@ class StoicIntegration:
         with self.store.reading(), self.store._connection() as db:
             counts = {row[0]: row[1] for row in db.execute(
                 "SELECT state,COUNT(*) FROM stoic_execution_bindings GROUP BY state")}
+            denied = [dict(row) for row in db.execute(
+                "SELECT run_id,error AS reason FROM stoic_execution_bindings WHERE state='denied' ORDER BY updated_at DESC LIMIT 20")]
         return {"enabled": bool(config["enabled"]), "base_url": config["base_url"],
                 "token_file": config["token_file"], "runner_id": config["runner_id"],
                 "max_concurrent_runs": config["max_concurrent_runs"],
@@ -125,7 +128,7 @@ class StoicIntegration:
                 "allowed_models": config.get("allowed_models", {}),
                 "credential_configured": Path(config["token_file"]).is_file(),
                 "last_connected_at": self.last_connected_at, "last_error": self.last_error,
-                "runs": counts}
+                "runs": counts, "denied_runs": denied}
 
     def configure(self, body):
         policy_keys = {"allowed_roots", "allowed_permission_modes", "allowed_models"}
@@ -176,7 +179,7 @@ class StoicIntegration:
             token_file = str(Path(token_file).expanduser().resolve())
             changed_identity = origin != config["base_url"] or token_file != config["token_file"]
             with self.store._connection() as db:
-                active = db.execute("SELECT 1 FROM stoic_execution_bindings WHERE state != 'published' LIMIT 1").fetchone()
+                active = db.execute("SELECT 1 FROM stoic_execution_bindings WHERE state NOT IN ('published','denied') LIMIT 1").fetchone()
                 if changed_identity and active:
                     raise CoordinationError("Finish or reconcile existing Stoic runs before changing the connection.")
                 if changed_identity:
@@ -190,6 +193,7 @@ class StoicIntegration:
                 policy.update(policy_changes)
                 db.execute("UPDATE stoic_connection SET policy_json=? WHERE id=1", (json.dumps(policy),))
             self.next_scan = 0
+            self.scan_offset = 0
             self.last_error = None
         finally:
             self.processing.release()
@@ -200,8 +204,8 @@ class StoicIntegration:
             rows = []
             # Give recovery and new work their own bounded pages so neither a
             # large pending queue nor historical uncertainty can starve them.
-            for predicate in ("state NOT IN ('published','conflict','claiming','uncertain')",
-                              "state='claiming'", "state='uncertain'"):
+            for predicate in ("state NOT IN ('published','conflict','claiming','denied','uncertain')",
+                              "state IN ('claiming','denied')", "state='uncertain'"):
                 rows.extend(dict(row) for row in db.execute(
                     "SELECT * FROM stoic_execution_bindings WHERE " + predicate + " ORDER BY updated_at LIMIT 100"))
             return rows
@@ -252,7 +256,20 @@ class StoicIntegration:
         run_id = binding["run_id"]
         path = self._run_path(run_id)
         source = "stoic:" + config["connection_id"]
-        if binding["state"] == "claiming":
+        if binding["state"] in {"claiming", "denied"}:
+            offered = client.request("GET", path)
+            if not isinstance(offered.get("settings"), dict):
+                raise StoicRequestError("Stoic returned an invalid execution offer.")
+            try:
+                self._authorize_settings(config, offered["settings"])
+            except CoordinationError as exc:
+                # A local configuration error must not consume a source
+                # occurrence that another appropriately configured runner can do.
+                binding["state"] = "denied"
+                self._save(run_id, state="denied", error=str(exc))
+                raise StoicRequestError(str(exc)) from None
+            if self.stopped.is_set():
+                return
             claimed = client.request("POST", path + "/claim", {
                 "runner_id": config["runner_id"], "claim_id": binding["claim_id"]})
             run, claim_token = claimed.get("run"), claimed.get("claim_token")
@@ -261,6 +278,7 @@ class StoicIntegration:
                     or not isinstance(run.get("settings"), dict)
                     or not isinstance(claim_token, str) or not claim_token):
                 raise StoicRequestError("Stoic returned an invalid claim receipt.")
+            run["submission_prompt"] = self._prompt(run)
             binding.update(claim_token=claim_token, run_json=json.dumps(run), state="claimed")
             self._save(run_id, claim_token=claim_token, run_json=binding["run_json"], state="claimed")
         auth = {"runner_id": config["runner_id"], "claim_token": binding["claim_token"]}
@@ -304,7 +322,8 @@ class StoicIntegration:
             run = json.loads(binding["run_json"])
             try:
                 self._authorize_settings(config, run["settings"])
-                local = self.external_work.submit(source, run_id, run["settings"], self._prompt(run), name=run.get("name"))
+                local = self.external_work.submit(source, run_id, run["settings"],
+                                                  run.get("submission_prompt", self._prompt(run)), name=run.get("name"))
             except BrowserBusyError:
                 # Maintenance refuses work before durable admission. Retain
                 # ownership and retry after the runtime resumes.
@@ -338,20 +357,20 @@ class StoicIntegration:
         try:
             config = self._configuration()
             bindings = self._bindings()
-            if not config["enabled"] and not any(b["state"] != "claiming" for b in bindings):
+            if not config["enabled"] and not any(b["state"] not in {"claiming", "denied"} for b in bindings):
                 return
             client = self.client_factory(config["base_url"], config["token_file"])
             failures = []
-            active_count = sum(b["state"] not in {"claiming", "uncertain"} for b in bindings)
+            active_count = sum(b["state"] not in {"claiming", "denied", "uncertain"} for b in bindings)
             for binding in bindings:
                 if self.stopped.is_set():
                     return
-                if binding["state"] == "claiming":
+                was_claiming = binding["state"] in {"claiming", "denied"}
+                if was_claiming:
                     admission = getattr(self.sessions, "admission", None)
                     if (not config["enabled"] or active_count >= config["max_concurrent_runs"]
                             or (admission is not None and admission.paused)):
                         continue
-                    active_count += 1
                 try:
                     self._synchronize(client, config, binding)
                 except Exception as exc:
@@ -369,17 +388,22 @@ class StoicIntegration:
                         # renewing leases or publishing already completed work.
                         error = "Stoic run recovery failed; inspect its execution."
                     failures.append(error)
+                finally:
+                    if was_claiming and binding["state"] not in {"claiming", "denied"}:
+                        active_count += 1
             if not config["enabled"]:
                 self.last_error = failures[0] if failures else None
                 return
             now = self.store.clock()
             if now >= self.next_scan:
-                page = client.request("GET", "/api/execution/runs?" + urlencode({"status": "pending", "limit": 100, "view": "ids"}))
+                page = client.request("GET", "/api/execution/runs?" + urlencode({"status": "pending", "limit": 100,
+                                      "view": "ids", "offset": self.scan_offset}))
                 rows = page.get("runs")
                 if not isinstance(rows, list):
                     raise StoicRequestError("Stoic returned an invalid pending-run list.")
                 for run in rows:
                     self._stage(run.get("id") if isinstance(run, dict) else None)
+                self.scan_offset = self.scan_offset + len(rows) if len(rows) == 100 else 0
                 self.next_scan = now + 30
             # The durable pending-run scan is authoritative. Feed events only
             # reduce latency, and cursor expiry never discards pending work.
