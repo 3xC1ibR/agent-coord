@@ -15,6 +15,8 @@ from .store import CoordinationError
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}\Z")
 SETTING_NAMES = {"cwd", "client", "model", "effort", "service_tier", "permission_mode", "yolo"}
 ACTIVE = ("pending", "running")
+RECEIPT_COLUMNS = ("source,request_id,state,thread_id,turn_id,result_json,error,"
+                   "created_at,updated_at,cancel_requested,owner")
 RESULT_LIMIT = 64_000
 LOST_OWNER = "The owning runtime ended before saving a confirmed outcome. Inspect the conversation before requesting new work."
 
@@ -50,8 +52,13 @@ class ExternalWorkRuntime:
         self.sessions = sessions
         self.store = sessions.store
         self.owner = sessions.execution.runtime_id
+        # In-process clients can construct a facade over an already serving
+        # BrowserSessions. Native events use the session manager's observer map.
+        current = getattr(sessions, "external_work", None)
+        if current is not None:
+            self.lock, self.observers = current.lock, current.observers
+            return
         self.lock = threading.Lock()
-        # Only current-process, admitted assignments subscribe to provider events.
         self.observers = {}
         with self._write("initialize") as db:
             db.execute("""CREATE TABLE IF NOT EXISTS external_work (
@@ -61,7 +68,10 @@ class ExternalWorkRuntime:
                 updated_at REAL NOT NULL, PRIMARY KEY(source, request_id))""")
             db.execute("CREATE INDEX IF NOT EXISTS external_work_order ON external_work(created_at DESC, source, request_id)")
             db.execute("CREATE INDEX IF NOT EXISTS external_work_source ON external_work(source, created_at DESC, request_id)")
+            db.execute("""CREATE INDEX IF NOT EXISTS external_work_active_owner ON external_work(owner)
+                WHERE state IN ('pending','running')""")
         self._recover_owners()
+        sessions.external_work = self
 
     @contextmanager
     def _write(self, name):
@@ -77,7 +87,10 @@ class ExternalWorkRuntime:
         for row in owners:
             if row["closed_at"] is not None or row["pid"] is None or not _alive(row["pid"]):
                 with self._write("recover") as db:
-                    db.execute("""UPDATE external_work SET state='uncertain',error=?,updated_at=?
+                    db.execute("""UPDATE external_work AS w SET state='uncertain',error=?,updated_at=?,
+                        turn_id=COALESCE(w.turn_id, (SELECT json_extract(r.result_json,'$.turn.id')
+                            FROM browser_submission_receipts r WHERE r.thread_id=w.thread_id
+                            AND r.request_id=w.request_id AND r.state='completed'))
                         WHERE owner=? AND state IN ('pending','running')""", (LOST_OWNER, self.store.clock(), row["owner"]))
 
     @staticmethod
@@ -92,7 +105,7 @@ class ExternalWorkRuntime:
 
     def _row(self, key):
         with self.store.reading(), self.store._connection() as db:
-            return db.execute("SELECT * FROM external_work WHERE source=? AND request_id=?", key).fetchone()
+            return db.execute(f"SELECT {RECEIPT_COLUMNS} FROM external_work WHERE source=? AND request_id=?", key).fetchone()
 
     def get(self, source, request_id):
         key = identifier(source), identifier(request_id)
@@ -109,7 +122,7 @@ class ExternalWorkRuntime:
         where = " WHERE source=?" if args else ""
         self._recover_owners()
         with self.store.reading(), self.store._connection() as db:
-            rows = db.execute("SELECT * FROM external_work" + where +
+            rows = db.execute(f"SELECT {RECEIPT_COLUMNS} FROM external_work" + where +
                               " ORDER BY created_at DESC,source,request_id LIMIT ?", (*args, limit)).fetchall()
         return [self._public(row) for row in rows]
 
@@ -144,7 +157,6 @@ class ExternalWorkRuntime:
     def _launch(self, key, settings, prompt):
         thread_id = None
         stage = "validate"
-
         expected = {}
 
         def validated(record):
@@ -173,6 +185,9 @@ class ExternalWorkRuntime:
                 if effective is not None and effective != expected["permission_mode"]:
                     raise CoordinationError("The provider selected different effective permissions.")
                 with self._write("admit") as db:
+                    used = db.execute("SELECT turn_id FROM work_threads WHERE thread_id=?", (thread_id,)).fetchone()
+                    if used and used["turn_id"]:
+                        raise BrowserBusyError("Another turn already used this conversation. Inspect it before requesting new work.")
                     if not self.sessions.inbox_wake._eligible(db, thread_id, cleanup=False):
                         raise BrowserBusyError("The conversation is paused or unavailable. Review its status.")
                     admitted = db.execute("""UPDATE external_work SET attempted=1,updated_at=? WHERE source=?
@@ -212,7 +227,7 @@ class ExternalWorkRuntime:
             with self.lock:
                 self.observers.pop(thread_id, None)
 
-    def observe(self, method, params, *, blocked=False):
+    def observe(self, method, params, *, pending_requests=()):
         """Copy only bounded, conclusive provider evidence on the event reader."""
         thread = params.get("threadId")
         turn = params.get("turn") or {}
@@ -223,6 +238,10 @@ class ExternalWorkRuntime:
                 return
             if method == "item/completed":
                 item = params.get("item") or {}
+                # A later tool or commentary item invalidates a previous
+                # candidate when the provider omits its terminal item list.
+                if item.get("type") != "userMessage":
+                    watch["final"] = None
                 if item.get("type") == "agentMessage" and item.get("phase") == "final_answer":
                     text = item.get("text")
                     watch["final"] = (identity, text[:RESULT_LIMIT+1]) if isinstance(text, str) else None
@@ -235,12 +254,18 @@ class ExternalWorkRuntime:
                 items = turn.get("items") or []
                 if items:
                     last = items[-1]
-                    if last.get("type") == "agentMessage" and last.get("phase") in (None, "final_answer"):
+                    text = None
+                    if (last.get("type") == "agentMessage" and last.get("phase") in (None, "final_answer")
+                            and last.get("status") in (None, "completed")):
                         text = last.get("text")
+                    elif len(items) == 1 and last.get("type") == "userMessage" and final and final[0] == identity:
+                        # Some native completions repeat only the initial input.
+                        text = final[1]
                 error = turn.get("error")
                 if (turn.get("termination") or {}).get("origin") == "user" or turn.get("status") in {"cancelled", "canceled"}:
                     outcome = ("cancelled", None, "The assigned turn was stopped.")
-                elif blocked or error or turn.get("status") != "completed":
+                elif (error or turn.get("status") != "completed"
+                        or any(r["params"].get("threadId") == thread for r in pending_requests)):
                     message = error.get("message") if isinstance(error, dict) else error
                     outcome = ("failed", None, str(message or "The assigned turn stopped before successful completion.")[:1000])
                 else:
@@ -249,7 +274,7 @@ class ExternalWorkRuntime:
             else:
                 return
             if watch["turn"] is None:
-                watch["early"][identity] = outcome
+                watch["early"].setdefault(identity, outcome)
                 return
         self.sessions.persistence.submit(lambda: self._finish(thread, identity, *outcome), key=thread)
 
@@ -267,9 +292,14 @@ class ExternalWorkRuntime:
                 stopped = db.execute("SELECT 1 FROM turn_stop_requests WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
                 if (row["cancel_requested"] or stopped) and state != "uncertain":
                     state, result, error = "cancelled", None, "The assigned turn was stopped."
-                elif state == "succeeded" and db.execute("""SELECT 1 FROM asks WHERE session_id=?
-                        AND status='open' AND blocking=1 LIMIT 1""", (thread,)).fetchone():
-                    state, result, error = "failed", None, "The assigned turn ended awaiting user input."
+                elif state == "succeeded":
+                    needs_user = db.execute("""SELECT EXISTS(SELECT 1 FROM asks
+                            WHERE session_id=? AND status='open' AND blocking=1) OR
+                        COALESCE((SELECT next_actor='user' FROM thread_checkpoints
+                            WHERE thread_id=? AND turn_id=? ORDER BY id DESC LIMIT 1),0)""",
+                        (thread, thread, turn)).fetchone()[0]
+                    if needs_user:
+                        state, result, error = "failed", None, "The assigned turn ended awaiting user input."
                 db.execute("""UPDATE external_work SET state=?,result_json=?,error=?,updated_at=?
                     WHERE thread_id=? AND turn_id=?""", (state, result, error, self.store.clock(), thread, turn))
         with self.lock:
@@ -297,6 +327,11 @@ class ExternalWorkRuntime:
             with self.sessions.lock:
                 active = self.sessions.active.get(thread)
             if active != turn:
+                # Completion may already be queued for asynchronous persistence.
+                # A missing active turn alone cannot confirm a successful Stop.
+                self.sessions._await_persistence(thread)
+                self._finish(thread, turn, "uncertain", None,
+                             "The assigned turn is no longer active and its terminal outcome could not be confirmed.")
                 return
             if self.store.threads.stop_requested(thread, turn):
                 return

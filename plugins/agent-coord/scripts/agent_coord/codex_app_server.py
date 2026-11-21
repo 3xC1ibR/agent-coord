@@ -668,9 +668,7 @@ class BrowserSessions:
                 self.execution.capture(thread_id)
             external = getattr(self, "external_work", None)
             if external and not review_stage and method in {"item/completed", "turn/completed"}:
-                blocked = method == "turn/completed" and any(
-                    r["params"].get("threadId") == thread_id for r in self.requests.values())
-                external.observe(method, params, blocked=blocked)
+                external.observe(method, params, pending_requests=self.requests.values())
             if method == "turn/completed" and thread_id:
                 self.active.pop(thread_id, None)
                 self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") != thread_id}

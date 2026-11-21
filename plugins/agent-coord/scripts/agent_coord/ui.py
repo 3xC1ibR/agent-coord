@@ -386,7 +386,7 @@ def _handler(
                 return
             if parsed.path == "/api/browser/integrations/stoic":
                 if self._integration_authorized():
-                    self._json(HTTPStatus.OK, self.server.stoic_integration.status())
+                    self._integration_response()
                 return
             # Installers may fetch app identity without browser cookies. Expose
             # only these fixed, non-sensitive assets after validating the host.
@@ -823,6 +823,13 @@ def _handler(
                 return False
             return True
 
+        def _integration_response(self, settings=None):
+            connector = self.server.stoic_integration
+            if connector is None:
+                self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "The Stoic integration is unavailable."})
+                return
+            self._json(HTTPStatus.OK, connector.status() if settings is None else connector.configure(settings))
+
         def do_PATCH(self) -> None:
             if urlparse(self.path).path != "/api/browser/integrations/stoic":
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -886,7 +893,7 @@ def _handler(
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
                 if route == ["api", "browser", "integrations", "stoic"] and self.command == "PATCH":
-                    self._json(HTTPStatus.OK, self.server.stoic_integration.configure(body))
+                    self._integration_response(body)
                     return
                 if route[:3] == ["api", "browser", "activity"]:
                     from .activity_api import record_browser_events, create_activity_review
@@ -1415,8 +1422,11 @@ def make_ui_server(
         sessions.watchdog.start()
         sessions.start_residency()
         sessions.dispatch.wake()
-        from .stoic_integration import start_connector
-        server.stoic_integration = start_connector(server.external_work)
+        # Standalone distributions can omit application-specific connectors.
+        from importlib.util import find_spec
+        if find_spec(".stoic_integration", __package__) is not None:
+            from .stoic_integration import start_connector
+            server.stoic_integration = start_connector(server.external_work)
     except BaseException:
         server.server_close()
         raise

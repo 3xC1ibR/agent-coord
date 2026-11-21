@@ -13,6 +13,7 @@ from unittest.mock import patch
 from test_codex_app_server import FakeCodex
 from agent_coord import cli
 from agent_coord.codex_app_server import BrowserBusyError, BrowserSessions
+from agent_coord.external_work import ExternalWorkRuntime
 from agent_coord.external_work_control import provision_token, read_token, token_file
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import make_ui_server
@@ -126,6 +127,16 @@ class ExternalWorkTests(unittest.TestCase):
         self.sessions._event({"method": "item/agentMessage/delta", "params": {**params, "itemId": "answer", "delta": "Partial"}})
         self.assertEqual(self.finish(row, [])["state"], "failed")
 
+    def test_terminal_checkpoint_requires_user_approval(self):
+        row = self.submit()
+        self.assertTrue(self.sessions.persistence.flush(key=row["thread_id"]))
+        self.store.threads.checkpoint(row["thread_id"], {"turn_id": row["turn_id"],
+            "phase": "validation", "summary": "Waiting for review.",
+            "next_step": {"actor": "user", "action": "Approve the proposed change."}})
+        final = self.finish(row, [self.answer("Please approve the change.")])
+        self.assertEqual(final["state"], "failed")
+        self.assertIsNone(final["result"])
+
     def test_final_item_without_terminal_item_list_and_mismatched_turn(self):
         row = self.submit()
         params = {"threadId": row["thread_id"], "turnId": "other"}
@@ -135,6 +146,15 @@ class ExternalWorkTests(unittest.TestCase):
         params["turnId"] = row["turn_id"]
         self.sessions._event({"method": "item/completed", "params": {**params, "item": self.answer("Correct")}})
         self.assertEqual(self.finish(row, [])["result"]["text"], "Correct")
+
+    def test_final_message_followed_by_tool_output_is_not_a_terminal_result(self):
+        facade = ExternalWorkRuntime(self.sessions)
+        row = facade.submit("test", "job", {}, "Compute.")
+        params = {"threadId": row["thread_id"], "turnId": row["turn_id"]}
+        self.sessions._event({"method": "item/completed", "params": {**params, "item": self.answer("Earlier")}})
+        tool = {"type": "commandExecution", "id": "cmd", "command": "pwd", "status": "completed"}
+        self.sessions._event({"method": "item/completed", "params": {**params, "item": tool}})
+        self.assertEqual(self.finish(row, [])["state"], "failed")
 
     def test_lost_acknowledgement_never_replays(self):
         original = self.sessions.rpc.request
@@ -196,6 +216,9 @@ class ExternalWorkTests(unittest.TestCase):
         finished = self.finish(self.submit("finished"), [self.answer("Done.")])
         live = self.submit()
         # Simulate abrupt owner exit without delivering any terminal event.
+        with self.store._connection() as db:
+            # Browser submission receipt committed before the external binding.
+            db.execute("UPDATE external_work SET state='pending',turn_id=NULL WHERE request_id='job'")
         self.sessions.execution.close()
         second = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
         self.addCleanup(second.close)
@@ -248,7 +271,12 @@ class ExternalWorkTests(unittest.TestCase):
         self.assertEqual(request("GET", path + "/app%3Atest/job", **auth)[1]["state"], "running")
         self.assertEqual(request("GET", path + "/test/missing", **auth)[0], 404)
         self.assertEqual(command("external-work", "--url", url, "list", "--source", "app:test")["data"][0]["source"], "app:test")
-        self.assertEqual(request("POST", path + "/app:test/job/cancel", {}, **auth)[0], 200)
+        self.assertEqual(command("external-work", "--url", url, "submit", "--source", "app:test", "--request-id", "job",
+                                 "--settings", "{}", "Compute.")["state"], "running")
+        read = command("external-work", "--url", url, "get", "--source", "app:test", "--request-id", "job")
+        self.assertEqual(read["request_id"], "job")
+        self.assertTrue(command("external-work", "--url", url, "cancel", "--source", "app:test",
+                                "--request-id", "job")["cancel_requested"])
         self.assertEqual(request("GET", "/api/browser/integrations/stoic")[0], 403)
         self.assertFalse(command("integration", "--url", url, "stoic", "status")["enabled"])
         self.assertEqual(command("integration", "--url", url, "stoic", "configure", "--settings",
