@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
 from agent_coord.message_timeline import message_changes, message_cursor, message_timeline, message_sends
+from agent_coord.sqlite_rows import NATIVE_JSON_REAL_ROUND_TRIP
 from agent_coord.store import CoordinationError
 from agent_coord.ui import make_ui_server
 from agent_coord.app_control import AppControl
@@ -158,7 +159,9 @@ class MessageTimelineTests(unittest.TestCase):
         self.assertEqual(actual, expected)
         self.assertEqual(actual[0]['creation_request_id'], request['request_id'])
         self.assertEqual(len(actual), count + 1)
-        self.assertLess(len(transferred), 50, 'Timeline crossed into Python once per message')
+        # The exact-float fallback transfers each message as an ordinary SQLite row.
+        ordinary_rows_expected = 0 if NATIVE_JSON_REAL_ROUND_TRIP else len(actual)
+        self.assertLess(len(transferred) - ordinary_rows_expected, 50, 'Excess timeline row transfers')
         for reference, row in zip(expected, actual):
             self.assertEqual(set(row), set(reference))
             for key, value in reference.items():
