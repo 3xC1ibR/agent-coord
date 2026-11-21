@@ -41,7 +41,7 @@ from .speech import Speech, spoken_text
 from .jev_settings import JevSettings
 from .provider_limits import ProviderLimits
 from .coordination_metrics import CoordinationMetrics
-from . import launch_metrics
+from . import external_work_control, launch_metrics
 
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 8765
@@ -381,6 +381,13 @@ def _handler(
                 self._json(HTTPStatus.FORBIDDEN, {"error": "Invalid host."})
                 return
             parsed = urlparse(self.path)
+            if self._external_work_path(parsed.path):
+                self._external_work()
+                return
+            if parsed.path == "/api/browser/integrations/stoic":
+                if self._integration_authorized():
+                    self._json(HTTPStatus.OK, self.server.stoic_integration.status())
+                return
             # Installers may fetch app identity without browser cookies. Expose
             # only these fixed, non-sensitive assets after validating the host.
             install_assets = {
@@ -797,6 +804,32 @@ def _handler(
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+        @staticmethod
+        def _external_work_path(path):
+            return path == external_work_control.ROUTE or path.startswith(external_work_control.ROUTE + "/")
+
+        def _external_work(self):
+            try:
+                external_work_control.handle_http(self, self.server.external_work)
+            except sqlite3.OperationalError as exc:
+                self._database_busy(exc)
+
+        def _integration_authorized(self):
+            if (not self._local_request() or not csrf_token
+                    or not secrets.compare_digest(self.headers.get("X-Agent-Coord-Token", "").encode("latin1"), csrf_token.encode())
+                    or self.headers.get("Origin") not in (None, "http://" + self.headers.get("Host", ""))
+                    or self.headers.get("Sec-Fetch-Site") == "cross-site"):
+                self._json(HTTPStatus.FORBIDDEN, {"error": "Manage integrations from an authenticated local Ribbon Field session."})
+                return False
+            return True
+
+        def do_PATCH(self) -> None:
+            if urlparse(self.path).path != "/api/browser/integrations/stoic":
+                self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            if self._integration_authorized():
+                self.do_POST()
+
         def do_POST(self) -> None:
             self._start_metrics("POST")
             with browser_sessions.admission.enter() as admitted:
@@ -812,6 +845,9 @@ def _handler(
 
         def _admitted_POST(self) -> None:
             path = urlparse(self.path).path
+            if self._external_work_path(path):
+                self._external_work()
+                return
             origin = self.headers.get("Origin")
             pairing = path == "/api/remote/pair" and self._remote_request()
             expected_origin = remote_access.origin if self._remote_request() else "http://" + self.headers.get("Host", "")
@@ -849,6 +885,9 @@ def _handler(
                 body = json.loads(raw_body)
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
+                if route == ["api", "browser", "integrations", "stoic"] and self.command == "PATCH":
+                    self._json(HTTPStatus.OK, self.server.stoic_integration.configure(body))
+                    return
                 if route[:3] == ["api", "browser", "activity"]:
                     from .activity_api import record_browser_events, create_activity_review
                     if route == ["api", "browser", "activity", "events"]:
@@ -1273,8 +1312,12 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     app_control: AppControlWorker | None = None
     coordination_metrics: CoordinationMetrics | None = None
 
+    stoic_integration = None
+
     def server_close(self) -> None:
         try:
+            if self.stoic_integration is not None:
+                self.stoic_integration.close()
             if self.coordination_metrics is not None:
                 self.coordination_metrics.close()
             if self.app_control is not None:
@@ -1343,6 +1386,7 @@ def make_ui_server(
         native.close()
         sessions.close()
         raise
+    server.external_work = sessions.external_work
     server.browser_sessions = sessions
     server.remote_access = remote
     server.web_push = push
@@ -1371,6 +1415,8 @@ def make_ui_server(
         sessions.watchdog.start()
         sessions.start_residency()
         sessions.dispatch.wake()
+        from .stoic_integration import start_connector
+        server.stoic_integration = start_connector(server.external_work)
     except BaseException:
         server.server_close()
         raise

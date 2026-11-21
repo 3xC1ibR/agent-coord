@@ -79,6 +79,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--db", help="Override the shared SQLite database path.")
     subcommands = parser.add_subparsers(dest="command", required=True)
+    from . import external_work_control
+    external_work_control.add_parser(subcommands)
     installer = subcommands.add_parser("install-cli", help="Install or refresh the stable agent-coord launcher.")
     installer.add_argument("--bin-dir", help="Executable directory; defaults to ~/.local/bin.")
 
@@ -685,6 +687,9 @@ def _parser() -> argparse.ArgumentParser:
 def run(arguments: argparse.Namespace, *, store=None) -> Any:
     bind_command_caller(arguments)
     command = arguments.command
+    if command in {"external-work", "integration"}:
+        from .external_work_control import run as run_external_work
+        return run_external_work(arguments)
     if command == "install-cli":
         return install_cli(arguments.bin_dir)
     if command == "antigravity":

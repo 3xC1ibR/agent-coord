@@ -160,7 +160,7 @@ def register_operation(name, handler):
 
 def local_cli_command(arguments):
     """These commands retain their process; finite database calls route separately."""
-    return (arguments.command in {"install-cli", "antigravity"}
+    return (arguments.command in {"install-cli", "antigravity", "external-work", "integration"}
             or arguments.command == "ui" and not arguments.ui_command
             or arguments.command == "delegation" and arguments.delegation_command == "supervise"
             or arguments.command == "wake-zellij" and arguments.wake_command == "watch"

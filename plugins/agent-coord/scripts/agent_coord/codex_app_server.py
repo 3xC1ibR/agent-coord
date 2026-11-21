@@ -327,6 +327,8 @@ class BrowserSessions:
         self.watchdog = TurnWatchdog(self)
         from .desktop_runtime import install_session_admission
         install_session_admission(self)
+        from .external_work import ExternalWorkRuntime
+        self.external_work = ExternalWorkRuntime(self)
 
     @contextmanager
     def _persistence_context(self):
@@ -664,6 +666,11 @@ class BrowserSessions:
             if method == "turn/started" and thread_id:
                 self.active[thread_id] = params["turn"]["id"]
                 self.execution.capture(thread_id)
+            external = getattr(self, "external_work", None)
+            if external and not review_stage and method in {"item/completed", "turn/completed"}:
+                blocked = method == "turn/completed" and any(
+                    r["params"].get("threadId") == thread_id for r in self.requests.values())
+                external.observe(method, params, blocked=blocked)
             if method == "turn/completed" and thread_id:
                 self.active.pop(thread_id, None)
                 self.requests = {k: v for k, v in self.requests.items() if v["params"].get("threadId") != thread_id}
@@ -687,6 +694,9 @@ class BrowserSessions:
                     disconnected_turns = {t: self.active[t] for t in disconnected if self.active.get(t)}
                 # This must not depend on a database write succeeding. Otherwise
                 # a disconnected turn stays running and blocks idle/deploy gates.
+                if external:
+                    for identity in disconnected:
+                        external.observe("disconnect", {"threadId": identity, "turnId": self.active.get(identity)})
                 self.loaded.difference_update(disconnected)
                 for identity in disconnected:
                     self.loaded_clients.pop(identity, None)
@@ -2134,8 +2144,10 @@ class BrowserSessions:
             self._validate_settings(record["model"], record["effort"], client)
         return record, associations
 
-    def create(self, body: dict, *, on_created=None) -> dict:
+    def create(self, body: dict, *, on_created=None, on_validated=None) -> dict:
         record, associations = self._creation_settings(body)
+        if on_validated is not None:
+            on_validated(record)
         repository, name, client, yolo = (record[key] for key in ("cwd", "name", "client", "yolo"))
         provider = self._provider(client)
         result = provider.request("thread/start", self._options(record))
