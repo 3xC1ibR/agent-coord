@@ -330,14 +330,9 @@ class ExternalWorkRuntime:
         stopped = db.execute("SELECT 1 FROM turn_stop_requests WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
         if (row["cancel_requested"] or stopped) and state != "uncertain":
             return "cancelled", None, "The assigned turn was stopped."
-        if state == "succeeded":
-            needs_user = db.execute("""SELECT EXISTS(SELECT 1 FROM asks
-                    WHERE session_id=? AND status='open' AND blocking=1) OR
-                COALESCE((SELECT next_actor='user' FROM thread_checkpoints
-                    WHERE thread_id=? AND turn_id=? ORDER BY id DESC LIMIT 1),0)""",
-                (thread, thread, turn)).fetchone()[0]
-            if needs_user:
-                return "failed", None, "The assigned turn ended awaiting user input."
+        if state == "succeeded" and db.execute("""SELECT 1 FROM asks
+                WHERE session_id=? AND status='open' AND blocking=1 LIMIT 1""", (thread,)).fetchone():
+            return "failed", None, "The assigned turn ended awaiting user input."
         return state, result, error
 
     def _archived_outcome(self, thread, turn):
@@ -440,9 +435,8 @@ class ExternalWorkRuntime:
                 if not evidence and not manual:
                     raise BrowserBusyError("No confirmed terminal result for the assigned turn. Inspect the conversation and supply a reviewed result or error.")
                 if manual and manual[0] == "succeeded" and turn is None and db.execute("""
-                        SELECT 1 FROM turn_stop_requests WHERE thread_id=? UNION ALL SELECT 1 FROM thread_checkpoints
-                        WHERE thread_id=? AND next_actor='user' LIMIT 1""", (thread, thread)).fetchone():
-                    raise BrowserBusyError("Cannot associate this result with a turn after a recorded Stop or approval request.")
+                        SELECT 1 FROM turn_stop_requests WHERE thread_id=? LIMIT 1""", (thread,)).fetchone():
+                    raise BrowserBusyError("Cannot associate this result with a turn after a recorded Stop.")
                 # The actual native result wins over an operator's alternative.
                 state, result, error = self._guard_outcome(db, row, thread, turn, *(evidence or manual))
                 db.execute("""UPDATE external_work SET state=?,result_json=?,error=?,updated_at=?,resolution_digest=?,

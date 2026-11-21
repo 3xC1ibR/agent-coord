@@ -127,15 +127,45 @@ class ExternalWorkTests(unittest.TestCase):
         self.sessions._event({"method": "item/agentMessage/delta", "params": {**params, "itemId": "answer", "delta": "Partial"}})
         self.assertEqual(self.finish(row, [])["state"], "failed")
 
-    def test_terminal_checkpoint_requires_user_approval(self):
+    def test_preparation_result_survives_user_review_checkpoint(self):
         row = self.submit()
         self.assertTrue(self.sessions.persistence.flush(key=row["thread_id"]))
         self.store.threads.checkpoint(row["thread_id"], {"turn_id": row["turn_id"],
             "phase": "validation", "summary": "Waiting for review.",
             "next_step": {"actor": "user", "action": "Approve the proposed change."}})
-        final = self.finish(row, [self.answer("Please approve the change.")])
+        result = {"text": "Weekly drafts are ready for review.", "artifacts": ["weekly-drafts.md"]}
+        final = self.finish(row, [self.answer(json.dumps(result))])
+        self.assertEqual(final["state"], "succeeded")
+        self.assertEqual(final["result"], result)
+
+    def test_open_blocking_ask_prevents_turn_success(self):
+        row = self.submit()
+        self.store.asks.create(row["thread_id"], "Which records should I score?", blocking=True)
+        final = self.finish(row, [self.answer("Waiting for your selection.")])
         self.assertEqual(final["state"], "failed")
         self.assertIsNone(final["result"])
+
+    def test_reviewed_preparation_with_unconfirmed_turn_and_user_followup(self):
+        original = self.sessions.rpc.request
+        def lost_ack(method, params=None):
+            response = original(method, params)
+            if method == "turn/start":
+                raise OSError("Lost acknowledgement")
+            return response
+        with patch.object(self.sessions.rpc, "request", lost_ack):
+            row = self.submit()
+        self.assertEqual(row["state"], "uncertain")
+        self.assertIsNone(row["turn_id"])
+        thread = row["thread_id"]
+        turn = self.sessions.rpc.threads[thread]["turns"][-1]["id"]
+        self.sessions._await_persistence(thread)
+        self.store.threads.checkpoint(thread, {"phase": "validation", "summary": "Drafts prepared.",
+            "turn_id": turn, "next_step": {"actor": "user", "action": "Review the drafts."}})
+        self.finish({**row, "turn_id": turn}, [self.answer("Drafts prepared.")])
+        result = {"text": "Drafts prepared.", "artifacts": []}
+        resolved = self.work.resolve("test", "job", {"thread_id": thread, "turn_id": None, "result": result})
+        self.assertEqual(resolved["state"], "succeeded")
+        self.assertEqual(resolved["result"], result)
 
     def test_final_item_without_terminal_item_list_and_mismatched_turn(self):
         row = self.submit()
