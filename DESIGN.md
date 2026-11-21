@@ -46,6 +46,13 @@ standard title bar. Auxiliary pages have a simple title, controls, and centered
 content. Activity uses a 1120px content maximum, 24px page spacing, 12px row spacing,
 and 8px control gaps. Declare additional module dimensions once as CSS properties.
 Narrow layouts stack controls and keep tables in labelled horizontal scroll areas.
+Mobile conversations use one 56px header with Back, a single truncated title,
+status and thread options. Workspace and conversation tabs return in the overview.
+The composer has a short touch-oriented prompt above one row of attachment, model,
+effort and send controls. Send work, Review and Schedule live in the existing
+thread options sheet; reuse their original controls and handlers. Keep 44px touch
+targets and a visible send action as drafts grow or the keyboard opens. Mobile
+dimensions are declared once in `web/styles.css`.
 Scheduled prompt actions wrap on desktop and use two columns on narrow screens.
 Their `--schedule-gap` (8px) and `--schedule-action-height` (44px) tokens live in
 `web/styles.css`; the form's action row stays visible as its body scrolls.
@@ -115,6 +122,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-21 | Mobile conversations use a single header and a two-row composer; secondary actions move into thread options | Return reading space from repeated navigation and desktop instructions while preserving the existing actions. |
 | 2026-11-12 | List inbox shows app agents beneath their immediate supervisor, expanded by default | Keep parent-child context visible and bring descendant requests to Attention without duplicate rows. |
 | 2026-11-08 | Offer available updates through a native Install / Skip for Now dialog | Make updates discoverable while keeping installation explicit and deferral temporary. |
 | 2026-11-04 | Apply staged backends through the existing native update menu | One operation owns restart, rollback and guarded continuation, with no new settings surface. |

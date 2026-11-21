@@ -18,7 +18,10 @@ class MobileChat {
     this.panel = this.$("context-panel");
     this.actions = doc.querySelector(".session-actions");
     this.info = doc.querySelector(".session-statusbar");
-    this.homes = [this.actions, this.panel, this.info].map(element => {
+    this.composerOptions = this.$("composer-options");
+    this.sendWork = this.$("send-work-mobile-chat");
+    this.origin = this.$("fork-origin");
+    this.homes = [this.actions, this.panel, this.info, this.composerOptions, this.sendWork, this.origin].map(element => {
       const marker = doc.createComment("mobile chat control position");
       element.before(marker);
       return {element, marker};
@@ -43,7 +46,8 @@ class MobileChat {
     this.dialog.addEventListener("click", event => {
       const button = event.target.closest("button");
       if (button && button.id !== "speech-toggle" && !button.closest(".context-panel-tabs, .agent-tree-panel") &&
-          !button.disabled && (this.actions.contains(button) || this.panel.contains(button) || this.info.contains(button))) this.close();
+          !button.disabled && (this.actions.contains(button) || this.panel.contains(button) || this.info.contains(button) ||
+            this.composerOptions.contains(button) || button === this.sendWork)) this.close();
     }, {capture: true});
     this.media.addEventListener("change", () => this.sync());
     view.visualViewport?.addEventListener("resize", () => this.viewport());
@@ -60,12 +64,32 @@ class MobileChat {
       this.$("mobile-sheet-actions").append(this.actions);
       this.$("mobile-sheet-context").append(this.panel);
       this.$("mobile-sheet-info").append(this.info);
+      this.$("mobile-sheet-info").append(this.origin);
+      this.$("mobile-sheet-composer").append(this.sendWork);
       this.layoutContext();
     } else {
       for (const {element, marker} of this.homes) marker.after(element);
       this.onContextLayout();
     }
+    this.layoutComposer();
+    this.placeholder();
     this.viewport();
+  }
+
+  placeholder(desktop, mobile) {
+    if (desktop !== undefined) this.prompts = {desktop, mobile};
+    if (this.prompts) this.$("message").placeholder = this.matches ? this.prompts.mobile : this.prompts.desktop;
+  }
+
+  layoutComposer(docked = this.docked) {
+    this.docked = docked;
+    const marker = this.homes.find(home => home.element === this.composerOptions).marker;
+    const target = this.matches && !docked ? this.$("mobile-sheet-composer") : marker.parentElement;
+    // Status refreshes must not detach a focused control in the open sheet.
+    if (this.composerOptions.parentElement !== target) {
+      if (target === marker.parentElement) marker.after(this.composerOptions);
+      else target.append(this.composerOptions);
+    }
   }
 
   viewport() {
@@ -91,6 +115,7 @@ class MobileChat {
     this.$("mobile-sheet-actions").hidden = context;
     this.$("mobile-show-context").hidden = context;
     this.$("mobile-sheet-info").hidden = context;
+    this.$("mobile-sheet-composer").hidden = context;
     this.$("mobile-sheet-context").hidden = !context;
     this.$("mobile-sheet-back").hidden = !context;
     // Prepare context before showModal chooses its initial focus target.

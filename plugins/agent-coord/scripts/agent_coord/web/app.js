@@ -1575,6 +1575,7 @@ function renderStatus() {
   const work = state.detail?.work_thread;
   const dispatcher = !!work?.dispatcher;
   const docked = !!state.dispatchDock?.active;
+  state.mobileChat?.layoutComposer(docked);
   $("dispatcher-permissions").hidden = !docked;
   $("dispatcher-permissions").disabled = $("edit-permissions").disabled;
   if ($("dispatcher-permissions").textContent !== $("edit-permissions").textContent)
@@ -1629,6 +1630,8 @@ function renderStatus() {
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
   if (state.detailRefreshing) $("composer-hint").textContent = "Opening conversation…";
   $("message").placeholder = $("composer-hint").textContent;
+  state.mobileChat?.placeholder($("composer-hint").textContent, archived || state.detailRefreshing ? $("composer-hint").textContent :
+    dispatcher ? "Send a request…" : running ? "Add a follow-up…" : "Message…");
   state.attachments?.render();
   state.slashCommands?.render();
   state.mentions?.render();

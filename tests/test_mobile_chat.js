@@ -42,12 +42,13 @@ class Element {
 function setup(mobile = true, pane = false) {
   const ids = ["mobile-thread-sheet", "mobile-chat-actions", "context-panel", "mobile-chat-back", "mobile-show-context",
     "mobile-sheet-back", "mobile-sheet-actions", "mobile-sheet-context", "mobile-sheet-info", "mobile-sheet-title",
-    "thread-context", "conversation", "mobile-chat-status"];
+    "thread-context", "conversation", "mobile-chat-status", "composer-options", "send-work-mobile-chat", "fork-origin", "mobile-sheet-composer", "message"];
   const elements = Object.fromEntries(ids.map(id => [id,new Element(id)]));
   const body = new Element("body"), header = new Element("header"), actions = new Element("actions"), info = new Element("info");
   body.append(header); header.append(actions); body.append(elements["context-panel"]); body.append(info);
   elements["context-panel"].append(elements["thread-context"]);
   for (const id of ["mobile-sheet-actions","mobile-sheet-context","mobile-show-context","mobile-sheet-info"]) elements["mobile-thread-sheet"].append(elements[id]);
+  for (const id of ["composer-options", "send-work-mobile-chat", "fork-origin"]) body.append(elements[id]);
   const doc = {body, getElementById: id => elements[id], createComment: () => new Element("marker"),
     querySelector: selector => selector === ".session-actions" ? actions : info};
   const media = {matches:mobile, addEventListener: (_, callback) => { media.change = callback; }};
@@ -156,4 +157,61 @@ test("header back navigation and accessible live status remain available", () =>
   s.chat.status("Needs input","input");
   assert.equal(s.elements["mobile-chat-status"].attributes["aria-label"],"Needs input");
   assert.equal(s.elements["mobile-chat-status"].dataset.status,"input");
+});
+
+test("mobile options preserve secondary controls and restore their desktop locations", () => {
+  const s = setup();
+  const ids = ["composer-options", "send-work-mobile-chat", "fork-origin"];
+  const homes = new Map(ids.map(id => [id, s.chat.homes.find(home => home.element === s.elements[id]).marker]));
+  assert.equal(s.elements["composer-options"].parentElement, s.elements["mobile-sheet-composer"]);
+  assert.equal(s.elements["send-work-mobile-chat"].parentElement, s.elements["mobile-sheet-composer"]);
+  assert.equal(s.elements["fork-origin"].parentElement, s.elements["mobile-sheet-info"]);
+  s.chat.open("context");
+  assert.equal(s.elements["mobile-sheet-composer"].hidden, true);
+  s.chat.open("actions");
+  assert.equal(s.elements["mobile-sheet-composer"].hidden, false);
+  s.media.matches = false; s.media.change();
+  for (const id of ids) {
+    assert.equal(s.elements[id].parentElement, homes.get(id).parentElement);
+    const siblings = homes.get(id).parentElement.children;
+    assert.equal(siblings.indexOf(s.elements[id]), siblings.indexOf(homes.get(id)) + 1);
+  }
+});
+
+test("composer options close the sheet before opening another dialog", () => {
+  const s = setup(), button = new Element("button-schedule");
+  s.elements["composer-options"].append(button);
+  s.chat.open("actions");
+  s.elements["mobile-thread-sheet"].fire("click", {target: button});
+  assert.equal(s.elements["mobile-thread-sheet"].open, false);
+  s.chat.open("actions");
+  const sendWork = s.elements["send-work-mobile-chat"];
+  sendWork.name = "button-send-work";
+  s.elements["mobile-thread-sheet"].fire("click", {target: sendWork});
+  assert.equal(s.elements["mobile-thread-sheet"].open, false);
+});
+
+test("touch prompts follow viewport changes without replacing the draft", () => {
+  const s = setup();
+  s.elements.message.value = "Keep this draft";
+  s.chat.placeholder("Enter to send · Shift + Enter for a new line", "Message…");
+  assert.equal(s.elements.message.placeholder, "Message…");
+  s.media.matches = false; s.media.change();
+  assert.equal(s.elements.message.placeholder, "Enter to send · Shift + Enter for a new line");
+  s.media.matches = true; s.media.change();
+  assert.equal(s.elements.message.placeholder, "Message…");
+  s.chat.placeholder("Enter to steer · Tab to queue", "Add a follow-up…");
+  assert.equal(s.elements.message.placeholder, "Add a follow-up…");
+  assert.equal(s.elements.message.value, "Keep this draft");
+});
+
+test("the mobile dispatcher dock retains its own composer options", () => {
+  const s = setup(), options = s.elements["composer-options"];
+  const marker = s.chat.homes.find(home => home.element === options).marker;
+  s.chat.layoutComposer(true);
+  assert.equal(options.parentElement, marker.parentElement);
+  s.chat.sync();
+  assert.equal(options.parentElement, marker.parentElement, "Viewport changes preserve dock controls");
+  s.chat.layoutComposer(false);
+  assert.equal(options.parentElement, s.elements["mobile-sheet-composer"]);
 });

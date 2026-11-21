@@ -38,6 +38,14 @@
   --sb-primary-ink: #0f1217;
   --mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
   --mobile-chat-header-height: 56px;
+  --mobile-chat-header-inset: 5px; /* drift-ok: mobile layout token in the DESIGN.md implementation source. */
+  --mobile-chat-inset: 12px; /* drift-ok: mobile layout token in the DESIGN.md implementation source. */
+  --mobile-chat-gap: 8px; /* drift-ok: mobile layout token in the DESIGN.md implementation source. */
+  --mobile-chat-title-size: 15px; /* drift-ok: mobile layout token in the DESIGN.md implementation source. */
+  --mobile-chat-message-size: 15px; /* drift-ok: mobile layout token in the DESIGN.md implementation source. */
+  --mobile-chat-input-size: 16px; /* drift-ok: mobile layout token in the DESIGN.md implementation source. */
+  --mobile-chat-input-leading: 1.5;
+  --mobile-chat-control-padding: 6px; /* drift-ok: mobile layout token in the DESIGN.md implementation source. */
   --mobile-draft-max-height: 320px;
   --mobile-input-max-height: 240px;
   --chat-control-size: 44px;
@@ -446,6 +454,8 @@ details.tool > pre { padding: 8px 0 10px 23px; font-size: 11px; }
 pre { font: 11px/1.7 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 15px 15px; margin: 0; max-height: 400px; overflow: auto; }
 .composer { position: relative; flex-shrink: 0; margin: 0 28px 12px; padding: 8px 12px; border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; box-shadow: 0 3px 12px color-mix(in srgb, var(--ink) 3%, transparent); }
 .composer:focus-within { border-color: var(--hover-line); box-shadow: none; }
+.composer-toolbar, .composer-options { display: contents; }
+.mobile-action-label { display: none; }
 .composer-model { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 11px; }
 .model-trigger { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; padding: 5px 7px; margin-left: -7px; border-color: transparent; background: transparent; font-size: 12px; font-weight: 500; }
 .effort-trigger { color: var(--muted); margin-left: 0; }
@@ -768,39 +778,56 @@ body.mobile-chat:has(#conversation:not([hidden])) {
 }
 body.mobile-chat:has(#conversation:not([hidden])) > main { height: 100%; }
 body.mobile-chat:has(#conversation:not([hidden])) .sidebar,
-body.mobile-chat:has(#conversation:not([hidden])) .workspace-bar { display: none; }
+body.mobile-chat:has(#conversation:not([hidden])) .workspace-bar,
+body.mobile-chat:has(#conversation:not([hidden])) > main > .conversation-tab-strip,
+body.mobile-chat:has(#conversation:not([hidden])) > main > .projects-bar { display: none; }
 body.mobile-chat .conversation { display: flex; flex-direction: column; }
 body.mobile-chat .conversation-main { flex: 1; overflow: hidden; }
 body.mobile-chat .conversation-content { display: flex; min-height: var(--mobile-chat-header-height); overflow: hidden; }
-body.mobile-chat .conversation-head { flex-shrink: 0; flex-wrap: nowrap; gap: 8px; padding: 6px 12px; min-height: var(--mobile-chat-header-height); }
+body.mobile-chat .conversation-head { flex-shrink: 0; flex-wrap: nowrap; gap: var(--mobile-chat-gap); padding: var(--mobile-chat-header-inset) var(--mobile-chat-inset); min-height: var(--mobile-chat-header-height); }
 body.mobile-chat .conversation-heading { flex: 1; min-width: 0; }
-body.mobile-chat .conversation-head h1 { font: 550 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+body.mobile-chat .conversation-head h1 { font: inherit; font-size: var(--mobile-chat-title-size); font-weight: 550; letter-spacing: 0; }
 body.mobile-chat .thread-title { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-block: 8px; }
 body.mobile-chat .title-editor input { font-size: 16px; }
 body.mobile-chat .title-editor-actions small:not([role="alert"]) { display: none; }
 body.mobile-chat .conversation-controls { flex-shrink: 0; }
 body.mobile-chat .mobile-chat-control { display: inline-flex; align-items: center; justify-content: center; }
-body.mobile-chat button.mobile-chat-control { min-width: 44px; min-height: 44px; padding: 6px; font-size: 24px; }
+body.mobile-chat button.mobile-chat-control { min-width: var(--chat-control-size); min-height: var(--chat-control-size); padding: var(--mobile-chat-control-padding); border-color: transparent; }
+body.mobile-chat .mobile-chat-control svg { width: var(--chat-control-icon); height: var(--chat-control-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 body.mobile-chat .mobile-chat-status { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
 body.mobile-chat .mobile-chat-status[data-status="running"] { background: var(--accent); }
 body.mobile-chat .mobile-chat-status[data-status="input"] { background: var(--warm); }
 body.mobile-chat #toggle-context, body.mobile-chat #expand-chat { display: none; }
 body.mobile-chat .timeline { min-height: 0; overflow: auto; overscroll-behavior-y: contain; padding: 16px; }
+body.mobile-chat .message { font-size: var(--mobile-chat-message-size); }
 body.mobile-chat .turn-elapsed { padding-inline: 16px; } /* drift-ok: matches the existing mobile message inset. */
 body.mobile-chat .requests { margin: 0 12px; max-height: 35%; overflow: auto; }
 body.mobile-chat .composer { margin: 0 12px max(8px, env(safe-area-inset-bottom)); }
+body.mobile-chat .agent-recipient { display: none; }
 body.mobile-chat:not(.dispatcher-workspace) .composer { display: flex; flex-direction: column; flex-shrink: 1; min-height: 0; }
 body.mobile-chat .composer > :not(.composer-draft) { flex-shrink: 0; }
 /* Give the editor its own scroll area. Feedback and attachments must never
    scroll the textarea itself out of the visible draft. */
 body.mobile-chat .composer-draft { display: flex; flex-direction: column; min-height: 0; max-height: min(var(--mobile-draft-max-height), calc(var(--mobile-viewport-height, 100dvh) * .55)); }
 body.mobile-chat .composer-draft > :not(textarea) { flex-shrink: 1; min-height: 0; overflow-y: auto; }
-body.mobile-chat .composer textarea { font-size: 16px; max-height: min(var(--mobile-input-max-height), calc(var(--mobile-viewport-height, 100dvh) * .45)); overflow-y: auto; resize: none; }
+body.mobile-chat .composer textarea { font-size: var(--mobile-chat-input-size); line-height: var(--mobile-chat-input-leading); max-height: min(var(--mobile-input-max-height), calc(var(--mobile-viewport-height, 100dvh) * .45)); overflow-y: auto; resize: none; }
 body.mobile-chat .composer-draft > .command-feedback { flex-shrink: 0; }
 body.mobile-chat .command-feedback { padding: 0; border: 0; background: transparent; color: var(--muted); }
-body.mobile-chat .composer-model { margin-top: 6px; gap: 6px; }
+body.mobile-chat .composer-toolbar { display: flex; align-items: center; gap: var(--mobile-chat-gap); margin-top: var(--mobile-chat-gap); min-width: 0; }
+body.mobile-chat.dispatcher-workspace .composer-toolbar { display: contents; }
+body.mobile-chat .composer-model { flex: 1; flex-wrap: nowrap; min-width: 0; margin: 0; gap: var(--mobile-chat-control-padding); }
+body.mobile-chat .composer-model .attach-image { flex-shrink: 0; }
+body.mobile-chat #model-trigger { min-width: 0; }
+body.mobile-chat #effort-trigger { flex-shrink: 0; padding-inline: 0; }
+body.mobile-chat .model-chevron { display: none; }
+body.mobile-chat .model-trigger { min-height: var(--chat-control-size); }
+body.mobile-chat .composer-model > #model-picker-status:empty { display: none; }
 body.mobile-chat .composer-footer > span { display: none; }
-body.mobile-chat .composer-footer { justify-content: flex-end; }
+body.mobile-chat .composer-footer { flex-shrink: 0; justify-content: flex-end; margin: 0; }
+body.mobile-chat .composer-footer > div { flex-wrap: nowrap; }
+body.mobile-chat #send { font-size: 0; }
+body.mobile-chat #send > span { display: none; }
+body.mobile-chat #send::after { content: "↑"; font-size: var(--chat-control-icon); }
 body.mobile-chat .composer-footer button { min-height: 36px; }
 body.mobile-chat .mobile-thread-sheet {
   position: fixed; inset: auto 0 max(0px, calc(100dvh - var(--mobile-viewport-height, 100dvh) - var(--mobile-viewport-top, 0px)));
@@ -813,6 +840,12 @@ body.mobile-chat .mobile-thread-sheet[open] { display: flex; flex-direction: col
 .mobile-thread-sheet #mobile-show-context, #mobile-sheet-info { flex-shrink: 0; }
 .mobile-sheet-heading h2 { flex: 1; font: 600 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; margin: 0; }
 .mobile-sheet-heading button { min-width: 44px; min-height: 44px; }
+body.mobile-chat #mobile-sheet-composer, body.mobile-chat .mobile-thread-sheet .composer-options { display: flex; flex-direction: column; align-items: stretch; gap: var(--mobile-chat-control-padding); }
+body.mobile-chat #mobile-sheet-composer { border-top: 1px solid var(--line); margin-top: var(--mobile-chat-inset); padding-top: var(--mobile-chat-inset); }
+body.mobile-chat #mobile-sheet-composer button { display: flex; align-items: center; gap: var(--mobile-chat-inset); width: 100%; min-height: var(--chat-control-size); padding: var(--mobile-chat-inset); text-align: left; font: inherit; border-color: transparent; }
+body.mobile-chat .mobile-thread-sheet #send-work-mobile-chat { justify-content: flex-start; }
+body.mobile-chat .mobile-thread-sheet .session-actions button { border-color: transparent; }
+body.mobile-chat .mobile-thread-sheet .mobile-action-label { display: inline; }
 body.mobile-chat .mobile-thread-sheet .session-actions { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
 .mobile-thread-sheet .session-actions button, .mobile-thread-sheet #mobile-show-context { min-height: 48px; width: 100%; text-align: left; padding: 12px; font-size: 15px; }
 .mobile-thread-sheet .status, .mobile-thread-sheet #snooze-status { margin: 0; padding: 8px 12px; font-size: 12px; }
