@@ -2219,9 +2219,19 @@ Identity is inferred. The creating session may manage a schedule; a destination
 session may read it. Access to another creator's or UI-created schedule requires
 explicit user instruction naming the ID and `--authorized-schedule-id <same-id>`.
 This flag is an authorization assertion by the acting agent. Enabling YOLO on
-creation or escalation requires explicit consent and `--yolo-authorized`.
+creation of a new agent or any edit retaining YOLO requires explicit consent
+for the resulting execution and `--yolo-authorized`. This includes edits to
+existing YOLO schedules and targets whose current permissions are YOLO; edits
+disabling YOLO need no assertion. Existing user authorization can supply it
+without a separate approval step. The app-request history retains caller and
+authorization assertions alongside the exact submitted changes; creation/mutation
+receipts expose them in `authorization`. Resuming or running another creator's
+YOLO schedule also requires `--yolo-authorized`. Existing-thread permissions
+are checked when processing the request and may change independently before
+delivery. The schedule-ID
+assertion is an agent trust contract, not an independently verified capability.
 The MCP equivalents are `authorized_schedule_id` and `yolo_authorized`.
-Use identical request IDs and arguments on retries; schedule mutations and their
-receipts commit together. Browser CSRF protections remain unchanged.
+Use identical request IDs and arguments on retries; schedule creation/mutations
+and their receipts commit together. Browser CSRF protections remain unchanged.
 See the [agent coordination skill](../plugins/agent-coord/skills/agent-coordination/SKILL.md)
 for examples and recurrence semantics. CLI `--help` documents each action.

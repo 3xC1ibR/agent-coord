@@ -24,6 +24,8 @@ def validate_request(control, sender, payload):
             allowed.add("version")
         if action == "edit":
             allowed |= EDIT_FIELDS | {"yolo_authorized"}
+        if action in {"resume", "run_now"}:
+            allowed.add("yolo_authorized")
     if set(payload) - allowed:
         raise CoordinationError("Unknown field for this schedule action.")
     if "yolo_authorized" in payload and type(payload["yolo_authorized"]) is not bool:
@@ -96,6 +98,10 @@ def execute(worker, request, payload):
     schedules = worker.sessions.schedules
     action = payload.get("action", "create")
     sender = request["sender_session_id"]
+    # The exact assertions also remain in the durable app-request payload.
+    authorization = {"sender_session_id": sender,
+                     "authorized_schedule_id": payload.get("authorized_schedule_id"),
+                     "yolo_authorized": payload.get("yolo_authorized", False)}
     if action == "create":
         body = {key: payload[key] for key in ("message", "run_at", "timezone", "recurrence") if key in payload}
         body["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:schedule:" + request["request_id"]))
@@ -103,7 +109,7 @@ def execute(worker, request, payload):
             body["target_thread_id"] = sender
         else:
             body["settings"] = payload["settings"]
-        return schedules.create(body, creator_session_id=sender)
+        return schedules.create(body, creator_session_id=sender, request_id=request["request_id"], authorization=authorization)
     with schedules.store.reading(), schedules.store._connection() as db:
         if action == "list":
             rows = db.execute("""SELECT * FROM scheduled_prompts WHERE creator_session_id = ?
@@ -117,6 +123,11 @@ def execute(worker, request, payload):
     if action == "read":
         return describe(schedules, row)
     body = {"action": action, "version": payload["version"]}
+    if action in {"resume", "run_now"} and row["creator_session_id"] != sender:
+        settings = (worker.sessions._record(row["target_thread_id"])
+                    if row["target_thread_id"] else schedules._describe(row)["settings"])
+        if settings.get("yolo") and not payload.get("yolo_authorized"):
+            raise CoordinationError("Resuming or running another creator's yolo schedule requires yolo_authorized=true.")
     if action == "edit":
         item = schedules._describe(row)
         body.update({key: item[key] for key in ("message", "run_at", "timezone", "recurrence", "mentions")})
@@ -132,10 +143,12 @@ def execute(worker, request, payload):
                 if not isinstance(payload["settings"], dict):
                     raise CoordinationError("settings must be an object.")
                 body["settings"].update(payload["settings"])
-            if body["settings"].get("yolo") and not item["settings"].get("yolo") and not payload.get("yolo_authorized"):
-                raise CoordinationError("Enabling yolo requires yolo_authorized=true and explicit user authorization.")
+        effective_settings = (worker.sessions._record(row["target_thread_id"])
+                              if row["target_thread_id"] else body["settings"])
+        if effective_settings.get("yolo") and not payload.get("yolo_authorized"):
+            raise CoordinationError("Editing a yolo schedule requires yolo_authorized=true confirming user authorization for the changed execution.")
         body.update({key: payload[key] for key in EDIT_FIELDS - {"settings"} if key in payload})
         if "message" in payload:
             # Old mention offsets belong to the old text.
             body["mentions"] = []
-    return schedules.change(payload["schedule_id"], body, request_id=request["request_id"])
+    return schedules.change(payload["schedule_id"], body, request_id=request["request_id"], authorization=authorization)

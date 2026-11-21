@@ -136,7 +136,7 @@ class ScheduledPrompts:
             record["effort"] = selected.get("defaultReasoningEffort")
         return message, run_at, timezone, {**record, **associations}, mentions, None, recurrence
 
-    def create(self, body, *, creator_session_id=None):
+    def create(self, body, *, creator_session_id=None, request_id=None, authorization=None):
         try:
             schedule_id = str(uuid.UUID(body.get("id", "")))
         except (ValueError, TypeError, AttributeError) as exc:
@@ -149,7 +149,9 @@ class ScheduledPrompts:
                 self._get(db, schedule_id)
                 if row["request_json"] != request:
                     raise CoordinationError("This prompt was already saved. Reopen it from Scheduled prompts to edit it.")
-                return self._describe(row)
+                result = self._describe(row)
+                self._complete_agent_request(db, request_id, result, authorization)
+                return result
         message, run_at, timezone, settings, mentions, target, recurrence = self._validate(body)
         now = self.store.clock()
         with self.store._connection() as db:
@@ -163,10 +165,12 @@ class ScheduledPrompts:
             row = self._get(db, schedule_id)
             if row["request_json"] != request:
                 raise CoordinationError("This scheduled prompt ID has already been used.")
+            result = self._describe(row)
+            self._complete_agent_request(db, request_id, result, authorization)
         self._changed()
-        return self._describe(row)
+        return result
 
-    def change(self, schedule_id, body, *, request_id=None):
+    def change(self, schedule_id, body, *, request_id=None, authorization=None):
         action = body.get("action")
         values = None
         if action == "edit":
@@ -222,17 +226,23 @@ class ScheduledPrompts:
                     version = version + 1, updated_at = ? WHERE id = ?""",
                     ("scheduled" if action == "run_now" else "cancelled", self.store.clock() if action == "run_now" else row["run_at"], self.store.clock(), schedule_id))
             result = self._describe(self._get(db, schedule_id))
-            if request_id is not None:
-                # The transition and durable agent receipt commit together. A
-                # crash after commit cannot turn an applied change into a retry.
-                changed = db.execute("""UPDATE app_control_requests SET status = 'completed',
-                    result_json = ?, error = NULL, updated_at = ? WHERE request_id = ?
-                    AND operation = 'schedule' AND status = 'running'""",
-                    (json.dumps(result), self.store.clock(), request_id)).rowcount
-                if changed != 1:
-                    raise CoordinationError("The schedule request is no longer running.")
+            self._complete_agent_request(db, request_id, result, authorization)
         self._changed()
         return result
+
+    def _complete_agent_request(self, db, request_id, result, authorization):
+        if request_id is None:
+            return
+        if authorization is not None:
+            result["authorization"] = authorization
+        # Creation/change and the durable receipt share the same commit. A
+        # crash after commit cannot leave an applied operation unconfirmed.
+        changed = db.execute("""UPDATE app_control_requests SET status = 'completed',
+            result_json = ?, error = NULL, updated_at = ? WHERE request_id = ?
+            AND operation = 'schedule' AND status = 'running'""",
+            (json.dumps(result), self.store.clock(), request_id)).rowcount
+        if changed != 1:
+            raise CoordinationError("The schedule request is no longer running.")
 
     def _changed(self):
         self.sessions._publish("browser/schedules", {})

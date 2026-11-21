@@ -130,7 +130,9 @@ class ScheduleControlTests(unittest.TestCase):
         self.assertIn('yolo_authorized', denied['error'])
         enabled = self.change(item, 'edit', settings={'yolo': True}, yolo_authorized=True)
         self.assertTrue(enabled['settings']['yolo'])
-        retained = self.change(enabled, 'edit', message='Keep permissions')
+        denied = self.request(action='edit', schedule_id=enabled['id'], version=enabled['version'], message='Keep permissions')
+        self.assertEqual(denied['status'], 'failed')
+        retained = self.change(enabled, 'edit', message='Keep permissions', yolo_authorized=True)
         self.assertTrue(retained['settings']['yolo'])
         self.assertFalse(self.change(retained, 'edit', settings={'yolo': False})['settings']['yolo'])
 
@@ -268,3 +270,136 @@ class ScheduleControlTests(unittest.TestCase):
         submitted = next(request for request in observed if request['kind'] == 'cli')
         self.assertTrue(submitted['payload']['defer_wait'])
         self.assertEqual(submitted['payload']['stdin'], receipt['result']['message'])
+
+    def test_edits_of_existing_yolo_content_require_consent_and_record_actor(self):
+        item = self.change(self.create(), 'edit', settings={'yolo': True}, yolo_authorized=True)
+        for sender in ('creator', 'other'):
+            for changes in ({'message': 'Changed full-access work'},
+                            {'recurrence': {'frequency': 'interval', 'minutes': 1}},
+                            {'settings': {'model': 'available-model'}},
+                            {'settings': {'client': 'codex', 'cwd': str(self.root)}},
+                            {'run_at': self.now + 900}, {'timezone': 'America/Chicago'}):
+                fields = {'authorized_schedule_id': item['id']} if sender == 'other' else {}
+                denied = self.request(sender=sender, action='edit', schedule_id=item['id'],
+                                      version=item['version'], **fields, **changes)
+                self.assertEqual(denied['status'], 'failed', denied)
+                self.assertIn('yolo_authorized', denied['error'])
+        changed = self.change(item, 'edit', sender='other', authorized_schedule_id=item['id'],
+                              yolo_authorized=True, message='User-authorized changed full-access work')
+        self.assertEqual(changed['authorization'], {'sender_session_id': 'other',
+                         'authorized_schedule_id': item['id'], 'yolo_authorized': True})
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute('SELECT * FROM app_control_requests WHERE request_id = ?',
+                             (f'operation-{self.serial}',)).fetchone()
+        self.assertEqual(row['sender_session_id'], 'other')
+        self.assertEqual(json.loads(row['payload_json'])['authorized_schedule_id'], item['id'])
+        self.assertTrue(json.loads(row['payload_json'])['yolo_authorized'])
+        self.assertEqual(json.loads(row['result_json'])['authorization'], changed['authorization'])
+        disabled = self.change(changed, 'edit', settings={'yolo': False})
+        edited = self.change(disabled, 'edit', message='Default-permission replacement')
+        denied = self.request(action='edit', schedule_id=item['id'], version=edited['version'], settings={'yolo': True})
+        self.assertEqual(denied['status'], 'failed')
+        self.assertTrue(self.change(edited, 'edit', settings={'yolo': True}, yolo_authorized=True)['settings']['yolo'])
+
+    def test_target_yolo_is_checked_at_execution_instead_of_enqueue(self):
+        target = self.sessions.create({'cwd': str(self.root), 'model': 'available-model'})['session']['thread_id']
+        item = self.request(sender=target, mode='self', message='Original prompt', run_at=self.now + 600,
+                            timezone='UTC')['result']
+        queued = schedule_prompt({'session_id': target, 'wait_seconds': 0, 'action': 'edit',
+            'schedule_id': item['id'], 'version': item['version'], 'message': 'Queued replacement',
+            'request_id': 'target-edit-before-yolo'}, store=self.store)
+        self.sessions.update(target, {'yolo': True})
+        self.worker.process_once()
+        denied = self.worker.control.status(queued['request_id'])
+        self.assertEqual(denied['status'], 'failed', denied)
+        self.assertIn('yolo_authorized', denied['error'])
+        for changes in ({'message': 'Full-access replacement'}, {'recurrence': {'frequency': 'daily'}}):
+            denied = self.request(sender=target, action='edit', schedule_id=item['id'], version=item['version'], **changes)
+            self.assertEqual(denied['status'], 'failed', denied)
+        changed = self.change(item, 'edit', sender=target, message='Authorized full-access replacement', yolo_authorized=True)
+        self.assertTrue(changed['settings']['yolo'])
+        self.assertEqual(changed['authorization']['sender_session_id'], target)
+
+    def test_schedule_yolo_change_after_guard_still_conflicts_on_version(self):
+        item = self.create()
+        original = self.sessions.schedules.change
+        def concurrent_yolo_change(schedule_id, body, **keywords):
+            with self.store._connection() as db:
+                db.execute("UPDATE scheduled_prompts SET settings_json = json_set(settings_json, '$.yolo', json('true')), version = version + 1 WHERE id = ?", (schedule_id,))
+            return original(schedule_id, body, **keywords)
+        with patch.object(self.sessions.schedules, 'change', side_effect=concurrent_yolo_change):
+            denied = self.request(action='edit', schedule_id=item['id'], version=item['version'], message='Concurrent edit')
+        self.assertEqual(denied['status'], 'failed')
+        self.assertIn('changed', denied['error'])
+        self.assertEqual(self.request(action='read', schedule_id=item['id'])['result']['message'], item['message'])
+
+    def test_cross_creator_resume_and_run_now_require_yolo_assertion(self):
+        recurring = self.change(self.create(recurrence={'frequency': 'daily'}), 'edit', settings={'yolo': True}, yolo_authorized=True)
+        paused = self.change(recurring, 'pause')
+        denied = self.request(sender='other', action='resume', schedule_id=paused['id'], version=paused['version'], authorized_schedule_id=paused['id'])
+        self.assertEqual(denied['status'], 'failed')
+        resumed = self.change(paused, 'resume', sender='other', authorized_schedule_id=paused['id'], yolo_authorized=True)
+        self.assertTrue(resumed['authorization']['yolo_authorized'])
+        self.change(resumed, 'cancel')
+        item = self.change(self.create(), 'edit', settings={'yolo': True}, yolo_authorized=True)
+        self.now += 1000
+        self.sessions.schedules.process_once()
+        missed = self.request(action='read', schedule_id=item['id'])['result']
+        denied = self.request(sender='other', action='run_now', schedule_id=item['id'], version=missed['version'], authorized_schedule_id=item['id'])
+        self.assertEqual(denied['status'], 'failed')
+        ready = self.change(missed, 'run_now', sender='other', authorized_schedule_id=item['id'], yolo_authorized=True)
+        self.assertEqual(ready['state'], 'scheduled')
+
+    def test_create_crash_after_insert_preserves_completed_receipt_through_reconcile(self):
+        original = self.sessions.schedules.create
+        def crash_after_create(*args, **fields):
+            original(*args, **fields)
+            raise RuntimeError('crash after durable create')
+        with patch.object(self.sessions.schedules, 'create', side_effect=crash_after_create):
+            receipt = self.request(mode='new', message='Durable creation', run_at=self.now + 600, timezone='UTC',
+                settings={'cwd': str(self.root), 'client': 'codex', 'model': 'available-model'})
+        self.assertEqual(receipt['status'], 'completed', receipt)
+        self.assertEqual(receipt['result']['message'], 'Durable creation')
+        self.assertEqual(receipt['result']['authorization']['sender_session_id'], 'creator')
+        self.now += 120
+        self.worker.control._reconcile()
+        self.assertEqual(self.worker.control.status(receipt['request_id']), receipt)
+        self.worker.control.complete(receipt['request_id'], error='Late worker error must not replace success')
+        self.assertEqual(self.worker.control.status(receipt['request_id']), receipt)
+        self.assertEqual(len(self.sessions.schedules.list()), 1)
+
+    def test_existing_create_id_completes_once_without_overwriting_saved_receipt(self):
+        import uuid
+        key = 'existing-create-id'
+        payload = {'mode': 'new', 'message': 'Existing creation', 'run_at': self.now + 600, 'timezone': 'UTC',
+                   'settings': {'cwd': str(self.root), 'client': 'codex', 'model': 'available-model'}}
+        queued = schedule_prompt({'session_id': 'creator', 'wait_seconds': 0, 'request_id': key, **payload}, store=self.store)
+        body = {name: payload[name] for name in ('message', 'run_at', 'timezone', 'settings')}
+        body['id'] = str(uuid.uuid5(uuid.NAMESPACE_URL, 'agent-coord:schedule:' + key))
+        self.sessions.schedules.create(body, creator_session_id='creator')
+        self.assertTrue(self.worker.control.claim(key, self.worker.owner))
+        with self.assertRaisesRegex(CoordinationError, 'already saved'):
+            self.sessions.schedules.create({**body, 'message': 'Conflicting body'}, creator_session_id='creator', request_id=key)
+        self.assertEqual(self.worker.control.status(key)['status'], 'running')
+        self.assertIsNone(self.worker.control.status(key)['result'])
+        item = self.sessions.schedules.create(body, creator_session_id='creator', request_id=key,
+                  authorization={'sender_session_id': 'creator', 'authorized_schedule_id': None, 'yolo_authorized': False})
+        saved = self.worker.control.status(key)
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(saved['result'], item)
+        self.now += 900
+        self.sessions.schedules.process_once()
+        with self.assertRaisesRegex(CoordinationError, 'no longer running'):
+            self.sessions.schedules.create(body, creator_session_id='creator', request_id=key)
+        self.assertEqual(self.worker.control.status(key), saved)
+        retry = schedule_prompt({'session_id': 'creator', 'wait_seconds': 0, 'request_id': key, **payload}, store=self.store)
+        self.assertEqual(retry['result'], saved['result'])
+        self.assertEqual(len(self.sessions.schedules.list()), 1)
+
+    def test_create_failure_before_receipt_rolls_back_insert(self):
+        with patch.object(self.sessions.schedules, '_complete_agent_request', side_effect=RuntimeError('receipt failure before commit')):
+            failed = self.request(mode='new', message='Must roll back', run_at=self.now + 600, timezone='UTC',
+                settings={'cwd': str(self.root), 'client': 'codex', 'model': 'available-model'})
+        self.assertEqual(failed['status'], 'failed')
+        self.assertIn('receipt failure before commit', failed['error'])
+        self.assertEqual(self.sessions.schedules.list(), [])

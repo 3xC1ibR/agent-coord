@@ -718,7 +718,7 @@ and `model`. `--message -` reads stdin. Use `--wait 0..30` (default 5), or MCP
 `wait_seconds`, then inspect `thread request-status --request-id <key>` until
 completed. Reuse the same request ID and identical arguments after a lost response;
 never increment a version or invent a new key to retry an uncertain operation.
-Mutation receipts commit atomically with the schedule change.
+Creation and mutation receipts commit atomically with the schedule operation.
 
 Caller identity is inferred and cannot be impersonated. Creators may manage
 their schedules; targets may list/read schedules addressed to them. For another
@@ -727,10 +727,23 @@ creator's or a UI-created schedule, use `--authorized-schedule-id <same-id>`
 and names that schedule ID. This is the agent's explicit authorization assertion,
 not a way to discover or modify unrelated schedules. Old schedules without
 recoverable creator provenance also require this assertion.
-Enabling YOLO on creation or escalation through edit requires explicit user
-consent plus `--yolo-authorized` (MCP `yolo_authorized: true`); retaining an
-already enabled setting does not require a new grant. Self schedules use their
-conversation's permissions at delivery. Version conflicts require a fresh read
+Creating a new YOLO agent or editing any schedule that will execute with YOLO
+requires explicit user consent for that execution plus `--yolo-authorized`
+(MCP `yolo_authorized: true`). This includes changes to an already-YOLO schedule
+and existing-thread schedules whose conversation currently uses YOLO. Disabling
+YOLO requires no such assertion. Self schedules use their conversation's permissions
+at delivery. An existing user instruction authorizing that edit and its full-access
+execution is sufficient; do not ask again merely to populate the assertion.
+Resuming or running another creator's YOLO schedule also requires the assertion;
+pausing/cancelling requires no new YOLO assertion. The check uses the saved
+schedule version verified by the mutation and the target's permissions when
+processing the request. A target's permissions can still change independently
+afterward; existing-thread schedules use its settings at delivery.
+Creation/mutation receipts expose `authorization` with `sender_session_id`,
+`authorized_schedule_id` and `yolo_authorized`. The durable app-request history
+stores these with the exact submitted changes and final receipt. The schedule-ID
+assertion follows the supported agent trust contract; it is not an independently
+verified user capability. Version conflicts require a fresh read
 and a new reviewed change. Pause/cancel prevent future recurring runs; a run
 already in progress keeps its recorded outcome. No schedule-management command
 bypasses browser CSRF checks or retries uncertain provider delivery.

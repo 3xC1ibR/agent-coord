@@ -166,7 +166,7 @@ SCHEDULE_TOOL = {
         "action defaults to create (mode, message, run_at, timezone required). Mutations require schedule_id and current version. "
         "Creators manage schedules; targets may read. Other access requires explicit user authorization naming authorized_schedule_id. "
         "Edit fields are partial; recurrence null removes repetition. run_now applies to missed prompts only. "
-        "Enabling yolo requires yolo_authorized=true with explicit user consent. "
+        "Creating a new yolo agent, editing a yolo schedule, or resuming/running another creator's yolo schedule requires yolo_authorized=true with explicit user consent. "
         "Choose self for your own app conversation, or new for a new agent with explicit provider settings. "
         "Self uses the conversation's settings at delivery. A queued receipt is not a saved schedule; inspect "
         "agent-coord thread request-status --request-id <id>. Reuse request_id on retry. "
@@ -181,7 +181,7 @@ SCHEDULE_TOOL = {
             "schedule_id": {"type": "string", "description": "Saved schedule ID; required except for create/list."},
             "version": {"type": "integer", "minimum": 1, "description": "Current version from read/list; required for mutations."},
             "authorized_schedule_id": {"type": "string", "description": "Only with explicit user instruction naming this exact schedule ID; permits access to another creator's or UI-created schedule."},
-            "yolo_authorized": {"type": "boolean", "description": "Confirms explicit user authorization to enable full machine access."},
+            "yolo_authorized": {"type": "boolean", "description": "Confirms explicit user authorization for full machine access on creation or the changed execution when editing a yolo schedule."},
             "mode": {"type": "string", "enum": ["self", "new"]},
             "message": {"type": "string", "minLength": 1, "maxLength": 100000},
             "run_at": {"type": "number", "description": "Future execution time as Unix epoch seconds (UTC)."},

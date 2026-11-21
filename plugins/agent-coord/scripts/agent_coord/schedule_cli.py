@@ -36,7 +36,8 @@ def add_parser(commands):
             command.add_argument('--timezone', required=action == 'create', help='IANA time zone.')
             command.add_argument('--recurrence', help='JSON recurrence object; null removes repetition when editing.')
             command.add_argument('--settings', help='JSON provider settings; edits accept partial settings, including yolo.')
-            command.add_argument('--yolo-authorized', action='store_true', help='Confirm explicit user authorization to enable YOLO.')
+        if action in {'create', 'edit', 'resume', 'run-now'}:
+            command.add_argument('--yolo-authorized', action='store_true', help='Confirm explicit user authorization for the resulting YOLO execution.')
 
 
 def execute(arguments, store):
