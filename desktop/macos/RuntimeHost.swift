@@ -209,7 +209,9 @@ final class Backend {
               url.user == nil, url.password == nil, url.path == "/",
               let pid = status["pid"] as? Int32, let instance = status["instance"] as? String,
               let payload = status["payload"] as? String else { throw Self.failure("Invalid runtime handshake.") }
-        let changed = self.instance != instance || completedUpdate
+        // A failed connection can hide every web view while the same runtime
+        // keeps working. Its next valid handshake must restore those views.
+        let changed = process == nil || self.instance != instance || completedUpdate
         // Use retained code even if Sparkle has already replaced the bundle.
         let retained = URL(fileURLWithPath: payload)
         let config = try JSONDecoder().decode(BackendConfiguration.self, from: Data(contentsOf: retained.appendingPathComponent("backend.json")))
