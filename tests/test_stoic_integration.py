@@ -70,7 +70,11 @@ class FakeStoic:
             offset = int(parse_qs(urlsplit(path).query).get("offset", [0])[0])
             return {"runs": [run for key, run in self.runs.items() if key not in self.claims][offset:offset + 100]}
         if method == "GET" and path.startswith("/api/execution/runs/"):
-            return copy.deepcopy(self.runs[path.split("/")[-1]])
+            identity = path.split("/")[-1]
+            run = copy.deepcopy(self.runs[identity])
+            if identity in self.claims:
+                run["runner_id"] = self.claims[identity]["runner_id"]
+            return run
         run_id, action = path.split("?")[0].split("/")[-2:]
         if action == "claim":
             prior = self.claims.setdefault(run_id, copy.deepcopy(body))
@@ -348,6 +352,29 @@ class StoicIntegrationTests(unittest.TestCase):
         self.launch()
         self.assertEqual(self.engine.launches, 1)
         self.assertEqual(set(self.remote.claims), {"run-3"})
+
+    def test_terminal_denied_offer_is_retired_without_claim(self):
+        self.enable(allowed_roots=[])
+        self.connector.process_once()
+        self.connector.process_once()
+        self.assertEqual(self.connector.status()["runs"], {"denied": 1})
+        self.remote.runs["run-1"]["status"] = "cancelled"
+        self.connector.process_once()
+        self.assertEqual(self.connector.status()["runs"], {"published": 1})
+        self.assertEqual(self.connector.status()["denied_runs"], [])
+        self.assertEqual(self.remote.claims, {})
+
+    def test_lost_claim_then_narrowed_policy_recovers_and_fails_owned_run(self):
+        self.enable()
+        self.connector.process_once()
+        self.remote.lose_claim_response = True
+        self.connector.process_once()
+        self.assertEqual(self.engine.launches, 0)
+        self.enable(allowed_roots=[])
+        self.connector.process_once()
+        self.assertEqual(self.remote.results["run-1"]["status"], "failed")
+        self.assertEqual(self.engine.launches, 0)
+        self.assertEqual(self.connector.status()["runs"], {"published": 1})
 
     def test_discovery_pages_past_denied_offers(self):
         allowed = copy.deepcopy(self.remote.runs["run-1"])

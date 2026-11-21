@@ -258,10 +258,18 @@ class StoicIntegration:
         source = "stoic:" + config["connection_id"]
         if binding["state"] in {"claiming", "denied"}:
             offered = client.request("GET", path)
+            if offered.get("status") in {"completed", "failed", "cancelled"}:
+                binding["state"] = "published"
+                self._save(run_id, state="published", error=None)
+                return
             if not isinstance(offered.get("settings"), dict):
                 raise StoicRequestError("Stoic returned an invalid execution offer.")
             try:
-                self._authorize_settings(config, offered["settings"])
+                # Recover an already accepted claim even if local policy has
+                # since narrowed; the pre-submit check can then report a
+                # definite not-started failure under the recovered ownership.
+                if offered.get("runner_id") != config["runner_id"]:
+                    self._authorize_settings(config, offered["settings"])
             except CoordinationError as exc:
                 # A local configuration error must not consume a source
                 # occurrence that another appropriately configured runner can do.
