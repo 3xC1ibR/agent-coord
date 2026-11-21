@@ -229,7 +229,8 @@ class ThreadStore:
                                  GROUP BY t.domain ORDER BY uses DESC, t.domain LIMIT 20""", (cwd,)).fetchall()
         return [row["domain"] for row in rows]
 
-    def ensure(self, session_id: str, *, project_cwd: str | None = None) -> dict:
+    def ensure(self, session_id: str, *, project_cwd: str | None = None,
+               creation_title: str | None = None) -> dict:
         session = self.store.get_session(session_id)
         launch_directory = str(Path(project_cwd or session["cwd"]).expanduser().resolve())
         with self.store._connection() as db:
@@ -240,10 +241,15 @@ class ThreadStore:
                 db.execute("INSERT OR IGNORE INTO work_projects VALUES (?, ?, ?)",
                            (project_id, root, Path(root).name or root))
                 now = self.store.clock()
-                title = session["name"] or "New thread"
-                source = "auto" if title in {"New thread", "New session"} else "user"
+                title = creation_title or session["name"] or "New thread"
+                source = "auto" if creation_title is None and title in {"New thread", "New session"} else "user"
                 db.execute("INSERT OR IGNORE INTO work_threads (thread_id, project_id, title, title_source, created_at, updated_at, project_cwd) VALUES (?, ?, ?, ?, ?, ?, ?)",
                            (session_id, project_id, title, source, now, now, launch_directory))
+            elif creation_title is not None:
+                # The provider's startup hook can register the thread before
+                # browser creation returns. Preserve any explicit rename.
+                db.execute("""UPDATE work_threads SET title = ?, title_source = 'user'
+                              WHERE thread_id = ? AND title_source = 'auto'""", (creation_title, session_id))
             # Older installed clients can still create rows after migration.
             if existing is not None and existing["project_cwd"] is None:
                 db.execute("UPDATE work_threads SET project_cwd = ? WHERE thread_id = ? AND project_cwd IS NULL",

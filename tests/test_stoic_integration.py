@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -27,13 +29,13 @@ class FakeExternalWork:
     def get(self, source, request_id):
         return copy.deepcopy(self.rows.get((source, request_id)))
 
-    def submit(self, source, request_id, settings, prompt, name=None):
+    def submit(self, source, request_id, settings, prompt, name=None, *, request_text=None):
         key = source, request_id
         if key not in self.rows:
             self.launches += 1
             self.rows[key] = {"state": "running", "thread_id": "thread-" + request_id,
                               "turn_id": "turn-1", "result": None, "error": None,
-                              "settings": settings, "prompt": prompt}
+                              "settings": settings, "prompt": prompt, "name": name, "request_text": request_text}
         if self.lose_submission_response:
             self.lose_submission_response = False
             raise CoordinationError("Provider response lost")
@@ -128,6 +130,35 @@ class StoicIntegrationTests(unittest.TestCase):
     def complete(self, state="succeeded"):
         row = next(iter(self.engine.rows.values()))
         row.update(state=state, result={"text": "The brief", "artifacts": []})
+
+    def test_job_titles_use_the_local_scheduled_day(self):
+        template = {**self.remote.runs["run-1"], "source": "job"}
+        self.remote.runs = {
+            f"run-{day}": {**template, "id": f"run-{day}", "occurrence_id": str(day),
+                           "scheduled_at": f"2026-11-{day}T00:30:00Z"}
+            for day in (22, 23)
+        }
+        try:
+            with patch.dict(os.environ, {"TZ": "America/Chicago"}):
+                time.tzset()
+                self.launch()
+        finally:
+            time.tzset()
+        self.assertEqual({run: row["name"] for (_, run), row in self.engine.rows.items()}, {
+            "run-22": "Daily economy brief · Sat Nov 21, 2026",
+            "run-23": "Daily economy brief · Sun Nov 22, 2026",
+        })
+
+    def test_unnamed_occurrence_passes_saved_instructions_for_title(self):
+        run = self.remote.runs["run-1"]
+        run.pop("name")
+        run.update(source="job", occurrence_id="today", scheduled_at="2026-11-21T20:36:00Z")
+        self.launch()
+        row = next(iter(self.engine.rows.values()))
+        self.assertIsNone(row["name"])
+        self.assertEqual(row["request_text"], run["prompt"])
+        self.assertTrue(row["prompt"].startswith("Stoic execution context"))
+        self.assertTrue(row["prompt"].endswith(run["prompt"]))
 
     def test_disabled_by_default_and_no_network(self):
         self.connector.process_once()

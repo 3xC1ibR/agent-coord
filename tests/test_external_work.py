@@ -30,7 +30,8 @@ class ExternalWorkTests(unittest.TestCase):
         self.work = self.sessions.external_work
 
     def submit(self, key="job", **kwargs):
-        return self.work.submit("test", key, kwargs.get("settings", {}), kwargs.get("prompt", "Compute."))
+        return self.work.submit("test", key, kwargs.get("settings", {}), kwargs.get("prompt", "Compute."),
+                                name=kwargs.get("name"), request_text=kwargs.get("request_text"))
 
     def finish(self, row, items, status="completed", **extra):
         thread, turn = row["thread_id"], row["turn_id"]
@@ -42,6 +43,45 @@ class ExternalWorkTests(unittest.TestCase):
     @staticmethod
     def answer(text, phase="final_answer"):
         return {"type": "agentMessage", "id": "answer", "phase": phase, "text": text}
+
+    def test_explicit_name_survives_provider_registration_and_automatic_titles(self):
+        native_request = self.sessions.rpc.request
+
+        def register_before_creation(method, params=None):
+            result = native_request(method, params)
+            if method == "thread/start":
+                self.store.register(session_id=result["thread"]["id"], client="codex", cwd=str(self.root))
+            return result
+
+        with patch.object(self.sessions.rpc, "request", register_before_creation):
+            for index, name in enumerate(("  Daily brief  ", "New session")):
+                with self.subTest(name=name):
+                    key = f"named-{index}"
+                    row = self.submit(key, name=name)
+                    thread_id = row["thread_id"]
+                    self.assertEqual(row["state"], "running", row)
+                    self.assertTrue(self.sessions.persistence.flush(key=thread_id))
+                    thread = self.store.threads.checkpoint(thread_id, {
+                        "phase": "investigation", "summary": "Working.", "title": "Generated title"})
+                    self.assertEqual(thread["title"], name)
+                    self.assertEqual(thread["original_request"], "Compute.")
+                    self.store.threads.update(thread_id, title="Explicit rename")
+                    self.assertEqual(self.submit(key, name=name), row)
+                    self.assertEqual(self.store.threads.get(thread_id)["title"], "Explicit rename")
+
+    def test_unnamed_assignment_uses_saved_request_for_automatic_title(self):
+        prompt = 'Stoic execution context (immutable occurrence):\n{}\n\nInstructions:\nWrite a brief.'
+        row = self.submit(prompt=prompt, request_text="Write a brief.")
+        self.assertEqual(row["state"], "running", row)
+        self.assertTrue(self.sessions.persistence.flush(key=row["thread_id"]))
+        thread = self.store.threads.get(row["thread_id"])
+        self.assertEqual(thread["title"], "Write a brief.")
+        self.assertEqual(thread["title_source"], "auto")
+        self.assertEqual(thread["original_request"], "Write a brief.")
+        submitted = next(params for method, params in self.sessions.rpc.calls if method == "turn/start")
+        self.assertEqual(submitted["input"], [{"type": "text", "text": prompt}])
+        unnamed = self.submit("ordinary")
+        self.assertEqual(self.store.threads.get(unnamed["thread_id"])["title"], "Compute.")
 
     def test_concurrent_idempotency_namespace_and_exact_settings(self):
         settings = {"client": "codex", "model": "available-model", "effort": "high", "service_tier": "fast"}

@@ -2118,7 +2118,8 @@ class BrowserSessions:
         repository = str(Path(cwd).expanduser().resolve())
         if not Path(repository).is_dir() or not matches_workspace(repository, self.cwd):
             raise CoordinationError("Choose an existing directory within this UI's workspace.")
-        name = self._text(body.get("name") or "New session", "Session name", 160)
+        name = body.get("name") or "New session"
+        self._text(name, "Session name", 160)
         client = body.get("client", "codex")
         self._provider(client)
         mode = requested_mode(client, body)
@@ -2158,7 +2159,8 @@ class BrowserSessions:
                                (thread_id, repository, name, record["model"], record["effort"], int(yolo), now, now, client, record["service_tier"], record["permission_mode"]))
         try:
             self._capture_settings(thread_id, result)
-            self.store.register(session_id=thread_id, client=client, cwd=repository, name=name)
+            self.store.register(session_id=thread_id, client=client, cwd=repository, name=name,
+                                creation_title=name if body.get("name") else None)
             self.execution.capture(thread_id)
         except Exception:
             # Do not leave a conversation that has no registered session.

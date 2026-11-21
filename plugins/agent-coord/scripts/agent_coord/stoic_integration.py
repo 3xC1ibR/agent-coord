@@ -5,6 +5,7 @@ receipts and delegates all provider execution to ExternalWorkRuntime.
 """
 from __future__ import annotations
 
+from datetime import datetime
 import json
 from pathlib import Path
 import threading
@@ -252,6 +253,26 @@ class StoicIntegration:
         return ("Stoic execution context (immutable occurrence):\n" + json.dumps(context, sort_keys=True)
                 + "\n\nInstructions:\n" + run["prompt"])
 
+    @staticmethod
+    def _conversation_name(run):
+        name = run.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        scheduled_at = run.get("scheduled_at")
+        if run.get("source") != "job" or not run.get("occurrence_id") or not isinstance(scheduled_at, str):
+            return name
+        try:
+            if scheduled_at.endswith("Z"):
+                scheduled_at = scheduled_at[:-1] + "+00:00"
+            scheduled = datetime.fromisoformat(scheduled_at)
+            if scheduled.tzinfo is None:
+                return name
+            local = scheduled.astimezone()
+        except (ValueError, OverflowError, OSError):
+            return name
+        suffix = f" · {local:%a %b} {local.day}, {local.year}"
+        return name[:160 - len(suffix)].rstrip() + suffix
+
     def _synchronize(self, client, config, binding):
         run_id = binding["run_id"]
         path = self._run_path(run_id)
@@ -330,8 +351,10 @@ class StoicIntegration:
             run = json.loads(binding["run_json"])
             try:
                 self._authorize_settings(config, run["settings"])
+                name = self._conversation_name(run)
                 local = self.external_work.submit(source, run_id, run["settings"],
-                                                  run.get("submission_prompt", self._prompt(run)), name=run.get("name"))
+                                                  run.get("submission_prompt", self._prompt(run)), name=name,
+                                                  request_text=run["prompt"] if name is None else None)
             except BrowserBusyError:
                 # Maintenance refuses work before durable admission. Retain
                 # ownership and retry after the runtime resumes.

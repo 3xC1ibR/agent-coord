@@ -130,7 +130,8 @@ class ScheduledPrompts:
             raise CoordinationError("Choose workspace, model, reasoning, and permissions.")
         self.sessions._text(settings.get("cwd"), "Workspace", 4096)
         self.sessions._text(settings.get("model"), "Model", 200)
-        record, associations = self.sessions._creation_settings({**settings, "name": message[:80]})
+        name = self.sessions._text(message[:80], "Session name", 160)
+        record, associations = self.sessions._creation_settings({**settings, "name": name})
         selected = self.sessions._validate_settings(record["model"], record["effort"], record["client"])
         if record["effort"] is None:
             record["effort"] = selected.get("defaultReasoningEffort")

@@ -22,8 +22,9 @@ source when events are missed, expired, or unavailable.
 An assignment contains a source namespace, a request ID, a prompt, and explicit
 provider settings. Settings use the ordinary RF session fields: `cwd`, `client`,
 `model`, `effort`, and `permission_mode` or the legacy `yolo` flag. An optional
-name labels the conversation. The runtime validates the settings through the
-same machinery used for an interactive session. It does not silently replace an
+name becomes the conversation title and is preserved by automatic titling.
+The conversation can still be renamed explicitly. The runtime validates settings
+through the same machinery used for an interactive session. It does not silently replace an
 unavailable model or reasoning setting.
 
 The pair `(source, request_id)` identifies an assignment. Repeating the same
@@ -85,6 +86,10 @@ new-execution capacity.
 User Stop and runtime update admission rules retain their ordinary meaning.
 
 ## Stoic connection
+
+Stoic job conversations append the occurrence's scheduled date in the Ribbon
+Field host's local time zone to the job name. For an unnamed run, Ribbon Field
+derives the title from the saved instructions.
 
 The adapter is disabled by default. Its configuration contains:
 

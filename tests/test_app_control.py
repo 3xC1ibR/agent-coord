@@ -274,7 +274,16 @@ class AppControlTests(unittest.TestCase):
                            "--effort", "high", "--request-id", "research-1", "--wait", "0", "-", stdin="Question\nwith literal $HOME and `text`.")
         self.assertEqual(receipt["status"], "queued")
         self.assertIsNone(receipt["thread_id"])
-        self.worker.process_once()
+        native_request = self.sessions.rpc.request
+
+        def register_before_creation(method, params=None):
+            result = native_request(method, params)
+            if method == "thread/start":
+                self.store.register(session_id=result["thread"]["id"], client="codex", cwd=str(self.root))
+            return result
+
+        with patch.object(self.sessions.rpc, "request", register_before_creation):
+            self.worker.process_once()
         receipt = self.cli("request-status", "--request-id", "research-1")
         self.assertEqual(receipt["status"], "completed")
         record = receipt["result"]
@@ -282,7 +291,9 @@ class AppControlTests(unittest.TestCase):
         self.assertEqual((record["model"], record["effort"], record["yolo"]), ("available-model", "high", True))
         self.assertEqual(record["session_id"], receipt["thread_id"])
         self.assertTrue(record["url"].startswith("agentcoord://thread/" + record["thread_id"]))
-        self.assertIn("literal $HOME", self.store.threads.get(record["thread_id"])["original_request"])
+        thread = self.store.threads.get(record["thread_id"])
+        self.assertIn("literal $HOME", thread["original_request"])
+        self.assertEqual(thread["title"], "Research specialist")
         self.assertEqual(self.cli("settings", "--session-id", record["thread_id"])["model"], "available-model")
 
     def test_cli_explicit_no_reply_matches_default_request_on_retry(self):

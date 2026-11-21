@@ -146,7 +146,7 @@ class ExternalWorkRuntime:
                               " ORDER BY created_at DESC,source,request_id LIMIT ?", (*args, limit)).fetchall()
         return [self._public(row) for row in rows]
 
-    def submit(self, source, request_id, settings, prompt, name=None):
+    def submit(self, source, request_id, settings, prompt, name=None, *, request_text=None):
         key = identifier(source), identifier(request_id)
         if not isinstance(settings, dict) or set(settings) - SETTING_NAMES:
             raise CoordinationError("Supply a settings object with supported provider creation fields.")
@@ -157,7 +157,12 @@ class ExternalWorkRuntime:
         if name is not None:
             self.sessions._text(name, "Session name", 160)
         mode = requested_mode(settings.get("client", "codex"), settings)
-        encoded = json.dumps({"settings": settings, "prompt": prompt, "name": name}, sort_keys=True, separators=(",", ":"))
+        inputs = {"settings": settings, "prompt": prompt, "name": name}
+        if request_text is not None:
+            # Adapters may wrap the saved request in execution context.
+            self.sessions._text(request_text, "Original request", 100_000)
+            inputs["request_text"] = request_text
+        encoded = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         with self.sessions.admission.enter() as admitted:
             if not admitted:
@@ -171,10 +176,10 @@ class ExternalWorkRuntime:
                 if not inserted and db.execute("SELECT digest FROM external_work WHERE source=? AND request_id=?", key).fetchone()[0] != digest:
                     raise BrowserBusyError("This source and request ID were already used with different input.")
             if inserted:
-                self._launch(key, {**settings, "permission_mode": mode, "name": name}, prompt)
+                self._launch(key, {**settings, "permission_mode": mode, "name": name}, prompt, request_text)
         return self.get(*key)
 
-    def _launch(self, key, settings, prompt):
+    def _launch(self, key, settings, prompt, request_text):
         thread_id = None
         stage = "validate"
         expected = {}
@@ -216,6 +221,8 @@ class ExternalWorkRuntime:
                         (self.store.clock(), *key)).rowcount
                 if not admitted:
                     return
+                if request_text is not None:
+                    self.store.threads.capture_request(thread_id, request_text)
                 with self.lock:
                     self.observers[thread_id] = {"turn": None, "final": None, "early": {}}
                 body = {"message": prompt, "requestId": key[1]}

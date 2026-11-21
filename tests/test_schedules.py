@@ -125,7 +125,8 @@ class ScheduledPromptTests(unittest.TestCase):
         self.store.register(session_id="caller", client="codex", cwd=str(self.root))
         worker = AppControlWorker(self.sessions)
         self.addCleanup(worker.close)
-        args = {"session_id": "caller", "mode": "new", "message": "Do the work", "run_at": self.now + 60,
+        message = "Prepare a report on the last release and include the checks the team should run before deployment."
+        args = {"session_id": "caller", "mode": "new", "message": message, "run_at": self.now + 60,
                 "timezone": "UTC", "request_id": "new-schedule", "wait_seconds": 0, "yolo_authorized": True,
                 "settings": {"cwd": str(self.root), "client": "claude", "model": "sonnet", "effort": "high", "yolo": True}}
         receipt = schedule_prompt(args, store=self.store)
@@ -138,9 +139,18 @@ class ScheduledPromptTests(unittest.TestCase):
         self.assertTrue(saved["result"]["settings"]["yolo"])
         self.assertFalse(self.sessions.rpc.threads)
         self.now += 60
-        self.schedules.process_once()
+        native_connection = self.sessions.claude._connection
+
+        def register_before_creation(thread_id, options):
+            self.store.register(session_id=thread_id, client="claude", cwd=str(self.root))
+            return native_connection(thread_id, options)
+
+        with patch.object(self.sessions.claude, "_connection", register_before_creation):
+            self.schedules.process_once()
         item = self.item(saved["result"])
         self.assertEqual(item["state"], "running")
+        thread = self.store.threads.get(item["thread_id"])
+        self.assertEqual(thread["title"], message[:80].rstrip())
         connection = self.sessions.claude.connections[item["thread_id"]]
         self.assertEqual(connection.options["model"], "sonnet")
         self.assertEqual(connection.options["effort"], "high")

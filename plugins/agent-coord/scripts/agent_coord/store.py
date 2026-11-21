@@ -1399,6 +1399,7 @@ class CoordinationStore:
         cwd: str,
         name: str | None = None,
         project_cwd: str | None = None,
+        creation_title: str | None = None,
     ) -> dict[str, Any]:
         if not session_id.strip():
             raise CoordinationError("Session ID must not be empty.")
@@ -1426,7 +1427,7 @@ class CoordinationStore:
                 """,
                 (session_id, client, repository, name, now, now),
             )
-        self.threads.ensure(session_id, project_cwd=project_cwd)
+        self.threads.ensure(session_id, project_cwd=project_cwd, creation_title=creation_title)
         from .launch_metrics import registered
         registered(self)
         return self.get_session(session_id)
