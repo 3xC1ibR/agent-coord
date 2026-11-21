@@ -2425,13 +2425,13 @@ class BrowserSessions:
                 return self.send(thread_id, body, start_only=True, completed_turn_id=expected_turn)
 
     def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False,
-             preserve_text: bool = False, recovery=None, completed_turn_id: str | None = None,
+             preserve_text: bool = False, literal: bool = False, recovery=None, completed_turn_id: str | None = None,
              coordination_delivery=None) -> dict:
         with self._thread_lock(thread_id):
             submission = {"started": False}
             try:
                 return self._send(thread_id, body, start_only=start_only, automatic=automatic,
-                                  preserve_text=preserve_text, submission=submission, recovery=recovery,
+                                  preserve_text=preserve_text, literal=literal, submission=submission, recovery=recovery,
                                   completed_turn_id=completed_turn_id, coordination_delivery=coordination_delivery)
             except BrowserBusyError:
                 raise
@@ -2452,14 +2452,14 @@ class BrowserSessions:
                 raise
 
     def _send(self, thread_id: str, body: dict, *, start_only: bool, automatic: bool,
-              preserve_text: bool, submission: dict, recovery=None, completed_turn_id: str | None = None,
+              preserve_text: bool, submission: dict, literal: bool = False, recovery=None, completed_turn_id: str | None = None,
               coordination_delivery=None) -> dict:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
         with self.store._writer.measure_request("send.persistence_barrier"):
             self._await_persistence(thread_id)
         message, images = message_images(body)
-        if preserve_text or body.get("mentions"):
+        if literal or preserve_text or body.get("mentions"):
             message = body["message"]  # Selected ranges refer to the untrimmed composer text.
         mentions = thread_mentions(message, body, self)
         source_window = window_id(body.get("windowId"))
@@ -2497,7 +2497,7 @@ class BrowserSessions:
                 # Work queued before a subsequent Close is retained; reopen if
                 # it is now eligible to run. A stopped/uncertain wake cannot get here.
                 self.store.threads.update(thread_id, attention="now")
-            command = self._command(thread_id, message, reconciled_session=record) if message and not images else None
+            command = self._command(thread_id, message, reconciled_session=record) if message and not images and not literal else None
             if command is not None:
                 return command
             completion_handoff = False

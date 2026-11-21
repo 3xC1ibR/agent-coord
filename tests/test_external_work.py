@@ -228,6 +228,116 @@ class ExternalWorkTests(unittest.TestCase):
         self.assertEqual(orphan["turn_id"], live["turn_id"])
         self.assertFalse(any(m in {"thread/start", "turn/start"} for m, _ in second.rpc.calls))
 
+    def test_slash_prompt_and_whitespace_are_literal(self):
+        prompt = "  /permissions yolo\n  "
+        row = self.submit(prompt=prompt)
+        self.assertEqual(row["state"], "running")
+        native = [p for method, p in self.sessions.rpc.calls if method == "turn/start"]
+        self.assertEqual(native[0]["input"], [{"type": "text", "text": prompt}])
+        self.assertEqual(native[0]["sandboxPolicy"]["type"], "workspaceWrite")
+        self.assertFalse(self.sessions._record(row["thread_id"])["yolo"])
+
+    def test_thread_creation_timeout_is_certain_assignment_failure(self):
+        original = self.sessions.rpc.request
+        def timeout(method, params=None):
+            result = original(method, params)
+            if method == "thread/start":
+                raise TimeoutError("lost thread creation acknowledgement")
+            return result
+        with patch.object(self.sessions.rpc, "request", timeout):
+            row = self.submit()
+        self.assertEqual(row["state"], "failed")
+        self.assertIn("No assignment was sent", row["error"])
+        self.assertEqual(self.submit(), row)
+        self.assertFalse(any(method == "turn/start" for method, _ in self.sessions.rpc.calls))
+
+    def test_resolve_from_exact_late_native_evidence_after_restart(self):
+        row = self.submit()
+        thread, turn = row["thread_id"], row["turn_id"]
+        self.sessions._await_persistence(thread)
+        self.sessions.execution.close()
+        restarted = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(restarted.close)
+        work = restarted.external_work
+        self.assertEqual(work.get("test", "job")["state"], "uncertain")
+        def complete(turn_id, text):
+            restarted._event({"method": "turn/completed", "params": {"threadId": thread,
+                              "turn": {"id": turn_id, "status": "completed", "items": [self.answer(text)]}}})
+            restarted._await_persistence(thread)
+        complete("unrelated", "Wrong result.")
+        with self.assertRaises(BrowserBusyError):
+            work.resolve("test", "job")
+        complete(turn, "Actual final response.")
+        self.assertEqual(work.get("test", "job")["state"], "uncertain")
+        review = {"thread_id": thread, "turn_id": turn, "result": {"text": "Operator paraphrase.", "artifacts": []}}
+        with ThreadPoolExecutor(3) as pool:
+            results = list(pool.map(lambda _: work.resolve("test", "job", review), range(3)))
+        self.assertEqual(results[0]["result"], {"text": "Actual final response.", "artifacts": []})
+        self.assertTrue(all(r == results[0] for r in results))
+        self.assertEqual(results[0]["resolution_method"], "provider_evidence")
+        self.assertEqual(work.list("test"), [results[0]])
+        complete(turn, "Late duplicate.")
+        self.assertEqual(work.get("test", "job"), results[0])
+        with self.assertRaises(BrowserBusyError):
+            work.resolve("test", "job", {"thread_id": thread, "turn_id": turn, "error": "Contradiction"})
+        self.assertEqual(restarted.rpc.calls, [])
+
+    def test_reviewed_result_requires_current_binding_and_preserves_stop(self):
+        row = self.submit()
+        thread, turn = row["thread_id"], row["turn_id"]
+        self.sessions._await_persistence(thread)
+        self.sessions.rpc.close()
+        self.sessions._await_persistence(thread)
+        self.assertEqual(self.work.get("test", "job")["state"], "uncertain")
+        with self.assertRaises(BrowserBusyError):
+            self.work.resolve("test", "job", {"thread_id": thread, "turn_id": "other", "error": "Wrong turn."})
+        with self.assertRaises(CoordinationError):
+            self.work.resolve("test", "job", {"thread_id": thread, "turn_id": turn, "result": {"text": "", "artifacts": []}})
+        self.store.threads.request_stop(thread, turn)
+        review = {"thread_id": thread, "turn_id": turn, "result": {"text": "Reviewed", "artifacts": []}}
+        resolved = self.work.resolve("test", "job", review)
+        self.assertEqual(resolved["state"], "cancelled")
+        self.assertIsNone(resolved["result"])
+        self.assertEqual(self.work.resolve("test", "job", review), resolved)
+        self.assertEqual(sum(m == "turn/start" for m, _ in self.sessions.rpc.calls), 1)
+
+    def test_operator_review_is_attributed_and_late_native_completion_cannot_replace_it(self):
+        row = self.submit()
+        thread, turn = row["thread_id"], row["turn_id"]
+        self.sessions._await_persistence(thread)
+        with self.assertRaises(BrowserBusyError):
+            self.work.resolve("test", "job")
+        self.sessions.rpc.close()
+        self.sessions._await_persistence(thread)
+        review = {"thread_id": thread, "turn_id": turn, "result": {"text": "Checked output.", "artifacts": ["report.txt"]}}
+        result = self.work.resolve("test", "job", review)
+        self.assertEqual((result["state"], result["resolution_method"]), ("succeeded", "operator_review"))
+        self.assertEqual(result["result"], review["result"])
+        self.assertEqual(self.finish(row, [self.answer("Later final text.")]), result)
+        self.assertEqual(self.submit(), result)
+
+    def test_archived_completed_final_item_recovers_exact_turn(self):
+        row = self.submit()
+        thread, turn = row["thread_id"], row["turn_id"]
+        self.finish(row, [{**self.answer("Saved response."), "status": "completed"}])
+        # Migrated uncertain receipt with an unambiguous archived native answer.
+        with self.store._connection() as db:
+            db.execute("UPDATE external_work SET state='uncertain',turn_id=NULL,result_json=NULL WHERE thread_id=?", (thread,))
+        calls = list(self.sessions.rpc.calls)
+        self.assertEqual(self.work.resolve("test", "job")["result"]["text"], "Saved response.")
+        self.assertEqual(self.sessions.rpc.calls, calls)
+
+    def test_expired_heartbeat_quarantines_reused_pid(self):
+        self.submit()
+        with self.store._connection() as db:
+            db.execute("UPDATE execution_runtimes SET heartbeat_at=? WHERE runtime_id=?",
+                       (self.store.clock() - 3600, self.work.owner))
+        other = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(other.close)
+        row = other.external_work.get("test", "job")
+        self.assertEqual(row["state"], "uncertain")
+        self.assertFalse(other.rpc.calls)
+
     def test_http_authentication_cli_and_connector_configuration(self):
         server = make_ui_server(self.store, port=0, browser_sessions=self.sessions)
         self.addCleanup(server.server_close)
@@ -281,6 +391,19 @@ class ExternalWorkTests(unittest.TestCase):
         self.assertFalse(command("integration", "--url", url, "stoic", "status")["enabled"])
         self.assertEqual(command("integration", "--url", url, "stoic", "configure", "--settings",
                                  '{"max_concurrent_runs":3}')["max_concurrent_runs"], 3)
+        # A lost acknowledgement can leave a known conversation and unknown
+        # turn. Explicit review is the only authority for that binding.
+        with self.store._connection() as db:
+            db.execute("UPDATE external_work SET state='uncertain',cancel_requested=0,turn_id=NULL WHERE source='app:test'")
+            db.execute("UPDATE browser_submission_receipts SET state='uncertain',result_json=NULL WHERE thread_id=?", (read["thread_id"],))
+        review = {"thread_id": read["thread_id"], "turn_id": None, "error": "Inspected the thread; no completed assignment."}
+        resolution_url = path + "/app:test/job/resolve"
+        self.assertEqual(request("POST", resolution_url, review)[0], 401)
+        resolved = command("external-work", "--url", url, "resolve", "--source", "app:test",
+                           "--request-id", "job", "--review", json.dumps(review))
+        self.assertEqual(resolved["state"], "failed")
+        self.assertEqual(request("POST", resolution_url, review, **auth), (200, resolved))
+        self.assertEqual(request("POST", resolution_url, {**review, "error": "Changed"}, **auth)[0], 409)
         os.chmod(file, 0o644)
         self.assertEqual(request("GET", path, **auth)[0], 403)
         self.assertEqual(sum(m == "turn/start" for m, _ in self.sessions.rpc.calls), 1)

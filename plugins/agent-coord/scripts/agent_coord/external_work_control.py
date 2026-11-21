@@ -60,7 +60,7 @@ def handle_http(handler, engine):
             result = {"data": engine.list(query.get("source", [None])[0], int(query.get("limit", [50])[0]))}
         elif handler.command == "GET" and len(parts) == 2:
             result = engine.get(*parts)
-        elif handler.command == "POST" and (not parts or (len(parts) == 3 and parts[2] == "cancel")):
+        elif handler.command == "POST" and (not parts or (len(parts) == 3 and parts[2] in {"cancel", "resolve"})):
             if handler.headers.get_content_type() != "application/json" or handler.headers.get("Transfer-Encoding"):
                 handler._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "Send a JSON object with a Content-Length."})
                 return
@@ -77,6 +77,10 @@ def handle_http(handler, engine):
                 if not isinstance(body, dict) or not required <= set(body) <= required | {"name"}:
                     raise CoordinationError("Submit source, request_id, settings, prompt and optionally name.")
                 result = engine.submit(**body)
+            elif parts[2] == "resolve":
+                if not isinstance(body, dict):
+                    raise CoordinationError("Resolve requires a JSON object.")
+                result = engine.resolve(*parts[:2], review=body)
             else:
                 if body != {}:
                     raise CoordinationError("Cancel accepts an empty JSON object.")
@@ -104,7 +108,9 @@ def add_parser(commands):
     submit.add_argument("prompt", help="Assignment text or - for standard input.")
     get = operations.add_parser("get")
     cancel = operations.add_parser("cancel")
-    for target in (submit, get, cancel):
+    resolve = operations.add_parser("resolve", help="Resolve uncertain work from saved evidence or a reviewed outcome.")
+    resolve.add_argument("--review", help="JSON containing the inspected thread_id, turn_id and result or error; - reads stdin.")
+    for target in (submit, get, cancel, resolve):
         target.add_argument("--source", required=True)
         target.add_argument("--request-id", required=True)
     listing = operations.add_parser("list")
@@ -175,9 +181,13 @@ def _run(arguments):
                 "name": arguments.name, "settings": json.loads(arguments.settings)}
     else:
         path += "/" + quote(identifier(arguments.source), safe=":") + "/" + quote(identifier(arguments.request_id), safe=":")
-        if operation == "cancel":
-            path += "/cancel"
+        if operation in {"cancel", "resolve"}:
+            path += "/" + operation
             body = {}
+            if operation == "resolve" and arguments.review is not None:
+                body = json.loads(sys.stdin.read(1024 * 1024 + 1) if arguments.review == "-" else arguments.review)
+                if not isinstance(body, dict):
+                    raise CoordinationError("Supply a JSON object for review.")
     conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=120)
     try:
         conn.request("GET" if body is None else "POST", path, None if body is None else json.dumps(body),
