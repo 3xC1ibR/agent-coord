@@ -683,9 +683,57 @@ Schedules support one-time runs or an explicitly authorized `recurrence`: use
 `frequency` of `daily`, `weekdays`, `weekly`, or `monthly`, or `interval` with
 whole `minutes` (1–525600). Calendar schedules keep their local time zone;
 monthly runs use the last day in shorter months. Recurring runs never overlap,
-skip missed occurrences, and can be paused, resumed, or cancelled in Scheduled
+skip missed occurrences, and can be managed through the agent surfaces below or Scheduled
 prompts. An uncertain send stops the recurrence for review. Attachments are not
 supported.
+
+Manage schedules through the same `schedule_prompt` MCP tool: `action` is
+`create` (default), `list`, `read`, `edit`, `pause`, `resume`, `cancel`, or
+`run_now`. List returns schedules created by or targeting the caller, including
+`id`, `version`, `state`, `recurrence_status`, `next_run_at`, settings (including
+`yolo`) and `message_preview`. Read takes `schedule_id`; mutations also require
+its current integer `version`. Edit accepts partial `message`, `run_at`,
+`timezone`, `recurrence` and `settings`; use `recurrence: null` to remove repetition.
+Existing-thread schedules retain their destination and use that thread's settings.
+`run_now` applies only to missed prompts, matching the app's action.
+
+The CLI uses the same contract:
+
+```bash
+agent-coord schedule list
+agent-coord schedule read --schedule-id <id>
+agent-coord schedule edit --schedule-id <id> --version <version> \
+  --settings '{"yolo":true}' --yolo-authorized --request-id <unique-edit-key>
+agent-coord schedule pause --schedule-id <id> --version <version> --request-id <unique-pause-key>
+agent-coord schedule resume --schedule-id <id> --version <version> --request-id <unique-resume-key>
+agent-coord schedule cancel --schedule-id <id> --version <version> --request-id <unique-cancel-key>
+agent-coord schedule run-now --schedule-id <id> --version <version> --request-id <unique-run-key>
+agent-coord schedule create --mode self --message 'Follow up' \
+  --run-at <future-unix-seconds> --timezone America/Chicago --request-id <unique-create-key>
+```
+
+Creation and edit accept `--recurrence '<JSON>'` and `--settings '<JSON>'`;
+new-agent creation requires `--mode new` and settings containing `cwd`, `client`
+and `model`. `--message -` reads stdin. Use `--wait 0..30` (default 5), or MCP
+`wait_seconds`, then inspect `thread request-status --request-id <key>` until
+completed. Reuse the same request ID and identical arguments after a lost response;
+never increment a version or invent a new key to retry an uncertain operation.
+Mutation receipts commit atomically with the schedule change.
+
+Caller identity is inferred and cannot be impersonated. Creators may manage
+their schedules; targets may list/read schedules addressed to them. For another
+creator's or a UI-created schedule, use `--authorized-schedule-id <same-id>`
+(MCP `authorized_schedule_id`) only when the user explicitly instructs access
+and names that schedule ID. This is the agent's explicit authorization assertion,
+not a way to discover or modify unrelated schedules. Old schedules without
+recoverable creator provenance also require this assertion.
+Enabling YOLO on creation or escalation through edit requires explicit user
+consent plus `--yolo-authorized` (MCP `yolo_authorized: true`); retaining an
+already enabled setting does not require a new grant. Self schedules use their
+conversation's permissions at delivery. Version conflicts require a fresh read
+and a new reviewed change. Pause/cancel prevent future recurring runs; a run
+already in progress keeps its recorded outcome. No schedule-management command
+bypasses browser CSRF checks or retries uncertain provider delivery.
 
 Use `--client claude` for Claude Code, `--client antigravity` for Google
 Antigravity, `--client kimi` for Kimi Code, or `--client muse` for Muse Code

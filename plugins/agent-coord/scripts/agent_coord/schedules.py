@@ -52,9 +52,19 @@ class ScheduledPrompts:
                 db.execute("ALTER TABLE scheduled_prompts ADD COLUMN target_thread_id TEXT")
             for name, definition in {
                 "recurrence_json": "TEXT", "recurrence_status": "TEXT", "anchor_at": "REAL",
+                "creator_session_id": "TEXT",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE scheduled_prompts ADD COLUMN {name} {definition}")
+
+            # Preserve creator access for schedules saved by pre-management agents.
+            db.execute("CREATE INDEX IF NOT EXISTS scheduled_prompts_creator ON scheduled_prompts(creator_session_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS scheduled_prompts_target ON scheduled_prompts(target_thread_id)")
+            if "creator_session_id" not in columns and db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
+                db.execute("""UPDATE scheduled_prompts SET creator_session_id = r.sender_session_id
+                    FROM app_control_requests r WHERE r.operation = 'schedule'
+                    AND json_extract(r.result_json, '$.id') = scheduled_prompts.id
+                    AND scheduled_prompts.creator_session_id IS NULL""")
 
     @staticmethod
     def _describe(row):
@@ -126,7 +136,7 @@ class ScheduledPrompts:
             record["effort"] = selected.get("defaultReasoningEffort")
         return message, run_at, timezone, {**record, **associations}, mentions, None, recurrence
 
-    def create(self, body):
+    def create(self, body, *, creator_session_id=None):
         try:
             schedule_id = str(uuid.UUID(body.get("id", "")))
         except (ValueError, TypeError, AttributeError) as exc:
@@ -146,24 +156,24 @@ class ScheduledPrompts:
             db.execute("BEGIN IMMEDIATE")
             db.execute("""INSERT OR IGNORE INTO scheduled_prompts
                 (id, cwd, settings_json, message, run_at, timezone, state, request_json, created_at, updated_at, mentions_json,
-                 target_thread_id, thread_id, recurrence_json, recurrence_status, anchor_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 target_thread_id, thread_id, recurrence_json, recurrence_status, anchor_at, creator_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (schedule_id, settings["cwd"], json.dumps(settings), message, run_at, timezone, request, now, now, json.dumps(mentions),
-                 target, target, json.dumps(recurrence) if recurrence else None, "active" if recurrence else None, run_at))
+                 target, target, json.dumps(recurrence) if recurrence else None, "active" if recurrence else None, run_at, creator_session_id))
             row = self._get(db, schedule_id)
             if row["request_json"] != request:
                 raise CoordinationError("This scheduled prompt ID has already been used.")
         self._changed()
         return self._describe(row)
 
-    def change(self, schedule_id, body):
+    def change(self, schedule_id, body, *, request_id=None):
         action = body.get("action")
         values = None
         if action == "edit":
             values = self._validate({key: value for key, value in body.items() if key != "action"})
         elif action not in {"cancel", "run_now", "pause", "resume"} or set(body) - {"action", "version"}:
             raise CoordinationError("Choose edit, cancel, run now, pause, or resume.")
-        with self.store._connection() as db:
+        with self.store.database_operation("schedules.change", priority="foreground"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._get(db, schedule_id)
             if type(body.get("version")) is not int or row["version"] != body["version"]:
@@ -212,6 +222,15 @@ class ScheduledPrompts:
                     version = version + 1, updated_at = ? WHERE id = ?""",
                     ("scheduled" if action == "run_now" else "cancelled", self.store.clock() if action == "run_now" else row["run_at"], self.store.clock(), schedule_id))
             result = self._describe(self._get(db, schedule_id))
+            if request_id is not None:
+                # The transition and durable agent receipt commit together. A
+                # crash after commit cannot turn an applied change into a retry.
+                changed = db.execute("""UPDATE app_control_requests SET status = 'completed',
+                    result_json = ?, error = NULL, updated_at = ? WHERE request_id = ?
+                    AND operation = 'schedule' AND status = 'running'""",
+                    (json.dumps(result), self.store.clock(), request_id)).rowcount
+                if changed != 1:
+                    raise CoordinationError("The schedule request is no longer running.")
         self._changed()
         return result
 

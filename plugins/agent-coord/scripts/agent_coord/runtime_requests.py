@@ -271,6 +271,8 @@ def _cli_payload(arguments, argv, *, defer_wait=False):
         field = "checkpoint_json"
     elif arguments.command in {"send", "reply"} or arguments.command == "session-control" and arguments.action == "submit":
         field = "message"
+    elif arguments.command == "schedule":
+        field = "message"
     elif arguments.command == "thread" and arguments.thread_command == "create":
         field = "prompt"
     elif arguments.command == "ask":
@@ -313,7 +315,7 @@ def _control_wait_kind(arguments):
     if (arguments.command == "thread" and arguments.thread_command in {
             "create", "settings", "models", "provider-limits", "move", "resume", "request-status"}
             or arguments.command == "sidecar" and arguments.sidecar_command == "attach"
-            or arguments.command == "session-control"):
+            or arguments.command in {"session-control", "schedule"}):
         return "app"
     if arguments.command == "ui" and arguments.ui_command == "open":
         return "navigation"

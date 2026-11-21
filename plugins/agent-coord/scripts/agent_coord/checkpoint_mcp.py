@@ -161,7 +161,12 @@ ASK_TOOL = {
 SCHEDULE_TOOL = {
     "name": "schedule_prompt",
     "description": (
-        "Schedule a one-time or recurring prompt through the running Ribbon Field app. Use only when the user authorizes scheduling. "
+        "Create, list, read, edit, pause, resume, cancel or run_now scheduled prompts through Ribbon Field. "
+        "Create or change schedules only with user authorization. "
+        "action defaults to create (mode, message, run_at, timezone required). Mutations require schedule_id and current version. "
+        "Creators manage schedules; targets may read. Other access requires explicit user authorization naming authorized_schedule_id. "
+        "Edit fields are partial; recurrence null removes repetition. run_now applies to missed prompts only. "
+        "Enabling yolo requires yolo_authorized=true with explicit user consent. "
         "Choose self for your own app conversation, or new for a new agent with explicit provider settings. "
         "Self uses the conversation's settings at delivery. A queued receipt is not a saved schedule; inspect "
         "agent-coord thread request-status --request-id <id>. Reuse request_id on retry. "
@@ -169,19 +174,24 @@ SCHEDULE_TOOL = {
         "Terminal sessions cannot schedule a prompt to themselves. Only set yolo with explicit authorization."
     ),
     "inputSchema": {
-        "type": "object", "additionalProperties": False, "required": ["mode", "message", "run_at", "timezone"],
+        "type": "object", "additionalProperties": False,
         "properties": {
             "session_id": {"type": "string", "minLength": 1, "description": "Optional assertion of the bound caller ID; a different ID is rejected."},
+            "action": {"type": "string", "enum": ["create", "list", "read", "edit", "pause", "resume", "cancel", "run_now"]},
+            "schedule_id": {"type": "string", "description": "Saved schedule ID; required except for create/list."},
+            "version": {"type": "integer", "minimum": 1, "description": "Current version from read/list; required for mutations."},
+            "authorized_schedule_id": {"type": "string", "description": "Only with explicit user instruction naming this exact schedule ID; permits access to another creator's or UI-created schedule."},
+            "yolo_authorized": {"type": "boolean", "description": "Confirms explicit user authorization to enable full machine access."},
             "mode": {"type": "string", "enum": ["self", "new"]},
             "message": {"type": "string", "minLength": 1, "maxLength": 100000},
             "run_at": {"type": "number", "description": "Future execution time as Unix epoch seconds (UTC)."},
             "timezone": {"type": "string", "minLength": 1, "description": "IANA time zone, e.g. America/Chicago."},
-            "recurrence": {"type": "object", "additionalProperties": False, "required": ["frequency"],
+            "recurrence": {"type": ["object", "null"], "additionalProperties": False, "required": ["frequency"],
                            "description": "Omit for one-time. Calendar schedules keep local time; interval requires minutes. Runs never overlap.",
                            "properties": {"frequency": {"type": "string", "enum": ["interval", "daily", "weekdays", "weekly", "monthly"]},
                                           "minutes": {"type": "integer", "minimum": 1, "maximum": 525600}}},
             "settings": {"type": "object", "additionalProperties": False,
-                         "required": ["cwd", "client", "model"], "description": "Required for new; forbidden for self.",
+                         "description": "Create new requires cwd/client/model. Edit accepts partial settings; forbidden for existing-thread schedules.",
                          "properties": {"cwd": {"type": "string", "minLength": 1},
                                         "client": {"type": "string", "enum": ["codex", "claude", "antigravity", "kimi", "muse"]},
                                         "model": {"type": "string", "minLength": 1},
@@ -201,39 +211,19 @@ def schedule_prompt(arguments, *, store=None):
     sender = bind_caller(arguments.get("session_id"))
     if not isinstance(sender, str) or not sender.strip():
         raise CoordinationError("No caller session. Pass session_id from your hook context.")
-    mode = arguments.get("mode")
-    message = arguments.get("message")
-    run_at = arguments.get("run_at")
-    timezone = arguments.get("timezone")
     wait = arguments.get("wait_seconds", 5)
-    if not isinstance(mode, str) or mode not in {"self", "new"} or not isinstance(message, str) or not message.strip() or len(message) > 100000:
-        raise CoordinationError("Choose self or new and supply a prompt of 1–100000 characters.")
-    if (type(run_at) not in (int, float) or not 0 < run_at < 253402300800 or not math.isfinite(run_at)
-            or not isinstance(timezone, str) or not timezone.strip()):
-        raise CoordinationError("Provide a future Unix time and an IANA time zone.")
     if type(wait) not in (int, float) or not 0 <= wait <= 30 or not math.isfinite(wait):
         raise CoordinationError("wait_seconds must be between 0 and 30.")
     if "request_id" in arguments and (not isinstance(arguments["request_id"], str)
                                       or not arguments["request_id"].strip() or len(arguments["request_id"]) > 160):
         raise CoordinationError("request_id must contain 1–160 characters.")
-    payload = {"mode": mode, "message": message, "run_at": run_at, "timezone": timezone}
-    if "recurrence" in arguments:
-        from .schedule_recurrence import validate_recurrence
-        payload["recurrence"] = validate_recurrence(arguments["recurrence"])
-    if mode == "new":
-        settings = arguments.get("settings")
-        allowed = {"cwd", "client", "model", "effort", "yolo", "project_id", "repository_id"}
-        if (not isinstance(settings, dict) or set(settings) - allowed or
-                any(not isinstance(settings.get(key), str) or not settings[key].strip() for key in ("cwd", "client", "model"))):
-            raise CoordinationError("New-agent schedules require workspace, client, and model settings.")
-        payload["settings"] = settings
-    elif "settings" in arguments:
-        raise CoordinationError("Self schedules use the conversation's current settings.")
     from .app_control import AppControl
     control = AppControl(store or CoordinationStore())
+    payload = {key: value for key, value in arguments.items() if key not in {"session_id", "wait_seconds", "request_id"}}
     receipt = control.request("schedule", sender, payload, request_id=arguments.get("request_id"))
     result = control.status(receipt["request_id"], wait=wait)
-    result["schedule_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:schedule:" + receipt["request_id"]))
+    result["schedule_id"] = (str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:schedule:" + receipt["request_id"]))
+                             if payload.get("action", "create") == "create" else payload.get("schedule_id"))
     return result
 
 

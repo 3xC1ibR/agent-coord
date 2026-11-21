@@ -2203,3 +2203,25 @@ remain in the full conversation. The local journal survives runtime restarts.
 Use `thread create --interactive` for a new voice-controlled thread. It binds the
 creating controller before the initial inbox wake so its first update cannot
 precede the public-output journal.
+
+## Agent scheduled prompt management
+
+`agent-coord schedule` and the `schedule_prompt` MCP tool support `create`,
+`list`, `read`, `edit`, `pause`, `resume`, `cancel`, and `run-now` (`run_now` in MCP).
+Read and mutations take `--schedule-id`; mutations require `--version` from a
+fresh list/read result. All commands accept `--request-id` and `--wait 0..30`.
+Creation requires `--mode self|new`, `--message`, `--run-at` (Unix seconds), and
+`--timezone`; new schedules require `--settings` JSON with cwd/client/model.
+Edit accepts partial message/time/timezone/recurrence/settings fields. Recurrence
+JSON `null` removes repetition. Run-now is available for missed prompts only.
+
+Identity is inferred. The creating session may manage a schedule; a destination
+session may read it. Access to another creator's or UI-created schedule requires
+explicit user instruction naming the ID and `--authorized-schedule-id <same-id>`.
+This flag is an authorization assertion by the acting agent. Enabling YOLO on
+creation or escalation requires explicit consent and `--yolo-authorized`.
+The MCP equivalents are `authorized_schedule_id` and `yolo_authorized`.
+Use identical request IDs and arguments on retries; schedule mutations and their
+receipts commit together. Browser CSRF protections remain unchanged.
+See the [agent coordination skill](../plugins/agent-coord/skills/agent-coordination/SKILL.md)
+for examples and recurrence semantics. CLI `--help` documents each action.

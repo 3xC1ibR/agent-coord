@@ -79,6 +79,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--db", help="Override the shared SQLite database path.")
     subcommands = parser.add_subparsers(dest="command", required=True)
+    from .schedule_cli import add_parser as add_schedule_parser
+    add_schedule_parser(subcommands)
     from . import external_work_control
     external_work_control.add_parser(subcommands)
     installer = subcommands.add_parser("install-cli", help="Install or refresh the stable agent-coord launcher.")
@@ -687,6 +689,9 @@ def _parser() -> argparse.ArgumentParser:
 def run(arguments: argparse.Namespace, *, store=None) -> Any:
     bind_command_caller(arguments)
     command = arguments.command
+    if command == "schedule":
+        from .schedule_cli import execute as execute_schedule
+        return execute_schedule(arguments, store or CoordinationStore(arguments.db))
     if command in {"external-work", "integration"}:
         from .external_work_control import run as run_external_work
         return run_external_work(arguments)

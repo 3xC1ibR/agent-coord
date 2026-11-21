@@ -112,25 +112,8 @@ class AppControl:
             payload = Sidecars(self.store).validate(sender_session_id, payload)
             cwd = payload["cwd"]
         elif operation == "schedule":
-            if (set(payload) - {"mode", "message", "run_at", "timezone", "settings", "recurrence"}
-                    or not isinstance(payload.get("mode"), str) or payload["mode"] not in {"self", "new"}):
-                raise CoordinationError("Choose a self or new-agent schedule with valid fields.")
-            if "recurrence" in payload:
-                from .schedule_recurrence import validate_recurrence
-                validate_recurrence(payload["recurrence"])
-            if payload["mode"] == "self":
-                if "settings" in payload:
-                    raise CoordinationError("A self schedule uses the conversation's current settings.")
-                record = self.settings(sender_session_id)
-                cwd = record["cwd"]
-            else:
-                settings = payload.get("settings")
-                if not isinstance(settings, dict) or not isinstance(settings.get("cwd"), str):
-                    raise CoordinationError("A new-agent schedule needs provider settings and a workspace.")
-                cwd = str(Path(settings["cwd"]).expanduser().resolve())
-                if not Path(cwd).is_dir():
-                    raise CoordinationError("Choose an existing workspace directory.")
-                payload["settings"] = {**settings, "cwd": cwd}
+            from .schedule_control import validate_request
+            payload, cwd = validate_request(self, sender_session_id, payload)
         elif operation in {"settings", "move", "resume"}:
             record = self.settings(thread_id)
             cwd = record["cwd"]
@@ -403,16 +386,8 @@ class AppControlWorker:
                 row.pop("account", None)
                 result = {"provider": row, "refresh_seconds": snapshot["refresh_seconds"]}
             elif request["operation"] == "schedule":
-                schedule_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:schedule:" + request["request_id"]))
-                body = {"id": schedule_id, "message": payload.get("message"), "run_at": payload.get("run_at"),
-                        "timezone": payload.get("timezone")}
-                if "recurrence" in payload:
-                    body["recurrence"] = payload["recurrence"]
-                if payload["mode"] == "self":
-                    body["target_thread_id"] = request["sender_session_id"]
-                else:
-                    body["settings"] = payload["settings"]
-                result = self.sessions.schedules.create(body)
+                from .schedule_control import execute
+                result = execute(self, request, payload)
             elif request["operation"] == "sidecar":
                 payload = self.sessions.sidecars.watches.validate(request["sender_session_id"], payload)
                 if not payload.get("existing_id"):

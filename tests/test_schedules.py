@@ -126,7 +126,7 @@ class ScheduledPromptTests(unittest.TestCase):
         worker = AppControlWorker(self.sessions)
         self.addCleanup(worker.close)
         args = {"session_id": "caller", "mode": "new", "message": "Do the work", "run_at": self.now + 60,
-                "timezone": "UTC", "request_id": "new-schedule", "wait_seconds": 0,
+                "timezone": "UTC", "request_id": "new-schedule", "wait_seconds": 0, "yolo_authorized": True,
                 "settings": {"cwd": str(self.root), "client": "claude", "model": "sonnet", "effort": "high", "yolo": True}}
         receipt = schedule_prompt(args, store=self.store)
         worker.process_once()
@@ -326,6 +326,7 @@ class ScheduledPromptTests(unittest.TestCase):
         from agent_coord.schedules import ScheduledPrompts
         item = self.schedules.create(self.body())
         with self.store._connection() as db:
+            db.execute("DROP INDEX scheduled_prompts_target")
             db.execute("ALTER TABLE scheduled_prompts DROP COLUMN target_thread_id")
         self.sessions.schedules = self.schedules = ScheduledPrompts(self.sessions)
         self.assertIsNone(self.item(item)["target_thread_id"])
