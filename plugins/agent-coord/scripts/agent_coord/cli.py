@@ -418,22 +418,44 @@ def _parser() -> argparse.ArgumentParser:
     send.add_argument("message", help="Message body; use - to read stdin.")
 
     ask = subcommands.add_parser(
-        "ask", help="Ask the user a decision; the answer arrives as an inbox message.")
+        "ask", help="Ask the user for a decision, action, approval, review or resource; the resolution arrives as an inbox message.")
     ask.add_argument("--from-session", help="Asking session; defaults to the current caller session.")
-    ask.add_argument("question", nargs="?", help="Question for the user; use - to read stdin.")
+    ask.add_argument("question", nargs="?", help="Title of the ask, shown to the user; use - to read stdin.")
+    ask.add_argument("--kind", choices=("decision", "action", "approval", "review", "request"),
+                     help="decision (default): choose or answer. action: something only the user can do. "
+                          "approval: permission beyond your authorization. review: read, verify or try a result. "
+                          "request: a tool, dataset, account, credential, budget or access that would materially improve the result.")
     ask.add_argument("--option", action="append", dest="options", metavar="TEXT",
-                     help="Offer an answer choice; repeat for each option. Free text is always allowed.")
+                     help="Offer an answer choice for a decision; repeat for each option. Free text is always allowed.")
     ask_mode = ask.add_mutually_exclusive_group()
     ask_mode.add_argument("--blocking", action="store_true", default=None,
-                          help="You cannot make useful progress without the answer. End your turn after asking unless you --wait.")
+                          help="You cannot make useful progress without the resolution. End your turn after asking unless you --wait.")
     ask_mode.add_argument("--non-blocking", dest="blocking", action="store_false",
-                          help="Keep working on a stated default; the answer arrives later as a normal message.")
+                          help="Keep working on a stated default; the resolution arrives later as a normal message.")
     ask.add_argument("--context", help="Why you ask and, for a non-blocking ask, the default you will proceed with.")
+    ask.add_argument("--unblocks", help="What resolving the ask enables. Required for an action or request; "
+                                        "for a request, state the expected gain and what you do without it.")
+    ask.add_argument("--effort", type=int, dest="effort_minutes", metavar="MINUTES",
+                     help="Your estimate of the user's time, in minutes.")
+    ask.add_argument("--link", help="Where the user acts: an HTTPS URL, an agentcoord:// link or an absolute file path.")
+    ask.add_argument("--due", dest="due_at", metavar="TIME",
+                     help="A real external deadline as Unix seconds or ISO 8601; a date alone means the end of that local day.")
+    ask.add_argument("--project", help="Grouping label; defaults to the asking thread's project.")
+    ask.add_argument("--request-id", help="Stable ID for retrying this exact ask; the same session and ID return the existing ask.")
     ask.add_argument("--supersedes", type=int, metavar="ASK_ID", help="Withdraw your earlier open ask when creating this one.")
     ask.add_argument("--wait", type=float, nargs="?", const=0.0, metavar="SECONDS",
-                     help="Block a blocking ask until it is answered; omit SECONDS to wait indefinitely.")
+                     help="Block a blocking ask until it is resolved; omit SECONDS to wait indefinitely.")
     ask.add_argument("--withdraw", type=int, metavar="ASK_ID", help="Withdraw your own open ask instead of creating one.")
+    ask.add_argument("--show", type=int, metavar="ASK_ID", help="Show one ask with its derived states. Read-only.")
     ask.add_argument("--list", action="store_true", dest="list_asks", help="List your open asks instead of creating one.")
+    ask.add_argument("--all-sessions", action="store_true",
+                     help="With --list: include asks filed by every session, so you can check before filing your own. Read-only.")
+    ask.add_argument("--status", choices=("open", "resolved", "withdrawn", "all"),
+                     help="With --list: select by status; defaults to open.")
+    ask.add_argument("--since", metavar="TIME",
+                     help="With --list or --metrics: only asks created at or after this Unix time or ISO 8601 time.")
+    ask.add_argument("--metrics", action="store_true",
+                     help="Report resolution latency, closure, rewrites, requests, blocked hours and stale asks. Read-only.")
 
     reply = subcommands.add_parser("reply", help="Answer a message without requesting another reply.")
     reply.add_argument("--from-session", help="Sender; defaults to the current caller session.")
@@ -706,7 +728,7 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
             identity = caller_session()
             settings_read = (command == "thread" and arguments.thread_command == "settings"
                              and all(getattr(arguments, key) is None for key in ("model", "effort", "yolo")))
-            if not identity and command != "ui" and not settings_read:
+            if not identity and command != "ui" and not settings_read and not ask_inspection(arguments):
                 flag = "--" + field.replace("_", "-")
                 raise CoordinationError(f"No caller session. Pass {flag}, or set AGENT_COORD_SESSION_ID (Codex also supports CODEX_THREAD_ID).")
             setattr(arguments, field, identity)
@@ -1157,15 +1179,46 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
     raise AssertionError(f"Unhandled command: {command}")
 
 
+ASK_CREATION_FLAGS = {
+    "kind": "--kind", "options": "--option", "blocking": "--blocking or --non-blocking", "context": "--context",
+    "unblocks": "--unblocks", "effort_minutes": "--effort", "link": "--link", "due_at": "--due",
+    "project": "--project", "request_id": "--request-id", "supersedes": "--supersedes", "wait": "--wait",
+}
+
+
+def ask_inspection(arguments):
+    """True for the read-only ask modes that need no caller session."""
+    return arguments.command == "ask" and (
+        arguments.metrics or arguments.show is not None or (arguments.list_asks and arguments.all_sessions))
+
+
 def run_ask(store, arguments):
-    """Create, wait on, withdraw, or list the caller's asks to the user."""
+    """File, wait on, withdraw, show, list, or measure asks to the user."""
+    from .asks import timestamp
     session_id = arguments.from_session
     modes = [name for name, chosen in (("--withdraw", arguments.withdraw is not None), ("--list", arguments.list_asks),
+                                       ("--show", arguments.show is not None), ("--metrics", arguments.metrics),
                                        ("a question", arguments.question is not None)) if chosen]
     if len(modes) != 1:
-        raise CoordinationError("Use exactly one of a question, --withdraw, or --list.")
+        raise CoordinationError("Use exactly one of a question, --withdraw, --show, --list, or --metrics.")
+    if arguments.question is None:
+        stray = [flag for name, flag in ASK_CREATION_FLAGS.items() if getattr(arguments, name) is not None]
+        if stray:
+            raise CoordinationError(f"{modes[0]} does not accept {stray[0]}; that flag files a new ask.")
+    if arguments.all_sessions and not arguments.list_asks:
+        raise CoordinationError("--all-sessions applies to --list.")
+    if arguments.status is not None and not arguments.list_asks:
+        raise CoordinationError("--status applies to --list.")
+    if arguments.since is not None and not (arguments.list_asks or arguments.metrics):
+        raise CoordinationError("--since applies to --list and --metrics.")
+    since = timestamp(arguments.since, "Since")
+    if arguments.metrics:
+        return store.asks.metrics(since=since)
+    if arguments.show is not None:
+        return store.asks.show(arguments.show)
     if arguments.list_asks:
-        return store.asks.list(session_id=session_id)
+        return store.asks.overview(status=arguments.status or "open", since=since,
+                                   session_id=None if arguments.all_sessions else session_id)
     if arguments.withdraw is not None:
         return store.asks.withdraw(arguments.withdraw, session_id)
     if arguments.blocking is None:
@@ -1176,8 +1229,11 @@ def run_ask(store, arguments):
         raise CoordinationError("--wait must be a finite, non-negative number of seconds.")
     question = read_input() if arguments.question == "-" else arguments.question
     ask = store.asks.create(session_id, question, options=arguments.options, blocking=arguments.blocking,
-                            context=arguments.context, supersedes=arguments.supersedes)
-    if arguments.wait is None:
+                            context=arguments.context, supersedes=arguments.supersedes, kind=arguments.kind,
+                            unblocks=arguments.unblocks, effort_minutes=arguments.effort_minutes,
+                            link=arguments.link, due_at=arguments.due_at, project=arguments.project,
+                            request_id=arguments.request_id)
+    if arguments.wait is None or ask["status"] != "open":
         return ask
     return store.asks.wait(ask["id"], session_id, timeout_seconds=arguments.wait or None)
 

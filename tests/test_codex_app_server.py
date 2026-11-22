@@ -1794,6 +1794,39 @@ class BrowserSessionTests(unittest.TestCase):
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.work_thread(thread_id)["original_request"], "The earlier request.")
 
+    def test_startup_only_migrates_incomplete_work_threads(self):
+        complete = self.create()
+        missing_directory = self.create()
+        missing_request = self.create()
+        missing_link = self.create()
+        stale_link = self.create()
+        for identity in (complete, missing_directory, missing_request, missing_link, stale_link):
+            self.store.threads.capture_request(identity, "Saved assignment.")
+        with self.store._connection() as db:
+            db.execute("UPDATE work_threads SET project_cwd = NULL WHERE thread_id = ?", (missing_directory,))
+            db.execute("UPDATE work_threads SET original_request = '' WHERE thread_id = ?", (missing_request,))
+            db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)",
+                       (missing_request, json.dumps({"id": missing_request, "turns": [{"items": [
+                           {"type": "userMessage", "content": [{"text": "Recovered assignment."}]}]}]})))
+            db.execute("UPDATE browser_sessions SET archived = 1 WHERE thread_id = ?", (missing_request,))
+            db.executemany("UPDATE sessions SET bead_id = 'work-a' WHERE session_id = ?", [(missing_link,), (stale_link,)])
+            db.execute("""INSERT INTO thread_links(thread_id,kind,label,target,project_id)
+                SELECT thread_id,'bead','outdated','work-a',project_id FROM work_threads WHERE thread_id = ?""", (stale_link,))
+        self.store.threads.update(missing_request, attention="now")
+        with patch.object(self.store.threads, "ensure", wraps=self.store.threads.ensure) as ensure:
+            reopened = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+            self.addCleanup(reopened.close)
+        self.assertEqual({call.args[0] for call in ensure.call_args_list},
+                         {missing_directory, missing_request, missing_link, stale_link})
+        self.assertEqual(reopened.work_thread(complete)["original_request"], "Saved assignment.")
+        self.assertEqual(reopened.work_thread(missing_directory)["project_cwd"], str(self.root))
+        restored = reopened.work_thread(missing_request)
+        self.assertEqual(restored["original_request"], "Recovered assignment.")
+        self.assertEqual(restored["attention"], "now")
+        for identity in (missing_link, stale_link):
+            self.assertTrue(any(link["kind"] == "bead" and link["target"] == "work-a" and link["label"] == "work-a"
+                                for link in reopened.work_thread(identity)["links"]))
+
     def test_delegated_children_remain_under_the_parent_thread(self):
         parent = self.create()
         self.store.create_delegation(parent_session_id=parent, cwd=str(self.root), bead_id="work-a", scopes=["src/**"], instructions="Investigate a subproblem.", mode="reviewed", delegation_id="delegated")

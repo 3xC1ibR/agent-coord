@@ -105,11 +105,12 @@
       <button id="open-folder" class="sidebar-icon" type="button" aria-label="Add project" title="Add project · ⌘O"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l3 3h8a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z M12 10v7 M8.5 13.5h7"/></svg></button>
       <button id="new-session" class="sidebar-icon" type="button" aria-label="New thread" title="New thread · ⌘N"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7 M14 5l5-3 3 3-3 5-8 8-5 1 1-5Z M17 4l3 3"/></svg></button>
     </div>
+    <a id="open-asks-view" class="asks-entry" href="/asks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13 6.5 5h11L20 13v6H4v-6Z M4 13h5l1 2.5h4l1-2.5h5"/></svg><span id="asks-entry-label"></span><span id="asks-count" class="asks-count" hidden></span></a>
     <nav id="sessions" aria-label="Work threads"><p class="muted">Loading threads…</p></nav>
     <a id="open-usage" class="usage-nav" href="/usage" aria-label="Usage" title="Usage and limits"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10 M12 20V4 M20 20v-7"/></svg><span>Usage</span></a>
     <a id="open-activity" class="usage-nav" href="/activity" aria-label="Activity" title="Your recorded activity"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Activity</span></a>
     <div class="sidebar-footer" role="group" aria-label="Workspace tools">
-      <button id="open-asks" class="sidebar-icon sidebar-asks" type="button" aria-label="Decisions" title="Decisions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7v.5"/><path d="M12 17h.01"/></svg><span id="asks-count" class="asks-count" hidden></span></button>
+      <button id="open-asks" class="sidebar-icon" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7v.5"/><path d="M12 17h.01"/></svg></button>
       <button id="scheduled-prompts" class="sidebar-icon" type="button" aria-label="Scheduled prompts" title="Scheduled prompts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button>
       <button id="roll-up-start" class="sidebar-icon" type="button" aria-label="Roll up waiting threads" aria-pressed="false" title="Roll up waiting threads · ⌥⌘R"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16 M4 11h11 M4 17h7 M16 14l4 4-4 4 M13 18h7"/></svg></button>
       <button id="open-project-scratchpad" class="sidebar-icon" type="button" aria-label="Open project scratchpad" title="Project scratchpad · ⌘⇧S" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h13a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6V3Z M3 7h5 M3 12h5 M3 17h5 M11 8h5 M11 12h5"/></svg></button>
@@ -305,6 +306,21 @@
   <dialog id="settings-dialog" class="settings-dialog" aria-label="Settings"><iframe id="settings-frame" title="Settings"></iframe></dialog>
   <dialog id="usage-dialog" aria-label="Usage"><iframe id="usage-frame" title="Provider usage and limits"></iframe></dialog>
   <dialog id="activity-dialog" aria-label="Activity"><iframe id="activity-frame" title="Activity history"></iframe></dialog>
+  <dialog id="asks-dialog" class="asks-view" aria-labelledby="asks-title">
+    <header class="asks-header"><div><h2 id="asks-title"></h2><p id="asks-summary"></p></div><button id="close-asks" class="quiet" type="button">Close</button></header>
+    <div class="asks-content">
+      <div id="asks-sections" class="asks-sections" role="tablist"></div>
+      <form id="asks-filters" class="asks-filters" hidden>
+        <label>Project<select id="asks-filter-project"><option value="">All projects</option></select></label>
+        <label>Kind<select id="asks-filter-kind"><option value="">All kinds</option></select></label>
+        <label>Resolved since<input id="asks-filter-since" type="date"></label>
+      </form>
+      <p id="asks-notice" class="asks-notice" hidden></p>
+      <p id="asks-error" class="asks-error" role="alert" hidden></p>
+      <p id="asks-status" class="asks-status" role="status"></p>
+      <div id="asks-list" class="asks-list" role="tabpanel"></div>
+    </div>
+  </dialog>
   <dialog id="project-scratchpad-dialog" class="project-scratchpad-dialog" aria-labelledby="project-scratchpad-title" aria-describedby="scratchpad-project-name"></dialog>
   <dialog id="mobile-thread-sheet" class="mobile-thread-sheet" aria-labelledby="mobile-sheet-title">
     <div class="mobile-sheet-heading"><button id="mobile-sheet-back" class="quiet" type="button" aria-label="Back to thread actions" hidden>←</button><h2 id="mobile-sheet-title">Thread actions</h2><button class="icon-button" type="button" data-close="mobile-thread-sheet" aria-label="Close thread actions">×</button></div>

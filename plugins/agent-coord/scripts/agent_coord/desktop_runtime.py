@@ -36,6 +36,8 @@ UPDATE_SHUTDOWN_SECONDS = 30
 # Required bookkeeping drains within this part of that budget, leaving time to
 # stop the persistence worker, finalize recovery and write the exit proof.
 UPDATE_DRAIN_SECONDS = 20
+# Close new requests before waiting for admitted operations to finish.
+UPDATE_ADMISSION_SECONDS = 30
 REVIEW_NOTICE = ("The backend update finished, but work stays paused for review because the previous "
                  "backend could not confirm a clean shutdown. Waiting will not resume it. Inspect running "
                  "tools, then run the runtime maintenance resume command.")
@@ -576,6 +578,7 @@ class Runtime:
         self.commit_fd = commit_fd
         self.trial = commit_fd is not None
         self.update_requested = None
+        self.update_drain_started = None
         self.update_exit_fd = None
         self.instance = uuid.uuid4().hex
         self.token = secrets.token_urlsafe(32)
@@ -648,6 +651,10 @@ class Runtime:
         if update:
             from .runtime_recovery import status
             update["recovery"] = status(self.server.browser_sessions.store, update["id"])
+            if update["phase"] not in runtime_update.TERMINAL:
+                update["blocked"] = uninterrupted_readiness(self.server.browser_sessions)
+                if self.update_drain_started is not None:
+                    update["admission_drain_seconds"] = time.monotonic() - self.update_drain_started
         projection = getattr(self.server.browser_sessions, "projection", None)
         transport = None
         if projection is not None:
@@ -686,7 +693,55 @@ class Runtime:
             "id": request_id, "phase": "accepted", "previous": str(self.payload),
             "target": payload, "source_instance": self.instance, "database": self.database,
             "created_at": time.time(), "error": None})
+        self.update_drain_started = None
         return self.update_requested
+
+    def prepare_handover(self):
+        """Drain an authorized update without waiting for an accidental idle gap.
+
+        The caller holds the runtime mutex. Unsupported providers remain
+        answerable; supported native turns belong to the surviving transport.
+        """
+        from . import runtime_update
+        sessions = self.server.browser_sessions
+        blocked = uninterrupted_readiness(sessions)
+        if blocked and (not self.update_requested or blocked != ["admitted operations"]):
+            # A previously admitted operation can start an unsupported provider
+            # during the drain. Reopen so that work can finish or be answered.
+            if self.update_drain_started is not None:
+                self.update_requested = runtime_update.write(self.directory, self.update_requested,
+                    phase="accepted", admission_drain_seconds=time.monotonic() - self.update_drain_started)
+                self.update_drain_started = None
+                sessions.admission.resume()
+                sessions.queue.wake()
+                sessions.dispatch.wake()
+            return False
+        sessions.admission.pause()
+        if self.update_requested and self.update_drain_started is None:
+            self.update_drain_started = time.monotonic()
+            self.update_requested = runtime_update.write(self.directory, self.update_requested,
+                phase="draining", admission_drain_started_at=time.time())
+        blocked = uninterrupted_readiness(sessions)
+        if self.update_requested:
+            elapsed = time.monotonic() - self.update_drain_started
+            if blocked and elapsed >= UPDATE_ADMISSION_SECONDS:
+                self.error = "Accepted operations did not drain; the current backend remains active."
+                runtime_update.write(self.directory, self.update_requested, phase="failed",
+                                     error=self.error, blocked=blocked, admission_drain_seconds=elapsed)
+                self.update_requested = None
+                self.update_drain_started = None
+                self.pending = None
+            elif not blocked:
+                self.update_requested = runtime_update.write(self.directory, self.update_requested,
+                    blocked=[], admission_drain_seconds=elapsed)
+                self.update_drain_started = None
+        if blocked:
+            if not self.update_requested:
+                sessions.admission.resume()
+                sessions.queue.wake()
+                sessions.dispatch.wake()
+            return False
+        return True
 
     def resume_work(self):
         """Finish saved recovery decisions before admitting automatic work."""
@@ -983,23 +1038,7 @@ class Runtime:
                     if (not self.update_requested and last_update and last_update["target"] == str(self.pending)
                             and last_update["phase"] in {"failed", "rolled-back"}):
                         continue
-                    # Busy work must remain answerable while an update waits.
-                    # Only close admission after an initial idle observation;
-                    # the closed-gate check below still catches newly admitted work.
-                    if uninterrupted_readiness(sessions):
-                        continue
-                    # Close admissions atomically before checking all accepted
-                    # operations and provider activity. A busy check reopens it.
-                    sessions.admission.pause()
-                    blocked = uninterrupted_readiness(sessions)
-                    if blocked:
-                        if self.update_requested and time.time() - self.update_requested["created_at"] > 30:
-                            runtime_update.write(self.directory, self.update_requested, phase="failed", error="Accepted operations did not drain; the current backend remains active.")
-                            self.update_requested = None
-                            self.pending = None
-                        if not self.update_requested:
-                            sessions.admission.resume()
-                            sessions.queue.wake()
+                    if not self.prepare_handover():
                         continue
                     self.upgrading = True
                     candidate = self.pending

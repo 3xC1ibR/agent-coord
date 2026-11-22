@@ -41,7 +41,7 @@ test('a deliberate navigation reports the surface where it began', () => {
   const cases = [
     [['#sessions', '#sidebar'], 'sidebar'], [['#overview', '#welcome'], 'cards'], [['#working-set-overview', '#welcome'], 'working-set'],
     [['#conversation-results', '#welcome'], 'search'], [['#conversation-tabs'], 'tabs'], [['#thread-hover'], 'hover-card'],
-    [['#roll-up-bar'], 'roll-up'], [['.asks-dialog'], 'decisions'], [['#dispatcher-workspace'], 'dispatcher'], [[], 'other'],
+    [['#roll-up-bar'], 'roll-up'], [['#asks-dialog'], 'decisions'], [['#dispatcher-workspace'], 'dispatcher'], [[], 'other'],
   ];
   for (const [selectors, surface] of cases) assert.equal(surfaceOf({type: 'pointerdown', target: inside(...selectors)}), surface, surface);
   assert.equal(surfaceOf({type: 'keydown', metaKey: true, target: inside('#sessions')}), 'shortcut');

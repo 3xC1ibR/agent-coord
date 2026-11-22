@@ -4261,9 +4261,8 @@ async function boot() {
   state.sidecars = new SidecarsUI({document, api, getThreads: () => state.sessions, openThread: select, onError: showError});
   if (globalThis.ReviewUI) state.reviewUI = new ReviewUI({document, api, onError: showError, changed: renderStatus});
   window.addEventListener("pagehide", () => clearInterval(state.sidecars.timer), {once: true});
-  state.asks = new AsksUI({document, api, openThread: select, onError: showError});
+  state.asks = new AsksUI({document, api, navigate: url => window.agentCoordNavigate(url), onError: showError});
   state.asks.refresh().catch(showError);
-  window.addEventListener("pagehide", () => clearInterval(state.asks.timer), {once: true});
   const sidecarButton = document.createElement("button");
   sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet thread-menu-action";
   sidecarButton.textContent = "Attach sidecar…"; sidecarButton.hidden = true;

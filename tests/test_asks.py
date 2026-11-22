@@ -1,4 +1,4 @@
-"""Decision layer: durable asks, answer delivery, CLI/MCP surfaces, attention, and the UI endpoint."""
+"""Asks: kinds, resolution delivery, CLI/MCP surfaces, attention, measurement, and the UI endpoint."""
 from __future__ import annotations
 
 import json
@@ -62,8 +62,9 @@ class AskStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(CoordinationError, "exactly one"):
             self.store.asks.answer(ask["id"], option="CSV", answer="CSV")
         answered = self.store.asks.answer(ask["id"], option="JSON")
-        self.assertEqual(answered["status"], "answered")
+        self.assertEqual((answered["status"], answered["resolution"], answered["kind"]), ("resolved", "answered", "decision"))
         self.assertEqual(answered["answer"], "JSON")
+        self.assertEqual(answered["answered_at"], answered["resolved_at"])
         messages = self.store.inbox("asker", mark_delivered=False)
         self.assertEqual(len(messages), 1)
         message = messages[0]
@@ -73,12 +74,13 @@ class AskStoreTests(unittest.TestCase):
         self.assertFalse(message["reply_required"])
         self.assertIn("Answer: JSON", message["body"])
         self.assertIn("Which format?", message["body"])
-        with self.assertRaisesRegex(CoordinationError, "already answered"):
+        with self.assertRaisesRegex(CoordinationError, "already resolved"):
             self.store.asks.answer(ask["id"], answer="again")
         free = self.store.asks.create("asker", "Name?", blocking=False, context="Default: untitled.")
         self.assertEqual(self.store.asks.answer(free["id"], answer="  Ribbon  ")["answer"], "Ribbon")
         self.assertEqual(self.store.asks.list(status="open"), [])
-        self.assertEqual([a["id"] for a in self.store.asks.list(status="answered", session_id="asker")], [ask["id"], free["id"]])
+        for status in ("resolved", "answered"):
+            self.assertEqual([a["id"] for a in self.store.asks.list(status=status, session_id="asker")], [ask["id"], free["id"]])
 
     def test_withdraw_and_supersede_are_owner_only(self):
         ask = self.store.asks.create("asker", "Which?", blocking=True)
@@ -104,7 +106,7 @@ class AskStoreTests(unittest.TestCase):
             if len(ticks) == 2:
                 self.store.asks.answer(ask["id"], answer="Go")
         result = self.store.asks.wait(ask["id"], "asker", timeout_seconds=30, sleep=sleep)
-        self.assertEqual((result["status"], result["answer"], result["timed_out"]), ("answered", "Go", False))
+        self.assertEqual((result["status"], result["answer"], result["timed_out"]), ("resolved", "Go", False))
         self.assertEqual(self.store.inbox("asker", unread_only=True, mark_delivered=False), [])
         slow = self.store.asks.create("asker", "Later?", blocking=True)
         def expire(seconds):
@@ -162,8 +164,31 @@ class AskStoreTests(unittest.TestCase):
                 ask_human({"question": "Which?", "blocking": False, "context": "x", "wait_seconds": 5}, store=self.store)
             with self.assertRaisesRegex(CoordinationError, "input fields"):
                 ask_human({"question": "Which?", "blocking": True, "extra": 1}, store=self.store)
+            with self.assertRaisesRegex(CoordinationError, "unblocks"):
+                ask_human({"question": "Provide a key", "blocking": True, "kind": "request"}, store=self.store)
+            request = ask_human({"question": "Provide a SerpAPI key", "blocking": False, "kind": "request",
+                                 "context": "Default: the public endpoint.", "unblocks": "Removes the rate limit.",
+                                 "effort_minutes": 5, "link": "https://serpapi.com/manage-api-key",
+                                 "due_at": "2023-12-01T09:00:00Z", "project": "Crawler", "request_id": "serpapi-key"},
+                                store=self.store)
+            saved = self.store.asks.get(request["ask_id"])
+            self.assertEqual((saved["kind"], saved["unblocks"], saved["effort_minutes"], saved["link"], saved["project"],
+                              saved["request_id"], saved["due_at"]),
+                             ("request", "Removes the rate limit.", 5, "https://serpapi.com/manage-api-key", "Crawler",
+                              "serpapi-key", "2023-12-01T09:00:00+00:00"))
+            replayed = ask_human({"question": "Provide a SerpAPI key again", "blocking": False, "kind": "request",
+                                  "context": "Default: the public endpoint.", "unblocks": "Removes the rate limit.",
+                                  "request_id": "serpapi-key"}, store=self.store)
+            self.assertEqual(replayed, {"status": "ok", "ask_id": request["ask_id"], "state": "open", "existing": True})
             blocking = ask_human({"question": "Go?", "blocking": True}, store=self.store)
             self.store.asks.answer(blocking["ask_id"], answer="Yes")
+            approval = ask_human({"question": "May I email support?", "blocking": True, "kind": "approval",
+                                  "request_id": "email-support"}, store=self.store)
+            self.store.asks.resolve(approval["ask_id"], "approved", note="Keep it short.")
+            self.assertEqual(ask_human({"question": "May I email support?", "blocking": True, "kind": "approval",
+                                        "request_id": "email-support", "wait_seconds": 1}, store=self.store),
+                             {"status": "ok", "ask_id": approval["ask_id"], "state": "resolved", "existing": True,
+                              "resolution": "approved", "note": "Keep it short."})
             original_wait = self.store.asks.wait
             def expire(seconds):
                 self.now += seconds
@@ -275,7 +300,7 @@ class AskAttentionTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in listed], [blocking["id"], later["id"]])
             self.assertEqual(listed[1]["thread_title"], "Terminal worker")
             answered = post("/api/browser/asks/" + str(later["id"]), {"option": "B"})
-            self.assertEqual((answered["status"], answered["answer"]), ("answered", "B"))
+            self.assertEqual((answered["status"], answered["resolution"], answered["answer"]), ("resolved", "answered", "B"))
             self.assertEqual(self.store.inbox("terminal", mark_delivered=False)[0]["thread_id"], f"ask:{later['id']}")
             free = post("/api/browser/asks/" + str(blocking["id"]), {"answer": "Use staging"})
             self.assertEqual(free["answer"], "Use staging")
@@ -304,7 +329,10 @@ class AskAttentionTests(unittest.TestCase):
         worker.start()
         base = "http://127.0.0.1:" + str(server.server_address[1])
         try:
-            for path, needle in (("/asks.js", b"class AsksUI"), ("/asks.css", b".asks-count"), ("/", b'id="open-asks"')):
+            # The whole view ships in the two URLs an older backend already serves.
+            for path, needle in (("/asks.js", b"class AsksUI"), ("/asks.js", b"class AsksView"), ("/asks.js", b"viewName"),
+                                 ("/asks.css", b".asks-count"), ("/asks.css", b".asks-view"), ("/", b'id="open-asks"'),
+                                 ("/", b'id="open-asks-view"'), ("/", b'id="asks-dialog"'), ("/", b'id="asks-list"')):
                 with urllib.request.urlopen(base + path) as response:
                     self.assertIn(needle, response.read(), path)
         finally:
@@ -313,10 +341,92 @@ class AskAttentionTests(unittest.TestCase):
             worker.join(timeout=5)
 
 
+class AskAttentionRegressionTests(unittest.TestCase):
+    """Pins thread attention for a fixed fixture of blocking and non-blocking asks.
+
+    Stage 1 of the asks redesign must not change how an open blocking ask marks
+    its thread. The expected values below were recorded on main at 8abb218,
+    before the redesign, and must stay literal.
+    """
+
+    ATTENTION_FIELDS = ("needs_attention", "attention_reason", "attention_key", "attention_action",
+                        "attention_since", "response_state", "open_ask", "can_handle_response", "status")
+    EXPECTED_THREADS = {
+        "Blocked": {
+            "needs_attention": True, "attention_reason": "blocked", "attention_key": "ask:2",
+            "attention_action": "Decision needed: Which account?", "attention_since": 1700000010.0,
+            "response_state": "input",
+            "open_ask": {"id": 2, "question": "Which account?", "created_at": 1700000010.0, "blocking": True},
+            "can_handle_response": False, "status": "idle"},
+        "Advisory": {
+            "needs_attention": False, "attention_reason": None, "attention_key": None, "attention_action": "",
+            "attention_since": None, "response_state": None, "open_ask": None,
+            "can_handle_response": False, "status": "idle"},
+        "Archived": {
+            "needs_attention": False, "attention_reason": None, "attention_key": None, "attention_action": "",
+            "attention_since": None, "response_state": None,
+            "open_ask": {"id": 5, "question": "Unseen?", "created_at": 1700000020.0, "blocking": True},
+            "can_handle_response": False, "status": "idle"},
+    }
+    EXPECTED_NOTIFICATIONS = [
+        {"request_key": "ask:2", "thread_id": "thread-1", "status": "question", "client": "codex",
+         "title": "Blocked", "project_name": None, "repository_name": None},
+        {"request_key": "ask:3", "thread_id": "thread-1", "status": "question", "client": "codex",
+         "title": "Blocked", "project_name": None, "repository_name": None},
+    ]
+    EXPECTED_OPEN_BLOCKING = {
+        "thread-1": {"id": 2, "question": "Which account?", "created_at": 1700000010.0, "blocking": True},
+        "thread-3": {"id": 5, "question": "Unseen?", "created_at": 1700000020.0, "blocking": True},
+    }
+
+    def setUp(self):
+        from test_codex_app_server import BrowserSessions, FakeCodex
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.now = 1700000000.0
+        self.store = CoordinationStore(self.root / "state.sqlite3", clock=lambda: self.now)
+        self.sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(self.sessions.close)
+        self.threads = {}
+        for name in ("Blocked", "Advisory", "Archived"):
+            self.threads[name] = self.sessions.create({"name": name, "cwd": str(self.root)})["session"]["thread_id"]
+            self.store.touch(self.threads[name], turn_active=False)
+        create = self.store.asks.create
+        create(self.threads["Blocked"], "Advisory question?", blocking=False, context="Default: proceed.")
+        self.now += 10
+        create(self.threads["Blocked"], "Which account?", blocking=True)
+        self.now += 10
+        create(self.threads["Blocked"], "Second blocking question?", blocking=True, context="Later.")
+        create(self.threads["Advisory"], "Which tone?", blocking=False, context="Default: formal.")
+        create(self.threads["Archived"], "Unseen?", blocking=True)
+        self.sessions.update_work_thread(self.threads["Archived"], {"attention": "archived"})
+        self.now += 30
+
+    def attention(self, thread):
+        return {field: thread.get(field) for field in self.ATTENTION_FIELDS}
+
+    def test_thread_attention_output_is_unchanged_for_the_fixed_fixture(self):
+        from agent_coord.asks import AskStore
+        self.assertEqual(self.threads, {"Blocked": "thread-1", "Advisory": "thread-2", "Archived": "thread-3"})
+        for name, thread_id in self.threads.items():
+            self.assertEqual(self.attention(self.sessions.work_thread(thread_id, history=False)),
+                             self.EXPECTED_THREADS[name], name)
+        inventory = {thread["thread_id"]: thread for thread in self.sessions.list_work_threads()}
+        self.assertEqual(sorted(inventory), ["thread-1", "thread-2"])
+        for name in ("Blocked", "Advisory"):
+            self.assertEqual(self.attention(inventory[self.threads[name]]), self.EXPECTED_THREADS[name], name)
+        self.assertEqual(self.sessions.approval_notifications(), self.EXPECTED_NOTIFICATIONS)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(AskStore.open_blocking(db), self.EXPECTED_OPEN_BLOCKING)
+            self.assertEqual(AskStore.open_blocking(db, ["thread-2", "thread-3"]),
+                             {"thread-3": self.EXPECTED_OPEN_BLOCKING["thread-3"]})
+
+
 class AskWebTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is required for browser tests")
-    def test_decisions_dialog_behaviour(self):
-        result = subprocess.run(["node", "--test", "tests/test_web_asks.js"], cwd=ROOT,
+    def test_asks_entry_and_view_behaviour(self):
+        result = subprocess.run(["node", "--test", "tests/test_web_asks.js", "tests/test_web_asks_view.js"], cwd=ROOT,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

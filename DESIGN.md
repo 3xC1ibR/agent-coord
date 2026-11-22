@@ -55,6 +55,10 @@ targets and a visible send action as drafts grow or the keyboard opens. Mobile
 dimensions are declared once in `web/styles.css`.
 Jump to latest is a floating, arrow-only 44px button above the composer. Its
 anchor never reserves a layout row; retain its accessible name and tooltip.
+The asks view opens in a workspace dialog and uses the auxiliary-page grammar: a
+simple title, sections, and a 760px reading width. Its sidebar entry sits above
+the thread list; the dialog fills the screen on narrow layouts. Its dimensions
+are declared once in `web/asks.css`.
 Scheduled prompt actions wrap on desktop and use two columns on narrow screens.
 Their `--schedule-gap` (8px) and `--schedule-action-height` (44px) tokens live in
 `web/styles.css`; the form's action row stays visible as its body scrolls.
@@ -91,6 +95,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
 | Role designation | A user-named role beside a conversation's metadata, muted 10px semibold, placed like the Dispatcher designation |
 | Stopped conversations | Quiet status-bar count of the user's Stops; a native dialog lists each with its supervising agent, all checked, before Release |
+| Asks view | Sidebar entry with an open count, red when an ask is blocking. Rows lead with the title; kind, effort, age, asking thread, state and the link follow as muted meta; the kind's resolution controls lead one row, with Add note, Snooze and Dismiss after them as quiet text controls. Red marks only the Blocking group and the sidebar count; overdue and stale use the attention colour, and resolved outcomes stay muted. Groups use plain headings and one-pixel dividers, not cards. The view's name and wording live only in the copy block of `web/asks.js` |
 | Title band | Mac workspace windows: native window controls centered on the project tab labels; the sidebar, a collapsed header and the compact header start clear of them |
 
 ## Do's and Don'ts
@@ -110,6 +115,9 @@ starts a separate human visit. Background restoration creates neither.
 Filtering and grouping change the view; reviewing creates an ordinary conversation
 with a fixed snapshot of the selected period. Clearing history affects the local
 activity ledger, not the conversations.
+An ask is an item an agent addresses to the user: a decision, action, approval,
+review or request. The user resolves an ask in the asks view; resolving it tells
+the asking thread. An ask belongs to its thread but is not a thread state.
 
 ## Motion and states
 Reuse the existing control transitions and honor reduced motion. Loading and
@@ -124,6 +132,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-22 | Asks get a primary sidebar entry and a view that replaces the Decisions dialog | The dialog behind the question-mark button went unnoticed. Asks now have kinds and in-place resolutions. The view opens in a workspace dialog with the auxiliary-page grammar, and ships in the existing `asks.js` and `asks.css` so an older backend can serve it before its update is applied. |
 | 2026-11-21 | List inbox starts app-agent families collapsed at every depth | Keep the inbox compact by default while preserving explicit expansion and descendant attention counts. |
 | 2026-11-21 | Mobile conversations use a single header and a two-row composer; secondary actions move into thread options | Return reading space from repeated navigation and desktop instructions while preserving the existing actions. |
 | 2026-11-12 | List inbox shows app agents beneath their immediate supervisor, expanded by default | Keep parent-child context visible and bring descendant requests to Attention without duplicate rows. |

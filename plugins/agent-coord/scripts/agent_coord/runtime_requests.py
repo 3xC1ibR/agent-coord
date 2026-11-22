@@ -421,7 +421,7 @@ def _ask_wait_poll(store, ask_id, session_id):
         raise CoordinationError("Ask does not belong to this caller.")
     if current["status"] == "open":
         store.touch(session_id)
-    elif current["status"] == "answered" and current["answer_message_id"]:
+    elif current["status"] == "resolved" and current["answer_message_id"]:
         store.record_message_retrieval(session_id, current["answer_message_id"])
     return current
 

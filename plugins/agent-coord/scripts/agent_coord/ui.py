@@ -587,6 +587,8 @@ def _handler(
             if route == "config":
                 self._json(HTTPStatus.OK, {"token": csrf_token, "cwd": browser_sessions.cwd or os.getcwd(), "workspaceRoot": browser_sessions.cwd,
                                           "recurringSchedules": True,
+                                          # The asks view checks this before offering kinds, notes, snooze and the log.
+                                          "askKinds": True,
                                           "remote": self._remote_request(),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
@@ -664,7 +666,12 @@ def _handler(
             elif route == "organization":
                 self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.list())
             elif route == "asks":
-                self._json(HTTPStatus.OK, {"data": store.asks.overview()})
+                from .asks import timestamp
+                status = query.get("status", ["open"])[-1] or "open"
+                if status not in {"open", "resolved", "withdrawn", "all"}:
+                    raise CoordinationError("Ask status must be open, resolved, withdrawn, or all.")
+                since = timestamp(query.get("since", [None])[-1] or None, "Since")
+                self._json(HTTPStatus.OK, {"data": store.asks.overview(status=status, since=since)})
             elif route.startswith("projects/") and len(route.split("/")) == 2:
                 self._json(HTTPStatus.OK, browser_sessions.store.threads.organization.get_project(unquote(route[9:])))
             elif route == "views":
@@ -1148,15 +1155,26 @@ def _handler(
                     self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.add_repository(body["path"]))
                     return
                 if route[:3] == ["api", "browser", "asks"]:
-                    if len(route) != 4:
-                        raise CoordinationError("Choose an ask to answer.")
-                    if set(body) not in ({"answer"}, {"option"}):
-                        raise CoordinationError("Answer an ask with either option or answer text.")
+                    if len(route) not in (4, 5) or (len(route) == 5 and route[4] != "snooze"):
+                        raise CoordinationError("Choose an ask to resolve.")
                     try:
                         ask_id = int(route[3])
                     except ValueError as exc:
                         raise CoordinationError("Ask ID must be a positive integer.") from exc
-                    result = store.asks.answer(ask_id, answer=body.get("answer"), option=body.get("option"))
+                    if len(route) == 5:
+                        if set(body) != {"until"}:
+                            raise CoordinationError("Snooze an ask with until: a future time, or null to show it again.")
+                        result = store.asks.snooze(ask_id, body["until"])
+                    elif "resolution" in body:
+                        if set(body) - {"resolution", "option", "answer", "note"}:
+                            raise CoordinationError("Resolve an ask with resolution and, where they apply, option, answer and note.")
+                        result = store.asks.resolve(ask_id, body["resolution"], option=body.get("option"),
+                                                    answer=body.get("answer"), note=body.get("note"))
+                    else:
+                        # Clients written before kinds answer a decision with one of these bodies.
+                        if set(body) not in ({"answer"}, {"option"}):
+                            raise CoordinationError("Answer an ask with either option or answer text.")
+                        result = store.asks.answer(ask_id, answer=body.get("answer"), option=body.get("option"))
                     browser_sessions._publish("browser/changed", {"threadId": result["session_id"]})
                     self._json(HTTPStatus.OK, result)
                     return

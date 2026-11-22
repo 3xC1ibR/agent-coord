@@ -1727,35 +1727,104 @@ Thread placement and checkpoint phases are independent of Beads. Linking an
 issue does not import the backlog or change issue status. Delegation and atomic
 handoff also work without an issue.
 
-## Ask the user a decision
+## Ask the user
 
-Agents escalate decisions only the user can make with `agent-coord ask` or the
-`ask_human` MCP tool. Each ask is a durable record tied to the asking session
-(question, optional options, blocking flag, context, status, answer). Open asks
-across every thread appear in the app's **Decisions** dialog, opened from the
-question-mark button in the sidebar; its badge counts open asks and turns red
-when any is blocking. Blocking asks sort first and mark their thread as needing
-the user. Answering picks an option or sends free text; the answer is delivered
-to the asking session as an ordinary `action_required` inbox message in thread
+Agents address the user with `agent-coord ask` or the `ask_human` MCP tool when
+they need something only the user can give. Each ask is a durable record tied
+to the asking session. The design, lifecycle and measurements are specified in
+[`docs/asks.md`](asks.md).
+
+An ask has one of five kinds, and the user closes it with a resolution for that
+kind or dismisses it. Each resolution may carry a note.
+
+| Kind | Meaning | Resolutions |
+| --- | --- | --- |
+| `decision` (default) | Choose between options or answer a question. | `answered` |
+| `action` | Do something only the user can do, usually elsewhere. | `done`, `not_done` |
+| `approval` | Permit something beyond the agent's authorization. | `approved`, `declined` |
+| `review` | Read, verify or try a result. | `accepted`, `changes_requested` |
+| `request` | Provide a tool, dataset, account, credential, budget or access that would materially improve the result. | `granted`, `declined` |
+
+Open asks across every thread appear in the app's **Queue**, opened from the
+sidebar entry above the thread list or from the question-mark button. The
+entry's count shows open asks and turns red when any is blocking. The Queue
+lists blocking asks first, then overdue ones, then the rest by project, and has
+**Snoozed** and **Resolved** sections; Resolved is the log of outcomes and
+notes. The user resolves an ask in place. The resolution is delivered to the
+asking session as an ordinary `action_required` inbox message in thread
 `ask:<id>`, so idle app conversations resume through the existing inbox wake.
+The message states the kind, resolution and note; after `done` it tells the
+agent to verify the result. Blocking asks also mark their thread as needing the
+user.
 
 ```bash
 agent-coord ask --non-blocking --context 'Default: keep CSV.' --option CSV --option JSON 'Export format?'
 agent-coord ask --blocking --context 'Needs production credentials.' --wait 120 'Which account?'
-agent-coord ask --list
+agent-coord ask --kind action --blocking --unblocks 'Pricing for all 18 verified actors.' \
+  --effort 10 --link 'https://console.apify.com/billing' --project 'HoldCo' \
+  --request-id apify-payout-1 'Add payout billing details in Apify'
+agent-coord ask --kind request --non-blocking \
+  --context 'Default: continue with the public endpoint at 10 requests per minute.' \
+  --unblocks 'A paid key removes the rate limit and cuts the crawl from 9 hours to 40 minutes.' \
+  'Provide a SerpAPI key'
+agent-coord ask --show <ask-id>
+agent-coord ask --list [--all-sessions] [--status open|resolved|withdrawn|all] [--since <time>]
 agent-coord ask --withdraw <ask-id>
+agent-coord ask --metrics [--since <time>]
 ```
 
-A non-blocking ask requires `--context` stating the default. `--wait` applies to
-blocking asks; on timeout the receipt includes `timed_out: true` and the ask
-stays open. A direct answer received while waiting records delivery automatically.
-`--supersedes <id>` withdraws an earlier open ask atomically.
+| Flag | Purpose |
+| --- | --- |
+| `--kind` | One of the five kinds; defaults to `decision`. |
+| `--blocking` / `--non-blocking` | Required. A non-blocking ask requires `--context` stating the default. |
+| `--unblocks` | What resolving the ask enables. Required for `action` and `request`. |
+| `--effort MINUTES` | The agent's estimate of the user's time. |
+| `--link` | Where the user acts: an HTTPS URL, an `agentcoord://` link or an absolute file path. |
+| `--due TIME` | A real external deadline: Unix seconds or ISO 8601. A date alone means the end of that local day. |
+| `--project` | Grouping label; defaults to the asking thread's project. |
+| `--request-id` | Idempotency key: the same session and ID return the existing ask. |
+| `--option` | An answer choice for a decision; repeat it. Free text is always allowed. |
+| `--supersedes ID` | Withdraws the caller's earlier open ask atomically. |
+| `--wait [SECONDS]` | Blocking asks only; on timeout the receipt includes `timed_out: true` and the ask stays open. A resolution received while waiting records delivery automatically. |
 
-The UI reads `GET /api/browser/asks` and answers with
-`POST /api/browser/asks/<id>` carrying `{"option": "..."}` or
-`{"answer": "..."}`. Open blocking asks share the approval alert path (desktop
-and phone notifications labelled “Answer needed”), claimed once per ask and
-scoped to the app's workspace like approvals.
+Creating an ask whose normalized title matches an open ask from the same
+session returns that ask with `"existing": true`, as does a repeated
+`--request-id`. `--show`, `--metrics` and `--list --all-sessions` are read-only
+and need no caller session; `--all-sessions` lets an orchestrator see asks
+other agents filed before filing its own. `--since` selects asks created at or
+after a time.
+
+Three states are derived on read, not stored. An open ask is **stale** when its
+thread is closed or its session has recorded no activity for 72 hours,
+**overdue** when `due_at` has passed, and **snoozed** while `snoozed_until` is
+in the future. Snoozing affects only the Queue; a snoozed blocking ask still
+marks its thread.
+
+`agent-coord ask --metrics` reports, for asks created in the period: median and
+90th-percentile time from creation to resolution by kind; the share of closed
+asks resolved by the user versus withdrawn by the agent; supersede chains per
+distinct need; requests filed and the share granted; blocked hours, the summed
+open duration of blocking asks; and the asks that are stale now.
+
+The UI reads `GET /api/browser/asks?status=open|resolved|withdrawn|all&since=`,
+which returns display fields with `stale`, `overdue` and `snoozed` flags. It
+resolves with `POST /api/browser/asks/<id>` carrying
+`{"resolution": "...", "option"?, "answer"?, "note"?}`; the earlier bodies
+`{"option": "..."}` and `{"answer": "..."}` still answer a decision. It snoozes
+with `POST /api/browser/asks/<id>/snooze` carrying `{"until": <time>}`, or
+`null` to show the ask again. Open blocking asks share the approval alert path
+(desktop and phone notifications labelled “Answer needed”), claimed once per
+ask and scoped to the app's workspace like approvals.
+
+The view ships entirely in `web/asks.js` and `web/asks.css`, the two URLs every
+installed backend already serves. `GET /api/browser/config` reports
+`"askKinds": true`; when a backend from before kinds serves the view, during the
+window between an interface install and the backend update, the view shows
+decisions only and answers them with the earlier bodies.
+
+The stored status is `open`, `resolved` or `withdrawn`. Asks answered before
+kinds existed were migrated from `answered` to `resolved` with resolution
+`answered`; readers still accept the earlier value.
 
 ## Attach a sidecar
 
