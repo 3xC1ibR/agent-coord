@@ -1279,6 +1279,32 @@ class BrowserSessionTests(unittest.TestCase):
             persisted = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
         self.assertEqual(persisted["turns"][0]["items"][0]["text"], "Partial update")
 
+    def test_stream_deltas_append_to_nullable_initial_text_and_output(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Continue"})["turn"]
+        params = {"threadId": thread_id, "turnId": turn["id"]}
+        cases = (
+            ("answer", "agentMessage", "text", "item/agentMessage/delta"),
+            ("command", "commandExecution", "aggregatedOutput", "item/commandExecution/outputDelta"),
+        )
+        for item_id, item_type, field, method in cases:
+            with self.subTest(item_type=item_type):
+                self.sessions._event({"method": "item/started", "params": {
+                    **params, "item": {"id": item_id, "type": item_type, field: None}}})
+                for delta in ("First", " second"):
+                    self.sessions._event({"method": method, "params": {
+                        **params, "itemId": item_id, "delta": delta}})
+        self.sessions._event({"method": "turn/completed", "params": {
+            "threadId": thread_id, "turn": {"id": turn["id"], "status": "completed", "items": []}}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
+        with self.store._connection() as db:
+            persisted = json.loads(db.execute(
+                "SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        items = {item["id"]: item for item in persisted["turns"][-1]["items"]}
+        for item_id, _, field, _ in cases:
+            self.assertEqual(items[item_id][field], "First second")
+        self.assertEqual(persisted["turns"][-1]["status"], "completed")
+
     def test_failed_history_read_keeps_cached_messages_and_can_recover(self):
         thread_id = self.create()
         turns = [{"id": "cached", "status": "completed", "items": [

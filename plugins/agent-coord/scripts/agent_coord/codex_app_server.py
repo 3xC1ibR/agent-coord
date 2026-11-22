@@ -1132,7 +1132,7 @@ class BrowserSessions:
         if item and isinstance(params.get("delta"), str):
             field = {"item/agentMessage/delta": "text", "item/commandExecution/outputDelta": "aggregatedOutput"}.get(method)
             if field:
-                item[field] = item.get(field, "") + params["delta"]
+                item[field] = (item.get(field) or "") + params["delta"]
         if method in {"turn/started", "turn/completed"}:
             thread["status"] = {"type": "active" if method == "turn/started" else "idle"}
         if method in {"item/completed", "turn/completed"}:
