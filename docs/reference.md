@@ -1816,6 +1816,12 @@ with `POST /api/browser/asks/<id>/snooze` carrying `{"until": <time>}`, or
 (desktop and phone notifications labelled “Answer needed”), claimed once per
 ask and scoped to the app's workspace like approvals.
 
+The view ships entirely in `web/asks.js` and `web/asks.css`, the two URLs every
+installed backend already serves. `GET /api/browser/config` reports
+`"askKinds": true`; when a backend from before kinds serves the view, during the
+window between an interface install and the backend update, the view shows
+decisions only and answers them with the earlier bodies.
+
 The stored status is `open`, `resolved` or `withdrawn`. Asks answered before
 kinds existed were migrated from `answered` to `resolved` with resolution
 `answered`; readers still accept the earlier value.

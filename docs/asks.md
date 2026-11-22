@@ -196,8 +196,10 @@ points the specification left open.
 
 | Decision | Reason |
 | --- | --- |
-| The view is an auxiliary page at `/asks`, opened from the sidebar entry in the dialog frame that Usage and Activity use, and full-screen on narrow layouts. It is not a new region of the workspace shell. | It reuses an existing surface type instead of adding one, keeps the change out of the workspace's view state, and gives the phone and the iOS wrapper the same page at a plain URL. |
-| The name "Queue" appears only in `web/asks-copy.js`. Files, routes, identifiers and tests use `asks`. | The name and the reference apps are defaults the owner has not confirmed; renaming the view is a one-line copy change. |
+| The view opens from the sidebar entry in a workspace dialog that uses the auxiliary-page grammar of Usage and Activity, and fills the screen on narrow layouts. It is not a new region of the workspace shell. | It reuses an existing surface type instead of adding one and keeps the change out of the workspace's view state. The iOS app wraps the same web interface, so it gets the view too. |
+| The whole view ships in `web/asks.js` and `web/asks.css`. There is no separate page, route or script URL. | After an interface install, the retained backend serves the new web files through its existing asset list until its update is applied. A new URL would return 404 in that window and break the workspace; these two URLs are already served by every installed backend. |
+| Against a backend from before kinds, the view shows decisions only and answers them with the legacy bodies. It hides notes, snooze, dismissal and the log, and says so. It learns this from `askKinds` in the browser config. | Open asks, including blocking ones, stay answerable between the interface install and the backend update, however long that takes. |
+| The name "Queue" appears only in the copy block at the top of `web/asks.js`. Files, identifiers and tests use `asks`. | The name and the reference apps are defaults the owner has not confirmed; renaming the view is a one-line copy change. |
 | **Deviation:** the open count moved from the question-mark button to the sidebar entry. The button stays and opens the view, without a count. | Two counts for one list duplicate an affordance. |
 | The affirmative control of each row is the standard button, not the primary button. | A list has no single principal action; a primary button on every row would spend the view's emphasis many times over. |
 | The note field of an action, approval, review or request appears when the user chooses **Add note**. A decision's answer field is always shown. | An image-only design review found the always-present optional field dominating every row. Most resolutions carry no note; one click reveals the field. |
@@ -236,5 +238,7 @@ points the specification left open.
 
 Thread attention text still reads "Decision needed:" for a blocking ask of any
 kind, because that derivation is frozen until stage 3. Resolving an ask is not
-written to the Activity ledger, as before. The native Mac window restoration
-list does not include `/asks`; the view opens inside the workspace window.
+written to the Activity ledger, as before. The runtime schema version is
+unchanged: the migration only adds columns and renames one status value, the
+earlier code reads the migrated table, and a higher schema version would forbid
+rolling the backend back.
