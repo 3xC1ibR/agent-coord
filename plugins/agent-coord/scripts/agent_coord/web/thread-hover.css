@@ -1,6 +1,6 @@
 .thread-hover {
   position: fixed; z-index: 80; width: min(420px, calc(100vw - 24px));
-  max-height: min(620px, calc(100dvh - 24px)); overflow-y: auto;
+  max-height: min(620px, calc(100dvh - 24px), var(--thread-hover-available-height, 100dvh)); overflow-y: auto; /* drift-ok: preserve the existing height limit and viewport inset. */
   box-sizing: border-box; padding: 18px 20px; border: 1px solid var(--line-strong);
   border-radius: 10px; background: var(--surface); color: var(--ink);
   box-shadow: 0 12px 42px var(--shadow);

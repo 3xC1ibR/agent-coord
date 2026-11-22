@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const {createThreadHover} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-hover.js");
 
 class Element {
-  constructor() { this.children = []; this.handlers = {}; this.attributes = {}; this.dataset = {}; this.style = {}; this.isConnected = true; this.offsetWidth = 420; this.offsetHeight = 400; }
+  constructor() { this.children = []; this.handlers = {}; this.attributes = {}; this.dataset = {}; this.style = {setProperty(key, value) { this[key] = value; }, removeProperty(key) { delete this[key]; }}; this.isConnected = true; this.offsetWidth = 420; this.offsetHeight = 400; }
   append(...items) { this.children.push(...items); for (const item of items) item.parent = this; }
   replaceChildren(...items) { this.children = []; this.append(...items); }
   setAttribute(key, value) { this.attributes[key] = value; }
@@ -31,19 +31,81 @@ function setup() {
   overview.append(first, second);
   overview.querySelectorAll = () => overview.children;
   tabs.querySelectorAll = () => tabs.children;
-  let tasks = new Map(), sequence = 0, requests = [], opened = [];
+  let tasks = new Map(), sequence = 0, requests = [], opened = [], delays = [];
   const threads = {};
   const result = createThreadHover({overview, tabs, document, window,
-    schedule: fn => { tasks.set(++sequence, fn); return sequence; }, cancel: id => tasks.delete(id),
+    schedule: (fn, delay) => { delays.push(delay); tasks.set(++sequence, fn); return sequence; }, cancel: id => tasks.delete(id),
     getThread: id => !id || ["new-session", "project-scratchpad"].includes(id) ? null : threads[id] || ({thread_id: id, title: id, cwd: "/workspace", checkpoint: {summary: "Saved progress"}}),
     relativeTime: () => "Just now", select: id => opened.push(id),
     loadPreview: id => new Promise((resolve, reject) => requests.push({id, resolve, reject}))});
-  return {...result, overview, tabs, document, window, first, second, requests, threads, opened,
+  return {...result, overview, tabs, document, window, first, second, requests, threads, opened, delays,
     async flush() { for (const [id, fn] of [...tasks]) if (tasks.delete(id)) fn(); await Promise.resolve(); },
     enter(target, type = "pointerover") { overview.handlers[type]({target, type, pointerType: "mouse"}); },
     leave(target) { overview.handlers.pointerout({target, relatedTarget: null}); }};
 }
 const response = id => ({thread: {title: id, client: "codex", checkpoint: {}}, latest_message: {role: "assistant", text: "<script>literal message</script>"}});
+
+test("preview opens at the latest pointer position and does not follow subsequent movement", async () => {
+  const s = setup();
+  s.overview.handlers.pointerover({target: s.first, type: "pointerover", pointerType: "mouse", clientX: 100, clientY: 120});
+  s.document.handlers.pointermove({pointerType: "mouse", clientX: 260, clientY: 180});
+  await s.flush();
+  assert.equal(s.panel.style.left, "270px"); assert.equal(s.panel.style.top, "190px");
+  s.document.handlers.pointermove({pointerType: "mouse", clientX: 400, clientY: 220});
+  s.requests[0].resolve(response("first")); await Promise.resolve();
+  assert.equal(s.panel.style.left, "270px"); assert.equal(s.panel.style.top, "190px");
+});
+
+test("loading growth and list refreshes preserve pointer placement and scrolling", async () => {
+  const s = setup(); s.panel.offsetHeight = 160;
+  s.overview.handlers.pointerover({target: s.first, type: "pointerover", pointerType: "mouse", clientX: 700, clientY: 600});
+  await s.flush();
+  const {left, top} = s.panel.style;
+  assert.equal(left, "270px"); assert.equal(top, "610px");
+  assert.equal(s.panel.style["--thread-hover-available-height"], "178px");
+  s.panel.offsetHeight = 500; s.panel.scrollTop = 42;
+  s.requests[0].resolve(response("first")); await Promise.resolve(); s.refresh();
+  assert.equal(s.panel.style.left, left); assert.equal(s.panel.style.top, top);
+  assert.equal(s.panel.scrollTop, 42);
+  s.panel.handlers.pointerdown(); s.window.innerHeight = 500; s.window.handlers.resize();
+  assert.ok(parseFloat(s.panel.style.top) >= 12);
+  assert.ok(parseFloat(s.panel.style.top) + parseFloat(s.panel.style["--thread-hover-available-height"]) <= 488);
+});
+
+test("pointer previews fit the bottom-right viewport edge and keyboard previews ignore old pointer coordinates", async () => {
+  const s = setup();
+  s.overview.handlers.pointerover({target: s.first, type: "pointerover", pointerType: "mouse", clientX: 990, clientY: 790});
+  await s.flush();
+  assert.equal(s.panel.style.left, "560px"); assert.equal(s.panel.style.top, "388px");
+  s.hide(); s.enter(s.second, "focusin"); await s.flush();
+  assert.equal(s.panel.style.left, "170px");
+  assert.equal(s.panel.style["--thread-hover-available-height"], undefined);
+});
+
+test("moving across row descendants does not restart the pending hover delay", async () => {
+  const s = setup(), title = new Element(); s.first.append(title);
+  s.enter(s.first); s.enter(title); s.enter(s.first);
+  assert.deepEqual(s.delays, [300]);
+  await s.flush(); assert.equal(s.requests.length, 1);
+});
+
+test("pinning preserves the pressed control so its first click can open the thread", async () => {
+  const s = setup(); s.enter(s.first); await s.flush();
+  const open = find(s.panel, "hover-foot").children.at(-1);
+  s.panel.handlers.pointerdown();
+  assert.equal(find(s.panel, "hover-foot").children.at(-1), open);
+  open.onclick({stopPropagation() {}});
+  assert.deepEqual(s.opened, ["first"]); assert.equal(s.panel.hidden, true);
+});
+
+test("keyboard focus inside the panel survives row exit and closes after focus leaves", async () => {
+  const s = setup(); s.enter(s.first, "focusin"); await s.flush();
+  const open = find(s.panel, "hover-foot").children.at(-1);
+  s.document.activeElement = open; s.leave(s.first); await s.flush();
+  assert.equal(s.panel.hidden, false);
+  s.document.activeElement = null; s.panel.handlers.focusout({target: open, relatedTarget: null}); await s.flush();
+  assert.equal(s.panel.hidden, true);
+});
 
 test("inbox rows share the existing preview and its pinning and open action", async () => {
   const s = setup(), row = new Element(), title = new Element();

@@ -16,6 +16,7 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
   const anchors = ".session[data-thread], .agent-row[data-thread], .tl-row[data-thread], .conversation-tab-select[data-thread-tab]";
   const threadId = el => el.dataset.thread || el.dataset.threadTab;
   let anchor = null, anchorSurface = null, current = null, openTimer, closeTimer, request = 0, pointerInside = false, pinned = false, trail = [], pointer = null;
+  let openingPoint = null, placement = null;
   const cache = new Map();
   const PROVIDERS = {muse: "Muse Code", codex: "Codex", claude: "Claude", kimi: "Kimi", antigravity: "Antigravity"};
   const VERBS = {run: "Running", edit: "Editing", read: "Reading", tool: "Using"};
@@ -51,9 +52,12 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
   function shortPath(path) { return String(path).replace(/^\/(Users|home)\/[^/]+/, "~"); }
   function hide() {
     cancel(openTimer); cancel(closeTimer); request++;
+    openTimer = closeTimer = null;
     anchor?.removeAttribute("aria-describedby");
     anchor = null; anchorSurface = null; current = null; pointerInside = false; pinned = false; trail = [];
     panel.hidden = true; panel.dataset.pinned = "false"; panel.setAttribute("role", "tooltip");
+    openingPoint = placement = null;
+    panel.style.removeProperty("--thread-hover-available-height");
   }
   function restoreAnchor() {
     if (!anchor || anchor.isConnected) return !!anchor;
@@ -76,6 +80,21 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
     panel.style.maxHeight = "";
     const width = panel.offsetWidth;
     let height = panel.offsetHeight;
+    if (openingPoint) {
+      // Capture one position when the preview opens. Loading, pinning and list
+      // refreshes must not move the panel away from the pointer or its controls.
+      if (!placement) placement = {
+        left: openingPoint.x + gap + width <= window.innerWidth - margin ? openingPoint.x + gap : openingPoint.x - width - gap,
+        top: Math.max(margin, Math.min(openingPoint.y + gap, window.innerHeight - height - margin)),
+        height,
+      };
+      const left = Math.max(margin, Math.min(placement.left, window.innerWidth - width - margin));
+      const top = Math.max(margin, Math.min(placement.top, window.innerHeight - Math.min(placement.height, window.innerHeight - margin * 2) - margin));
+      panel.style.left = left + "px";
+      panel.style.top = top + "px";
+      panel.style.setProperty("--thread-hover-available-height", Math.max(0, window.innerHeight - top - margin) + "px");
+      return;
+    }
     const tab = anchor.dataset.threadTab !== undefined;
     let left = tab ? rect.left : rect.right + gap, top = tab ? rect.bottom + gap : rect.top;
     if (tab) {
@@ -109,6 +128,7 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
     return button;
   }
   function render(thread, data, {loading = false, failed = false} = {}) {
+    const scrollTop = panel.scrollTop;
     panel.replaceChildren();
     panel.dataset.pinned = pinned ? "true" : "false";
     panel.setAttribute("role", pinned ? "dialog" : "tooltip");
@@ -127,11 +147,9 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
       state.append(back);
     }
     panel.append(state);
-    if (pinned) {
-      const close = element("button", "×", "hover-close"); close.type = "button"; close.setAttribute("aria-label", "Close");
-      close.onclick = event => { event?.stopPropagation?.(); hide(); };
-      panel.append(close);
-    }
+    const close = element("button", "×", "hover-close"); close.type = "button"; close.setAttribute("aria-label", "Close");
+    close.onclick = event => { event?.stopPropagation?.(); hide(); };
+    panel.append(close);
     if (activity.text) panel.append(element("p", activity.text, "hover-activity"));
     if (thread.checkpoint?.summary) {
       panel.append(markdownBody(thread.checkpoint.summary, "hover-summary"));
@@ -184,6 +202,7 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
       panel.append(foot);
     }
     position();
+    panel.scrollTop = scrollTop;
   }
   async function show(button, id, {thread: given} = {}) {
     if (!button?.isConnected) return;
@@ -211,13 +230,16 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
     // Phones and touch screens have no hover: a Peek button opens the lens already pinned.
     cancel(openTimer); cancel(closeTimer);
     if (anchor && anchor !== button) hide();
+    openingPoint = placement = null;
+    panel.style.removeProperty("--thread-hover-available-height");
     pinned = true; trail = [];
     button.removeAttribute?.("title");
     show(button, id, {thread});
   }
   function pin() {
     if (pinned || panel.hidden || !current) return;
-    pinned = true; render(current.thread, cache.get(current.thread_id)?.data || null);
+    // Keep the pressed element in the DOM so its first click still reaches it.
+    pinned = true; panel.dataset.pinned = "true"; panel.setAttribute("role", "dialog");
   }
   function refresh() {
     if (panel.hidden || !current) return;
@@ -238,23 +260,28 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
     const button = target(event);
     if (!button) return;
     cancel(closeTimer);
-    if (button === anchor && !panel.hidden) return;
+    if (button === anchor && (!panel.hidden || openTimer != null)) return;
     if (pinned) return; // A pinned lens stays until it is closed or another one is opened.
     hide(); anchor = button; anchorSurface = surfaces.find(surface => surface.contains(button));
     // Avoid native tooltips covering the richer preview.
     button.removeAttribute("title");
     for (const el of button.querySelectorAll("[title]")) el.removeAttribute("title");
-    openTimer = schedule(() => { if (restoreAnchor()) show(anchor, threadId(anchor)); }, event.type === "focusin" ? 0 : 300);
+    const pointerOpening = event.type !== "focusin" && Number.isFinite(event.clientX) && Number.isFinite(event.clientY) && button.dataset.threadTab === undefined;
+    openTimer = schedule(() => {
+      openTimer = null;
+      if (restoreAnchor()) { openingPoint = pointerOpening ? {...pointer} : null; show(anchor, threadId(anchor)); }
+    }, event.type === "focusin" ? 0 : 300);
   }
   function leave(event) {
     if (pinned) return;
-    if (event.target && !anchor?.contains(event.target)) return;
+    if (event.target && !anchor?.contains(event.target) && !panel.contains(event.target)) return;
     if (anchor?.contains(event.relatedTarget) || panel.contains(event.relatedTarget)) return;
     cancel(openTimer);
+    openTimer = null;
     cancel(closeTimer);
     closeTimer = schedule(() => {
-      if (!pointerInside && !anchor?.contains(document.activeElement)) hide();
-    }, 180);
+      if (!pointerInside && !anchor?.contains(document.activeElement) && !panel.contains(document.activeElement)) hide();
+    }, 300);
   }
   for (const surface of surfaces) {
     surface.addEventListener("pointerover", enter);
@@ -270,6 +297,8 @@ function createThreadHover({overview, tabs = null, document, window, getThread, 
   panel.addEventListener("pointerenter", () => { pointerInside = true; cancel(closeTimer); });
   panel.addEventListener("pointerleave", () => { pointerInside = false; leave({relatedTarget: null}); });
   panel.addEventListener("pointerdown", () => pin());
+  panel.addEventListener("focusin", () => cancel(closeTimer));
+  panel.addEventListener("focusout", leave);
   document.addEventListener("keydown", event => { if (event.key === "Escape") hide(); });
   window.addEventListener("resize", () => { if (pinned && !panel.hidden) position(); else hide(); });
   document.addEventListener("scroll", event => { if (panel.contains(event.target)) return; if (pinned && !panel.hidden) position(); else hide(); }, true);
