@@ -146,6 +146,77 @@ class StoicExecutionContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal[0].payload["description"], result["text"][:178])
         self.assertEqual(len(notifications), 2 if uncertain_notification else 1)
 
+    async def route_definition(self, role="outcomes"):
+        """Name a role on the job before its occurrence is selected for execution."""
+        response = await self.fixture.client.put("/api/execution/definitions/job/job",
+                                                 json={**self.definition, "route": {"role": role}})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["route"], {"role": role})
+
+    def holder(self, name="outcomes"):
+        from agent_coord import workspace_roles
+        from agent_coord.supervision import USER
+        thread = self.sessions.create({})["session"]["thread_id"]
+        role = workspace_roles.create_role(self.store, workspace=str(self.root), name=name, requester_kind=USER)
+        workspace_roles.appoint(self.store, role_id=role["role_id"], holder=thread, requester_kind=USER,
+                                workspace=str(self.root))
+        self.connector.configure({"allowed_permission_modes": {
+            "codex": ["full-access", self.sessions._record(thread)["permission_mode"]]}})
+        return thread
+
+    async def test_run_without_route_carries_no_routing_fields_through_api_and_engine(self):
+        row = await self.launch()
+        self.assertNotIn("delivery", row)
+        result = await self.finish(row)
+        await self.synchronize()
+        remote = (await self.fixture.client.get("/api/execution/runs/" + row["request_id"])).json()
+        self.assertEqual(remote["result"], result)
+        self.assertNotIn("route", remote)
+        self.assertNotIn("delivery", remote)
+        self.assertEqual(self.connector.status()["uncovered_roles"], [])
+        self.assertIsNotNone(self.connector.status()["route_coverage_checked_at"])
+
+    async def test_routed_run_reaches_the_role_holder_and_stoic_records_the_delivery(self):
+        await self.route_definition()
+        holder = await asyncio.to_thread(self.holder)
+        threads = sum(method == "thread/start" for method, _ in self.sessions.rpc.calls)
+        row = await self.launch()
+        self.assertEqual(row["thread_id"], holder)
+        self.assertEqual(sum(method == "thread/start" for method, _ in self.sessions.rpc.calls), threads)
+        (native,) = [p for method, p in self.sessions.rpc.calls if method == "turn/start"]
+        submitted = "\n".join(item.get("text", "") for item in native["input"])
+        self.assertTrue(submitted.startswith("Stoic execution context (immutable occurrence):\n"))
+        self.assertTrue(submitted.endswith("Instructions:\n" + self.definition["prompt"]))
+        result = await self.finish(row)
+        self.lose_result_response = True
+        await asyncio.to_thread(self.connector.process_once)
+        self.assertIn("lost result response", self.connector.last_error)
+        await self.synchronize()
+        remote = (await self.fixture.client.get("/api/execution/runs/" + row["request_id"])).json()
+        self.assertEqual(remote["status"], "completed")
+        self.assertEqual(remote["route"], {"role": "outcomes"})
+        self.assertEqual(remote["delivery"], {"route": {"role": "outcomes"}, "outcome": "holder", "thread_id": holder})
+        self.assertEqual([remote["thread_id"], remote["turn_id"]], [holder, row["turn_id"]])
+        await self.assert_published_result(row, result)
+        self.assertEqual(self.connector.status()["uncovered_roles"], [])
+
+    async def test_unheld_role_falls_back_and_stoic_records_the_reason(self):
+        await self.route_definition()
+        row = await self.launch()
+        self.assertEqual(row["delivery"]["outcome"], "fallback")
+        (native,) = [p for method, p in self.sessions.rpc.calls if method == "turn/start"]
+        self.assertEqual((native["threadId"], native["model"], native["effort"]),
+                         (row["thread_id"], "available-model", "high"))
+        (gap,) = self.connector.status()["uncovered_roles"]
+        self.assertEqual([gap["role"], [item["id"] for item in gap["definitions"]]], ["outcomes", ["job"]])
+        result = await self.finish(row)
+        await self.synchronize()
+        remote = (await self.fixture.client.get("/api/execution/runs/" + row["request_id"])).json()
+        self.assertEqual(remote["status"], "completed")
+        self.assertEqual(remote["delivery"]["outcome"], "fallback")
+        self.assertIn("does not exist", remote["delivery"]["reason"])
+        await self.assert_published_result(row, result)
+
     async def test_actual_api_engine_result_retry_and_notification_idempotency(self):
         from sqlalchemy import func, select
         from src.models import OutboxMessage

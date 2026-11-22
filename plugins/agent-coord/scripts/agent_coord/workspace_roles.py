@@ -14,6 +14,7 @@ its own role to another session. Nothing here wakes, resumes or stops an agent.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import uuid
 
 from . import supervision
@@ -88,6 +89,27 @@ def held_role(db, session_id):
         return None
     row = db.execute("SELECT role_id, name FROM workspace_roles WHERE holder_session_id = ?", (session_id,)).fetchone()
     return {"role_id": row["role_id"], "name": row["name"]} if row else None
+
+
+def find_role(db, name, directory):
+    """Read-only: the role a working directory refers to by name, as (row, None) or (None, reason).
+
+    The nearest role workspace that contains the directory wins. Otherwise one
+    role in a workspace beneath the directory is accepted; several are ambiguous.
+    """
+    name = _name(name)
+    rows = []
+    if supervision._exists(db, "workspace_roles"):
+        rows = [row for row in db.execute("SELECT * FROM workspace_roles WHERE name = ?", (name,))
+                if _visible(row["workspace"], directory)]
+    containing = [row for row in rows if matches_workspace(directory, row["workspace"])]
+    if containing:
+        return max(containing, key=lambda row: len(Path(row["workspace"]).expanduser().resolve().parts)), None
+    if len(rows) == 1:
+        return rows[0], None
+    if rows:
+        return None, f"Several roles named {name!r} exist beneath {directory}."
+    return None, f"Role {name!r} does not exist in the workspace of {directory}."
 
 
 def list_roles(store, workspace):

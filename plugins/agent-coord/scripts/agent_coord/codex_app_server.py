@@ -2875,6 +2875,7 @@ class BrowserSessions:
         self.event_subscriptions.close()
         self.sidecars.close()
         self.inbox_wake.close()
+        self.external_work.close()
         self.rpc.close()
         self.claude.close()
         self.antigravity.close()

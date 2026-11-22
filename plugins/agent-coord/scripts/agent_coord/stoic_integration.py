@@ -20,6 +20,13 @@ from .codex_app_server import BrowserBusyError
 DEFAULT_ORIGIN = "https://tryblume.ai"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 TERMINAL_STATES = {"succeeded", "failed", "cancelled", "uncertain"}
+COVERAGE_INTERVAL_SECONDS = 24 * 60 * 60
+COVERAGE_RETRY_SECONDS = 10 * 60
+COVERAGE_GUIDANCE = ("Stoic definitions route their runs to this Ribbon Field role, but no open conversation can "
+                     "receive them. Until a holder is appointed, each run opens a new conversation with the "
+                     "definition's own settings. Tell the user; choosing the holder is their decision "
+                     "(agent-coord role transfer, or the role control in Ribbon Field). This notice is sent once "
+                     "for this gap. No reply is required.")
 
 
 class StoicRequestError(CoordinationError):
@@ -84,8 +91,15 @@ class StoicIntegration:
         self.scan_offset = 0
         self.last_error = None
         self.last_connected_at = None
+        # Routing coverage is checked when the adapter starts, then once a day.
+        self.next_coverage_check = 0.0
+        self.coverage_checked_at = None
         with self.store._connection() as db:
             db.executescript("""
+                CREATE TABLE IF NOT EXISTS stoic_route_gaps (
+                    gap TEXT PRIMARY KEY, role TEXT NOT NULL, reason TEXT NOT NULL,
+                    definitions_json TEXT NOT NULL, first_seen_at REAL NOT NULL, notified_at REAL
+                );
                 CREATE TABLE IF NOT EXISTS stoic_connection (
                     id INTEGER PRIMARY KEY CHECK(id=1), connection_id TEXT NOT NULL,
                     runner_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
@@ -129,11 +143,14 @@ class StoicIntegration:
                 "allowed_models": config.get("allowed_models", {}),
                 "credential_configured": Path(config["token_file"]).is_file(),
                 "last_connected_at": self.last_connected_at, "last_error": self.last_error,
-                "runs": counts, "denied_runs": denied}
+                "runs": counts, "denied_runs": denied,
+                "notice_session_id": config.get("notice_session_id"),
+                "route_coverage_checked_at": self.coverage_checked_at, "uncovered_roles": self._gaps()}
 
     def configure(self, body):
         policy_keys = {"allowed_roots", "allowed_permission_modes", "allowed_models"}
-        if not isinstance(body, dict) or set(body) - {"enabled", "base_url", "token_file", "max_concurrent_runs"} - policy_keys:
+        if not isinstance(body, dict) or set(body) - {"enabled", "base_url", "token_file", "max_concurrent_runs",
+                                                      "notice_session_id"} - policy_keys:
             raise CoordinationError("Unknown Stoic connection setting.")
         if "enabled" in body and not isinstance(body["enabled"], bool):
             raise CoordinationError("Stoic enabled must be a boolean.")
@@ -159,6 +176,15 @@ class StoicIntegration:
                     for client, entries in value.items())):
                 raise CoordinationError(f"Stoic {key} must map provider names to lists of exact identifiers.")
             policy_changes[key] = value
+        if "notice_session_id" in body:
+            recipient = body["notice_session_id"]
+            if recipient is not None:
+                if not isinstance(recipient, str) or not recipient or len(recipient) > 200:
+                    raise CoordinationError("Stoic notice_session_id must be a conversation ID or null.")
+                with self.store.reading(), self.store._connection() as db:
+                    if not db.execute("SELECT 1 FROM sessions WHERE session_id=?", (recipient,)).fetchone():
+                        raise CoordinationError("Stoic notice_session_id does not name a known conversation.")
+            policy_changes["notice_session_id"] = recipient
         # Configuration never changes underneath an in-flight authenticated request.
         if not self.processing.acquire(blocking=False):
             raise CoordinationError("Stoic is synchronizing. Retry the connection change shortly.")
@@ -190,15 +216,146 @@ class StoicIntegration:
                            (int(body.get("enabled", bool(config["enabled"]))), origin, token_file, self.store.clock()))
                 if "max_concurrent_runs" in body:
                     db.execute("UPDATE stoic_connection SET max_concurrent_runs=? WHERE id=1", (body["max_concurrent_runs"],))
-                policy = {key: config[key] for key in policy_keys if key in config}
+                policy = {key: config[key] for key in policy_keys | {"notice_session_id"} if key in config}
                 policy.update(policy_changes)
                 db.execute("UPDATE stoic_connection SET policy_json=? WHERE id=1", (json.dumps(policy),))
             self.next_scan = 0
             self.scan_offset = 0
             self.last_error = None
+            self.next_coverage_check = 0.0
         finally:
             self.processing.release()
         return self.status()
+
+    def _gaps(self):
+        with self.store.reading(), self.store._connection() as db:
+            return [{"role": row["role"], "reason": row["reason"], "definitions": json.loads(row["definitions_json"]),
+                     "first_seen_at": row["first_seen_at"], "notified_at": row["notified_at"]}
+                    for row in db.execute("SELECT * FROM stoic_route_gaps ORDER BY first_seen_at, gap")]
+
+    def _authorize_holder(self, record):
+        """A routed run may enter only a conversation that local policy would let Stoic start."""
+        config = self._configuration()
+        modes = {record.get("permission_mode"), record.get("permission_mode_effective") or record.get("permission_mode")}
+        try:
+            for mode in modes:
+                self._authorize_settings(config, {"cwd": record.get("cwd"), "client": record.get("client"),
+                                                  "permission_mode": mode, "model": record.get("model")})
+        except CoordinationError as exc:
+            raise CoordinationError("The role holder is outside the local Stoic execution policy. " + str(exc)) from None
+
+    @staticmethod
+    def _routed(binding):
+        text = binding.get("run_json") or ""
+        return '"route"' in text and json.loads(text).get("route") is not None
+
+    @staticmethod
+    def _within_roots(config, directory):
+        if not isinstance(directory, str) or not Path(directory).expanduser().is_absolute():
+            return False
+        resolved = Path(directory).expanduser().resolve()
+        return any(resolved.is_relative_to(Path(root)) for root in config.get("allowed_roots", []))
+
+    def _awaiting_holder(self, config, binding):
+        """A routed run that waits for its holder has started no provider work."""
+        if not self._routed(binding):
+            return False
+        local = self.external_work.get("stoic:" + config["connection_id"], binding["run_id"])
+        return bool(local and local["state"] == "pending"
+                    and (local.get("delivery") or {}).get("outcome") == "waiting")
+
+    @staticmethod
+    def _gap_key(status):
+        return "role:" + status["role_id"] if status.get("role_id") else "name:" + str(status.get("role")).casefold()
+
+    def _record_gaps(self, gaps, *, complete):
+        """Save uncovered roles; a complete check also clears the gaps that have closed."""
+        now = self.store.clock()
+        with self.store.database_operation("stoic.route_gaps", priority="background"), self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if complete:
+                known = [row[0] for row in db.execute("SELECT gap FROM stoic_route_gaps")]
+                db.executemany("DELETE FROM stoic_route_gaps WHERE gap=?", [(gap,) for gap in known if gap not in gaps])
+            for gap, value in gaps.items():
+                db.execute("""INSERT INTO stoic_route_gaps (gap,role,reason,definitions_json,first_seen_at)
+                    VALUES (?,?,?,?,?) ON CONFLICT(gap) DO UPDATE SET role=excluded.role,reason=excluded.reason,
+                    definitions_json=excluded.definitions_json""",
+                    (gap, value["role"], value["reason"], json.dumps(value["definitions"][:20]), now))
+
+    def _notify_gaps(self, config):
+        """Send one notice for each uncovered role that has not been announced."""
+        from .supervision import retired
+        recipient = config.get("notice_session_id")
+        if not recipient:
+            return
+        with self.store.database_operation("stoic.route_notice", priority="background"), self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM sessions WHERE session_id=?", (recipient,)).fetchone() or retired(db, recipient):
+                return
+            now = self.store.clock()
+            for row in db.execute("SELECT * FROM stoic_route_gaps WHERE notified_at IS NULL ORDER BY first_seen_at, gap").fetchall():
+                body = json.dumps({"event": "stoic_role_uncovered", "role": row["role"], "reason": row["reason"],
+                                   "definitions": json.loads(row["definitions_json"]),
+                                   "guidance": COVERAGE_GUIDANCE}, ensure_ascii=True)
+                # The integration is not a session, so the notice is addressed from the recipient to itself.
+                self.store._insert_message(db, sender_session_id=recipient, recipient_session_id=recipient, body=body,
+                                           classification="action_required",
+                                           thread_id="stoic-role-coverage:" + row["gap"] + ":" + uuid.uuid4().hex[:12],
+                                           reply_required=False, now=now)
+                db.execute("UPDATE stoic_route_gaps SET notified_at=? WHERE gap=?", (now, row["gap"]))
+
+    def _inspect(self, route, directory):
+        try:
+            return self.external_work.inspect_route(route, directory, holder_policy=self._authorize_holder)
+        except CoordinationError as exc:
+            return {"deliverable": False, "reason": str(exc)[:500], "role_id": None,
+                    "role": route.get("role") if isinstance(route, dict) else None, "thread_id": None}
+
+    def _observe_fallback(self, config, run, local):
+        """A run that fell back reveals an uncovered role before the next daily check."""
+        delivery = local.get("delivery") or {}
+        if delivery.get("outcome") != "fallback":
+            return
+        status = self._inspect(run["route"], run["settings"].get("cwd"))
+        if status["deliverable"]:
+            return
+        gap = self._gap_key(status)
+        with self.store.reading(), self.store._connection() as db:
+            if db.execute("SELECT 1 FROM stoic_route_gaps WHERE gap=?", (gap,)).fetchone():
+                return
+        self._record_gaps({gap: {"role": str(status["role"]), "reason": status["reason"], "definitions": [{
+            "source": run.get("source"), "id": run.get("source_id"), "name": run.get("name"),
+            "cwd": run["settings"].get("cwd")}]}}, complete=False)
+        self._notify_gaps(config)
+
+    def check_coverage(self, client, config):
+        """Compare every routed Stoic definition with the roles that can receive its runs."""
+        definitions, offset = [], 0
+        while offset < 2000:
+            page = client.request("GET", "/api/execution/definitions?" + urlencode(
+                {"routed": "true", "limit": 100, "offset": offset}))
+            rows = page.get("definitions")
+            if not isinstance(rows, list):
+                raise StoicRequestError("Stoic returned an invalid definition list.")
+            definitions.extend(row for row in rows if isinstance(row, dict) and isinstance(row.get("route"), dict)
+                               and row["route"])
+            if len(rows) < 100:
+                break
+            offset += 100
+        gaps = {}
+        for definition in definitions:
+            if not self._within_roots(config, definition.get("cwd")):
+                # Local policy would deny this definition's runs; another runner serves it.
+                continue
+            status = self._inspect(definition["route"], definition.get("cwd"))
+            if status["deliverable"]:
+                continue
+            gap = gaps.setdefault(self._gap_key(status), {"role": str(status["role"]), "reason": status["reason"],
+                                                          "definitions": []})
+            gap["definitions"].append({key: definition.get(key) for key in ("source", "id", "name", "cwd")})
+        self._record_gaps(gaps, complete=True)
+        self._notify_gaps(config)
+        self.coverage_checked_at = self.store.clock()
 
     def _bindings(self):
         with self.store.reading(), self.store._connection() as db:
@@ -311,6 +468,10 @@ class StoicIntegration:
             binding.update(claim_token=claim_token, run_json=json.dumps(run), state="claimed")
             self._save(run_id, claim_token=claim_token, run_json=binding["run_json"], state="claimed")
         auth = {"runner_id": config["runner_id"], "claim_token": binding["claim_token"]}
+        routed = self._routed(binding)
+        if routed:
+            # A routed run that outlived a restart waits for this policy before it is delivered.
+            self.external_work.register_holder_policy(source, self._authorize_holder)
         if binding["receipt_json"]:
             receipt = json.loads(binding["receipt_json"])
             client.request("POST", path + "/result?view=receipt", receipt)
@@ -352,9 +513,12 @@ class StoicIntegration:
             try:
                 self._authorize_settings(config, run["settings"])
                 name = self._conversation_name(run)
+                # A route is passed only when the run names one; other runs use the unchanged call.
+                routing = ({"route": run["route"], "holder_policy": self._authorize_holder}
+                           if run.get("route") is not None else {})
                 local = self.external_work.submit(source, run_id, run["settings"],
                                                   run.get("submission_prompt", self._prompt(run)), name=name,
-                                                  request_text=run["prompt"] if name is None else None)
+                                                  request_text=run["prompt"] if name is None else None, **routing)
             except BrowserBusyError:
                 # Maintenance refuses work before durable admission. Retain
                 # ownership and retry after the runtime resumes.
@@ -368,11 +532,19 @@ class StoicIntegration:
                 if local is None:
                     local = {"state": "failed", "result": None, "error": str(exc)[:1000]}
         state = local["state"]
+        delivery = local.get("delivery") if routed else None
+        if delivery:
+            self._observe_fallback(config, json.loads(binding["run_json"]), local)
         if state in TERMINAL_STATES:
             status = "completed" if state == "succeeded" else state
             receipt = {**auth, "receipt_id": "result:" + binding["claim_id"] + ":" + status,
                        "status": status,
                        "result": local.get("result"), "error": local.get("error")}
+            if delivery:
+                # Stoic records how a routed run was delivered, including a fallback and its reason.
+                receipt["delivery"] = {key: delivery[key][:1000] if key == "reason" else delivery[key]
+                                       for key in ("route", "outcome", "thread_id", "reason")
+                                       if delivery.get(key) is not None}
             # Save the exact terminal bytes before network publication. A lost
             # response reuses the receipt, including after process restart.
             self._save(run_id, receipt_json=json.dumps(receipt), state="reporting")
@@ -392,7 +564,8 @@ class StoicIntegration:
                 return
             client = self.client_factory(config["base_url"], config["token_file"])
             failures = []
-            active_count = sum(b["state"] not in {"claiming", "denied", "uncertain"} for b in bindings)
+            active_count = sum(b["state"] not in {"claiming", "denied", "uncertain"}
+                               and not self._awaiting_holder(config, b) for b in bindings)
             for binding in bindings:
                 if self.stopped.is_set():
                     return
@@ -458,6 +631,16 @@ class StoicIntegration:
                     raise
             self.last_error = failures[0] if failures else None
             self.last_connected_at = self.store.clock()
+            if self.store.clock() >= self.next_coverage_check:
+                try:
+                    self.check_coverage(client, config)
+                    self.next_coverage_check = self.store.clock() + COVERAGE_INTERVAL_SECONDS
+                except Exception as exc:
+                    # Coverage is advisory and never interrupts runs. A Stoic release
+                    # without the definition list is checked again a day later.
+                    unsupported = isinstance(exc, StoicRequestError) and exc.status in {400, 404, 405, 422}
+                    self.next_coverage_check = self.store.clock() + (
+                        COVERAGE_INTERVAL_SECONDS if unsupported else COVERAGE_RETRY_SECONDS)
         except StoicRequestError as exc:
             self.last_error = str(exc)
         finally:

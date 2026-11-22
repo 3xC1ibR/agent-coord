@@ -74,8 +74,8 @@ def handle_http(handler, engine):
             body = json.loads(data)
             if not parts:
                 required = {"source", "request_id", "settings", "prompt"}
-                if not isinstance(body, dict) or not required <= set(body) <= required | {"name"}:
-                    raise CoordinationError("Submit source, request_id, settings, prompt and optionally name.")
+                if not isinstance(body, dict) or not required <= set(body) <= required | {"name", "route"}:
+                    raise CoordinationError("Submit source, request_id, settings, prompt and optionally name and route.")
                 result = engine.submit(**body)
             elif parts[2] == "resolve":
                 if not isinstance(body, dict):
@@ -105,6 +105,7 @@ def add_parser(commands):
     submit = operations.add_parser("submit")
     submit.add_argument("--settings", required=True, help="JSON object with provider creation settings.")
     submit.add_argument("--name")
+    submit.add_argument("--route", help='JSON object naming who receives the assignment, such as {"role":"lead"}.')
     submit.add_argument("prompt", help="Assignment text or - for standard input.")
     get = operations.add_parser("get")
     cancel = operations.add_parser("cancel")
@@ -179,6 +180,8 @@ def _run(arguments):
         prompt = sys.stdin.read(100001) if arguments.prompt == "-" else arguments.prompt
         body = {"source": arguments.source, "request_id": arguments.request_id, "prompt": prompt,
                 "name": arguments.name, "settings": json.loads(arguments.settings)}
+        if arguments.route is not None:
+            body["route"] = json.loads(arguments.route)
     else:
         path += "/" + quote(identifier(arguments.source), safe=":") + "/" + quote(identifier(arguments.request_id), safe=":")
         if operation in {"cancel", "resolve"}:

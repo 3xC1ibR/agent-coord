@@ -34,7 +34,7 @@ an error. Keep this identity stable after a timeout or a lost response.
 The Python interface is:
 
 ```python
-runtime.submit(source, request_id, settings, prompt, name=None)
+runtime.submit(source, request_id, settings, prompt, name=None, route=None)
 runtime.get(source, request_id)
 runtime.list(source=None, limit=50)
 runtime.cancel(source, request_id)
@@ -62,7 +62,7 @@ agent-coord external-work provision-token
 
 Use `agent-coord external-work submit|get|list|cancel|resolve` for authenticated local
 execution. Submit takes `--source`, `--request-id`, `--settings` as JSON, an
-optional `--name`, and the prompt (or `-` for stdin). The optional `--url` selects
+optional `--name`, an optional `--route` as JSON, and the prompt (or `-` for stdin). The optional `--url` selects
 an RF runtime endpoint. The global `--db` selects the coordination database.
 
 Receipts contain `source`, `request_id`, `state`, `thread_id`, `turn_id`, `result`,
@@ -85,6 +85,67 @@ on the connector's next pass. Uncertain runs remain visible but do not consume
 new-execution capacity.
 User Stop and runtime update admission rules retain their ordinary meaning.
 
+## Routing an assignment to a role holder
+
+By default every assignment starts a new conversation. An assignment can
+instead carry a route, `{"role": "<role name>"}`, naming a
+[workspace role](reference.md#supervision-roles-and-succession). Ribbon Field then delivers the prompt as a new
+turn in the conversation that holds the role, and that turn's final message is
+the result. Routing is optional and additive: an assignment without a route is
+stored, launched and reported exactly as before, and its receipt has no
+`delivery` field. The route is part of the assignment's identity.
+
+**Workspace.** The role is looked up by name (ignoring case and repeated
+spaces) from the assignment's `settings.cwd`, or the runtime's workspace when
+`cwd` is absent. The nearest role workspace that contains the directory wins.
+Otherwise a single role of that name beneath the directory is used; several
+are ambiguous and cause a fallback.
+
+**Resolution.** The holder is resolved at each delivery attempt, never
+earlier. The first attempt happens when the assignment is submitted, which for
+a Stoic run is immediately after its claim. A run that is still waiting follows
+the role if it is transferred, and stops waiting if the role is vacated or its
+holder is closed.
+
+**Delivery.** The holder keeps its own provider, model, effort and permissions.
+The assignment's settings are not applied to it. Its title and saved original
+request do not change. The assignment waits while the holder has a running
+turn, an active review, messages the user queued, or an earlier waiting
+assignment; a waiting receipt is `pending` with no `thread_id` and
+`delivery.outcome` `waiting`. The runtime retries every two seconds. A waiting
+assignment can be cancelled, survives a runtime restart without operator
+review because nothing was sent, and has no deadline: it waits as long as the
+holder stays busy.
+
+**Fallback.** The ordinary new-conversation path runs with the assignment's
+own settings and name when the route cannot be delivered: the role does not
+exist, is ambiguous, has no holder, its holder is closed, closing, not an app
+conversation of this runtime, refused by the source's holder policy, or cannot
+be read, or the route has a form this runtime does not support. The receipt
+records `delivery.outcome` `fallback` and the reason. An assignment is never
+discarded because of its route.
+
+**Receipt.** A routed receipt adds `delivery`:
+
+```json
+{"route": {"role": "outcomes"}, "outcome": "holder", "role_id": "…", "thread_id": "<holder conversation>"}
+{"route": {"role": "outcomes"}, "outcome": "waiting", "reason": "Waiting for the role holder's current work to finish.", "thread_id": "<holder conversation>"}
+{"route": {"role": "outcomes"}, "outcome": "fallback", "reason": "Role 'outcomes' has no holder."}
+```
+
+The existing guarantees hold. The assignment is admitted in one transaction
+before the provider is contacted. A provider refusal that proves nothing was
+sent returns the assignment to waiting. Any ambiguous submission to the holder
+becomes `uncertain` and is never replayed; `resolve` works as for any other
+assignment. Cancellation stops the assigned turn only while it is the holder's
+active turn. A question the holder asked the user before the assignment does
+not fail it; a blocking question asked during the assigned turn does.
+
+In-process sources can pass `holder_policy`, a callable that receives the
+holder's session record and raises `CoordinationError` to refuse it.
+`runtime.inspect_route(route, directory)` reports whether a route would reach a
+holder now, without delivering anything.
+
 ## Stoic connection
 
 Stoic job conversations append the occurrence's scheduled date in the Ribbon
@@ -104,7 +165,8 @@ The adapter is disabled by default. Its configuration contains:
     "codex": ["workspace-write"],
     "claude": ["default"]
   },
-  "allowed_models": {}
+  "allowed_models": {},
+  "notice_session_id": null
 }
 ```
 
@@ -143,6 +205,44 @@ the last connection error, and run counts. Authenticated `PATCH` on the same
 path changes configuration. These endpoints use RF's local browser control
 authentication. Status does not return bearer tokens or run claim tokens.
 
+### Role-routed Stoic runs
+
+A Stoic execution definition can name a role beside its settings:
+`{"mode":"external","prompt":"…","settings":{…},"route":{"role":"outcomes"}}`.
+Stoic copies the route into each run's snapshot, and the adapter passes it to
+the external-work interface when it submits the claimed run. A definition
+without a route is unaffected: its runs open a new conversation each time, the
+submission call and the published receipt are unchanged.
+
+- **Workspace.** The run's `settings.cwd` selects the workspace in which the
+  role name is resolved. The five settings remain required and are checked
+  against local policy before the claim, because they define the fallback.
+- **Holder policy.** A routed run enters a holder only when local policy would
+  let Stoic start that conversation: the holder's directory is beneath an
+  allowed root, its provider and permission mode are listed in
+  `allowed_permission_modes`, and its model passes `allowed_models`. Otherwise
+  the run falls back to a new conversation, so a route cannot widen what the
+  connected Stoic account may run.
+- **Heartbeat and result.** While the run waits for a busy holder the adapter
+  heartbeats without a thread or turn. After delivery it heartbeats with the
+  holder's thread and the assigned turn, and publishes that turn's final
+  message. The result receipt adds
+  `"delivery": {"route": …, "outcome": "holder"|"fallback"|"waiting", "thread_id": …, "reason": …}`,
+  which Stoic stores on the run. Claim and receipt identities are unchanged.
+- **Capacity.** A run that is only waiting for its holder does not count
+  against `max_concurrent_runs`; it counts once its turn has started.
+- **Coverage check.** When the adapter starts, and once a day afterwards, it
+  reads `GET /api/execution/definitions?routed=true` and resolves every named
+  role whose definition's `cwd` is beneath an allowed root. A role that could not receive a run is listed under `uncovered_roles`
+  in the connection status. One `action_required` message per uncovered role is
+  sent to the conversation named by `notice_session_id`; it is not repeated
+  while the same gap remains, including across restarts. When the role becomes
+  deliverable the gap is cleared, and a later gap is announced again. A run
+  that falls back records and announces its role's gap immediately. Without a
+  `notice_session_id` the gap stays in the status and is announced once a
+  recipient is configured. A Stoic release without the definition list is
+  ignored and checked again the next day.
+
 Disabling the connection stops new claims and submissions. The adapter continues reconciling
 already claimed work and publishing completed results. It does not kill active
 agents. Cancel a particular run to stop that assignment. Changing the origin or
@@ -172,7 +272,9 @@ client's response limit. Claims retain the full immutable run snapshot.
 
 The adapter maps RF `succeeded` to Stoic `completed`. Failed, cancelled, and
 uncertain execution retain their respective meanings. The run contains the
-immutable `id`, `name`, `prompt`, and `settings` needed by the executor.
+immutable `id`, `name`, `prompt`, and `settings` needed by the executor, and
+`route` when its definition names one. A routed run uses the same envelope and
+submission text; only the receiving conversation differs.
 RF prepends an occurrence-context JSON object with `run_id`, `source`,
 `source_id`, `occurrence_id`, and `scheduled_at` before the unchanged instruction
 text. Jobs can therefore use the scheduled date after a delayed start. The
@@ -215,6 +317,11 @@ backend is active. Keep existing jobs on internal execution until the complete
 external path has passed a bounded live validation.
 
 ## Verification
+
+`tests/test_external_work_routing.py` and `tests/test_stoic_routing.py` cover
+routing: unchanged behavior without a route, delivery to an idle holder, waiting
+behind a busy holder, fallback for an unheld or closed role, role transfer,
+restart, the holder policy, and the single coverage notice.
 
 The connector tests cover disabled operation, exact settings, restart recovery,
 lost claim and result responses, uncertain submissions, cancellation, revoked
