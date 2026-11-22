@@ -113,15 +113,17 @@ request do not change. The assignment waits while the holder has a running
 turn, an active review, messages the user queued, or an earlier waiting
 assignment; a waiting receipt is `pending` with no `thread_id` and
 `delivery.outcome` `waiting`. The runtime retries every two seconds. A waiting
-assignment can be cancelled, survives a runtime restart without operator
-review because nothing was sent, and has no deadline: it waits as long as the
-holder stays busy.
+assignment can be cancelled and survives a runtime restart without operator
+review because nothing was sent. It waits at most two hours from submission
+(`ROUTE_WAIT_SECONDS`). If the holder is still busy then, the assignment falls
+back to a new conversation and records that the holder stayed busy.
 
 **Fallback.** The ordinary new-conversation path runs with the assignment's
 own settings and name when the route cannot be delivered: the role does not
 exist, is ambiguous, has no holder, its holder is closed, closing, not an app
-conversation of this runtime, refused by the source's holder policy, or cannot
-be read, or the route has a form this runtime does not support. The receipt
+conversation of this runtime, refused by the source's holder policy, cannot be
+read, or stayed busy for the whole waiting period, or the route has a form this
+runtime does not support. The receipt
 records `delivery.outcome` `fallback` and the reason. An assignment is never
 discarded because of its route.
 

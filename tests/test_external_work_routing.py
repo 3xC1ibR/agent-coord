@@ -398,6 +398,57 @@ class FallbackTests(RoutingFixture):
         self.assertEqual(self.calls("thread/start"), [])
 
 
+class WaitingDeadlineTests(RoutingFixture):
+    def age(self, key, seconds):
+        with self.store._connection() as db:
+            db.execute("UPDATE external_work SET created_at=created_at-? WHERE source='test' AND request_id=?",
+                       (seconds, key))
+
+    def test_assignment_that_waited_two_hours_for_a_busy_holder_starts_a_new_conversation(self):
+        holder = self.conversation()
+        self.role(holder)
+        self.occupy(holder)
+        self.submit("patient", "Run the job.")
+        self.age("patient", 2 * 60 * 60 - 60)
+        self.work.advance_routes()
+        self.assertEqual(self.work.get("test", "patient")["delivery"]["outcome"], "waiting")
+        self.age("patient", 60)
+        self.work.advance_routes()
+        fallen = self.work.get("test", "patient")
+        self.assertEqual(fallen["state"], "running")
+        self.assertNotEqual(fallen["thread_id"], holder)
+        self.assertEqual(fallen["delivery"], {"route": ROUTE, "outcome": "fallback",
+                                              "reason": "The holder of role 'outcomes' stayed busy for 2 hours."})
+        self.assertEqual(len(self.calls("turn/start", holder)), 1)
+        self.assertEqual(self.work.advance_routes(), 0)
+
+    def test_overdue_assignment_is_still_delivered_when_the_holder_has_become_idle(self):
+        holder = self.conversation()
+        self.role(holder)
+        user_turn = self.occupy(holder)
+        self.submit("late", "Run the job.")
+        self.age("late", 3 * 60 * 60)
+        self.complete(holder, user_turn)
+        self.work.advance_routes()
+        delivered = self.work.get("test", "late")
+        self.assertEqual([delivered["state"], delivered["thread_id"]], ["running", holder])
+
+    def test_assignment_whose_source_never_restores_its_policy_falls_back_after_the_deadline(self):
+        holder = self.conversation()
+        self.role(holder)
+        self.occupy(holder)
+        self.submit("guarded", "Run the job.", holder_policy=lambda record: None)
+        self.work.holder_policies.clear()
+        self.work.advance_routes()
+        self.assertEqual(self.work.get("test", "guarded")["state"], "pending")
+        self.age("guarded", 2 * 60 * 60)
+        self.work.advance_routes()
+        fallen = self.work.get("test", "guarded")
+        self.assertEqual(fallen["state"], "running")
+        self.assertEqual(fallen["delivery"]["reason"],
+                         "The source did not restore its delivery policy within the waiting period.")
+
+
 class RoleTransferTests(RoutingFixture):
     def test_role_transferred_between_two_runs_sends_the_second_run_to_the_successor(self):
         first_holder, successor = self.conversation(), self.conversation()

@@ -30,6 +30,8 @@ RECEIPT_COLUMNS = ("source,request_id,state,thread_id,turn_id,result_json,error,
 RESULT_LIMIT = 64_000
 ROUTE_LIMIT = 2_000
 ROUTING_INTERVAL_SECONDS = 2
+# A routed assignment waits this long for its holder, then starts a new conversation.
+ROUTE_WAIT_SECONDS = 2 * 60 * 60
 # Delivery outcomes recorded on the receipt of a routed assignment.
 HOLDER, FALLBACK, WAITING = "holder", "fallback", "waiting"
 WAITING_REASON = "Waiting for the role holder's current work to finish."
@@ -340,25 +342,29 @@ class ExternalWorkRuntime:
             self.routing["attempting"].add(key)
         try:
             with self.store.reading(), self.store._connection() as db:
-                row = db.execute(f"""SELECT input_json,holder_policy FROM external_work WHERE source=?
+                row = db.execute(f"""SELECT input_json,holder_policy,created_at FROM external_work WHERE source=?
                     AND request_id=? AND owner=? AND {UNDELIVERED}""", (*key, self.owner)).fetchone()
             if row is None:
                 return
             inputs = json.loads(row["input_json"])
             route, settings = inputs["route"], inputs["settings"]
-            policy = None
+            overdue = self.store.clock() - row["created_at"] >= ROUTE_WAIT_SECONDS
+            policy, reason = None, None
             if row["holder_policy"]:
                 with self.lock:
                     policy = self.holder_policies.get(key[0])
-                if policy is None:
+                if policy is None and overdue:
+                    reason = "The source did not restore its delivery policy within the waiting period."
+                elif policy is None:
                     # The source has not restored its policy since this runtime started.
                     self._report(key, route, WAITING, "Waiting for the source to restore its delivery policy.")
                     return self._start_routing()
-            role, holder, reason = self._resolve(route, settings.get("cwd"))
+            if reason is None:
+                role, holder, reason = self._resolve(route, settings.get("cwd"))
             if reason is None:
                 reason = self._approved(policy, holder)
             if reason is None:
-                reason = self._deliver(key, inputs, role, holder)
+                reason = self._deliver(key, inputs, role, holder, overdue=overdue)
             if reason is not None and self._report(key, route, FALLBACK, reason, launching=True):
                 self._launch(key, {**settings, "permission_mode": requested_mode(settings.get("client", "codex"), settings),
                                    "name": inputs["name"]}, inputs["prompt"], inputs.get("request_text"))
@@ -366,7 +372,7 @@ class ExternalWorkRuntime:
             with self.lock:
                 self.routing["attempting"].discard(key)
 
-    def _deliver(self, key, inputs, role, holder):
+    def _deliver(self, key, inputs, role, holder, *, overdue=False):
         """Send the assignment to the holder as a new turn. Returns a reason only when a fallback is required."""
         from . import supervision
         sessions, route, stage = self.sessions, inputs["route"], "check"
@@ -386,6 +392,9 @@ class ExternalWorkRuntime:
                             AND json_extract(delivery_json,'$.thread_id')=? AND (created_at,source,request_id)<
                                 (SELECT created_at,source,request_id FROM external_work WHERE source=? AND request_id=?)
                             LIMIT 1""", (self.owner, holder, *key)).fetchone())
+                if busy and overdue:
+                    hours = ROUTE_WAIT_SECONDS / 3600
+                    return f"The holder of role {role['name']!r} stayed busy for {hours:g} hours."
                 if busy:
                     report = {"route": route, "outcome": WAITING, "reason": WAITING_REASON, "thread_id": holder}
                     with self._write("route") as db:
