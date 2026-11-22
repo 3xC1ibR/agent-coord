@@ -515,10 +515,17 @@ def install_session_admission(sessions):
         self.assertTrue(staged["pending_confirmation"])
         self.assertEqual(staged["runtime_update_prompts"], 1)
         time.sleep(1.2)  # More than two idle-handover polling intervals.
-        status = runtime.control(record, "status")
+        # Automatic worker polls count as admitted operations while they run,
+        # so one status sample can be transiently busy on a slow machine. A
+        # leaked admission would still never reach an idle snapshot.
+        def idle_status():
+            observed = runtime.control(record, "status")
+            return observed if observed["busy"] == [] else None
+        status = self.wait(idle_status)
         self.assertEqual(status["instance"], first["instance"])
         self.assertFalse(status["paused"])
-        self.assertEqual(status["busy"], [])
+        time.sleep(1.2)  # Observed idle; two more polling intervals still hold the update.
+        self.assertEqual(runtime.control(record, "status")["instance"], first["instance"])
         # A legacy attachment must not silently undo the user's deferral.
         self.assertTrue(self.launch(new)["pending_confirmation"])
         runtime.control(record, "activate-update", request_id="confirmed-install", payload=staged["pending"])
