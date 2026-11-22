@@ -67,6 +67,11 @@ class ProjectionTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             pack(object())
 
+    def test_codec_recovers_existing_tuple_keys_and_set_members(self):
+        value = {"requests": {("thread", ("turn", 1)): ["pending"]},
+                 "confirmed": {("thread", "item")}}
+        self.assertEqual(unpack(json.loads(json.dumps(pack(value)))), value)
+
     def test_projection_failure_rolls_back_effects_state_and_cursor(self):
         event = self.event(1, "item/started", item={"id": "output", "type": "agentMessage", "text": ""})
         original = self.projection._save
@@ -301,6 +306,7 @@ class ProjectionTests(unittest.TestCase):
         from agent_coord.desktop_runtime import interrupt_stopped_projection
         # Native children can be in the adapter mirror without an app session.
         self.sessions.active["unregistered-native-child"] = "child-turn"
+        self.sessions.usage_recovery_attempts.add((self.identity, self.turn_id))
         self.projection.project(self.event(1, "item/started", item={"id": "output", "type": "agentMessage", "text": "retained"}))
         self.sessions.queue.enqueue(self.identity, {"message": "Review before sending"})
         with self.store._connection() as db:

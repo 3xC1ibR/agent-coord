@@ -40,14 +40,22 @@ def pack(value):
     raise TypeError("Unsupported coordinator state: " + type(value).__name__)
 
 
+def _unpack_hashable(value):
+    # Arrays in mapping keys and set members were tuples before serialization.
+    # Keep decoding the existing representation so retained journals recover.
+    if isinstance(value, list):
+        return tuple(_unpack_hashable(v) for v in value)
+    return unpack(value)
+
+
 def unpack(value):
     if isinstance(value, list):
         return [unpack(v) for v in value]
     if isinstance(value, dict):
         if "$map" in value:
-            return {unpack(k): unpack(v) for k, v in value["$map"]}
+            return {_unpack_hashable(k): unpack(v) for k, v in value["$map"]}
         if "$set" in value:
-            return {unpack(v) for v in value["$set"]}
+            return {_unpack_hashable(v) for v in value["$set"]}
         raise ValueError("Unknown coordinator state representation")
     return value
 
