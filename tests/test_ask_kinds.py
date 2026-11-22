@@ -557,6 +557,25 @@ class AskBrowserTests(unittest.TestCase):
         self.assertEqual(len(self.get("/api/browser/asks?status=all&since=0")["data"]), 2)
         self.assertEqual(self.get("/api/browser/asks?status=all&since=2999-01-01")["data"], [])
 
+    def test_listings_carry_what_a_conversation_needs_to_show_its_own_asks(self):
+        # The strip above a conversation's composer selects that thread's asks from these listings in the page.
+        mine, other = self.app_thread(), self.app_thread()
+        waiting = self.run_cli(mine, "ask", "--kind", "request", "--non-blocking", "--context", "Default: the public endpoint.",
+                               "--unblocks", "No rate limit.", "Provide a SerpAPI key")
+        settled = self.run_cli(mine, "ask", "--kind", "approval", "--non-blocking", "--context", "Default: hold.",
+                               "Approve a $40 test budget")
+        self.run_cli(other, "ask", "--non-blocking", "--context", "Default: CSV.", "Which format?")
+        resolution = self.post(f"/api/browser/asks/{settled['id']}", {"resolution": "approved", "note": "For one week."})
+        self.assertEqual(resolution["session_id"], mine)
+        self.assertTrue(resolution["resolved_at"])
+        open_asks = self.get("/api/browser/asks")["data"]
+        self.assertEqual([item["id"] for item in open_asks if item["session_id"] == mine], [waiting["id"]])
+        self.assertEqual({item["session_id"] for item in open_asks}, {mine, other})
+        log = [item for item in self.get("/api/browser/asks?status=resolved")["data"] if item["session_id"] == mine]
+        self.assertEqual([(item["id"], item["resolution"], item["note"], item["kind"]) for item in log],
+                         [(settled["id"], "approved", "For one week.", "approval")])
+        self.assertEqual(log[0]["resolved_at"], resolution["resolved_at"])
+
     def test_config_advertises_ask_kinds_and_the_view_needs_no_new_urls(self):
         self.assertIs(self.get("/api/browser/config")["askKinds"], True)
         with urllib.request.urlopen(self.base + "/") as response:

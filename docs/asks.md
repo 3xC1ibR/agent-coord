@@ -148,6 +148,12 @@ the question-mark button opens the view.
   project, kind and date.
 - Resolution happens in place. Unsaved input is preserved on failure.
 - The same view works at phone width.
+- **In a conversation.** A conversation shows its own asks in a strip above its
+  composer: the open ones with the same resolution controls, note, Snooze and
+  Dismiss, and its resolutions of the last 30 days folded away beneath them.
+  The strip is absent when the conversation has neither.
+- **While the navigation is closed** (a phone, or a collapsed sidebar), the
+  navigation toggle carries the open count.
 - Follow `DESIGN.md`. Reference apps: Linear Inbox for triage and Things for
   the action list. The owner may change these references.
 
@@ -210,6 +216,13 @@ points the specification left open.
 | A link that is an `.html` file path opens in the existing HTML output viewer; any other file path offers **Copy path**. | The browser cannot open local files. The viewer already exists for HTML results. |
 | The Resolved section lists user resolutions only. Withdrawn asks remain available from the API and CLI (`--status withdrawn`). | Resolved is the user's decision log; an agent's withdrawal is not the user's decision. |
 | The Resolved date filter applies to the resolution time and runs in the page. | The API's `since` selects by creation time, which would hide an old ask resolved today. |
+| A conversation's strip (added 2026-11-22, after stage 1) reuses the view's rows and resolves through the view's data, so the count, the view and the strip never disagree. It ships in the same `web/asks.js` and `web/asks.css`; its element and the toggle count are in `index.html`. | The owner could not see a thread's asks in the thread. One row builder keeps the kinds' controls identical in both places, and no new URL keeps the change safe before a backend update. |
+| The strip starts unfolded while an ask waits and folded when the conversation has only snoozed asks or resolutions. The user's folding choice is kept per conversation until the page reloads. Its height is capped at 35% of the window (55% of the conversation on a phone; 75% while a phone keyboard is open on one of its fields) and it scrolls inside that. | An ask waiting in the open conversation is the reason to look; history is one muted line. The cap keeps the conversation readable and the composer in place. |
+| In the strip one ask is shown in full: the first in order, or the one the user opened by its title. The others show their title and meta line. The ask in full does not change while it stays open, even when a more urgent one arrives. Folded, the strip's line gives the count, the blocking count and the first ask's title. | An image-only design review found that two full rows hid the second ask's controls behind the composer with no sign it could scroll, and on a phone cut the first ask's controls. One ask in full fits the cap; a row must not move under a half-typed answer. |
+| Review findings not adopted: a card surface and inset for the strip; a filled primary button; moving Answer into the field and Snooze and Dismiss into an overflow menu; a tappable count row on the phone overview. | The contract uses dividers, not cards, and no primary button per row. The strip must keep the view's controls. The overview row is a larger change than the count on the toggle and can follow if the count proves too quiet. |
+| The strip selects its thread's asks in the page from the two existing listings. The resolved log is read when a conversation opens, at most once a minute, and again when one of the conversation's asks leaves the open list without a local resolution. | No backend change was allowed, and the store's `session_id` selection is not exposed by the browser API. The log is at most 500 rows and changes rarely, so a per-thread read is not worth a new parameter yet. |
+| In a conversation, a row carries the Blocking flag and does not name its thread. Snoozed asks stay listed, after the others, with **Show now**. | The view's Blocking heading and thread link are absent or redundant there. A person who opened the thread should still find an ask they postponed. |
+| The count on the navigation toggle shows only while the toggle reports the navigation closed. It is the toggle's description for assistive technology; the toggle keeps its own name and action. | The sidebar entry is the count's home. On a phone that entry is inside the drawer, which is how the earlier dialog went unnoticed. |
 
 ### Model and delivery
 

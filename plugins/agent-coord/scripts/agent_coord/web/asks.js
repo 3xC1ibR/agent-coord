@@ -1,6 +1,7 @@
 "use strict";
-/* Asks in the workspace: the sidebar entry and count, and the view where the user resolves them.
-   Everything loads from this one established URL, so an older backend can serve it before its update. */
+/* Asks in the workspace: the sidebar entry and count, the view where the user resolves them, and the
+   strip that shows a conversation's own asks. Everything loads from this one established URL, so an
+   older backend can serve it before its update. */
 (() => {
   // Display copy. The view's name and wording are defaults the owner may change: change them here only.
   const copy = {
@@ -21,6 +22,14 @@
       filtered: "No resolved asks match these filters.",
     },
     legacyNotice: "Showing decisions only. Kinds, notes, snooze, dismissal and the resolved log appear once the backend update is applied.",
+    // A conversation's own asks, shown above its composer.
+    thread: {
+      label: "Asks from this conversation",
+      waiting: count => count + (count === 1 ? " ask" : " asks") + " waiting for you",
+      snoozed: count => count + (count === 1 ? " snoozed ask" : " snoozed asks"),
+      blocking: count => count + " blocking",
+      resolved: count => count + (count === 1 ? " resolved ask" : " resolved asks"),
+    },
     entryTitle(count, blocking) {
       if (!count) return this.viewName;
       return count + (count === 1 ? " ask" : " asks") + " waiting for you" + (blocking ? " · " + blocking + " blocking" : "");
@@ -29,6 +38,10 @@
   const SECTIONS = ["open", "snoozed", "resolved"];
   const SNOOZE_CHOICES = [["hour", "In 1 hour"], ["three_hours", "In 3 hours"], ["tomorrow", "Tomorrow at 9 AM"], ["week", "Next week"]];
   const REFRESH_MILLISECONDS = 5000;
+  // A conversation lists its resolutions from this period; the full log is in the view.
+  const THREAD_RESOLVED_DAYS = 30;
+  // The resolved log changes rarely, so a conversation rereads it at most this often.
+  const RESOLVED_REREAD_MILLISECONDS = 60000;
   const LONG_TEXT_CHARACTERS = 240, LONG_TEXT_LINES = 3;
 
   function formatAge(seconds) {
@@ -117,31 +130,9 @@
     return null;
   }
 
-  class AsksView {
-    constructor({document, api, openThread, navigate, close, copyText, clock = () => Date.now()}) {
-      Object.assign(this, {document, api, openThread, navigate, close, copyText, clock});
-      // The dialog is closed until the user opens it; data still loads for the count.
-      this.visible = false;
-      // An older backend serves this view until its update is applied; it knows only decisions.
-      this.legacy = false;
-      const $ = id => document.getElementById(id);
-      this.elements = {title: $("asks-title"), summary: $("asks-summary"), close: $("close-asks"),
-        sections: $("asks-sections"), filters: $("asks-filters"), project: $("asks-filter-project"),
-        kind: $("asks-filter-kind"), since: $("asks-filter-since"), notice: $("asks-notice"),
-        error: $("asks-error"), status: $("asks-status"), list: $("asks-list")};
-      this.section = "open";
-      this.open = [];
-      this.resolved = [];
-      this.loaded = false;
-      this.resolvedLoaded = false;
-      this.failure = null;
-      this.sequence = 0;
-      this.records = new Map();
-      this.pending = new Set();
-      this.signature = null;
-      this.tabs = new Map();
-      this.setup();
-    }
+  /* Rows for one ask, open or resolved, and the controls that resolve it. The view and a
+     conversation's strip build the same rows. A subclass supplies resolve, snooze and legacy. */
+  class AskRows {
     node(tag, text, className) {
       const element = this.document.createElement(tag);
       if (text != null && text !== "") element.textContent = text;
@@ -171,171 +162,6 @@
       const {title, detail} = splitQuestion(ask.question);
       return {title: this.node("h4", title, "ask-title"), detail: detail ? this.passage(detail, "ask-detail") : []};
     }
-    setup() {
-      const {elements} = this;
-      elements.title.textContent = copy.viewName;
-      elements.summary.textContent = copy.summary;
-      elements.sections.setAttribute("aria-label", copy.viewName + " sections");
-      for (const section of SECTIONS) {
-        const tab = this.button("", () => this.select(section), "asks-section");
-        tab.setAttribute("role", "tab");
-        tab.setAttribute("aria-controls", "asks-list");
-        const count = this.node("span", "", "asks-section-count");
-        tab.append(this.node("span", copy.sections[section]), count);
-        this.tabs.set(section, {tab, count});
-        elements.sections.append(tab);
-      }
-      elements.close.onclick = () => this.close();
-      elements.notice.textContent = copy.legacyNotice;
-      for (const [kind, label] of Object.entries(copy.kinds)) {
-        const option = this.node("option", label); option.value = kind;
-        elements.kind.append(option);
-      }
-      for (const control of [elements.project, elements.kind, elements.since]) control.onchange = () => this.render();
-      elements.filters.onsubmit = event => event?.preventDefault?.();
-      this.render();
-    }
-    fail(error) {
-      this.failure = error?.message || String(error);
-      this.render();
-    }
-    async select(section) {
-      this.section = section;
-      this.render();
-      if (section === "resolved") await this.refresh();
-    }
-    /* Show or hide the view; a hidden view keeps its data current without building rows. */
-    setVisible(visible) {
-      this.visible = visible;
-      if (visible) this.render();
-    }
-    setLegacy(legacy) {
-      if (this.legacy === legacy) return;
-      this.legacy = legacy;
-      if (legacy) this.section = "open";
-      this.records.clear();
-      this.signature = null;
-      this.render();
-    }
-    async refresh() {
-      const sequence = ++this.sequence;
-      try {
-        const requests = [this.api("asks")];
-        if (this.visible && this.section === "resolved" && !this.legacy) requests.push(this.api("asks?status=resolved"));
-        const [open, resolved] = await Promise.all(requests);
-        if (sequence !== this.sequence) return;
-        this.open = open.data || [];
-        if (resolved) { this.resolved = resolved.data || []; this.resolvedLoaded = true; }
-        this.loaded = true;
-        this.failure = null;
-      } catch (error) {
-        if (sequence !== this.sequence) return;
-        this.failure = error?.message || String(error);
-      }
-      this.render();
-    }
-    counts() {
-      const snoozed = this.open.filter(ask => ask.snoozed).length;
-      return {open: this.open.length - snoozed, snoozed, blocking: this.open.filter(ask => ask.blocking && !ask.snoozed).length};
-    }
-    filteredResolved() {
-      const {project, kind, since} = this.elements;
-      let cutoff = null;
-      if (since.value) {
-        const [year, month, day] = since.value.split("-").map(Number);
-        cutoff = new Date(year, month - 1, day).getTime();
-      }
-      return this.resolved.filter(ask =>
-        (!project.value || (ask.project_label || "") === project.value)
-        && (!kind.value || ask.kind === kind.value)
-        && (cutoff == null || new Date(ask.resolved_at).getTime() >= cutoff));
-    }
-    render() {
-      if (!this.visible) return;
-      const {elements} = this, counts = this.counts();
-      elements.sections.hidden = this.legacy;
-      elements.notice.hidden = !this.legacy;
-      for (const [section, {tab, count}] of this.tabs) {
-        const selected = section === this.section;
-        tab.setAttribute("aria-selected", String(selected));
-        tab.className = "asks-section" + (selected ? " asks-section-selected" : "");
-        const value = section === "resolved" ? "" : String(counts[section] || "");
-        count.textContent = value;
-        count.hidden = !value;
-      }
-      elements.error.textContent = this.failure ? this.failure + " Showing the last loaded asks." : "";
-      elements.error.hidden = !this.failure;
-      elements.filters.hidden = this.section !== "resolved";
-      const ready = this.section === "resolved" ? this.resolvedLoaded : this.loaded;
-      elements.status.hidden = ready;
-      elements.status.textContent = ready ? "" : this.failure ? "" : "Loading…";
-      elements.list.setAttribute("aria-label", copy.sections[this.section]);
-      if (!ready) { this.signature = null; elements.list.replaceChildren(); return; }
-      if (this.section === "resolved") return this.renderResolved();
-      this.renderOpen();
-    }
-    renderOpen() {
-      const snoozedSection = this.section === "snoozed";
-      const visible = this.open.filter(ask => Boolean(ask.snoozed) === snoozedSection);
-      const groups = snoozedSection
-        ? (visible.length ? [{key: "snoozed", title: "", urgent: false,
-            items: visible.slice().sort((a, b) => String(a.snoozed_until).localeCompare(String(b.snoozed_until)))}] : [])
-        : openGroups(visible);
-      const live = new Set();
-      for (const group of groups) for (const ask of group.items) {
-        const key = this.section + ":" + ask.id;
-        live.add(key);
-        if (!this.records.has(key)) this.records.set(key, this.buildRow(ask, snoozedSection));
-        this.records.get(key).update(ask);
-      }
-      for (const key of [...this.records.keys()]) if (!live.has(key)) this.records.delete(key);
-      // Reuse rows across refreshes so a typed note, focus and selection survive.
-      const signature = this.section + "|" + groups.map(group => group.key + ":" + group.items.map(ask => ask.id).join(",")).join("|");
-      if (signature === this.signature) return;
-      this.signature = signature;
-      const {list} = this.elements;
-      const active = this.document.activeElement;
-      const selectionStart = active?.selectionStart, selectionEnd = active?.selectionEnd;
-      list.replaceChildren();
-      if (!groups.length) {
-        list.append(this.node("p", copy.empty[this.section], "asks-empty"));
-        return;
-      }
-      for (const group of groups) {
-        const section = this.node("section", "", "ask-group" + (group.urgent ? " ask-group-urgent" : ""));
-        if (group.title) {
-          const heading = this.node("h3", group.title, "ask-group-title");
-          heading.append(this.node("span", String(group.items.length), "ask-group-count"));
-          section.append(heading);
-        }
-        for (const ask of group.items) section.append(this.records.get(this.section + ":" + ask.id).element);
-        list.append(section);
-      }
-      if (active && list.contains?.(active)) {
-        active.focus?.();
-        if (selectionStart != null) active.setSelectionRange?.(selectionStart, selectionEnd);
-      }
-    }
-    renderResolved() {
-      const {elements} = this;
-      this.signature = null;
-      const labels = [...new Set(this.resolved.map(ask => ask.project_label || "").filter(Boolean))].sort((a, b) => a.localeCompare(b));
-      const selected = elements.project.value;
-      const first = elements.project.children[0];
-      elements.project.replaceChildren(first, ...labels.map(label => {
-        const option = this.node("option", label); option.value = label; return option;
-      }));
-      elements.project.value = labels.includes(selected) ? selected : "";
-      const items = this.filteredResolved();
-      elements.list.replaceChildren();
-      if (!items.length) {
-        elements.list.append(this.node("p", this.resolved.length ? copy.empty.filtered : copy.empty.resolved, "asks-empty"));
-        return;
-      }
-      const section = this.node("section", "", "ask-group");
-      for (const ask of items) section.append(this.buildResolvedRow(ask));
-      elements.list.append(section);
-    }
     threadControl(ask) {
       const thread = this.button(ask.thread_title, () => this.openThread(ask.session_id), "ask-thread");
       thread.title = "Open this thread";
@@ -363,13 +189,25 @@
       }
       return link;
     }
-    buildRow(ask, snoozedSection) {
+    /* An open ask. `snoozed` gives the row the control that shows it again; `grouped` means a
+       heading above already says it is blocking; `thread` names the asking thread; `fold` makes
+       the title a control that opens and closes the rest of the row. */
+    buildRow(ask, {snoozed: snoozedSection = false, grouped = false, thread = true, fold = null} = {}) {
       const element = this.node("article", "", "ask-row");
       element.dataset.id = String(ask.id);
       element.dataset.kind = ask.kind || "decision";
       const head = this.node("div", "", "ask-head");
       const heading = this.heading(ask);
       head.append(heading.title);
+      let disclosure = null, caret = null;
+      if (fold) {
+        const text = heading.title.textContent;
+        heading.title.textContent = "";
+        disclosure = this.button(text, () => fold(ask), "ask-title-toggle");
+        heading.title.append(disclosure);
+        caret = this.node("span", "", "thread-asks-caret"); caret.setAttribute("aria-hidden", "true");
+        head.append(caret);
+      }
       const meta = this.node("p", "", "ask-meta");
       const age = this.node("span", "", "ask-age");
       const blocking = this.node("span", copy.groups.blocking, "ask-flag ask-flag-urgent");
@@ -379,7 +217,7 @@
       meta.append(this.node("span", copy.kinds[ask.kind || "decision"] || ask.kind, "ask-kind"));
       const effort = formatEffort(ask.effort_minutes);
       if (effort) meta.append(this.node("span", "takes about " + effort, "ask-effort"));
-      meta.append(age, this.threadControl(ask), blocking, stale, due, snoozed);
+      meta.append(age, ...(thread ? [this.threadControl(ask)] : []), blocking, stale, due, snoozed);
       // The link is where the user starts, so it sits with the title's meta, not at the far edge.
       const link = this.linkControl(ask);
       if (link) meta.append(link);
@@ -403,6 +241,13 @@
       const error = this.node("p", "", "ask-row-error"); error.setAttribute("role", "alert"); error.hidden = true;
       const controls = [input];
       const record = {element, controls, error, input};
+      // A folded row keeps its title and meta line; what was typed in it stays.
+      record.fold = folded => {
+        if (!disclosure) return;
+        element.className = "ask-row" + (folded ? " ask-row-folded" : "");
+        disclosure.setAttribute("aria-expanded", String(!folded));
+        caret.textContent = folded ? "▸" : "▾";
+      };
       const note = () => { const text = input.value.trim(); return text ? {note: text} : {}; };
       const resolveWith = resolution => () => this.resolve(ask, {resolution, ...note()}, record);
       // One row of controls: the kind's resolutions at a fixed left edge, quiet text controls after them.
@@ -477,7 +322,7 @@
       record.update = current => {
         const now = this.clock();
         age.textContent = "asked " + (formatAge(current.age_seconds) === "just now" ? "just now" : formatAge(current.age_seconds) + " ago");
-        blocking.hidden = !(snoozedSection && current.blocking);
+        blocking.hidden = grouped || !current.blocking;
         stale.hidden = !current.stale;
         stale.textContent = !current.stale ? "" : current.stale_reason === "thread_closed"
           ? "Stale · thread closed" : "Stale · thread idle " + formatAge(current.idle_seconds);
@@ -490,7 +335,7 @@
       };
       return record;
     }
-    buildResolvedRow(ask) {
+    buildResolvedRow(ask, {thread = true} = {}) {
       const element = this.node("article", "", "ask-row ask-row-resolved");
       element.dataset.id = String(ask.id);
       element.dataset.kind = ask.kind;
@@ -500,8 +345,9 @@
         this.node("span", copy.resolved[ask.resolution] || ask.resolution, "ask-resolution"));
       const meta = this.node("p", "", "ask-meta");
       meta.append(this.node("span", copy.kinds[ask.kind] || ask.kind, "ask-kind"),
-        this.node("span", "resolved " + formatMoment(ask.resolved_at, this.clock()), "ask-age"), this.threadControl(ask));
-      if (ask.project_label) meta.append(this.node("span", ask.project_label, "ask-project"));
+        this.node("span", "resolved " + formatMoment(ask.resolved_at, this.clock()), "ask-age"));
+      if (thread) meta.append(this.threadControl(ask));
+      if (thread && ask.project_label) meta.append(this.node("span", ask.project_label, "ask-project"));
       element.append(head, meta, ...heading.detail);
       for (const [label, text] of [["Answer", ask.answer], ["Note", ask.note]]) {
         if (!text) continue;
@@ -526,6 +372,209 @@
         return null;
       } finally { this.pending.delete(ask.id); }
     }
+  }
+
+  class AsksView extends AskRows {
+    constructor({document, api, openThread, navigate, close, copyText, clock = () => Date.now()}) {
+      super();
+      Object.assign(this, {document, api, openThread, navigate, close, copyText, clock});
+      // The dialog is closed until the user opens it; data still loads for the count.
+      this.visible = false;
+      // An older backend serves this view until its update is applied; it knows only decisions.
+      this.legacy = false;
+      const $ = id => document.getElementById(id);
+      this.elements = {title: $("asks-title"), summary: $("asks-summary"), close: $("close-asks"),
+        sections: $("asks-sections"), filters: $("asks-filters"), project: $("asks-filter-project"),
+        kind: $("asks-filter-kind"), since: $("asks-filter-since"), notice: $("asks-notice"),
+        error: $("asks-error"), status: $("asks-status"), list: $("asks-list")};
+      this.section = "open";
+      this.open = [];
+      this.resolved = [];
+      this.loaded = false;
+      this.resolvedLoaded = false;
+      this.failure = null;
+      this.sequence = 0;
+      this.records = new Map();
+      this.pending = new Set();
+      this.signature = null;
+      this.tabs = new Map();
+      this.setup();
+    }
+    setup() {
+      const {elements} = this;
+      elements.title.textContent = copy.viewName;
+      elements.summary.textContent = copy.summary;
+      elements.sections.setAttribute("aria-label", copy.viewName + " sections");
+      for (const section of SECTIONS) {
+        const tab = this.button("", () => this.select(section), "asks-section");
+        tab.setAttribute("role", "tab");
+        tab.setAttribute("aria-controls", "asks-list");
+        const count = this.node("span", "", "asks-section-count");
+        tab.append(this.node("span", copy.sections[section]), count);
+        this.tabs.set(section, {tab, count});
+        elements.sections.append(tab);
+      }
+      elements.close.onclick = () => this.close();
+      elements.notice.textContent = copy.legacyNotice;
+      for (const [kind, label] of Object.entries(copy.kinds)) {
+        const option = this.node("option", label); option.value = kind;
+        elements.kind.append(option);
+      }
+      for (const control of [elements.project, elements.kind, elements.since]) control.onchange = () => this.render();
+      elements.filters.onsubmit = event => event?.preventDefault?.();
+      this.render();
+    }
+    fail(error) {
+      this.failure = error?.message || String(error);
+      this.render();
+    }
+    async select(section) {
+      this.section = section;
+      this.render();
+      if (section === "resolved") await this.refresh();
+    }
+    /* Show or hide the view; a hidden view keeps its data current without building rows. */
+    setVisible(visible) {
+      this.visible = visible;
+      if (visible) this.render();
+    }
+    setLegacy(legacy) {
+      if (this.legacy === legacy) return;
+      this.legacy = legacy;
+      if (legacy) this.section = "open";
+      this.records.clear();
+      this.signature = null;
+      this.render();
+    }
+    async refresh() {
+      const sequence = ++this.sequence;
+      try {
+        const requests = [this.api("asks")];
+        const log = !this.legacy && (this.resolvedDue || this.visible && this.section === "resolved");
+        if (log) requests.push(this.api("asks?status=resolved"));
+        const [open, resolved] = await Promise.all(requests);
+        if (sequence !== this.sequence) return;
+        this.open = open.data || [];
+        if (resolved) {
+          this.resolved = resolved.data || [];
+          this.resolvedLoaded = true; this.resolvedDue = false; this.resolvedReadAt = this.clock();
+        }
+        this.loaded = true;
+        this.failure = null;
+      } catch (error) {
+        if (sequence !== this.sequence) return;
+        this.failure = error?.message || String(error);
+      }
+      this.render();
+    }
+    /* Read the resolved log with the open list. A conversation asks for it; the view reads it only in its own section. */
+    readResolved() {
+      if (this.legacy) return Promise.resolve();
+      this.resolvedDue = true;
+      return this.refresh();
+    }
+    counts() {
+      const snoozed = this.open.filter(ask => ask.snoozed).length;
+      return {open: this.open.length - snoozed, snoozed, blocking: this.open.filter(ask => ask.blocking && !ask.snoozed).length};
+    }
+    filteredResolved() {
+      const {project, kind, since} = this.elements;
+      let cutoff = null;
+      if (since.value) {
+        const [year, month, day] = since.value.split("-").map(Number);
+        cutoff = new Date(year, month - 1, day).getTime();
+      }
+      return this.resolved.filter(ask =>
+        (!project.value || (ask.project_label || "") === project.value)
+        && (!kind.value || ask.kind === kind.value)
+        && (cutoff == null || new Date(ask.resolved_at).getTime() >= cutoff));
+    }
+    render() {
+      if (!this.visible) return;
+      const {elements} = this, counts = this.counts();
+      elements.sections.hidden = this.legacy;
+      elements.notice.hidden = !this.legacy;
+      for (const [section, {tab, count}] of this.tabs) {
+        const selected = section === this.section;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.className = "asks-section" + (selected ? " asks-section-selected" : "");
+        const value = section === "resolved" ? "" : String(counts[section] || "");
+        count.textContent = value;
+        count.hidden = !value;
+      }
+      elements.error.textContent = this.failure ? this.failure + " Showing the last loaded asks." : "";
+      elements.error.hidden = !this.failure;
+      elements.filters.hidden = this.section !== "resolved";
+      const ready = this.section === "resolved" ? this.resolvedLoaded : this.loaded;
+      elements.status.hidden = ready;
+      elements.status.textContent = ready ? "" : this.failure ? "" : "Loading…";
+      elements.list.setAttribute("aria-label", copy.sections[this.section]);
+      if (!ready) { this.signature = null; elements.list.replaceChildren(); return; }
+      if (this.section === "resolved") return this.renderResolved();
+      this.renderOpen();
+    }
+    renderOpen() {
+      const snoozedSection = this.section === "snoozed";
+      const visible = this.open.filter(ask => Boolean(ask.snoozed) === snoozedSection);
+      const groups = snoozedSection
+        ? (visible.length ? [{key: "snoozed", title: "", urgent: false,
+            items: visible.slice().sort((a, b) => String(a.snoozed_until).localeCompare(String(b.snoozed_until)))}] : [])
+        : openGroups(visible);
+      const live = new Set();
+      for (const group of groups) for (const ask of group.items) {
+        const key = this.section + ":" + ask.id;
+        live.add(key);
+        if (!this.records.has(key)) this.records.set(key, this.buildRow(ask, {snoozed: snoozedSection, grouped: !snoozedSection}));
+        this.records.get(key).update(ask);
+      }
+      for (const key of [...this.records.keys()]) if (!live.has(key)) this.records.delete(key);
+      // Reuse rows across refreshes so a typed note, focus and selection survive.
+      const signature = this.section + "|" + groups.map(group => group.key + ":" + group.items.map(ask => ask.id).join(",")).join("|");
+      if (signature === this.signature) return;
+      this.signature = signature;
+      const {list} = this.elements;
+      const active = this.document.activeElement;
+      const selectionStart = active?.selectionStart, selectionEnd = active?.selectionEnd;
+      list.replaceChildren();
+      if (!groups.length) {
+        list.append(this.node("p", copy.empty[this.section], "asks-empty"));
+        return;
+      }
+      for (const group of groups) {
+        const section = this.node("section", "", "ask-group" + (group.urgent ? " ask-group-urgent" : ""));
+        if (group.title) {
+          const heading = this.node("h3", group.title, "ask-group-title");
+          heading.append(this.node("span", String(group.items.length), "ask-group-count"));
+          section.append(heading);
+        }
+        for (const ask of group.items) section.append(this.records.get(this.section + ":" + ask.id).element);
+        list.append(section);
+      }
+      if (active && list.contains?.(active)) {
+        active.focus?.();
+        if (selectionStart != null) active.setSelectionRange?.(selectionStart, selectionEnd);
+      }
+    }
+    renderResolved() {
+      const {elements} = this;
+      this.signature = null;
+      const labels = [...new Set(this.resolved.map(ask => ask.project_label || "").filter(Boolean))].sort((a, b) => a.localeCompare(b));
+      const selected = elements.project.value;
+      const first = elements.project.children[0];
+      elements.project.replaceChildren(first, ...labels.map(label => {
+        const option = this.node("option", label); option.value = label; return option;
+      }));
+      elements.project.value = labels.includes(selected) ? selected : "";
+      const items = this.filteredResolved();
+      elements.list.replaceChildren();
+      if (!items.length) {
+        elements.list.append(this.node("p", this.resolved.length ? copy.empty.filtered : copy.empty.resolved, "asks-empty"));
+        return;
+      }
+      const section = this.node("section", "", "ask-group");
+      for (const ask of items) section.append(this.buildResolvedRow(ask));
+      elements.list.append(section);
+    }
     async resolve(ask, body, record) {
       const saved = await this.submit(ask, record, "asks/" + encodeURIComponent(ask.id), body);
       if (!saved) return;
@@ -542,14 +591,187 @@
     }
   }
 
-  /* Workspace entry: the sidebar count, the dialog, and the refresh cycle while it is open. */
+  /* A conversation's own asks, above its composer: the open ones with the view's controls, and its
+     recent resolutions folded away. It shows the view's data and resolves through the view. */
+  class ThreadAsksView extends AskRows {
+    constructor({document, source, element, onError}) {
+      super();
+      Object.assign(this, {document, source, element, onError});
+      this.thread = null;
+      this.records = new Map();
+      this.signature = null;
+      // This conversation's open asks at the last render, to notice one resolved elsewhere.
+      this.shown = new Set();
+      // What the user folded or unfolded, by thread, until the page reloads.
+      this.choices = new Map();
+      // The ask shown in full in the open conversation.
+      this.full = null;
+      if (element) this.setup();
+    }
+    get legacy() { return this.source.legacy; }
+    get clock() { return this.source.clock; }
+    get copyText() { return this.source.copyText; }
+    get navigate() { return this.source.navigate; }
+    fail(error) { this.onError?.(error); }
+    resolve(ask, body, record) { return this.source.resolve(ask, body, record); }
+    snooze(ask, until, record) { return this.source.snooze(ask, until, record); }
+    setup() {
+      const {element} = this;
+      element.setAttribute("aria-label", copy.thread.label);
+      const part = (key, className) => {
+        const list = this.node("div", "", "thread-asks-list");
+        list.id = "thread-asks-" + key;
+        const toggle = this.button("", () => this.fold(key), "thread-asks-toggle " + className);
+        toggle.setAttribute("aria-controls", list.id);
+        const caret = this.node("span", "", "thread-asks-caret"); caret.setAttribute("aria-hidden", "true");
+        const summary = this.node("span", "");
+        toggle.append(caret, summary);
+        return {toggle, caret, summary, list};
+      };
+      this.parts = {open: part("open", "thread-asks-open"), resolved: part("resolved", "thread-asks-resolved")};
+      this.blocking = this.node("span", "", "ask-flag-urgent");
+      // Folded, the line names the first ask, so the user knows what waits without unfolding.
+      this.first = this.node("span", "", "thread-asks-first");
+      this.parts.open.toggle.append(this.blocking, this.first);
+      element.replaceChildren(this.parts.open.toggle, this.parts.open.list, this.parts.resolved.toggle, this.parts.resolved.list);
+      this.render();
+    }
+    /* Show the asks of one conversation, or of none. */
+    setThread(thread) {
+      thread = thread || null;
+      if (thread === this.thread) return Promise.resolve();
+      this.thread = thread;
+      this.full = null;
+      this.records.clear();
+      this.shown = new Set();
+      this.signature = null;
+      this.render();
+      // Nothing else keeps the resolved log current, and it changes rarely.
+      const {source} = this;
+      const due = source.clock() - (source.resolvedReadAt ?? -Infinity) >= RESOLVED_REREAD_MILLISECONDS;
+      return thread && this.element && due ? source.readResolved() : Promise.resolve();
+    }
+    fold(key) {
+      const choice = this.choices.get(this.thread) || {};
+      choice[key] = !this.expanded(key);
+      this.choices.set(this.thread, choice);
+      this.render();
+      // Bring what was unfolded to the top of the strip, under the line that stays in place.
+      const {open, resolved} = this.parts;
+      const top = key === "open" ? 0 : resolved.toggle.offsetTop - open.toggle.offsetHeight * !open.toggle.hidden;
+      if (choice[key] && Number.isFinite(top)) this.element.scrollTop = top;
+    }
+    /* One open ask is shown in full: the one the user opened, else the one already in full, else
+       the first in order. The rest show their title and meta line. */
+    unfolded(asks) {
+      const choice = this.choices.get(this.thread);
+      const listed = id => asks.some(ask => ask.id === id);
+      if (choice && "ask" in choice && (choice.ask == null || listed(choice.ask))) return choice.ask;
+      return listed(this.full) ? this.full : asks[0]?.id ?? null;
+    }
+    unfold(ask) {
+      const choice = this.choices.get(this.thread) || {};
+      choice.ask = this.unfolded(this.openAsks()) === ask.id ? null : ask.id;
+      this.choices.set(this.thread, choice);
+      this.render();
+    }
+    /* Open asks start unfolded while one waits; resolutions start folded. */
+    expanded(key) {
+      const choice = this.choices.get(this.thread)?.[key];
+      if (choice != null) return choice;
+      return key === "open" && this.openAsks().some(ask => !ask.snoozed);
+    }
+    /* Blocking first, then overdue, then oldest first; snoozed asks last. */
+    openAsks() {
+      if (!this.thread) return [];
+      const rank = ask => ask.snoozed ? 3 : ask.blocking ? 0 : ask.overdue ? 1 : 2;
+      return this.source.open.filter(ask => ask.session_id === this.thread)
+        .sort((a, b) => rank(a) - rank(b) || b.age_seconds - a.age_seconds || a.id - b.id);
+    }
+    recentResolved() {
+      if (!this.thread || this.legacy) return [];
+      const cutoff = this.clock() - THREAD_RESOLVED_DAYS * 86400000;
+      return this.source.resolved.filter(ask => {
+        const at = new Date(ask.resolved_at).getTime();
+        return ask.session_id === this.thread && (Number.isNaN(at) || at >= cutoff);
+      });
+    }
+    render() {
+      const {element, source} = this;
+      if (!element) return;
+      const {open, resolved} = this.parts;
+      const asks = this.openAsks(), log = this.recentResolved();
+      // An ask that left the open list and is not in the log was resolved elsewhere: reread the log.
+      const ids = new Set(asks.map(ask => ask.id)), logged = new Set(source.resolved.map(ask => ask.id));
+      const departed = [...this.shown].some(id => !ids.has(id) && !logged.has(id));
+      this.shown = ids;
+      if (departed) source.readResolved().catch(error => this.fail(error));
+      element.hidden = !asks.length && !log.length;
+      if (element.hidden) {
+        this.records.clear();
+        this.signature = null;
+        open.list.replaceChildren(); resolved.list.replaceChildren();
+        return;
+      }
+      const waiting = asks.filter(ask => !ask.snoozed), blocking = waiting.filter(ask => ask.blocking).length;
+      const openExpanded = this.expanded("open"), resolvedExpanded = this.expanded("resolved");
+      open.toggle.hidden = !asks.length;
+      open.list.hidden = !asks.length || !openExpanded;
+      open.summary.textContent = waiting.length ? copy.thread.waiting(waiting.length) : copy.thread.snoozed(asks.length);
+      // Unfolded, the rows carry the Blocking flag and their titles; folded, the line has to.
+      this.blocking.textContent = blocking && !openExpanded ? copy.thread.blocking(blocking) : "";
+      this.blocking.hidden = !this.blocking.textContent;
+      this.first.textContent = waiting.length && !openExpanded ? splitQuestion(waiting[0].question).title : "";
+      this.first.hidden = !this.first.textContent;
+      // The resolutions fold away with the open asks, and stand alone when nothing is open.
+      resolved.toggle.hidden = !log.length || asks.length > 0 && !openExpanded;
+      resolved.list.hidden = resolved.toggle.hidden || !resolvedExpanded;
+      resolved.summary.textContent = copy.thread.resolved(log.length);
+      for (const [part, expanded] of [[open, openExpanded], [resolved, resolvedExpanded]]) {
+        part.toggle.setAttribute("aria-expanded", String(expanded));
+        part.caret.textContent = expanded ? "▾" : "▸";
+      }
+      // The ask in full stays in place while the conversation is open, even when a more urgent one arrives mid-answer.
+      const full = this.full = this.unfolded(asks);
+      const live = new Set();
+      for (const ask of asks) {
+        const key = ask.id + ":" + Boolean(ask.snoozed);
+        live.add(key);
+        if (!this.records.has(key)) {
+          this.records.set(key, this.buildRow(ask, {snoozed: Boolean(ask.snoozed), thread: false, fold: item => this.unfold(item)}));
+        }
+        const record = this.records.get(key);
+        record.update(ask);
+        record.fold(ask.id !== full);
+      }
+      for (const key of [...this.records.keys()]) if (!live.has(key)) this.records.delete(key);
+      // Reuse rows across refreshes so a typed note, focus and selection survive.
+      const signature = [this.thread, this.legacy, [...live].join(","), log.map(ask => ask.id + ":" + ask.resolution).join(",")].join("|");
+      if (signature === this.signature) return;
+      this.signature = signature;
+      const active = this.document.activeElement;
+      const selectionStart = active?.selectionStart, selectionEnd = active?.selectionEnd;
+      open.list.replaceChildren(...[...live].map(key => this.records.get(key).element));
+      resolved.list.replaceChildren(...log.map(ask => this.buildResolvedRow(ask, {thread: false})));
+      if (active && open.list.contains?.(active)) {
+        active.focus?.();
+        if (selectionStart != null) active.setSelectionRange?.(selectionStart, selectionEnd);
+      }
+    }
+  }
+
+  /* Workspace entry: the sidebar count, the dialog, the refresh cycle while it is open, the count
+     on the navigation toggle, and the open conversation's strip. */
   class AsksUI {
-    constructor({document, api, view = globalThis, navigate, onError, copyText, clock}) {
+    constructor({document, api, view = globalThis, navigate, onError, copyText, clock, kinds}) {
       Object.assign(this, {document, api, view, navigate, onError});
       const $ = id => document.getElementById(id);
       this.entry = $("open-asks-view");
       this.label = $("asks-entry-label");
       this.badge = $("asks-count");
+      // While the navigation is closed its entry is out of sight, so the toggle carries the count.
+      this.toggle = $("menu-toggle");
+      this.toggleBadge = $("asks-toggle-count");
       this.shortcut = $("open-asks");
       this.dialog = $("asks-dialog");
       if (this.label) this.label.textContent = copy.viewName;
@@ -559,9 +781,12 @@
         navigate: url => this.follow(url), close: () => this.dialog.close(),
         copyText: copyText || (text => view.navigator.clipboard.writeText(text)),
         ...(clock ? {clock} : {})});
+      // The workspace already knows whether its backend predates kinds; opening the view asks again.
+      if (kinds === false) this.viewer.setLegacy(true);
+      this.thread = new ThreadAsksView({document, source: this.viewer, element: $("thread-asks"), onError});
       const render = this.viewer.render.bind(this.viewer);
-      // Every change to the list, including an in-place resolution, also moves the count.
-      this.viewer.render = () => { render(); this.updateBadge(); };
+      // Every change to the list, including an in-place resolution, also moves the counts and the strip.
+      this.viewer.render = () => { render(); this.updateBadge(); this.thread.render(); };
       for (const control of [this.entry, this.shortcut]) {
         if (control) control.onclick = event => { event?.preventDefault?.(); return this.open(); };
       }
@@ -570,17 +795,23 @@
     }
     get items() { return this.viewer.open; }
     refresh() { return this.viewer.refresh(); }
+    /* Show one conversation's asks in its strip; no thread hides the strip. */
+    showThread(thread) { return this.thread.setThread(thread); }
     updateBadge() {
       // Snoozed asks are out of the open list until their time.
       const {open: count, blocking} = this.viewer.counts();
-      if (this.badge) {
-        this.badge.hidden = !count;
-        this.badge.textContent = count ? String(count) : "";
-        this.badge.classList?.toggle("asks-count-blocking", blocking > 0);
+      for (const badge of [this.badge, this.toggleBadge]) {
+        if (!badge) continue;
+        badge.hidden = !count;
+        badge.textContent = count ? String(count) : "";
+        badge.classList?.toggle("asks-count-blocking", blocking > 0);
       }
       const title = copy.entryTitle(count, blocking);
       for (const control of [this.entry, this.shortcut]) if (control) control.title = title;
       this.entry?.setAttribute("aria-label", count ? copy.viewName + ": " + title : copy.viewName);
+      // The toggle keeps its own name; the count is its description.
+      if (count) this.toggle?.setAttribute("aria-description", title);
+      else this.toggle?.removeAttribute("aria-description");
     }
     async open() {
       const backdrop = this.document.getElementById("sidebar-backdrop");
@@ -611,7 +842,7 @@
     }
   }
 
-  const exported = {AsksUI, AsksView, AsksCopy: copy, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget, splitQuestion, isLong};
+  const exported = {AsksUI, AsksView, ThreadAsksView, AsksCopy: copy, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget, splitQuestion, isLong};
   if (typeof module !== "undefined") module.exports = exported;
   globalThis.AsksUI = AsksUI;
 })();

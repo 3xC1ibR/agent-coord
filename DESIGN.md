@@ -59,6 +59,12 @@ The asks view opens in a workspace dialog and uses the auxiliary-page grammar: a
 simple title, sections, and a 760px reading width. Its sidebar entry sits above
 the thread list; the dialog fills the screen on narrow layouts. Its dimensions
 are declared once in `web/asks.css`.
+A conversation's own asks sit in a strip between the conversation and its
+composer, with the request area's insets. One line states how many wait; it folds
+the strip. One ask is shown in full and the others as their title and meta line.
+The strip takes at most 35% of the window height (55% of the conversation on a
+phone) and scrolls within that. It is absent when the conversation has no open
+asks and no recent resolutions.
 Scheduled prompt actions wrap on desktop and use two columns on narrow screens.
 Their `--schedule-gap` (8px) and `--schedule-action-height` (44px) tokens live in
 `web/styles.css`; the form's action row stays visible as its body scrolls.
@@ -96,6 +102,8 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Role designation | A user-named role beside a conversation's metadata, muted 10px semibold, placed like the Dispatcher designation |
 | Stopped conversations | Quiet status-bar count of the user's Stops; a native dialog lists each with its supervising agent, all checked, before Release |
 | Asks view | Sidebar entry with an open count, red when an ask is blocking. Rows lead with the title; kind, effort, age, asking thread, state and the link follow as muted meta; the kind's resolution controls lead one row, with Add note, Snooze and Dismiss after them as quiet text controls. Red marks only the Blocking group and the sidebar count; overdue and stale use the attention colour, and resolved outcomes stay muted. Groups use plain headings and one-pixel dividers, not cards. The view's name and wording live only in the copy block of `web/asks.js` |
+| Conversation asks | The asks view's rows above the composer, without the thread name: open asks first, with the Blocking flag in red on the row; the conversation's resolutions of the last 30 days behind a muted disclosure line. Unfolded while an ask waits; the user's fold is kept per conversation. One ask shows in full, the first in order unless the user opens another by its title; the rest show title and meta. Folded, the summary line carries the blocking count and the first ask's title. No card, no heading: dividers and the summary line only |
+| Navigation toggle count | The sidebar entry's count pill on the corner of the navigation toggle, ringed in the paper colour, only while the navigation is closed (a phone, or a collapsed sidebar); red when an ask is blocking. The toggle's name and action do not change |
 | Title band | Mac workspace windows: native window controls centered on the project tab labels; the sidebar, a collapsed header and the compact header start clear of them |
 
 ## Do's and Don'ts
@@ -116,8 +124,10 @@ Filtering and grouping change the view; reviewing creates an ordinary conversati
 with a fixed snapshot of the selected period. Clearing history affects the local
 activity ledger, not the conversations.
 An ask is an item an agent addresses to the user: a decision, action, approval,
-review or request. The user resolves an ask in the asks view; resolving it tells
-the asking thread. An ask belongs to its thread but is not a thread state.
+review or request. The user resolves an ask in the asks view or in its own
+conversation; resolving it tells the asking thread. The conversation shows a
+second view of the same asks, not another object. An ask belongs to its thread
+but is not a thread state.
 
 ## Motion and states
 Reuse the existing control transitions and honor reduced motion. Loading and
@@ -133,6 +143,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | Date | Decision | Reason |
 | --- | --- | --- |
 | 2026-11-22 | Upcoming chat prompts use a clock in the header and the existing details dialog | Keep the conversation readable while preserving prompt details and scheduling actions |
+| 2026-11-22 | A conversation shows its own asks above its composer, and the navigation toggle carries the open count while the navigation is closed | The owner could not see a thread's asks in the thread, and on a phone the count was inside the drawer. Both are views of existing asks built from the asks view's rows and count, in the existing `asks.js` and `asks.css`. |
 | 2026-11-22 | Asks get a primary sidebar entry and a view that replaces the Decisions dialog | The dialog behind the question-mark button went unnoticed. Asks now have kinds and in-place resolutions. The view opens in a workspace dialog with the auxiliary-page grammar, and ships in the existing `asks.js` and `asks.css` so an older backend can serve it before its update is applied. |
 | 2026-11-21 | List inbox starts app-agent families collapsed at every depth | Keep the inbox compact by default while preserving explicit expansion and descendant attention counts. |
 | 2026-11-21 | Mobile conversations use a single header and a two-row composer; secondary actions move into thread options | Return reading space from repeated navigation and desktop instructions while preserving the existing actions. |

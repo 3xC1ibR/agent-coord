@@ -84,4 +84,39 @@
   .asks-view .ask-note { flex-basis: 100%; }
   .ask-later { margin-left: 0; }
 }
+/* The count on the navigation toggle, shown while the navigation and its entry are out of sight. */
+:root { --asks-toggle-count-offset: -5px; --asks-toggle-count-ring: 2px; } /* drift-ok: the count overlaps the toggle's corner, set off from the icon by a ring of the surface behind it. */
+#menu-toggle { position: relative; }
+#menu-toggle .asks-toggle-count { position: absolute; top: var(--asks-toggle-count-offset); right: var(--asks-toggle-count-offset); margin: 0; pointer-events: none; box-shadow: 0 0 0 var(--asks-toggle-count-ring) var(--paper); }
+#menu-toggle[aria-expanded="true"] .asks-toggle-count { display: none; }
+/* A conversation's own asks, above its composer. The rows are the view's rows; insets follow the conversation's request area. */
+:root {
+  --thread-asks-inset: 28px; --thread-asks-inset-narrow: 15px; --thread-asks-inset-phone: 12px; /* drift-ok: the conversation's request-area insets at each width. */
+  --thread-asks-height: 35vh; --thread-asks-height-narrow: 55%; /* drift-ok: room for one ask in full; the strip never takes more than this share of the conversation. */
+  --thread-asks-height-editing: 75%; /* drift-ok: room for the field being typed in while a phone keyboard is open. */
+}
+.thread-asks { position: relative; flex-shrink: 0; max-height: var(--thread-asks-height); overflow: auto; margin: 0 var(--thread-asks-inset) var(--asks-space-sm); border-top: var(--asks-line) solid var(--line); }
+.asks-view .thread-asks-toggle { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--asks-space-sm); width: 100%; min-height: var(--asks-control); padding: 0; border: 0; border-radius: 0; background: var(--paper); color: var(--muted); font-size: var(--asks-meta); text-align: left; }
+.asks-view .thread-asks-toggle:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
+.asks-view .thread-asks-open { color: var(--ink); font-weight: var(--asks-weight); }
+.thread-asks-open .ask-flag-urgent { font-weight: normal; }
+.asks-view .thread-asks-resolved { position: static; }
+.thread-asks-caret { flex-shrink: 0; width: var(--asks-space-lg); color: var(--muted); font-size: var(--asks-text); font-weight: normal; line-height: var(--asks-leading); }
+.thread-asks-first { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-weight: normal; text-overflow: ellipsis; white-space: nowrap; }
+.asks-view .ask-row .ask-title-toggle { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.asks-view .ask-row .ask-title-toggle:hover:not(:disabled) { background: transparent; color: var(--accent); }
+.ask-head > .thread-asks-caret { width: auto; }
+.ask-row-folded > :not(.ask-head):not(.ask-meta) { display: none; }
+.asks-view .thread-asks-open[aria-expanded="true"] { border-bottom: var(--asks-line) solid var(--line); }
+.thread-asks .ask-row { padding: var(--asks-space-md) 0; border-top: var(--asks-line) solid var(--line); border-bottom: 0; }
+#thread-asks-open > .ask-row:first-child { border-top: 0; }
+.thread-asks-list:not([hidden]) + .thread-asks-resolved { border-top: var(--asks-line) solid var(--line); }
+@media (max-width: 720px) {
+  .thread-asks { max-height: var(--thread-asks-height-narrow); margin-inline: var(--thread-asks-inset-narrow); }
+}
+@media (max-width: 760px) {
+  .asks-view .thread-asks-toggle, .asks-view .ask-row-folded .ask-title-toggle { min-height: var(--asks-hit); }
+}
+body.mobile-chat .thread-asks { max-height: var(--thread-asks-height-narrow); margin-inline: var(--thread-asks-inset-phone); }
+body.mobile-chat .thread-asks:has(.ask-note:focus) { max-height: var(--thread-asks-height-editing); }
 @media (prefers-reduced-motion: reduce) { .asks-view button { transition: none; } }

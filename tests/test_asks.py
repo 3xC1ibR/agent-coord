@@ -329,10 +329,14 @@ class AskAttentionTests(unittest.TestCase):
         worker.start()
         base = "http://127.0.0.1:" + str(server.server_address[1])
         try:
-            # The whole view ships in the two URLs an older backend already serves.
+            # The whole view, and the strip in a conversation, ship in the two URLs an older backend already serves.
             for path, needle in (("/asks.js", b"class AsksUI"), ("/asks.js", b"class AsksView"), ("/asks.js", b"viewName"),
+                                 ("/asks.js", b"class ThreadAsksView"), ("/asks.css", b".thread-asks"),
+                                 ("/asks.css", b".asks-toggle-count"),
                                  ("/asks.css", b".asks-count"), ("/asks.css", b".asks-view"), ("/", b'id="open-asks"'),
-                                 ("/", b'id="open-asks-view"'), ("/", b'id="asks-dialog"'), ("/", b'id="asks-list"')):
+                                 ("/", b'id="open-asks-view"'), ("/", b'id="asks-dialog"'), ("/", b'id="asks-list"'),
+                                 ("/", b'<section id="thread-asks" class="asks-view thread-asks" hidden>'),
+                                 ("/", b'<span id="asks-toggle-count" class="asks-count asks-toggle-count" hidden>')):
                 with urllib.request.urlopen(base + path) as response:
                     self.assertIn(needle, response.read(), path)
         finally:
@@ -426,7 +430,8 @@ class AskAttentionRegressionTests(unittest.TestCase):
 class AskWebTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is required for browser tests")
     def test_asks_entry_and_view_behaviour(self):
-        result = subprocess.run(["node", "--test", "tests/test_web_asks.js", "tests/test_web_asks_view.js"], cwd=ROOT,
+        result = subprocess.run(["node", "--test", "tests/test_web_asks.js", "tests/test_web_asks_view.js",
+                                 "tests/test_web_asks_thread.js"], cwd=ROOT,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

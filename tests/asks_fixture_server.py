@@ -109,6 +109,46 @@ def seed(store, clock, root):
     clock[0] = None
 
 
+def seed_conversations(store, sessions, clock, root):
+    """Conversations for the strip above the composer: one the browser owns, and one with resolutions only."""
+    now = time.time()
+    directory = root / "Shop"
+    directory.mkdir(exist_ok=True)
+    owned = sessions.create({"name": "Checkout pricing page", "cwd": str(directory)})["session"]["thread_id"]
+    clock[0] = now - 14 * DAY
+    store.register(session_id="onboarding", client="claude", cwd=str(directory), name="Onboarding email copy")
+    asks = store.asks
+
+    def file(thread, age, title, **fields):
+        clock[0] = now - age
+        return asks.create(thread, title, **fields)["id"]
+
+    file(owned, 50 * 60, "Which plan should the pricing page lead with?", blocking=True,
+         options=["Monthly", "Annual", "Both, side by side"],
+         context="The page is built and waits on this choice. The memo recommends Annual.")
+    file(owned, 3 * HOUR, "Provide a Stripe test key for the checkout preview", kind="request", blocking=False,
+         context="Default: keep the mocked payment form.",
+         unblocks="A working test purchase in the preview instead of a mocked form.", effort_minutes=3,
+         link="https://dashboard.stripe.com/test/apikeys")
+    for thread, age, title, fields, resolved_after, resolution, extra in (
+            (owned, 2 * DAY, "Approve the 20% launch discount", dict(kind="approval", unblocks="The launch banner copy."),
+             5 * HOUR, "approved", dict(note="For the first 30 days only.")),
+            (owned, 4 * DAY, "Which currency should prices show first?", dict(options=["USD", "EUR"]),
+             2 * HOUR, "answered", dict(option="USD")),
+            ("onboarding", 6 * DAY, "Read the welcome email draft", dict(kind="review", unblocks="Sending to the first 50 users."),
+             DAY, "changes_requested", dict(note="Shorten the second paragraph and drop the survey link.")),
+            ("onboarding", 3 * DAY, "Which sender name should the email use?", dict(options=["Ribbon Field", "Ronnie"]),
+             4 * HOUR, "answered", dict(answer="Ronnie at Ribbon Field"))):
+        fields.setdefault("blocking", False)
+        if "context" not in fields:
+            fields["context"] = "Default: continue without it."
+        identifier = file(thread, age, title, **fields)
+        clock[0] = now - age + resolved_after
+        asks.resolve(identifier, resolution, **extra)
+    clock[0] = None
+    return owned
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=18791)
@@ -128,6 +168,8 @@ def main():
         if not args.database and not args.empty:
             seed(store, clock, root)
         sessions = BrowserSessions(store, str(root), rpc_factory=FakeCodex, claude_factory=claude_factory)
+        if not args.database and not args.empty:
+            print("Browser conversation:", seed_conversations(store, sessions, clock, root), flush=True)
         server = make_ui_server(store, port=args.port, cwd=str(root), browser_sessions=sessions)
         for component in (server.app_control, sessions.inbox_wake, sessions.sidecars):
             component.close()

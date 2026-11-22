@@ -1565,6 +1565,7 @@ function renderStatus() {
   const sidecarButton = $("attach-sidecar");
   if (sidecarButton) sidecarButton.hidden = isSessionDraft() || !state.detail?.work_thread?.browser_session || state.detail?.work_thread?.attention === "archived";
   state.schedules?.renderThread($("thread-schedules"), state.selected);
+  state.asks?.showThread(isSessionDraft() ? null : state.selected)?.catch(showError);
   globalThis.agentCoordSpeech?.update(state.selected, state.detail, state.config);
   state.rollUp?.changed();
   renderSessionSettings();
@@ -3149,6 +3150,7 @@ function goHome({restoreDispatcher = true, rememberTab = true, preserveRollUp = 
   state.selected = null; state.detail = null; state.titleEdit = null;
   state.activity?.select(null);
   state.scratchpad?.select(null);
+  state.asks?.showThread(null);
   state.threadTabs?.overview({remember: rememberTab});
   state.agentTreeController?.bind();
   state.detailRefreshing = false;
@@ -4261,7 +4263,7 @@ async function boot() {
   state.sidecars = new SidecarsUI({document, api, getThreads: () => state.sessions, openThread: select, onError: showError});
   if (globalThis.ReviewUI) state.reviewUI = new ReviewUI({document, api, onError: showError, changed: renderStatus});
   window.addEventListener("pagehide", () => clearInterval(state.sidecars.timer), {once: true});
-  state.asks = new AsksUI({document, api, navigate: url => window.agentCoordNavigate(url), onError: showError});
+  state.asks = new AsksUI({document, api, navigate: url => window.agentCoordNavigate(url), onError: showError, kinds: Boolean(state.config.askKinds)});
   state.asks.refresh().catch(showError);
   const sidecarButton = document.createElement("button");
   sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet thread-menu-action";
