@@ -28,12 +28,14 @@ from .permission_modes import CLAUDE_MODES, legacy_mode, validate_mode
 
 class ClaudeConnection:
     def __init__(self, store, callback, options, *, command=None):
+        self.store = store
         self.callback = callback
         self.thread_id = options["threadId"]
         self.lock = threading.Lock()
         self.pending = {}
         self.errors = deque(maxlen=12)
         self.closed = False
+        self.channel = "claude:" + self.thread_id + ":" + uuid.uuid4().hex
         args = list(command or ["claude"])
         args += ["--print", "--input-format", "stream-json", "--output-format", "stream-json",
                  "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio"]
@@ -66,6 +68,12 @@ class ClaudeConnection:
         # rejected it. Browser conversations should use the user's Claude login.
         env.pop("ANTHROPIC_API_KEY", None)
         env = client_environment(env, store.database_path, "claude", session_id=options["threadId"])
+        projection = getattr(store, "provider_projection", None)
+        if projection is not None:
+            self.readers = []
+            self.process = projection.open(self.channel, args, env, options["cwd"], self._message,
+                                           provider="claude", thread_id=self.thread_id)
+            return
         try:
             self.process = subprocess.Popen(args, cwd=options["cwd"], env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -78,6 +86,10 @@ class ClaudeConnection:
             reader.start()
 
     def write(self, message):
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None:
+            projection.write(self.channel, message)
+            return
         with self.lock:
             if self.closed or self.process.poll() is not None:
                 raise CoordinationError("Claude Code disconnected. Send again to resume the conversation.")
@@ -116,6 +128,36 @@ class ClaudeConnection:
                 "Claude callback failed: thread=%s frame=%s process_status=%s",
                 self.thread_id, message.get("type"), self.process.poll())
 
+    @classmethod
+    def attach(cls, store, callback, thread_id, channel, pid):
+        connection = cls.__new__(cls)
+        connection.store, connection.callback, connection.thread_id = store, callback, thread_id
+        connection.lock, connection.pending = threading.Lock(), {}
+        connection.errors, connection.closed, connection.readers = deque(maxlen=12), False, []
+        connection.channel = channel
+        connection.process = store.provider_projection.attach(channel, pid, connection._message,
+                                                               provider="claude", thread_id=thread_id)
+        return connection
+
+    def _message(self, message):
+        if message.get("type") == "control_response":
+            response = message.get("response", {})
+            with self.lock:
+                future = self.pending.get(response.get("request_id"))
+                if future and not future.done():
+                    def complete():
+                        if future.done():
+                            return
+                        if response.get("subtype") == "error":
+                            future.set_exception(CoordinationError(str(response.get("error"))))
+                        else:
+                            future.set_result(response.get("response") or {})
+                    projection = getattr(self.store, "provider_projection", None)
+                    projection.after_commit(complete) if projection is not None else complete()
+        else:
+            # Projection errors must fail its transaction and retain the cursor.
+            self.callback(message)
+
     def _read(self):
         try:
             for line in self.process.stdout:
@@ -150,6 +192,10 @@ class ClaudeConnection:
 
     def close(self):
         self.closed = True
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None:
+            projection.close_channel(self.channel)
+            return
         if self.process.poll() is None:
             self.process.terminate()
             try:
@@ -547,7 +593,11 @@ class ClaudeRPC:
 
     def _handle_message(self, thread_id, message):
         # Results can describe background work outside the visible turn.
-        self.usage.capture(thread_id, message)
+        from .browser_persistence import capturing_writes
+        if capturing_writes():
+            self.persistence.submit(lambda: self.usage.capture(thread_id, message), key=thread_id, required=False)
+        else:
+            self.usage.capture(thread_id, message)
         kind = message.get("type")
         if kind == "system" and not message.get("parent_tool_use_id") and message.get("permissionMode"):
             mode = message["permissionMode"]
@@ -714,6 +764,8 @@ class ClaudeRPC:
         self.closed = True
         for thread_id, connection in list(self.connections.items()):
             connection.close()
-            self._finish(thread_id, "interrupted")
+            projection = getattr(self.store, "provider_projection", None)
+            if projection is None or not getattr(projection.sessions, "transport_handover", False):
+                self._finish(thread_id, "interrupted")
         self.connections.clear()
         self.persistence.close()

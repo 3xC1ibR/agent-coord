@@ -20,7 +20,8 @@ SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 DOWNLOAD_URL = "https://downloads.ribbonfield.com"
 KEYCHAIN_ACCOUNT = "ribbon-field"
 RUNTIME_KEYS = ("runtime_protocol", "runtime_version", "ui_protocol_min", "ui_protocol_max",
-                "runtime_schema_min", "runtime_schema_max")
+                "runtime_schema_min", "runtime_schema_max", "provider_transport_protocol",
+                "coordinator_projection_version")
 ET.register_namespace("sparkle", SPARKLE_NS)
 
 

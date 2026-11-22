@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -49,13 +51,17 @@ def record(value):
     with lock:
         with (root / 'calls.jsonl').open('a') as f: f.write(json.dumps(value) + '\n')
 def work(identity, turn, needs_approval):
-    if turn['items'][0]['content'][0].get('text') == 'held-work': return
+    # Native child activity insertion point.
+    if (turn['items'][0]['content'][0].get('text') == 'held-work' or
+            (os.environ.get('RIBBON_FAKE_HOLD_RECOVERY') == '1' and
+             turn['items'][0]['content'][0].get('text', '').startswith('[Automatic continuation'))):
+        while not (root / 'release-held-work').exists(): time.sleep(.01)
     if needs_approval:
         for n in range(5):
             time.sleep(.1)
             emit({'method':'item/agentMessage/delta','params':{'threadId':identity,'turnId':turn['id'],'itemId':'output','delta':str(n)}})
         emit({'id':900,'method':'item/commandExecution/requestApproval','params':{'threadId':identity,'turnId':turn['id'],'itemId':'tool','command':'fake-tool'}})
-        approval.wait(20)
+        approval.wait()
     time.sleep(.15)
     item = {'id':'output','type':'agentMessage','text':'output while desktop disconnected'}
     turn['items'].append(item)
@@ -146,9 +152,17 @@ class RuntimeTests(unittest.TestCase):
         if (self.root / "calls.jsonl").exists():
             detail += "\nCALLS: " + json.dumps(self.calls())[-5000:]
         try:
-            with sqlite3.connect(self.database) as db:
+            with closing(sqlite3.connect(self.database)) as db:
                 detail += "\nQUEUE: " + repr(db.execute("SELECT message,state,error,owner FROM browser_message_queue").fetchall())
         except sqlite3.Error:
+            pass
+        update_path = runtime.runtime_directory(self.database) / "update.json"
+        if update_path.exists():
+            detail += "\nUPDATE: " + update_path.read_text()
+        try:
+            status = runtime.control(runtime.discover(self.database), "status", timeout=2)
+            detail += "\nSTATUS: " + json.dumps({k: status.get(k) for k in ("paused", "upgrade_error", "update")})
+        except (RuntimeError, OSError):
             pass
         self.fail("Condition did not become true before timeout\n" + detail)
 
@@ -171,8 +185,21 @@ class RuntimeTests(unittest.TestCase):
         if body is not None:
             headers = {"X-Agent-Coord-Token": self.api(url, "api/browser/config")["token"], "Content-Type":"application/json"}
         request = urllib.request.Request(url + path, data=json.dumps(body).encode() if body is not None else None, headers=headers)
-        with urllib.request.urlopen(request, timeout=5) as response:
-            return json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors="replace")[:2000]
+            error.close()
+            error.msg = str(error.reason) + ": " + detail
+            raise
+
+    def assert_no_recovery_turns(self, thread):
+        import sqlite3
+        with closing(sqlite3.connect(self.database)) as db:
+            table = db.execute("SELECT 1 FROM sqlite_master WHERE name='runtime_update_recoveries'").fetchone()
+            if table:
+                self.assertEqual(db.execute("SELECT count(*) FROM runtime_update_recoveries WHERE thread_id=?", (thread,)).fetchone()[0], 0)
 
     def test_detached_reconnect_preserves_provider_approval_output_and_queue_after_bundle_deletion(self):
         first = self.launch()
@@ -324,7 +351,26 @@ Runtime.status = _status_with_barrier
             (self.root / "release-locks").touch()
         self.assertEqual(runtime.control(record, "status")["instance"], first["instance"])
 
-    def prepare_requested_update(self, *, corrupt=False, message="one"):
+    def prepare_requested_update(self, *, corrupt=False, message="one", legacy=False):
+        # Explicit-update tests hold only automatic activation until the public
+        # activate-update request is accepted. The independent live gate covers
+        # passive activation; this barrier removes a race with the new path.
+        runtime_source = self.resources / "backend/agent_coord/desktop_runtime.py"
+        runtime_source.write_text(runtime_source.read_text() + '''
+_explicit_test_readiness = uninterrupted_readiness
+def uninterrupted_readiness(sessions):
+    from . import runtime_update as test_updates
+    reasons = _explicit_test_readiness(sessions)
+    update = test_updates.read(runtime_directory(sessions.store.database_path))
+    if not update or update.get("phase") not in {"accepted", "stopping"}:
+        reasons.append("automatic activation held by explicit-update fixture")
+    return reasons
+''')
+        candidate_runtime_source = runtime_source.read_text()
+        if legacy:
+            # Frozen 6d3a900 control code reproduces the real legacy launch,
+            # shutdown drain and recovery boundary, including direct trial entry.
+            runtime_source.write_bytes((ROOT / "tests/fixtures/legacy_desktop_runtime.py").read_bytes())
         first = self.launch()
         record = runtime.discover(self.database)
         thread = self.api(first["url"], "api/browser/sessions", {"cwd": str(self.root)})["session"]["thread_id"]
@@ -332,12 +378,15 @@ Runtime.status = _status_with_barrier
         self.wait(lambda: ("pending approvals or questions" if message == "one" else "active turns") in runtime.control(record, "status")["busy"])
         new = self.root / "Candidate/Contents/Resources"
         shutil.copytree(self.resources, new)
+        if legacy:
+            candidate_source = new / "backend/agent_coord/desktop_runtime.py"
+            candidate_source.write_text(candidate_runtime_source)
         metadata = json.loads((new / "backend.json").read_text())
         metadata["runtime_version"] = "2+2"
         (new / "backend.json").write_text(json.dumps(metadata))
         if corrupt:
             source = new / "backend/agent_coord/desktop_runtime.py"
-            source.write_text(source.read_text() + "\nfrom contextlib import closing\n_original_serve = Runtime.serve\ndef fail_trial(self):\n    if self.commit_fd is not None:\n        with closing(sqlite3.connect(self.database)) as db: db.execute('CREATE TABLE trial_migration (id INTEGER)')\n        atomic_json(self.directory / 'schema.json', {'schema': 999, 'fingerprint': 'trial'})\n        raise RuntimeError('injected candidate failure')\n    return _original_serve(self)\nRuntime.serve = fail_trial\n")
+            source.write_text(source.read_text() + "\nfrom contextlib import closing\n_original_serve = Runtime.serve\ndef fail_trial(self):\n    if self.commit_fd is not None:\n        with closing(sqlite3.connect(self.database)) as db:\n            db.execute('CREATE TABLE trial_migration (id INTEGER)')\n            db.commit()\n        atomic_json(self.directory / 'schema.json', {'schema': 999, 'fingerprint': 'trial'})\n        raise RuntimeError('injected candidate failure')\n    return _original_serve(self)\nRuntime.serve = fail_trial\n")
             if corrupt == "cancel":
                 source.write_text(source.read_text().replace("        raise RuntimeError('injected candidate failure')",
                     "        (self.directory / 'trial-entered').touch()\n        while not (self.directory / 'release-trial').exists(): time.sleep(.01)\n        raise RuntimeError('injected candidate failure')"))
@@ -349,7 +398,7 @@ Runtime.status = _status_with_barrier
             try:
                 record = runtime.discover(self.database, timeout=1)
                 status = runtime.control(record, "status", timeout=1) if record else None
-                return status if status and status.get("update", {}).get("phase") == phase and status["status"] == "serving" else None
+                return status if status and (status.get("update") or {}).get("phase") == phase and status["status"] == "serving" else None
             except (OSError, RuntimeError):
                 return None
         return self.wait(ready, timeout=35)
@@ -389,19 +438,70 @@ Runtime.status = _status_with_barrier
         self.assertIsNone(selected["pending"])
         self.assertFalse(selected["pending_confirmation"])
 
-    def test_requested_update_restarts_busy_runtime_and_preserves_approval_gate(self):
+    def test_requested_update_replaces_coordinator_and_preserves_original_approval(self):
         first, record, thread, staged, _ = self.prepare_requested_update()
+        original = self.api(first["url"], f"api/browser/sessions/{thread}")
+        provider = int((self.root / "provider.pid").read_text())
         accepted = runtime.control(record, "activate-update", request_id="acceptance-update", payload=staged["pending"])
         duplicate = runtime.control(record, "activate-update", request_id="acceptance-update", payload=staged["pending"])
         self.assertEqual(accepted["update"]["id"], duplicate["update"]["id"])
         current = self.wait_update("committed")
         self.assertEqual(current["payload"], staged["pending"])
         self.assertNotEqual(current["pid"], first["pid"])
-        import sqlite3
-        with sqlite3.connect(self.database) as db:
-            self.assertEqual(db.execute("SELECT state FROM runtime_update_recoveries WHERE thread_id=?", (thread,)).fetchone()[0], "skipped")
+        self.assertEqual(provider, int((self.root / "provider.pid").read_text()))
+        detail = self.api(current["url"], f"api/browser/sessions/{thread}")
+        self.assertEqual(detail["activeTurn"], original["activeTurn"])
+        self.assertEqual([r["key"] for r in detail["requests"]], [r["key"] for r in original["requests"]])
+        self.assertTrue(current["update"]["uninterrupted"])
+        self.assert_no_recovery_turns(thread)
+        self.api(current["url"], f"api/browser/sessions/{thread}/requests/{original['requests'][0]['key']}", {"decision": "accept"})
+        self.wait(lambda: not self.api(current["url"], f"api/browser/sessions/{thread}")["running"])
         self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
         self.assertNotIn("ResourceWarning", self.log())
+
+    def test_legacy_adoption_then_upgrade_retains_original_native_work(self):
+        self.env["RIBBON_FAKE_PERSIST"] = "1"
+        self.env["RIBBON_FAKE_HOLD_RECOVERY"] = "1"
+        first, record, thread, staged, candidate = self.prepare_requested_update(message="held-work", legacy=True)
+        runtime.control(record, "activate-update", request_id="legacy-adoption", payload=staged["pending"])
+        current = self.wait_update("committed")
+        self.wait(lambda: runtime.control(runtime.discover(self.database), "status")["update"]["recovery"]["counts"] == {"continued": 1})
+        current = runtime.control(runtime.discover(self.database), "status")
+        self.assertFalse(current["update"].get("uninterrupted", False))
+        original = self.api(current["url"], f"api/browser/sessions/{thread}")["activeTurn"]
+        provider = int((self.root / "provider.pid").read_text())
+        turns = len([call for call in self.calls() if call.get("method") == "turn/start"])
+        # The directly adopted coordinator also needs crash recovery before it
+        # has performed its first normal supervised replacement.
+        os.kill(current["pid"], signal.SIGKILL)
+        def recovered():
+            try:
+                record = runtime.discover(self.database, timeout=.5)
+                status = runtime.control(record, "status", timeout=1) if record else None
+                return status if status and status["pid"] != current["pid"] else None
+            except (RuntimeError, OSError):
+                return None
+        current = self.wait(recovered)
+        self.assertEqual(provider, int((self.root / "provider.pid").read_text()))
+        self.assertEqual(self.api(current["url"], f"api/browser/sessions/{thread}")["activeTurn"], original)
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), turns)
+        second = self.root / "Second/Contents/Resources"
+        shutil.copytree(candidate, second)
+        metadata = json.loads((second / "backend.json").read_text())
+        metadata["runtime_version"] = "3+3"
+        (second / "backend.json").write_text(json.dumps(metadata))
+        staged = self.launch(second, confirm_updates=True)
+        runtime.control(runtime.discover(self.database), "activate-update", request_id="following-upgrade", payload=staged["pending"])
+        upgraded = self.wait_update("committed")
+        self.assertEqual(upgraded["payload"], staged["pending"])
+        self.assertTrue(upgraded["update"]["uninterrupted"])
+        self.assertNotEqual(upgraded["pid"], current["pid"])
+        self.assertEqual(upgraded["transport"]["pid"], current["transport"]["pid"])
+        self.assertEqual(provider, int((self.root / "provider.pid").read_text()))
+        self.assertEqual(self.api(upgraded["url"], f"api/browser/sessions/{thread}")["activeTurn"], original)
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), turns)
+        (self.root / "release-held-work").touch()
+        self.wait(lambda: not self.api(upgraded["url"], f"api/browser/sessions/{thread}")["running"])
 
     def test_requested_update_rolls_back_candidate_migration(self):
         first, record, thread, staged, candidate = self.prepare_requested_update(corrupt=True)
@@ -409,7 +509,7 @@ Runtime.status = _status_with_barrier
         current = self.wait_update("rolled-back")
         self.assertEqual(current["payload"], first["payload"])
         import sqlite3
-        with sqlite3.connect(self.database) as db:
+        with closing(sqlite3.connect(self.database)) as db:
             self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='trial_migration'").fetchone())
         self.assertEqual(runtime.read_json(runtime.runtime_directory(self.database) / "schema.json")["schema"], runtime.SCHEMA_VERSION)
         attached = self.launch(candidate)
@@ -417,23 +517,23 @@ Runtime.status = _status_with_barrier
         self.assertEqual(attached["update"]["phase"], "rolled-back")
         self.assertNotIn("ResourceWarning", self.log())
 
-    def test_requested_update_continues_native_conversation_once_and_stop_stays_stopped(self):
+    def test_requested_update_preserves_native_turn_and_stop_stays_stopped(self):
         import sqlite3
         from contextlib import closing
         self.env["RIBBON_FAKE_PERSIST"] = "1"
         first, record, thread, staged, candidate = self.prepare_requested_update(message="held-work")
         provider = int((self.root / "provider.pid").read_text())
+        original = self.api(first["url"], f"api/browser/sessions/{thread}")["activeTurn"]
         runtime.control(record, "activate-update", request_id="continue-update", payload=staged["pending"])
         current = self.wait_update("committed")
-        self.wait(lambda: len([call for call in self.calls() if call.get("method") == "turn/start"]) == 2)
-        self.wait(lambda: not runtime.control(runtime.discover(self.database), "status")["busy"])
         self.assertNotEqual(current["pid"], first["pid"])
-        self.assertNotEqual(provider, int((self.root / "provider.pid").read_text()))
+        self.assertEqual(provider, int((self.root / "provider.pid").read_text()))
+        self.assertEqual(self.api(current["url"], f"api/browser/sessions/{thread}")["activeTurn"], original)
+        self.assert_no_recovery_turns(thread)
         with closing(sqlite3.connect(self.database)) as db:
-            self.assertEqual(db.execute("SELECT state FROM runtime_update_recoveries WHERE thread_id=?", (thread,)).fetchone()[0], "continued")
             self.assertEqual(db.execute("SELECT original_request FROM work_threads WHERE thread_id=?", (thread,)).fetchone()[0], "held-work")
         turns = [call for call in self.calls() if call.get("method") == "turn/start"]
-        self.assertEqual([call["params"]["threadId"] for call in turns], [thread, thread])
+        self.assertEqual([call["params"]["threadId"] for call in turns], [thread])
         runtime.control(runtime.discover(self.database), "stop")
         self.wait(lambda: runtime.owner_available(runtime.runtime_directory(self.database)))
         result = subprocess.run([sys.executable, "-B", str(candidate / "backend.py"), "--db", str(self.database),
@@ -442,7 +542,7 @@ Runtime.status = _status_with_barrier
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(runtime.owner_available(runtime.runtime_directory(self.database)))
         self.launch(candidate)
-        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 2)
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
         self.assertNotIn("ResourceWarning", self.log())
 
     def test_stop_during_trial_rolls_back_without_restarting(self):
@@ -475,17 +575,39 @@ Runtime.status = _status_with_barrier
         first, record, thread, staged, _ = self.prepare_requested_update(message="held-work")
         self.api(first["url"], f"api/browser/sessions/{thread}/queue", {"message": "user follow-up"})
         runtime.control(record, "activate-update", request_id="queue-update", payload=staged["pending"])
-        self.wait_update("committed")
+        current = self.wait_update("committed")
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
+        self.assertTrue(self.api(current["url"], f"api/browser/sessions/{thread}")["running"])
+        (self.root / "release-held-work").touch()
         self.wait(lambda: len([call for call in self.calls() if call.get("method") == "turn/start"]) == 2)
         self.wait(lambda: not runtime.control(runtime.discover(self.database), "status")["busy"])
         turns = [call["params"]["input"][0]["text"] for call in self.calls() if call.get("method") == "turn/start"]
         self.assertEqual(turns, ["held-work", "user follow-up"])
 
+    def test_failed_projection_freeze_rejects_update_and_preserves_running_work(self):
+        self.env["RIBBON_FAKE_PERSIST"] = "1"
+        source = self.resources / "backend/agent_coord/coordinator_projection.py"
+        source.write_text(source.read_text() + "\ndef fail_freeze(self):\n    raise RuntimeError('injected unsaved projection')\nCoordinatorProjection.freeze = fail_freeze\n")
+        first, record, thread, staged, candidate = self.prepare_requested_update(message="held-work")
+        provider = int((self.root / "provider.pid").read_text())
+        original = self.api(first["url"], f"api/browser/sessions/{thread}")["activeTurn"]
+        runtime.control(record, "activate-update", request_id="incomplete-update", payload=staged["pending"])
+        current = self.wait(lambda: (value if (value := runtime.control(record, "status")).get("upgrade_error") else None))
+        self.assertIn("injected unsaved projection", current["upgrade_error"])
+        self.assertEqual(current["pid"], first["pid"])
+        self.assertEqual(provider, int((self.root / "provider.pid").read_text()))
+        self.assertFalse(current["paused"])
+        self.assertEqual(self.api(first["url"], f"api/browser/sessions/{thread}")["activeTurn"], original)
+        self.assertEqual(current["update"]["phase"], "failed")
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
+        (self.root / "release-held-work").touch()
+        self.wait(lambda: not self.api(first["url"], f"api/browser/sessions/{thread}")["running"])
+
     def test_incomplete_shutdown_keeps_all_work_paused_across_restart(self):
         self.env["RIBBON_FAKE_PERSIST"] = "1"
         source = self.resources / "backend/agent_coord/runtime_recovery.py"
         source.write_text(source.read_text() + "\ndef fail_finalize(self, update_id):\n    raise RuntimeError('injected incomplete shutdown')\nRuntimeRecovery.finalize = fail_finalize\n")
-        first, record, thread, staged, candidate = self.prepare_requested_update(message="held-work")
+        first, record, thread, staged, candidate = self.prepare_requested_update(message="held-work", legacy=True)
         runtime.control(record, "activate-update", request_id="incomplete-update", payload=staged["pending"])
         current = self.wait_update("committed")
         self.assertTrue(current["paused"])
@@ -504,7 +626,7 @@ Runtime.status = _status_with_barrier
         with self.assertRaises(urllib.error.HTTPError) as rejected:
             self.api(status["url"], "api/browser/sessions", {"cwd": str(self.root)})
         self.assertEqual(rejected.exception.code, 503)
-        self.assertEqual(json.load(rejected.exception)["error"], runtime.REVIEW_NOTICE)
+        self.assertIn(runtime.REVIEW_NOTICE, str(rejected.exception))
         rejected.exception.close()
         failure = runtime.control(runtime.discover(self.database), "client-request", request={})["failure"]
         self.assertEqual(failure, {"type": "RuntimeRequestUnavailable", "message": runtime.REVIEW_NOTICE})
@@ -538,7 +660,7 @@ def _close_with_late_bookkeeping(self):
     return _original_close_components(self)
 BrowserSessions._close_components = _close_with_late_bookkeeping
 """)
-        first, record, thread, staged, _ = self.prepare_requested_update(message="held-work")
+        first, record, thread, staged, _ = self.prepare_requested_update(message="held-work", legacy=True)
         runtime.control(record, "activate-update", request_id="late-bookkeeping-update", payload=staged["pending"])
         self.wait_update("committed")
         # Admission stays closed only while the recovery decision runs.
@@ -559,7 +681,7 @@ BrowserSessions._close_components = _close_with_late_bookkeeping
         self.env["RIBBON_FAKE_PERSIST"] = "1"
         source = self.resources / "backend/agent_coord/runtime_recovery.py"
         source.write_text(source.read_text() + "\ndef fail_finalize(self, update_id):\n    raise RuntimeError('injected incomplete shutdown')\nRuntimeRecovery.finalize = fail_finalize\n")
-        _, record, _, staged, candidate = self.prepare_requested_update(message="held-work")
+        _, record, _, staged, candidate = self.prepare_requested_update(message="held-work", legacy=True)
         runtime.control(record, "activate-update", request_id="reviewed-update", payload=staged["pending"])
         current = self.wait_update("committed")
         self.assertTrue(current["paused"])
@@ -586,19 +708,19 @@ BrowserSessions._close_components = _close_with_late_bookkeeping
         self.assertFalse(restarted["update"]["requires_review"])
         self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
 
-    def test_busy_update_swaps_web_assets_then_activates_at_idle(self):
-        # Hold the automatic idle probe while an approval is pending. The
-        # accepted turn must remain answerable throughout this busy check.
+    def test_busy_update_serves_new_assets_and_accepts_approval_before_handover(self):
+        # Hold the handover boundary while an approval is pending. The accepted
+        # turn must remain answerable before admission is closed for replacement.
         runtime_source = self.resources / "backend/agent_coord/desktop_runtime.py"
         runtime_source.write_text(runtime_source.read_text() + '''
-_readiness_without_test_barrier = readiness
-def readiness(sessions):
+_readiness_without_test_barrier = uninterrupted_readiness
+def uninterrupted_readiness(sessions):
     result = _readiness_without_test_barrier(sessions)
     root = Path(os.environ["RIBBON_FAKE_ROOT"])
-    if (threading.current_thread() is threading.main_thread()
+    if (not result and threading.current_thread() is threading.main_thread()
             and (root / "hold-idle-probe").exists()
             and not (root / "idle-probe-entered").exists()):
-        atomic_json(root / "idle-probe-entered", result)
+        atomic_json(root / "idle-probe-entered", readiness(sessions))
         deadline = time.monotonic() + 10
         while not (root / "release-idle-probe").exists():
             if time.monotonic() >= deadline:
@@ -612,17 +734,17 @@ def readiness(sessions):
         self.api(first["url"], f"api/browser/sessions/{thread}/messages", {"message":"one"})
         self.wait(lambda: "pending approvals or questions" in runtime.control(record, "status")["busy"])
         key = self.api(first["url"], f"api/browser/sessions/{thread}")["requests"][0]["key"]
+        self.assertTrue(runtime.control(record, "decision", target=runtime.compatibility_metadata("2"))["busy"])
         new = self.root / "New/Contents/Resources"
         shutil.copytree(self.resources, new)
         page = new / "backend/agent_coord/web/index.html"
         page.write_text(page.read_text() + "\n<!-- new-interface-marker -->")
+        (self.root / "hold-idle-probe").touch()
         second = self.launch(new)
         self.assertEqual(second["instance"], first["instance"])
         self.assertTrue(second["pending"])
         with urllib.request.urlopen(first["url"]) as response:
             self.assertIn(b"new-interface-marker", response.read())
-        self.assertTrue(runtime.control(record, "decision", target=runtime.compatibility_metadata("2"))["busy"])
-        (self.root / "hold-idle-probe").touch()
         try:
             entered = self.root / "idle-probe-entered"
             self.wait(entered.exists)
@@ -691,7 +813,7 @@ def readiness(sessions):
             with self.assertRaisesRegex(CoordinationError, "downgrade is unsafe"):
                 CoordinationStore(self.database)
 
-    def test_failed_candidate_start_restores_old_runtime_with_known_queue_owner(self):
+    def test_failed_candidate_start_restores_retained_payload(self):
         first = self.launch()
         record = runtime.discover(self.database)
         runtime.control(record, "pause")
@@ -701,20 +823,12 @@ def readiness(sessions):
         entry.write_text("import sys\nif '--runtime-serve' in sys.argv: raise SystemExit(9)\n" + entry.read_text().replace("from __future__ import annotations", ""))
         self.launch(new)
         runtime.control(record, "resume")
-        def restored():
-            try:
-                value = runtime.discover(self.database)
-                if value:
-                    status = runtime.control(value, "status")
-                    return status if status.get("upgrade_error") else None
-            except (RuntimeError, OSError):
-                pass
-        status = self.wait(restored, timeout=20)
-        self.assertEqual(status["pid"], first["pid"])
+        status = self.wait_update("rolled-back")
+        self.assertNotEqual(status["pid"], first["pid"])
         self.assertEqual(status["payload"], first["payload"])
-        self.assertIn("retained runtime restored", status["upgrade_error"])
+        self.assertIn("previous coordinator restored", status["update"]["error"])
 
-    def test_failed_candidate_after_schema_advance_does_not_claim_rollback(self):
+    def test_failed_candidate_after_schema_advance_restores_snapshot(self):
         first = self.launch(paused=True)
         record = runtime.discover(self.database)
         new = self.root / "New/Contents/Resources"
@@ -736,10 +850,10 @@ def readiness(sessions):
                          entry.read_text().replace("from __future__ import annotations", ""))
         self.launch(new)
         runtime.control(record, "resume")
-        self.wait(lambda: runtime.owner_available(runtime.runtime_directory(self.database)), timeout=20)
-        self.assertEqual(runtime.read_json(runtime.runtime_directory(self.database) / "schema.json")["schema"], 3)
-        self.assertIn("Candidate failed after advancing the database schema", self.log())
-        self.assertNotIn("retained runtime restored", self.log())
+        status = self.wait_update("rolled-back")
+        self.assertEqual(status["payload"], first["payload"])
+        self.assertEqual(runtime.read_json(runtime.runtime_directory(self.database) / "schema.json")["schema"], runtime.SCHEMA_VERSION)
+        self.assertTrue(status["update"]["backup"])
 
     def test_idle_handover_adopts_accepted_queued_work_once(self):
         first = self.launch()
@@ -805,14 +919,15 @@ def readiness(sessions):
         # active; the saved item must not be claimed by a background consumer.
         import sqlite3
         now = time.time()
-        with sqlite3.connect(self.database) as db:
+        with closing(sqlite3.connect(self.database)) as db:
             db.execute("""INSERT INTO scheduled_prompts
                 (id,cwd,settings_json,message,run_at,timezone,state,request_json,created_at,updated_at)
                 VALUES (?,?,?,?,?,?,'scheduled','{}',?,?)""", ("maintenance-test", str(self.root.resolve()),
                 json.dumps({"cwd":str(self.root.resolve()),"client":"codex","model":None,"effort":None,"yolo":False}),
                 "scheduled", now+.2, "UTC", now, now))
+            db.commit()
         time.sleep(1.2)
-        with sqlite3.connect(self.database) as db:
+        with closing(sqlite3.connect(self.database)) as db:
             self.assertEqual(db.execute("SELECT state,owner FROM scheduled_prompts WHERE id='maintenance-test'").fetchone(), ("scheduled",None))
         self.assertFalse((self.root / "provider.pid").exists())
         runtime.control(record, "resume")
@@ -836,8 +951,19 @@ def readiness(sessions):
         self.assertFalse((directory / "stop-proof.json").exists())
         # A signal stop is not an authenticated explicit-stop proof.
         os.kill(second["pid"], 15)
-        self.wait(lambda: runtime.owner_available(directory))
-        self.assertNotEqual(decide(first["instance"]).returncode, 0)
+        def recovered():
+            try:
+                record = runtime.discover(self.database)
+                return record if record and record["pid"] != second["pid"] else None
+            except (OSError, RuntimeError):
+                return None
+        current = self.wait(recovered)
+        self.assertFalse((directory / "stop-proof.json").exists())
+        self.assertFalse(runtime.owner_available(directory))
+        decision = decide(first["instance"])
+        self.assertEqual(decision.returncode, 0, decision.stderr)
+        self.assertEqual(json.loads(decision.stdout)["instance"], current["instance"])
+        self.assertEqual(json.loads(decision.stdout)["status"], "serving")
 
 
 class AdmissionTests(unittest.TestCase):

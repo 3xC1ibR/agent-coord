@@ -41,6 +41,11 @@ REVIEW_NOTICE = ("The backend update finished, but work stays paused for review 
                  "tools, then run the runtime maintenance resume command.")
 _OWNED_DATABASES = set()
 
+
+class RuntimeOwnerUnavailableError(RuntimeError):
+    """An ownership lock remains held while its discovered endpoint is unavailable."""
+
+
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_OWNED_DATABASES.clear)
 
@@ -48,7 +53,8 @@ if hasattr(os, "register_at_fork"):
 def compatibility_metadata(version):
     return {"runtime_version": str(version), "runtime_protocol": PROTOCOL_VERSION,
             "ui_protocol_min": PROTOCOL_VERSION, "ui_protocol_max": PROTOCOL_VERSION,
-            "runtime_schema_min": 1, "runtime_schema_max": SCHEMA_VERSION}
+            "runtime_schema_min": 1, "runtime_schema_max": SCHEMA_VERSION,
+            "provider_transport_protocol": 1, "coordinator_projection_version": 1}
 
 
 def compatible(target):
@@ -126,12 +132,61 @@ def confirm_stopped(directory, database, instance):
         descriptor = lock_file(directory / "owner.lock")
     except BlockingIOError:
         return False
+    transport_descriptor = None
     try:
+        transport = directory / "provider-transport"
+        if (transport / "owner.json").exists():
+            return False
+        if (transport / "owner.lock").exists():
+            try:
+                transport_descriptor = lock_file(transport / "owner.lock")
+            except BlockingIOError:
+                return False
         atomic_json(directory / "stop-proof.json", {"instance": instance,
             "database": str(Path(database).resolve()), "schema": SCHEMA_VERSION, "protocol": PROTOCOL_VERSION})
     finally:
+        if transport_descriptor is not None:
+            os.close(transport_descriptor)
         os.close(descriptor)
     return True
+
+
+def stop_failure_path(directory, instance):
+    return directory / "stop-failures" / (str(uuid.UUID(instance)) + ".json")
+
+
+def record_stop_failure(directory, database, instance, transport_instance, error):
+    path = stop_failure_path(directory, instance)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    atomic_json(path, {"runtime_instance": instance, "database": str(Path(database).resolve()),
+                      "transport_instance": transport_instance, "error": str(error)})
+
+
+def retained_stop_failure(directory, database, instance):
+    """Read a matching failed Stop only after both owners release their locks."""
+    path = stop_failure_path(directory, instance)
+    if not path.exists():
+        return None
+    descriptors = []
+    try:
+        descriptors.append(lock_file(directory / "owner.lock"))
+        descriptors.append(lock_file(directory / "provider-transport/owner.lock"))
+        failure = read_json(path)
+        transport = read_json(directory / "provider-transport/owner.json")
+        if (isinstance(failure, dict) and isinstance(transport, dict)
+                and failure.get("runtime_instance") == instance
+                and failure.get("database") == str(Path(database).resolve())
+                and isinstance(failure.get("transport_instance"), str) and failure["transport_instance"]
+                and failure.get("transport_instance") == transport.get("instance")
+                and isinstance(failure.get("error"), str) and failure["error"]):
+            return ("Provider transport owner exited, but surviving providers cannot be verified by this Stop request. "
+                    "Retained evidence was preserved. Shutdown error: " + failure["error"])
+    except (OSError, ValueError):
+        return None  # Busy ownership or incomplete evidence is not a conclusion.
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    return None
 
 
 @functools.lru_cache(maxsize=1)
@@ -322,6 +377,26 @@ def readiness(sessions):
         return ["runtime readiness unavailable"]
 
 
+def uninterrupted_readiness(sessions):
+    """Provider work is transferable only when every active adapter supports it."""
+    if not hasattr(sessions, "projection"):
+        return ["provider transport ownership is not transferable"]
+    reasons = []
+    if sessions.admission.inflight:
+        reasons.append("admitted operations")
+    with sessions.lock:
+        for identity in sessions.active:
+            client = sessions.loaded_clients.get(identity, "codex")
+            if client not in {"codex", "claude"}:
+                reasons.append("active unsupported provider: " + client)
+    background = getattr(sessions.muse, "background_active", None)
+    if background and background():
+        reasons.append("Muse background workflows")
+    if sessions.projection.error:
+        reasons.append("provider projection requires recovery")
+    return reasons
+
+
 def payload_digest(resources):
     digest = hashlib.sha256()
     for path in sorted(resources.rglob("*")):
@@ -416,7 +491,7 @@ def discover(database, *, timeout=25):
             status = control(record, "status", timeout=timeout)
     except (OSError, ValueError, RuntimeError):
         if not owner_available(directory):
-            raise RuntimeError("The runtime owner is unavailable. Refusing a second owner.")
+            raise RuntimeOwnerUnavailableError("The runtime owner is unavailable. Refusing a second owner.")
         return None
     if status.get("protocol") != PROTOCOL_VERSION:
         raise RuntimeError("The running runtime is incompatible with this desktop.")
@@ -435,7 +510,16 @@ def bootstrap(database, resources, *, start_paused=False, require_confirmation=F
         selected_payload = payload
         deadline = time.monotonic() + 20
         while True:
-            record = discover(database)
+            try:
+                record = discover(database)
+            except RuntimeOwnerUnavailableError:
+                # A stale endpoint after Stop can coincide with a finite
+                # owner check or CLI operation. Keep the same admission wait;
+                # ownership must still be reserved before any process launch.
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(.05)
+                continue
             if record:
                 if start_paused and not control(record, "status")["paused"]:
                     raise RuntimeError("A runtime is already admitting work. Pause it explicitly before maintenance.")
@@ -457,7 +541,7 @@ def bootstrap(database, resources, *, start_paused=False, require_confirmation=F
             with (directory / "runtime.log").open("ab", buffering=0) as log:
                 # Reserve ownership through exec: checking availability before
                 # spawning leaves a window for another standalone writer.
-                command = payload_command(payload) + ["--runtime-serve", "--db", database,
+                command = payload_command(payload) + ["--runtime-supervise", "--db", database,
                                                        "--inherit-owner-fd", str(owner_fd)]
                 if start_paused:
                     command.append("--runtime-start-paused")
@@ -507,13 +591,55 @@ class Runtime:
         self.server = None
         self.recovery_started = None
         self.recovery_running = False
+        self.supervised = os.environ.pop("RIBBON_RUNTIME_SUPERVISED", "") == "1"
+        self.supervisor_exit_fd = None
+
+    def ensure_supervisor(self):
+        """Adopt a legacy direct launch only after its durable commit.
+
+        The exit pipe stays open until this process exits. Its reader retains
+        ownership without running adapters or relying on a reusable source PID.
+        """
+        if self.supervised:
+            return
+        exit_read, exit_write = os.pipe()
+        ready_read, ready_write = os.pipe()
+        child = None
+        try:
+            command = payload_command(self.payload) + ["--runtime-supervise", "--db", self.database,
+                "--inherit-owner-fd", str(self.owner_fd), "--exit-fd", str(exit_read),
+                "--source-instance", self.instance, "--ready-fd", str(ready_write)]
+            with (self.directory / "runtime.log").open("ab", buffering=0) as log:
+                child = subprocess.Popen(command, pass_fds=(self.owner_fd, exit_read, ready_write),
+                    env=payload_environment(self.payload), cwd=str(Path.home()), stdin=subprocess.DEVNULL,
+                    stdout=log, stderr=log, start_new_session=True)
+            os.close(exit_read)
+            exit_read = None
+            os.close(ready_write)
+            ready_write = None
+            readable, _, _ = select.select([ready_read], [], [], 10)
+            if not readable or os.read(ready_read, 32) != b"ready\n":
+                raise RuntimeError("The adopted runtime supervisor did not confirm ownership.")
+            self.supervisor_exit_fd = exit_write
+            exit_write = None  # OS process exit is the only successful close.
+            self.supervised = True
+            threading.Thread(target=child.wait, daemon=True).start()
+        except BaseException:
+            if child is not None and child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+            raise
+        finally:
+            for descriptor in (exit_read, exit_write, ready_read, ready_write):
+                if descriptor is not None:
+                    os.close(descriptor)
 
     def identity(self):
         """Immutable owner identity; independent of readiness and session locks."""
         return {"database": self.database, "instance": self.instance,
                 "protocol": PROTOCOL_VERSION, "schema": SCHEMA_VERSION, "pid": os.getpid(),
                 "payload": str(self.payload), "client_requests": 1, "runtime_updates": 1,
-                "runtime_update_prompts": 1}
+                "runtime_update_prompts": 1, "uninterrupted_updates": 1}
 
     def status(self):
         from .database_writer import performance_snapshot
@@ -522,6 +648,15 @@ class Runtime:
         if update:
             from .runtime_recovery import status
             update["recovery"] = status(self.server.browser_sessions.store, update["id"])
+        projection = getattr(self.server.browser_sessions, "projection", None)
+        transport = None
+        if projection is not None:
+            transport = {"pid": projection.client.record["pid"], "instance": projection.client.record["instance"],
+                         "epoch": projection.client.epoch, "cursor": projection.cursor,
+                         "error": projection.error or projection.delivery_error,
+                         "providers": [{"channel": name, "pid": entry["process"].pid,
+                                        "pgid": entry["process"].pid, "thread_id": entry.get("thread_id")}
+                                       for name, entry in projection.channels.items()]}
         return {**self.identity(), "status": "preparing" if self.trial else "serving",
                 "url": f"http://127.0.0.1:{self.server.server_port}/",
                 "pending": str(self.pending) if self.pending else None,
@@ -529,6 +664,7 @@ class Runtime:
                 "paused": self.server.browser_sessions.admission.paused,
                 "busy": readiness(self.server.browser_sessions),
                 "update": update,
+                "transport": transport,
                 "database_metrics": performance_snapshot(self.server.browser_sessions)}
 
     def request_update(self, request_id, payload):
@@ -558,8 +694,12 @@ class Runtime:
         sessions = self.server.browser_sessions
         if self.stopping.is_set() or self.maintenance or self.recovery_running:
             return
+        self.ensure_supervisor()
+        projection = getattr(sessions, "projection", None)
+        if projection is not None and projection.worker is None:
+            projection.start()
         update = runtime_update.read(self.directory)
-        if (update and update["id"] != self.recovery_started and not update.get("cancelled")
+        if (update and not update.get("uninterrupted") and update["id"] != self.recovery_started and not update.get("cancelled")
                 and not update.get("recovery_uncertain") and update["phase"] in {"committed", "rolled-back"}):
             self.recovery_started = update["id"]
             self.recovery_running = True
@@ -644,6 +784,10 @@ class Runtime:
                 metadata = read_json(candidate / "backend.json")
                 if not compatible(metadata):
                     raise RuntimeError("Desktop and running runtime are incompatible; activation deferred.")
+                if (candidate != self.payload and hasattr(sessions, "projection")
+                        and (metadata.get("provider_transport_protocol") != 1
+                             or metadata.get("coordinator_projection_version") != 1)):
+                    raise RuntimeError("Candidate cannot restore the surviving provider transport; activation deferred.")
                 if self.upgrading:
                     raise RuntimeError("Runtime handover is in progress. Reconnect shortly.")
                 if self.update_requested and candidate != self.pending:
@@ -726,6 +870,8 @@ class Runtime:
         from .ui import make_ui_server
         from . import launch_metrics
         store = CoordinationStore(self.database)
+        from .provider_transport import Client
+        store.provider_transport = Client.connect(self.directory / "provider-transport", self.instance)
         # Finish ownership adoption before any automatic worker can claim work.
         self.server = make_ui_server(store, host="127.0.0.1", port=0, admission_paused=True)
         sessions = self.server.browser_sessions
@@ -789,10 +935,17 @@ class Runtime:
                 # EOF after durable commit is equivalent to acknowledgement.
                 self.activate_committed()
             except RuntimeError:
+                sessions.transport_handover = True
+                sessions.runtime_handover = True
                 controller.shutdown()
                 self.server.shutdown()
+                control_thread.join()
+                ui_thread.join()
                 controller.server_close()
                 self.server.server_close()
+                record_path = self.directory / "discovery.json"
+                if record_path.exists() and read_json(record_path).get("instance") == self.instance:
+                    record_path.unlink()
                 raise
         else:
             # A subsequent ordinary idle handover supersedes the previous
@@ -804,6 +957,7 @@ class Runtime:
                 if update.get("superseded_by") or str(self.payload) != expected:
                     runtime_update.write(self.directory, update, superseded_by=str(self.payload))
         with self.mutex:
+            self.ensure_supervisor()
             if not self.maintenance:
                 self.resume_work()
             elif not self.trial:
@@ -832,12 +986,12 @@ class Runtime:
                     # Busy work must remain answerable while an update waits.
                     # Only close admission after an initial idle observation;
                     # the closed-gate check below still catches newly admitted work.
-                    if not self.update_requested and readiness(sessions):
+                    if uninterrupted_readiness(sessions):
                         continue
                     # Close admissions atomically before checking all accepted
                     # operations and provider activity. A busy check reopens it.
                     sessions.admission.pause()
-                    blocked = (["admitted operations"] if sessions.admission.inflight else []) if self.update_requested else readiness(sessions)
+                    blocked = uninterrupted_readiness(sessions)
                     if blocked:
                         if self.update_requested and time.time() - self.update_requested["created_at"] > 30:
                             runtime_update.write(self.directory, self.update_requested, phase="failed", error="Accepted operations did not drain; the current backend remains active.")
@@ -874,7 +1028,7 @@ class Runtime:
                     if self.stopping.is_set():
                         candidate = None
                         break
-                    if self.maintenance or (sessions.admission.inflight if self.update_requested else readiness(sessions)):
+                    if self.maintenance or uninterrupted_readiness(sessions):
                         self.upgrading = False
                         candidate = None
                         if not self.maintenance:
@@ -883,6 +1037,35 @@ class Runtime:
                 with self.mutex:
                     if self.stopping.is_set():
                         candidate = None
+                        break
+                    if hasattr(sessions, "projection"):
+                        try:
+                            if not sessions.persistence.flush() or not sessions.claude.persistence.flush():
+                                raise RuntimeError("Provider bookkeeping did not reach a saved boundary.")
+                            sessions.projection.freeze()
+                            update = self.update_requested or {
+                                "id": str(uuid.uuid4()), "target": str(candidate), "previous": str(self.payload),
+                                "source_instance": self.instance, "created_at": time.time()}
+                            runtime_update.write(self.directory, update, phase="stopping", uninterrupted=True,
+                                                 queue_owner=sessions.queue.owner,
+                                                 schedule_start=sessions.schedules.started_at)
+                            sessions.transport_handover = True
+                        except Exception as exc:
+                            self.error = str(exc)
+                            if self.update_requested:
+                                runtime_update.write(self.directory, self.update_requested, phase="failed", error=str(exc))
+                                self.update_requested = None
+                            self.pending = None
+                            self.upgrading = False
+                            candidate = None
+                            if not sessions.projection.stopped.is_set():
+                                sessions.admission.resume()
+                            elif sessions.projection.worker is None or not sessions.projection.worker.is_alive():
+                                sessions.projection.start()
+                                sessions.admission.resume()
+                            else:
+                                self.maintenance = True
+                            continue
                         break
                     if self.update_requested:
                         try:
@@ -908,8 +1091,24 @@ class Runtime:
             control_thread.join()
             ui_thread.join()
             controller.server_close()
-            sessions.runtime_handover = candidate is not None and not self.explicit_stop
-            self.server.server_close()
+            sessions.runtime_handover = not self.explicit_stop
+            if hasattr(sessions, "projection") and not self.explicit_stop:
+                # SIGTERM and unexpected exceptions replace only this
+                # coordinator. Only authenticated explicit Stop owns providers.
+                sessions.transport_handover = True
+                try:
+                    sessions.projection.freeze()
+                except Exception as exc:
+                    self.error = str(exc)  # Recover the last committed cursor.
+            try:
+                self.server.server_close()
+            except (RuntimeError, OSError) as error:
+                if self.explicit_stop:
+                    record_stop_failure(self.directory, self.database, self.instance,
+                                        store.provider_transport.record["instance"], error)
+                raise
+        if getattr(sessions, "transport_handover", False) and not self.explicit_stop:
+            return 75 if candidate is not None else 1
         if self.update_exit_fd is not None:
             report = sessions.shutdown_report or {"clean": False, "reason": "The bookkeeping drain did not run."}
             # Record the measured drain before any proof. An unclean drain
@@ -926,6 +1125,15 @@ class Runtime:
             return 0
         if self.explicit_stop:
             candidate = None
+            try:
+                stop_retained_transport(self.directory, self.database)
+            except (RuntimeError, OSError) as error:
+                # The command caller may outlive this coordinator. Retain the
+                # exact failure with both identities; never turn it into proof.
+                record_stop_failure(self.directory, self.database, self.instance,
+                                    store.provider_transport.record["instance"], error)
+                raise
+            clear_stopped_projection(self.database)
         if candidate:
             last_update = runtime_update.read(self.directory)
             if last_update:
@@ -1088,6 +1296,9 @@ class Runtime:
         except Exception as exc:
             if update["phase"] == "committed":
                 raise
+            if commit_write is not None:
+                os.close(commit_write)
+                commit_write = None
             if child is not None:
                 child.terminate()
                 try:
@@ -1117,12 +1328,242 @@ class Runtime:
                     os.close(descriptor)
 
 
+def stop_retained_transport(directory, database=None):
+    """Honor explicit Stop even when no coordinator is ready to receive it."""
+    from .provider_transport import Client, TransportError, retire_dead_owner
+    record_path = directory / "provider-transport/owner.json"
+    if not record_path.exists():
+        return
+    client = Client(read_json(record_path), "stop:" + uuid.uuid4().hex, 0)
+    try:
+        state = client.call("status")
+    except TransportError:
+        if database is None:
+            raise RuntimeError("Dead transport recovery requires its coordination database; evidence was retained.")
+        retire_dead_owner(record_path.parent, client.record,
+                          lambda archive, reason: interrupt_stopped_projection(database, archive, reason))
+        return
+    client.epoch = client.call("claim", expected_epoch=state["epoch"])["epoch"]
+    client.call("stop")
+    deadline = time.monotonic() + 15
+    while record_path.exists() and time.monotonic() < deadline:
+        time.sleep(.05)
+    if record_path.exists():
+        raise RuntimeError("Provider transport has not confirmed Stop.")
+
+
+def interrupt_stopped_projection(database, archive, reason):
+    """Retain lost-owner evidence and pause work before explicit maintenance."""
+    from contextlib import closing
+    import zlib
+    from .coordinator_projection import unpack
+    from .store import CoordinationStore
+    store = CoordinationStore(database)
+    names = ("coordinator_projection", "coordinator_commands", "coordinator_events", "coordinator_channels")
+    saved = archive / "coordinator.sqlite3"
+    if not saved.exists():
+        temporary = archive / ("coordinator-" + uuid.uuid4().hex + ".sqlite3")
+        try:
+            with closing(sqlite3.connect(temporary)) as evidence:
+                os.chmod(temporary, 0o600)
+                with store.reading(), store._connection() as db, evidence:
+                    for name in names:
+                        schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+                        if schema is None:
+                            continue
+                        evidence.execute(schema[0])
+                        rows = db.execute("SELECT * FROM " + name)
+                        # Stream rows; retained native frames can be large.
+                        evidence.executemany("INSERT INTO " + name + " VALUES (" + ",".join("?" for _ in rows.description) + ")", rows)
+            os.replace(temporary, saved)
+        finally:
+            temporary.unlink(missing_ok=True)
+    # Always use the first retained snapshot if maintenance was interrupted.
+    with closing(sqlite3.connect(saved)) as evidence:
+        exists = evidence.execute("SELECT 1 FROM sqlite_master WHERE name='coordinator_projection'").fetchone()
+        row = evidence.execute("SELECT state FROM coordinator_projection WHERE singleton=1").fetchone() if exists else None
+    state = unpack(json.loads(zlib.decompress(row[0]))) if row else {}
+    active = state.get("browser", {}).get("active", {})
+    with store.reading(), store._connection() as db:
+        # Provider-native children are not app registrations. Do not synthesize
+        # them, or end a registered thread whose turn has since changed.
+        active = {identity: turn for identity, turn in active.items() if db.execute(
+            "SELECT 1 FROM work_threads t JOIN sessions s ON s.session_id=t.thread_id WHERE t.thread_id=? AND t.turn_id IS ?",
+            (identity, turn)).fetchone()}
+    for identity, turn in active.items():
+        store.threads.finish_turn(identity, turn_id=turn, status="interrupted")
+        store.end_session(identity)
+    with store.database_operation("coordinator.interrupted"), store._connection() as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        identities = set(active)
+        if "browser_message_queue" in tables and state.get("queue_owner"):
+            identities.update(row[0] for row in db.execute("SELECT thread_id FROM browser_message_queue WHERE owner=? AND state IN ('queued','sending')", (state["queue_owner"],)))
+            db.execute("UPDATE browser_message_queue SET state='paused',error=? WHERE owner=? AND state IN ('queued','sending')", (reason, state["queue_owner"]))
+        if "browser_inbox_wake" in tables:
+            for identity in identities:
+                db.execute("""INSERT INTO browser_inbox_wake (thread_id,paused,error,pause_kind,paused_at)
+                    VALUES (?,1,?,'stop',?) ON CONFLICT(thread_id) DO UPDATE SET
+                    paused=1,error=excluded.error,pause_kind='stop',paused_at=excluded.paused_at,retry_at=NULL""",
+                           (identity, reason, store.clock()))
+    clear_stopped_projection(database)
+
+
+def clear_stopped_projection(database):
+    """Discard only transport-bound recovery state after confirmed Stop."""
+    from .store import CoordinationStore
+    store = CoordinationStore(database)
+    with store.database_operation("coordinator.stop"), store._connection() as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("coordinator_projection", "coordinator_commands", "coordinator_events", "coordinator_channels"):
+            if table in tables:
+                db.execute("DELETE FROM " + table)
+
+
+def supervise(database, payload, owner_fd, *, start_paused=False, source_exit_fd=None,
+              source_instance=None, ready_fd=None):
+    """Retain ownership through coordinator exit; execute no provider adapters."""
+    from . import runtime_update
+    directory = runtime_directory(database)
+    current = Path(payload)
+    transition = None
+    failures = 0
+    if source_exit_fd is not None:
+        # A legacy updater owns the initial trial's readiness and commit. Its
+        # candidate creates this monitor only after that commit is authoritative.
+        atomic_json(directory / "supervisor.json", {"pid": os.getpid(),
+            "source_instance": source_instance, "payload": str(current)})
+        if ready_fd is not None:
+            os.write(ready_fd, b"ready\n")
+            os.close(ready_fd)
+        try:
+            while os.read(source_exit_fd, 64):
+                pass
+        finally:
+            os.close(source_exit_fd)
+        proof_path = directory / "stop-proof.json"
+        if proof_path.exists() and read_json(proof_path).get("instance") == source_instance:
+            return 0
+        update = runtime_update.read(directory)
+        if (update and update.get("uninterrupted") and update["source_instance"] == source_instance
+                and update["previous"] == str(current) and update["phase"] == "stopping"):
+            if update.get("cancelled"):
+                stop_retained_transport(directory, database)
+                clear_stopped_projection(database)
+                atomic_json(directory / "stop-proof.json", {"instance": source_instance,
+                    "database": str(Path(database).resolve()), "schema": SCHEMA_VERSION,
+                    "protocol": PROTOCOL_VERSION})
+                return 0
+            transition = runtime_update.snapshot(str(database), directory, update)
+            current = Path(transition["target"])
+        start_paused = bool(update and update.get("requires_review"))
+    while True:
+        ready_read, ready_write = os.pipe()
+        commit_read = commit_write = None
+        command = payload_command(current) + ["--runtime-serve", "--db", str(database),
+            "--inherit-owner-fd", str(owner_fd), "--ready-fd", str(ready_write)]
+        descriptors = [owner_fd, ready_write]
+        if transition is not None:
+            commit_read, commit_write = os.pipe()
+            descriptors.append(commit_read)
+            command += ["--commit-fd", str(commit_read), "--runtime-start-paused"]
+            transition = runtime_update.write(directory, transition, phase="trial")
+        elif start_paused:
+            command.append("--runtime-start-paused")
+        environment = payload_environment(current)
+        environment["RIBBON_RUNTIME_SUPERVISED"] = "1"
+        try:
+            with (directory / "runtime.log").open("ab", buffering=0) as log:
+                child = subprocess.Popen(command, env=environment, pass_fds=tuple(descriptors),
+                    cwd=str(Path.home()), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        finally:
+            os.close(ready_write)
+            if commit_read is not None:
+                os.close(commit_read)
+        ready = False
+        try:
+            deadline = time.monotonic() + 30
+            while child.poll() is None and time.monotonic() < deadline:
+                readable, _, _ = select.select([ready_read], [], [], .1)
+                if readable:
+                    response = os.read(ready_read, 32)
+                    ready = response == (b"prepared\n" if transition else b"ready\n")
+                    break
+            if ready and transition:
+                latest = runtime_update.read(directory)
+                if latest.get("cancelled"):
+                    ready = False
+                else:
+                    transition = runtime_update.write(directory, transition, phase="committed")
+                    os.write(commit_write, b"commit\n")
+            if not ready:
+                # EOF releases a prepared candidate before we wait for it.
+                # SIGTERM alone only sets its stop flag and cannot unblock read.
+                if commit_write is not None:
+                    os.close(commit_write)
+                    commit_write = None
+                # This exact candidate is our child; providers belong to the
+                # independent I/O owner and are never signaled here.
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=5)
+                if transition:
+                    if runtime_update.read(directory).get("cancelled"):
+                        stop_retained_transport(directory, database)
+                        transition = runtime_update.restore(str(database), directory, transition)
+                        clear_stopped_projection(database)
+                        atomic_json(directory / "stop-proof.json", {"instance": transition["source_instance"],
+                            "database": str(Path(database).resolve()), "schema": SCHEMA_VERSION, "protocol": PROTOCOL_VERSION})
+                        return 0
+                    transition = runtime_update.write(directory, transition,
+                        error="Candidate exited before readiness; previous coordinator restored.")
+                    runtime_update.restore(str(database), directory, transition)
+                    current = Path(transition["previous"])
+                    transition = None
+                    continue
+                failures += 1
+                if failures >= 3:
+                    raise RuntimeError("Coordinator repeatedly failed to restore; provider transports remain retained.")
+                time.sleep(.2)
+                continue
+        finally:
+            os.close(ready_read)
+            if commit_write is not None:
+                os.close(commit_write)
+        failures = 0
+        transition = None
+        atomic_json(directory / "supervisor.json", {"pid": os.getpid(), "coordinator_pid": child.pid,
+                                                    "payload": str(current)})
+        result = child.wait()
+        proof = directory / "stop-proof.json"
+        if result == 0 and proof.exists():
+            return 0
+        if result == 75:
+            update = runtime_update.read(directory)
+            if not update or not update.get("uninterrupted") or update["previous"] != str(current):
+                raise RuntimeError("Coordinator exit did not contain a valid transport handover.")
+            if update.get("cancelled"):
+                stop_retained_transport(directory, database)
+                clear_stopped_projection(database)
+                atomic_json(directory / "stop-proof.json", {"instance": update["source_instance"],
+                    "database": str(Path(database).resolve()), "schema": SCHEMA_VERSION, "protocol": PROTOCOL_VERSION})
+                return 0
+            transition = runtime_update.snapshot(str(database), directory, update)
+            current = Path(transition["target"])
+        # Unexpected coordinator exit restarts this exact payload against its
+        # committed projection. No native resume or continuation is submitted.
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db")
     parser.add_argument("--resources")
     parser.add_argument("--runtime-bootstrap", action="store_true")
     parser.add_argument("--runtime-serve", action="store_true")
+    parser.add_argument("--runtime-supervise", action="store_true")
     parser.add_argument("--runtime-probe", action="store_true")
     parser.add_argument("--runtime-start-paused", action="store_true")
     parser.add_argument("--runtime-confirm-updates", action="store_true")
@@ -1133,6 +1574,7 @@ def main(argv=None):
     parser.add_argument("--runtime-coordinate-update", action="store_true")
     parser.add_argument("--exit-fd", type=int)
     parser.add_argument("--source-pid", type=int)
+    parser.add_argument("--source-instance")
     args = parser.parse_args(argv)
     if args.runtime_probe:
         from . import ui
@@ -1192,8 +1634,19 @@ def main(argv=None):
             proof_path = directory / "stop-proof.json"
             proof = read_json(proof_path) if proof_path.exists() else {}
             if args.runtime_command == "stop" and owner_available(directory):
-                print(json.dumps({"status": "stopped", "instance": proof.get("instance")}))
-                return 0
+                # Reserve the coordinator boundary while retaining evidence and
+                # clearing its projection; bootstrap must not race maintenance.
+                maintenance_owner = lock_file(directory / "owner.lock")
+                try:
+                    if (directory / "provider-transport/owner.json").exists():
+                        stop_retained_transport(directory, args.db)
+                        clear_stopped_projection(args.db)
+                finally:
+                    os.close(maintenance_owner)
+                if confirm_stopped(directory, args.db, proof.get("instance")):
+                    print(json.dumps({"status": "stopped", "instance": proof.get("instance")}))
+                    return 0
+                raise RuntimeError("Provider transport has not confirmed exit; work may still be stopping.")
             if (args.runtime_command == "decision" and values.get("stopped_instance")
                     and proof.get("instance") == values["stopped_instance"]
                     and proof.get("database") == str(Path(args.db).resolve())
@@ -1208,12 +1661,15 @@ def main(argv=None):
                 if confirm_stopped(directory, args.db, record["instance"]):
                     result = {"status": "stopped", "instance": record["instance"]}
                     break
+                failure = retained_stop_failure(directory, args.db, record["instance"])
+                if failure:
+                    raise RuntimeError("Stop is unconfirmed: " + failure)
                 time.sleep(.1)
             else:
                 raise RuntimeError("Runtime has not confirmed exit; work may still be stopping.")
         print(json.dumps(result), flush=True)
         return 0
-    if args.runtime_serve or args.runtime_coordinate_update:
+    if args.runtime_serve or args.runtime_coordinate_update or args.runtime_supervise:
         directory = runtime_directory(args.db)
         fd = args.inherit_owner_fd
         if fd is not None:
@@ -1226,6 +1682,10 @@ def main(argv=None):
         (directory / "stop-proof.json").unlink(missing_ok=True)
         _OWNED_DATABASES.add(str(Path(args.db).resolve()))
         try:
+            if args.runtime_supervise:
+                return supervise(args.db, Path(sys.argv[0]).resolve().parent, fd,
+                    start_paused=args.runtime_start_paused, source_exit_fd=args.exit_fd,
+                    source_instance=args.source_instance, ready_fd=args.ready_fd)
             if args.runtime_coordinate_update:
                 return Runtime(args.db, Path(sys.argv[0]).resolve().parent, fd).coordinate_update(args.exit_fd, args.source_pid)
             return Runtime(args.db, Path(sys.argv[0]).resolve().parent, fd, args.ready_fd,

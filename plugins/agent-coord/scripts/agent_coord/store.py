@@ -387,6 +387,52 @@ class _StoreConnection(sqlite3.Connection):
             cursor.close()
 
 
+class _SharedTransaction:
+    """Borrowed transaction: nested BEGIN cannot commit the caller's work."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.read_depth = 0
+
+    @contextmanager
+    def reading(self):
+        def authorize(action, first, second, *_):
+            writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+                      sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_ALTER_TABLE,
+                      sqlite3.SQLITE_CREATE_INDEX, sqlite3.SQLITE_DROP_INDEX, sqlite3.SQLITE_ATTACH,
+                      sqlite3.SQLITE_DETACH, sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT}
+            return sqlite3.SQLITE_DENY if action in writes or action == sqlite3.SQLITE_PRAGMA and second is not None else sqlite3.SQLITE_OK
+        if self.read_depth == 0:
+            self.connection.set_authorizer(authorize)
+        self.read_depth += 1
+        try:
+            yield self
+        finally:
+            self.read_depth -= 1
+            if self.read_depth == 0:
+                self.connection.set_authorizer(None)
+
+    def execute(self, sql, parameters=()):
+        statement = sql.strip().rstrip(";").upper()
+        if statement in {"BEGIN", "BEGIN IMMEDIATE", "BEGIN DEFERRED", "BEGIN EXCLUSIVE"}:
+            return self.connection.execute("SELECT 1")
+        if statement in {"COMMIT", "END", "ROLLBACK"}:
+            raise CoordinationError("A borrowed projection transaction cannot end its outer transaction.")
+        return self.connection.execute(sql, parameters)
+
+    def commit(self):
+        raise CoordinationError("Only the projection owner can commit.")
+
+    def rollback(self):
+        raise CoordinationError("Only the projection owner can roll back.")
+
+    def executescript(self, *_):
+        raise CoordinationError("Scripts cannot run in a borrowed projection transaction.")
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+
 class _IdleConnection:
     """One thread's reusable store connection, closed with the thread or store."""
 
@@ -549,6 +595,14 @@ class CoordinationStore:
     def _connection(self):
         if os.getpid() != self._process_id:
             raise CoordinationError("A CoordinationStore cannot be reused after a process fork; create a new store in the child.")
+        shared = getattr(self._connection_options, "shared_transaction", None)
+        if shared is not None:
+            # An explicitly supplied transaction is not an independent nested
+            # connection. Its outer owner alone commits or rolls it back.
+            reading = self.read_only or getattr(self._connection_options, "reading", False)
+            with shared.reading() if reading else nullcontext():
+                yield shared
+            return
         from .runtime_requests import connection_ownership
         reading = self.read_only or getattr(self._connection_options, "reading", False)
         if reading:
@@ -574,6 +628,23 @@ class CoordinationStore:
             else:
                 with self.reading(), self._local_connection() as connection:
                     yield connection
+
+    @contextmanager
+    def sharing_transaction(self, connection):
+        """Pass an existing write transaction through composed store services.
+
+        Independent nested connections remain read-only. This opt-in boundary
+        is reserved for finite coordinator projection callbacks, which must not
+        perform provider I/O, sleep, or commit the caller's transaction.
+        """
+        if not connection.in_transaction or self._writer.owner != threading.get_ident():
+            raise CoordinationError("Sharing requires the admitted current write transaction.")
+        previous = getattr(self._connection_options, "shared_transaction", None)
+        self._connection_options.shared_transaction = _SharedTransaction(connection)
+        try:
+            yield connection
+        finally:
+            self._connection_options.shared_transaction = previous
 
     @contextmanager
     def _local_connection(self):

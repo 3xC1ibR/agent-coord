@@ -146,15 +146,14 @@ class BookkeepingUpdateProcessTests(unittest.TestCase):
     emit({'method':'turn/started','params':{'threadId':child,'turn':child_turn}})
     child_turn['status'] = 'completed'
     emit({'method':'turn/completed','params':{'threadId':child,'turn':child_turn}})
-    if turn['items'][0]['content'][0].get('text') == 'held-work': return
 """
         executable.write_text(executable.read_text().replace(
-            "    if turn['items'][0]['content'][0].get('text') == 'held-work': return", child_activity))
+            "    # Native child activity insertion point.", child_activity))
         first, record, thread, staged, _ = fixture.prepare_requested_update(message="held-work")
+        original_turn = fixture.api(first["url"], f"api/browser/sessions/{thread}")["activeTurn"]
+        provider_pid = int((fixture.root / "provider.pid").read_text())
         for generation in (2, 3):
             if generation == 3:
-                fixture.wait(lambda: not fixture.api(current["url"], f"api/browser/sessions/{thread}")["running"])
-                fixture.api(current["url"], f"api/browser/sessions/{thread}/messages", {"message": "held-work"})
                 candidate = fixture.root / "SecondCandidate/Contents/Resources"
                 shutil.copytree(fixture.resources, candidate)
                 metadata = json.loads((candidate / "backend.json").read_text())
@@ -170,9 +169,16 @@ class BookkeepingUpdateProcessTests(unittest.TestCase):
             current = fixture.wait_update("committed")
             self.assertEqual(current["payload"], staged["pending"])
             self.assertNotEqual(current["instance"], first["instance"])
-            fixture.wait(lambda: runtime.control(runtime.discover(fixture.database), "status")["update"]["recovery"]["counts"].get("continued") == 1)
+            self.assertTrue(current["update"]["uninterrupted"])
+            self.assertEqual(current["update"]["recovery"]["counts"].get("continued", 0), 0)
+            detail = fixture.api(current["url"], f"api/browser/sessions/{thread}")
+            self.assertTrue(detail["running"])
+            self.assertEqual(detail["activeTurn"], original_turn)
+            self.assertEqual(int((fixture.root / "provider.pid").read_text()), provider_pid)
             self.assertFalse(runtime.control(runtime.discover(fixture.database), "status")["paused"])
-            self.assertEqual(len([call for call in fixture.calls() if call.get("method") == "turn/start"]), (generation - 1) * 2)
+            self.assertEqual(len([call for call in fixture.calls() if call.get("method") == "turn/start"]), 1)
+        (fixture.root / "release-held-work").touch()
+        fixture.wait(lambda: not fixture.api(current["url"], f"api/browser/sessions/{thread}")["running"])
         self.assertNotIn("Browser bookkeeping failed", fixture.log())
 
 

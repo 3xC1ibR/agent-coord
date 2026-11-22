@@ -43,7 +43,7 @@ ordinary-row fallback, while that test expects native JSON batching. The matched
 receipts/s, foreground p95 0.976 ms and writer-hold p95 0.387 ms. Independent wake
 review found no confirmed blocker.
 
-## Coordinated backend restart and recovery
+## Legacy backend restart and first-adoption recovery
 
 Native available-update alerts offer **Install** and **Skip for Now**. Local
 desktop attachment requests `--runtime-confirm-updates`; runtimes advertising
@@ -60,7 +60,7 @@ prompt. Install rechecks the payload identity after the dialog, preserving the
 existing activation, rollback and recovery checks. Signed release prompts use
 Sparkle's temporary dismiss choice, rather than permanently skipping a version.
 
-Runtimes advertising `runtime_updates: 1` support an explicit **Apply Backend
+Legacy runtimes advertising `runtime_updates: 1` support an explicit **Apply Backend
 Update… → Update and Continue** operation. A staged local build exposes it in the
 existing update menu, including builds without Sparkle. Signed installation
 authorization is bound to the live source instance and target release; attachment
@@ -163,61 +163,61 @@ timeouts**, foreground **p95 9.692 ms**, and writer-hold **p95 4.807 ms**.
 No running installation, plugin cache, or signed release was replaced by this
 source validation.
 
-## Uninterrupted backend rollout investigation
+## Uninterrupted coordinator upgrades
 
-Passive updates still use an idle boundary. Uninterrupted backend
-replacement remains a separate, stronger contract: a compatible backend
-must become active within 60 seconds with streaming turns, tools and approvals
-in progress, without signaling a provider or resuming a replacement turn. An
-active payload digest alone is insufficient if old coordination or adapter code
-still performs the work behind a forwarding facade.
+The integrated backend implements stable provider ownership for Codex and Claude.
+A provider-neutral transport process retains their processes, pipes, native turns,
+long-running tools and pending approvals while the coordinator and provider
+adapters are replaced. Status advertises `uninterrupted_updates: 1` and identifies
+both the active coordinator payload and the retained transport. The transport
+owner itself, provider executables and machine restarts are outside this contract.
 
-The independent, real-backend workload is
-[`scripts/runtime_live_acceptance.py`](../scripts/runtime_live_acceptance.py),
-with the wire-level subprocess provider in
-[`tests/fixtures/runtime_live_provider.py`](../tests/fixtures/runtime_live_provider.py).
-It uses a newly created private database/runtime directory and never attaches to
-the installed runtime. Its initial run held Codex streaming and long-tool turns
-and a Claude approval. Activation failed after **60.046 seconds**: the active
-payload remained `a4dd8f12b5a282a38f66e221f0045a0a04f1ab6683a83fc770ebdb5300b40951`
-and candidate `2c8526ded7d59597f422d8e0879b10cbd3c7da42c5bb9d28f9d2a20eb46552de`
-remained pending. See the [baseline report](../build/live-runtime-spike/baseline.json).
-This is a failing baseline, not live-rollout acceptance.
+Compatible replacements close admissions, drain accepted operations, freeze the
+versioned projection and start the candidate against the same transport. Commands
+carry durable content-bound receipts; projection effects and the event cursor
+commit together. Failed candidates restore the prior coordinator and database
+snapshot without resubmitting native turns. Uncertain deliveries remain uncertain.
+Explicit Stop still ends work and verifies transport shutdown.
 
-The first migration from the installed implementation is a separate constraint.
-Its authenticated controls expose no provider descriptor export or session-state
-transfer operation. Pending futures, decoder buffers and provider adapter state
-are process-local. Its existing idle handover also calls provider `close()`, which
-signals provider processes. Thus even a naturally idle legacy handover cannot be
-reported as a no-signal live swap. Do not inject code into an existing runtime,
-signal its agents, or substitute native resume to claim otherwise. A future
-stable-host implementation must report its supported first-adoption boundary
-separately from subsequent coordinator upgrades.
+Native update confirmation remains effective: a held pending payload does not
+activate until Install or **Apply Backend Update… → Update and Continue** authorizes
+it. Passive compatible attachment without a confirmation hold can also replace the
+coordinator while supported turns run. Active Kimi, Antigravity or Muse turns and
+Muse background workflows defer this replacement. Incompatible transport or
+projection versions also defer activation; they do not fall back to interrupting
+agents. Providers keep executing while the interface reconnects, so bounded HTTP
+or event-stream gaps are possible.
 
-Architecture measurements compare direct descriptor/state transfer against
-stable provider hosts with a reconnectable event journal. The decision must
-cover coordinator state and claim/receipt transactions as well as kernel pipes:
-processing an event before acknowledging it can duplicate projection effects
-after a coordinator crash, and writing a provider command before recording its
-receipt can leave a queue claim uncertain. The host must retain command outcomes;
-the coordinator must commit its projection and replay cursor atomically.
+The full ownership, receipt, retention, crash-recovery and rollback contract is in
+[Provider ownership during coordinator replacement](runtime-provider-ownership.md).
+The unchanged [`runtime_live_acceptance.py`](../scripts/runtime_live_acceptance.py)
+gate and additive [`runtime_upgrade_validation.py`](../scripts/runtime_upgrade_validation.py)
+exercise the real backend in private runtime directories using wire-level fixture
+providers. The additive driver measures interface gaps and sustained commands as
+well as provider PIDs, native turns, approvals, tool completion and replay.
 
-Primary precedents clarify the required boundaries:
+### First adoption from a legacy runtime
 
-- [nginx executable upgrades](https://nginx.org/en/docs/control.html) retain old
-  workers while their requests finish.
-- [Envoy hot restart](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/hot_restart)
-  transfers listening sockets, but explicitly does not transfer established
-  connections. Draining alone therefore does not meet this rollout contract.
-- [systemd's descriptor store](https://systemd.io/FILE_DESCRIPTOR_STORE/) keeps
-  duplicated descriptors outside the replaceable service. The design principle
-  is useful on macOS; systemd itself is not a project dependency.
-- [Erlang release handling](https://www.erlang.org/doc/system/release_handling.html)
-  uses explicit state transformation during code upgrades. Python adapter state
-  likewise needs a versioned contract rather than incidental object serialization.
-- [Temporal worker versioning](https://docs.temporal.io/worker-versioning) separates
-  execution compatibility from code deployment; retaining an older execution
-  version must remain visible rather than being described as fully upgraded.
+A backend without stable provider ownership cannot transfer its process-local
+pipes, pending requests or adapter state. It can adopt this implementation through
+one ordinary guarded **Update and Continue** when it advertises `runtime_updates: 1`;
+an idle window is not inherently required. That first transition interrupts native
+execution and continues eligible saved conversations under the existing recovery
+rules. It is never evidence of an uninterrupted upgrade.
+
+Before first adoption, finish pending approvals and arrange explicit continuation
+for any active Kimi, Antigravity or Muse assignments. Preserve checkpoints and
+external action outcomes. The old backend performs the shutdown drain, so a
+legacy drain failure can commit the new backend with `requires_review: true`.
+Inspect its exact recovery states and tool outcomes before authenticated `resume`;
+uncertain submissions must never be replayed automatically. The fixed drain only
+becomes available after adoption.
+
+After adoption, prove a second compatible upgrade while a real supported agent
+is mid-turn: record the coordinator and executing payload change, the unchanged
+transport and provider PIDs, and the unchanged native turn ID. Verify that a
+long-running tool completes, output continues and no replacement submission is
+made. Source tests, installation and activation are separate outcomes.
 
 ## Product contract
 
@@ -460,8 +460,8 @@ any test on real conversations. Tests must demonstrate:
    nor submitted twice.
 4. Concurrent launches, stale discovery, and failed candidate startup do not
    create two owners or terminate an unrelated process.
-5. Runtime replacement defers when busy and excludes new admissions during the
-   final idle transition.
+5. Compatible coordinator replacement retains supported running providers and
+   excludes new admissions during transfer; unsupported active providers defer it.
 6. Incompatible runtime/UI combinations and invalid update metadata fail safely.
 7. Both standalone packaging paths retain signature/runtime integrity; ordinary
    development builds and native smoke tests still work and clean up owned tests.

@@ -9,11 +9,33 @@ import threading
 import time
 from collections import deque
 from collections.abc import Iterator
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 
 
 ALL_KEYS = object()
+_CAPTURE = threading.local()
+
+
+@contextmanager
+def capture_writes():
+    """Collect one provider projection's finite bookkeeping before its commit.
+
+    Used only by the reconnectable coordinator. Ordinary callers retain the
+    asynchronous, per-key retry worker. Collected callbacks perform database
+    bookkeeping only; provider commands must never be submitted here.
+    """
+    previous = getattr(_CAPTURE, "writes", None)
+    writes = [] if previous is None else previous
+    _CAPTURE.writes = writes
+    try:
+        yield writes
+    finally:
+        _CAPTURE.writes = previous
+
+
+def capturing_writes():
+    return getattr(_CAPTURE, "writes", None) is not None
 
 
 def database_busy(error):
@@ -95,6 +117,10 @@ class BrowserPersistence:
             return bool(self.queues)
 
     def submit(self, callback, *, key=None, coalesce=None, required=True):
+        captured = getattr(_CAPTURE, "writes", None)
+        if captured is not None:
+            captured.append((callback, required))
+            return len(captured)
         with self.condition:
             if self.stopped:
                 raise RuntimeError("Browser persistence is closed.")

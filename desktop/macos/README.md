@@ -260,9 +260,12 @@ repeat dialogs for that version until the next interface launch; the update menu
 remains available. The staged backend stays inactive until explicitly installed.
 Signed releases use the same two choices while retaining Sparkle's verified
 download, progress, and installation checks. Development builds still do not
-check production release feeds. The coordinated operation
-interrupts execution, retains rollback state, and continues eligible saved
-conversations. Approvals, Stop, queued user input and uncertain submissions take
+check production release feeds. Runtimes advertising `uninterrupted_updates: 1`
+retain Codex and Claude provider processes and native turns across compatible
+coordinator upgrades. Active unsupported providers defer replacement. First
+adoption from a legacy backend uses one guarded restart, retains rollback state,
+and continues eligible saved conversations; that first transition interrupts
+execution. Approvals, Stop, queued user input and uncertain submissions take
 precedence. Use the matching installed helper's
 [`--runtime-command status`](../../docs/runtime-updates.md#runtime-maintenance-controls)
 to check ownership, pending payload and busy reasons; while work continues,

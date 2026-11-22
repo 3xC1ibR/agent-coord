@@ -78,6 +78,7 @@ class CodexRPC:
         self.command = command or ["codex", "app-server"]
         self.process = None
         self.pending: dict[int, Future] = {}
+        self.pending_methods = {}
         self.lock = threading.RLock()
         self.start_lock = threading.Lock()
         self.write_lock = threading.Lock()
@@ -86,6 +87,8 @@ class CodexRPC:
         self.errors: deque[str] = deque(maxlen=12)
         self.closed = False
         self.ready = False
+        self.initialized_response = False
+        self.channel = "codex:" + uuid.uuid4().hex
 
     def start(self) -> None:
         with self.start_lock:
@@ -94,6 +97,23 @@ class CodexRPC:
             if self.ready:
                 return
             if self.process is not None:
+                projection = getattr(self.store, "provider_projection", None)
+                if projection is not None and self.process.poll() is None:
+                    if "initialize" in self.pending_methods.values():
+                        deadline = time.monotonic() + 30
+                        while not self.ready and time.monotonic() < deadline:
+                            time.sleep(.02)
+                        if not self.ready:
+                            raise CoordinationError("Retained Codex initialization has not completed.")
+                        return
+                    if not self.initialized_response:
+                        self.request("initialize", {"clientInfo": {
+                            "name": "agent_coord_ui", "title": "Ribbon Field", "version": "0.1.0"
+                        }}, start=False)
+                    self.write({"method": "initialized", "params": {}})
+                    self.ready = True
+                    projection.checkpoint()
+                    return
                 raise CoordinationError("Codex app-server stopped. Restart the UI.")
             env = dict(os.environ)
             for key in list(env):
@@ -102,6 +122,16 @@ class CodexRPC:
                 }:
                     env.pop(key)
             env = client_environment(env, self.store.database_path, "codex")
+            projection = getattr(self.store, "provider_projection", None)
+            if projection is not None:
+                self.process = projection.open(self.channel, self.command, env, None, self._message, provider="codex")
+                self.request("initialize", {"clientInfo": {
+                    "name": "agent_coord_ui", "title": "Ribbon Field", "version": "0.1.0"
+                }}, start=False)
+                self.write({"method": "initialized", "params": {}})
+                self.ready = True
+                projection.checkpoint()
+                return
             try:
                 self.process = subprocess.Popen(
                     self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -127,6 +157,10 @@ class CodexRPC:
                 raise
 
     def write(self, message: dict) -> None:
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None:
+            projection.write(self.channel, message)
+            return
         with self.write_lock:
             if self.closed or self.process is None or self.process.poll() is not None:
                 raise CoordinationError("Codex app-server is unavailable. Restart the UI.")
@@ -140,12 +174,24 @@ class CodexRPC:
         if start:
             self.start()
         future: Future = Future()
-        with self.lock:
-            self.next_id += 1
-            request_id = self.next_id
-            self.pending[request_id] = future
+        projection = getattr(self.store, "provider_projection", None)
+        request_id = None
+        def register():
+            nonlocal request_id
+            with self.lock:
+                self.next_id += 1
+                request_id = self.next_id
+                self.pending[request_id] = future
+                self.pending_methods[request_id] = method
+            return {"id": request_id, "method": method, "params": params or {}}
         try:
-            self.write({"id": request_id, "method": method, "params": params or {}})
+            # A concurrent checkpoint must not save a pending initialization
+            # without the matching durable outbound command. Transport I/O
+            # follows that transaction without holding the browser state lock.
+            if projection is not None:
+                projection.write_registered(self.channel, register)
+            else:
+                self.write(register())
             return future.result(timeout=timeout)
         except TimeoutError as exc:
             raise CoordinationError(f"Codex did not respond to {method}; refresh before retrying.") from exc
@@ -157,6 +203,39 @@ class CodexRPC:
         for line in self.process.stderr:
             self.errors.append(line.rstrip()[-1000:])
 
+    def _message(self, message):
+        if "method" in message:
+            if message["method"] == "bridge/disconnected":
+                self.ready = False
+                with self.lock:
+                    pending = list(self.pending.values())
+                def disconnected():
+                    for future in pending:
+                        if not future.done():
+                            future.set_exception(CoordinationError("Codex app-server disconnected."))
+                projection = getattr(self.store, "provider_projection", None)
+                projection.after_commit(disconnected) if projection is not None else disconnected()
+            self.on_event(message)
+        else:
+            with self.lock:
+                future = self.pending.get(message.get("id"))
+                method = self.pending_methods.pop(message.get("id"), None)
+                if method == "initialize" and "error" not in message:
+                    self.initialized_response = True
+                    if future is None:
+                        self.write({"method": "initialized", "params": {}})
+                        self.ready = True
+                if future and not future.done():
+                    def complete():
+                        if future.done():
+                            return
+                        if "error" in message:
+                            future.set_exception(CoordinationError(str(message["error"].get("message", "Codex request failed."))))
+                        else:
+                            future.set_result(message.get("result"))
+                    projection = getattr(self.store, "provider_projection", None)
+                    projection.after_commit(complete) if projection is not None else complete()
+
     def _read(self) -> None:
         try:
             for line in self.process.stdout:
@@ -164,18 +243,7 @@ class CodexRPC:
                     message = json.loads(line)
                     if not isinstance(message, dict):
                         continue
-                    if "method" in message:
-                        self.on_event(message)
-                    else:
-                        with self.lock:
-                            future = self.pending.get(message.get("id"))
-                            if future and not future.done():
-                                if "error" in message:
-                                    future.set_exception(CoordinationError(
-                                        str(message["error"].get("message", "Codex request failed."))
-                                    ))
-                                else:
-                                    future.set_result(message.get("result"))
+                    self._message(message)
                 except (ValueError, KeyError, TypeError, CoordinationError, sqlite3.Error) as exc:
                     self.errors.append(str(exc)[-1000:])
         finally:
@@ -193,6 +261,10 @@ class CodexRPC:
         self.closed = True
         self.ready = False
         if self.process is None:
+            return
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None:
+            projection.close_channel(self.channel)
             return
         if self.process.poll() is None:
             self.process.terminate()
@@ -328,10 +400,16 @@ class BrowserSessions:
         self.dispatch = DispatchRuntime(self)
         from .turn_watchdog import TurnWatchdog
         self.watchdog = TurnWatchdog(self)
+        from .session_control import SessionControl
+        self.session_control = SessionControl(store)
         from .desktop_runtime import install_session_admission
         install_session_admission(self)
         from .external_work import ExternalWorkRuntime
         self.external_work = ExternalWorkRuntime(self)
+        if getattr(store, "provider_transport", None) is not None:
+            from .coordinator_projection import CoordinatorProjection
+            self.projection = store.provider_projection = CoordinatorProjection(self, store.provider_transport)
+            self.projection.load()
 
     @contextmanager
     def _persistence_context(self):
@@ -428,8 +506,18 @@ class BrowserSessions:
                                            or method in CONVERSATION_ONLY_EVENTS):
             self.inventory_changed()
         with self.changed:
+            projection = getattr(self, "projection", None)
+            if projection is not None and projection.buffer_publication({"method": method, "params": params, **extra}):
+                return
             self.sequence += 1
-            self.events.append({"seq": self.sequence, "method": method, "params": params, **extra})
+            event = {"seq": self.sequence, "method": method, "params": params, **extra}
+            if projection is not None:
+                try:
+                    projection.publication(event)
+                except Exception:
+                    self.sequence -= 1
+                    raise
+            self.events.append(event)
             self.changed.notify_all()
 
     def inventory_changed(self) -> None:
@@ -767,8 +855,7 @@ class BrowserSessions:
             self.persistence.submit(lambda: self._persist_public_output("turn/completed", public_params), key=thread_id)
 
     def _persist_public_output(self, method, params):
-        from .session_control import SessionControl
-        SessionControl(self.store).observe(method, params)
+        self.session_control.observe(method, params)
 
     @staticmethod
     def _persistence_event_params(method, params):
@@ -938,6 +1025,9 @@ class BrowserSessions:
 
     def _save_history(self, thread_id: str) -> None:
         self._dirty_history(thread_id)
+        from .browser_persistence import capturing_writes
+        if capturing_writes():
+            return  # The projection publishes history with its cursor.
         self.persistence.submit(lambda: self._persist_history(thread_id), key=thread_id, coalesce="history")
 
     def _persist_history(self, thread_id):
@@ -1136,6 +1226,8 @@ class BrowserSessions:
                     return copy.deepcopy(self._history(thread_id))
                 thread["historyUnavailable"] = False
                 return self._remember_thread(thread)
+        with self.lock:
+            revision = self.history_revisions.get(thread_id, 0)
         try:
             thread = self._query_thread(provider, thread_id, include_turns=True)
         except CoordinationError as exc:
@@ -1164,8 +1256,21 @@ class BrowserSessions:
                 thread["turns"] = turns
                 thread["historyUnavailable"] = False
                 return self._remember_thread(thread)
-        thread["historyUnavailable"] = False
-        return self._remember_thread(thread)
+        with self.lock:
+            if revision != self.history_revisions.get(thread_id, 0):
+                return copy.deepcopy(self._history(thread_id))
+            # Native history can contain only the accepted prompt until the
+            # turn finishes. A read does not prove streamed items were deleted.
+            cached = {turn["id"]: turn for turn in self._history(thread_id).get("turns", [])}
+            for turn in thread.get("turns", []):
+                current = cached.get(turn["id"])
+                if current is not None and turn.get("status") == "inProgress":
+                    items = {item["id"]: item for item in turn.get("items", [])}
+                    items.update({item["id"]: copy.deepcopy(item) for item in current.get("items", [])})
+                    turn.update(copy.deepcopy(current))
+                    turn["items"] = list(items.values())
+            thread["historyUnavailable"] = False
+            return self._remember_thread(thread)
 
     def events_after(self, sequence: int, timeout=15) -> dict:
         with self.changed:
@@ -2755,6 +2860,11 @@ class BrowserSessions:
                 self.database_checkpoint.close()
 
     def _close_components(self) -> None:
+        projection = getattr(self, "projection", None)
+        if projection is not None and not getattr(self, "transport_handover", False):
+            projection.stopped.set()
+            if projection.worker is not None:
+                projection.worker.join(timeout=5)
         self.residency_stopped.set()
         if self.residency_worker is not None:
             self.residency_worker.join(timeout=6)
@@ -2772,7 +2882,7 @@ class BrowserSessions:
         self.muse.close()
         self.schedules.close()
         for thread_id in list(self.loaded):
-            if self.loaded_clients.get(thread_id) != "codex":
+            if self.loaded_clients.get(thread_id) != "codex" and not getattr(self, "transport_handover", False):
                 self._event({"method": "thread/closed", "params": {"threadId": thread_id}})
         self.queue.close()
         with self.history_lock:
