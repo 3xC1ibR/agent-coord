@@ -1,32 +1,43 @@
 "use strict";
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
-const {AsksUI} = require("../plugins/agent-coord/scripts/agent_coord/web/asks.js");
-const {AsksCopy} = require("../plugins/agent-coord/scripts/agent_coord/web/asks-copy.js");
+const {AsksUI, AsksCopy} = require("../plugins/agent-coord/scripts/agent_coord/web/asks.js");
 const {Element, makeDocument} = require("./web_dom_stub.js");
 
-function setup(api) {
-  const navigated = [], errors = [];
-  const document = makeDocument(["open-asks-view", "asks-entry-label", "asks-count", "open-asks", "asks-dialog", "asks-frame",
-    "sidebar-backdrop", "menu-toggle"]);
+const IDS = ["open-asks-view", "asks-entry-label", "asks-count", "open-asks", "asks-dialog", "sidebar-backdrop", "menu-toggle",
+  "asks-title", "asks-summary", "close-asks", "asks-sections", "asks-filters", "asks-filter-project", "asks-filter-kind",
+  "asks-filter-since", "asks-notice", "asks-error", "asks-status", "asks-list"];
+function setup(open, {config = {askKinds: true}} = {}) {
+  const navigated = [], errors = [], calls = [], timers = [];
+  const state = {open, config};
+  const document = makeDocument(IDS);
   const $ = id => document.getElementById(id);
-  $("asks-frame").contentWindow = {};
+  $("asks-filter-project").append(Object.assign(new Element("option"), {textContent: "All projects"}));
   $("sidebar-backdrop").hidden = true;
   $("sidebar-backdrop").click = () => { $("sidebar-backdrop").clicked = true; };
-  const view = new Element("window"); view.location = {origin: "http://127.0.0.1:8765"};
-  const ui = new AsksUI({document, api, view, navigate: url => { navigated.push(url); }, onError: error => errors.push(error)});
-  const send = (data, overrides = {}) => view.dispatch("message", {origin: view.location.origin, source: $("asks-frame").contentWindow, data, ...overrides});
-  return {ui, $, view, navigated, errors, send};
+  const view = {setInterval: callback => { timers.push(callback); return timers.length; }, clearInterval: id => { if (Number.isInteger(id)) timers[id - 1] = null; }};
+  const api = async (path, body) => {
+    calls.push({path, body});
+    if (path === "config") { if (state.config instanceof Error) throw state.config; return state.config; }
+    if (body !== undefined) return {id: Number(path.split("/")[1]), status: "resolved", ...body};
+    return {data: state.open};
+  };
+  const ui = new AsksUI({document, api, view, navigate: url => { navigated.push(url); }, onError: error => errors.push(error),
+    copyText: async () => {}, clock: () => Date.now()});
+  const open_ = () => $("open-asks-view").onclick({preventDefault() {}});
+  return {ui, $, state, navigated, errors, calls, timers, open: open_};
 }
-const blocking = {id: 7, blocking: true, snoozed: false};
-const quiet = {id: 8, blocking: false, snoozed: false};
-const snoozedBlocking = {id: 9, blocking: true, snoozed: true};
+const item = {session_id: "thread-7", thread_title: "Checkout", project_label: "Shop", context: null, options: [], status: "open",
+  age_seconds: 60, kind: "action", unblocks: "Pricing.", resolutions: ["done", "not_done", "dismissed"], snoozed: false};
+const blocking = {...item, id: 7, question: "Add payout details", blocking: true};
+const quiet = {...item, id: 8, question: "Upload ID", blocking: false};
+const snoozedBlocking = {...item, id: 9, question: "Confirm account", blocking: true, snoozed: true, snoozed_until: "2999-01-01T00:00:00+00:00"};
 
 test("the entry is named from the copy and counts open asks that are not snoozed", async () => {
-  const {ui, $} = setup(async () => ({data: [blocking, quiet, snoozedBlocking]}));
+  const {ui, $, state} = setup([blocking, quiet, snoozedBlocking]);
   assert.equal($("asks-entry-label").textContent, AsksCopy.viewName);
-  assert.equal($("asks-dialog").getAttribute("aria-label"), AsksCopy.viewName);
   assert.equal($("open-asks").getAttribute("aria-label"), AsksCopy.viewName);
+  assert.equal($("asks-title").textContent, AsksCopy.viewName);
   assert.equal($("asks-count").hidden, true);
   await ui.refresh();
   assert.equal($("asks-count").hidden, false);
@@ -35,67 +46,88 @@ test("the entry is named from the copy and counts open asks that are not snoozed
   assert.equal($("open-asks-view").title, "2 asks waiting for you · 1 blocking");
   assert.equal($("open-asks").title, $("open-asks-view").title);
   assert.equal($("open-asks-view").getAttribute("aria-label"), AsksCopy.viewName + ": 2 asks waiting for you · 1 blocking");
-  ui.api = async () => ({data: [quiet, snoozedBlocking]});
+  // The dialog is closed, so no rows are built for a background refresh.
+  assert.equal($("asks-list").byClass("ask-row").length, 0);
+  state.open = [quiet, snoozedBlocking];
   await ui.refresh();
   assert.equal($("asks-count").textContent, "1");
   assert.equal($("asks-count").classList.contains("asks-count-blocking"), false);
   assert.equal($("open-asks-view").title, "1 ask waiting for you");
-  ui.api = async () => ({data: [snoozedBlocking]});
+  state.open = [snoozedBlocking];
   await ui.refresh();
   assert.equal($("asks-count").hidden, true);
   assert.equal($("open-asks-view").title, AsksCopy.viewName);
   assert.equal($("open-asks-view").getAttribute("aria-label"), AsksCopy.viewName);
 });
 
-test("the sidebar entry and the question-mark button both open the embedded view", () => {
-  const {$} = setup(async () => ({data: []}));
+test("the sidebar entry and the question-mark button both open the view and start its refresh cycle", async () => {
+  const {$, timers, calls, ui} = setup([blocking, quiet]);
   for (const id of ["open-asks-view", "open-asks"]) {
-    $("asks-dialog").open = false; delete $("asks-frame").src;
     let prevented = false;
-    $(id).onclick({preventDefault() { prevented = true; }});
+    await $(id).onclick({preventDefault() { prevented = true; }});
     assert.equal(prevented, true, id);
-    assert.equal($("asks-frame").src, "/asks?embedded=1");
     assert.equal($("asks-dialog").open, true);
+    assert.deepEqual($("asks-list").byClass("ask-row").map(row => row.dataset.id), ["7", "8"]);
+    $("asks-dialog").close();
+    assert.equal(ui.viewer.visible, false);
   }
+  assert.deepEqual(calls.filter(call => call.path === "config").length, 2);
+  // One live timer while open; closing clears it.
+  assert.deepEqual(timers, [null, null]);
   $("sidebar-backdrop").hidden = false;
-  $("open-asks-view").onclick({preventDefault() {}});
+  await $("open-asks-view").onclick({preventDefault() {}});
   assert.equal($("sidebar-backdrop").clicked, true);
+  assert.equal(typeof timers.at(-1), "function");
+  const before = calls.length;
+  timers.at(-1)();
+  assert.equal(calls.length, before + 1);
 });
 
-test("messages from the embedded view close it, open a thread, or follow an app link", async () => {
-  const {$, send, navigated, view} = setup(async () => ({data: []}));
-  const open = () => { $("open-asks-view").onclick({preventDefault() {}}); };
-  open();
-  send({type: "ribbon-field-asks-thread", thread_id: "thread 7"}, {origin: "https://elsewhere.example"});
-  send({type: "ribbon-field-asks-thread", thread_id: "thread 7"}, {source: view});
-  send({type: "ribbon-field-asks-thread", thread_id: 7});
-  send({type: "ribbon-field-asks-navigate", url: "https://example.com"});
-  send({type: "unknown"});
-  assert.deepEqual(navigated, []);
-  assert.equal($("asks-dialog").open, true);
-  const intents = [];
-  view.agentCoordActivity = {markIntent: surface => intents.push(surface)};
-  send({type: "ribbon-field-asks-thread", thread_id: "thread 7"});
-  assert.deepEqual(navigated, ["agentcoord://thread/thread%207"]);
-  assert.deepEqual(intents, ["decisions"]);
+test("resolving in the view moves the sidebar count at once", async () => {
+  const {$, open} = setup([blocking, quiet]);
+  await open();
+  assert.equal($("asks-count").textContent, "2");
+  const row = $("asks-list").byClass("ask-row")[0];
+  await row.byTag("button").find(button => button.textContent === "Mark done").onclick();
+  assert.equal($("asks-count").textContent, "1");
+  assert.equal($("asks-count").classList.contains("asks-count-blocking"), false);
+});
+
+test("opening a thread or an app link closes the view and navigates in the workspace", async () => {
+  const {$, open, navigated} = setup([blocking, {...quiet, link: "agentcoord://view/Needs%20me"}]);
+  await open();
+  const rows = $("asks-list").byClass("ask-row");
+  await rows[0].byClass("ask-thread")[0].onclick();
+  assert.deepEqual(navigated, ["agentcoord://thread/thread-7"]);
   assert.equal($("asks-dialog").open, false);
-  open();
-  send({type: "ribbon-field-asks-navigate", url: "agentcoord://view/Needs%20me"});
+  await open();
+  $("asks-list").byClass("ask-row")[1].byClass("ask-link")[0].onclick({preventDefault() {}});
   assert.deepEqual(navigated.at(-1), "agentcoord://view/Needs%20me");
   assert.equal($("asks-dialog").open, false);
-  open();
-  send({type: "ribbon-field-close-asks"});
+  await open();
+  $("close-asks").onclick();
   assert.equal($("asks-dialog").open, false);
+  assert.equal($("open-asks-view").focused, true);
 });
 
-test("closing the view unloads it, returns focus and refreshes the count", async () => {
-  let reads = 0;
-  const {$, send} = setup(async () => { reads += 1; return {data: [quiet]}; });
-  $("open-asks-view").onclick({preventDefault() {}});
-  send({type: "ribbon-field-close-asks"});
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal($("asks-frame").src, undefined);
-  assert.equal($("open-asks-view").focused, true);
-  assert.equal(reads, 1);
+test("a backend from before kinds is detected on opening and served the decisions-only view", async () => {
+  const legacyAsk = {id: 3, session_id: "thread-3", thread_title: "Docs", project_name: null, question: "Tone?", context: null,
+    options: [], blocking: true, status: "open", age_seconds: 30};
+  const {$, open, state, ui, errors} = setup([legacyAsk], {config: {token: "t"}});
+  await open();
+  assert.equal(ui.viewer.legacy, true);
+  assert.deepEqual([$("asks-notice").hidden, $("asks-sections").hidden], [false, true]);
   assert.equal($("asks-count").textContent, "1");
+  $("asks-dialog").close();
+  // After the update is applied the same window gets the full view on its next opening.
+  state.config = {token: "t", askKinds: true};
+  await open();
+  assert.equal(ui.viewer.legacy, false);
+  assert.deepEqual([$("asks-notice").hidden, $("asks-sections").hidden], [true, false]);
+  $("asks-dialog").close();
+  // A failed capability check reports the error and keeps the last known mode.
+  state.config = new Error("Connection lost.");
+  await open();
+  assert.equal(errors.at(-1).message, "Connection lost.");
+  assert.equal(ui.viewer.legacy, false);
 });

@@ -343,7 +343,7 @@ def _handler(
                                  if openui_frame else "")
                 embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
                             and ((parsed.path == "/" and query.get("pane") == ["1"])
-                                 or (parsed.path in {"/settings", "/usage", "/usage/coordination", "/activity", "/asks", "/html-preview"} and query.get("embedded") == ["1"]))
+                                 or (parsed.path in {"/settings", "/usage", "/usage/coordination", "/activity", "/html-preview"} and query.get("embedded") == ["1"]))
                             and self._authorized())
                 self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame or html_preview else "DENY")
                 self.send_header(
@@ -471,9 +471,6 @@ def _handler(
             if parsed.path == "/activity":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "activity.html").read_bytes())
                 return
-            if parsed.path == "/asks":
-                self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "asks-page.html").read_bytes())
-                return
             if parsed.path in {"/activity.js", "/activity.css", "/activity-collector.js"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
@@ -486,7 +483,7 @@ def _handler(
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
-            if parsed.path in {"/reviews.js", "/reviews.css", "/sidecars.js", "/sidecars.css", "/asks.js", "/asks.css", "/asks-copy.js", "/asks-page.js", "/asks-page.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
+            if parsed.path in {"/reviews.js", "/reviews.css", "/sidecars.js", "/sidecars.css", "/asks.js", "/asks.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
                 self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
                 return
@@ -590,6 +587,8 @@ def _handler(
             if route == "config":
                 self._json(HTTPStatus.OK, {"token": csrf_token, "cwd": browser_sessions.cwd or os.getcwd(), "workspaceRoot": browser_sessions.cwd,
                                           "recurringSchedules": True,
+                                          # The asks view checks this before offering kinds, notes, snooze and the log.
+                                          "askKinds": True,
                                           "remote": self._remote_request(),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":

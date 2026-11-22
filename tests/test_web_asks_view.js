@@ -1,8 +1,7 @@
 "use strict";
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
-const {AsksView, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget, splitQuestion, isLong} = require("../plugins/agent-coord/scripts/agent_coord/web/asks-page.js");
-const {AsksCopy} = require("../plugins/agent-coord/scripts/agent_coord/web/asks-copy.js");
+const {AsksView, AsksCopy, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget, splitQuestion, isLong} = require("../plugins/agent-coord/scripts/agent_coord/web/asks.js");
 const {Element, makeDocument} = require("./web_dom_stub.js");
 
 const NOW = new Date(2026, 10, 22, 10, 0, 0).getTime();
@@ -33,13 +32,12 @@ const resolvedItems = [
     note: null, answer: null, resolved_at: "2026-11-01T18:00:00+00:00", project_label: null},
 ];
 
-function setup(open, {resolved = resolvedItems, respond, embedded = true} = {}) {
+function setup(open, {resolved = resolvedItems, respond, legacy = false} = {}) {
   const calls = [], opened = [], navigated = [], copied = [];
   const state = {open, resolved, closed: 0};
   const document = makeDocument(["asks-title", "asks-summary", "close-asks", "asks-sections", "asks-filters",
-    "asks-filter-project", "asks-filter-kind", "asks-filter-since", "asks-error", "asks-status", "asks-list"]);
+    "asks-filter-project", "asks-filter-kind", "asks-filter-since", "asks-notice", "asks-error", "asks-status", "asks-list"]);
   const $ = id => document.getElementById(id);
-  $("close-asks").hidden = true;
   $("asks-filter-project").append(Object.assign(new Element("option"), {textContent: "All projects"}));
   const api = async (path, body) => {
     calls.push({path, body});
@@ -47,8 +45,10 @@ function setup(open, {resolved = resolvedItems, respond, embedded = true} = {}) 
     return {data: path.includes("status=resolved") ? state.resolved : state.open};
   };
   const view = new AsksView({document, api, clock: () => NOW, openThread: id => opened.push(id),
-    navigate: embedded ? url => navigated.push(url) : null, close: embedded ? () => { state.closed += 1; } : null,
+    navigate: url => navigated.push(url), close: () => { state.closed += 1; },
     copyText: async text => { copied.push(text); }});
+  view.setLegacy(legacy);
+  view.setVisible(true);
   const list = $("asks-list");
   const rows = () => list.byClass("ask-row");
   const row = id => rows().find(node => node.dataset.id === String(id));
@@ -121,7 +121,7 @@ test("the view is named from the copy alone", () => {
   try {
     const {$, document} = setup([]);
     assert.equal($("asks-title").textContent, "Inbox");
-    assert.equal(document.title, "Inbox — Ribbon Field");
+    assert.equal(document.title, "");
     assert.equal($("asks-sections").getAttribute("aria-label"), "Inbox sections");
   } finally { AsksCopy.viewName = original; }
 });
@@ -132,7 +132,7 @@ test("the open section shows each ask's kind, gain, effort, thread and state", a
   await view.refresh();
   assert.equal($("asks-status").hidden, true);
   assert.equal($("asks-title").textContent, AsksCopy.viewName);
-  assert.equal($("close-asks").hidden, false);
+  assert.deepEqual([$("asks-notice").hidden, $("asks-sections").hidden], [true, false]);
   $("close-asks").onclick();
   assert.equal(state.closed, 1);
   const tabs = $("asks-sections").children;
@@ -341,9 +341,45 @@ test("app links navigate inside the workspace and file paths are copied", async 
   assert.deepEqual([copy.tagName, copy.textContent, copy.title], ["button", "Copy path", "/work/data.csv"]);
   await copy.onclick();
   assert.deepEqual([copied, copy.textContent], [["/work/data.csv"], "Copied"]);
-  const standalone = setup([appLink], {embedded: false});
-  await standalone.view.refresh();
-  const direct = standalone.row(21).byClass("ask-link")[0];
-  assert.deepEqual([direct.href, direct.target, direct.onclick], ["agentcoord://thread/abc", "_blank", undefined]);
-  assert.equal(standalone.$("close-asks").hidden, true);
+});
+
+test("a hidden view keeps its data current without building rows", async () => {
+  const {view, rows, calls} = setup([action, decision]);
+  view.setVisible(false);
+  await view.refresh();
+  assert.equal(rows().length, 0);
+  assert.deepEqual(view.counts(), {open: 2, snoozed: 0, blocking: 1});
+  view.section = "resolved";
+  await view.refresh();
+  assert.equal(calls.some(call => call.path.includes("status=resolved")), false);
+  view.section = "open";
+  view.setVisible(true);
+  assert.equal(rows().length, 2);
+});
+
+test("an older backend gets decisions only, answered with the bodies it accepts", async () => {
+  // Before its update is applied, the backend lists asks without kinds and rejects resolutions.
+  const legacyBlocking = {id: 40, session_id: "thread-40", thread_title: "Apify", project_name: "projects", question: "Which account?",
+    context: null, options: ["Staging", "Production"], blocking: true, status: "open", age_seconds: 4000};
+  const legacyQuiet = {id: 41, session_id: "thread-41", thread_title: "Docs", project_name: null, question: "Tone?",
+    context: "Default: formal.", options: [], blocking: false, status: "open", age_seconds: 30};
+  const {view, $, row, rows, control, posts, list} = setup([legacyBlocking, legacyQuiet], {legacy: true,
+    respond: (path, body) => ({id: Number(path.split("/")[1]), status: "answered", ...body})});
+  await view.refresh();
+  assert.deepEqual([$("asks-notice").hidden, $("asks-notice").textContent, $("asks-sections").hidden],
+    [false, AsksCopy.legacyNotice, true]);
+  assert.deepEqual(list.byClass("ask-group-title").map(node => node.text), ["Blocking 1", "No project 1"]);
+  assert.equal(row(40).byClass("ask-meta")[0].text, "Decision asked 1h ago Apify");
+  assert.deepEqual(row(40).byTag("button").map(button => button.textContent), ["Apify", "Staging", "Production", "Answer"]);
+  assert.equal(row(40).byTag("select").length, 0);
+  row(40).byClass("ask-note")[0].value = "typed first";
+  await control(row(40), "Production").onclick();
+  assert.deepEqual(posts().at(-1), {path: "asks/40", body: {option: "Production"}});
+  row(41).byClass("ask-note")[0].value = " Friendly ";
+  await row(41).byTag("form")[0].onsubmit({preventDefault() {}});
+  assert.deepEqual(posts().at(-1), {path: "asks/41", body: {answer: "Friendly"}});
+  assert.equal(rows().length, 0);
+  // Once the backend is updated the full view returns.
+  view.setLegacy(false);
+  assert.deepEqual([$("asks-notice").hidden, $("asks-sections").hidden], [true, false]);
 });

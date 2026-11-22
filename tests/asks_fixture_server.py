@@ -142,7 +142,7 @@ def main():
 
         server.RequestHandlerClass = FixtureHandler
         try:
-            print(f"Asks fixture: http://127.0.0.1:{server.server_port}/asks", flush=True)
+            print(f"Asks fixture: http://127.0.0.1:{server.server_port}/", flush=True)
             server.serve_forever()
         except KeyboardInterrupt:
             pass
