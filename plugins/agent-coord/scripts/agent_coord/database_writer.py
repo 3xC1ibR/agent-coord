@@ -18,6 +18,8 @@ import threading
 import time
 import weakref
 
+from .sqlite_compatibility import SQLITE_BUSY
+
 try:
     import resource
 except ImportError:  # Windows has no resource module.
@@ -156,7 +158,7 @@ class DatabaseWriter:
                                 "active_duration_ms": round((observed - self.started) * 1000, 3)
                                                       if self.started is not None else 0})
                             error = sqlite3.OperationalError("database is busy: writer admission deadline exceeded")
-                            error.sqlite_errorcode, error.sqlite_errorname = sqlite3.SQLITE_BUSY, "SQLITE_BUSY"
+                            error.sqlite_errorcode, error.sqlite_errorname = SQLITE_BUSY, "SQLITE_BUSY"
                             raise error
                         self.condition.wait(remaining)
                 except BaseException:

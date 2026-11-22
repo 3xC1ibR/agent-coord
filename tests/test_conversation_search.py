@@ -17,7 +17,7 @@ from agent_coord.cli import _parser, run
 from agent_coord import conversation_search
 from agent_coord.conversation_search import prepare_messages, publish_messages, refresh_messages, sync_messages
 from agent_coord.navigation import NavigationStore
-from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.store import CoordinationError, CoordinationStore, _StoreCursor
 from agent_coord.thread_search import search_threads
 
 
@@ -35,6 +35,21 @@ class ConversationSearchTests(unittest.TestCase):
         self.store.threads.update(identity, attention=attention)
         if text is not None:
             self.save(identity, text, role=role)
+
+    def limit_variables(self, connection, maximum):
+        if hasattr(connection, "setlimit"):
+            connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, maximum)
+            return
+        # Python 3.10 cannot change SQLite limits. Enforce the bound for these
+        # generated parameter lists so the same batching tests still run.
+        execute = _StoreCursor.execute
+        def bounded_execute(cursor, sql, parameters=()):
+            if len(parameters) > maximum:
+                raise sqlite3.OperationalError("too many SQL variables")
+            return execute(cursor, sql, parameters)
+        patcher = patch.object(_StoreCursor, "execute", bounded_execute)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def save(self, identity, text, *, role="user"):
         item = {"id": "message", "timelineAt": 1234, "type": "userMessage", "content": [{"type": "text", "text": text}]}
@@ -642,7 +657,7 @@ class ConversationSearchTests(unittest.TestCase):
                                         for i in range(1025)]}]}
         prepared = storage.prepare_history(history)
         with self.store._connection() as db:
-            db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+            self.limit_variables(db, 999)
         for _ in conversation_search.seed_prepared_history_steps(self.store, prepared):
             self.assertIsNone(self.store._writer.active_operation)
         metrics = conversation_search.search_metrics(self.store)["documents"]
@@ -665,7 +680,7 @@ class ConversationSearchTests(unittest.TestCase):
         failure = conversation_search._document_key(prepared.documents[(0, 800)].references)
         conversation_search._ensure_document_cache(self.store)
         with self.store._connection() as db:
-            db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+            self.limit_variables(db, 999)
             db.execute("CREATE TABLE document_cache_failure (document TEXT PRIMARY KEY)")
             db.execute("INSERT INTO document_cache_failure VALUES (?)", (failure,))
             db.execute("""CREATE TRIGGER reject_document BEFORE INSERT ON conversation_search_documents

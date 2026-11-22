@@ -16,6 +16,7 @@ from contextlib import contextmanager
 
 from .context import (bind_caller, caller_directory, caller_environment, caller_session,
                       client_context, read_input, request_ownership)
+from .sqlite_compatibility import SQLITE_BUSY
 from .store import (AmbiguousTargetError, ConflictError, CoordinationError,
                     InboxTimeoutError, CoordinationStore, default_database_path)
 
@@ -75,7 +76,7 @@ def owner_operation(database, *, timeout=None):
     acquired = lock.acquire() if timeout is None else lock.acquire(timeout=max(0, timeout))
     if not acquired:
         error = sqlite3.OperationalError("Database ownership is busy with another local operation.")
-        error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        error.sqlite_errorcode = SQLITE_BUSY
         error.sqlite_errorname = "SQLITE_BUSY"
         raise error
     try:
@@ -121,7 +122,7 @@ def connection_ownership(database, *, timeout=5):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             error = sqlite3.OperationalError("Database ownership is busy with another process.")
-            error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            error.sqlite_errorcode = SQLITE_BUSY
             error.sqlite_errorname = "SQLITE_BUSY"
             raise error
         time.sleep(min(.01, remaining))

@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .database_writer import SLOW_DATABASE_THRESHOLD_MS
+from .sqlite_compatibility import clear_authorizer
 
 ACTIVITIES = {
     "idle",
@@ -410,7 +411,7 @@ class _SharedTransaction:
         finally:
             self.read_depth -= 1
             if self.read_depth == 0:
-                self.connection.set_authorizer(None)
+                clear_authorizer(self.connection)
 
     def execute(self, sql, parameters=()):
         statement = sql.strip().rstrip(";").upper()

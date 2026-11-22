@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .store import CoordinationError
+from .sqlite_compatibility import SQLITE_CANTOPEN
 
 
 INLINE_BYTES = 256 * 1024
@@ -276,7 +277,7 @@ def decode_history(serialized, *, database_path=None, db=None):
         return read("ro")
     except sqlite3.OperationalError as error:
         code = getattr(error, "sqlite_errorcode", None)
-        if code != sqlite3.SQLITE_CANTOPEN and not (code is None and str(error) == "unable to open database file"):
+        if code != SQLITE_CANTOPEN and not (code is None and str(error) == "unable to open database file"):
             raise
     # A restored SQLite backup can retain WAL mode without WAL coordination
     # files. Allow SQLite to initialize those files, but prevent every logical
