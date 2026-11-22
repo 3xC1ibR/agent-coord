@@ -1,7 +1,7 @@
 "use strict";
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
-const {AsksView, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget} = require("../plugins/agent-coord/scripts/agent_coord/web/asks-page.js");
+const {AsksView, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget, splitQuestion, isLong} = require("../plugins/agent-coord/scripts/agent_coord/web/asks-page.js");
 const {AsksCopy} = require("../plugins/agent-coord/scripts/agent_coord/web/asks-copy.js");
 const {Element, makeDocument} = require("./web_dom_stub.js");
 
@@ -85,6 +85,34 @@ test("a link leads to a web page, a place in the app, an HTML result, or a path 
     {type: "preview", label: "Open result.html", href: "/html-preview?thread=t+1&path=%2Fwork%2FMy+Reports%2Fresult.html"});
   assert.deepEqual(linkTarget({link: "/work/data.csv"}), {type: "path", path: "/work/data.csv", label: "Copy path"});
   assert.deepEqual(linkTarget({link: "javascript:alert(1)"}), null);
+});
+
+test("a long ask leads with its first line and collapses the rest", async () => {
+  assert.deepEqual(splitQuestion("  One step left.\n\n1. Open the console.\n2. Add billing.  "),
+    {title: "One step left.", detail: "1. Open the console.\n2. Add billing."});
+  assert.deepEqual(splitQuestion("Which format?"), {title: "Which format?", detail: ""});
+  assert.deepEqual([isLong("Short."), isLong("x".repeat(321)), isLong("a\nb\nc\nd\ne")], [false, true, true]);
+  const steps = "1. Open the console.\n2. Add billing details.\n3. Verify identity.\n4. Close the dialog.\n5. Reply here.";
+  const long = {...decision, id: 30, question: "One Apify step left that only you can do.\n" + steps, context: "c".repeat(400)};
+  const {view, row, control} = setup([long, decision]);
+  await view.refresh();
+  assert.equal(row(30).byClass("ask-title")[0].textContent, "One Apify step left that only you can do.");
+  const detail = row(30).byClass("ask-detail")[0], context = row(30).byClass("ask-context")[0];
+  assert.equal(detail.textContent, steps);
+  assert.deepEqual([detail.className, context.className], ["ask-detail ask-clamped", "ask-context ask-clamped"]);
+  const [more] = row(30).byClass("ask-more");
+  assert.deepEqual([more.textContent, more.getAttribute("aria-expanded")], ["Show more", "false"]);
+  await more.onclick();
+  assert.deepEqual([detail.className, more.textContent, more.getAttribute("aria-expanded")], ["ask-detail", "Show less", "true"]);
+  assert.equal(context.className, "ask-context ask-clamped");
+  await more.onclick();
+  assert.equal(detail.className, "ask-detail ask-clamped");
+  // An expanded passage survives a refresh, because the row is reused.
+  await more.onclick();
+  await view.refresh();
+  assert.equal(row(30).byClass("ask-detail")[0].className, "ask-detail");
+  assert.equal(row(3).byClass("ask-more").length, 0);
+  assert.equal(row(3).byClass("ask-detail").length, 0);
 });
 
 test("the view is named from the copy alone", () => {
@@ -189,7 +217,7 @@ test("a failed resolution keeps the row, its input and says what went wrong", as
   assert.equal(row(1).byClass("ask-note")[0], input);
   assert.equal(input.value, "Keep this note");
   assert.equal(error.hidden, false);
-  assert.equal(error.textContent, "Ask 1 is already resolved. Your input is kept; try again.");
+  assert.equal(error.textContent, "Ask 1 is already resolved. Your input is kept.");
   assert.ok(row(1).byTag("button").every(button => button.disabled === false));
   assert.equal(input.disabled, false);
   assert.equal($("asks-error").hidden, true);

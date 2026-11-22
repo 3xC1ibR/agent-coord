@@ -3,6 +3,8 @@
 **Status:** Stage 1 specification, proposed 2026-11-22. The direction was agreed
 with the owner in thread `1506df07-ad54-41cc-b6d3-118e2719268d`; this document
 awaits his review before implementation is merged.
+Stage 1 is implemented on branch `asks-stage-1`; the [decision record](#decision-record)
+lists where the implementation departs from or adds to this specification.
 
 ## Problem
 
@@ -183,3 +185,54 @@ The baseline is the 24 asks recorded before this stage.
 - `python3 -W error::ResourceWarning -m unittest discover -s tests -v`, the web
   tests and `scripts/measure_database_contention.py --check` pass.
 - Desktop and phone-width screenshots of Open, Resolved and an empty Queue.
+
+## Decision record
+
+Choices made while implementing stage 1 on 2026-11-22, with the reason for
+each. Items marked **deviation** differ from the text above; the rest settle
+points the specification left open.
+
+### View
+
+| Decision | Reason |
+| --- | --- |
+| The view is an auxiliary page at `/asks`, opened from the sidebar entry in the dialog frame that Usage and Activity use, and full-screen on narrow layouts. It is not a new region of the workspace shell. | It reuses an existing surface type instead of adding one, keeps the change out of the workspace's view state, and gives the phone and the iOS wrapper the same page at a plain URL. |
+| The name "Queue" appears only in `web/asks-copy.js`. Files, routes, identifiers and tests use `asks`. | The name and the reference apps are defaults the owner has not confirmed; renaming the view is a one-line copy change. |
+| **Deviation:** the open count moved from the question-mark button to the sidebar entry. The button stays and opens the view, without a count. | Two counts for one list duplicate an affordance. |
+| The affirmative control of each row is the standard button, not the primary button. | A list has no single principal action; a primary button on every row would spend the view's emphasis many times over. |
+| An ask whose text has several lines leads with its first line; the remainder and a long context start collapsed behind **Show more**. | The six open production asks carry whole instruction lists in the title. Without this one ask fills the screen. |
+| Typing text and then choosing a decision's option sends the text as the note. Enter in a note field never chooses a resolution. | The typed text is not lost, and a resolution is always a deliberate click. |
+| Snooze offers four fixed choices (1 hour, 3 hours, tomorrow 9 AM, next week). | It matches the thread snooze choices; a free date can follow if the fixed set proves too narrow. |
+| A link that is an `.html` file path opens in the existing HTML output viewer; any other file path offers **Copy path**. | The browser cannot open local files. The viewer already exists for HTML results. |
+| The Resolved section lists user resolutions only. Withdrawn asks remain available from the API and CLI (`--status withdrawn`). | Resolved is the user's decision log; an agent's withdrawal is not the user's decision. |
+| The Resolved date filter applies to the resolution time and runs in the page. | The API's `since` selects by creation time, which would hide an old ask resolved today. |
+
+### Model and delivery
+
+| Decision | Reason |
+| --- | --- |
+| **Deviation:** the store rejects an `action` or `request` without `unblocks`, and options on any kind but `decision`. | A rule the store enforces holds for every client; guidance alone does not. |
+| **Deviation:** a legacy `{option}` or `{answer}` body sent to a non-decision ask is rejected with the resolutions that kind accepts. | "Answered" is not an outcome of an action, approval, review or request; the note carries free text for those. Legacy bodies still answer decisions. |
+| Dismissing an ask also delivers a message. It tells the agent not to assume the thing happened. | Dismissal is a resolution; an agent that never hears of it would wait or ask again. |
+| Stale uses the thread's Closed state or 72 hours without session activity. It does not use the session's ended time. | App conversations end their process between turns and remain resumable, so an ended session is not evidence of abandonment. |
+| A repeated `request_id` returns its ask whatever its status. A matching title returns only an open ask. `--supersedes` is not matched against the ask it replaces. The returned record carries `"existing": true`. | A retry must be idempotent after resolution too; a resolved need may legitimately be asked again; a rewrite with the same title is an intended replacement. |
+| Records keep `answered_at` beside the new `resolved_at`. | Readers written before kinds continue to work during migration. |
+| A due date without a time means the end of that local day; a time without an offset is local. | That is how the user reads a date. |
+| `--status` and the API also accept `withdrawn` and `all`; `--since` selects by creation time. | An orchestrator checking for earlier asks needs the closed ones too. |
+| `--show`, `--metrics` and `--list --all-sessions` need no caller session. | They are read-only inspection, useful from a terminal and for measuring a database copy. |
+
+### Measurement
+
+| Decision | Reason |
+| --- | --- |
+| The 90th percentile uses the nearest rank. | Interpolation invents values on samples as small as these. |
+| Closure separates superseded withdrawals from withdrawals without a successor. | A rewrite and an abandoned ask are different failures. |
+| Stale asks are the current state of every open ask, whatever the period. | Staleness is a property of now, not of the period in which an ask was created. |
+| Blocked hours count an open blocking ask up to the time of measurement. | An unanswered blocking ask is the most expensive case and must not read as zero. |
+
+### Unchanged in stage 1
+
+Thread attention text still reads "Decision needed:" for a blocking ask of any
+kind, because that derivation is frozen until stage 3. Resolving an ask is not
+written to the Activity ledger, as before. The native Mac window restoration
+list does not include `/asks`; the view opens inside the workspace window.

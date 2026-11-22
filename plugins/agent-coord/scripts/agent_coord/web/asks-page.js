@@ -5,6 +5,7 @@
   const SECTIONS = ["open", "snoozed", "resolved"];
   const SNOOZE_CHOICES = [["hour", "In 1 hour"], ["three_hours", "In 3 hours"], ["tomorrow", "Tomorrow at 9 AM"], ["week", "Next week"]];
   const REFRESH_MILLISECONDS = 5000;
+  const LONG_TEXT_CHARACTERS = 320, LONG_TEXT_LINES = 4;
 
   function formatAge(seconds) {
     if (!Number.isFinite(seconds) || seconds < 60) return "just now";
@@ -39,6 +40,16 @@
     else if (choice === "week") { date.setDate(date.getDate() + 7); date.setHours(9, 0, 0, 0); }
     else return null;
     return Math.floor(date.getTime() / 1000);
+  }
+  /* The first line of an ask is its title; anything after it is detail. */
+  function splitQuestion(question) {
+    const text = String(question ?? "").trim();
+    const end = text.indexOf("\n");
+    return end < 0 ? {title: text, detail: ""} : {title: text.slice(0, end).trim(), detail: text.slice(end + 1).trim()};
+  }
+  /* Long supporting text starts collapsed so one ask cannot fill the view. */
+  function isLong(text) {
+    return text.length > LONG_TEXT_CHARACTERS || text.split("\n").length > LONG_TEXT_LINES;
   }
   /* Blocking first, then overdue, then by project; each group oldest first. */
   function openGroups(items) {
@@ -113,6 +124,24 @@
       const button = this.node("button", text, className); button.type = "button";
       button.onclick = () => Promise.resolve().then(callback).catch(error => this.fail(error));
       return button;
+    }
+    /* Supporting text that collapses when long, with a control to read all of it. */
+    passage(text, className) {
+      const paragraph = this.node("p", text, className);
+      if (!isLong(text)) return [paragraph];
+      paragraph.className = className + " ask-clamped";
+      const toggle = this.button("Show more", () => {
+        const collapsed = paragraph.className.includes("ask-clamped");
+        paragraph.className = collapsed ? className : className + " ask-clamped";
+        toggle.textContent = collapsed ? "Show less" : "Show more";
+        toggle.setAttribute("aria-expanded", String(collapsed));
+      }, "ask-more");
+      toggle.setAttribute("aria-expanded", "false");
+      return [paragraph, toggle];
+    }
+    heading(ask) {
+      const {title, detail} = splitQuestion(ask.question);
+      return {title: this.node("h3", title, "ask-title"), detail: detail ? this.passage(detail, "ask-detail") : []};
     }
     setup() {
       const {elements} = this;
@@ -296,7 +325,8 @@
       element.dataset.id = String(ask.id);
       element.dataset.kind = ask.kind;
       const head = this.node("div", "", "ask-head");
-      head.append(this.node("h3", ask.question, "ask-title"));
+      const heading = this.heading(ask);
+      head.append(heading.title);
       const link = this.linkControl(ask);
       if (link) head.append(link);
       const meta = this.node("p", "", "ask-meta");
@@ -309,13 +339,13 @@
       const effort = formatEffort(ask.effort_minutes);
       if (effort) meta.append(this.node("span", "about " + effort, "ask-effort"));
       meta.append(age, this.threadControl(ask), blocking, stale, due, snoozed);
-      element.append(head, meta);
+      element.append(head, meta, ...heading.detail);
       if (ask.unblocks) {
         const unblocks = this.node("p", "", "ask-unblocks");
         unblocks.append(this.node("span", "Unblocks", "ask-label"), this.node("span", ask.unblocks));
         element.append(unblocks);
       }
-      if (ask.context) element.append(this.node("p", ask.context, "ask-context"));
+      if (ask.context) element.append(...this.passage(ask.context, "ask-context"));
 
       const decision = ask.kind === "decision";
       const form = this.node("form", "", "ask-resolve");
@@ -404,13 +434,14 @@
       element.dataset.id = String(ask.id);
       element.dataset.kind = ask.kind;
       const head = this.node("div", "", "ask-head");
-      head.append(this.node("h3", ask.question, "ask-title"),
+      const heading = this.heading(ask);
+      head.append(heading.title,
         this.node("span", copy.resolved[ask.resolution] || ask.resolution, "ask-resolution ask-resolution-" + ask.resolution));
       const meta = this.node("p", "", "ask-meta");
       meta.append(this.node("span", copy.kinds[ask.kind] || ask.kind, "ask-kind"),
         this.node("span", formatMoment(ask.resolved_at, this.clock()), "ask-age"), this.threadControl(ask));
       if (ask.project_label) meta.append(this.node("span", ask.project_label, "ask-project"));
-      element.append(head, meta);
+      element.append(head, meta, ...heading.detail);
       for (const [label, text] of [["Answer", ask.answer], ["Note", ask.note]]) {
         if (!text) continue;
         const outcome = this.node("p", "", "ask-unblocks");
@@ -429,7 +460,7 @@
       } catch (error) {
         // Keep the row and whatever the user typed; say what went wrong beside it.
         for (const control of record.controls) control.disabled = false;
-        record.error.textContent = (error?.message || String(error)) + " Your input is kept; try again.";
+        record.error.textContent = (error?.message || String(error)) + " Your input is kept.";
         record.error.hidden = false;
         return null;
       } finally { this.pending.delete(ask.id); }
@@ -457,7 +488,7 @@
     }
   }
 
-  const exported = {AsksView, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget};
+  const exported = {AsksView, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget, splitQuestion, isLong};
   if (typeof module !== "undefined") { module.exports = exported; return; }
   globalThis.AsksView = AsksView;
   const doc = globalThis.document;
@@ -472,7 +503,8 @@
       Object.assign(options, {method: "POST", body: JSON.stringify(body),
         headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": token}});
     }
-    const response = await fetch("/api/browser/" + path, options);
+    let response;
+    try { response = await fetch("/api/browser/" + path, options); } catch { throw Error("Could not reach Ribbon Field. Check the connection."); }
     let result;
     try { result = await response.json(); } catch { throw Error("Could not read the response. Check the connection and try again."); }
     if (!response.ok) throw Error(result.error || "The request failed. Check the connection and try again.");
