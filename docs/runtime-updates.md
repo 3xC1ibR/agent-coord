@@ -5,19 +5,19 @@ interface is compatible with the running runtime. This removes a barrier to
 receiving fixes and continuing to use the installed app.
 
 This document records the implementation contract and rollout procedures.
-The runtime and updater are implemented, with focused checks, the full regression
-suite, and independent signed replacement acceptance complete. On October 28,
-2026, the development laptop's installation was verified as version `0.1.3`,
-build `5`, with an independent runtime serving active agents. Release CI
-[build 6](https://github.com/3xC1ibR/agent-coord/actions/runs/40789015760) also
-completed for both architectures. That installation is already migrated; future
-local changes use the [normal local rebuild workflow](../desktop/macos/README.md#build-and-install-locally),
-not the legacy one-time interruption below.
+On November 22, 2026 (UTC), the local installation reached version `0.1.7`,
+build `54`, after a failed build 52 rollout and a machine reboot. Build 54 is
+serving with stable provider ownership and healthy event projection. The required
+following live upgrade with unchanged provider processes and native turns has
+**not been verified**. Source acceptance, local activation and recovered
+conversations do not establish that result. See the
+[incident and acceptance gaps](runtime-upgrade-incident-2026-11-22.md).
 
-Public release is a separate step: at that verification, the public download
-still advertised `0.1.2` and the alpha arm64 feed returned 404. Check current
-published manifests and feeds before claiming customer updates are operational;
-an installed app or a passing CI run alone does not establish publication.
+This installation already has an independent runtime. Future authorized local
+changes use the [normal local rebuild workflow](../desktop/macos/README.md#build-and-install-locally),
+not the legacy one-time interruption below. Public publication remains a
+separate outcome; an installed app or a passing CI run alone does not establish
+published customer updates.
 
 ## Inbox recovery after a runtime exit
 
@@ -142,9 +142,9 @@ private runtime state and must not be removed during an update.
 
 Source validation uses isolated process tests for successful continuation,
 approval exclusion, queued input, cancellation during candidate migration,
-SQLite/schema rollback, and Stop followed by status polling. Native macOS build,
-screenshots, and signed replacement acceptance must be rerun for this new flow;
-the October 28 evidence below applies to the earlier idle handover implementation.
+SQLite/schema rollback, and Stop followed by status polling. The November 22
+integration evidence below supersedes the earlier source checks for its exact
+revision; the October 28 evidence applies to the earlier idle handover.
 
 November 4 source validation ran 2,231 regression tests with 20 platform/optional
 skips. The only failure was a desktop isolation fixture that also failed on
@@ -196,6 +196,101 @@ exercise the real backend in private runtime directories using wire-level fixtur
 providers. The additive driver measures interface gaps and sustained commands as
 well as provider PIDs, native turns, approvals, tool completion and replay.
 
+### November 22 integration validation
+
+The reintegration onto current main is commit `6d636c9`, tree
+`11682d841e5d98f151615c3016f6205c1601fcd1`. Python 3.12.7 ran the complete
+regression suite once: **2,633 tests, 26 platform/optional skips, 941.136 seconds**.
+A fresh independent Claude review found no blocking finding and accepted guarded
+first adoption. The signed build 52 and 53 bundles passed strict signature,
+backend-snapshot and native quit/reconnect checks.
+
+The unchanged original gate passed 596 checks across 50 replacements. The
+independent driver passed 2,838 checks across steady traffic, idle replacement,
+rollback, candidate/coordinator crashes, coordinator termination, Stop during
+preparation and transport-owner failure. Its steady workload included another
+50 replacements, with activation p95 4.899 seconds and maximum observed event
+gap 2.504 seconds. Six wire channels delivered all 3,600 events exactly once at
+60 Hz for ten seconds; a blocked writer remained isolated. Six simultaneous
+streams with 150 archival turns and 2,634,000 characters per conversation also
+passed three replacements.
+
+The original gate recorded 308 HTTP 400 responses and 282 unavailable-owner
+responses during replacement. A separate three-replacement diagnostic captured
+all 19 HTTP 400 response bodies as maintenance-pausing-new-work responses.
+Provider continuity does not imply continuous HTTP availability.
+
+The matched database gate compared baseline `6d3a900` with candidate `6d636c9`:
+15 seconds, six foreground writers, one background writer, two readers and
+128 KiB chunks. Both passed unchanged budgets with **zero errors and admission
+timeouts**.
+
+| Database measurement | Baseline | Candidate |
+| --- | ---: | ---: |
+| Foreground receipts per second | 251.278 | 252.147 |
+| Foreground latency p95 | 1.932 ms | 1.830 ms |
+| Writer hold p95 | 0.512 ms | 0.366 ms |
+
+The matched HTTP workload used six streams at 6 Hz, three windows, writes at
+3 Hz, 1,500 KiB histories, 30 sends and 15 reads per selected endpoint. Both
+passed all existing latency and persistence-health budgets with zero errors.
+These finite observations establish budget compliance, not a causal speedup.
+
+Private process proofs using copies of the actual installed build 51 modules
+passed 37 checks each for ordinary and SIGTERM-resistant providers: guarded
+adoption followed by an uninterrupted replacement, retained provider/tool/native
+turn identities and exactly one completion. Source validation and these private
+proofs remain distinct from live activation and the following installed-runtime
+proof. Local artifacts are under `build/uninterrupted-integration-validation/`,
+`build/uninterrupted-integration-review/` and `build/uninterrupted-runtime-activation/`
+in the integration worktree.
+
+### Live adoption, incident and reboot recovery
+
+The first guarded adoption from build 51 to build 52 committed at
+05:21:25 UTC on November 22, update
+`c357c510-c13c-4801-8846-b94419375bc5`, payload `203dd3ff…`. The old
+bookkeeping drain did not prove a clean stop. Operator review and authenticated
+resume at 05:23:17 reopened admissions, retaining ten uncertain conversations
+and two skipped, withdrawn approvals. No continuation was automatically replayed.
+
+Build 52 then encountered a valid Codex command item with
+`aggregatedOutput: null`. Applying a later output delta raised `TypeError`,
+halting the shared durable projection at cursor 1237. Provider events remained
+journaled, but Codex and Claude event delivery and initialization were blocked.
+Build 53 was not staged or activated and no following live proof ran.
+
+The machine rebooted at **23:30:42 CST on November 21**
+(05:30:42 UTC on November 22), ending every pre-reboot local process.
+Recovery also exposed tuple mapping keys and tuple set members decoded as
+unhashable lists. Repairs `e84f1ee` and `f6e2b32` corrected these defects;
+`8abb218` refreshed the plugin. Build 54, payload
+`4d9e106462e24ab369ddc779e1572b7ee81d4623ccc2fdb24690b16910c1a4b9`,
+was installed and committed through the supported recovery flow. Its new-boot
+transport uses epoch 2. This was cold recovery, not uninterrupted replacement.
+
+The recovery checks passed 127 browser-session tests and 21 projection/recovery
+tests, including the exact retained event reproduction and compound hashable
+state. The repair database gate on Python fingerprint `cf34428e…` passed its
+15-second, six-foreground-writer/one-background-writer/two-reader, 128 KiB
+workload: **245.262 receipts/s**, foreground **p95 4.078 ms**, writer-hold
+**p95 3.256 ms**, **zero errors and admission timeouts**. This is a separate
+budget check, not a matched performance comparison with the earlier runs.
+
+Read-only verification found build 54 serving, unpaused, with no pending update
+or transport projection error. The recovery report records explicit new native
+turns for all 13 targeted conversations while preserving withdrawn work. These
+are resumed assignments, not the original pre-reboot turns. The complete suite
+and repeated-upgrade acceptance were not rerun on the repair commits.
+
+Local recovery receipts are under `build/runtime-incident-recovery/` in the main
+checkout, including `runtime-verification.json`, `continuation-verification.json`
+and `database-performance.json`. The original adoption and failure receipts are
+under `build/uninterrupted-runtime-execution/receipts/` in the integration
+worktree. Further installation or activation is prohibited by the current
+recovery instruction; the live continuity proof remains open pending a separate
+authorization.
+
 ### First adoption from a legacy runtime
 
 A backend without stable provider ownership cannot transfer its process-local
@@ -212,6 +307,18 @@ legacy drain failure can commit the new backend with `requires_review: true`.
 Inspect its exact recovery states and tool outcomes before authenticated `resume`;
 uncertain submissions must never be replayed automatically. The fixed drain only
 becomes available after adoption.
+
+The legacy guard also refuses active native child turns or requests that have no
+registered app conversation. Listing app conversations alone cannot rule these
+out. A stopped parent can leave such children waiting on approvals that the old
+interface cannot expose. Preserve their native identifiers and evidence, then
+have the authorized supervisor finish or interrupt exactly those children using
+native controls. A separately authorized maintenance-only parent turn can perform
+that cleanup without restarting its withdrawn assignment. Do not clear activity
+flags, invent registrations, approve abandoned commands, or disconnect the shared
+provider to bypass the guard. Once the native blockers clear, explicitly reattach
+the identical target with confirmation held and issue a new guarded update;
+failed-operation evidence remains available and no new build is required.
 
 After adoption, prove a second compatible upgrade while a real supported agent
 is mid-turn: record the coordinator and executing payload change, the unchanged

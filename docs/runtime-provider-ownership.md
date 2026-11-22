@@ -5,6 +5,12 @@ contract for uninterrupted coordinator upgrades. Isolated validation does not
 mean that the installed legacy runtime supports the contract; first adoption
 is a separate operation described below.
 
+The November 22 local rollout reached build 54 after a build 52 projection
+failure and a machine reboot. Current projection is healthy, but the required
+following live upgrade with retained provider PIDs and native turns has not
+been demonstrated. See the [incident note](runtime-upgrade-incident-2026-11-22.md)
+and [current rollout evidence](runtime-updates.md#live-adoption-incident-and-reboot-recovery).
+
 ## Execution boundary
 
 A stable, provider-neutral transport owner retains the provider processes and
