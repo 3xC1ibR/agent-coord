@@ -101,6 +101,31 @@ continuations uncertain. Inspect native execution and external tools before an
 explicit maintenance `resume`. Do not mistake backend activation for completed
 cleanup or resume uncertain actions blindly.
 
+The old runtime proves a clean stop only after its bookkeeping drain saves every
+required write. The drain has no sequence barrier: completion and disconnect
+events that stopping providers emit while it drains belong to the same shutdown.
+Drain writes use foreground writer admission with a one-second wait, instead of
+the 100 ms background admission that starves behind sustained foreground writers.
+The drain shares one 20-second monotonic budget with provider shutdown, leaving
+the remainder of the supervisor's 30-second deadline to stop the worker, finalize
+recovery and write the exit proof. Optional derived work keeps its rotation slot
+but cannot extend the drain. An unsaved search seed or backfill step is rebuilt
+later and does not make the stop unclean. Unsaved required writes still withhold
+the proof, so the supervisor keeps the update paused for review.
+
+Each update records `update.shutdown`, a content-free drain measurement. It
+includes clean status, drain and stop seconds, the remaining deadline, the
+initial backlog and submissions while closing, required writes and up to ten keys,
+the oldest required age, unsaved optional writes, failed keys, the in-flight key,
+retries, and worker exit. It also records writer state at the moment before stop:
+active operation and duration, queue depth, admission timeouts, and recent
+timeout and slow-scope records. An unclean drain also logs that report.
+
+While a committed update awaits review, rejected HTTP, CLI, hook and MCP requests
+return that state instead of "Try again shortly": waiting will not resume work.
+Coordination requests report `RuntimeRequestUnavailable`. The hold and its status
+explanation survive restart and reattachment until an explicit resume.
+
 After inspecting tool outcomes, authenticated maintenance `resume` records the
 review decision durably and clears the runtime's pause warning before reopening
 admissions. A later restart preserves that decision. Uncertain conversation

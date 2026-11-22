@@ -519,20 +519,94 @@ class BrowserPersistenceTests(unittest.TestCase):
             persistence.submit(history, key="history")
             persistence.submit(hold, key="other")
         self.assertTrue(holding.wait(1))
-        with patch.object(persistence, "flush", return_value=False):
-            with self.assertLogs("agent_coord.browser_persistence", level="WARNING"):
-                closer = threading.Thread(target=persistence.close)
-                closer.start()
-                try:
-                    with persistence.condition:
-                        self.assertTrue(persistence.condition.wait_for(lambda: persistence.stopped, timeout=1))
-                finally:
-                    release.set()
-                    closer.join(2)
+        # An exhausted shutdown budget stops without waiting for required work.
+        with self.assertLogs("agent_coord.browser_persistence", level="WARNING"):
+            closer = threading.Thread(target=lambda: persistence.close(timeout=0))
+            closer.start()
+            try:
+                with persistence.condition:
+                    self.assertTrue(persistence.condition.wait_for(lambda: persistence.stopped, timeout=1))
+            finally:
+                release.set()
+                closer.join(2)
         self.assertFalse(closer.is_alive())
         self.assertEqual(closed, [(persistence.worker.ident, 0, False)])
         self.assertFalse(persistence.worker.is_alive())
         self.assertFalse(persistence.flush(timeout=0, key="history"))
+
+    def test_close_drains_required_work_submitted_while_closing(self):
+        # Production shape: a history save submits its derived search seed and
+        # a provider completion while shutdown drains. The seed is briefly busy.
+        import time
+        persistence = BrowserPersistence(retry_delay=.05)
+        self.addCleanup(persistence.close)
+        saved, attempts = [], {"search": 0, "completion": 0}
+
+        def search():
+            attempts["search"] += 1
+            if attempts["search"] < 4:
+                raise sqlite3.OperationalError("database is locked")
+            saved.append("search")
+
+        def completion():
+            attempts["completion"] += 1
+            if attempts["completion"] < 3:
+                raise sqlite3.OperationalError("database is locked")
+            saved.append("completion")
+
+        def history():
+            while not persistence.closing:
+                time.sleep(.005)  # These writes arrive after shutdown begins.
+            yield
+            persistence.submit(search, key=("history_search", "conversation"), required=False)
+            persistence.submit(completion, key="late-provider-event")
+            yield
+            saved.append("history")
+
+        persistence.submit(history, key="conversation")
+        with self.assertLogs("agent_coord.browser_persistence", level="WARNING") as logs:
+            report = persistence.close()
+        self.assertNotIn("unsaved", "\n".join(logs.output))
+        self.assertTrue(report["clean"], report)
+        self.assertIn("completion", saved)
+        self.assertEqual(report["required_writes"], 0)
+        self.assertEqual(report["submitted_while_closing"], 2)
+        self.assertGreaterEqual(report["retries_while_closing"], 2)
+        self.assertTrue(report["worker_stopped"])
+        self.assertIs(persistence.close(), report)
+
+    def test_close_reports_unsaved_required_work_with_stop_evidence(self):
+        persistence = BrowserPersistence(retry_delay=.01)
+        self.addCleanup(persistence.close)
+
+        def contended():
+            raise sqlite3.OperationalError("database is locked")
+
+        persistence.submit(contended, key="conversation")
+        persistence.submit(lambda: None, key=("history_search", "conversation"), required=False)
+        observed = []
+        with self.assertLogs("agent_coord.browser_persistence", level="WARNING") as logs:
+            report = persistence.close(timeout=.2, diagnostics=lambda: observed.append(persistence.stopped) or {"queue_depth": 3})
+        self.assertEqual(observed, [False])  # Evidence describes the moment before stop.
+        self.assertFalse(report["clean"])
+        self.assertEqual(report["required_keys"], ["conversation"])
+        self.assertEqual(report["required_writes"], 1)
+        self.assertGreater(report["oldest_required_age_seconds"], .1)
+        self.assertGreater(report["retries_while_closing"], 0)
+        self.assertEqual(report["writer"], {"queue_depth": 3})
+        self.assertIn('"required_keys": ["conversation"]', "\n".join(logs.output))
+
+    def test_close_shares_its_caller_deadline_and_ignores_unsaved_optional_work(self):
+        import time
+        persistence = BrowserPersistence(retry_delay=.01)
+        self.addCleanup(persistence.close)
+        persistence.submit(lambda: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+                           key=("search_substrings",), required=False)
+        started = time.monotonic()
+        report = persistence.close(timeout=30, deadline=started + .1)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(report["clean"], report)
+        self.assertEqual(report["optional_writes_unsaved"], 1)
 
     def test_busy_codes_and_python_310_fallback(self):
         error = sqlite3.OperationalError("localized error")

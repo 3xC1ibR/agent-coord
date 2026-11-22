@@ -841,7 +841,8 @@ def _handler(
             self._start_metrics("POST")
             with browser_sessions.admission.enter() as admitted:
                 if not admitted:
-                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Runtime maintenance is pausing new work. Try again shortly."})
+                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": browser_sessions.admission.message(
+                        "Runtime maintenance is pausing new work. Try again shortly.")})
                     return
                 try:
                     self._admitted_POST()

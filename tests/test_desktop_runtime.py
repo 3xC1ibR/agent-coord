@@ -492,9 +492,68 @@ Runtime.status = _status_with_barrier
         self.assertTrue(current["update"]["requires_review"])
         self.assertEqual(current["update"]["recovery"]["counts"], {"uncertain": 1})
         self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
+        self.assert_review_notice(current)
         runtime.control(runtime.discover(self.database), "stop")
         self.wait(lambda: runtime.owner_available(runtime.runtime_directory(self.database)))
-        self.assertTrue(self.launch(candidate)["paused"])
+        restarted = self.launch(candidate)
+        self.assertTrue(restarted["paused"])
+        self.assert_review_notice(restarted)
+
+    def assert_review_notice(self, status):
+        # A committed update awaiting review is not transient maintenance.
+        with self.assertRaises(urllib.error.HTTPError) as rejected:
+            self.api(status["url"], "api/browser/sessions", {"cwd": str(self.root)})
+        self.assertEqual(rejected.exception.code, 503)
+        self.assertEqual(json.load(rejected.exception)["error"], runtime.REVIEW_NOTICE)
+        rejected.exception.close()
+        failure = runtime.control(runtime.discover(self.database), "client-request", request={})["failure"]
+        self.assertEqual(failure, {"type": "RuntimeRequestUnavailable", "message": runtime.REVIEW_NOTICE})
+        self.assertIn("shutdown was incomplete", runtime.control(runtime.discover(self.database), "status")["upgrade_error"])
+
+    def test_bookkeeping_accepted_during_shutdown_drain_completes_update_cleanly(self):
+        # agent-coord-clfw: provider events arriving after the drain begins,
+        # briefly busy, previously left the update paused for review.
+        self.env["RIBBON_FAKE_PERSIST"] = "1"
+        source = self.resources / "backend/agent_coord/codex_app_server.py"
+        source.write_text(source.read_text() + """
+import os as _os, pathlib as _pathlib, sqlite3 as _sqlite3, threading as _threading, time as _time
+_original_close_components = BrowserSessions._close_components
+def _close_with_late_bookkeeping(self):
+    persistence, attempts, closing = self.persistence, [], _threading.Event()
+    def late():
+        attempts.append(1)
+        if len(attempts) < 4:
+            raise _sqlite3.OperationalError("database is locked")
+        (_pathlib.Path(_os.environ["RIBBON_FAKE_ROOT"]) / "late-bookkeeping-saved").touch()
+    def earlier():
+        closing.wait(10)
+        _time.sleep(.2)  # The drain is already waiting when this event arrives.
+        persistence.submit(late, key="late-provider-event")
+    original_close = persistence.close
+    def close(*args, **kwargs):
+        closing.set()
+        return original_close(*args, **kwargs)
+    persistence.close = close
+    persistence.submit(earlier, key="earlier-provider-event")
+    return _original_close_components(self)
+BrowserSessions._close_components = _close_with_late_bookkeeping
+""")
+        first, record, thread, staged, _ = self.prepare_requested_update(message="held-work")
+        runtime.control(record, "activate-update", request_id="late-bookkeeping-update", payload=staged["pending"])
+        self.wait_update("committed")
+        # Admission stays closed only while the recovery decision runs.
+        self.wait(lambda: runtime.control(runtime.discover(self.database), "status")["update"]["recovery"]["counts"] == {"continued": 1})
+        current = runtime.control(runtime.discover(self.database), "status")
+        self.assertFalse(current["paused"], current["update"])
+        self.assertFalse(current["update"].get("requires_review", False))
+        self.assertFalse(current["update"].get("recovery_uncertain", False))
+        shutdown = current["update"]["shutdown"]
+        self.assertTrue(shutdown["clean"], shutdown)
+        self.assertGreaterEqual(shutdown["submitted_while_closing"], 1)
+        self.assertGreaterEqual(shutdown["retries_while_closing"], 3)
+        self.assertIn("queue_depth", shutdown["writer"])
+        self.assertTrue((self.root / "late-bookkeeping-saved").exists())
+        self.assertNotIn("did not stop cleanly", self.log())
 
     def test_reviewed_resume_is_durable_without_replaying_uncertain_work(self):
         self.env["RIBBON_FAKE_PERSIST"] = "1"
@@ -510,6 +569,9 @@ Runtime.status = _status_with_barrier
         record = runtime.discover(self.database)
         resumed = runtime.control(record, "resume")
         self.assertFalse(resumed["paused"])
+        # Admission now accepts requests; this empty one fails validation instead.
+        self.assertEqual(runtime.control(record, "client-request", request={})["failure"]["message"],
+                         "Invalid runtime client request.")
         self.assertFalse(resumed["update"]["requires_review"])
         self.assertTrue(resumed["update"]["recovery_uncertain"])
         self.assertIsNone(resumed["upgrade_error"])

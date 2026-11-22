@@ -6,6 +6,8 @@ from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 
 from test_codex_app_server import FakeCodex
@@ -78,6 +80,55 @@ class BookkeepingOwnershipTests(unittest.TestCase):
             self.child_event("turn/started", "broken-app")
             self.assertFalse(self.sessions.persistence.flush())
         self.assertIn("not registered", self.sessions.persistence.failure("broken-app"))
+
+
+class ShutdownDrainTests(unittest.TestCase):
+    def test_provider_events_emitted_while_closing_are_saved_with_foreground_priority(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = CoordinationStore(Path(temporary.name) / "state.sqlite3")
+        runtime._OWNED_DATABASES.add(str(store.database_path.resolve()))
+        self.addCleanup(runtime._OWNED_DATABASES.discard, str(store.database_path.resolve()))
+        sessions = BrowserSessions(store, temporary.name, rpc_factory=FakeCodex)
+        self.addCleanup(sessions.close)
+        thread = sessions.create({})["session"]["thread_id"]
+        sessions.send(thread, {"message": "Interrupted by the update"})
+        sessions._await_persistence(thread)
+        attempts, delivered = [], threading.Event()
+
+        def late_completion():
+            # Provider output delivered after the drain began, first seen busy.
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise sqlite3.OperationalError("database is locked")
+
+        def provider_reader():
+            with sessions.persistence.condition:
+                self.assertTrue(sessions.persistence.condition.wait_for(lambda: sessions.persistence.closing, timeout=5))
+            sessions.persistence.submit(late_completion, key=thread)
+            delivered.set()
+
+        close_provider = sessions.rpc.close
+        def close_with_late_event():
+            close_provider()
+            reader = threading.Thread(target=provider_reader)
+            reader.start()
+            self.addCleanup(reader.join)
+            # Earlier bookkeeping is still saving when the late event arrives.
+            sessions.persistence.submit(lambda: delivered.wait(5), key="earlier-provider-event")
+        sessions.rpc.close = close_with_late_event
+        sessions.shutdown_deadline = time.monotonic() + 10
+        with self.assertLogs("agent_coord.browser_persistence", "WARNING") as logs:
+            sessions.close()
+        report = sessions.shutdown_report
+        self.assertNotIn("unsaved", "\n".join(logs.output))
+        self.assertTrue(report["clean"], report)
+        self.assertEqual(len(attempts), 3)
+        self.assertGreaterEqual(report["submitted_while_closing"], 1)
+        self.assertGreaterEqual(report["retries_while_closing"], 2)
+        self.assertLessEqual({"active_operation", "queue_depth", "admission_timeouts"}, set(report["writer"]))
+        self.assertIn("persistence.drain", store.database_metrics()["operations"])
+        self.assertIsNotNone(store.get_session(thread)["ended_at"])
 
 
 class BookkeepingUpdateProcessTests(unittest.TestCase):

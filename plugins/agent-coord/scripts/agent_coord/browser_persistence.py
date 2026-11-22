@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import sqlite3
 import threading
@@ -58,6 +59,11 @@ class BrowserPersistence:
     Optional telemetry failures are logged and do not prevent later lifecycle work.
     Storage exhaustion retains the idempotent write and retries with a longer
     backoff, so restoring capacity recovers without resubmitting provider work.
+
+    Close drains every required write, including writes accepted while it
+    drains, such as completion events from stopping providers. Optional work
+    keeps its place in rotation but does not extend the drain; unsaved optional
+    work (derived search seeding and backfill) does not make the stop unclean.
     """
 
     def __init__(self, *, retry_delay=0.25, storage_retry_delay=30, context=nullcontext, max_pending_per_key=1024):
@@ -68,6 +74,8 @@ class BrowserPersistence:
         self.sequence = 0
         self.in_flight = None
         self.stopped = False
+        self.closing = False
+        self.drain_report = None
         self.worker = None
         self.retry_delay = retry_delay
         self.storage_retry_delay = storage_retry_delay
@@ -262,11 +270,73 @@ class BrowserPersistence:
                     "oldest_age_seconds": max((time.monotonic() - write.created_at for write in pending), default=0),
                     "draining": bool(pending), "stopped": self.stopped}
 
-    def close(self):
-        if not self.flush():
-            logging.getLogger(__name__).warning("Closing with unsaved browser bookkeeping; provider history remains authoritative")
+    def _required_pending(self):
+        """Keys whose sequence can still save required work; failed keys cannot."""
+        return [key for key, queue in self.queues.items()
+                if key not in self.failures and any(write.required for write in queue)]
+
+    def close(self, timeout=5, *, deadline=None, diagnostics=None, join_timeout=6):
+        """Drain required bookkeeping and return a content-free shutdown report.
+
+        The drain has no sequence barrier: work accepted while closing is part
+        of the same shutdown. ``deadline`` is a monotonic time shared with the
+        caller's own shutdown budget. ``diagnostics`` runs after the drain and
+        before stopping, so contention evidence describes the moment of stop.
+        """
+        started = time.monotonic()
+        deadline = started + timeout if deadline is None else deadline
         with self.condition:
+            if self.stopped:
+                return self.drain_report
+            self.closing = True
+            retries, sequence = self.retries, self.sequence
+            initial = sum(len(queue) for queue in self.queues.values())
+            self.condition.notify_all()
+            self.condition.wait_for(lambda: not self._required_pending(),
+                                    timeout=max(0, deadline - time.monotonic()))
+        observed = None
+        if diagnostics is not None:
+            try:
+                observed = diagnostics()
+            except Exception:  # noqa: BLE001 -- evidence must not prevent shutdown.
+                logging.getLogger(__name__).exception("Bookkeeping drain diagnostics failed")
+        with self.condition:
+            drained = time.monotonic()
             self.stopped = True
             self.condition.notify_all()
         if self.worker is not None:
-            self.worker.join(timeout=6)
+            self.worker.join(timeout=join_timeout)
+        worker_stopped = self.worker is None or not self.worker.is_alive()
+        with self.condition:
+            # The worker has exited, so this is the final saved state.
+            now = time.monotonic()
+            required = self._required_pending()
+            pending = [write for queue in self.queues.values() for write in queue]
+            in_flight = self.in_flight
+            report = {
+                "clean": worker_stopped and not required and not self.failures,
+                "drain_seconds": round(drained - started, 3),
+                "stop_seconds": round(now - drained, 3),
+                "deadline_remaining_seconds": round(deadline - drained, 3),
+                "initial_writes": initial,
+                "submitted_while_closing": self.sequence - sequence,
+                "required_writes": sum(write.required for write in pending
+                                       if write.key not in self.failures),
+                "required_keys": [str(key) for key in required[:10]],
+                "optional_writes_unsaved": sum(not write.required for write in pending),
+                "failed_keys": [str(key) for key in list(self.failures)[:10]],
+                "failure_count": len(self.failures),
+                "oldest_required_age_seconds": round(max((now - write.created_at for write in pending
+                    if write.required and write.key not in self.failures), default=0), 3),
+                "in_flight_key": str(in_flight.key) if in_flight is not None else None,
+                "retries_while_closing": self.retries - retries,
+                "worker_stopped": worker_stopped,
+            }
+            if observed is not None:
+                report["writer"] = observed
+            self.drain_report = report
+        if not report["clean"]:
+            logging.getLogger(__name__).warning(
+                "Closing with unsaved browser bookkeeping; provider history remains authoritative: %s",
+                json.dumps(report, sort_keys=True, default=str))
+        return report

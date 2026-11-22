@@ -166,7 +166,7 @@ class ExternalWorkRuntime:
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         with self.sessions.admission.enter() as admitted:
             if not admitted:
-                raise BrowserBusyError("Runtime maintenance is pausing new work.")
+                raise BrowserBusyError(self.sessions.admission.message("Runtime maintenance is pausing new work."))
             now = self.store.clock()
             with self._write("reserve") as db:
                 inserted = db.execute("""INSERT INTO external_work

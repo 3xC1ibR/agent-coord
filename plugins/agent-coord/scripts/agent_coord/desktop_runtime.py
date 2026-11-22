@@ -31,6 +31,14 @@ import uuid
 
 PROTOCOL_VERSION = 1
 SCHEMA_VERSION = 2
+# The supervisor force-stops a runtime that has not proven exit by this time.
+UPDATE_SHUTDOWN_SECONDS = 30
+# Required bookkeeping drains within this part of that budget, leaving time to
+# stop the persistence worker, finalize recovery and write the exit proof.
+UPDATE_DRAIN_SECONDS = 20
+REVIEW_NOTICE = ("The backend update finished, but work stays paused for review because the previous "
+                 "backend could not confirm a clean shutdown. Waiting will not resume it. Inspect running "
+                 "tools, then run the runtime maintenance resume command.")
 _OWNED_DATABASES = set()
 
 if hasattr(os, "register_at_fork"):
@@ -215,6 +223,12 @@ class AdmissionGate:
         self.local = threading.local()
         self.paused = False
         self.inflight = 0
+        # A review hold does not end by waiting; rejected callers receive this
+        # state instead of transient maintenance guidance.
+        self.notice = None
+
+    def message(self, default):
+        return self.notice or default
 
     @contextmanager
     def enter(self, *, maintenance=False):
@@ -243,7 +257,7 @@ class AdmissionGate:
                     if automatic:
                         return False
                     from .codex_app_server import BrowserBusyError
-                    raise BrowserBusyError("Runtime maintenance is pausing new work. Try again shortly.")
+                    raise BrowserBusyError(self.message("Runtime maintenance is pausing new work. Try again shortly."))
                 return method(*args, **kwargs)
         setattr(target, name, admitted)
 
@@ -584,9 +598,13 @@ class Runtime:
             self.trial = False
             self.maintenance = bool(update.get("requires_review"))
             if self.maintenance:
-                self.error = "Backend updated; work remains paused because shutdown was incomplete. Inspect running tools before resuming."
+                self.hold_for_review()
             else:
                 self.resume_work()
+
+    def hold_for_review(self):
+        self.error = "Backend updated; work remains paused because shutdown was incomplete. Inspect running tools before resuming."
+        self.server.browser_sessions.admission.notice = REVIEW_NOTICE
 
     def dispatch(self, body):
         action = body.get("action")
@@ -605,8 +623,11 @@ class Runtime:
             # runtime mutex while waiting on application state or providers.
             with sessions.admission.enter() as allowed:
                 if not allowed:
+                    # Clients since October 30 classify the type; older ones
+                    # also recognize the transient message exactly.
                     return {**self.identity(), "failure": {
-                        "type": "CoordinationError", "message": "Runtime maintenance is pausing new coordination requests."}}
+                        "type": "RuntimeRequestUnavailable" if sessions.admission.notice else "CoordinationError",
+                        "message": sessions.admission.message("Runtime maintenance is pausing new coordination requests.")}}
                 return {**self.identity(), **execute_request(sessions.store, body)}
         with self.mutex:
             sessions = self.server.browser_sessions
@@ -639,7 +660,8 @@ class Runtime:
                     self.pending_confirmation = body.get("require_confirmation") is True
                 elif body.get("require_confirmation") is True:
                     self.pending_confirmation = True
-                self.error = None
+                if not sessions.admission.notice:
+                    self.error = None  # A review hold keeps its explanation until resume.
                 # Each attach selects the installed desktop, so rollback to the
                 # old desktop cancels a previously staged newer runtime.
                 from . import ui
@@ -675,6 +697,7 @@ class Runtime:
                     # resume nor a later boot replays unverified submissions.
                     runtime_update.write(self.directory, update, requires_review=False, reviewed_at=time.time())
                     self.error = None
+                sessions.admission.notice = None
                 self.maintenance = False
                 self.resume_work()
             elif action == "stop":
@@ -783,6 +806,11 @@ class Runtime:
         with self.mutex:
             if not self.maintenance:
                 self.resume_work()
+            elif not self.trial:
+                update = runtime_update.read(self.directory)
+                if update and update["phase"] in runtime_update.TERMINAL and update.get("requires_review"):
+                    # A restart preserves the review hold and its explanation.
+                    self.hold_for_review()
         if self.ready_fd is not None:
             os.write(self.ready_fd, b"ready\n")
             os.close(self.ready_fd)
@@ -864,6 +892,7 @@ class Runtime:
                             self.update_requested = runtime_update.write(self.directory, self.update_requested, phase="stopping",
                                 queue_owner=sessions.queue.owner, schedule_start=sessions.schedules.started_at)
                             self.launch_update_supervisor()
+                            sessions.shutdown_deadline = time.monotonic() + UPDATE_DRAIN_SECONDS
                         except Exception as exc:
                             runtime_update.write(self.directory, self.update_requested, phase="failed", error=str(exc))
                             self.update_requested = None
@@ -882,10 +911,15 @@ class Runtime:
             sessions.runtime_handover = candidate is not None and not self.explicit_stop
             self.server.server_close()
         if self.update_exit_fd is not None:
-            if (not sessions.persistence.flush() or
-                    (sessions.persistence.worker and sessions.persistence.worker.is_alive())):
-                raise RuntimeError("Provider bookkeeping did not stop cleanly.")
-            recovery.finalize(runtime_update.read(self.directory)["id"])
+            report = sessions.shutdown_report or {"clean": False, "reason": "The bookkeeping drain did not run."}
+            # Record the measured drain before any proof. An unclean drain
+            # leaves required writes unsaved, so recovery cannot tell completed
+            # tool effects from interrupted ones; the supervisor keeps review.
+            update = runtime_update.write(self.directory, runtime_update.read(self.directory), shutdown=report)
+            if not report["clean"]:
+                raise RuntimeError("Provider bookkeeping did not stop cleanly: "
+                                   + json.dumps(report, sort_keys=True, default=str))
+            recovery.finalize(update["id"])
             os.write(self.update_exit_fd, b"stopped\n")
             # The coordinator waits for EOF, proving every thread of this process
             # has exited before taking a database snapshot or starting a trial.
@@ -964,7 +998,7 @@ class Runtime:
         from . import runtime_update
         update = runtime_update.read(self.directory)
         self.update_requested = update
-        deadline, stopped, proof = time.monotonic() + 30, False, b""
+        deadline, stopped, proof = time.monotonic() + UPDATE_SHUTDOWN_SECONDS, False, b""
         try:
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([exit_fd], [], [], .1)

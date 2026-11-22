@@ -236,6 +236,9 @@ class BrowserSessions:
         self.history_revisions: dict[str, int] = {}
         self.usage_recovery_attempts: set[str] = set()
         self.persistence = BrowserPersistence(context=self._persistence_context)
+        # A runtime handover shares one monotonic budget with its supervisor.
+        self.shutdown_deadline = None
+        self.shutdown_report = None
         self.history_persistence = HistoryPersistence(store, on_saved=self._seed_history_search)
         self.conversation_barrier = lambda identity: self.persistence.flush(key=identity)
         self.store.conversation_barrier = self.conversation_barrier
@@ -332,11 +335,29 @@ class BrowserSessions:
 
     @contextmanager
     def _persistence_context(self):
+        if self.persistence.closing:
+            # The shutdown drain is the handover's critical path. A background
+            # entry with a short deadline starves behind sustained foreground
+            # writers and loses its queue position on every retry.
+            with self.store.connection_timeout(1000), self.store.database_operation("persistence.drain"):
+                yield
+            return
         # A zero admission timeout continually forfeits the writer queue's
         # fairness under foreground traffic. Keep this wait finite, while
         # allowing accepted background work to take its scheduled turn.
         with self.store.connection_timeout(100), self.store.database_operation("persistence", priority="background"):
             yield
+
+    def _writer_diagnostics(self):
+        """Content-free writer contention evidence for a bookkeeping drain."""
+        metrics = self.store.database_metrics()
+        evidence = {key: metrics[key] for key in ("active_operation", "active_duration_ms", "queue_depth",
+                                                  "maximum_queue_depth", "admission_timeouts")}
+        evidence["recent_admission_timeouts"] = metrics["admission_timeout_records"][-4:]
+        evidence["recent_slow_writer_scopes"] = [
+            {key: scope.get(key) for key in ("operation", "duration_ms", "off_cpu_ms")}
+            for scope in metrics["slow_writer_scopes"][-4:]]
+        return evidence
 
     def _thread_lock(self, thread_id: str):
         with self.lock:
@@ -2758,7 +2779,8 @@ class BrowserSessions:
             if self.history_rpc is not None:
                 self.history_rpc.close()
                 self.history_rpc = None
-        self.persistence.close()
+        self.shutdown_report = self.persistence.close(deadline=self.shutdown_deadline,
+                                                      diagnostics=self._writer_diagnostics)
         if getattr(self.store, "conversation_barrier", None) is self.conversation_barrier:
             del self.store.conversation_barrier
         self.execution.close()
