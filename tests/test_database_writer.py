@@ -18,6 +18,7 @@ from agent_coord import database_writer as writer_module
 from agent_coord.store import CoordinationStore
 from agent_coord.store import CoordinationError
 from agent_coord.database_writer import DatabaseWriter
+from agent_coord.sqlite_compatibility import SQLITE_BUSY, SQLITE_CANTOPEN
 from unittest.mock import patch
 
 
@@ -75,7 +76,7 @@ class DatabaseWriterTests(unittest.TestCase):
                 with self.assertRaises(sqlite3.OperationalError) as caught:
                     with self.store.connection_timeout(0), self.store._connection():
                         self.fail('contending writer admitted')
-                self.assertEqual(caught.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY)
+                self.assertEqual(caught.exception.sqlite_errorcode, SQLITE_BUSY)
                 metrics = self.store.database_metrics()
                 self.assertEqual(metrics['queue_depth'], 0)
                 record = metrics['admission_timeout_records'][-1]
@@ -200,7 +201,7 @@ class DatabaseWriterTests(unittest.TestCase):
                       if item['phase'] == 'transaction.commit')
         self.assertEqual(record['duration_ms'], 80)
         self.assertEqual(record['failed'], 1)
-        self.assertEqual(record['error_code'], caught.exception.sqlite_errorcode)
+        self.assertEqual(record['error_code'], getattr(caught.exception, 'sqlite_errorcode', 0))
         self.assertEqual(record['transaction_open'], 1)
         self.assertIsNone(self.store.database_metrics()['active_operation'])
 
@@ -350,7 +351,7 @@ class DatabaseWriterTests(unittest.TestCase):
         self.store._idle_connections.holder.discard()
         clock = [100.0]
         error = sqlite3.OperationalError('private database path')
-        error.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+        error.sqlite_errorcode = SQLITE_CANTOPEN
 
         def failed_connect(*args, **kwargs):
             clock[0] += .08
@@ -365,7 +366,7 @@ class DatabaseWriterTests(unittest.TestCase):
         metrics = self.store.database_metrics()
         opened = next(record for record in metrics['slow_operations'] if record['phase'] == 'connection.open')
         self.assertEqual(opened['failed'], 1)
-        self.assertEqual(opened['error_code'], sqlite3.SQLITE_CANTOPEN)
+        self.assertEqual(opened['error_code'], SQLITE_CANTOPEN)
         self.assertEqual(opened['connection_id'], 0)
         self.assertIsNone(metrics['active_scope_id'])
         self.assertNotIn('private database path', repr(metrics))

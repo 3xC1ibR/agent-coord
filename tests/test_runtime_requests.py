@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coor
 from agent_coord import cli, desktop_runtime as runtime, runtime_requests as requests
 from agent_coord.context import caller_directory, caller_environment, caller_session, request_ownership
 from agent_coord.store import ConflictError, CoordinationError, CoordinationStore
+from agent_coord.sqlite_compatibility import SQLITE_BUSY
 
 
 class RuntimeRequestsTests(unittest.TestCase):
@@ -271,7 +272,7 @@ finally:
             with self.assertRaises(sqlite3.OperationalError) as raised:
                 with requests.owner_operation(self.store.database_path, timeout=0):
                     self.fail("another request owns this operation")
-            self.assertEqual(raised.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY)
+            self.assertEqual(raised.exception.sqlite_errorcode, SQLITE_BUSY)
             return time.monotonic() - started
         with ThreadPoolExecutor(max_workers=1) as pool:
             with requests.owner_operation(self.store.database_path):
@@ -322,7 +323,7 @@ os.close(fd)
                 with self.assertRaises(sqlite3.OperationalError) as raised:
                     with self.store._connection():
                         self.fail("owner is still held")
-            self.assertEqual(raised.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY)
+            self.assertEqual(raised.exception.sqlite_errorcode, SQLITE_BUSY)
             discover.assert_not_called()
         finally:
             os.close(descriptor)
