@@ -47,10 +47,15 @@ class ThreadPreviewTests(unittest.TestCase):
         for closed in (False, True):
             if closed:
                 self.store.threads.update(thread_id, attention="archived")
+            # Session creation queues an execution snapshot write. Compare
+            # saved state only after queued bookkeeping, including any the
+            # preview itself might queue, has been written.
+            self.assertTrue(self.sessions.persistence.flush())
             before = self.store.threads.get(thread_id)
             calls = list(self.sessions.rpc.calls)
             self.assertEqual(thread_preview(self.sessions, thread_id)["latest_message"]["text"], "Latest result")
             self.assertEqual(self.sessions.rpc.calls, calls)
+            self.assertTrue(self.sessions.persistence.flush())
             self.assertEqual(self.store.threads.get(thread_id), before)
             self.assertNotIn(thread_id, self.sessions.loaded)
 
