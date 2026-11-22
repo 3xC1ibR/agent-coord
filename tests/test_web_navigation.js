@@ -1,9 +1,60 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const {parse, safe, initialLink, pageURL, Router} = require("../plugins/agent-coord/scripts/agent_coord/web/navigation.js");
+const {parse, safe, initialLink, pageURL, HistoryNavigation, Router} = require("../plugins/agent-coord/scripts/agent_coord/web/navigation.js");
 const markdown = require("../plugins/agent-coord/scripts/agent_coord/web/markdown.js");
 const request = "11111111-1111-4111-8111-111111111111";
+
+function historyNavigationFixture() {
+  const listeners = new Map(), opened = [], restored = [];
+  const view = {history: {state: null}, addEventListener: (type, listener) => listeners.set(type, listener)};
+  const navigation = new HistoryNavigation(view);
+  const router = {open: async (...args) => opened.push(args), back: async snapshot => restored.push(snapshot)};
+  const fragment = hash => listeners.get("hashchange")({newURL: "https://mac.example/" + hash});
+  return {view, navigation, router, opened, restored, fragment, listeners};
+}
+
+test("native notification fragment opens its conversation after the page is ready", async () => {
+  const f = historyNavigationFixture();
+  await f.navigation.ready(f.router);
+  f.listeners.get("popstate")({state: null});
+  f.fragment("#notification-thread");
+  assert.deepEqual(f.opened, [["agentcoord://thread/notification-thread", {push: false}]]);
+  assert.deepEqual(f.restored, []);
+});
+
+test("notification taps during startup wait for restoration and keep the latest destination", async () => {
+  const f = historyNavigationFixture();
+  f.fragment("#first-thread");
+  f.fragment("#second-thread");
+  assert.deepEqual(f.opened, []);
+  // Startup can rewrite the current URL/history without losing the queued tap.
+  f.view.history.state = {agentCoord: {thread: "restored-thread"}};
+  await f.navigation.ready(f.router);
+  assert.deepEqual(f.opened, [["agentcoord://thread/second-thread", {push: false}]]);
+  await f.navigation.ready(f.router);
+  assert.equal(f.opened.length, 1);
+});
+
+test("Back and Forward restore full snapshots without duplicate fragment navigation", async () => {
+  const f = historyNavigationFixture();
+  await f.navigation.ready(f.router);
+  const snapshot = {thread: "previous-thread", directory: "/work", filters: {search: "retained"}};
+  f.view.history.state = {agentCoord: snapshot};
+  f.listeners.get("popstate")({state: f.view.history.state});
+  f.fragment("#previous-thread");
+  assert.deepEqual(f.restored, [snapshot]);
+  assert.deepEqual(f.opened, []);
+});
+
+test("notification fragments accept only bounded thread identities", async () => {
+  const f = historyNavigationFixture();
+  await f.navigation.ready(f.router);
+  for (const hash of ["", "#", "#%E0%A4%A", "#thread%2Fother", "#<script>", "#" + "a".repeat(201)]) f.fragment(hash);
+  assert.deepEqual(f.opened, []);
+  f.fragment("#thread%2D1");
+  assert.deepEqual(f.opened, [["agentcoord://thread/thread-1", {push: false}]]);
+});
 
 test("dispatcher URLs retain the opt-in page and selected worker without changing overview URLs", () => {
   const base = {directory: "/work", viewId: "all", filters: {}, thread: null};
