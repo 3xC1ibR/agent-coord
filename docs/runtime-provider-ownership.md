@@ -5,6 +5,13 @@ contract for uninterrupted coordinator upgrades. Isolated validation does not
 mean that the installed legacy runtime supports the contract; first adoption
 is a separate operation described below.
 
+The November 22 build 60-to-62 update supplied observed continuity evidence for
+sampled Codex and Claude work: retained provider PIDs, native execution, long
+tools, pending approvals and submission identity. The earlier build 52 adoption
+and build 54 reboot recovery interrupted execution. See the
+[incident note](runtime-upgrade-incident-2026-11-22.md) and
+[current rollout evidence](runtime-updates.md#observed-following-upgrade).
+
 ## Execution boundary
 
 A stable, provider-neutral transport owner retains the provider processes and
