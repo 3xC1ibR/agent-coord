@@ -2345,10 +2345,17 @@ class BrowserSessions:
 
     def read(self, thread_id: str, *, recent: bool = False, snapshot: bool = False) -> dict:
         """Read a conversation; ``recent`` returns only the view for opening it."""
-        if not self.store.threads.is_browser_session(thread_id):
-            return self._read_external_snapshot(self.work_thread(thread_id), recent=recent)
-        if recent or snapshot:
-            return self._read_snapshot(thread_id, recent=recent)
+        with self.store.reading():
+            if self.store.threads.is_browser_session(thread_id):
+                if recent or snapshot:
+                    return self._read_snapshot(thread_id, recent=recent)
+                external = None
+            else:
+                external = self.work_thread(thread_id)
+        if external is not None:
+            # The history-only provider request journals its command and response.
+            # The conversation's own database reads stay query-only.
+            return self._read_external_snapshot(external, recent=recent)
         with self._thread_lock(thread_id):
             with self.lock:
                 revision = self.turn_revisions.get(thread_id, 0)
@@ -2394,9 +2401,11 @@ class BrowserSessions:
                 thread["historyError"] = "Saved conversation history could not be read: " + str(exc)
         if recent:
             thread = recent_view(thread)
+        with self.store.reading():
+            messages = message_timeline(self.store, thread_id, self.cwd)
         return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
                 "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
-                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "coordinationMessages": messages,
                 "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
     def _read_snapshot(self, thread_id: str, *, recent: bool = True) -> dict:

@@ -285,6 +285,32 @@ def decode_history(serialized, *, database_path=None, db=None):
     return read("rw")
 
 
+def saved_turn_status(store, thread_id, turn_id):
+    """Look up an outcome in one published root without loading archived item bodies."""
+    with store.reading(), store._connection() as db:
+        db.execute("BEGIN")
+        row = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
+        if not row:
+            return None
+        root = json.loads(row[0])
+        if MARKER not in root:
+            turns = root.get("turns", [])
+        elif root.get(MARKER) == 1 and root.get("layout") == "turns":
+            try:
+                references = _documents(db, [root["root"]])[0]["turns"]
+                for end in range(len(references), 0, -READ_CHUNKS):
+                    batch = references[max(0, end - READ_CHUNKS):end]
+                    for turn in reversed(_documents(db, batch)):
+                        if turn["metadata"]["id"] == turn_id:
+                            return turn["metadata"].get("status")
+                return None
+            except (KeyError, TypeError) as exc:
+                raise HistoryUnavailableError("Saved conversation has an invalid turn manifest.") from exc
+        else:
+            turns = _decode(db, root).get("turns", [])
+        return next((turn.get("status") for turn in reversed(turns) if turn.get("id") == turn_id), None)
+
+
 def read_history(store, thread_id):
     """Read the root and its complete history in one snapshot, without a writer."""
     with store.reading(), store._connection() as db:

@@ -11,6 +11,7 @@ from collections.abc import Iterator
 import copy
 import json
 import logging
+import sqlite3
 import threading
 import time
 import uuid
@@ -18,6 +19,7 @@ import zlib
 
 from .browser_persistence import capture_writes
 from .provider_transport import Client, TransportError
+from .history_persistence import saved_turn_status
 
 VERSION = 1
 BROWSER_FIELDS = ("sequence", "turn_revisions", "requests", "active", "loaded", "loaded_clients",
@@ -86,6 +88,7 @@ class CoordinatorProjection:
         self.error = None
         self.delivery_error = None
         self.prepared_histories = {}
+        self.restored_completions = deque()
         self.in_event = threading.local()
         with self.store._connection() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS coordinator_projection (
@@ -100,16 +103,19 @@ class CoordinatorProjection:
                 channel TEXT PRIMARY KEY, provider TEXT NOT NULL, thread_id TEXT,
                 role TEXT NOT NULL, pid INTEGER, closed INTEGER NOT NULL DEFAULT 0)""")
 
-    def state(self, *, durable=False, affected=None):
+    def state(self, *, durable=False, affected=None, published_completions=()):
         sessions = self.sessions
         browser = {name: copy.deepcopy(getattr(sessions, name)) for name in BROWSER_FIELDS if name != "histories"}
         if not durable:
             browser["histories"] = {identity: copy.deepcopy(value) if affected is None or identity in affected else value
                                     for identity, value in sessions.histories.items()}
+        claude = {name: copy.deepcopy(getattr(sessions.claude, name)) for name in CLAUDE_FIELDS if name != "completed"}
+        claude["completed"] = {identity: copy.deepcopy(turn) for identity, turn in sessions.claude.completed.items()
+                               if identity not in published_completions}
         return {"version": VERSION,
             "browser": browser,
             "events": [] if durable else list(sessions.events),
-            "claude": {name: copy.deepcopy(getattr(sessions.claude, name)) for name in CLAUDE_FIELDS},
+            "claude": claude,
             "codex": {"next_id": sessions.rpc.next_id, "ready": sessions.rpc.ready,
                       "initialized_response": getattr(sessions.rpc, "initialized_response", False),
                       "pending_methods": copy.deepcopy(getattr(sessions.rpc, "pending_methods", {}))},
@@ -159,6 +165,10 @@ class CoordinatorProjection:
             raise TransportError("The saved coordinator projection does not match the surviving transport.")
         state = unpack(json.loads(zlib.decompress(row["state"])))
         self.restore(state)
+        # Earlier versions also checkpointed turns already published in history.
+        # Verify those copies incrementally after readiness, outside the session lock.
+        self.restored_completions = deque((identity, turn["id"], turn["status"])
+                                          for identity, turn in self.sessions.claude.completed.items())
         # Histories are durable independently of the provider projection. The
         # normal event and read paths load them on demand; eagerly decoding all
         # loaded conversations can exceed readiness before any work can resume.
@@ -222,8 +232,8 @@ class CoordinatorProjection:
         value = {"args": args, "env": env, "cwd": cwd}
         role = "history" if provider == "codex" and getattr(callback, "__self__", None) is not self.sessions.rpc else "main"
         with self.lock:
-            prepared = self.prepare_histories()
-            encoded, value_json = self._encoded(), json.dumps(value)
+            prepared, completions, encoded = self.prepare_checkpoint()
+            value_json = json.dumps(value)
             with self.store.database_operation("coordinator.open"), self.store._connection() as db:
                 self.publish_histories(db, prepared)
                 self._save(db, encoded, self.cursor)
@@ -231,27 +241,37 @@ class CoordinatorProjection:
                            (channel, provider, thread_id, role))
                 db.execute("INSERT INTO coordinator_commands VALUES (?,?,?,?, 'pending',NULL)",
                            (identity, channel, "open", value_json))
-            self.remember_histories(prepared)
+            self.remember_histories(prepared, completions)
         result = self.deliver(identity, channel, "open", value)
         return self.attach(channel, result["pid"], callback, provider=provider, thread_id=thread_id)
 
-    def _encoded(self):
-        return zlib.compress(json.dumps(pack(self.state(durable=True)), separators=(",", ":")).encode(), level=1)
-
-    def prepare_histories(self):
+    def prepare_checkpoint(self):
         from .history_persistence import prepare_history, stage_history
         prepared = {identity: prepare_history(self.sessions.histories[identity], previous=self.prepared_histories.get(identity))
                     for identity in self.sessions.dirty_histories if identity in self.sessions.histories}
         for history in prepared.values():
             stage_history(self.store, history)
-        return prepared
+        # These roots and the projection commit together. Exclude only a matching
+        # terminal outcome, and keep the live recovery copy until commit succeeds.
+        completions = {}
+        for identity in prepared:
+            completed = self.sessions.claude.completed.get(identity)
+            if completed and completed["status"] in {"completed", "failed", "interrupted"} and any(
+                    turn.get("id") == completed["id"] and turn.get("status") == completed["status"]
+                    for turn in reversed(self.sessions.histories[identity].get("turns", []))):
+                completions[identity] = {completed["id"]: completed["status"]}
+        state = self.state(durable=True, published_completions=completions)
+        encoded = zlib.compress(json.dumps(pack(state), separators=(",", ":")).encode(), level=1)
+        return prepared, completions, encoded
 
     def publish_histories(self, db, prepared):
         from .history_persistence import publish_history
         for identity, history in prepared.items():
             publish_history(db, identity, history)
 
-    def remember_histories(self, prepared):
+    def remember_histories(self, prepared, completions):
+        for identity, outcome in completions.items():
+            self.sessions.claude.discard_persisted_completion(identity, outcome)
         self.sessions.dirty_histories.difference_update(prepared)
         for identity, history in prepared.items():
             # Keep bounded immutable item values so unchanged archive items can
@@ -290,12 +310,11 @@ class CoordinatorProjection:
 
     def checkpoint(self):
         with self.lock, self.sessions.claude.lock, self.sessions.lock:
-            prepared = self.prepare_histories()
-            encoded = self._encoded()
+            prepared, completions, encoded = self.prepare_checkpoint()
             with self.store.database_operation("coordinator.checkpoint"), self.store._connection() as db:
                 self.publish_histories(db, prepared)
                 self._save(db, encoded, self.cursor)
-            self.remember_histories(prepared)
+            self.remember_histories(prepared, completions)
 
     def write(self, channel, message):
         self.write_registered(channel, lambda: message)
@@ -313,14 +332,14 @@ class CoordinatorProjection:
                 self.in_event.commands.append((identity, channel, "write", json.dumps(value)))
                 return  # Dispatch only after this event and its command commit.
             identity = "initialized:" + channel if message.get("method") == "initialized" else uuid.uuid4().hex
-            prepared = self.prepare_histories()
-            encoded, value_json = self._encoded(), json.dumps(value)
+            prepared, completions, encoded = self.prepare_checkpoint()
+            value_json = json.dumps(value)
             with self.store.database_operation("coordinator.command"), self.store._connection() as db:
                 self.publish_histories(db, prepared)
                 self._save(db, encoded, self.cursor)
                 db.execute("INSERT OR IGNORE INTO coordinator_commands VALUES (?,?,?,?, 'pending',NULL)",
                            (identity, channel, "write", value_json))
-            self.remember_histories(prepared)
+            self.remember_histories(prepared, completions)
         self.deliver(identity, channel, "write", value)
 
     def deliver(self, identity, channel, operation, value):
@@ -441,8 +460,7 @@ class CoordinatorProjection:
                     # Histories and the replay cursor share the same snapshot.
                     # Metadata callbacks are finite and borrow this transaction;
                     # nested callbacks append to this list before it is exhausted.
-                    prepared = self.prepare_histories()
-                    encoded = self._encoded()
+                    prepared, published_completions, encoded = self.prepare_checkpoint()
                     with self.store.database_operation("coordinator.project"), self.store._connection() as db:
                         db.execute("BEGIN IMMEDIATE")
                         with self.store.sharing_transaction(db):
@@ -473,7 +491,7 @@ class CoordinatorProjection:
                     self.sessions.sequence = sequence
                 if self.in_event.publications:
                     self.sessions.changed.notify_all()
-                self.remember_histories(prepared)
+                self.remember_histories(prepared, published_completions)
                 commands = list(self.in_event.commands)
                 completions = list(self.in_event.completions)
             except Exception:
@@ -498,9 +516,23 @@ class CoordinatorProjection:
         if getattr(self.sessions.rpc, "process", None) is not None and not self.sessions.rpc.ready:
             self.sessions.rpc.start()
 
+    def reconcile_restored_completion(self):
+        identity, turn_id, status = self.restored_completions.popleft()
+        if status not in {"completed", "failed", "interrupted"}:
+            return
+        try:
+            saved = saved_turn_status(self.store, identity, turn_id)
+        except (ValueError, sqlite3.Error):
+            logging.getLogger(__name__).warning("Retaining an unverified recovery turn", exc_info=True)
+            return
+        if saved == status:
+            self.sessions.claude.discard_persisted_completion(identity, {turn_id: status})
+
     def _run(self):
         while not self.stopped.is_set():
             try:
+                if self.restored_completions:
+                    self.reconcile_restored_completion()
                 if self.delivery_error and time.monotonic() >= getattr(self, "next_reconciliation", 0):
                     self.next_reconciliation = time.monotonic() + 1
                     self.recover_commands()

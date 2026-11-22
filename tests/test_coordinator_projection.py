@@ -6,6 +6,8 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import urllib.request
+import zlib
 from concurrent.futures import Future
 from unittest.mock import patch
 
@@ -93,6 +95,85 @@ class ProjectionTests(unittest.TestCase):
             self.assertNotEqual(db.execute("SELECT name FROM browser_sessions WHERE thread_id=?", (self.identity,)).fetchone()[0], "uncommitted")
         self.projection.project(event)
         self.assertEqual(self.projection.cursor, 1)
+
+    def test_only_committed_matching_completions_leave_recovery_state(self):
+        from agent_coord.history_persistence import read_history
+        completed = {"id": self.turn_id, "status": "completed", "items": []}
+        self.sessions.claude.completed[self.identity] = copy.deepcopy(completed)
+        self.sessions.histories[self.identity] = {"id": self.identity, "turns": [{**completed, "status": "failed"}]}
+        self.sessions._dirty_history(self.identity)
+        self.projection.checkpoint()
+        self.assertIn(self.identity, self.sessions.claude.completed)
+        self.sessions.histories[self.identity]["turns"] = [completed]
+        self.sessions._dirty_history(self.identity)
+        with patch.object(self.projection, "_save", side_effect=sqlite3.IntegrityError("rollback")):
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.projection.checkpoint()
+        self.assertIn(self.identity, self.sessions.claude.completed)
+        self.assertEqual(read_history(self.store, self.identity)["turns"][0]["status"], "failed")
+        self.projection.checkpoint()
+        self.assertNotIn(self.identity, self.sessions.claude.completed)
+        with self.store.reading(), self.store._connection() as db:
+            encoded = db.execute("SELECT state FROM coordinator_projection").fetchone()[0]
+        self.assertNotIn(self.identity, unpack(json.loads(zlib.decompress(encoded)))["claude"]["completed"])
+        self.assertEqual(read_history(self.store, self.identity)["turns"], [completed])
+
+    def test_legacy_completion_reconciles_from_saved_manifests_after_readiness(self):
+        from agent_coord.history_persistence import INLINE_BYTES
+        completed = {"id": self.turn_id, "status": "interrupted",
+                     "items": [{"id": "large", "text": "x" * INLINE_BYTES}]}
+        self.sessions.histories[self.identity] = {"id": self.identity, "turns": [completed]}
+        self.sessions._dirty_history(self.identity)
+        self.projection.checkpoint()
+        # This is the old layout: an already published turn was saved again.
+        self.sessions.claude.completed.update({self.identity: completed, "unpublished": completed})
+        self.projection.checkpoint()
+        self.projection.load()
+        self.assertEqual(self.sessions.histories, {})
+        while self.projection.restored_completions:
+            self.projection.reconcile_restored_completion()
+        self.assertEqual(self.sessions.histories, {})
+        self.assertEqual(self.sessions.claude.completed, {"unpublished": completed})
+        self.projection.checkpoint()
+        self.projection.load()
+        self.assertEqual(self.sessions.claude.completed, {"unpublished": completed})
+
+    def test_external_http_history_read_journals_transport_without_claiming_session(self):
+        from agent_coord.codex_app_server import CodexRPC
+        from agent_coord.ui import make_ui_server
+
+        self.store.register(session_id="terminal", client="codex", cwd=self.temporary.name)
+        before = self.store.get_session("terminal")
+        rpc = self.sessions.history_rpc = CodexRPC(self.store, lambda _: None)
+        rpc.channel, rpc.ready = "history", True
+        self.projection.attach(rpc.channel, 123, rpc._message, provider="codex")
+        native = {"id": "terminal", "turns": [{"id": "saved", "status": "completed", "items": []}]}
+        def deliver(action, **values):
+            if action == "command":
+                message = json.loads(values["value"]["data"])
+                self.assertEqual(message["method"], "thread/read")
+                rpc._message({"id": message["id"], "result": {"thread": native}})
+            return {"outcome": "written", "result": {}}
+        self.client.call = deliver
+        server = make_ui_server(self.store, port=0, cwd=self.temporary.name, browser_sessions=self.sessions)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            for view in ("recent", "complete"):
+                request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/api/browser/sessions/terminal",
+                                                 headers={"X-Agent-Coord-History-View": view})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    result = json.load(response)
+                self.assertFalse(result["thread"]["historyUnavailable"])
+                self.assertEqual(result["thread"]["turns"][0]["id"], "saved")
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(2)
+        self.assertEqual(self.store.get_session("terminal"), before)
+        with self.store.reading(), self.store._connection() as db:
+            count = db.execute("SELECT COUNT(*) FROM coordinator_commands WHERE channel='history' AND outcome='written'").fetchone()[0]
+        self.assertEqual(count, 2)
 
     def test_replaying_committed_delta_has_no_second_effect(self):
         self.projection.project(self.event(1, "item/started", item={"id": "output", "type": "agentMessage", "text": ""}))
@@ -224,7 +305,6 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(tuple(row), ("written", "{}"))
 
     def test_provider_delivery_does_not_hold_browser_lock(self):
-        import zlib
         from agent_coord.codex_app_server import CodexRPC
         rpc = self.sessions.rpc = CodexRPC(self.store, self.sessions._event)
         rpc.channel = "codex"
