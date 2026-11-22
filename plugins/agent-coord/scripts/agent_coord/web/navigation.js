@@ -45,6 +45,38 @@
     for (const key of ["project", "repository"]) if (q.has(key)) filters.set(key, q.get(key));
     return filters.toString() ? "agentcoord://overview?" + filters : null;
   }
+  class HistoryNavigation {
+    constructor(view) {
+      this.pending = null;
+      this.router = null;
+      // Install before boot awaits anything. Native notification taps can change
+      // the fragment while saved projects and conversations are still restoring.
+      view.addEventListener("popstate", event => {
+        if (event.state?.agentCoord) this.dispatch({snapshot: event.state.agentCoord});
+      });
+      view.addEventListener("hashchange", event => {
+        // Back/Forward with a saved snapshot is handled by popstate, including
+        // its filters, project and pane state. A native hash assignment has no
+        // saved state and needs to open the actual conversation explicitly.
+        if (view.history.state?.agentCoord) return;
+        try {
+          const thread = decodeURIComponent(new URL(event.newURL).hash.slice(1));
+          if (identity(thread)) this.dispatch({thread});
+        } catch { /* Ignore malformed fragments. */ }
+      });
+    }
+    dispatch(destination) {
+      if (!this.router) { this.pending = destination; return; }
+      if (destination.snapshot) return this.router.back(destination.snapshot);
+      return this.router.open("agentcoord://thread/" + encodeURIComponent(destination.thread), {push: false});
+    }
+    ready(router) {
+      this.router = router;
+      const destination = this.pending;
+      this.pending = null;
+      if (destination) return this.dispatch(destination);
+    }
+  }
   class Router {
     constructor({api, capture, apply, restore, history, location, windowId, blocked, onError}) {
       Object.assign(this, {api, capture, apply, restore, history, location, windowId, blocked, onError});
@@ -105,7 +137,7 @@
       return task;
     }
   }
-  const api = {parse, safe, pageURL, initialLink, Router};
+  const api = {parse, safe, pageURL, initialLink, HistoryNavigation, Router};
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.agentCoordNavigation = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

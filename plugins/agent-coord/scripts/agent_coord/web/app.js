@@ -4095,6 +4095,7 @@ function setupComposerSizing(input) {
   return resize;
 }
 async function boot() {
+  const historyNavigation = new agentCoordNavigation.HistoryNavigation(window);
   state.permissionMenu = new PermissionMenu({document, view: window});
   state.resizeComposer = setupComposerSizing($("message"));
   state.timelineScroll = new ConversationScroll($("timeline"), $("jump-to-latest"));
@@ -4374,7 +4375,6 @@ async function boot() {
   });
   window.agentCoordNavigate = (url, options) => navigation.open(url, options);
   window.addEventListener("agent-coord-pane-state", () => { if (window.agentCoordPanes?.active) navigation.remember(); });
-  window.addEventListener("popstate", event => navigation.back(event.state?.agentCoord));
   document.addEventListener("click", event => {
     const link = event.target.closest("a[href]");
     if (!link?.getAttribute("href")?.startsWith("agentcoord:") || event.button !== 0) return;
@@ -4396,6 +4396,7 @@ async function boot() {
   syncDispatcherOverview();
   navigation.remember();
   window.agentCoordConversationTransfer = setupConversationTransfer({state, document, select, goHome, renderStatus});
+  await historyNavigation.ready(navigation);
   window.agentCoordDesktop?.navigationReady();
   if (state.config.remote) await notifications.ready();
   // Checkpoints written by terminal agents arrive through the shared database.
