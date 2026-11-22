@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections import defaultdict
 
 from .attention import AttentionStore, MODEL, POLICY_VERSION
@@ -36,9 +37,14 @@ class ThreadInventory:
         writing = db.in_transaction
         if not writing:
             db.execute("BEGIN")
-        # A database that never ran browser inbox wake has no table yet.
-        self.wake_pauses = {row["thread_id"]: dict(row) for row in db.execute(
-            WAKE_PAUSES + " AND w.thread_id IN (" + self.selected + ")", self.params)} if has_table(db, "browser_inbox_wake") else {}
+        # Read the optional browser table in one batch on the common app path.
+        try:
+            self.wake_pauses = {row["thread_id"]: dict(row) for row in db.execute(
+                WAKE_PAUSES + " AND w.thread_id IN (" + self.selected + ")", self.params)}
+        except sqlite3.OperationalError as error:
+            if str(error) != "no such table: browser_inbox_wake":
+                raise
+            self.wake_pauses = {}  # CLI-only stores need no browser schema.
         self.rows, self.associations = self._base(db)
         from .execution_state import read_many
         self.executions = read_many(threads.store, db, [row["thread_id"] for row in self.rows])
