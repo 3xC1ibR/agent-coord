@@ -371,8 +371,7 @@ body:not(.mobile-chat) .session-actions .thread-menu-action, body.mobile-chat .t
 .sidebar .fork-links { margin: 0 8px 8px 24px; color: var(--sb-muted); font-size: 11px; }
 .sidebar .fork-links a { color: var(--sb-ink); }
 .jump-to-latest-anchor { position: relative; flex: 0 0 0; height: 0; z-index: 2; pointer-events: none; }
-.jump-to-latest-anchor:has(button:not([hidden])) { flex-basis: calc(var(--response-action-size) + var(--response-action-gap)); height: calc(var(--response-action-size) + var(--response-action-gap)); }
-.jump-to-latest { position: absolute; min-height: var(--response-action-size); bottom: var(--response-action-gap); left: 50%; transform: translateX(-50%); pointer-events: auto; white-space: nowrap; padding: 7px 13px; border: 1px solid var(--line); border-radius: 20px; background: var(--surface); color: var(--ink); box-shadow: 0 2px 10px #0002; font-size: 12px; }
+.jump-to-latest { position: absolute; display: grid; place-items: center; width: var(--response-action-touch-size); height: var(--response-action-touch-size); bottom: var(--response-action-gap); left: 50%; transform: translateX(-50%); pointer-events: auto; padding: 0; border: 1px solid var(--line); border-radius: var(--response-action-touch-size); background: var(--surface); color: var(--ink); box-shadow: 0 2px 10px #0002; font-size: var(--chat-control-icon); } /* drift-ok: retain the existing floating-button shadow. */
 .message { margin-bottom: 27px; line-height: 1.8; font-size: 13px; overflow-wrap: anywhere; }
 .message .speaker { display: block; color: var(--muted); font: 9px var(--mono); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 11px; }
 .message .text { white-space: pre-wrap; }
@@ -970,7 +969,6 @@ body.mobile-chat .mobile-thread-sheet .session-statusbar { display: flex; paddin
 .response-copy-buffer { position: fixed; left: var(--response-copy-buffer-offset); top: 0; }
 @media (pointer: coarse) {
   .response-code-actions button, .response-discuss, .jump-to-latest { min-height: var(--response-action-touch-size); }
-  .jump-to-latest-anchor:has(button:not([hidden])) { flex-basis: calc(var(--response-action-touch-size) + var(--response-action-gap)); height: calc(var(--response-action-touch-size) + var(--response-action-gap)); }
 }
 
 /* Existing session attributes use the same quiet controls as the composer. */

@@ -53,6 +53,8 @@ effort and send controls. Send work, Review and Schedule live in the existing
 thread options sheet; reuse their original controls and handlers. Keep 44px touch
 targets and a visible send action as drafts grow or the keyboard opens. Mobile
 dimensions are declared once in `web/styles.css`.
+Jump to latest is a floating, arrow-only 44px button above the composer. Its
+anchor never reserves a layout row; retain its accessible name and tooltip.
 Scheduled prompt actions wrap on desktop and use two columns on narrow screens.
 Their `--schedule-gap` (8px) and `--schedule-action-height` (44px) tokens live in
 `web/styles.css`; the form's action row stays visible as its body scrolls.
