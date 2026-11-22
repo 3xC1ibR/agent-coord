@@ -502,7 +502,7 @@ def _handler(
                 try:
                     route = parsed.path.removeprefix("/api/browser/")
                     if route in {"config", "organization", "asks", "sessions", "threads", "views",
-                                 "activity", "activity/settings", "activity/history", "workspaces/scratchpad"} or route.startswith(("threads/", "projects/")):
+                                 "activity", "activity/settings", "activity/history", "workspaces/scratchpad"} or route.startswith(("threads/", "sessions/", "projects/")):
                         # Sidecar receipts still perform explicit stale-request
                         # reconciliation; they have a separate mutation boundary.
                         with (nullcontext() if route.endswith("/sidecars") else store.reading()):
@@ -750,7 +750,8 @@ def _handler(
                 view = self.headers.get("X-Agent-Coord-History-View", "complete")
                 if view not in {"complete", "recent"}:
                     raise CoordinationError("History view must be complete or recent.")
-                result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
+                with store.reading():
+                    result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
                 self._json(HTTPStatus.OK, result)
             elif route == "events":
                 try:

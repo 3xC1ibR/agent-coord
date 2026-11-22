@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from concurrent.futures import Future, TimeoutError
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -315,6 +315,7 @@ class BrowserSessions:
         self.conversation_barrier = lambda identity: self.persistence.flush(key=identity)
         self.store.conversation_barrier = self.conversation_barrier
         self.history_lock = threading.Lock()
+        self.external_history_reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="external-history")
         self.desktop_project_windows: dict[str, dict] = {}
         self.desktop_project_revision = 0
         self.inventory_lock = threading.Lock()
@@ -2345,17 +2346,10 @@ class BrowserSessions:
 
     def read(self, thread_id: str, *, recent: bool = False, snapshot: bool = False) -> dict:
         """Read a conversation; ``recent`` returns only the view for opening it."""
-        with self.store.reading():
-            if self.store.threads.is_browser_session(thread_id):
-                if recent or snapshot:
-                    return self._read_snapshot(thread_id, recent=recent)
-                external = None
-            else:
-                external = self.work_thread(thread_id)
-        if external is not None:
-            # The history-only provider request journals its command and response.
-            # The conversation's own database reads stay query-only.
-            return self._read_external_snapshot(external, recent=recent)
+        if not self.store.threads.is_browser_session(thread_id):
+            return self._read_external_snapshot(self.work_thread(thread_id), recent=recent)
+        if recent or snapshot:
+            return self._read_snapshot(thread_id, recent=recent)
         with self._thread_lock(thread_id):
             with self.lock:
                 revision = self.turn_revisions.get(thread_id, 0)
@@ -2395,17 +2389,21 @@ class BrowserSessions:
         thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
         if work_thread["client"] == "codex":
             try:
-                thread = self._stored_thread(thread_id)
+                # The HTTP observer stays query-only. Its serialized provider
+                # reader owns the durable transport command and receipt.
+                with self.lock:
+                    if self.closed:
+                        raise CoordinationError("Browser sessions are closed.")
+                    pending = self.external_history_reader.submit(self._stored_thread, thread_id)
+                thread = pending.result()
                 thread["historyUnavailable"] = False
             except (CoordinationError, OSError) as exc:
                 thread["historyError"] = "Saved conversation history could not be read: " + str(exc)
         if recent:
             thread = recent_view(thread)
-        with self.store.reading():
-            messages = message_timeline(self.store, thread_id, self.cwd)
         return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
                 "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
-                "coordinationMessages": messages,
+                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                 "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
     def _read_snapshot(self, thread_id: str, *, recent: bool = True) -> dict:
@@ -2876,6 +2874,7 @@ class BrowserSessions:
                 self.database_checkpoint.close()
 
     def _close_components(self) -> None:
+        self.external_history_reader.shutdown()
         projection = getattr(self, "projection", None)
         if projection is not None and not getattr(self, "transport_handover", False):
             projection.stopped.set()
