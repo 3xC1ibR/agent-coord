@@ -159,9 +159,13 @@ class CoordinatorProjection:
             raise TransportError("The saved coordinator projection does not match the surviving transport.")
         state = unpack(json.loads(zlib.decompress(row["state"])))
         self.restore(state)
-        from .history_persistence import read_history
-        self.sessions.histories = {identity: read_history(self.store, identity) or {"id": identity, "turns": []}
-                                   for identity in self.sessions.loaded}
+        # Histories are durable independently of the provider projection. The
+        # normal event and read paths load them on demand; eagerly decoding all
+        # loaded conversations can exceed readiness before any work can resume.
+        self.sessions.histories = {}
+        # The saved projection and these histories committed atomically. Dirty
+        # markers were captured before publication and are no longer pending.
+        self.sessions.dirty_histories.clear()
         with self.store.reading(), self.store._connection() as db:
             rows = db.execute("SELECT event_json FROM coordinator_events ORDER BY sequence").fetchall()
         if rows:

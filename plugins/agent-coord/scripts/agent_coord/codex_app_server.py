@@ -362,12 +362,19 @@ class BrowserSessions:
         self.antigravity = antigravity_factory(store, self._event)
         self.kimi = kimi_factory(store, self._event)
         self.muse = muse_factory(store, self._event)
-        # Upgrade browser conversations created before work threads existed.
+        # Upgrade incomplete legacy rows only. Rebuilding every complete thread
+        # projection here makes coordinator readiness scale with all saved chats.
         threads = self.store.threads
         with self.store.reading(), self.store._connection() as connection:
             previous = connection.execute("""SELECT b.*, t.thread_id AS existing_work_thread,
-                EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = b.thread_id) AS registered
-                FROM browser_sessions b LEFT JOIN work_threads t ON t.thread_id = b.thread_id""").fetchall()
+                s.session_id IS NOT NULL AS registered
+                FROM browser_sessions b LEFT JOIN work_threads t ON t.thread_id = b.thread_id
+                LEFT JOIN sessions s ON s.session_id = b.thread_id
+                WHERE t.thread_id IS NULL OR t.project_cwd IS NULL OR t.original_request = ''
+                   OR (s.bead_id IS NOT NULL AND s.bead_id != '' AND NOT EXISTS (
+                       SELECT 1 FROM thread_links l WHERE l.thread_id = b.thread_id
+                       AND l.kind = 'bead' AND l.target = s.bead_id
+                       AND l.project_id = t.project_id AND l.label = s.bead_id))""").fetchall()
         for row in previous:
             if not row["registered"]:
                 # A creation interrupted before its session was registered

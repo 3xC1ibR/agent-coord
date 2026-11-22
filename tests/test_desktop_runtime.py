@@ -13,10 +13,11 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 import urllib.error
 import urllib.request
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
@@ -362,7 +363,7 @@ def uninterrupted_readiness(sessions):
     from . import runtime_update as test_updates
     reasons = _explicit_test_readiness(sessions)
     update = test_updates.read(runtime_directory(sessions.store.database_path))
-    if not update or update.get("phase") not in {"accepted", "stopping"}:
+    if not update or update.get("phase") not in {"accepted", "draining", "stopping"}:
         reasons.append("automatic activation held by explicit-update fixture")
     return reasons
 ''')
@@ -402,6 +403,78 @@ def uninterrupted_readiness(sessions):
             except (OSError, RuntimeError):
                 return None
         return self.wait(ready, timeout=35)
+
+    def hold_admitted_operation(self, *, drain_timeout=30):
+        source = self.resources / "backend/agent_coord/desktop_runtime.py"
+        source.write_text(source.read_text() + '''
+_install_admission_before_held_operation = install_session_admission
+def install_session_admission(sessions):
+    gate = _install_admission_before_held_operation(sessions)
+    root = Path(os.environ["RIBBON_FAKE_ROOT"])
+    if (root / "admitted-operation-entered").exists():
+        return gate
+    def hold_operation():
+        with gate.enter() as allowed:
+            if not allowed:
+                return
+            (root / "admitted-operation-entered").touch()
+            while not (root / "release-admitted-operation").exists():
+                time.sleep(.01)
+            with gate.enter() as nested:
+                if nested:
+                    (root / "admitted-nested-operation-finished").touch()
+    threading.Thread(target=hold_operation, daemon=True).start()
+    return gate
+''' + f"\nUPDATE_ADMISSION_SECONDS = {drain_timeout!r}\n")
+
+    def test_requested_update_closes_admission_before_waiting_for_requests(self):
+        self.hold_admitted_operation()
+        first, record, thread, staged, _ = self.prepare_requested_update()
+        self.wait(lambda: (self.root / "admitted-operation-entered").exists())
+        original = runtime.control(record, "status")["transport"]
+        try:
+            runtime.control(record, "activate-update", request_id="drain-admitted-operation", payload=staged["pending"])
+            def draining():
+                status = runtime.control(record, "status")
+                return status if status["update"]["phase"] == "draining" else None
+            status = self.wait(draining, timeout=5)
+            self.assertTrue(status["paused"])
+            self.assertIn("admitted operations", status["update"]["blocked"])
+            rejected = runtime.control(record, "client-request", request={})
+            self.assertIn("pausing new coordination requests", rejected["failure"]["message"])
+        finally:
+            (self.root / "release-admitted-operation").touch()
+        current = self.wait_update("committed")
+        self.assertEqual(current["payload"], staged["pending"])
+        self.assertFalse(current["paused"])
+        self.assertTrue((self.root / "admitted-nested-operation-finished").exists())
+        self.assertEqual(current["transport"]["pid"], original["pid"])
+        self.assertEqual(current["transport"]["providers"], original["providers"])
+        self.assertGreaterEqual(current["update"]["admission_drain_seconds"], 0)
+        snapshot = self.api(current["url"], f"api/browser/sessions/{thread}")
+        self.assertEqual(len(snapshot["requests"]), 1)
+        self.api(current["url"], f"api/browser/sessions/{thread}/requests/{snapshot['requests'][0]['key']}", {"decision":"accept"})
+        self.assertEqual(len([call for call in self.calls() if call.get("method") == "turn/start"]), 1)
+
+    def test_requested_update_admission_timeout_reopens_original_backend(self):
+        self.hold_admitted_operation(drain_timeout=.5)
+        first, record, thread, staged, _ = self.prepare_requested_update()
+        original = runtime.control(record, "status")["transport"]
+        try:
+            runtime.control(record, "activate-update", request_id="admission-timeout", payload=staged["pending"])
+            current = self.wait_update("failed")
+            self.assertEqual(current["instance"], first["instance"])
+            self.assertEqual(current["transport"]["pid"], original["pid"])
+            self.assertFalse(current["paused"])
+            self.assertIsNone(current["pending"])
+            self.assertIn("did not drain", current["update"]["error"])
+            self.assertGreaterEqual(current["update"]["admission_drain_seconds"], .5)
+            self.assertEqual(runtime.control(record, "client-request", request={})["failure"]["message"],
+                             "Invalid runtime client request.")
+            snapshot = self.api(current["url"], f"api/browser/sessions/{thread}")
+            self.api(current["url"], f"api/browser/sessions/{thread}/requests/{snapshot['requests'][0]['key']}", {"decision":"accept"})
+        finally:
+            (self.root / "release-admitted-operation").touch()
 
     def test_update_confirmation_holds_an_idle_runtime_until_install(self):
         first = self.launch()
@@ -967,6 +1040,31 @@ def uninterrupted_readiness(sessions):
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_provider_becoming_unsupported_during_drain_reopens_admission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = runtime.Runtime(Path(temporary) / "state.sqlite3", Path(temporary) / "previous", -1)
+            owner.pending = Path(temporary) / "candidate"
+            sessions = SimpleNamespace(admission=runtime.AdmissionGate(), lock=threading.RLock(),
+                active={}, loaded_clients={}, projection=SimpleNamespace(error=None),
+                muse=SimpleNamespace(), queue=SimpleNamespace(wake=Mock()), dispatch=SimpleNamespace(wake=Mock()))
+            owner.server = SimpleNamespace(browser_sessions=sessions)
+            owner.request_update("unsupported-during-drain", str(owner.pending))
+            with sessions.admission.enter() as allowed:
+                self.assertTrue(allowed)
+                self.assertFalse(owner.prepare_handover())
+                self.assertTrue(sessions.admission.paused)
+                # The admitted request starts work before it returns. That
+                # provider cannot transfer and must remain answerable.
+                sessions.active["kimi-thread"] = "native-turn"
+                sessions.loaded_clients["kimi-thread"] = "kimi"
+                self.assertFalse(owner.prepare_handover())
+                self.assertFalse(sessions.admission.paused)
+                self.assertEqual(owner.update_requested["phase"], "accepted")
+                self.assertIsNone(owner.update_drain_started)
+            sessions.active.clear()
+            self.assertTrue(owner.prepare_handover())
+            self.assertTrue(sessions.admission.paused)
+
     def test_pause_excludes_new_entries_but_admitted_operation_and_nested_calls_finish(self):
         gate = runtime.AdmissionGate()
         entered, release = threading.Event(), threading.Event()

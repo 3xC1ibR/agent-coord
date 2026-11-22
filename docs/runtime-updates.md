@@ -179,6 +179,23 @@ commit together. Failed candidates restore the prior coordinator and database
 snapshot without resubmitting native turns. Uncertain deliveries remain uncertain.
 Explicit Stop still ends work and verifies transport shutdown.
 
+An explicitly requested replacement closes new admissions before waiting for
+accepted requests to drain. Continuous interface polling and agent requests cannot
+starve that boundary. The drain has a 30-second monotonic deadline measured from
+admission closure; a timeout fails the update and reopens the current backend.
+Status exposes the `draining` phase, current `blocked` reasons and
+`admission_drain_seconds`. Unsupported active providers defer closure, and work
+that becomes unsupported during a drain reopens admission so it remains answerable.
+Passive updates continue to wait for a quiet request boundary.
+
+Coordinator startup migrates only incomplete work-thread metadata, including
+missing request text, directories and current Beads links. Restoring the adapter
+projection preserves loaded providers and active turns without reading every
+conversation history before readiness. The existing history read and event paths
+load saved transcripts when needed. Restored dirty flags are cleared because
+the history and projection cursor were committed together; a failed subsequent
+event still rolls back its history changes and cursor as one transaction.
+
 Native update confirmation remains effective: a held pending payload does not
 activate until Install or **Apply Backend Update… → Update and Continue** authorizes
 it. Passive compatible attachment without a confirmation hold can also replace the

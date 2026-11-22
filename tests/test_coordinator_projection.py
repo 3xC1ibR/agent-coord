@@ -106,6 +106,36 @@ class ProjectionTests(unittest.TestCase):
         with self.store.reading(), self.store._connection() as db:
             self.assertEqual(db.execute("SELECT cursor FROM coordinator_projection").fetchone()[0], 2)
 
+    def test_restore_loads_history_on_first_event_and_rolls_back_failed_delta(self):
+        from agent_coord.history_persistence import read_history
+        self.projection.attach("codex", 123, self.sessions.rpc._message, provider="codex")
+        self.projection.project(self.event(1, "item/started", item={"id": "output", "type": "agentMessage", "text": "retained "}))
+        saved = read_history(self.store, self.identity)
+        with patch("agent_coord.history_persistence.read_history", side_effect=AssertionError("eager startup history read")):
+            self.projection.load()
+        self.assertEqual(self.sessions.histories, {})
+        self.assertEqual(self.sessions.dirty_histories, set())
+        self.assertIn(self.identity, self.sessions.loaded)
+        self.assertEqual(self.sessions.active[self.identity], self.turn_id)
+        self.assertEqual(self.projection.cursor, 1)
+        delta = self.event(2, "item/agentMessage/delta", itemId="output", delta="once")
+        original = self.projection._save
+        def failed(db, state, cursor):
+            original(db, state, cursor)
+            raise sqlite3.IntegrityError("injected after restored history write")
+        with patch.object(self.projection, "_save", side_effect=failed):
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "injected"):
+                self.projection.project(delta)
+        self.assertEqual(self.sessions.histories, {})
+        self.assertEqual(self.projection.cursor, 1)
+        self.assertEqual(read_history(self.store, self.identity), saved)
+        self.projection.project(delta)
+        self.projection.project(delta)
+        restored = read_history(self.store, self.identity)
+        self.assertEqual(restored["turns"][-1]["items"][:-1], saved["turns"][-1]["items"][:-1])
+        self.assertEqual(restored["turns"][-1]["items"][-1]["text"], "retained once")
+        self.assertEqual(self.projection.cursor, 2)
+
     def test_command_identity_and_state_are_durable_before_delivery(self):
         def deliver(action, **values):
             with self.store.reading(), self.store._connection() as db:
