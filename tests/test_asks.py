@@ -313,6 +313,88 @@ class AskAttentionTests(unittest.TestCase):
             worker.join(timeout=5)
 
 
+class AskAttentionRegressionTests(unittest.TestCase):
+    """Pins thread attention for a fixed fixture of blocking and non-blocking asks.
+
+    Stage 1 of the asks redesign must not change how an open blocking ask marks
+    its thread. The expected values below were recorded on main at 8abb218,
+    before the redesign, and must stay literal.
+    """
+
+    ATTENTION_FIELDS = ("needs_attention", "attention_reason", "attention_key", "attention_action",
+                        "attention_since", "response_state", "open_ask", "can_handle_response", "status")
+    EXPECTED_THREADS = {
+        "Blocked": {
+            "needs_attention": True, "attention_reason": "blocked", "attention_key": "ask:2",
+            "attention_action": "Decision needed: Which account?", "attention_since": 1700000010.0,
+            "response_state": "input",
+            "open_ask": {"id": 2, "question": "Which account?", "created_at": 1700000010.0, "blocking": True},
+            "can_handle_response": False, "status": "idle"},
+        "Advisory": {
+            "needs_attention": False, "attention_reason": None, "attention_key": None, "attention_action": "",
+            "attention_since": None, "response_state": None, "open_ask": None,
+            "can_handle_response": False, "status": "idle"},
+        "Archived": {
+            "needs_attention": False, "attention_reason": None, "attention_key": None, "attention_action": "",
+            "attention_since": None, "response_state": None,
+            "open_ask": {"id": 5, "question": "Unseen?", "created_at": 1700000020.0, "blocking": True},
+            "can_handle_response": False, "status": "idle"},
+    }
+    EXPECTED_NOTIFICATIONS = [
+        {"request_key": "ask:2", "thread_id": "thread-1", "status": "question", "client": "codex",
+         "title": "Blocked", "project_name": None, "repository_name": None},
+        {"request_key": "ask:3", "thread_id": "thread-1", "status": "question", "client": "codex",
+         "title": "Blocked", "project_name": None, "repository_name": None},
+    ]
+    EXPECTED_OPEN_BLOCKING = {
+        "thread-1": {"id": 2, "question": "Which account?", "created_at": 1700000010.0, "blocking": True},
+        "thread-3": {"id": 5, "question": "Unseen?", "created_at": 1700000020.0, "blocking": True},
+    }
+
+    def setUp(self):
+        from test_codex_app_server import BrowserSessions, FakeCodex
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.now = 1700000000.0
+        self.store = CoordinationStore(self.root / "state.sqlite3", clock=lambda: self.now)
+        self.sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(self.sessions.close)
+        self.threads = {}
+        for name in ("Blocked", "Advisory", "Archived"):
+            self.threads[name] = self.sessions.create({"name": name, "cwd": str(self.root)})["session"]["thread_id"]
+            self.store.touch(self.threads[name], turn_active=False)
+        create = self.store.asks.create
+        create(self.threads["Blocked"], "Advisory question?", blocking=False, context="Default: proceed.")
+        self.now += 10
+        create(self.threads["Blocked"], "Which account?", blocking=True)
+        self.now += 10
+        create(self.threads["Blocked"], "Second blocking question?", blocking=True, context="Later.")
+        create(self.threads["Advisory"], "Which tone?", blocking=False, context="Default: formal.")
+        create(self.threads["Archived"], "Unseen?", blocking=True)
+        self.sessions.update_work_thread(self.threads["Archived"], {"attention": "archived"})
+        self.now += 30
+
+    def attention(self, thread):
+        return {field: thread.get(field) for field in self.ATTENTION_FIELDS}
+
+    def test_thread_attention_output_is_unchanged_for_the_fixed_fixture(self):
+        from agent_coord.asks import AskStore
+        self.assertEqual(self.threads, {"Blocked": "thread-1", "Advisory": "thread-2", "Archived": "thread-3"})
+        for name, thread_id in self.threads.items():
+            self.assertEqual(self.attention(self.sessions.work_thread(thread_id, history=False)),
+                             self.EXPECTED_THREADS[name], name)
+        inventory = {thread["thread_id"]: thread for thread in self.sessions.list_work_threads()}
+        self.assertEqual(sorted(inventory), ["thread-1", "thread-2"])
+        for name in ("Blocked", "Advisory"):
+            self.assertEqual(self.attention(inventory[self.threads[name]]), self.EXPECTED_THREADS[name], name)
+        self.assertEqual(self.sessions.approval_notifications(), self.EXPECTED_NOTIFICATIONS)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(AskStore.open_blocking(db), self.EXPECTED_OPEN_BLOCKING)
+            self.assertEqual(AskStore.open_blocking(db, ["thread-2", "thread-3"]),
+                             {"thread-3": self.EXPECTED_OPEN_BLOCKING["thread-3"]})
+
+
 class AskWebTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is required for browser tests")
     def test_decisions_dialog_behaviour(self):
