@@ -283,8 +283,48 @@ class ProjectionTests(unittest.TestCase):
             command = db.execute("SELECT outcome,value_json FROM coordinator_commands WHERE command_id=?",
                                  ("open:" + channel,)).fetchone()
             self.assertEqual(tuple(command), ("rejected", "{}"))
-            self.assertEqual(tuple(db.execute("SELECT closed,pid FROM coordinator_channels WHERE channel=?",
-                                              (channel,)).fetchone()), (1, None))
+            self.assertIsNone(db.execute("SELECT 1 FROM coordinator_channels WHERE channel=?", (channel,)).fetchone())
+
+    def test_restart_recovers_rejected_open_without_replay_or_inert_channel(self):
+        self.projection.checkpoint()
+        channel = "claude:rejected-launch"
+        with self.store._connection() as db:
+            db.execute("INSERT INTO coordinator_channels VALUES (?, 'claude', ?, 'main', NULL, 0)",
+                       (channel, self.identity))
+            db.execute("INSERT INTO coordinator_commands VALUES (?, ?, 'open', '{}', 'pending', NULL)",
+                       ("open:" + channel, channel))
+        receipt = {"outcome": "rejected", "result": {"error": "Launch directory was removed"}}
+        with patch.object(self.client, "call", return_value=receipt) as transport:
+            projection = CoordinatorProjection(self.sessions, self.client)
+            projection.load()
+            projection.checkpoint()
+            restored = CoordinatorProjection(self.sessions, self.client)
+            restored.load()
+            transport.assert_called_once_with("outcome", command_id="open:" + channel)
+        self.assertNotIn(channel, restored.channels)
+        self.assertIsNone(restored.delivery_error)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM coordinator_channels WHERE channel=?", (channel,)).fetchone())
+            self.assertEqual(db.execute("SELECT outcome FROM coordinator_commands WHERE channel=?", (channel,)).fetchone()[0],
+                             "rejected")
+
+    def test_malformed_orphaned_launch_receipt_stays_uncertain_without_blocking_restore(self):
+        self.projection.checkpoint()
+        channel = "claude:damaged-receipt"
+        damaged = '{"error": "[Errno 2] No such file or directory: '
+        with self.store._connection() as db:
+            db.execute("INSERT INTO coordinator_commands VALUES (?, ?, 'open', '{}', 'uncertain', ?)",
+                       ("open:" + channel, channel, damaged))
+        with patch.object(self.client, "call", return_value={
+                "channels": [{"channel": channel, "pid": None, "state": "closed"}]}) as transport:
+            projection = CoordinatorProjection(self.sessions, self.client)
+            projection.load()
+            transport.assert_called_once_with("status")
+        self.assertIn("uncertain", projection.delivery_error)
+        self.assertIn("codex", projection.channels)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(tuple(db.execute("SELECT outcome,result_json FROM coordinator_commands WHERE channel=?",
+                                              (channel,)).fetchone()), ("uncertain", damaged))
 
     def test_restart_recovers_legacy_enoent_open_only_with_closed_unstarted_channel(self):
         self.projection.checkpoint()

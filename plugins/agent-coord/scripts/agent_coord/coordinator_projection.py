@@ -372,8 +372,14 @@ class CoordinatorProjection:
     def _record_outcome(self, identity, channel, operation, receipt, *, unstarted_channels=None):
         state = receipt["outcome"]
         detail = receipt.get("result")
+        retained_result = None
         if isinstance(detail, str):
-            detail = json.loads(detail)
+            try:
+                detail = json.loads(detail)
+            except json.JSONDecodeError:
+                # Keep damaged evidence verbatim and unresolved. A malformed
+                # receipt is neither a rejection proof nor provider input.
+                retained_result, detail, state = detail, None, "uncertain"
         if (operation == "open" and state == "uncertain" and isinstance(detail, dict)
                 and str(detail.get("error", "")).startswith("[Errno 2] No such file or directory: ")):
             if unstarted_channels is None:
@@ -382,7 +388,7 @@ class CoordinatorProjection:
                 state = "rejected"
         if state != "written" and not (state == "rejected" and operation == "open"):
             state = "uncertain"
-        result_json = json.dumps(detail)
+        result_json = retained_result if retained_result is not None else json.dumps(detail)
         with self.store.database_operation("coordinator.command_outcome"), self.store._connection() as db:
             db.execute("""UPDATE coordinator_commands SET outcome=?, result_json=?,
                 value_json=CASE WHEN ? IN ('written','rejected') THEN '{}' ELSE value_json END WHERE command_id=?""",
@@ -390,7 +396,9 @@ class CoordinatorProjection:
             if operation == "open" and state == "written":
                 db.execute("UPDATE coordinator_channels SET pid=? WHERE channel=?", (detail["pid"], channel))
             elif state == "rejected":
-                db.execute("UPDATE coordinator_channels SET closed=1 WHERE channel=? AND pid IS NULL", (channel,))
+                # No process was attached. Retain its terminal receipt, not a
+                # derived NULL-PID channel that older coordinators cannot load.
+                db.execute("DELETE FROM coordinator_channels WHERE channel=? AND pid IS NULL", (channel,))
         return state, detail
 
     def recover_commands(self, *, operations=None):
