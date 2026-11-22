@@ -28,7 +28,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-release
+  # A signed candidate can be installed while a public release awaits approval.
+  group: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish && 'macos-release-candidate' || 'macos-release' }}
   cancel-in-progress: false
 
 jobs:
