@@ -209,6 +209,18 @@ class RuntimeTests(unittest.TestCase):
             if table:
                 self.assertEqual(db.execute("SELECT count(*) FROM runtime_update_recoveries WHERE thread_id=?", (thread,)).fetchone()[0], 0)
 
+    def test_loopback_startup_does_not_resolve_hostnames(self):
+        (self.resources / "backend/sitecustomize.py").write_text(
+            "import socket\n"
+            "def unavailable(*args, **kwargs):\n"
+            "    raise RuntimeError('Reverse DNS is unavailable')\n"
+            "socket.getfqdn = unavailable\n"
+        )
+        result = self.launch(paused=True)
+        self.assertEqual(result["status"], "serving")
+        record = runtime.discover(self.database)
+        self.assertTrue(runtime.control(record, "status")["paused"])
+
     def test_detached_reconnect_preserves_provider_approval_output_and_queue_after_bundle_deletion(self):
         first = self.launch()
         url = first["url"]

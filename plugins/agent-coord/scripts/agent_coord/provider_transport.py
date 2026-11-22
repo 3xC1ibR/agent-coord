@@ -12,7 +12,7 @@ import errno
 import fcntl
 from functools import lru_cache
 import hashlib
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 from pathlib import Path
@@ -27,6 +27,8 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+
+from .local_http import LocalHTTPServer
 
 PROTOCOL = 1
 # Native history replies can exceed 32 MiB. Limits apply to frames, encoded
@@ -704,7 +706,7 @@ class Owner:
             def log_message(self, *_):
                 pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server = LocalHTTPServer(("127.0.0.1", 0), Handler)
         server.daemon_threads = True
         server.timeout = .2
         record = {"url": f"http://127.0.0.1:{server.server_port}/", "token": self.token,

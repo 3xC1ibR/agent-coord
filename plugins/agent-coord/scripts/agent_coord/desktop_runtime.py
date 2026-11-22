@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import fcntl
 import functools
 import hashlib
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 from pathlib import Path
@@ -28,6 +28,8 @@ import threading
 import time
 import urllib.request
 import uuid
+
+from .local_http import LocalHTTPServer
 
 PROTOCOL_VERSION = 1
 SCHEMA_VERSION = 2
@@ -966,7 +968,7 @@ class Runtime:
                 self.wfile.write(data)
             def log_message(self, *_):
                 pass
-        controller = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        controller = LocalHTTPServer(("127.0.0.1", 0), Handler)
         controller.daemon_threads = True
         record = {**self.status(), "control_url": f"http://127.0.0.1:{controller.server_port}/", "control_token": self.token}
         atomic_json(self.directory / "discovery.json", record)
