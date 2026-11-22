@@ -1,23 +1,16 @@
-.sidebar .sidebar-asks { position: relative; }
-.asks-count { position: absolute; top: 3px; right: 3px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; font: 600 10px/16px system-ui, sans-serif; text-align: center; color: var(--paper, #fff); background: var(--sb-muted, #888); }
-.asks-count.asks-count-blocking { background: var(--danger, #c64848); }
-.asks-dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); overflow: auto; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--ink); }
-.asks-dialog::backdrop { background: #0008; }
-.asks-dialog h2 { margin: 0 0 8px; font-size: 20px; }
-.asks-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.asks-head h2 { margin-bottom: 12px; }
-.asks-intro, .asks-empty { color: var(--muted, #777); }
-.asks-list { display: flex; flex-direction: column; gap: 14px; max-height: calc(100dvh - 220px); overflow: auto; }
-.ask-row { padding: 12px 14px; border: 1px solid var(--line, #ddd); border-radius: 8px; }
-.ask-row.ask-blocking { border-color: var(--danger, #c64848); }
-.ask-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; color: var(--muted, #777); }
-.ask-kind { padding: 1px 6px; border-radius: 4px; font-weight: 600; background: var(--line, #ddd); color: var(--ink, #222); }
-.ask-blocking .ask-kind { background: var(--danger, #c64848); color: #fff; }
-.ask-thread { padding: 0 2px; border: 0; background: none; color: var(--ink, #222); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-.ask-age { margin-left: auto; }
-.ask-question { margin: 8px 0 4px; font-size: 14px; white-space: pre-wrap; }
-.ask-context { margin: 0 0 8px; font-size: 12px; color: var(--muted, #777); white-space: pre-wrap; }
-.ask-answers { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-.ask-option { font-weight: 600; }
-.ask-free { display: flex; flex: 1 1 240px; gap: 6px; min-width: 0; }
-.ask-free input { flex: 1; min-width: 0; }
+/* Sidebar entry and embedded dialog for the asks view; the page itself is styled by asks-page.css. */
+:root {
+  --asks-entry-gap: 10px; --asks-entry-inset: 12px; --asks-entry-radius: 6px; --asks-entry-text: 12px; --asks-entry-icon: 18px; --asks-entry-stroke: 1.6; /* drift-ok: matches the Usage and Activity sidebar entries. */
+  --asks-entry-count: 18px; --asks-entry-count-radius: 9px; --asks-entry-count-inset: 5px; --asks-entry-count-text: 11px; --asks-entry-weight: 600; /* drift-ok: count is a full-height pill. */
+  --asks-dialog-width: 860px; --asks-dialog-height: 900px; --asks-dialog-margin: 24px; /* drift-ok: auxiliary-page dialog pattern at the view's reading width. */
+}
+.sidebar .asks-entry { display: flex; flex: 0 0 auto; align-items: center; gap: var(--asks-entry-gap); padding: var(--asks-entry-gap) var(--asks-entry-inset); border-radius: var(--asks-entry-radius); color: var(--sb-ink); font-size: var(--asks-entry-text); text-decoration: none; }
+.sidebar .asks-entry:hover { background: var(--sb-hover); }
+.asks-entry svg { width: var(--asks-entry-icon); height: var(--asks-entry-icon); fill: none; stroke: currentColor; stroke-width: var(--asks-entry-stroke); stroke-linecap: round; stroke-linejoin: round; }
+.asks-count { margin-left: auto; min-width: var(--asks-entry-count); height: var(--asks-entry-count); padding: 0 var(--asks-entry-count-inset); border-radius: var(--asks-entry-count-radius); background: var(--sb-hover); color: var(--sb-ink); font-size: var(--asks-entry-count-text); font-weight: var(--asks-entry-weight); line-height: var(--asks-entry-count); text-align: center; font-variant-numeric: tabular-nums; }
+.asks-count.asks-count-blocking { background: var(--danger); color: var(--on-accent); }
+#asks-dialog { width: min(var(--asks-dialog-width), calc(100vw - 2 * var(--asks-dialog-margin))); max-width: none; height: min(var(--asks-dialog-height), calc(100dvh - 2 * var(--asks-dialog-margin))); padding: 0; overflow: hidden; background: var(--paper); }
+#asks-frame { display: block; width: 100%; height: 100%; border: 0; }
+@media (max-width: 760px) {
+  #asks-dialog { width: 100%; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; margin: 0; }
+}

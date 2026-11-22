@@ -1,37 +1,29 @@
 "use strict";
+/* Workspace entry to the asks view: the sidebar count and the embedded page. */
 (() => {
-  function formatAge(seconds) {
-    if (!Number.isFinite(seconds) || seconds < 60) return "just now";
-    if (seconds < 3600) return Math.floor(seconds / 60) + "m";
-    if (seconds < 86400) return Math.floor(seconds / 3600) + "h";
-    return Math.floor(seconds / 86400) + "d";
-  }
+  const copy = typeof module !== "undefined" ? require("./asks-copy.js").AsksCopy : globalThis.AsksCopy;
   class AsksUI {
-    constructor({document, api, openThread, onError, button, badge}) {
-      Object.assign(this, {document, api, openThread, onError});
+    constructor({document, api, view = globalThis, navigate, onError, entry, label, badge, shortcut, dialog, frame}) {
+      Object.assign(this, {document, api, view, navigate, onError});
+      const $ = id => document.getElementById(id);
       this.items = [];
       this.sequence = 0;
-      this.pending = new Set();
-      this.rows = new Map();
-      this.renderedIds = null;
-      this.button = button || document.getElementById("open-asks");
-      this.badge = badge || document.getElementById("asks-count");
-      this.dialog = this.node("dialog", "", "asks-dialog");
-      this.dialog.setAttribute("aria-labelledby", "asks-heading");
-      this.document.body.append(this.dialog);
-      if (this.button) this.button.onclick = () => this.open().catch(onError);
-      this.dialog.addEventListener?.("close", () => clearInterval(this.timer));
-    }
-    node(tag, text, className) {
-      const element = this.document.createElement(tag);
-      if (text) element.textContent = text;
-      if (className) element.className = className;
-      return element;
-    }
-    control(text, callback, className = "quiet") {
-      const button = this.node("button", text, className); button.type = "button";
-      button.onclick = () => Promise.resolve().then(callback).catch(this.onError);
-      return button;
+      this.entry = entry || $("open-asks-view");
+      this.label = label || $("asks-entry-label");
+      this.badge = badge || $("asks-count");
+      this.shortcut = shortcut || $("open-asks");
+      this.dialog = dialog || $("asks-dialog");
+      this.frame = frame || $("asks-frame");
+      if (this.label) this.label.textContent = copy.viewName;
+      this.dialog?.setAttribute("aria-label", copy.viewName);
+      this.frame?.setAttribute("title", copy.viewName);
+      this.shortcut?.setAttribute("aria-label", copy.viewName);
+      for (const control of [this.entry, this.shortcut]) {
+        if (control) control.onclick = event => { event?.preventDefault?.(); this.open(); };
+      }
+      view.addEventListener?.("message", event => this.receive(event));
+      this.dialog?.addEventListener?.("close", () => this.closed());
+      this.updateBadge();
     }
     async refresh() {
       const sequence = ++this.sequence;
@@ -39,106 +31,49 @@
       if (sequence !== this.sequence) return;
       this.items = data.data || [];
       this.updateBadge();
-      if (this.dialog.open) this.render();
     }
     updateBadge() {
-      const count = this.items.length, blocking = this.items.filter(item => item.blocking).length;
+      // Snoozed asks are out of the open list until their time.
+      const waiting = this.items.filter(item => !item.snoozed);
+      const count = waiting.length, blocking = waiting.filter(item => item.blocking).length;
       if (this.badge) {
         this.badge.hidden = !count;
         this.badge.textContent = count ? String(count) : "";
         this.badge.classList?.toggle("asks-count-blocking", blocking > 0);
       }
-      if (this.button) {
-        this.button.title = count ? count + (count === 1 ? " decision" : " decisions") + " waiting for you" + (blocking ? " · " + blocking + " blocking" : "") : "Decisions";
-      }
+      const title = copy.entryTitle(count, blocking);
+      for (const control of [this.entry, this.shortcut]) if (control) control.title = title;
+      this.entry?.setAttribute("aria-label", count ? copy.viewName + ": " + title : copy.viewName);
     }
-    async open() {
-      await this.refresh();
-      this.render();
+    open() {
+      const backdrop = this.document.getElementById("sidebar-backdrop");
+      if (backdrop && !backdrop.hidden) backdrop.click();
+      this.frame.src = "/asks?embedded=1";
       if (!this.dialog.open) this.dialog.showModal();
-      clearInterval(this.timer);
-      this.timer = setInterval(() => { if (!this.document.hidden) this.refresh().catch(this.onError); }, 5000);
     }
-    close() { clearInterval(this.timer); this.dialog.close(); }
-    render() {
-      const dialog = this.dialog;
-      const ids = this.items.map(ask => ask.id).join(",");
-      for (const ask of this.items) {
-        if (!this.rows.has(ask.id)) this.rows.set(ask.id, this.row(ask));
-        const age = Array.from(this.rows.get(ask.id).querySelectorAll("span"))
-          .find(node => node.className === "ask-age");
-        if (age) age.textContent = formatAge(ask.age_seconds);
-      }
-      // Reuse answer forms across polls so typing, focus, and selection survive.
-      if (this.renderedIds === ids) return;
-      this.renderedIds = ids;
-      const active = this.document.activeElement;
-      const selection = active?.selectionStart;
-      const selectionEnd = active?.selectionEnd;
-      for (const id of this.rows.keys()) if (!this.items.some(ask => ask.id === id)) this.rows.delete(id);
-      dialog.replaceChildren();
-      const head = this.node("div", "", "asks-head");
-      const heading = this.node("h2", "Decisions"); heading.id = "asks-heading";
-      head.append(heading, this.control("Close", () => this.close()));
-      dialog.append(head);
-      if (!this.items.length) {
-        dialog.append(this.node("p", "No open decisions. Agents will ask here when they need you.", "asks-empty"));
-        return;
-      }
-      dialog.append(this.node("p", "Blocking decisions stop an agent until you answer. Non-blocking ones keep working on the stated default.", "asks-intro"));
-      const list = this.node("div", "", "asks-list");
-      for (const ask of this.items) list.append(this.rows.get(ask.id));
-      dialog.append(list);
-      if (active && dialog.contains?.(active)) {
-        active.focus();
-        if (selection != null) active.setSelectionRange?.(selection, selectionEnd);
+    receive(event) {
+      if (event.origin !== this.view.location.origin || event.source !== this.frame?.contentWindow) return;
+      const {type, thread_id: threadId, url} = event.data || {};
+      if (type === "ribbon-field-close-asks") this.dialog.close();
+      else if (type === "ribbon-field-asks-thread" && typeof threadId === "string") {
+        this.follow("agentcoord://thread/" + encodeURIComponent(threadId));
+      } else if (type === "ribbon-field-asks-navigate" && typeof url === "string" && url.startsWith("agentcoord://")) {
+        this.follow(url);
       }
     }
-    row(ask) {
-      const row = this.node("article", "", "ask-row" + (ask.blocking ? " ask-blocking" : ""));
-      row.dataset.id = String(ask.id);
-      const meta = this.node("div", "", "ask-meta");
-      meta.append(this.node("span", ask.blocking ? "Blocking" : "Non-blocking", "ask-kind"));
-      const thread = this.control(ask.thread_title, () => { this.close(); return this.openThread(ask.session_id); }, "ask-thread");
-      thread.title = "Open this thread";
-      meta.append(thread);
-      if (ask.project_name) meta.append(this.node("span", ask.project_name, "ask-project"));
-      meta.append(this.node("span", formatAge(ask.age_seconds), "ask-age"));
-      row.append(meta, this.node("p", ask.question, "ask-question"));
-      if (ask.context) row.append(this.node("p", ask.context, "ask-context"));
-      const answers = this.node("div", "", "ask-answers");
-      for (const option of ask.options) answers.append(this.control(option, () => this.answer(ask, {option}, row), "ask-option"));
-      const form = this.node("form", "", "ask-free");
-      const input = this.node("input"); input.type = "text"; input.maxLength = 4000;
-      input.placeholder = ask.options.length ? "Or answer in your own words…" : "Your answer…";
-      input.setAttribute("aria-label", "Answer: " + ask.question);
-      const send = this.node("button", "Answer", "primary"); send.type = "submit";
-      form.append(input, send);
-      form.onsubmit = event => {
-        event?.preventDefault?.();
-        const text = input.value.trim();
-        if (!text) return;
-        return this.answer(ask, {answer: text}, row).catch(this.onError);
-      };
-      answers.append(form);
-      row.append(answers);
-      return row;
+    follow(url) {
+      this.dialog.close();
+      // The click happened inside the embedded page, so name the surface for the activity record here.
+      this.view.agentCoordActivity?.markIntent?.("decisions");
+      Promise.resolve(this.navigate(url)).catch(this.onError);
     }
-    async answer(ask, body, row) {
-      if (this.pending.has(ask.id)) return;
-      this.pending.add(ask.id);
-      for (const button of row.querySelectorAll?.("button, input") || []) button.disabled = true;
-      try {
-        await this.api("asks/" + encodeURIComponent(ask.id), body);
-        this.items = this.items.filter(item => item.id !== ask.id);
-        this.updateBadge();
-        this.render();
-      } catch (error) {
-        for (const button of row.querySelectorAll?.("button, input") || []) button.disabled = false;
-        throw error;
-      } finally { this.pending.delete(ask.id); }
+    closed() {
+      this.frame.removeAttribute("src");
+      const visible = this.entry?.getClientRects?.().length;
+      (visible ? this.entry : this.document.getElementById("menu-toggle"))?.focus?.({preventScroll: true});
+      this.refresh().catch(this.onError);
     }
   }
-  if (typeof module !== "undefined") module.exports = {AsksUI, formatAge};
+  if (typeof module !== "undefined") module.exports = {AsksUI};
   globalThis.AsksUI = AsksUI;
 })();

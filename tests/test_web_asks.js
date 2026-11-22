@@ -1,112 +1,101 @@
 "use strict";
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
-const {AsksUI, formatAge} = require("../plugins/agent-coord/scripts/agent_coord/web/asks.js");
+const {AsksUI} = require("../plugins/agent-coord/scripts/agent_coord/web/asks.js");
+const {AsksCopy} = require("../plugins/agent-coord/scripts/agent_coord/web/asks-copy.js");
+const {Element, makeDocument} = require("./web_dom_stub.js");
 
-class Element {
-  constructor(tag) { this.tagName = tag; this.children = []; this.attributes = {}; this.value = ""; this.hidden = false; this.dataset = {}; this.classList = {set: new Set(), toggle: (name, on) => { on ? this.classList.set.add(name) : this.classList.set.delete(name); }, contains: name => this.classList.set.has(name)}; }
-  append(...children) { this.children.push(...children); }
-  replaceChildren(...children) { this.children = children; }
-  setAttribute(key, value) { this.attributes[key] = value; }
-  addEventListener() {}
-  showModal() { this.open = true; }
-  close() { this.open = false; }
-  querySelectorAll(selector) {
-    const tags = selector.split(",").map(value => value.trim());
-    return this.children.flatMap(child => [...(tags.includes(child.tagName) ? [child] : []), ...child.querySelectorAll(selector)]);
-  }
-  find(className) { return this.querySelectorAll("button, span, p, form, input, article, div, h2").find(node => node.className === className); }
-}
 function setup(api) {
-  const opened = [], errors = [];
-  const button = new Element("button"), badge = new Element("span");
-  const document = {body: new Element("body"), hidden: false, createElement: tag => new Element(tag), getElementById: () => null};
-  const ui = new AsksUI({document, api, openThread: id => opened.push(id), onError: error => errors.push(error), button, badge});
-  return {ui, opened, errors, button, badge};
+  const navigated = [], errors = [];
+  const document = makeDocument(["open-asks-view", "asks-entry-label", "asks-count", "open-asks", "asks-dialog", "asks-frame",
+    "sidebar-backdrop", "menu-toggle"]);
+  const $ = id => document.getElementById(id);
+  $("asks-frame").contentWindow = {};
+  $("sidebar-backdrop").hidden = true;
+  $("sidebar-backdrop").click = () => { $("sidebar-backdrop").clicked = true; };
+  const view = new Element("window"); view.location = {origin: "http://127.0.0.1:8765"};
+  const ui = new AsksUI({document, api, view, navigate: url => { navigated.push(url); }, onError: error => errors.push(error)});
+  const send = (data, overrides = {}) => view.dispatch("message", {origin: view.location.origin, source: $("asks-frame").contentWindow, data, ...overrides});
+  return {ui, $, view, navigated, errors, send};
 }
-const blocking = {id: 7, session_id: "thread-7", thread_title: "Checkout <b>", project_name: "Shop", question: "Which account?", context: null, options: ["Staging", "Production"], blocking: true, age_seconds: 4000};
-const quiet = {id: 8, session_id: "thread-8", thread_title: "Docs", project_name: null, question: "Tone?", context: "Default: formal.", options: [], blocking: false, age_seconds: 30};
+const blocking = {id: 7, blocking: true, snoozed: false};
+const quiet = {id: 8, blocking: false, snoozed: false};
+const snoozedBlocking = {id: 9, blocking: true, snoozed: true};
 
-test("formatAge is coarse and never negative", () => {
-  assert.deepEqual([formatAge(-5), formatAge(30), formatAge(120), formatAge(4000), formatAge(200000)], ["just now", "just now", "2m", "1h", "2d"]);
+test("the entry is named from the copy and counts open asks that are not snoozed", async () => {
+  const {ui, $} = setup(async () => ({data: [blocking, quiet, snoozedBlocking]}));
+  assert.equal($("asks-entry-label").textContent, AsksCopy.viewName);
+  assert.equal($("asks-dialog").getAttribute("aria-label"), AsksCopy.viewName);
+  assert.equal($("open-asks").getAttribute("aria-label"), AsksCopy.viewName);
+  assert.equal($("asks-count").hidden, true);
+  await ui.refresh();
+  assert.equal($("asks-count").hidden, false);
+  assert.equal($("asks-count").textContent, "2");
+  assert.ok($("asks-count").classList.contains("asks-count-blocking"));
+  assert.equal($("open-asks-view").title, "2 asks waiting for you · 1 blocking");
+  assert.equal($("open-asks").title, $("open-asks-view").title);
+  assert.equal($("open-asks-view").getAttribute("aria-label"), AsksCopy.viewName + ": 2 asks waiting for you · 1 blocking");
+  ui.api = async () => ({data: [quiet, snoozedBlocking]});
+  await ui.refresh();
+  assert.equal($("asks-count").textContent, "1");
+  assert.equal($("asks-count").classList.contains("asks-count-blocking"), false);
+  assert.equal($("open-asks-view").title, "1 ask waiting for you");
+  ui.api = async () => ({data: [snoozedBlocking]});
+  await ui.refresh();
+  assert.equal($("asks-count").hidden, true);
+  assert.equal($("open-asks-view").title, AsksCopy.viewName);
+  assert.equal($("open-asks-view").getAttribute("aria-label"), AsksCopy.viewName);
 });
 
-test("badge counts open asks and marks blocking ones", async () => {
-  const {ui, badge, button} = setup(async () => ({data: [blocking, quiet]}));
-  await ui.refresh();
-  assert.equal(badge.hidden, false);
-  assert.equal(badge.textContent, "2");
-  assert.ok(badge.classList.contains("asks-count-blocking"));
-  assert.match(button.title, /2 decisions .* 1 blocking/);
-  ui.api = async () => ({data: []});
-  await ui.refresh();
-  assert.equal(badge.hidden, true);
-  assert.equal(button.title, "Decisions");
+test("the sidebar entry and the question-mark button both open the embedded view", () => {
+  const {$} = setup(async () => ({data: []}));
+  for (const id of ["open-asks-view", "open-asks"]) {
+    $("asks-dialog").open = false; delete $("asks-frame").src;
+    let prevented = false;
+    $(id).onclick({preventDefault() { prevented = true; }});
+    assert.equal(prevented, true, id);
+    assert.equal($("asks-frame").src, "/asks?embedded=1");
+    assert.equal($("asks-dialog").open, true);
+  }
+  $("sidebar-backdrop").hidden = false;
+  $("open-asks-view").onclick({preventDefault() {}});
+  assert.equal($("sidebar-backdrop").clicked, true);
 });
 
-test("dialog renders text safely, opens the thread, and answers through the API", async t => {
-  const calls = [];
-  const {ui, opened} = setup(async (path, body) => { calls.push({path, body}); return body ? {status: "answered"} : {data: [blocking, quiet]}; });
-  t.after(() => ui.close());
-  await ui.open();
-  assert.equal(ui.dialog.open, true);
-  const rows = ui.dialog.children[2].children;
-  assert.equal(rows.length, 2);
-  const [first, second] = rows;
-  assert.equal(first.className, "ask-row ask-blocking");
-  assert.equal(first.find("ask-kind").textContent, "Blocking");
-  assert.equal(first.find("ask-thread").textContent, blocking.thread_title);
-  assert.equal(first.find("ask-thread").innerHTML, undefined);
-  assert.equal(first.find("ask-question").textContent, "Which account?");
-  assert.equal(second.find("ask-context").textContent, "Default: formal.");
-  assert.equal(second.find("ask-age").textContent, "just now");
-  const options = first.querySelectorAll("button").filter(node => node.className === "ask-option");
-  assert.deepEqual(options.map(node => node.textContent), ["Staging", "Production"]);
-  await options[1].onclick();
-  assert.deepEqual(calls.at(-1), {path: "asks/7", body: {option: "Production"}});
-  assert.equal(ui.items.length, 1);
-  const remaining = ui.dialog.children[2].children[0];
-  const form = remaining.find("ask-free");
-  form.children[0].value = "  Friendly  ";
-  await form.onsubmit({preventDefault() {}});
-  assert.deepEqual(calls.at(-1), {path: "asks/8", body: {answer: "Friendly"}});
-  assert.equal(ui.items.length, 0);
-  assert.equal(ui.dialog.find("asks-empty").textContent, "No open decisions. Agents will ask here when they need you.");
-  ui.items = [blocking]; ui.render();
-  await ui.dialog.children[2].children[0].find("ask-thread").onclick();
-  assert.deepEqual(opened, ["thread-7"]);
-  assert.equal(ui.dialog.open, false);
+test("messages from the embedded view close it, open a thread, or follow an app link", async () => {
+  const {$, send, navigated, view} = setup(async () => ({data: []}));
+  const open = () => { $("open-asks-view").onclick({preventDefault() {}}); };
+  open();
+  send({type: "ribbon-field-asks-thread", thread_id: "thread 7"}, {origin: "https://elsewhere.example"});
+  send({type: "ribbon-field-asks-thread", thread_id: "thread 7"}, {source: view});
+  send({type: "ribbon-field-asks-thread", thread_id: 7});
+  send({type: "ribbon-field-asks-navigate", url: "https://example.com"});
+  send({type: "unknown"});
+  assert.deepEqual(navigated, []);
+  assert.equal($("asks-dialog").open, true);
+  const intents = [];
+  view.agentCoordActivity = {markIntent: surface => intents.push(surface)};
+  send({type: "ribbon-field-asks-thread", thread_id: "thread 7"});
+  assert.deepEqual(navigated, ["agentcoord://thread/thread%207"]);
+  assert.deepEqual(intents, ["decisions"]);
+  assert.equal($("asks-dialog").open, false);
+  open();
+  send({type: "ribbon-field-asks-navigate", url: "agentcoord://view/Needs%20me"});
+  assert.deepEqual(navigated.at(-1), "agentcoord://view/Needs%20me");
+  assert.equal($("asks-dialog").open, false);
+  open();
+  send({type: "ribbon-field-close-asks"});
+  assert.equal($("asks-dialog").open, false);
 });
 
-test("a failed answer re-enables the row and surfaces the error", async t => {
-  const {ui, errors} = setup(async (path, body) => { if (body) throw new Error("Ask already answered"); return {data: [blocking]}; });
-  t.after(() => ui.close());
-  await ui.open();
-  const row = ui.dialog.children[2].children[0];
-  const option = row.querySelectorAll("button").find(node => node.className === "ask-option");
-  await option.onclick();
-  assert.equal(errors.length, 1);
-  assert.equal(errors[0].message, "Ask already answered");
-  assert.ok(row.querySelectorAll("button, input").every(node => node.disabled === false));
-  assert.equal(ui.items.length, 1);
-});
-
-test("polling preserves an answer draft and updates its age", async () => {
-  let items = [blocking, quiet];
-  const {ui} = setup(async () => ({data: items}));
-  await ui.open();
-  const row = ui.dialog.children[2].children[0];
-  const input = row.find("ask-free").children[0];
-  input.value = "Keep my unfinished answer";
-  items = [{...blocking, age_seconds: 86400}, quiet];
-  await ui.refresh();
-  assert.equal(ui.dialog.children[2].children[0], row);
-  assert.equal(row.find("ask-free").children[0], input);
-  assert.equal(input.value, "Keep my unfinished answer");
-  assert.equal(row.find("ask-age").textContent, "1d");
-  items = [items[0]];
-  await ui.refresh();
-  assert.equal(ui.dialog.children[2].children[0], row);
-  assert.equal(input.value, "Keep my unfinished answer");
-  ui.close();
+test("closing the view unloads it, returns focus and refreshes the count", async () => {
+  let reads = 0;
+  const {$, send} = setup(async () => { reads += 1; return {data: [quiet]}; });
+  $("open-asks-view").onclick({preventDefault() {}});
+  send({type: "ribbon-field-close-asks"});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal($("asks-frame").src, undefined);
+  assert.equal($("open-asks-view").focused, true);
+  assert.equal(reads, 1);
+  assert.equal($("asks-count").textContent, "1");
 });

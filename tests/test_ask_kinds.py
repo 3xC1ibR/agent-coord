@@ -557,6 +557,14 @@ class AskBrowserTests(unittest.TestCase):
         self.assertEqual(len(self.get("/api/browser/asks?status=all&since=0")["data"]), 2)
         self.assertEqual(self.get("/api/browser/asks?status=all&since=2999-01-01")["data"], [])
 
+    def test_asks_page_may_be_framed_only_by_the_workspace(self):
+        for path, expected in (("/asks", "DENY"), ("/asks?embedded=0", "DENY"), ("/asks?embedded=1", "SAMEORIGIN")):
+            with urllib.request.urlopen(self.base + path) as response:
+                self.assertEqual(response.headers["X-Frame-Options"], expected, path)
+                self.assertIn("frame-ancestors " + ("'self'" if expected == "SAMEORIGIN" else "'none'"),
+                              response.headers["Content-Security-Policy"])
+                self.assertIn(b'id="asks-list"', response.read())
+
     def test_resolving_an_action_or_request_wakes_the_idle_app_conversation(self):
         for client in ("codex", "claude"):
             with self.subTest(client=client):

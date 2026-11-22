@@ -329,7 +329,10 @@ class AskAttentionTests(unittest.TestCase):
         worker.start()
         base = "http://127.0.0.1:" + str(server.server_address[1])
         try:
-            for path, needle in (("/asks.js", b"class AsksUI"), ("/asks.css", b".asks-count"), ("/", b'id="open-asks"')):
+            for path, needle in (("/asks.js", b"class AsksUI"), ("/asks.css", b".asks-count"), ("/", b'id="open-asks"'),
+                                 ("/", b'id="open-asks-view"'), ("/", b'id="asks-dialog"'), ("/asks", b'id="asks-list"'),
+                                 ("/asks-page.js", b"class AsksView"), ("/asks-page.css", b".asks-page"),
+                                 ("/asks-copy.js", b"viewName")):
                 with urllib.request.urlopen(base + path) as response:
                     self.assertIn(needle, response.read(), path)
         finally:
@@ -422,8 +425,8 @@ class AskAttentionRegressionTests(unittest.TestCase):
 
 class AskWebTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is required for browser tests")
-    def test_decisions_dialog_behaviour(self):
-        result = subprocess.run(["node", "--test", "tests/test_web_asks.js"], cwd=ROOT,
+    def test_asks_entry_and_view_behaviour(self):
+        result = subprocess.run(["node", "--test", "tests/test_web_asks.js", "tests/test_web_asks_page.js"], cwd=ROOT,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

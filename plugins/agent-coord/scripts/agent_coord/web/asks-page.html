@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script src="/theme.js"></script>
+  <title>Ribbon Field</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/asks-page.css">
+  <script src="/asks-copy.js" defer></script>
+  <script src="/asks-page.js" defer></script>
+</head>
+<body class="asks-page">
+  <header class="asks-header">
+    <div><h1 id="asks-title"></h1><p id="asks-summary"></p></div>
+    <button id="close-asks" class="quiet" type="button" hidden>Close</button>
+  </header>
+  <main class="asks-content">
+    <div id="asks-sections" class="asks-sections" role="tablist"></div>
+    <form id="asks-filters" class="asks-filters" hidden>
+      <label>Project<select id="asks-filter-project"><option value="">All projects</option></select></label>
+      <label>Kind<select id="asks-filter-kind"><option value="">All kinds</option></select></label>
+      <label>Resolved since<input id="asks-filter-since" type="date"></label>
+    </form>
+    <p id="asks-error" class="asks-error" role="alert" hidden></p>
+    <p id="asks-status" class="asks-status" role="status">Loading…</p>
+    <div id="asks-list" class="asks-list" role="tabpanel"></div>
+  </main>
+</body>
+</html>

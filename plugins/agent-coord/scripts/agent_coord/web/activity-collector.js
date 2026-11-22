@@ -3,7 +3,7 @@
   "use strict";
   // Where a deliberate navigation began, matched from the most specific container.
   const SURFACES = [
-    ["#thread-hover", "hover-card"], [".asks-dialog", "decisions"], ["#roll-up-bar", "roll-up"],
+    ["#thread-hover", "hover-card"], ["#asks-dialog", "decisions"], ["#roll-up-bar", "roll-up"],
     ["#sessions, #sidebar", "sidebar"], ["#conversation-results", "search"],
     ["#working-set-overview", "working-set"], ["#thread-list-overview", "list"], ["#atlas-overview", "atlas"], ["#overview", "cards"],
     ["#conversation-tabs", "tabs"], ["#dispatcher-workspace, #dispatcher-dock, #dispatcher-empty, #send-work-dock", "dispatcher"],
