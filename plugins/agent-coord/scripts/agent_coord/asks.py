@@ -307,7 +307,7 @@ class AskStore:
     # -- reads -----------------------------------------------------------
     def get(self, ask_id: Any) -> dict[str, Any]:
         _positive_id(ask_id, "Ask ID must be a positive integer.")
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             row = db.execute("SELECT * FROM asks WHERE id = ?", (ask_id,)).fetchone()
         if row is None:
             raise CoordinationError(f"Unknown ask: {ask_id}.")
@@ -334,7 +334,7 @@ class AskStore:
         if since is not None:
             clauses.append("a.created_at >= ?"); params.append(since)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             rows = db.execute("SELECT a.* FROM asks a" + where + " ORDER BY a.blocking DESC, a.created_at, a.id",
                               params).fetchall()
         return [_record(row) for row in rows]
@@ -523,7 +523,12 @@ class AskStore:
         if supersedes is not None and (not isinstance(supersedes, int) or isinstance(supersedes, bool) or supersedes <= 0):
             raise CoordinationError("supersedes must be the ID of your own open ask.")
         self.store.get_session(session_id)
+        # Compare titles before the write scope; the scope only confirms the match is still open.
         title = normalized_title(text)
+        with self.store.reading(), self.store._connection() as db:
+            same_title = [row["id"] for row in db.execute(
+                "SELECT id, question FROM asks WHERE session_id = ? AND status = 'open'", (session_id,))
+                if row["id"] != supersedes and normalized_title(row["question"]) == title]
         now = self.store.clock()
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -538,10 +543,11 @@ class AskStore:
                     raise CoordinationError(f"Ask {supersedes} is not yours.")
                 if _status(earlier) != "open":
                     raise CoordinationError(f"Ask {supersedes} is already {_status(earlier)}.")
-            for candidate in db.execute("SELECT * FROM asks WHERE session_id = ? AND status = 'open' AND id IS NOT ?",
-                                        (session_id, supersedes)):
-                if normalized_title(candidate["question"]) == title:
-                    return {**_record(candidate), "existing": True}
+            if same_title:
+                duplicate = db.execute("SELECT * FROM asks WHERE status = 'open' AND id IN ("
+                                       + ",".join("?" * len(same_title)) + ") ORDER BY id LIMIT 1", same_title).fetchone()
+                if duplicate is not None:
+                    return {**_record(duplicate), "existing": True}
             if supersedes is not None:
                 db.execute("UPDATE asks SET status = 'withdrawn', withdrawn_at = ?, updated_at = ? WHERE id = ?",
                            (now, now, supersedes))
