@@ -470,7 +470,7 @@ const WorkingSet = (() => {
       return b;
     };
     let host, source = [], options = {}, context = "", pageKey = ALL, signature = "";
-    const collapsed = new Set(), shown = new Set();
+    const expanded = new Set(), shown = new Set();
     function row(t, data, depth = 0) {
       const agent = depth > 0;
       const time = now(), request = requestOf(t), place = placementOf(t, data.byId, time, data.workingRoots, false);
@@ -498,8 +498,8 @@ const WorkingSet = (() => {
         const descendants = [...children];
         for (let i = 0; i < descendants.length; i++) descendants.push(...data.agents.get(descendants[i].thread_id) || []);
         const working = descendants.filter(running).length, waiting = descendants.filter(c => ["approval", "question", "needs-you"].includes(requestOf(c))).length;
-        const failed = descendants.filter(c => requestOf(c) === "failed").length, isOpen = !collapsed.has(t.thread_id);
-        const toggle = button("", "tl-agents", () => { isOpen ? collapsed.add(t.thread_id) : collapsed.delete(t.thread_id); paint(); });
+        const failed = descendants.filter(c => requestOf(c) === "failed").length, isOpen = expanded.has(t.thread_id);
+        const toggle = button("", "tl-agents", () => { isOpen ? expanded.delete(t.thread_id) : expanded.add(t.thread_id); paint(); });
         toggle.dataset.thread = t.thread_id; toggle.dataset.action = "agents";
         toggle.setAttribute("aria-expanded", String(isOpen));
         toggle.append(descendants.length + (descendants.length === 1 ? " agent" : " agents"));
@@ -545,7 +545,7 @@ const WorkingSet = (() => {
       const list = el("ul", "tl-rows"), all = name !== "idle" || shown.has(name);
       const append = (t, depth = 0) => {
         list.append(row(t, data, depth));
-        if (!collapsed.has(t.thread_id)) for (const child of data.agents.get(t.thread_id) || []) append(child, depth + 1);
+        if (expanded.has(t.thread_id)) for (const child of data.agents.get(t.thread_id) || []) append(child, depth + 1);
       };
       for (const t of all ? items : items.slice(0, IDLE_CAP)) append(t);
       node.append(list);
@@ -590,7 +590,7 @@ const WorkingSet = (() => {
         const nextSignature = JSON.stringify([nextContext, next.selectedGroup, next.revision]);
         // The app's list revision changes whenever thread data changes, and once a minute for relative times.
         if (signature === nextSignature && next.revision !== undefined) return;
-        if (context !== nextContext) { context = nextContext; collapsed.clear(); shown.clear(); }
+        if (context !== nextContext) { context = nextContext; expanded.clear(); shown.clear(); }
         // Shared group tabs and Filters own selection; old List preferences must
         // not retain a second, invisible filter after its navigation is removed.
         pageKey = next.selectedGroup == null ? ALL : "group:" + next.selectedGroup;

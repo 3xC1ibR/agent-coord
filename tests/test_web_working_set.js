@@ -591,36 +591,54 @@ test("list rows open, read, close and open the thread menu without opening the r
   row.onclick({target: row.children[0]}); row.onclick({target: c.control("quiet", "more")});
   assert.deepEqual(c.calls, [["read", "reply"], ["menu", "reply", "more"], ["close", "reply"], ["open", "reply"], ["open", "quiet"]]);
 });
-test("list agents start expanded beneath their parent and keep requests in one Attention family", () => {
+test("list agents start collapsed beneath their parent and keep requests in one Attention family", () => {
   const c = listSetup();
   const agent = (id, extra) => listThread(id, {creation_mode: "orchestration", created_by_thread_id: "lead", ...extra});
   c.render([listThread("lead", {title: "Lead", checkpoint: {id: 1}}), agent("worker", {unread_result: true, checkpoint: {id: 2}}),
     agent("blocked", {status: "needs input", title: "Blocked agent", attention_since: NOW - 120})]);
-  assert.deepEqual(c.rows("attention"), ["lead", "blocked", "worker"]); assert.deepEqual(c.rows("idle"), []);
+  assert.deepEqual(c.rows("attention"), ["lead"]); assert.deepEqual(c.rows("idle"), []);
+  const toggle = c.control("lead", "agents"); assert.equal(toggle.attrs["aria-expanded"], "false");
+  assert.match(toggle.text, /2 agents.*1 need you/);
+  toggle.onclick({stopPropagation() {}});
+  assert.deepEqual(c.rows("attention"), ["lead", "blocked", "worker"]);
+  assert.equal(c.control("lead", "agents").attrs["aria-expanded"], "true");
   assert.equal(c.control("blocked", "open").text, "Blocked agent");
   assert.equal(c.host.querySelectorAll(".tl-row").find(row => row.dataset.thread === "blocked").querySelectorAll(".tl-time")[0].textContent, "2m");
-  const toggle = c.control("lead", "agents"); assert.equal(toggle.attrs["aria-expanded"], "true");
   c.control("blocked", "more").onclick({stopPropagation() {}});
   c.control("worker", "open").onclick({stopPropagation() {}});
   assert.deepEqual(c.calls, [["menu", "blocked", "more"], ["open", "worker"]]);
-  toggle.onclick({stopPropagation() {}});
+  c.control("lead", "agents").onclick({stopPropagation() {}});
   assert.deepEqual(c.rows("attention"), ["lead"]);
   assert.equal(c.control("lead", "agents").attrs["aria-expanded"], "false");
 });
-test("list preserves immediate parents at every depth and remembers collapsed branches through refresh", () => {
+test("list starts every depth collapsed and remembers expanded branches through refresh", () => {
   const c = listSetup();
   const records = [listThread("lead", {checkpoint: {id: 1}}),
     listThread("worker", {creation_mode: "orchestration", created_by_thread_id: "lead", checkpoint: {id: 2}}),
     listThread("validator", {creation_mode: "orchestration", created_by_thread_id: "worker", status: "running", response_state: "working"})];
   c.render(records);
-  assert.deepEqual(c.rows("working"), ["lead", "worker", "validator"]);
-  assert.deepEqual(c.host.querySelectorAll(".tl-row").map(row => row.attrs["aria-level"]), ["1", "2", "3"]);
-  c.control("worker", "agents").onclick({stopPropagation() {}});
-  c.render(records.map(t => ({...t, updated_at: NOW})));
+  assert.deepEqual(c.rows("working"), ["lead"]);
+  c.control("lead", "agents").onclick({stopPropagation() {}});
   assert.deepEqual(c.rows("working"), ["lead", "worker"]);
   assert.equal(c.control("worker", "agents").attrs["aria-expanded"], "false");
   c.control("worker", "agents").onclick({stopPropagation() {}});
   assert.deepEqual(c.rows("working"), ["lead", "worker", "validator"]);
+  assert.deepEqual(c.host.querySelectorAll(".tl-row").map(row => row.attrs["aria-level"]), ["1", "2", "3"]);
+  c.render(records.map(t => ({...t, updated_at: NOW})));
+  assert.deepEqual(c.rows("working"), ["lead", "worker", "validator"]);
+  assert.equal(c.control("worker", "agents").attrs["aria-expanded"], "true");
+  c.control("worker", "agents").onclick({stopPropagation() {}});
+  c.render(records);
+  assert.deepEqual(c.rows("working"), ["lead", "worker"]);
+  assert.equal(c.control("worker", "agents").attrs["aria-expanded"], "false");
+  c.control("worker", "agents").onclick({stopPropagation() {}});
+  assert.deepEqual(c.rows("working"), ["lead", "worker", "validator"]);
+  c.render([...records, listThread("new-lead", {checkpoint: {id: 3}}),
+    listThread("new-worker", {supervisor_thread_id: "new-lead", checkpoint: {id: 4}})]);
+  assert.deepEqual(c.rows("idle"), ["new-lead"]);
+  assert.equal(c.control("new-lead", "agents").attrs["aria-expanded"], "false");
+  c.render(records, {workspace: "/another-workspace"});
+  assert.deepEqual(c.rows("working"), ["lead"], "a different inbox context resets expansion");
 });
 test("list uses the current supervisor, respects release to the user and leaves dispatch provenance independent", () => {
   const c = listSetup();
@@ -628,9 +646,11 @@ test("list uses the current supervisor, respects release to the user and leaves 
     listThread("moved", {creation_mode: "orchestration", created_by_thread_id: "old", supervisor_thread_id: "current"}),
     listThread("released", {creation_mode: "orchestration", created_by_thread_id: "old", supervisor_thread_id: null, checkpoint: {id: 3}}),
     listThread("dispatch", {created_by_thread_id: "old", checkpoint: {id: 4}})]);
-  assert.deepEqual(c.rows("idle"), ["current", "moved", "dispatch", "old", "released"]);
+  assert.deepEqual(c.rows("idle"), ["current", "dispatch", "old", "released"]);
   assert.equal(c.control("old", "agents"), undefined);
-  assert.equal(c.control("current", "agents").attrs["aria-expanded"], "true");
+  assert.equal(c.control("current", "agents").attrs["aria-expanded"], "false");
+  c.control("current", "agents").onclick({stopPropagation() {}});
+  assert.deepEqual(c.rows("idle"), ["current", "moved", "dispatch", "old", "released"]);
   const records = [listThread("old", {project_id: "old-group", checkpoint: {id: 1}}),
     listThread("released", {creation_mode: "orchestration", created_by_thread_id: "old", supervisor_thread_id: null, checkpoint: {id: 2}})];
   c.render(records, {selectedGroup: "old-group"});
@@ -653,6 +673,8 @@ test("list shows historical cycles, self links and missing parents exactly once 
     listThread("self", {supervisor_thread_id: "self", checkpoint: {id: 2}})];
   const before = JSON.stringify(records);
   c.render(records);
+  c.control("a", "agents").onclick({stopPropagation() {}});
+  c.control("b", "agents").onclick({stopPropagation() {}});
   assert.deepEqual(c.rows("idle").sort(), ["a", "b", "deep", "missing", "self"]);
   assert.equal(JSON.stringify(records), before);
 });
@@ -662,15 +684,21 @@ test("descendant requests promote their entire family and drain once resolved", 
     listThread("question", {supervisor_thread_id: "worker", open_ask: {id: 1, question: "Which target?"}}),
     listThread("reply", {unread_result: true, attention_since: NOW - 5})];
   c.render(records);
-  assert.deepEqual(c.rows("attention"), ["lead", "worker", "question", "reply"]);
+  assert.deepEqual(c.rows("attention"), ["lead", "reply"]);
+  assert.match(c.control("lead", "agents").text, /1 need you/);
   c.render(records.map(t => t.thread_id === "question" ? {...t, open_ask: null} : t));
   assert.deepEqual(c.rows("attention"), ["reply"]);
+  assert.deepEqual(c.rows("idle"), ["lead"]);
+  c.control("lead", "agents").onclick({stopPropagation() {}});
+  c.control("worker", "agents").onclick({stopPropagation() {}});
   assert.deepEqual(c.rows("idle"), ["lead", "worker", "question"]);
 });
 test("Later and Closed retain nested families without adding active sections", () => {
   for (const attention of ["later", "archived"]) {
     const c = listSetup();
     c.render([listThread("parent", {attention}), listThread("child", {attention, supervisor_thread_id: "parent"})], {placement: attention});
+    assert.deepEqual(c.rows("parked"), ["parent"]);
+    c.control("parent", "agents").onclick({stopPropagation() {}});
     assert.deepEqual(c.rows("parked"), ["parent", "child"]);
     assert.deepEqual(c.rows("attention"), []);
   }
