@@ -390,7 +390,15 @@ def uninterrupted_readiness(sessions):
         if legacy:
             # Frozen 6d3a900 control code reproduces the real legacy launch,
             # shutdown drain and recovery boundary, including direct trial entry.
-            runtime_source.write_bytes((ROOT / "tests/fixtures/legacy_desktop_runtime.py").read_bytes())
+            # Only its control server binds like the current runtime: reverse
+            # DNS of 127.0.0.1 takes 35 s per process on GitHub macOS runners,
+            # beyond the legacy 20 s start wait. server_name is never read.
+            legacy_source = (ROOT / "tests/fixtures/legacy_desktop_runtime.py").read_text()
+            plain_bind = '        controller = ThreadingHTTPServer(("127.0.0.1", 0), Handler)\n'
+            self.assertEqual(legacy_source.count(plain_bind), 1)
+            runtime_source.write_text(legacy_source.replace(plain_bind,
+                '        from .local_http import LocalHTTPServer\n'
+                '        controller = LocalHTTPServer(("127.0.0.1", 0), Handler)\n'))
         first = self.launch()
         record = runtime.discover(self.database)
         thread = self.api(first["url"], "api/browser/sessions", {"cwd": str(self.root)})["session"]["thread_id"]
