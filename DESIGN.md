@@ -77,7 +77,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | --- | --- |
 | Permission menu | Provider-supplied session modes as checked menu choices; unavailable native choices remain identified; opening never changes a selection |
 | Composer controls | Shortcut help in the state-aware placeholder; arrow send and calendar schedule retain accessible names and touch targets |
-| Scheduled prompts | Repeat is an attribute of a scheduled prompt; reuse native labelled selects and inputs, existing result cards, and quiet Edit, Pause, Resume and Cancel actions |
+| Scheduled prompts | A small clock in the chat header appears when the thread has upcoming prompts and opens its scheduled-prompt details in the existing dialog. Repeat is an attribute of a scheduled prompt; reuse native labelled selects and inputs, existing result cards, and quiet Edit, Pause, Resume and Cancel actions |
 | Thread group label | Group beside the workspace path opens the existing group assignment editor |
 | Quiet button | Refresh, dismiss, secondary actions |
 | Primary button | The view's principal action |
@@ -132,6 +132,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-22 | Upcoming chat prompts use a clock in the header and the existing details dialog | Keep the conversation readable while preserving prompt details and scheduling actions |
 | 2026-11-22 | Asks get a primary sidebar entry and a view that replaces the Decisions dialog | The dialog behind the question-mark button went unnoticed. Asks now have kinds and in-place resolutions. The view opens in a workspace dialog with the auxiliary-page grammar, and ships in the existing `asks.js` and `asks.css` so an older backend can serve it before its update is applied. |
 | 2026-11-21 | List inbox starts app-agent families collapsed at every depth | Keep the inbox compact by default while preserving explicit expansion and descendant attention counts. |
 | 2026-11-21 | Mobile conversations use a single header and a two-row composer; secondary actions move into thread options | Return reading space from repeated navigation and desktop instructions while preserving the existing actions. |

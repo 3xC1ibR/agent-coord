@@ -214,8 +214,12 @@
       finally { this.saving = false; this.$("schedule-save").disabled = false; }
     }
 
-    async showList() {
+    async showList(threadId = null) {
+      this.listThreadId = threadId;
+      this.$("schedules-description").textContent = threadId ? "Upcoming prompts for this thread." :
+        "Manage upcoming runs and recurring jobs. Open a result thread to review the outcome.";
       this.error("schedules-error", null);
+      this.renderList();
       if (!this.$("schedules-dialog").open) this.$("schedules-dialog").showModal();
       await this.refresh();
       clearInterval(this.timer);
@@ -259,10 +263,11 @@
       if (area.dataset.signature === signature) return;
       area.dataset.signature = signature;
       area.hidden = !items.length;
-      area.replaceChildren();
-      if (!items.length) return;
-      area.append(this.node("h2", items.length === 1 ? "Scheduled prompt" : "Scheduled prompts"));
-      for (const item of items) area.append(this.card(item, {compact: true}));
+      area.onclick = items.length ? () => this.showList(threadId).catch(this.onError) : null;
+      const label = `${items.length} scheduled ${items.length === 1 ? "prompt" : "prompts"}`;
+      area.setAttribute("aria-label", label);
+      area.title = items.length ? `${label} · ${new Date(items[0].run_at * 1000).toLocaleString(undefined,
+        {timeZone: items[0].timezone, dateStyle: "medium", timeStyle: "short"})} · ${items[0].timezone}` : "";
     }
 
     renderUpcoming(area, items) {
@@ -277,11 +282,12 @@
 
     renderList() {
       const list = this.$("schedule-list"); list.replaceChildren();
-      if (!this.items.length) list.append(this.node("p", "No scheduled prompts yet.", "muted"));
-      for (const item of this.items) list.append(this.card(item));
+      const items = this.listThreadId ? this.upcoming({threadId: this.listThreadId}) : this.items;
+      if (!items.length) list.append(this.node("p", this.listThreadId ? "No upcoming prompts for this thread." : "No scheduled prompts yet.", "muted"));
+      for (const item of items) list.append(this.card(item));
     }
 
-    card(item, {compact = false} = {}) {
+    card(item) {
       const labels = {scheduled: "Scheduled", waiting: "Waiting for thread", starting: "Starting", running: "Running", completed: "Completed", failed: "Failed", missed: "Missed", cancelled: "Cancelled", paused: "Paused", review: "Needs review"};
       const card = this.node("article", null, "schedule-card");
       const title = this.node("h3", item.message);
@@ -290,11 +296,11 @@
       const status = ["starting", "running"].includes(item.state) && ["paused", "cancelled"].includes(item.recurrence_status) ?
         `${labels[item.state]} · ${item.recurrence_status === "paused" ? "Pauses after this run" : "No further runs"}` : labels[item.state] || item.state;
       card.append(title, this.node("p", `${status}${repeat ? " · " + repeat : ""} · ${time} · ${item.timezone}`, "schedule-meta"));
-      if (!compact) card.append(
+      card.append(
         this.node("p", item.target_thread_id ? "Existing thread · " + (this.getThread?.(item.target_thread_id)?.title || "Uses its settings at delivery") : `New thread · ${item.settings.model} · ${item.settings.effort || "Model default"} · ${item.settings.yolo ? "Full access" : "Workspace access"}`, "muted"),
         this.node("p", item.cwd, "muted"));
       if (item.error) card.append(this.node("p", item.error, "schedule-error"));
-      if (item.last_run && !compact) {
+      if (item.last_run) {
         const last = item.last_run;
         const finished = new Date(last.run_at * 1000).toLocaleString(undefined, {timeZone: item.timezone, dateStyle: "medium", timeStyle: "short"});
         card.append(this.node("p", `Last run: ${labels[last.state] || last.state} · ${finished}`, "muted"));
@@ -327,7 +333,7 @@
         this.accept(await this.api("schedules/" + item.id, {action: "run_now", version: item.version})); await this.refresh();
       });
       const threadId = item.thread_id || item.last_run?.thread_id;
-      if (threadId && !compact) button("Open thread", async () => { await this.openThread(threadId); this.$("schedules-dialog").close(); }, false);
+      if (threadId) button("Open thread", async () => { await this.openThread(threadId); this.$("schedules-dialog").close(); }, false);
       card.append(actions); return card;
     }
   }

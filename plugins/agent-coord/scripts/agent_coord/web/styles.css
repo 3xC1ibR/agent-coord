@@ -754,14 +754,8 @@ body.monitor-page { display: block; height: auto; min-height: 100dvh; }
 #schedule-form { display: flex; flex-direction: column; max-height: calc(100dvh - var(--schedule-form-inset)); }
 .schedule-form-body { overflow: auto; min-height: 0; padding-inline: var(--schedule-gap); margin-inline: calc(-1 * var(--schedule-gap)); }
 #schedule-form > .dialog-actions { flex-shrink: 0; padding-top: var(--schedule-gap); }
-.thread-schedules { flex: none; max-height: 180px; overflow-y: auto; border-top: 1px solid var(--line); padding: 10px 28px; }
-.thread-schedules > h2, .upcoming-schedules > h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
-.thread-schedules .schedule-card { padding: 10px 12px; margin-top: 8px; }
-.thread-schedules .schedule-card h3 { font-size: 12px; max-height: 3em; }
-.thread-schedules .dialog-actions { margin-top: 8px; }
-.thread-schedules .dialog-actions button { padding: 3px 8px; font-size: 12px; }
+.upcoming-schedules > h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; } /* drift-ok: retain the existing overview schedule heading while removing the chat panel. */
 .upcoming-schedules .schedule-card { background: var(--surface); }
-@media (max-width: 720px) { .thread-schedules { padding: 10px 16px; max-height: 160px; } }
 .composer-footer > div { flex-wrap: wrap; justify-content: flex-end; }
 @media (max-width: 520px) { .schedule-settings { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 520px) {
@@ -793,6 +787,7 @@ body.mobile-chat .conversation-controls { flex-shrink: 0; }
 body.mobile-chat .mobile-chat-control { display: inline-flex; align-items: center; justify-content: center; }
 body.mobile-chat button.mobile-chat-control { min-width: var(--chat-control-size); min-height: var(--chat-control-size); padding: var(--mobile-chat-control-padding); border-color: transparent; }
 body.mobile-chat .mobile-chat-control svg { width: var(--chat-control-icon); height: var(--chat-control-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+body.mobile-chat #thread-schedules { min-width: var(--chat-control-size); min-height: var(--chat-control-size); padding: var(--mobile-chat-control-padding); border-color: transparent; }
 body.mobile-chat .mobile-chat-status { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
 body.mobile-chat .mobile-chat-status[data-status="running"] { background: var(--accent); }
 body.mobile-chat .mobile-chat-status[data-status="input"] { background: var(--warm); }

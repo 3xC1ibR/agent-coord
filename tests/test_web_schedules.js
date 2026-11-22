@@ -259,26 +259,52 @@ test("upcoming includes new and existing threads in run order, including waiting
   assert.deepEqual(rows, original, "selection never reorders the shared history");
 });
 
-test("chat shows every upcoming prompt for its destination and clears on thread switch or delivery", t => {
-  const c = setup(t), area = new Element("section");
+test("chat clock opens only its thread's upcoming prompts and clears on thread switch or delivery", async t => {
+  const c = setup(t), area = new Element("button"), icon = new Element("svg");
+  area.append(icon);
   c.ui.update([scheduled("one", {target_thread_id: "a"}), scheduled("two", {state: "waiting", target_thread_id: "a"}),
     scheduled("elsewhere", {target_thread_id: "b"}), scheduled("new")]);
+  const api = c.ui.api;
+  c.ui.api = (path, body) => path === "schedules" && !body ? {data: c.ui.items} : api(path, body);
   c.ui.renderThread(area, "a");
   assert.equal(area.hidden, false);
-  assert.equal(area.children[0].textContent, "Scheduled prompts");
-  assert.match(textContent(area), /Continue one/);
-  assert.match(textContent(area), /Waiting for thread/);
-  assert.match(textContent(area), /America\/Chicago/);
-  assert.doesNotMatch(textContent(area), /elsewhere|Continue new/);
-  assert.deepEqual(buttons(area.children[1]).map(button => button.textContent), ["Edit", "Cancel"]);
-  const retained = area.children[1]; c.ui.renderThread(area, "a");
-  assert.equal(area.children[1], retained, "polling preserves focused controls when unchanged");
+  assert.equal(area.attributes["aria-label"], "2 scheduled prompts");
+  assert.match(area.title, /America\/Chicago/);
+  assert.deepEqual(area.children, [icon], "the indicator keeps only its icon");
+  const retained = area.onclick; c.ui.renderThread(area, "a");
+  assert.equal(area.onclick, retained, "polling leaves the indicator unchanged");
+  await area.onclick();
+  assert.equal(c.$("schedules-dialog").open, true);
+  const list = c.$("schedule-list");
+  assert.equal(list.children.length, 2);
+  assert.match(textContent(list), /Continue one/);
+  assert.match(textContent(list), /Waiting for thread/);
+  assert.match(textContent(list), /America\/Chicago/);
+  assert.doesNotMatch(textContent(list), /elsewhere|Continue new/);
+  assert.deepEqual(buttons(list.children[0]).map(button => button.textContent), ["Edit", "Cancel"]);
+  assert.equal(c.saved.length, 0, "viewing schedules leaves the composer draft alone");
+  c.$("schedules-dialog").close();
   c.ui.renderThread(area, "b");
-  assert.match(textContent(area), /Continue elsewhere/);
-  assert.doesNotMatch(textContent(area), /Continue one/);
+  assert.equal(area.attributes["aria-label"], "1 scheduled prompt");
+  await area.onclick();
+  assert.match(textContent(list), /Continue elsewhere/);
+  assert.doesNotMatch(textContent(list), /Continue one/);
+  await c.$("scheduled-prompts").onclick();
+  assert.equal(list.children.length, 4, "the sidebar still opens all schedules");
   c.ui.update(c.ui.items.map(item => ({...item, state: "running"})));
   c.ui.renderThread(area, "b"); assert.equal(area.hidden, true);
-  c.ui.renderThread(area, null); assert.equal(area.children.length, 0);
+  assert.equal(area.onclick, null);
+  c.ui.renderThread(area, null); assert.equal(area.hidden, true);
+  assert.deepEqual(area.children, [icon]);
+});
+
+test("thread schedule details show the empty state when the last prompt is cancelled", async t => {
+  const c = setup(t);
+  c.ui.api = async () => ({data: [scheduled("one", {target_thread_id: "a"})]});
+  await c.ui.showList("a");
+  c.ui.accept(scheduled("one", {target_thread_id: "a", state: "cancelled"}));
+  assert.match(textContent(c.$("schedule-list")), /No upcoming prompts for this thread/);
+  assert.doesNotMatch(textContent(c.$("schedule-list")), /Continue one/);
 });
 
 test("Later cards display destination, time, actions, and can open an existing thread", async t => {
@@ -299,10 +325,12 @@ test("cancellation updates chat and Later immediately and rejects an older in-fl
   let staleResolve, freshResolve, changes = 0;
   c.ui.onChange = () => { changes++; c.ui.renderThread(area, "a"); };
   c.ui.update([item]);
+  c.ui.listThreadId = "a";
+  c.$("schedules-dialog").showModal(); c.ui.renderList();
   c.ui.api = (path, body) => body ? Promise.resolve({...item, state: "cancelled", version: 2}) :
     new Promise(resolve => { if (!staleResolve) staleResolve = resolve; else freshResolve = resolve; });
   const stale = c.ui.refresh({background: true});
-  const cancelled = buttons(area.children[1]).find(button => button.textContent === "Cancel").onclick();
+  const cancelled = buttons(c.$("schedule-list").children[0]).find(button => button.textContent === "Cancel").onclick();
   await Promise.resolve(); await Promise.resolve();
   assert.equal(area.hidden, true);
   assert.deepEqual(c.ui.upcoming(), []);
