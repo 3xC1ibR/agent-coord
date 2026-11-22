@@ -178,8 +178,15 @@ class RuntimeTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def log(self):
-        path = runtime.runtime_directory(self.database) / "runtime.log"
-        return path.read_text() if path.exists() else ""
+        directory = runtime.runtime_directory(self.database)
+        details = []
+        for relative in ("runtime.log", "provider-transport/owner.log"):
+            path = directory / relative
+            if path.exists():
+                with path.open("rb") as stream:
+                    stream.seek(max(0, path.stat().st_size - 16_384))
+                    details.append(relative + ":\n" + stream.read().decode(errors="replace"))
+        return "\n".join(details)
 
     def api(self, url, path, body=None):
         headers = {}
