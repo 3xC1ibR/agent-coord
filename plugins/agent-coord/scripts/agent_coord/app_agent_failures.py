@@ -216,6 +216,15 @@ def _notify(store, db, request, *, event_key, stage, error, turn_id=None, event=
         if assignment:
             result = {"assignment_message_id": assignment["id"],
                       **result_snapshot(db, child, turn_id, assignment["id"])}
+    if stage == "wake":
+        # A transport launch can fail before the provider assigns a turn.
+        pause = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id=? AND paused=1", (child,)).fetchone()
+        message_id = dict(pause).get("wake_message_id") if pause else None
+        if message_id:
+            result["wake_message_id"] = message_id
+            guidance = (f"Inspect the inbox pause on this agent. Later work is queued. After reviewing the failure, "
+                        f"run agent-coord thread resume --session-id {child} --expected-message-id {message_id} "
+                        "--wait 30. The user can also choose Resume inbox in the conversation.")
     body = json.dumps({
         "event": event, "source": "runtime", "stage": stage,
         "request_id": request["request_id"], "session_id": child,

@@ -116,6 +116,17 @@ class TransportTests(unittest.TestCase):
             time.sleep(.01)
         self.assertEqual([r["data"] for r in self.owner.journal.events(0)], ["once\n"])
 
+    def test_missing_launch_directory_has_durable_rejection_before_provider_input(self):
+        options = {"args": [sys.executable], "env": {}, "cwd": self.directory.name + "/removed-worktree"}
+        result = self.command("open", "open", options)
+        self.assertEqual(result["outcome"], "rejected")
+        self.assertIn("removed-worktree", result["result"]["error"])
+        self.assertEqual(self.command("open", "open", options), result)
+        self.assertEqual(self.owner.dispatch({"action": "outcome", "command_id": "open", **self.claim}), result)
+        channel = self.owner.dispatch({"action": "status"})["channels"][0]
+        self.assertEqual((channel["state"], channel["pid"]), ("closed", None))
+        self.assertFalse(self.owner.processes)
+
     def test_uncertain_write_is_never_repeated(self):
         self.open()
         real = self.owner._command

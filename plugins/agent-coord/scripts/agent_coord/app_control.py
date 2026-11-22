@@ -119,7 +119,10 @@ class AppControl:
             cwd = record["cwd"]
             if operation == "resume":
                 expected = payload.get("expected_turn_id")
-                if set(payload) - {"expected_turn_id", "reason", "execution_confirmed"} or not isinstance(expected, str) or not expected.strip() or len(expected) > 200:
+                if "expected_message_id" in payload:
+                    if set(payload) != {"expected_message_id"} or type(payload["expected_message_id"]) is not int or payload["expected_message_id"] <= 0:
+                        raise CoordinationError("Wake recovery accepts one positive expected message ID.")
+                elif set(payload) - {"expected_turn_id", "reason", "execution_confirmed"} or not isinstance(expected, str) or not expected.strip() or len(expected) > 200:
                     raise CoordinationError("Recovery requires the expected failed or interrupted turn ID.")
                 if "reason" in payload:
                     reason = payload["reason"]
@@ -201,6 +204,8 @@ class AppControl:
                 # Pre-recovery app workers treat unknown queued operations as
                 # creation. Keep recovery invisible to their queued-only scan.
                 queued = "queued_" + operation if operation in {"resume", "sidecar", "session", "schedule"} else "queued"
+                if operation == "resume" and "expected_message_id" in payload:
+                    queued = "queued_wake_resume"  # Earlier workers only understand failed-turn recovery.
                 db.execute("""INSERT INTO app_control_requests
                     (request_id, operation, sender_session_id, cwd, thread_id, payload_json,
                      status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -239,7 +244,7 @@ class AppControl:
             if not row:
                 raise CoordinationError("App request not found.")
             result = {key: row[key] for key in ("request_id", "operation", "status", "thread_id", "error")}
-            if result["status"] in {"queued_resume", "queued_sidecar", "queued_session", "queued_schedule"}:
+            if result["status"] in {"queued_resume", "queued_wake_resume", "queued_sidecar", "queued_session", "queued_schedule"}:
                 result["status"] = "queued"
             result["result"] = json.loads(row["result_json"]) if row["result_json"] else None
             if result["status"] == "queued":
@@ -258,7 +263,7 @@ class AppControl:
                 raise CoordinationError("App request not found.")
             if row[0] == "running":
                 raise CoordinationError("The app request is already executing. Inspect request-status before acting again.")
-            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume', 'queued_sidecar', 'queued_session', 'queued_schedule')",
+            db.execute("UPDATE app_control_requests SET status = 'cancelled', updated_at = ? WHERE request_id = ? AND status IN ('queued', 'queued_resume', 'queued_wake_resume', 'queued_sidecar', 'queued_session', 'queued_schedule')",
                        (self.store.clock(), request_id))
         return self.status(request_id)
 
@@ -266,14 +271,14 @@ class AppControl:
         self._reconcile()
         with self.store.reading(), self.store._connection() as db:
             return [dict(row) for row in db.execute("""SELECT * FROM app_control_requests
-                WHERE status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
+                WHERE status = 'queued' OR (operation = 'resume' AND status IN ('queued_resume', 'queued_wake_resume'))
                 OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar')
                 OR (operation = 'schedule' AND status = 'queued_schedule') ORDER BY created_at, rowid""")]
 
     def claim(self, request_id, owner):
         with self.store._connection() as db:
             return bool(db.execute("""UPDATE app_control_requests SET status = 'running', owner = ?, updated_at = ?
-                WHERE request_id = ? AND (status = 'queued' OR (operation = 'resume' AND status = 'queued_resume')
+                WHERE request_id = ? AND (status = 'queued' OR (operation = 'resume' AND status IN ('queued_resume', 'queued_wake_resume'))
                 OR (operation = 'session' AND status = 'queued_session') OR (operation = 'sidecar' AND status = 'queued_sidecar')
                 OR (operation = 'schedule' AND status = 'queued_schedule'))""",
                                    (owner, self.store.clock(), request_id)).rowcount)
@@ -396,9 +401,13 @@ class AppControlWorker:
                 result = self.sessions.sidecars.watches.attach(self.sessions, request,
                     on_created=lambda tid: self.control.identified(request["request_id"], tid))
             elif request["operation"] == "resume":
-                result = self.sessions.inbox_wake.recover(request["thread_id"], payload["expected_turn_id"],
-                    request["sender_session_id"], reason=payload.get("reason"),
-                    execution_confirmed=payload.get("execution_confirmed", False))
+                if "expected_message_id" in payload:
+                    result = self.sessions.inbox_wake.recover_wake(request["thread_id"], payload["expected_message_id"],
+                                                                   request["sender_session_id"])
+                else:
+                    result = self.sessions.inbox_wake.recover(request["thread_id"], payload["expected_turn_id"],
+                        request["sender_session_id"], reason=payload.get("reason"),
+                        execution_confirmed=payload.get("execution_confirmed", False))
             elif request["operation"] == "move":
                 from .thread_move import move_work_thread
                 thread_id = request["thread_id"]

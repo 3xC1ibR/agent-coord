@@ -14,6 +14,7 @@ from unittest.mock import patch
 from test_codex_app_server import FakeCodex
 from agent_coord.codex_app_server import BrowserSessions
 from agent_coord.coordinator_projection import CoordinatorProjection, pack, unpack
+from agent_coord.provider_transport import ProviderLaunchRejected
 from agent_coord.store import CoordinationError, CoordinationStore
 
 
@@ -268,6 +269,62 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(calls, ["outcome"])
         with self.store.reading(), self.store._connection() as db:
             self.assertEqual(db.execute("SELECT outcome FROM coordinator_commands").fetchone()[0], "written")
+
+    def test_failed_open_from_retained_transport_has_no_provider_input(self):
+        error = "[Errno 2] No such file or directory: '/removed-worktree'"
+        receipt = {"outcome": "uncertain", "result": {"error": error}}
+        channel = "claude:missing-worktree"
+        status = {"channels": [{"channel": channel, "pid": None, "state": "closed"}]}
+        with patch.object(self.client, "call", side_effect=[receipt, status]):
+            with self.assertRaisesRegex(ProviderLaunchRejected, "removed-worktree"):
+                self.projection.open(channel, ["claude"], {}, "/removed-worktree", lambda _: None,
+                                     provider="claude", thread_id=self.identity)
+        with self.store.reading(), self.store._connection() as db:
+            command = db.execute("SELECT outcome,value_json FROM coordinator_commands WHERE command_id=?",
+                                 ("open:" + channel,)).fetchone()
+            self.assertEqual(tuple(command), ("rejected", "{}"))
+            self.assertEqual(tuple(db.execute("SELECT closed,pid FROM coordinator_channels WHERE channel=?",
+                                              (channel,)).fetchone()), (1, None))
+
+    def test_restart_recovers_legacy_enoent_open_only_with_closed_unstarted_channel(self):
+        self.projection.checkpoint()
+        channel = "claude:missing-worktree"
+        error = "[Errno 2] No such file or directory: '/removed-worktree'"
+        with self.store._connection() as db:
+            db.execute("INSERT INTO coordinator_channels VALUES (?, 'claude', ?, 'main', NULL, 0)",
+                       (channel, self.identity))
+            db.execute("INSERT INTO coordinator_commands VALUES (?, ?, 'open', '{}', 'uncertain', ?)",
+                       ("open:" + channel, channel, json.dumps({"error": error})))
+        for pid, state in [(987, "closed"), (None, "opening"), (None, "closed")]:
+            with self.subTest(pid=pid, state=state), patch.object(self.client, "call", return_value={
+                    "channels": [{"channel": channel, "pid": pid, "state": state}]}) as transport:
+                projection = CoordinatorProjection(self.sessions, self.client)
+                if pid or state != "closed":
+                    with self.assertRaisesRegex(RuntimeError, "uncertain"):
+                        projection.load()
+                else:
+                    projection.load()
+                    self.assertNotIn(channel, projection.channels)
+                    self.assertIsNone(projection.delivery_error)
+                self.assertTrue(all(call.args == ("status",) for call in transport.call_args_list))
+
+    def test_restart_recovers_orphaned_launch_receipts_from_matching_retained_channels(self):
+        self.projection.checkpoint()
+        closed = ["claude:removed-first", "claude:removed-second"]
+        unknown = "claude:absent"
+        error = "[Errno 2] No such file or directory: '/removed-worktree'"
+        with self.store._connection() as db:
+            db.executemany("INSERT INTO coordinator_commands VALUES (?, ?, 'open', '{}', 'uncertain', ?)",
+                           [("open:" + c, c, json.dumps({"error": error})) for c in [*closed, unknown]])
+        with patch.object(self.client, "call", return_value={
+                "channels": [{"channel": c, "pid": None, "state": "closed"} for c in closed]}) as transport:
+            projection = CoordinatorProjection(self.sessions, self.client)
+            projection.load()
+            transport.assert_called_once_with("status")
+        with self.store.reading(), self.store._connection() as db:
+            outcomes = dict(db.execute("SELECT channel, outcome FROM coordinator_commands"))
+        self.assertEqual(outcomes, {closed[0]: "rejected", closed[1]: "rejected", unknown: "uncertain"})
+        self.assertIn("uncertain", projection.delivery_error)
 
     def test_uncertain_command_is_not_replayed(self):
         with self.store._connection() as db:

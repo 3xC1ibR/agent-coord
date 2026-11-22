@@ -270,7 +270,9 @@ def _parser() -> argparse.ArgumentParser:
     resume = thread_commands.add_parser("resume", help="Let the current supervisor (the creating orchestrator unless adopted) recover a failed or interrupted app agent for fresh inbox work.")
     resume.add_argument("--session-id", required=True, help="Target app agent.")
     resume.add_argument("--from-session", help="Current supervisor; defaults to the current caller.")
-    resume.add_argument("--expected-turn-id", required=True, help="Failed or interrupted turn inspected before requesting recovery.")
+    boundary = resume.add_mutually_exclusive_group(required=True)
+    boundary.add_argument("--expected-message-id", type=int, help="Message ID shown for the paused inbox wake.")
+    boundary.add_argument("--expected-turn-id", help="Failed or interrupted turn inspected before requesting recovery.")
     resume.add_argument("--reason", help="Why this explicit recovery is safe; saved in the recovery audit.")
     resume.add_argument("--confirm-stopped", action="store_true", help="Attest that native execution stopped after inspecting agent and tool outcomes; requires --reason.")
     adopt = thread_commands.add_parser("adopt", help="Adopt selected idle app agents from a supervisor that has ended or been closed; never wakes or stops them.")
@@ -878,7 +880,8 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
             if operation == "request-status":
                 return control.status(arguments.request_id, wait=arguments.wait)
             if operation == "resume":
-                payload = {"expected_turn_id": arguments.expected_turn_id}
+                payload = ({"expected_message_id": arguments.expected_message_id} if arguments.expected_message_id is not None
+                           else {"expected_turn_id": arguments.expected_turn_id})
                 if arguments.reason is not None:
                     payload["reason"] = arguments.reason
                 if arguments.confirm_stopped:

@@ -50,6 +50,22 @@ class BrowserInboxWake:
                 if column not in columns:
                     db.execute(f"ALTER TABLE browser_inbox_wake ADD COLUMN {column} {definition}")
 
+            if "wake_message_id" not in columns:
+                db.execute("ALTER TABLE browser_inbox_wake ADD COLUMN wake_message_id INTEGER")
+                # This legacy error was emitted only after a claimed submission
+                # failed. Preserve its reservations, even after inbox closure.
+                db.execute("""UPDATE browser_inbox_wake AS w SET wake_message_id = (
+                    SELECT a.message_id FROM messages m JOIN message_wake_attempts a ON a.message_id=m.id
+                    WHERE m.recipient_session_id=w.thread_id AND a.session_id=w.thread_id
+                    AND a.outcome='failed' AND w.error='Inbox wake may have started; send a message to continue. ' || a.detail
+                    ORDER BY a.attempted_at DESC, a.message_id LIMIT 1)
+                    WHERE paused=1 AND pause_kind='unknown'""")
+                db.execute("""UPDATE browser_inbox_wake SET pause_kind='uncertain'
+                    WHERE paused=1 AND pause_kind='unknown' AND wake_message_id IS NOT NULL""")
+                db.execute("""UPDATE browser_inbox_wake AS w SET wake_message_id = (
+                    SELECT MIN(id) FROM messages WHERE recipient_session_id=w.thread_id
+                    AND delivered_at IS NULL AND suppressed_at IS NULL AND classification='action_required')
+                    WHERE paused=1 AND pause_kind='pre_submit'""")
             db.execute("""CREATE TABLE IF NOT EXISTS browser_wake_recoveries (
                 id INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
                 requester TEXT NOT NULL, reason TEXT NOT NULL, pause_kind TEXT NOT NULL,
@@ -57,29 +73,48 @@ class BrowserInboxWake:
             )""")
             if "execution_confirmed" not in {row[1] for row in db.execute("PRAGMA table_info(browser_wake_recoveries)")}:
                 db.execute("ALTER TABLE browser_wake_recoveries ADD COLUMN execution_confirmed INTEGER NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS browser_message_wake_recoveries (
+                id INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, message_id INTEGER NOT NULL,
+                requester TEXT NOT NULL, pause_kind TEXT NOT NULL, recovered_at REAL NOT NULL
+            )""")
             db.execute("""CREATE TABLE IF NOT EXISTS browser_stop_releases (
                 id INTEGER PRIMARY KEY, release_id TEXT NOT NULL, thread_id TEXT NOT NULL,
                 released_at REAL NOT NULL
             )""")
 
-    def pause(self, thread_id, reason, *, kind="unknown"):
+    def pause(self, thread_id, reason, *, kind="unknown", message_id=None):
         self.checked_pauses.pop(thread_id, None)
         with self.store._connection() as db:
-            db.execute("""INSERT INTO browser_inbox_wake (thread_id, paused, error, pause_kind)
-                VALUES (?, 1, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET paused = 1,
-                error = CASE WHEN pause_kind = 'stop' THEN error ELSE excluded.error END,
-                pause_kind = CASE WHEN pause_kind = 'stop' THEN 'stop' ELSE excluded.pause_kind END,
-                recovery_turn_id = NULL, reconciled_turn_id = NULL,
-                recovery_after_message_id = 0""", (thread_id, reason, kind))
-            db.execute("UPDATE browser_inbox_wake SET paused_at = COALESCE(paused_at, ?), retry_at = NULL WHERE thread_id = ?",
-                       (self.store.clock(), thread_id))
+            self._save_pause(db, thread_id, reason, kind, message_id)
+
+    def _save_pause(self, db, thread_id, reason, kind, message_id=None):
+        db.execute("""INSERT INTO browser_inbox_wake (thread_id, paused, error, pause_kind, wake_message_id, paused_at)
+            VALUES (?, 1, ?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET paused = 1,
+            error = CASE WHEN pause_kind = 'stop' THEN error ELSE excluded.error END,
+            pause_kind = CASE WHEN pause_kind = 'stop' THEN 'stop' ELSE excluded.pause_kind END,
+            wake_message_id = CASE WHEN pause_kind = 'stop' THEN NULL ELSE excluded.wake_message_id END,
+            paused_at = COALESCE(paused_at, excluded.paused_at), retry_at = NULL,
+            recovery_turn_id = NULL, reconciled_turn_id = NULL, recovery_after_message_id = 0""",
+            (thread_id, reason, kind, message_id, self.store.clock()))
+
+    def _pause_uncertain(self, thread_id, ids, error):
+        # Publish the failed batch and its recovery boundary in one commit.
+        self.checked_pauses.pop(thread_id, None)
+        with self.store.database_operation("wake.pause_uncertain"), self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._save_pause(db, thread_id, "Inbox delivery is uncertain. Resume the inbox to allow later messages. " + str(error),
+                             "uncertain", ids[0])
+            db.executemany("""UPDATE message_wake_attempts SET outcome='failed', detail=?
+                WHERE message_id=? AND session_id=? AND outcome='claimed'""",
+                [(str(error), ident, thread_id) for ident in ids])
+            db.execute("UPDATE browser_inbox_wake SET dispatching=0 WHERE thread_id=?", (thread_id,))
 
     def resume(self, thread_id):
         """Accepted user input re-enables wakes, including after deliberate Stop."""
         self.checked_pauses.pop(thread_id, None)
         with self.store._connection() as db:
             db.execute("""UPDATE browser_inbox_wake SET paused = 0, dispatching = 0,
-                error = NULL, pause_kind = NULL, recovery_turn_id = NULL,
+                error = NULL, pause_kind = NULL, wake_message_id = NULL, recovery_turn_id = NULL,
                 retry_count = 0, retry_at = NULL, paused_at = NULL,
                 reconciled_turn_id = NULL, recovery_after_message_id = 0 WHERE thread_id = ?""",
                        (thread_id,))
@@ -149,7 +184,7 @@ class BrowserInboxWake:
         return {"release_id": release_id, "released_thread_ids": released, "skipped": skipped,
                 "notified_supervisors": sorted(notices)}
 
-    def _not_submitted(self, thread_id, error):
+    def _not_submitted(self, thread_id, error, message_id=None):
         """Retry only transient contention proven to precede turn submission."""
         transient = isinstance(error, sqlite3.OperationalError) and database_busy(error)
         with self.store._connection() as db:
@@ -158,13 +193,17 @@ class BrowserInboxWake:
             row = db.execute("SELECT retry_count, pause_kind FROM browser_inbox_wake WHERE thread_id = ?", (thread_id,)).fetchone()
             if row["pause_kind"] == "stop":
                 return
+            if message_id is None:
+                message_id = db.execute("""SELECT MIN(id) FROM messages WHERE recipient_session_id=?
+                    AND delivered_at IS NULL AND suppressed_at IS NULL AND classification='action_required'""",
+                    (thread_id,)).fetchone()[0]
             count = row["retry_count"]
             retry_at = (self.store.clock() + PRE_SUBMIT_RETRY_DELAYS[count]
                         if transient and count < len(PRE_SUBMIT_RETRY_DELAYS) else None)
             db.execute("""UPDATE browser_inbox_wake SET retry_count = retry_count + 1,
-                retry_at = ?, error = ?, pause_kind = 'pre_submit', paused = ?,
+                retry_at = ?, error = ?, wake_message_id = ?, pause_kind = 'pre_submit', paused = ?,
                 paused_at = CASE WHEN ? IS NULL THEN ? ELSE NULL END WHERE thread_id = ?""",
-                (retry_at, str(error), int(retry_at is None), retry_at, self.store.clock(), thread_id))
+                (retry_at, str(error), message_id, int(retry_at is None), retry_at, self.store.clock(), thread_id))
         if retry_at is None:
             self._report_failure(thread_id, "Inbox wake was not submitted. " + str(error))
 
@@ -283,6 +322,92 @@ class BrowserInboxWake:
         except (OSError, ValueError, KeyError, TypeError):
             pass  # Missing or ambiguous proof leaves the failure gate intact.
         return None
+
+    def _confirm_delivery(self, thread_id, message_id, *, resume_completed=False):
+        """Use the batch receipt or the reserved Claude source input. Absence cannot authorize a retry."""
+        from .claude_usage import received_inbox_input
+        with self.store.reading(), self.store._connection() as db:
+            batch = db.execute("""SELECT d.* FROM message_delivery_attempts d JOIN messages m ON m.id=d.message_id
+                WHERE d.turn_id=(SELECT turn_id FROM message_delivery_attempts WHERE message_id=? AND turn_id GLOB 'wake:*'
+                    ORDER BY attempted_at DESC, rowid DESC LIMIT 1)
+                AND d.channel='prompt' AND m.recipient_session_id=? ORDER BY d.message_id""",
+                (message_id, thread_id)).fetchall()
+        if not batch or not any(row["message_id"] == message_id for row in batch):
+            return False
+        receipt = batch[0]
+        ids = [row["message_id"] for row in batch]
+        confirmed = all(row["submitted_at"] is not None for row in batch)
+        if not confirmed:
+            source_uuid = receipt["boundary_id"]
+            if (not source_uuid or not all(row["boundary_id"] == source_uuid for row in batch)
+                    or not received_inbox_input(self.store, thread_id, source_uuid)):
+                return False
+        with self.store.database_operation("wake.confirm_delivery"), self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not confirmed:
+                MessageDelivery(self.store).confirm_batch(db, thread_id, receipt["turn_id"], ids,
+                    evidence="claude_native_input", provider_turn_id=receipt["provider_turn_id"])
+            db.executemany("""UPDATE message_wake_attempts SET outcome='sent', detail='Provider confirmed receipt of the inbox input.'
+                WHERE message_id=? AND session_id=? AND outcome='failed'""", [(ident, thread_id) for ident in ids])
+            if resume_completed and receipt["provider_turn_id"] and db.execute("""SELECT 1 FROM turn_completions
+                    WHERE thread_id=? AND turn_key=? AND status='completed'""", (thread_id, receipt["provider_turn_id"])).fetchone():
+                return bool(db.execute("""UPDATE browser_inbox_wake SET paused=0, error=NULL, pause_kind=NULL,
+                    wake_message_id=NULL, paused_at=NULL, retry_count=0, retry_at=NULL
+                    WHERE thread_id=? AND paused=1 AND wake_message_id=? AND pause_kind='uncertain'""",
+                    (thread_id, message_id)).rowcount)
+            db.execute("""UPDATE browser_inbox_wake SET error=?
+                WHERE thread_id=? AND paused=1 AND wake_message_id=? AND pause_kind='uncertain'""",
+                ("The provider received this inbox input. Review the turn before resuming queued messages.", thread_id, message_id))
+        return False
+
+    def recover_wake(self, thread_id, expected_message_id, requester):
+        """Release a specific paused inbox. Uncertain delivery reservations survive recovery."""
+        from .supervision import authorizes
+        if type(expected_message_id) is not int or expected_message_id <= 0:
+            raise CoordinationError("A positive wake message ID is required.")
+        with self.sessions._thread_lock(thread_id):
+            self.sessions._await_persistence(thread_id)
+            with self.store.reading(), self.store._connection() as db:
+                if requester is not None and not authorizes(db, requester, thread_id):
+                    raise CoordinationError("Only this app agent's current supervisor can recover it.")
+                if not db.execute("""SELECT 1 FROM browser_inbox_wake WHERE thread_id=? AND paused=1
+                        AND wake_message_id=? AND pause_kind IN ('pre_submit','uncertain')""",
+                        (thread_id, expected_message_id)).fetchone():
+                    raise CoordinationError("The wake pause changed. Inspect the current message before recovery.")
+            record = self.sessions._record(thread_id)
+            if not Path(record["cwd"]).is_dir():
+                raise CoordinationError(f"Restore the conversation working directory before recovery: {record['cwd']}")
+            detail = self.sessions.read(thread_id)
+            if detail["running"]:
+                raise CoordinationError("Recovery refused: the conversation is running.")
+            self._confirm_delivery(thread_id, expected_message_id)
+            with self.store.database_operation("wake.recover_message"), self.store._connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                if requester is not None and not authorizes(db, requester, thread_id):
+                    raise CoordinationError("Only this app agent's current supervisor can recover it.")
+                wake = db.execute("""SELECT w.*, s.turn_active, t.attention FROM browser_inbox_wake w
+                    JOIN sessions s ON s.session_id=w.thread_id JOIN work_threads t ON t.thread_id=w.thread_id
+                    WHERE w.thread_id=?""", (thread_id,)).fetchone()
+                if (not wake or not wake["paused"] or wake["wake_message_id"] != expected_message_id
+                        or wake["pause_kind"] not in {"uncertain", "pre_submit"}):
+                    raise CoordinationError("The wake pause changed. Inspect the current message before recovery.")
+                if wake["dispatching"] or wake["turn_active"] or wake["attention"] == "archived":
+                    raise CoordinationError("Recovery requires an open, idle conversation.")
+                if db.execute("SELECT 1 FROM browser_message_queue WHERE thread_id=?", (thread_id,)).fetchone():
+                    raise CoordinationError("Queued user input takes priority.")
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='thread_close_requests'").fetchone() and db.execute(
+                        "SELECT 1 FROM thread_close_requests WHERE thread_id=? AND status IN ('queued','closing')",
+                        (thread_id,)).fetchone():
+                    raise CoordinationError("The conversation has a pending close request.")
+                # Uncertain batches retain their receipts and stay ineligible.
+                # A proven pre-submission rejection has no reservation to replay.
+                db.execute("""UPDATE browser_inbox_wake SET paused=0, error=NULL, pause_kind=NULL,
+                    wake_message_id=NULL, paused_at=NULL, retry_count=0, retry_at=NULL WHERE thread_id=?""", (thread_id,))
+                db.execute("""INSERT INTO browser_message_wake_recoveries
+                    (thread_id, message_id, requester, pause_kind, recovered_at) VALUES (?, ?, ?, ?, ?)""",
+                    (thread_id, expected_message_id, requester or "user", wake["pause_kind"], self.store.clock()))
+            self.sessions._publish("browser/changed", {"threadId": thread_id})
+            return {"session_id": thread_id, "resumed_after_message_id": expected_message_id, "state": "ready"}
 
     def recover(self, thread_id, expected_turn_id, requester, *, reason=None, execution_confirmed=False):
         """Explicit creator authorization for fresh work after a terminal turn.
@@ -575,15 +700,18 @@ class BrowserInboxWake:
                 with self.store._connection() as db:
                     db.executemany("DELETE FROM message_wake_attempts WHERE message_id = ? AND outcome = 'claimed'",
                                    [(message_id,) for message_id in ids])
-                self._not_submitted(thread_id, exc.__cause__ or exc)
+                self._not_submitted(thread_id, exc.__cause__ or exc, ids[0])
             except Exception as exc:
                 delivery.failed(token, batch, str(exc))
                 # A provider can acknowledge a start, receive Stop, and fail
                 # its response before lifecycle bookkeeping commits. Preserve
                 # that accepted Stop before classifying the transport failure.
-                # If persistence is unavailable, retain the existing claim;
-                # replaying an uncertain provider submission is never safe.
-                sessions._await_persistence(thread_id)
+                try:
+                    sessions._await_persistence(thread_id)
+                except Exception:
+                    self._pause_uncertain(thread_id, ids, exc)
+                    self._report_failure(thread_id, str(exc))
+                    raise
                 with self.store._connection() as db:
                     stopped = db.execute("""SELECT r.turn_id FROM turn_stop_requests r
                         JOIN work_threads t ON t.thread_id = r.thread_id AND t.turn_id = r.turn_id
@@ -597,9 +725,9 @@ class BrowserInboxWake:
                 if stopped:
                     self.store.complete_wake_attempts(thread_id, ids, outcome="sent", detail="Accepted turn stopped by the user.")
                     return
-                self.store.complete_wake_attempts(thread_id, ids, outcome="failed", detail=str(exc))
-                self.pause(thread_id, "Inbox wake may have started; send a message to continue. " + str(exc))
-                self._report_failure(thread_id, str(exc))
+                self._pause_uncertain(thread_id, ids, exc)
+                if not self._confirm_delivery(thread_id, ids[0], resume_completed=True):
+                    self._report_failure(thread_id, str(exc))
             else:
                 self.store.complete_wake_attempts(thread_id, ids, outcome="sent", detail=WAKE_PROMPT)
                 with self.store._connection() as db:

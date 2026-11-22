@@ -736,6 +736,29 @@ class AppControlTests(unittest.TestCase):
     def recover_request(self, thread, turn, **kwargs):
         return self.control.request("resume", "dispatcher", {"expected_turn_id": turn}, thread_id=thread, **kwargs)
 
+    def test_turnless_claude_wake_can_be_seen_and_resumed_by_message_id(self):
+        thread = self.create("claude")
+        with self.store.reading(), self.store._connection() as db:
+            message_id = db.execute("SELECT MIN(id) FROM messages WHERE recipient_session_id=?", (thread,)).fetchone()[0]
+        self.sessions.inbox_wake.pause(thread, "The provider could not start.", kind="pre_submit", message_id=message_id)
+        shown = self.cli("show", "--session-id", thread)
+        self.assertEqual(shown["wake_message_id"], message_id)
+        self.assertTrue(shown["wake_paused"])
+        self.assertEqual(shown["wake_pause_reason"], "The provider could not start.")
+        self.assertEqual(self.sessions.work_thread(thread)["wake_message_id"], message_id)
+        self.store.register(session_id="other", client="codex", cwd=str(self.root))
+        with self.assertRaisesRegex(CoordinationError, "current supervisor"):
+            self.control.request("resume", "other", {"expected_message_id": message_id}, thread_id=thread)
+        request = self.cli("resume", "--session-id", thread, "--expected-message-id", str(message_id), "--wait", "0")
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT status FROM app_control_requests WHERE request_id=?",
+                                        (request["request_id"],)).fetchone()[0], "queued_wake_resume")
+        self.worker.process_once()
+        receipt = self.control.status(request["request_id"])
+        self.assertEqual(receipt["status"], "completed", receipt)
+        self.assertEqual(receipt["result"]["state"], "ready")
+        self.assertFalse(self.cli("show", "--session-id", thread)["wake_paused"])
+
     def test_creator_can_explicitly_recover_fresh_inbox_work_once_without_replaying_failure(self):
         for client in ("codex", "claude"):
             with self.subTest(client=client):

@@ -114,3 +114,24 @@ test("an external conversation loads native history while retaining read-only ow
   assert.equal(c.state.detailRefreshing, false);
   assert.equal(c.requests.some(request => request.path.endsWith("/messages")), false);
 });
+
+test("a paused inbox keeps its exact recovery action after its queued messages are closed", async () => {
+  const c = setup(), detail = fixture("claude-thread"), posts = [];
+  c.state.selected = detail.work_thread.thread_id;
+  c.state.detail = detail;
+  Object.assign(detail.work_thread, {wake_message_id: 41, wake_pause_reason: "Provider delivery is uncertain."});
+  c.action = fn => fn();
+  c.refreshDetail = async () => {};
+  c.refreshList = async () => {};
+  c.api = async (path, body) => posts.push({path, id: body.expected_message_id});
+  vm.runInContext(source.slice(source.indexOf("function renderDetailRefresh("), source.indexOf("function renderCloseWhenDone(")), c);
+  c.renderDetailRefresh();
+  assert.equal(c.$("inbox-pause").hidden, false);
+  assert.match(c.$("inbox-pause-reason").textContent, /#41.*Provider delivery is uncertain/);
+  assert.equal(c.$("resume-inbox").disabled, false);
+  await c.$("resume-inbox").onclick();
+  assert.deepEqual(posts, [{path: "threads/claude-thread/resume-inbox", id: 41}]);
+  detail.work_thread.wake_message_id = null;
+  c.renderDetailRefresh();
+  assert.equal(c.$("inbox-pause").hidden, true);
+});

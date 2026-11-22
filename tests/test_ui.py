@@ -517,6 +517,24 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertFalse(detail["session"]["archived"])
         self.assertTrue(detail["running"])
 
+    def test_resume_inbox_requires_app_authorization_and_current_message(self):
+        thread = self.request("/api/browser/sessions", {"name": "Paused conversation"})[1]["session"]["thread_id"]
+        path = "/api/browser/threads/" + thread
+        self.sessions.inbox_wake.pause(thread, "Provider delivery is uncertain.", kind="uncertain", message_id=17)
+        shown = self.request(path)[1]
+        self.assertEqual(shown["wake_message_id"], 17)
+        self.assertTrue(shown["wake_paused"])
+        endpoint = path + "/resume-inbox"
+        self.assertEqual(self.request(endpoint, {"expected_message_id": 17}, {"X-Agent-Coord-Token": "wrong"})[0], 403)
+        self.assertEqual(self.request(endpoint, {"expected_message_id": 18})[0], 400)
+        self.assertEqual(self.request(endpoint, {"expected_message_id": 17, "requester": "other"})[0], 400)
+        self.assertTrue(self.request(path)[1]["wake_paused"])
+        status, result = self.request(endpoint, {"expected_message_id": 17})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["state"], "ready")
+        self.assertFalse(self.request(path)[1]["wake_paused"])
+        self.assertEqual(self.request(endpoint, {"expected_message_id": 17})[0], 400)
+
     def test_fork_over_http_preserves_parent_and_rejects_invalid_requests(self):
         parent = self.request("/api/browser/sessions", {"name": "Source"})[1]["session"]["thread_id"]
         path = "/api/browser/threads/" + parent + "/fork"

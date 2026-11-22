@@ -1641,6 +1641,29 @@ function renderStatus() {
   state.reviewUI?.render(state.detail, isSessionDraft() ? state.newSessionDraft?.draftId || state.selected : state.selected);
 }
 function renderDetailRefresh() {
+  const work = state.detail?.work_thread || state.sessions.find(row => row.thread_id === state.selected);
+  const messageId = work?.wake_message_id;
+  const paused = !!messageId && work.thread_id === state.selected && work.attention !== "archived";
+  $("inbox-pause").hidden = !paused;
+  if (paused) {
+    const threadId = work.thread_id;
+    const resume = $("resume-inbox");
+    $("inbox-pause-reason").textContent = "Inbox paused at message #" + messageId + ". " + (work.wake_pause_reason || "");
+    resume.disabled = !!state.detailRefreshing || !!state.detail?.running || !!state.resumingInboxes?.has(threadId);
+    resume.onclick = () => action(async () => {
+      state.resumingInboxes ??= new Set();
+      if (state.resumingInboxes.has(threadId)) return;
+      state.resumingInboxes.add(threadId);
+      resume.disabled = true;
+      try {
+        await api(threadPath(threadId) + "/resume-inbox", {expected_message_id: messageId});
+      } finally {
+        state.resumingInboxes.delete(threadId);
+        if (state.selected === threadId) await refreshDetail();
+        await refreshList();
+      }
+    });
+  }
   const entry = state.conversations?.get(state.selected);
   const visible = !!state.selected && !isSessionDraft() && !!(state.detailRefreshing || entry?.refreshError);
   $("conversation-refresh").hidden = !visible;

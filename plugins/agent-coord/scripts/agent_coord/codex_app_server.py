@@ -26,7 +26,7 @@ from .permission_modes import (CLAUDE_MODES, codex_effective_mode, codex_modes, 
                                legacy_mode, requested_mode, selected_mode, selection, validate_mode)
 from .store import CoordinationError, CoordinationStore
 from .browser_queue import BrowserMessageQueue
-from .thread_inventory import WAKE_PAUSES, has_table
+from .thread_inventory import WAKE_PAUSES, has_table, wake_fields
 from .inventory_projection import entity_tag, list_card
 from .conversation_residency import Resident, releasable
 from .history_window import recent_view
@@ -1642,8 +1642,7 @@ class BrowserSessions:
                           response_state="failed" if thread["response_state"] == "failed" else "action",
                           attention_key=f"wake:{thread_id}:{wake_pause['paused_at'] or wake_pause['error']}",
                           attention_since=wake_pause["paused_at"] or thread["updated_at"], can_handle_response=False)
-        thread["wake_pause_reason"] = wake_pause["error"] if wake_pause else None
-        thread["wake_pause_kind"] = wake_pause["pause_kind"] if wake_pause else None
+        thread.update(wake_fields(wake_pause))
         policy = notification_policy.decide(thread, waiting=bool(waiting) or blocked_on_ask or blocked_wake, owners=owners)
         health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
         thread["turn_health"] = health
@@ -2716,13 +2715,22 @@ class BrowserSessions:
                     rpc = self._rpc(thread_id)
                     if coordination_delivery:
                         token, batch = coordination_delivery
-                        self.message_delivery.attempted(token, batch)
+                        source_uuid = str(uuid.uuid4()) if record["client"] == "claude" else None
+                        if source_uuid:
+                            params["_coordination_input_id"] = source_uuid
+                        self.message_delivery.attempted(token, batch, boundary_id=source_uuid)
                         if record['client'] == 'antigravity':
                             params['_coordination_delivery'] = True
                         with self.lock:
                             self.delivery_inflight[thread_id] = {'token': token, 'batch': batch, 'turn_id': None}
                     submission["started"] = True
-                    result = rpc.request("turn/start", params)
+                    from .provider_transport import ProviderLaunchRejected
+                    try:
+                        result = rpc.request("turn/start", params)
+                    except ProviderLaunchRejected:
+                        if automatic and record["client"] == "claude":
+                            submission["started"] = False
+                        raise
                     if coordination_delivery:
                         native_turn = result.get('turn', {}).get('id')
                         self.message_delivery.bind(token, native_turn)

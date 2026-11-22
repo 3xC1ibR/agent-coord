@@ -275,6 +275,14 @@ class ThreadStore:
         from .execution_state import read_many
         result["execution"] = (inventory.executions[row["thread_id"]] if inventory is not None else
                                read_many(self.store, db, [row["thread_id"]])[row["thread_id"]])
+        # Detail and list must expose the same recovery boundary even if no provider turn exists.
+        from .thread_inventory import has_table, wake_fields
+        if inventory is not None:
+            result.update(wake_fields(inventory.wake_pauses.get(row["thread_id"])))
+        elif history:
+            pause = (db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id=? AND paused=1",
+                                (row["thread_id"],)).fetchone() if has_table(db, "browser_inbox_wake") else None)
+            result.update(wake_fields(pause))
         context = (inventory.notification_contexts.get(row["thread_id"]) if inventory is not None else
                    db.execute("SELECT * FROM turn_notification_context WHERE thread_id = ? AND turn_key = ?",
                               (row["thread_id"], row["turn_key"])).fetchone())

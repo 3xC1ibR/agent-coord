@@ -79,7 +79,10 @@ class ClaudeConnection:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True)
         except OSError as exc:
-            raise CoordinationError(f"Cannot start Claude Code: {exc}. Install Claude Code and run claude auth login.") from exc
+            from .provider_transport import ProviderLaunchRejected
+            if isinstance(exc, FileNotFoundError) and Path(options["cwd"]).is_dir():
+                raise ProviderLaunchRejected(f"Cannot start Claude Code: {exc}. Install Claude Code and run claude auth login.") from exc
+            raise ProviderLaunchRejected(f"Cannot start Claude Code: {exc}") from exc
         self.readers = [threading.Thread(target=self._read, daemon=True),
                         threading.Thread(target=self._stderr, daemon=True)]
         for reader in self.readers:
@@ -517,7 +520,7 @@ class ClaudeRPC:
             options = {**self.options.get(thread_id, {}), **self._options(params)}
             options["developerInstructions"] = self.store.threads.instructions(thread_id, caller_context=True)
             connection = self._connection(thread_id, options)
-            user = {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}
+            user = {"id": params.get("_coordination_input_id") or str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}
             turn = {"id": str(uuid.uuid4()), "items": [user], "status": "inProgress"}
             self.turns[thread_id] = turn
             self.blocks[thread_id] = {}

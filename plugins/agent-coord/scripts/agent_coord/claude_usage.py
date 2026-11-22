@@ -84,6 +84,34 @@ def native_id(store, thread_id):
     return row[0] if row and row[0] else thread_id
 
 
+def received_inbox_input(store, thread_id, source_uuid):
+    """A native, top-level user frame positively identifies this reserved prompt."""
+    try:
+        source_uuid = str(uuid.UUID(source_uuid))
+        with store.reading():
+            identity = str(uuid.UUID(native_id(store, thread_id)))
+        root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
+        paths = list(root.glob(f"*/{identity}.jsonl"))
+        if len(paths) != 1:
+            return False
+        from .message_delivery import DELIVERY_LABEL
+        for entry in _lines(paths[0]):
+            if (entry.get("type") != "user" or entry.get("isSidechain")
+                    or entry.get("sessionId") != identity or entry.get("uuid") != source_uuid):
+                continue
+            message = entry.get("message")
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content.startswith(DELIVERY_LABEL)
+            return isinstance(content, list) and any(isinstance(part, dict) and part.get("type") == "text"
+                and isinstance(part.get("text"), str) and part["text"].startswith(DELIVERY_LABEL) for part in content)
+    except (OSError, ValueError, TypeError):
+        pass
+    return False
+
+
 def _own_epoch(store, thread_id, identity):
     position = store.usage.epoch_position(thread_id, provider="claude", native_id=identity)
     return position is not None and position > 0

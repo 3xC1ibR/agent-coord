@@ -15,6 +15,13 @@ WAKE_PAUSES = """SELECT w.*, EXISTS (SELECT 1 FROM messages m WHERE m.recipient_
             AS pending_action FROM browser_inbox_wake w WHERE w.paused = 1"""
 
 
+def wake_fields(pause):
+    """Public recovery boundary. Older pause rows may predate its message identity."""
+    pause = dict(pause) if pause else {}
+    return {"wake_paused": bool(pause), "wake_pause_reason": pause.get("error"),
+            "wake_pause_kind": pause.get("pause_kind"), "wake_message_id": pause.get("wake_message_id")}
+
+
 def has_table(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
 
@@ -29,6 +36,9 @@ class ThreadInventory:
         writing = db.in_transaction
         if not writing:
             db.execute("BEGIN")
+        # A database that never ran browser inbox wake has no table yet.
+        self.wake_pauses = {row["thread_id"]: dict(row) for row in db.execute(
+            WAKE_PAUSES + " AND w.thread_id IN (" + self.selected + ")", self.params)} if has_table(db, "browser_inbox_wake") else {}
         self.rows, self.associations = self._base(db)
         from .execution_state import read_many
         self.executions = read_many(threads.store, db, [row["thread_id"] for row in self.rows])
@@ -116,9 +126,6 @@ class ThreadInventory:
     def load_runtime(self, db):
         """Load the app-only fields without starting or resuming providers."""
         self.notification_owners = available_owners(db, self.threads.store)
-        # A database that never ran browser inbox wake has no table yet.
-        self.wake_pauses = {row["thread_id"]: dict(row) for row in db.execute(
-            WAKE_PAUSES + " AND w.thread_id IN (" + self.selected + ")", self.params)} if has_table(db, "browser_inbox_wake") else {}
         self.sessions = {row["session_id"]: self.threads.store._row_to_session(row) for row in db.execute(
             "SELECT * FROM sessions WHERE session_id IN (" + self.selected + ")", self.params)}
         self.browser = set(json.loads(db.execute(

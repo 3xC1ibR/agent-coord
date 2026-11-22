@@ -86,22 +86,26 @@ class MessageDelivery:
     def submitted(self, session_id, turn_id, batch, *, evidence="provider_response", provider_turn_id=None):
         if not batch:
             return
-        now = self.store.clock()
         with self.store.database_operation("message.delivery.confirm"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            for message_id in batch['ids']:
-                attempt = db.execute("""SELECT a.* FROM message_delivery_attempts a JOIN messages m ON m.id=a.message_id
-                    WHERE a.message_id=? AND a.turn_id=? AND m.recipient_session_id=?""",
-                    (message_id, turn_id, session_id)).fetchone()
-                if not attempt:
-                    continue
-                db.execute("""UPDATE message_delivery_attempts SET submitted_at=COALESCE(submitted_at, ?), error=NULL,
-                    evidence=COALESCE(evidence, ?), provider_turn_id=COALESCE(provider_turn_id, ?)
-                    WHERE message_id=? AND turn_id=?""", (now, evidence, provider_turn_id, message_id, turn_id))
-                if attempt['full_body']:
-                    db.execute("""UPDATE messages SET delivered_at=COALESCE(delivered_at, ?),
-                        recipient_turn_id=COALESCE(recipient_turn_id, ?) WHERE id=?""",
-                        (now, provider_turn_id or attempt['provider_turn_id'] or turn_id, message_id))
+            self.confirm_batch(db, session_id, turn_id, batch["ids"], evidence=evidence, provider_turn_id=provider_turn_id)
+
+    def confirm_batch(self, db, session_id, turn_id, message_ids, *, evidence, provider_turn_id):
+        """Confirm the reserved inputs within the caller's write transaction."""
+        now = self.store.clock()
+        for message_id in message_ids:
+            attempt = db.execute("""SELECT a.* FROM message_delivery_attempts a JOIN messages m ON m.id=a.message_id
+                WHERE a.message_id=? AND a.turn_id=? AND m.recipient_session_id=?""",
+                (message_id, turn_id, session_id)).fetchone()
+            if not attempt:
+                continue
+            db.execute("""UPDATE message_delivery_attempts SET submitted_at=COALESCE(submitted_at, ?), error=NULL,
+                evidence=COALESCE(evidence, ?), provider_turn_id=COALESCE(provider_turn_id, ?)
+                WHERE message_id=? AND turn_id=?""", (now, evidence, provider_turn_id, message_id, turn_id))
+            if attempt['full_body']:
+                db.execute("""UPDATE messages SET delivered_at=COALESCE(delivered_at, ?),
+                    recipient_turn_id=COALESCE(recipient_turn_id, ?) WHERE id=?""",
+                    (now, provider_turn_id or attempt['provider_turn_id'] or turn_id, message_id))
 
     def release(self, turn_id):
         """Only for a proven rejection before provider submission."""

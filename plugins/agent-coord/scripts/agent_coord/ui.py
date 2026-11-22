@@ -1231,6 +1231,11 @@ def _handler(
                         result = browser_sessions.checkpoint_work_thread(thread_id, body)
                     elif route[4] == "resume":
                         result = browser_sessions.resume_work_thread(thread_id)
+                    elif route[4] == "resume-inbox":
+                        if set(body) != {"expected_message_id"}:
+                            raise CoordinationError("Wake recovery requires the inspected message ID.")
+                        browser_sessions.work_thread(thread_id, history=False)
+                        result = browser_sessions.inbox_wake.recover_wake(thread_id, body["expected_message_id"], None)
                     elif route[4] == "fork":
                         if body:
                             raise CoordinationError("Fork accepts an empty object.")

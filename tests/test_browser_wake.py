@@ -310,6 +310,135 @@ class BrowserWakeTests(unittest.TestCase):
         self.assertEqual(self.turns(thread), [])
         self.assertEqual(len(self.attempts()), 1)
 
+    def test_turnless_failure_recovery_preserves_original_and_wakes_later_work(self):
+        thread = self.create()
+        first = self.message(thread)
+        self.sessions.rpc.fail_turn = True
+        self.sessions.inbox_wake.process_once()
+        self.sessions.rpc.fail_turn = False
+        later = self.message(thread)
+        with self.assertRaisesRegex(CoordinationError, "supervisor"):
+            self.sessions.inbox_wake.recover_wake(thread, first["id"], "sender")
+        with self.assertRaisesRegex(CoordinationError, "changed"):
+            self.sessions.inbox_wake.recover_wake(thread, later["id"], None)
+        wake = BrowserInboxWake(self.sessions)
+        wake.process_once()
+        self.assertEqual(self.turns(thread), [])
+        self.assertEqual(wake.recover_wake(thread, first["id"], None)["state"], "ready")
+        wake.process_once()
+        attempts = self.attempts()
+        self.assertEqual([(row["message_id"], row["outcome"]) for row in attempts],
+                         [(first["id"], "failed"), (later["id"], "sent")])
+        text = self.turns(thread)[0]["items"][0]["content"][0]["text"]
+        self.assertIn(f'"id": {later["id"]},', text)
+        self.assertNotIn(f'"id": {first["id"]},', text)
+
+    def test_legacy_turnless_pause_can_be_recovered_after_messages_were_closed(self):
+        thread = self.create("claude")
+        first = self.message(thread)
+        later = self.message(thread)
+        with self.store._connection() as db:
+            db.execute("ALTER TABLE browser_inbox_wake DROP COLUMN wake_message_id")
+            db.execute("""INSERT OR REPLACE INTO browser_inbox_wake(thread_id,paused,pause_kind,error)
+                VALUES (?,1,'unknown','Inbox wake may have started; send a message to continue. Lost ack')""", (thread,))
+            db.execute("INSERT INTO message_wake_attempts VALUES (?,?,?, 'failed','Lost ack')",
+                       (first["id"], thread, self.store.clock()))
+        for message in (first, later):
+            self.message(thread, classification="closure", thread_id=message["thread_id"])
+        wake = BrowserInboxWake(self.sessions)
+        probe = self.message(thread)
+        wake.process_once()
+        self.assertFalse(self.turns(thread))
+        wake.recover_wake(thread, first["id"], None)
+        wake.process_once()
+        text = self.turns(thread)[0]["items"][0]["content"][0]["text"]
+        self.assertIn(f'"id": {probe["id"]},', text)
+        self.assertNotIn(f'"id": {later["id"]},', text)
+        self.assertNotIn(f'"id": {first["id"]},', text)
+
+    def test_proven_claude_launch_rejection_releases_batch_for_explicit_retry(self):
+        from agent_coord.provider_transport import ProviderLaunchRejected
+        thread = self.create("claude")
+        message = self.message(thread)
+        self.sessions.claude.release(thread)
+        with patch.object(self.sessions.claude, "connection_factory", side_effect=ProviderLaunchRejected("Working directory is missing")):
+            wake = self.sessions.inbox_wake
+            wake.process_once()
+            wake.process_once()
+        with self.store._connection() as db:
+            pause = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()
+            self.assertEqual((pause["pause_kind"], pause["wake_message_id"]), ("pre_submit", message["id"]))
+            self.assertIn("Working directory is missing", pause["error"])
+            self.assertIsNone(db.execute("SELECT 1 FROM message_delivery_attempts WHERE message_id=?", (message["id"],)).fetchone())
+        later = self.message(thread)
+        wake.recover_wake(thread, message["id"], None)
+        wake.process_once()
+        wake.process_once()
+        self.assertEqual([row["message_id"] for row in self.attempts() if row["outcome"] == "sent"],
+                         [message["id"], later["id"]])
+        self.assertEqual(len(self.turns(thread)), 1)
+
+    def test_stop_after_uncertain_wake_invalidates_message_recovery(self):
+        thread = self.create()
+        first = self.message(thread)
+        self.sessions.rpc.fail_turn = True
+        self.sessions.inbox_wake.process_once()
+        self.sessions.inbox_wake.pause(thread, "Stopped by the user.", kind="stop")
+        with self.assertRaisesRegex(CoordinationError, "changed"):
+            self.sessions.inbox_wake.recover_wake(thread, first["id"], None)
+        with self.store.reading(), self.store._connection() as db:
+            wake = db.execute("SELECT paused, pause_kind, wake_message_id FROM browser_inbox_wake WHERE thread_id=?",
+                              (thread,)).fetchone()
+            self.assertEqual(tuple(wake), (1, "stop", None))
+
+    def test_confirmed_completed_batch_releases_inbox_after_lost_response(self):
+        thread = self.create()
+        first = self.message(thread)
+        request = self.sessions.rpc.request
+        def completed_without_ack(method, params=None):
+            result = request(method, params)
+            if method == "turn/start":
+                self.finish(thread)
+                raise TimeoutError("Response lost after completion")
+            return result
+        with patch.object(self.sessions.rpc, "request", side_effect=completed_without_ack):
+            self.sessions.inbox_wake.process_once()
+        later = self.message(thread)
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual([(row["message_id"], row["outcome"]) for row in self.attempts()],
+                         [(first["id"], "sent"), (later["id"], "sent")])
+        self.assertEqual(len(self.turns(thread)), 2)
+
+    def test_claude_native_input_confirms_uncertain_delivery_without_replaying(self):
+        thread = self.create("claude")
+        first = self.message(thread)
+        request = self.sessions.claude.request
+        def accepted_without_ack(method, params=None):
+            result = request(method, params)
+            if method == "turn/start":
+                raise TimeoutError("Response lost")
+            return result
+        with patch.object(self.sessions.claude, "request", side_effect=accepted_without_ack):
+            self.sessions.inbox_wake.process_once()
+        self.finish(thread)
+        frame = self.sessions.claude.connections[thread].writes[-1]
+        native = self.root / "projects" / "workspace" / (thread + ".jsonl")
+        native.parent.mkdir(parents=True)
+        entry = {"type": "user", "message": frame["message"], "sessionId": thread, "uuid": frame["uuid"]}
+        later = self.message(thread)
+        with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(self.root)}):
+            native.write_text(json.dumps({**entry, "isSidechain": True}) + "\n")
+            self.sessions.inbox_wake._confirm_delivery(thread, first["id"])
+            self.assertEqual(self.attempts()[0]["outcome"], "failed")
+            native.write_text(json.dumps(entry) + "\n")
+            self.sessions.inbox_wake.recover_wake(thread, first["id"], None)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT evidence FROM message_delivery_attempts WHERE message_id=?",
+                                        (first["id"],)).fetchone()[0], "claude_native_input")
+        self.sessions.inbox_wake.process_once()
+        self.assertEqual([(row["message_id"], row["outcome"]) for row in self.attempts()],
+                         [(first["id"], "sent"), (later["id"], "sent")])
+
     def test_transient_pre_submit_lock_retries_after_backoff_without_a_claim(self):
         thread = self.create()
         self.message(thread)
@@ -366,7 +495,7 @@ class BrowserWakeTests(unittest.TestCase):
         self.assertEqual(len(self.turns(thread)), 1)
         self.assertEqual(self.attempts()[0]["outcome"], "failed")
         with self.store._connection() as db:
-            self.assertEqual(db.execute("SELECT pause_kind FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()[0], "unknown")
+            self.assertEqual(db.execute("SELECT pause_kind FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()[0], "uncertain")
 
     def test_authoritative_completed_turn_reconciles_false_failure_but_not_stop_or_uncertain(self):
         for kind in ("failure", "stop", "unknown"):

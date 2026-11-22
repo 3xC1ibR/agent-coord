@@ -3288,6 +3288,11 @@ class CoordinationStore:
             guidance = ("The recipient's last turn failed or was stopped, so its automatic wake is paused. "
                         "This message is queued and will not wake it. Its supervisor must recover it with "
                         "agent-coord thread resume, or hand its scope to another worker.")
+        elif row.get("wake_message_id"):
+            guidance = (f"The recipient's inbox is paused at message #{row['wake_message_id']}. "
+                        "Its supervisor can inspect the failure and run "
+                        f"agent-coord thread resume --session-id {recipient_session_id} "
+                        f"--expected-message-id {row['wake_message_id']} --wait 30.")
         elif kind == "stop":
             guidance = ("The user stopped the recipient. This message is queued until the user continues "
                         "that conversation.")

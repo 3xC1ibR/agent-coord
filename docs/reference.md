@@ -589,14 +589,27 @@ agent-coord thread resume --session-id <agent-id> \
   --expected-turn-id <failed-turn-id> --request-id <unique-recovery-key> --wait 30
 ```
 
-Recovery runs through the owning app runtime and only accepts the creating
-orchestrator. The expected turn must still be the latest failed or interrupted turn, with a
+Recovery runs through the owning app runtime and requires the current supervisor. The expected turn must still be the latest failed or interrupted turn, with a
 confirmed failure pause and fresh actionable inbox work. Stop, uncertain wake
 submissions, closed/pending-close threads, and queued user input remain blocked.
 Recovery never replays the failed prompt or resets uncertain wake attempts.
 A completed receipt's `result.state: ready` confirms authorization, not execution.
 Reuse the request ID for retries. Direct user input handles deliberate Stop and
 pause records saved by older runtimes without a confirmed failure cause.
+
+For a paused wake without a turn, inspect `wake_pause_reason` and
+`wake_message_id` in `thread show`. Restore an unavailable working directory
+first. Check pending work and close superseded assignments on their original
+message threads. Use the conversation’s inbox recovery action or run:
+
+```bash
+agent-coord thread resume --session-id <agent-id> \
+  --expected-message-id <wake-message-id> --request-id <unique-recovery-key> --wait 30
+```
+
+A rejected launch leaves its batch eligible for delivery. With an uncertain
+submission the runtime preserves the original reservation and resumes later
+work. For Claude it checks the native transcript for the reserved source UUID.
 
 An interrupted provider can keep executing after the app receives its terminal
 event. For an interruption or unknown tool outcome, inspect the native agent and

@@ -18,7 +18,7 @@ import uuid
 import zlib
 
 from .browser_persistence import capture_writes
-from .provider_transport import Client, TransportError
+from .provider_transport import Client, ProviderLaunchRejected, TransportError
 from .history_persistence import saved_turn_status
 
 VERSION = 1
@@ -184,12 +184,16 @@ class CoordinatorProjection:
         self.cursor = row["cursor"]
         self.recover_commands(operations={"open"})
         with self.store.reading(), self.store._connection() as db:
-            records = db.execute("SELECT * FROM coordinator_channels").fetchall()
+            records = db.execute("""SELECT c.*, o.outcome AS launch_outcome FROM coordinator_channels c
+                LEFT JOIN coordinator_commands o ON o.command_id = 'open:' || c.channel
+                AND o.channel = c.channel AND o.operation = 'open'""").fetchall()
         channels = copy.deepcopy(state["channels"])
         for row in records:
             channels.setdefault(row["channel"], {}).update(dict(row))
         for channel, entry in channels.items():
             if entry.get("pid") is None:
+                if entry.get("closed") and entry.get("launch_outcome") == "rejected":
+                    continue
                 raise TransportError("Provider launch has an uncertain outcome; retained transport requires review.")
             if entry.get("closed"):
                 process = self.attach(channel, entry["pid"], lambda _: None,
@@ -348,16 +352,46 @@ class CoordinatorProjection:
         except Exception:
             self.delivery_error = "Provider command acknowledgement was lost; its retained outcome is being reconciled."
             raise
-        result_json = json.dumps(result.get("result"))
-        with self.store._connection() as db:
-            db.execute("UPDATE coordinator_commands SET outcome=?,result_json=?,value_json=CASE WHEN ?='written' THEN '{}' ELSE value_json END WHERE command_id=?",
-                       (result["outcome"], result_json, result["outcome"], identity))
-            if operation == "open" and result["outcome"] == "written":
-                db.execute("UPDATE coordinator_channels SET pid=? WHERE channel=?", (result["result"]["pid"], channel))
-        if result["outcome"] != "written":
+        state, detail = self._record_outcome(identity, channel, operation, result)
+        if state == "rejected":
+            raise ProviderLaunchRejected(detail["error"])
+        if state != "written":
             self.delivery_error = "Provider delivery is uncertain; the command will not be replayed."
-            raise TransportError("Provider delivery is uncertain; the command will not be replayed.")
-        return result["result"]
+            raise TransportError(self.delivery_error)
+        return detail
+
+    def _unstarted_channels(self):
+        # Legacy owners closed a Popen failure with a NULL PID. A process
+        # that ever started keeps its PID even when its channel is closed.
+        try:
+            channels = self.client.call("status")["channels"]
+        except TransportError:
+            return set()
+        return {c["channel"] for c in channels if c["state"] == "closed" and c["pid"] is None}
+
+    def _record_outcome(self, identity, channel, operation, receipt, *, unstarted_channels=None):
+        state = receipt["outcome"]
+        detail = receipt.get("result")
+        if isinstance(detail, str):
+            detail = json.loads(detail)
+        if (operation == "open" and state == "uncertain" and isinstance(detail, dict)
+                and str(detail.get("error", "")).startswith("[Errno 2] No such file or directory: ")):
+            if unstarted_channels is None:
+                unstarted_channels = self._unstarted_channels()
+            if channel in unstarted_channels:
+                state = "rejected"
+        if state != "written" and not (state == "rejected" and operation == "open"):
+            state = "uncertain"
+        result_json = json.dumps(detail)
+        with self.store.database_operation("coordinator.command_outcome"), self.store._connection() as db:
+            db.execute("""UPDATE coordinator_commands SET outcome=?, result_json=?,
+                value_json=CASE WHEN ? IN ('written','rejected') THEN '{}' ELSE value_json END WHERE command_id=?""",
+                (state, result_json, state, identity))
+            if operation == "open" and state == "written":
+                db.execute("UPDATE coordinator_channels SET pid=? WHERE channel=?", (detail["pid"], channel))
+            elif state == "rejected":
+                db.execute("UPDATE coordinator_channels SET closed=1 WHERE channel=? AND pid IS NULL", (channel,))
+        return state, detail
 
     def recover_commands(self, *, operations=None):
         """Reconcile durable intent against the owner's retained result.
@@ -365,31 +399,42 @@ class CoordinatorProjection:
         A confirmed absent identity is an unsent outbox entry. Resubmitting the
         exact recorded identity is safe; writing/uncertain are never replayed.
         """
+        # A previous coordinator can remove a failed channel row while its
+        # launch receipt survives. Inspect these opens during the existing
+        # pending-command scan at startup; retain specifications only for
+        # pending commands, which may still need the original bytes.
+        repair_launches = operations == {"open"}
         with self.store.reading(), self.store._connection() as db:
-            pending = db.execute("SELECT * FROM coordinator_commands WHERE outcome='pending'").fetchall()
+            pending = db.execute("""SELECT command_id,channel,operation,outcome,result_json,
+                CASE WHEN outcome='pending' THEN value_json END AS value_json FROM coordinator_commands o
+                WHERE outcome='pending' OR (? AND outcome='uncertain' AND operation='open'
+                AND command_id='open:' || channel AND instr(result_json, '[Errno 2] No such file or directory: ')>0
+                AND NOT EXISTS (SELECT 1 FROM coordinator_channels c WHERE c.channel=o.channel AND c.pid IS NOT NULL))
+                """, (repair_launches,)).fetchall()
+        unstarted_channels = None
         for row in pending:
             if operations is not None and row["operation"] not in operations:
                 continue
+            if row["outcome"] == "uncertain":
+                if unstarted_channels is None:
+                    unstarted_channels = self._unstarted_channels()
+                if row["channel"] in unstarted_channels:
+                    self._record_outcome(row["command_id"], row["channel"], "open",
+                                         {"outcome": "uncertain", "result": row["result_json"]},
+                                         unstarted_channels=unstarted_channels)
+                continue
             outcome = self.client.call("outcome", command_id=row["command_id"])
             if outcome["outcome"] == "absent":
-                self.deliver(row["command_id"], row["channel"], row["operation"], json.loads(row["value_json"]))
+                try:
+                    self.deliver(row["command_id"], row["channel"], row["operation"], json.loads(row["value_json"]))
+                except ProviderLaunchRejected:
+                    pass  # The rejected receipt is durable; there is no process to attach.
                 continue
             deadline = time.monotonic() + 10
             while outcome["outcome"] == "writing" and time.monotonic() < deadline:
                 time.sleep(.02)
                 outcome = self.client.call("outcome", command_id=row["command_id"])
-            state = outcome["outcome"] if outcome["outcome"] == "written" else "uncertain"
-            result = outcome.get("result")
-            if not isinstance(result, str):
-                result = json.dumps(result)
-            with self.store._connection() as db:
-                db.execute("UPDATE coordinator_commands SET outcome=?,result_json=?,value_json=CASE WHEN ?='written' THEN '{}' ELSE value_json END WHERE command_id=?",
-                           (state, result, state, row["command_id"]))
-                if row["operation"] == "open" and state == "written":
-                    db.execute("UPDATE coordinator_channels SET pid=? WHERE channel=?",
-                               (json.loads(result)["pid"], row["channel"]))
-            if state != "written":
-                self.delivery_error = "A retained provider command has uncertain delivery; review its outcome before sending again."
+            self._record_outcome(row["command_id"], row["channel"], row["operation"], outcome)
         with self.store.reading(), self.store._connection() as db:
             uncertain = db.execute("SELECT 1 FROM coordinator_commands WHERE outcome IN ('uncertain','writing') LIMIT 1").fetchone()
         self.delivery_error = ("A retained provider command has uncertain delivery; review its outcome before sending again."

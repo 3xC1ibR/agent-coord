@@ -894,13 +894,23 @@ agent-coord thread resume --session-id <agent-id> \
   --expected-turn-id <failed-turn-id> --request-id <unique-recovery-key> --wait 30
 ```
 
-Only the creating orchestrator can do this. A `completed` receipt with
-`result.state: ready` confirms the failure gate was cleared for fresh inbox work;
-it does not confirm task execution. Recovery rejects stale turn IDs, deliberate
-Stop, uncertain wakes, closed/pending-close threads, and queued user input.
-It never replays the failed prompt or resets an uncertain submission. Direct
-user input remains the recovery path for Stop or older, untyped pause records.
-This command requires an updated running app backend.
+The current supervisor can authorize recovery. A completed request with
+`result.state: ready` means the inbox can accept work again.
+
+When a wake fails before the app records a turn, inspect `wake_pause_reason`
+and `wake_message_id` in `thread show`. Repair a missing working directory
+before resuming. Close each superseded assignment on its original message
+thread so queued instructions reflect the work still wanted.
+
+```bash
+agent-coord thread resume --session-id <agent-id> \
+  --expected-message-id <wake-message-id> --request-id <unique-recovery-key> --wait 30
+```
+
+The user can resume the inbox from the conversation in the app. A known
+launch rejection leaves the original batch eligible. An uncertain batch
+retains its reservation and later messages can wake the agent. The runtime
+can confirm a Claude submission from its native source input UUID.
 
 An `app_agent_failed`, `app_agent_recovery_overdue` or `app_agent_work_queued`
 report means the agent's automatic wake is paused, not just that one assignment
@@ -919,8 +929,7 @@ release scopes after assignments; completing work does not close the chat.
 Closing preserves identity, context, and settings. The same ordinary `send`
 wakes a closed app specialist and automatically returns it to Now, restoring
 its direct user composer. No reopen flag or separate reopen command is needed.
-Stop and uncertain wake attempts require direct user input to resume automatic
-wake; confirmed failures also support creator-authorized `thread resume` above.
+A deliberate Stop requires user intervention. Use the guarded recovery actions above for failed wakes.
 Antigravity delivers peer messages after the active prompt finishes, preserving
 running tools and pending approvals. An updated running app services pending messages;
 offline queueing does not launch the app. Terminal `delegate` behavior is unchanged.

@@ -29,6 +29,7 @@ import urllib.request
 import uuid
 
 from .local_http import LocalHTTPServer
+from .store import CoordinationError
 
 PROTOCOL = 1
 # Native history replies can exceed 32 MiB. Limits apply to frames, encoded
@@ -44,6 +45,10 @@ WRITE_TIMEOUT = 5.0
 
 class TransportError(RuntimeError):
     pass
+
+
+class ProviderLaunchRejected(TransportError, CoordinationError):
+    """The process launch failed before any provider input could be sent."""
 
 
 @lru_cache(maxsize=1)
@@ -491,11 +496,12 @@ class Owner:
         try:
             result = self._command(channel, operation, value)
         except Exception as error:
-            # Once intent is durable, even a partial write is never retried.
+            outcome = "rejected" if operation == "open" and isinstance(error, ProviderLaunchRejected) else "uncertain"
+            result = {"error": str(error)}
             with self.journal.lock, self.journal.db:
-                self.journal.db.execute("UPDATE commands SET outcome='uncertain',result=? WHERE command_id=?",
-                                        (encode({"error": str(error)}), identity))
-            return {"outcome": "uncertain", "result": {"error": str(error)}}
+                self.journal.db.execute("UPDATE commands SET outcome=?,result=? WHERE command_id=?",
+                                        (outcome, encode(result), identity))
+            return {"outcome": outcome, "result": result}
         with self.journal.lock, self.journal.db:
             self.journal.db.execute("UPDATE commands SET outcome='written',result=? WHERE command_id=?",
                                     (encode(result), identity))
@@ -522,9 +528,11 @@ class Owner:
             try:
                 process = subprocess.Popen(value["args"], cwd=value.get("cwd"), env=value["env"],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-            except Exception:
+            except Exception as error:
                 with self.journal.lock, self.journal.db:
                     self.journal.db.execute("UPDATE channels SET state='closed',specification='' WHERE channel=?", (channel,))
+                if isinstance(error, OSError):
+                    raise ProviderLaunchRejected(str(error)) from error
                 raise
             os.set_blocking(process.stdin.fileno(), False)
             with self.journal.lock, self.journal.db:
@@ -760,6 +768,8 @@ class Client:
     def command(self, channel, operation, value, *, command_id=None):
         result = self.call("command", channel=channel, operation=operation, value=value,
                            command_id=command_id or uuid.uuid4().hex)
+        if operation == "open" and result["outcome"] == "rejected":
+            raise ProviderLaunchRejected(result["result"]["error"])
         if result["outcome"] != "written":
             raise TransportError("Provider delivery is uncertain; inspect the retained command outcome.")
         return result["result"]
