@@ -95,7 +95,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
 | Role designation | A user-named role beside a conversation's metadata, muted 10px semibold, placed like the Dispatcher designation |
 | Stopped conversations | Quiet status-bar count of the user's Stops; a native dialog lists each with its supervising agent, all checked, before Release |
-| Asks view | Sidebar entry with an open count, red when an ask is blocking. Rows lead with the title; kind, effort, age, asking thread and state follow as muted meta; the kind's resolution controls share one row with an optional note, Snooze and Dismiss. Groups use plain headings and one-pixel dividers, not cards. The view's name and wording live only in `web/asks-copy.js` |
+| Asks view | Sidebar entry with an open count, red when an ask is blocking. Rows lead with the title; kind, effort, age, asking thread, state and the link follow as muted meta; the kind's resolution controls lead one row, with Add note, Snooze and Dismiss after them as quiet text controls. Red marks only the Blocking group and the sidebar count; overdue and stale use the attention colour, and resolved outcomes stay muted. Groups use plain headings and one-pixel dividers, not cards. The view's name and wording live only in `web/asks-copy.js` |
 | Title band | Mac workspace windows: native window controls centered on the project tab labels; the sidebar, a collapsed header and the compact header start clear of them |
 
 ## Do's and Don'ts

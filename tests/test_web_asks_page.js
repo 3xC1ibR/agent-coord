@@ -72,7 +72,7 @@ test("open asks group as blocking, then overdue, then projects, oldest first", (
   const later = {...action, id: 20, age_seconds: 60};
   const groups = openGroups([decision, review, later, request, approval, action, closed]);
   assert.deepEqual(groups.map(group => [group.key, group.title, group.urgent, group.items.map(ask => ask.id)]), [
-    ["blocking", "Blocking", true, [1, 20]], ["overdue", "Overdue", true, [2]],
+    ["blocking", "Blocking", true, [1, 20]], ["overdue", "Overdue", false, [2]],
     ["project:Crawler", "Crawler", false, [4, 3]], ["project:", "No project", false, [5, 6]]]);
   assert.deepEqual(openGroups([]), []);
 });
@@ -91,7 +91,7 @@ test("a long ask leads with its first line and collapses the rest", async () => 
   assert.deepEqual(splitQuestion("  One step left.\n\n1. Open the console.\n2. Add billing.  "),
     {title: "One step left.", detail: "1. Open the console.\n2. Add billing."});
   assert.deepEqual(splitQuestion("Which format?"), {title: "Which format?", detail: ""});
-  assert.deepEqual([isLong("Short."), isLong("x".repeat(321)), isLong("a\nb\nc\nd\ne")], [false, true, true]);
+  assert.deepEqual([isLong("Short."), isLong("x".repeat(241)), isLong("a\nb\nc\nd")], [false, true, true]);
   const steps = "1. Open the console.\n2. Add billing details.\n3. Verify identity.\n4. Close the dialog.\n5. Reply here.";
   const long = {...decision, id: 30, question: "One Apify step left that only you can do.\n" + steps, context: "c".repeat(400)};
   const {view, row, control} = setup([long, decision]);
@@ -137,23 +137,26 @@ test("the open section shows each ask's kind, gain, effort, thread and state", a
   assert.equal(state.closed, 1);
   const tabs = $("asks-sections").children;
   assert.deepEqual(tabs.map(tab => [tab.text, tab.getAttribute("aria-selected")]), [["Open 6", "true"], ["Snoozed 1", "false"], ["Resolved", "false"]]);
-  assert.equal(tabs[0].children[1].className, "asks-section-count asks-section-count-blocking");
+  // Red is spent once: on the blocking group, not on the count or the overdue group.
+  assert.deepEqual(list.byClass("ask-group").map(node => node.className), ["ask-group ask-group-urgent", "ask-group", "ask-group", "ask-group"]);
   assert.deepEqual(list.byClass("ask-group-title").map(node => node.text), ["Blocking 1", "Overdue 1", "Crawler 2", "No project 2"]);
   assert.deepEqual(list.byClass("ask-row").map(node => node.dataset.id), ["1", "2", "4", "3", "5", "6"]);
   const first = row(1);
   assert.equal(first.byClass("ask-title")[0].textContent, "Add payout billing details in Apify");
-  assert.equal(first.byClass("ask-meta")[0].text, "Action about 10 min asked 9h ago Checkout <b>");
+  assert.equal(first.byClass("ask-meta")[0].text, "Action takes about 10 min asked 9h ago Checkout <b> Open console.apify.com");
   assert.equal(first.byClass("ask-unblocks")[0].text, "Unblocks Pricing for all 18 verified actors.");
   const link = first.byClass("ask-link")[0];
   assert.deepEqual([link.tagName, link.href, link.target, link.rel, link.textContent],
     ["a", "https://console.apify.com/billing", "_blank", "noopener noreferrer", "Open console.apify.com"]);
-  assert.deepEqual(first.byTag("button").map(button => button.textContent), ["Checkout <b>", "Mark done", "Not done", "Dismiss"]);
+  assert.deepEqual(first.byTag("button").map(button => button.textContent), ["Checkout <b>", "Mark done", "Not done", "Add note", "Dismiss"]);
   assert.equal(first.byClass("ask-note")[0].placeholder, "Note for the agent (optional)");
+  assert.equal(first.byClass("ask-note")[0].hidden, true);
   assert.equal(row(2).byClass("ask-meta")[0].text, "Approval asked 3d ago Checkout <b> Overdue · due Nov 20");
-  assert.equal(row(2).byClass("ask-flag-urgent").filter(node => !node.hidden).length, 1);
-  assert.deepEqual(row(2).byTag("button").map(button => button.textContent).slice(1), ["Approve", "Decline", "Dismiss"]);
-  assert.deepEqual(row(4).byTag("button").map(button => button.textContent).slice(1), ["Grant", "Decline", "Dismiss"]);
-  assert.deepEqual(row(5).byTag("button").map(button => button.textContent).slice(1), ["Accept", "Request changes", "Dismiss"]);
+  assert.equal(row(2).byClass("ask-flag-attention").filter(node => !node.hidden).length, 1);
+  assert.deepEqual(row(2).byTag("button").map(button => button.textContent).slice(1), ["Approve", "Decline", "Add note", "Dismiss"]);
+  assert.deepEqual(row(4).byTag("button").map(button => button.textContent).slice(1), ["Grant", "Decline", "Add note", "Dismiss"]);
+  assert.deepEqual(row(5).byTag("button").map(button => button.textContent).slice(1), ["Accept", "Request changes", "Add note", "Dismiss"]);
+  assert.equal(row(3).byClass("ask-note")[0].hidden, false);
   assert.deepEqual(row(3).byTag("button").map(button => button.textContent), ["Crawler", "CSV", "JSON", "Answer", "Dismiss"]);
   assert.equal(row(3).byClass("ask-context")[0].textContent, "Default: CSV.");
   assert.equal(row(3).byClass("ask-note")[0].placeholder, "Or answer in your own words…");
@@ -168,7 +171,12 @@ test("the open section shows each ask's kind, gain, effort, thread and state", a
 test("resolutions post the kind's outcome with the note and remove the row", async () => {
   const {view, row, rows, control, posts, $} = setup([action, approval, request, review]);
   await view.refresh();
-  row(1).byClass("ask-note")[0].value = "  Card ending 4242.  ";
+  // The optional note appears on request and takes focus.
+  const noteField = row(1).byClass("ask-note")[0], addNote = control(row(1), "Add note");
+  assert.deepEqual([noteField.hidden, addNote.hidden], [true, false]);
+  await addNote.onclick();
+  assert.deepEqual([noteField.hidden, addNote.hidden, noteField.focused], [false, true, true]);
+  noteField.value = "  Card ending 4242.  ";
   await control(row(1), "Mark done").onclick();
   assert.deepEqual(posts().at(-1), {path: "asks/1", body: {resolution: "done", note: "Card ending 4242."}});
   assert.equal(row(1), undefined);
@@ -236,7 +244,7 @@ test("refreshing preserves an unfinished note and updates the ask's age", async 
   await view.refresh();
   assert.equal(row(1), element);
   assert.equal(input.value, "Unfinished note");
-  assert.match(element.byClass("ask-meta")[0].text, /asked 2d ago .* Stale · thread idle 4d$/);
+  assert.match(element.byClass("ask-meta")[0].text, /asked 2d ago .* Stale · thread idle 4d Open console\.apify\.com$/);
   state.open = [state.open[0]];
   await view.refresh();
   assert.equal(row(1), element);
@@ -289,7 +297,8 @@ test("the resolved section is a filterable log of outcomes and notes", async () 
   assert.equal(row(11).byClass("ask-resolution")[0].textContent, "Granted");
   assert.equal(row(11).byClass("ask-unblocks")[0].text, "Note Read access for 30 days.");
   assert.equal(row(12).byClass("ask-unblocks")[0].text, "Answer 60 minutes");
-  assert.equal(row(13).byClass("ask-resolution")[0].className, "ask-resolution ask-resolution-dismissed");
+  assert.equal(row(13).byClass("ask-resolution")[0].textContent, "Dismissed");
+  assert.match(row(11).byClass("ask-meta")[0].text, /^Request resolved Nov 21, /);
   assert.equal(row(13).byTag("form").length, 0);
   assert.deepEqual($("asks-filter-project").children.map(option => option.textContent), ["All projects", "Crawler", "Shop"]);
   assert.deepEqual($("asks-filter-kind").children.map(option => option.value), Object.keys(AsksCopy.kinds));

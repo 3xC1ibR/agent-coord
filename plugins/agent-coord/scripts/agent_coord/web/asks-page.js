@@ -5,7 +5,7 @@
   const SECTIONS = ["open", "snoozed", "resolved"];
   const SNOOZE_CHOICES = [["hour", "In 1 hour"], ["three_hours", "In 3 hours"], ["tomorrow", "Tomorrow at 9 AM"], ["week", "Next week"]];
   const REFRESH_MILLISECONDS = 5000;
-  const LONG_TEXT_CHARACTERS = 320, LONG_TEXT_LINES = 4;
+  const LONG_TEXT_CHARACTERS = 240, LONG_TEXT_LINES = 3;
 
   function formatAge(seconds) {
     if (!Number.isFinite(seconds) || seconds < 60) return "just now";
@@ -64,7 +64,7 @@
     }
     const groups = [];
     if (blocking.length) groups.push({key: "blocking", title: copy.groups.blocking, urgent: true, items: blocking});
-    if (overdue.length) groups.push({key: "overdue", title: copy.groups.overdue, urgent: true, items: overdue});
+    if (overdue.length) groups.push({key: "overdue", title: copy.groups.overdue, urgent: false, items: overdue});
     const labels = [...projects.keys()].sort((a, b) => !a - !b || a.localeCompare(b));
     for (const label of labels) {
       groups.push({key: "project:" + label, title: label || copy.groups.unassigned, urgent: false,
@@ -218,7 +218,6 @@
         const value = section === "resolved" ? "" : String(counts[section] || "");
         count.textContent = value;
         count.hidden = !value;
-        count.className = "asks-section-count" + (section === "open" && counts.blocking ? " asks-section-count-blocking" : "");
       }
       elements.error.textContent = this.failure ? this.failure + " Showing the last loaded asks." : "";
       elements.error.hidden = !this.failure;
@@ -327,18 +326,19 @@
       const head = this.node("div", "", "ask-head");
       const heading = this.heading(ask);
       head.append(heading.title);
-      const link = this.linkControl(ask);
-      if (link) head.append(link);
       const meta = this.node("p", "", "ask-meta");
       const age = this.node("span", "", "ask-age");
       const blocking = this.node("span", copy.groups.blocking, "ask-flag ask-flag-urgent");
-      const stale = this.node("span", "", "ask-flag ask-flag-stale");
+      const stale = this.node("span", "", "ask-flag ask-flag-attention");
       const due = this.node("span", "", "ask-flag");
       const snoozed = this.node("span", "", "ask-flag");
       meta.append(this.node("span", copy.kinds[ask.kind] || ask.kind, "ask-kind"));
       const effort = formatEffort(ask.effort_minutes);
-      if (effort) meta.append(this.node("span", "about " + effort, "ask-effort"));
+      if (effort) meta.append(this.node("span", "takes about " + effort, "ask-effort"));
       meta.append(age, this.threadControl(ask), blocking, stale, due, snoozed);
+      // The link is where the user starts, so it sits with the title's meta, not at the far edge.
+      const link = this.linkControl(ask);
+      if (link) meta.append(link);
       element.append(head, meta, ...heading.detail);
       if (ask.unblocks) {
         const unblocks = this.node("p", "", "ask-unblocks");
@@ -358,7 +358,9 @@
       const record = {element, controls, error, input};
       const note = () => { const text = input.value.trim(); return text ? {note: text} : {}; };
       const resolveWith = resolution => () => this.resolve(ask, {resolution, ...note()}, record);
-      const actions = this.node("div", "", "ask-actions");
+      // One row of controls: the kind's resolutions at a fixed left edge, quiet text controls after them.
+      const entry = this.node("div", "", "ask-entry");
+      const later = this.node("div", "", "ask-later");
       if (decision) {
         if (ask.options.length) {
           const options = this.node("div", "", "ask-options");
@@ -369,7 +371,8 @@
           form.append(options);
         }
         const send = this.node("button", copy.resolve.answered, "ask-affirm"); send.type = "submit";
-        controls.push(send); actions.append(send);
+        controls.push(send);
+        entry.append(input, send);
         form.onsubmit = event => {
           event?.preventDefault?.();
           const text = input.value.trim();
@@ -379,21 +382,25 @@
       } else {
         const [affirm, ...others] = ask.resolutions.filter(resolution => resolution !== "dismissed");
         const primary = this.button(copy.resolve[affirm] || affirm, resolveWith(affirm), "ask-affirm");
-        controls.push(primary); actions.append(primary);
+        controls.push(primary); entry.append(primary);
         for (const resolution of others) {
           const other = this.button(copy.resolve[resolution] || resolution, resolveWith(resolution), "quiet");
-          controls.push(other); actions.append(other);
+          controls.push(other); entry.append(other);
         }
+        // A note is optional and rare, so its field appears on request, above the resolutions.
+        input.hidden = true;
+        const addNote = this.button("Add note", () => {
+          input.hidden = false; addNote.hidden = true;
+          input.focus?.();
+        }, "ask-text-control");
+        controls.push(addNote); later.append(addNote);
+        form.append(input);
         // Enter in the note must not pick a resolution for the user.
         form.onsubmit = event => event?.preventDefault?.();
       }
-      const entry = this.node("div", "", "ask-entry");
-      form.append(entry);
-
-      const secondary = this.node("div", "", "ask-secondary");
       if (snoozedSection) {
-        const show = this.button("Show now", () => this.snooze(ask, null, record), "quiet");
-        controls.push(show); secondary.append(show);
+        const show = this.button("Show now", () => this.snooze(ask, null, record), "ask-text-control");
+        controls.push(show); later.append(show);
       } else {
         const select = this.node("select", "", "ask-snooze");
         select.setAttribute("aria-label", "Snooze: " + ask.question);
@@ -406,12 +413,13 @@
           select.value = "";
           if (until != null) return this.snooze(ask, until, record);
         };
-        controls.push(select); secondary.append(select);
+        controls.push(select); later.append(select);
       }
-      const dismiss = this.button(copy.resolve.dismissed, resolveWith("dismissed"), "quiet");
+      const dismiss = this.button(copy.resolve.dismissed, resolveWith("dismissed"), "ask-text-control");
       dismiss.title = "Close this ask without acting on it. The agent is told.";
-      controls.push(dismiss); secondary.append(dismiss);
-      entry.append(input, actions, secondary);
+      controls.push(dismiss); later.append(dismiss);
+      entry.append(later);
+      form.append(entry);
       element.append(form, error);
 
       record.update = current => {
@@ -423,7 +431,7 @@
           ? "Stale · thread closed" : "Stale · thread idle " + formatAge(current.idle_seconds);
         due.hidden = !current.due_at;
         due.textContent = current.due_at ? (current.overdue ? "Overdue · due " : "Due ") + formatDay(current.due_at, now) : "";
-        due.className = "ask-flag" + (current.overdue ? " ask-flag-urgent" : "");
+        due.className = "ask-flag" + (current.overdue ? " ask-flag-attention" : "");
         snoozed.hidden = !current.snoozed;
         snoozed.textContent = current.snoozed ? "Snoozed until " + formatMoment(current.snoozed_until, now) : "";
       };
@@ -436,10 +444,10 @@
       const head = this.node("div", "", "ask-head");
       const heading = this.heading(ask);
       head.append(heading.title,
-        this.node("span", copy.resolved[ask.resolution] || ask.resolution, "ask-resolution ask-resolution-" + ask.resolution));
+        this.node("span", copy.resolved[ask.resolution] || ask.resolution, "ask-resolution"));
       const meta = this.node("p", "", "ask-meta");
       meta.append(this.node("span", copy.kinds[ask.kind] || ask.kind, "ask-kind"),
-        this.node("span", formatMoment(ask.resolved_at, this.clock()), "ask-age"), this.threadControl(ask));
+        this.node("span", "resolved " + formatMoment(ask.resolved_at, this.clock()), "ask-age"), this.threadControl(ask));
       if (ask.project_label) meta.append(this.node("span", ask.project_label, "ask-project"));
       element.append(head, meta, ...heading.detail);
       for (const [label, text] of [["Answer", ask.answer], ["Note", ask.note]]) {
