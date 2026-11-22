@@ -127,6 +127,11 @@ def stop_terminal_session(session: dict, *, timeout: float = 5) -> None:
     error = "Cannot safely stop this session from the UI. Exit it in its terminal, then close this thread."
     transcript, _ = _transcript(session)
     owners = _owners(transcript)
+    if not owners:
+        # An exited terminal or archived app subagent can miss SessionEnd.
+        # Reuse the handoff proof: stale, inactive, quiet, and still unowned.
+        verify_terminal_handoff(session)
+        return
     if len(owners) != 1:
         raise CoordinationError(error)
     pid = next(iter(owners))

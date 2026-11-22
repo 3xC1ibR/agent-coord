@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import unittest
 from unittest.mock import patch
@@ -135,6 +136,34 @@ class WorkThreadCloseTests(unittest.TestCase):
         kill.assert_not_called()
         stop.assert_not_called()
         self.assertEqual(self.sessions.list_work_threads(), [])
+        self.sessions.reopen_work_thread(thread_id)
+        self.assertEqual(self.sessions.work_thread(thread_id)["attention"], "now")
+
+    def test_close_archived_subagent_with_stale_registration_preserves_saved_result(self):
+        thread_id = "01a1853d-7bf5-76b2-ab09-0dbc28adaac9"
+        transcript = self.root / "archived_sessions" / ("rollout-" + thread_id + ".jsonl")
+        transcript.parent.mkdir()
+        transcript.write_text(json.dumps({"type": "session_meta", "payload": {
+            "id": thread_id, "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+            "originator": "agent_coord_ui"}}) + "\n")
+        os.utime(transcript, (1, 1))
+        self.store.register(session_id=thread_id, client="codex", cwd=str(self.root))
+        self.store.threads.checkpoint(thread_id, {"phase": "finished", "summary": "Saved provider fixes."})
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET last_seen_at = ? WHERE session_id = ?",
+                       (self.store.clock() - 31 * 86400, thread_id))
+        before = self.store.threads.get(thread_id)
+        with patch.dict("os.environ", {"CODEX_HOME": str(self.root)}), \
+                patch("agent_coord.session_close._owners", return_value=set()), \
+                patch("agent_coord.session_close.os.kill") as kill:
+            closed = self.sessions.close_work_thread(thread_id)
+            self.sessions.close_work_thread(thread_id)
+        self.assertEqual(closed["attention"], "archived")
+        self.assertEqual(closed["checkpoint"], before["checkpoint"])
+        self.assertEqual(self.store.get_session(thread_id)["presence"], "offline")
+        self.assertEqual(transcript.read_text().count("\n"), 1)
+        self.assertEqual(self.sessions.rpc.calls, [])
+        kill.assert_not_called()
         self.sessions.reopen_work_thread(thread_id)
         self.assertEqual(self.sessions.work_thread(thread_id)["attention"], "now")
 

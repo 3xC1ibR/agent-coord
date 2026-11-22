@@ -86,6 +86,40 @@ class TerminalCloseTests(unittest.TestCase):
         self.owners.assert_not_called()
         self.kill.assert_not_called()
 
+    def test_stale_unowned_sessions_close_without_signalling(self):
+        self.owners.return_value = set()
+        os.utime(self.transcript, (1, 1))
+        stop_terminal_session({**self.session, "presence": "stale", "turn_active": False})
+        self.kill.assert_not_called()
+        self.terminal.assert_not_called()
+
+    def test_unowned_session_must_be_stale_inactive_and_quiet(self):
+        self.owners.return_value = set()
+        for presence, active, modified in [("online", False, 1), ("stale", True, 1),
+                                            ("stale", False, None)]:
+            with self.subTest(presence=presence, active=active, modified=modified):
+                os.utime(self.transcript, None if modified is None else (modified, modified))
+                with self.assertRaises(CoordinationError):
+                    stop_terminal_session({**self.session, "presence": presence, "turn_active": active})
+        self.kill.assert_not_called()
+
+    def test_orphan_close_rechecks_owners_and_transcript_changes(self):
+        os.utime(self.transcript, (1, 1))
+        session = {**self.session, "presence": "stale", "turn_active": False}
+        self.owners.side_effect = [set(), set(), {43210}]
+        with self.assertRaises(CoordinationError):
+            stop_terminal_session(session)
+
+        self.owners.side_effect = None
+        def append_event(_):
+            with self.transcript.open("a") as stream:
+                stream.write('{}\n')
+            return set()
+        self.owners.side_effect = append_event
+        with self.assertRaises(CoordinationError):
+            stop_terminal_session(session)
+        self.kill.assert_not_called()
+
     def test_handoff_accepts_a_quiet_unowned_transcript_even_with_vscode_transport(self):
         self.transcript.write_text(json.dumps({"type": "session_meta", "payload": {
             "id": self.session["session_id"], "source": "vscode", "originator": "codex-tui"}}) + "\n")
