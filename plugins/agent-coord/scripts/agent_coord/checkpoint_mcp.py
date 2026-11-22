@@ -136,23 +136,45 @@ MOVE_TOOL = {
 ASK_TOOL = {
     "name": "ask_human",
     "description": (
-        "Ask the user a decision only they can make. The ask appears in Ribbon Field's Decisions list; "
-        "the answer arrives later as an ordinary inbox message. Choose blocking only when you cannot make "
-        "useful progress without the answer, then end your turn (or set wait_seconds). A non-blocking ask "
-        "must state in context the default you will proceed with. Returns the ask id and status."
+        "Ask the user for something only they can provide. The ask appears in Ribbon Field's Queue; the user's "
+        "resolution arrives later as an ordinary inbox message. Choose a kind: decision (choose between options or "
+        "answer a question), action (something only the user can do, usually elsewhere), approval (permission beyond "
+        "your authorization), review (read, verify or try a result), or request (a tool, dataset, account, credential, "
+        "budget or access that would materially improve the result). File a request whenever such a resource would "
+        "materially improve the outcome; do not limit the work to the resources at hand. An action or request must "
+        "state unblocks. Choose blocking only when you cannot make useful progress without the resolution, then end "
+        "your turn (or set wait_seconds). A non-blocking ask must state in context the default you will proceed "
+        "with. When the user must act, file an ask instead of only writing it in a reply. Returns the ask id and status."
     ),
     "inputSchema": {
         "type": "object", "additionalProperties": False, "required": ["question", "blocking"],
         "properties": {
             "session_id": {"type": "string", "minLength": 1, "description": "Optional assertion of the bound caller ID; a different ID is rejected."},
-            "question": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "options": {"type": "array", "maxItems": 8, "description": "Optional answer choices; free text is always allowed.",
+            "question": {"type": "string", "minLength": 1, "maxLength": 2000,
+                         "description": "The title the user reads: one specific question or instruction."},
+            "kind": {"type": "string", "enum": ["decision", "action", "approval", "review", "request"],
+                     "description": "Defaults to decision. The user resolves a decision by answering; an action as done or "
+                                    "not done; an approval as approved or declined; a review as accepted or changes "
+                                    "requested; a request as granted or declined. Any kind may be dismissed."},
+            "options": {"type": "array", "maxItems": 8, "description": "Decision only: optional answer choices; free text is always allowed.",
                         "items": {"type": "string", "minLength": 1, "maxLength": 200}},
-            "blocking": {"type": "boolean", "description": "True only when no useful progress is possible without the answer."},
+            "blocking": {"type": "boolean", "description": "True only when no useful progress is possible without the resolution."},
             "context": {"type": "string", "maxLength": 4000, "description": "Why you ask and, for non-blocking asks, the default you will use."},
+            "unblocks": {"type": "string", "maxLength": 1000,
+                         "description": "What resolving the ask enables. Required for an action or request; for a request, "
+                                        "the expected gain and what you do without it."},
+            "effort_minutes": {"type": "integer", "minimum": 1, "maximum": 10080,
+                               "description": "Your estimate of the user's time in minutes."},
+            "link": {"type": "string", "maxLength": 2000,
+                     "description": "Where the user acts: an HTTPS URL, an agentcoord:// link or an absolute file path."},
+            "due_at": {"type": ["string", "number"],
+                       "description": "A real external deadline, as ISO 8601 text or Unix seconds. Omit agent-invented targets."},
+            "project": {"type": "string", "maxLength": 160, "description": "Grouping label; defaults to the asking thread's project."},
+            "request_id": {"type": "string", "maxLength": 200,
+                           "description": "Stable ID for retrying this exact ask; the same session and ID return the existing ask."},
             "supersedes": {"type": "integer", "minimum": 1, "description": "Withdraw your earlier open ask with this ID."},
             "wait_seconds": {"type": "number", "minimum": 1, "maximum": 300,
-                             "description": "Blocking only: wait up to this long for the answer before returning."},
+                             "description": "Blocking only: wait up to this long for the resolution before returning."},
         },
     },
     "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
@@ -229,7 +251,8 @@ def schedule_prompt(arguments, *, store=None):
 
 def ask_human(arguments, *, store=None):
     if not isinstance(arguments, dict) or set(arguments) - ASK_TOOL["inputSchema"]["properties"].keys():
-        raise CoordinationError("Use the ask_human input fields: question, blocking, options, context, supersedes, wait_seconds.")
+        raise CoordinationError("Use the ask_human input fields: question, blocking, kind, options, context, unblocks, "
+                                "effort_minutes, link, due_at, project, request_id, supersedes, wait_seconds.")
     session_id = bind_caller(arguments.get("session_id"))
     if not isinstance(session_id, str) or not session_id.strip():
         raise CoordinationError("No caller session. Pass session_id from your hook context, or set AGENT_COORD_SESSION_ID or CODEX_THREAD_ID.")
@@ -241,14 +264,24 @@ def ask_human(arguments, *, store=None):
     asks = (store or CoordinationStore()).asks
     ask = asks.create(session_id, arguments.get("question"), options=arguments.get("options"),
                       blocking=arguments.get("blocking"), context=arguments.get("context"),
-                      supersedes=arguments.get("supersedes"))
-    if wait is not None:
+                      supersedes=arguments.get("supersedes"), kind=arguments.get("kind"),
+                      unblocks=arguments.get("unblocks"), effort_minutes=arguments.get("effort_minutes"),
+                      link=arguments.get("link"), due_at=arguments.get("due_at"), project=arguments.get("project"),
+                      request_id=arguments.get("request_id"))
+    existing = ask.get("existing", False)
+    if wait is not None and ask["status"] == "open":
         ask = asks.wait(ask["id"], session_id, timeout_seconds=float(wait))
     result = {"status": "ok", "ask_id": ask["id"], "state": ask["status"]}
-    if ask["status"] == "answered":
-        result["answer"] = ask["answer"]
+    if existing:
+        result["existing"] = True
+    if ask["status"] == "resolved":
+        result["resolution"] = ask["resolution"]
+        if ask["answer"] is not None:
+            result["answer"] = ask["answer"]
+        if ask["note"]:
+            result["note"] = ask["note"]
     elif wait is not None:
-        result["note"] = "Not answered yet. End your turn; the answer will arrive as an inbox message."
+        result["note"] = "Not resolved yet. End your turn; the resolution will arrive as an inbox message."
     return result
 
 

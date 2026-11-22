@@ -1,4 +1,4 @@
-"""Decision layer: durable asks, answer delivery, CLI/MCP surfaces, attention, and the UI endpoint."""
+"""Asks: kinds, resolution delivery, CLI/MCP surfaces, attention, measurement, and the UI endpoint."""
 from __future__ import annotations
 
 import json
@@ -62,8 +62,9 @@ class AskStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(CoordinationError, "exactly one"):
             self.store.asks.answer(ask["id"], option="CSV", answer="CSV")
         answered = self.store.asks.answer(ask["id"], option="JSON")
-        self.assertEqual(answered["status"], "answered")
+        self.assertEqual((answered["status"], answered["resolution"], answered["kind"]), ("resolved", "answered", "decision"))
         self.assertEqual(answered["answer"], "JSON")
+        self.assertEqual(answered["answered_at"], answered["resolved_at"])
         messages = self.store.inbox("asker", mark_delivered=False)
         self.assertEqual(len(messages), 1)
         message = messages[0]
@@ -73,12 +74,13 @@ class AskStoreTests(unittest.TestCase):
         self.assertFalse(message["reply_required"])
         self.assertIn("Answer: JSON", message["body"])
         self.assertIn("Which format?", message["body"])
-        with self.assertRaisesRegex(CoordinationError, "already answered"):
+        with self.assertRaisesRegex(CoordinationError, "already resolved"):
             self.store.asks.answer(ask["id"], answer="again")
         free = self.store.asks.create("asker", "Name?", blocking=False, context="Default: untitled.")
         self.assertEqual(self.store.asks.answer(free["id"], answer="  Ribbon  ")["answer"], "Ribbon")
         self.assertEqual(self.store.asks.list(status="open"), [])
-        self.assertEqual([a["id"] for a in self.store.asks.list(status="answered", session_id="asker")], [ask["id"], free["id"]])
+        for status in ("resolved", "answered"):
+            self.assertEqual([a["id"] for a in self.store.asks.list(status=status, session_id="asker")], [ask["id"], free["id"]])
 
     def test_withdraw_and_supersede_are_owner_only(self):
         ask = self.store.asks.create("asker", "Which?", blocking=True)
@@ -104,7 +106,7 @@ class AskStoreTests(unittest.TestCase):
             if len(ticks) == 2:
                 self.store.asks.answer(ask["id"], answer="Go")
         result = self.store.asks.wait(ask["id"], "asker", timeout_seconds=30, sleep=sleep)
-        self.assertEqual((result["status"], result["answer"], result["timed_out"]), ("answered", "Go", False))
+        self.assertEqual((result["status"], result["answer"], result["timed_out"]), ("resolved", "Go", False))
         self.assertEqual(self.store.inbox("asker", unread_only=True, mark_delivered=False), [])
         slow = self.store.asks.create("asker", "Later?", blocking=True)
         def expire(seconds):
@@ -162,8 +164,31 @@ class AskStoreTests(unittest.TestCase):
                 ask_human({"question": "Which?", "blocking": False, "context": "x", "wait_seconds": 5}, store=self.store)
             with self.assertRaisesRegex(CoordinationError, "input fields"):
                 ask_human({"question": "Which?", "blocking": True, "extra": 1}, store=self.store)
+            with self.assertRaisesRegex(CoordinationError, "unblocks"):
+                ask_human({"question": "Provide a key", "blocking": True, "kind": "request"}, store=self.store)
+            request = ask_human({"question": "Provide a SerpAPI key", "blocking": False, "kind": "request",
+                                 "context": "Default: the public endpoint.", "unblocks": "Removes the rate limit.",
+                                 "effort_minutes": 5, "link": "https://serpapi.com/manage-api-key",
+                                 "due_at": "2023-12-01T09:00:00Z", "project": "Crawler", "request_id": "serpapi-key"},
+                                store=self.store)
+            saved = self.store.asks.get(request["ask_id"])
+            self.assertEqual((saved["kind"], saved["unblocks"], saved["effort_minutes"], saved["link"], saved["project"],
+                              saved["request_id"], saved["due_at"]),
+                             ("request", "Removes the rate limit.", 5, "https://serpapi.com/manage-api-key", "Crawler",
+                              "serpapi-key", "2023-12-01T09:00:00+00:00"))
+            replayed = ask_human({"question": "Provide a SerpAPI key again", "blocking": False, "kind": "request",
+                                  "context": "Default: the public endpoint.", "unblocks": "Removes the rate limit.",
+                                  "request_id": "serpapi-key"}, store=self.store)
+            self.assertEqual(replayed, {"status": "ok", "ask_id": request["ask_id"], "state": "open", "existing": True})
             blocking = ask_human({"question": "Go?", "blocking": True}, store=self.store)
             self.store.asks.answer(blocking["ask_id"], answer="Yes")
+            approval = ask_human({"question": "May I email support?", "blocking": True, "kind": "approval",
+                                  "request_id": "email-support"}, store=self.store)
+            self.store.asks.resolve(approval["ask_id"], "approved", note="Keep it short.")
+            self.assertEqual(ask_human({"question": "May I email support?", "blocking": True, "kind": "approval",
+                                        "request_id": "email-support", "wait_seconds": 1}, store=self.store),
+                             {"status": "ok", "ask_id": approval["ask_id"], "state": "resolved", "existing": True,
+                              "resolution": "approved", "note": "Keep it short."})
             original_wait = self.store.asks.wait
             def expire(seconds):
                 self.now += seconds
@@ -275,7 +300,7 @@ class AskAttentionTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in listed], [blocking["id"], later["id"]])
             self.assertEqual(listed[1]["thread_title"], "Terminal worker")
             answered = post("/api/browser/asks/" + str(later["id"]), {"option": "B"})
-            self.assertEqual((answered["status"], answered["answer"]), ("answered", "B"))
+            self.assertEqual((answered["status"], answered["resolution"], answered["answer"]), ("resolved", "answered", "B"))
             self.assertEqual(self.store.inbox("terminal", mark_delivered=False)[0]["thread_id"], f"ask:{later['id']}")
             free = post("/api/browser/asks/" + str(blocking["id"]), {"answer": "Use staging"})
             self.assertEqual(free["answer"], "Use staging")
