@@ -73,7 +73,9 @@ def generate_snapshot(database):
         db.executemany("INSERT INTO browser_sessions(thread_id, archived, updated_at) VALUES (?, 0, 1)",
                        [("generated-large",), ("generated-medium",)])
         db.execute("INSERT INTO browser_history VALUES (?, ?)", (large["id"], encoded))
-    medium = generated_history("generated-medium", turns=3, commands=50, lines=64)
+    # The reported slow archive contained 331 turns and 1,714 items. Keep this
+    # generated counterpart large enough to exercise the same recent-window read.
+    medium = generated_history("generated-medium", turns=331, commands=3, lines=72)
     prepared = history_persistence.prepare_history(medium)
     history_persistence.stage_history(store, prepared)
     with store._connection() as db:
