@@ -1,5 +1,5 @@
 """End-to-end behavior of the local update listener, separate from the runtime owner."""
-from contextlib import closing
+from contextlib import ExitStack, closing
 import http.client
 import json
 from pathlib import Path
@@ -41,8 +41,10 @@ class GatewayTests(unittest.TestCase):
         self.current = {"status":"serving", "database": str(self.g.database), "url": self.g.backend[0], "instance": "old", "payload": self.g.backend[3], "pending": self.g.payload, "pending_confirmation": True}
         self.g.source = self.g._authority(self.current)
         gateway.runtime.atomic_json(self.g.runtime_directory / "discovery.json", self.current)
-        self.enterContext(patch.object(gateway.runtime, "discover", return_value=self.current))
-        self.enterContext(patch.object(gateway.runtime, "control", return_value=self.current))
+        resources = ExitStack()
+        self.addCleanup(resources.close)
+        resources.enter_context(patch.object(gateway.runtime, "discover", return_value=self.current))
+        resources.enter_context(patch.object(gateway.runtime, "control", return_value=self.current))
 
     def close(self):
         self.g.stop.set()

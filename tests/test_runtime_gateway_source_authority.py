@@ -1,5 +1,5 @@
 """Replay ownership across passive staging, source replacement, and an explicit stop."""
-from contextlib import closing
+from contextlib import ExitStack, closing
 import hashlib
 import json
 from pathlib import Path
@@ -29,11 +29,13 @@ class SourceAuthorityTests(unittest.TestCase):
         self.status = dict(self.record, status="serving", paused=False, pending=self.target, pending_confirmation=True)
         self.exchanges = []
         self.body = {"requestId": "original", "message": "accepted input"}
-        self.enterContext(patch.object(gateway.runtime, "discover", side_effect=lambda *_args, **_kw: self.record.copy()))
-        self.enterContext(patch.object(gateway.runtime, "control", side_effect=lambda *_args, **_kw: self.status.copy()))
-        self.enterContext(patch.object(gateway, "_exchange", side_effect=self.exchange))
+        resources = ExitStack()
+        self.addCleanup(resources.close)
+        resources.enter_context(patch.object(gateway.runtime, "discover", side_effect=lambda *_args, **_kw: self.record.copy()))
+        resources.enter_context(patch.object(gateway.runtime, "control", side_effect=lambda *_args, **_kw: self.status.copy()))
+        resources.enter_context(patch.object(gateway, "_exchange", side_effect=self.exchange))
         views = SimpleNamespace(authorize_composer=lambda *_: True, close=lambda: None)
-        self.enterContext(patch.object(gateway, "SavedRuntimeViews", return_value=views))
+        resources.enter_context(patch.object(gateway, "SavedRuntimeViews", return_value=views))
         self.g = self.restart()
         self.g.connect_backend()
         self.publish_discovery()

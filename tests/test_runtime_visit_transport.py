@@ -1,5 +1,5 @@
 """Visit writes in a separate connection pool still receive the owner's canonical decision."""
-from contextlib import closing
+from contextlib import ExitStack, closing
 import http.client
 import json
 from pathlib import Path
@@ -25,7 +25,9 @@ class VisitTransportTests(unittest.TestCase):
         self.sessions.activity.configure(True)
         g = self.g = gateway.InteractionGateway(self.store.database_path, self.root / "gateway", self.root)
         self.addCleanup(g.delivery_pool.shutdown)
-        self.primary = self.enterContext(gateway.GatewayServer(("127.0.0.1", 0), gateway.GatewayHandler))
+        resources = ExitStack()
+        self.addCleanup(resources.close)
+        self.primary = resources.enter_context(gateway.GatewayServer(("127.0.0.1", 0), gateway.GatewayHandler))
         self.primary.gateway = g
         g.url = f"http://127.0.0.1:{self.primary.server_port}/"
         g.token, g.control_token = "primary", "control"
@@ -33,8 +35,8 @@ class VisitTransportTests(unittest.TestCase):
         record = {"database":str(g.database), "url":g.backend[0], "instance":"previous", "payload":g.backend[3]}
         g.source = g._authority(record)
         gateway.runtime.atomic_json(g.runtime_directory / "discovery.json", record)
-        self.enterContext(patch.object(gateway.runtime, "discover", return_value=record))
-        self.enterContext(gateway.visit_listener(g))
+        resources.enter_context(patch.object(gateway.runtime, "discover", return_value=record))
+        resources.enter_context(gateway.visit_listener(g))
 
     def send_visit(self, event, **kwargs):
         return self.exchange("POST", body={"events":[event]}, **kwargs)
