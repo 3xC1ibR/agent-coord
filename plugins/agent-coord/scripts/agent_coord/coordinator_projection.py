@@ -21,6 +21,7 @@ import zlib
 from .browser_persistence import capture_writes
 from .provider_transport import Client, ProviderLaunchRejected, TransportError
 from .history_persistence import saved_turn_status
+from .store import CoordinationError
 
 VERSION = 1
 SINGLE_PAYLOAD_FORMAT = 2
@@ -508,6 +509,24 @@ class CoordinatorProjection:
         if getattr(self.sessions, "transport_handover", False):
             return
         self.client.command(channel, "close", {})
+        self._mark_closed(channel)
+
+    def close_exited_channel(self, channel):
+        """Retire a channel whose output ended, before its replacement opens.
+
+        The owner may already have reaped an exited provider; that channel has
+        nothing left to close. A provider that outlived a failed reader still
+        owns its process group and must not run beside the replacement.
+        """
+        if getattr(self.sessions, "transport_handover", False):
+            raise CoordinationError("Codex app-server stopped during a coordinator handover; "
+                                    "the replacement coordinator starts it again.")
+        retained = self.client.call("status").get("channels", [])
+        if any(entry["channel"] == channel and entry["state"] != "closed" for entry in retained):
+            self.client.command(channel, "close", {})
+        self._mark_closed(channel)
+
+    def _mark_closed(self, channel):
         with self.lock:
             if channel in self.channels:
                 self.channels[channel]["closed"] = True
@@ -622,8 +641,15 @@ class CoordinatorProjection:
         self.stopped.clear()
         self.worker = threading.Thread(target=self._run, name="provider-projection", daemon=True)
         self.worker.start()
-        if getattr(self.sessions.rpc, "process", None) is not None and not self.sessions.rpc.ready:
-            self.sessions.rpc.start()
+        rpc = self.sessions.rpc
+        process = getattr(rpc, "process", None)
+        # Readiness runs with admission closed. It finishes only the handshake of a
+        # retained, running provider, which restores existing work; this entry
+        # authorizes that handshake alone. An exited provider waits for its first
+        # admitted request.
+        if process is not None and process.poll() is None and not rpc.ready:
+            with self.sessions.admission.enter(maintenance=True):
+                rpc.start()
 
     def reconcile_restored_completion(self):
         identity, turn_id, status = self.restored_completions.popleft()

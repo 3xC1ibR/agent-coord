@@ -114,7 +114,11 @@ class CodexRPC:
                     self.ready = True
                     projection.checkpoint()
                     return
-                raise CoordinationError("Codex app-server stopped. Restart the UI.")
+                if self.process.poll() is None:
+                    raise CoordinationError("Codex app-server stopped. Restart the UI.")
+                # Its output ended. Disconnect already unloaded its conversations,
+                # so a replacement resumes each one on the next request.
+                self._release_exited()
             env = dict(os.environ)
             for key in list(env):
                 if key.startswith("ZELLIJ") or key in {
@@ -155,6 +159,29 @@ class CodexRPC:
             except Exception:
                 self.close()
                 raise
+
+    def _release_exited(self) -> None:
+        """Release a provider whose output ended so start() can replace it."""
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None:
+            projection.close_exited_channel(self.channel)
+        else:
+            for reader in self.readers:
+                if reader is not threading.current_thread():
+                    reader.join(timeout=3)
+            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                stream.close()
+        with self.lock:
+            stale = list(self.pending.values())
+            self.pending.clear()
+            self.pending_methods.clear()
+        for future in stale:
+            if not future.done():
+                future.set_exception(CoordinationError("Codex app-server disconnected."))
+        self.process = None
+        self.readers = []
+        self.initialized_response = False
+        self.channel = "codex:" + uuid.uuid4().hex
 
     def write(self, message: dict) -> None:
         projection = getattr(self.store, "provider_projection", None)

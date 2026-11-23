@@ -42,6 +42,44 @@ class TransportClient:
         return {"closed": True}
 
 
+class ProviderOwner(TransportClient):
+    """Owner double that launches channels and answers Codex initialization."""
+
+    pid = 456
+
+    def __init__(self, projection, channels):
+        super().__init__()
+        self.projection, self.channels = projection, dict(channels)
+        self.opened, self.closed = [], []
+
+    def call(self, action, **values):
+        if action == "status":
+            return {"channels": [{"channel": name, "pid": 123, "state": state}
+                                 for name, state in self.channels.items()]}
+        if action == "events":
+            return {"events": []}
+        if action != "command":
+            return super().call(action, **values)
+        channel, operation, value = values["channel"], values["operation"], values["value"]
+        if operation == "open":
+            self.opened.append(channel)
+            self.channels[channel] = "running"
+            return {"outcome": "written", "result": {"pid": self.pid, "attached": False}}
+        if operation == "close":
+            self.closed.append(channel)
+            self.channels[channel] = "closed"
+            return {"outcome": "written", "result": {"closed": True}}
+        message = json.loads(value["data"])
+        if message.get("method") == "initialize":
+            response = {"sequence": self.projection.cursor + 1, "channel": channel, "stream": "stdout",
+                        "data": json.dumps({"id": message["id"], "result": {}})}
+            threading.Thread(target=self.projection.project, args=(response,), daemon=True).start()
+        return {"outcome": "written", "result": {"bytes": len(value["data"])}}
+
+    def command(self, channel, operation, value, **_):
+        return self.call("command", channel=channel, operation=operation, value=value)["result"]
+
+
 class ProjectionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -552,6 +590,106 @@ class ProjectionTests(unittest.TestCase):
         self.assertFalse(rpc.ready)
         with self.assertRaisesRegex(CoordinationError, "disconnected"):
             future.result(timeout=1)
+
+    def test_next_request_replaces_codex_provider_whose_output_ended(self):
+        from agent_coord.codex_app_server import CodexRPC
+        for retained in ("running", "closed"):
+            with self.subTest(retained=retained):
+                transport = ProviderOwner(self.projection, {"codex": retained})
+                self.projection.client = transport
+                rpc = CodexRPC(self.store, self.sessions._event)
+                self.sessions.rpc = rpc
+                rpc.ready = rpc.initialized_response = True
+                rpc.channel = "codex"
+                rpc.process = self.projection.attach("codex", 123, rpc._message, provider="codex")
+                self.projection.project({"sequence": self.projection.cursor + 1, "channel": "codex",
+                                         "stream": "eof", "data": ""})
+                self.assertFalse(rpc.ready)
+
+                rpc.start()
+
+                # A provider outliving its failed reader is closed; a reaped one has nothing to close.
+                self.assertEqual(transport.closed, ["codex"] if retained == "running" else [])
+                self.assertNotEqual(rpc.channel, "codex")
+                self.assertEqual(transport.opened, [rpc.channel])
+                self.assertTrue(rpc.ready)
+                self.assertIsNone(rpc.process.poll())
+                self.assertTrue(self.projection.channels["codex"]["closed"])
+                with self.store.reading(), self.store._connection() as db:
+                    row = db.execute("SELECT role, pid, closed FROM coordinator_channels WHERE channel=?",
+                                     (rpc.channel,)).fetchone()
+                self.assertEqual(tuple(row), ("main", transport.pid, 0))
+
+    def test_readiness_defers_replacing_an_exited_codex_provider_to_its_first_request(self):
+        from agent_coord.codex_app_server import CodexRPC
+        transport = ProviderOwner(self.projection, {"codex": "running"})
+        self.projection.client = transport
+        rpc = CodexRPC(self.store, self.sessions._event)
+        self.sessions.rpc = rpc
+        rpc.channel = "codex"
+        rpc.process = self.projection.attach("codex", 123, rpc._message, provider="codex")
+        rpc.process.returncode = 1
+        # Readiness runs with admission closed. A gated provider request there
+        # raised BrowserBusyError and failed every coordinator start.
+        self.sessions.admission.wrap(rpc, "request")
+        self.sessions.admission.pause()
+        self.projection.start()
+        self.addCleanup(lambda: (self.projection.stopped.set(), self.projection.worker.join(timeout=3)))
+        self.assertEqual((transport.closed, transport.opened), ([], []))
+        self.assertFalse(rpc.ready)
+
+        # The first admitted request replaces it; its initialize passes the gate.
+        self.sessions.admission.resume()
+        rpc.start()
+
+        self.assertEqual(transport.closed, ["codex"])
+        self.assertEqual(transport.opened, [rpc.channel])
+        self.assertTrue(rpc.ready)
+
+    def test_restored_readiness_finishes_retained_handshake_without_admitting_new_work(self):
+        from agent_coord.codex_app_server import BrowserBusyError, CodexRPC
+        transport = ProviderOwner(self.projection, {"codex": "closed"})
+        self.projection.client = transport
+        self.projection._mark_closed("codex")
+        launching = CodexRPC(self.store, self.sessions._event)
+        self.sessions.rpc = launching
+        channel = "codex:" + "1" * 32
+        # The durable open commits; the coordinator stops before registering initialize.
+        self.projection.open(channel, ["codex", "app-server"], {}, None, launching._message, provider="codex")
+
+        rpc = CodexRPC(self.store, self.sessions._event)
+        self.sessions.rpc = rpc
+        restored = CoordinatorProjection(self.sessions, transport)
+        self.sessions.projection = self.store.provider_projection = transport.projection = restored
+        restored.load()
+        self.assertEqual((rpc.channel, rpc.process.poll(), rpc.ready, rpc.initialized_response, rpc.pending_methods),
+                         (channel, None, False, False, {}))
+        self.sessions.admission.wrap(rpc, "request")
+        self.sessions.admission.pause()
+        self.addCleanup(self.sessions.admission.resume)
+
+        restored.start()
+        self.addCleanup(lambda: (restored.stopped.set(), restored.worker.join(timeout=3)))
+
+        self.assertTrue(rpc.ready)
+        self.assertEqual((transport.closed, transport.opened), ([], [channel]))
+        with self.assertRaises(BrowserBusyError):
+            rpc.request("thread/list", {})
+
+    def test_exited_codex_provider_is_not_replaced_during_coordinator_handover(self):
+        from agent_coord.codex_app_server import CodexRPC
+        transport = ProviderOwner(self.projection, {"codex": "running"})
+        self.projection.client = transport
+        rpc = CodexRPC(self.store, self.sessions._event)
+        self.sessions.rpc = rpc
+        rpc.channel = "codex"
+        rpc.process = self.projection.attach("codex", 123, rpc._message, provider="codex")
+        rpc.process.returncode = 1
+        self.sessions.transport_handover = True
+        with self.assertRaisesRegex(CoordinationError, "handover"):
+            rpc.start()
+        self.assertEqual((transport.closed, transport.opened), ([], []))
+        self.assertEqual(rpc.channel, "codex")
 
     def test_confirmed_stop_clears_transport_projection_but_retains_history(self):
         from agent_coord.desktop_runtime import clear_stopped_projection

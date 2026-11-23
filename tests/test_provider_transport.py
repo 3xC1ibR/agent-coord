@@ -463,6 +463,63 @@ class JournalBoundsTests(unittest.TestCase):
                 self.journal.stop_waits()
                 writer.join(timeout=3)
 
+    def test_full_storage_defers_the_reader_instead_of_ending_the_channel(self):
+        database = self.journal.db
+        with self.journal.lock:
+            database.execute("PRAGMA max_page_count=%d" % database.execute("PRAGMA page_count").fetchone()[0])
+        data, appended = "x" * 65536, []
+        writer = threading.Thread(target=lambda: appended.append(self.journal.append("provider", "stdout", data)))
+        with patch("sys.stderr"):
+            writer.start()
+            try:
+                writer.join(timeout=.3)
+                self.assertTrue(writer.is_alive(), "A full volume must not end the provider reader")
+                with self.journal.lock:
+                    database.execute("PRAGMA max_page_count=1073741823")
+                writer.join(timeout=3)
+                self.assertFalse(writer.is_alive())
+            finally:
+                self.journal.stop_waits()
+                writer.join(timeout=3)
+        self.assertEqual(appended, [1])
+        self.assertEqual(self.journal.events(0)[0]["data"], data)
+
+    def test_readers_recovering_from_full_storage_still_respect_journal_capacity(self):
+        database = self.journal.db
+        with self.journal.lock:
+            database.execute("PRAGMA max_page_count=%d" % database.execute("PRAGMA page_count").fetchone()[0])
+        data, appended = "x" * 65536, []
+        limit = event_size("provider", "stdout", data) + 1  # One event fits.
+        writers = [threading.Thread(target=lambda: appended.append(self.journal.append("provider", "stdout", data)))
+                   for _ in range(2)]
+        with patch("sys.stderr"), patch("agent_coord.provider_transport.MAX_JOURNAL_BYTES", limit):
+            for writer in writers:
+                writer.start()
+            try:
+                time.sleep(.3)
+                self.assertEqual(appended, [])
+                with self.journal.lock:
+                    database.execute("PRAGMA max_page_count=1073741823")
+                deadline = time.monotonic() + 5
+                while not appended and time.monotonic() < deadline:
+                    time.sleep(.02)
+                time.sleep(.5)
+                # Both readers woke after space returned; only one event fits the journal.
+                self.assertEqual(appended, [1])
+                self.assertLessEqual(self.journal.event_bytes, limit)
+                self.journal.acknowledge_events(1)
+                time.sleep(.3)
+                self.assertEqual(appended, [1], "Acknowledgement alone must preserve rollback data")
+                self.journal.acknowledge_events(1, retain_after=1)
+                for writer in writers:
+                    writer.join(timeout=3)
+                self.assertEqual(appended, [1, 2])
+                self.assertLessEqual(self.journal.event_bytes, limit)
+            finally:
+                self.journal.stop_waits()
+                for writer in writers:
+                    writer.join(timeout=3)
+
     def test_recovery_floor_and_sequence_survive_restart_and_empty_journal(self):
         self.journal.append("provider", "stdout", "first")
         self.journal.acknowledge_events(1, retain_after=1)
