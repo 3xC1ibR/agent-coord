@@ -428,6 +428,20 @@ class BrowserHTTPTests(unittest.TestCase):
         self.server.server_close()
         self.worker.join(2)
 
+    def test_minimal_read_receipt_validates_cursors_without_projecting_thread_detail(self):
+        thread = self.sessions.create({})["session"]["thread_id"]
+        route = "/api/browser/threads/" + thread
+        markers = {"seen": True, "seen_checkpoint_id": 0, "seen_completion_id": 0}
+        with patch.object(self.sessions, "work_thread", wraps=self.sessions.work_thread) as detail:
+            status, result = self.request(route, markers, {"Prefer": "return=minimal"})
+            self.assertEqual((status, result), (200, {"seen": True}))
+            self.assertEqual(detail.call_count, 0)
+            self.assertEqual(self.request(route, {**markers, "seen_completion_id": 999999},
+                                          {"Prefer": "return=minimal"})[0], 400)
+        self.assertEqual(self.request(route, markers)[1]["thread_id"], thread)
+        self.assertEqual(self.request(route, {"title": "Revised title"},
+                                      {"Prefer": "return=minimal"})[1]["title"], "Revised title")
+
     def test_recording_a_visit_reuses_the_thread_list_and_renaming_rebuilds_it(self):
         thread = self.sessions.create({})["session"]["thread_id"]
         self.sessions.activity.configure(True)

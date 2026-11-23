@@ -42,7 +42,7 @@ async function api(path, body, requestOptions = {}) {
   const options = {cache: "no-store", ...fetchOptions};
   if (submission && !body.action) options.priority = "high";
   if (entity?.tag && entity.value) options.headers = {...options.headers, "If-None-Match": entity.tag};
-  if (body !== undefined) Object.assign(options, {method: "POST", headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token}, body: JSON.stringify(body)});
+  if (body !== undefined) Object.assign(options, {method: "POST", headers: {...options.headers, "Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token}, body: JSON.stringify(body)});
   let address = base + path;
   const visit = path === "activity/events" && body !== undefined && state.config?.interactionContinuity && state.config.visitTransport;
   if (visit && /^http:\/\/127\.0\.0\.1:\d+$/.test(visit.origin) && visit.token) {
@@ -104,12 +104,12 @@ async function openMentionFile(ref) {
   dialog.addEventListener("close", ()=>dialog.remove());document.body.append(dialog);dialog.showModal();
 }
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
-async function refreshList({background = false, priority = background ? "low" : "auto"} = {}) {
-  if (state.paneMode) { refreshDecisionsIfDue(background); window.parent.agentCoordPanes?.requestList({background}); return; }
+async function refreshList({background = false, afterMutation = false, priority = background ? "low" : "auto"} = {}) {
+  if (state.paneMode) { refreshDecisionsIfDue(background); window.parent.agentCoordPanes?.requestList({background, afterMutation}); return; }
   const view = $("view").value, pending = state.listRefresh;
   // Polls and streamed events must not keep superseding a slow inventory read.
   // Explicit refreshes after user actions still invalidate earlier snapshots.
-  if (background && pending?.view === view && pending.request === listRequest) return pending.promise;
+  if (background && !afterMutation && pending?.view === view && pending.request === listRequest) return pending.promise;
   // Coalesce decisions and schedules with the inventory read. Every WebKit
   // fetch retains memory in the Networking process, so skipped refreshes
   // must not still issue their companion requests.
@@ -1250,7 +1250,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   const checkpoint = displayed.checkpoint?.id || 0, completion = displayed.turn_completion?.id || 0;
   if (!dock && !state.detail?.deferReadAcknowledgment &&
       (checkpoint > (displayed.seen_checkpoint_id || 0) || completion > (displayed.seen_completion_id || 0))) {
-    await api(threadPath(id), {seen: true, seen_checkpoint_id: checkpoint, seen_completion_id: completion});
+    await api(threadPath(id), {seen: true, seen_checkpoint_id: checkpoint, seen_completion_id: completion}, {headers: {Prefer: "return=minimal"}});
   }
   if (refreshInventory) await refreshList();
   if (state.selected !== id) return;
@@ -1360,8 +1360,8 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
     if (markSeen && !detail.deferReadAcknowledgment && !state.paneMode && detail.work_thread.unread_result && !document.hidden && document.hasFocus() &&
         !$("conversation").hidden && (!state.dispatchDock?.active || state.dispatchDock.expanded)) {
       await api(threadPath(id), {seen: true, seen_checkpoint_id: detail.work_thread.checkpoint?.id || 0,
-        seen_completion_id: detail.work_thread.turn_completion?.id || 0});
-      await refreshList();
+        seen_completion_id: detail.work_thread.turn_completion?.id || 0}, {headers: {Prefer: "return=minimal"}});
+      await refreshList({background: true, afterMutation: true});
     }
     if (revision !== entry.revision) scheduleDetail();
     return !changed;

@@ -962,7 +962,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         gateway.verify_origin(backend)
         address, token, _, _ = backend
         headers = {key: self.headers[key] for key in
-                   ("X-Agent-Coord-History-View", "X-Agent-Coord-Thread-Controls", "If-None-Match")
+                   ("X-Agent-Coord-History-View", "X-Agent-Coord-Thread-Controls", "If-None-Match", "Prefer")
                    if self.headers.get(key)}
         if method == "GET" and self.headers.get("X-Agent-Coord-Token") == gateway.token:
             headers["X-Agent-Coord-Token"] = token

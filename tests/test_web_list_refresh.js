@@ -45,6 +45,27 @@ test("slow background refreshes publish running state despite repeated polling a
   assert.equal(rendered[1].priority[0].thread_id, "dispatcher", "a real approval still needs attention");
 });
 
+test("a confirmed read receipt supersedes older inventory without reading unrelated decisions or workspace settings", async () => {
+  const {c, reads} = setup();
+  const companions = countCompanions(c), routes = [], api = c.api;
+  c.api = (path, ...args) => { routes.push(path); return api(path, ...args); };
+  c.Date = {now: () => 100000};
+  const initial = c.refreshList();
+  reads[0].resolve({data: [thread()]});
+  await initial;
+  routes.length = 0;
+  const old = c.refreshList({background: true});
+  const confirmed = c.refreshList({background: true, afterMutation: true});
+  assert.equal(reads.length, 3);
+  assert.deepEqual(routes, ["threads?archived=false", "threads?archived=false"]);
+  assert.deepEqual(companions, {asks: 1, schedules: 1});
+  reads[2].resolve({data: [thread({unread_result: false})]});
+  await confirmed;
+  reads[1].resolve({data: [thread({unread_result: true})]});
+  await old;
+  assert.equal(c.state.sessions[0].unread_result, false);
+});
+
 test("explicit refresh after a user action supersedes an earlier background snapshot", async () => {
   const {c, reads} = setup();
   const old = c.refreshList({background: true});

@@ -1273,7 +1273,8 @@ def _handler(
                         raise CoordinationError("Choose a work thread.")
                     thread_id = unquote(route[3])
                     if len(route) == 4:
-                        result = browser_sessions.update_work_thread(thread_id, body)
+                        result = browser_sessions.update_work_thread(
+                            thread_id, body, prefer_minimal=self.headers.get("Prefer") == "return=minimal")
                     elif route[4] == "sidecars":
                         browser_sessions.work_thread(thread_id, history=False)
                         from .app_control import AppControl

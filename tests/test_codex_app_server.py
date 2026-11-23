@@ -128,6 +128,16 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
         return identity
 
+    def test_displayed_read_receipt_only_builds_the_requested_thread_response(self):
+        thread_id = self.create()
+        receipt = {"seen": True, "seen_checkpoint_id": 0, "seen_completion_id": 0}
+        with patch.object(self.sessions, "work_thread", wraps=self.sessions.work_thread) as rendered, \
+                patch.object(self.store.threads, "get", wraps=self.store.threads.get) as read:
+            response = self.sessions.update_work_thread(thread_id, receipt)
+        self.assertEqual(response["thread_id"], thread_id)
+        self.assertEqual(rendered.call_count, 1)
+        self.assertEqual(sum(call.kwargs.get("history") is True for call in read.call_args_list), 1)
+
     def test_projected_turn_lifecycle_repairs_registration_without_rendering_thread_detail(self):
         thread_id = self.create()
         with self.store._connection() as db:

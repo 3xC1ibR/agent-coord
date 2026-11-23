@@ -232,6 +232,7 @@ test("opening acknowledges either advancing marker even when the unread badge is
     const writes = c.calls.filter(call => call.body?.seen);
     assert.equal(writes.length, 1);
     assert.deepEqual(clone(writes[0].body), {seen: true, seen_checkpoint_id: 8, seen_completion_id: 12});
+    assert.equal(writes[0].options.headers.Prefer, "return=minimal");
   }
 });
 
@@ -621,12 +622,12 @@ function readStateSetup() {
   c.state.threadTabs = new ThreadTabs({});
   c.state.threadTabs.setProject("/project");
   const api = c.api;
-  c.api = async (path, body) => {
+  c.api = async (path, body, options) => {
     if (body?.seen) {
       const work = c.replies.get(path.split("/")[1])?.work_thread;
       if (work) work.unread_result = work.turn_completion.id > body.seen_completion_id;
     }
-    return api(path, body);
+    return api(path, body, options);
   };
   c.refreshList = async () => c.state.threadTabs.update([...c.replies.values()].map(detail => detail.work_thread));
   c.reply = (id, completion) => {
@@ -648,6 +649,17 @@ test("a reply displayed in the current tab stays read after switching away", asy
   await c.select("two");
   assert.equal(c.state.threadTabs.items.find(item => item.thread_id === "one").unread_result, false);
   assert.equal(c.replies.get("other").work_thread.unread_result, true, "background replies stay unread");
+});
+
+test("a displayed reply refreshes its unread badge without refreshing workspace configuration", async () => {
+  const c = readStateSetup();
+  await c.select("one");
+  c.reply("one", 2);
+  const refreshes = [];
+  c.refreshList = async options => refreshes.push(options);
+  await c.refreshDetail();
+  assert.deepEqual(clone(refreshes), [{background: true, afterMutation: true}]);
+  assert.equal(c.calls.filter(call => call.body?.seen).at(-1).options.headers.Prefer, "return=minimal");
 });
 
 test("hidden, unfocused and collapsed conversations do not consume new replies", async () => {

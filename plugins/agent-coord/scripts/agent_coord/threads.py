@@ -487,7 +487,7 @@ class ThreadStore:
     def update(self, thread_id: str, *, title=None, domain=UNSET, attention=None, pinned=UNSET, seen=False,
                seen_checkpoint_id=None, seen_completion_id=None, handled=False,
                handled_checkpoint_id=None, handled_completion_id=None, repository_id=UNSET, project_id=UNSET,
-               snoozed_until=UNSET, resume_snooze=UNSET) -> dict:
+               snoozed_until=UNSET, resume_snooze=UNSET, return_thread=True) -> dict | None:
         self.get(thread_id)
         if title is not None:
             title = _text(title, "Thread title", 160)
@@ -544,7 +544,7 @@ class ThreadStore:
                            (attention, self.store.clock() if attention == "later" else None, thread_id))
             if pinned is not UNSET:
                 db.execute("UPDATE work_threads SET pinned = ? WHERE thread_id = ?", (int(pinned), thread_id))
-        return self.get(thread_id, history=True)
+        return self.get(thread_id, history=True) if return_thread else None
 
     @staticmethod
     def _mark_seen(db, thread_id, checkpoint_id=None, completion_id=None):

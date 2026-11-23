@@ -1803,10 +1803,14 @@ class BrowserSessions:
             self.work_thread(thread_id, history=False, _creators=inventory.creators, _inventory=inventory)
             for thread_id in inventory.projected])
 
-    def update_work_thread(self, thread_id: str, body: dict) -> dict:
+    def update_work_thread(self, thread_id: str, body: dict, *, prefer_minimal=False) -> dict:
         with self._thread_lock(thread_id):
             before = self.store.threads.get(thread_id)
-            result = self._update_work_thread(thread_id, body)
+            if not matches_workspace(before["cwd"], self.cwd):
+                raise CoordinationError("Work thread not found in this workspace.")
+            minimal_receipt = (prefer_minimal and body.get("seen") is True
+                               and body.keys() == {"seen", "seen_checkpoint_id", "seen_completion_id"})
+            result = self._update_work_thread(thread_id, body, minimal_receipt=minimal_receipt)
             changed = {key: {"before": before.get(key), "after": result.get(key)}
                        for key in ("domain", "project_id", "repository_id")
                        if key in body and before.get(key) != result.get(key)}
@@ -1817,8 +1821,7 @@ class BrowserSessions:
                     details={"action": "handled" if body.get("handled") else "placement", "attention": result["attention"]})
             return result
 
-    def _update_work_thread(self, thread_id: str, body: dict) -> dict:
-        thread = self.work_thread(thread_id)
+    def _update_work_thread(self, thread_id: str, body: dict, *, minimal_receipt: bool) -> dict:
         if set(body) - {"attention", "title", "domain", "pinned", "seen", "seen_checkpoint_id", "seen_completion_id",
                         "handled", "handled_checkpoint_id", "handled_completion_id", "repository_id", "project_id",
                         "snoozed_until", "resume_snooze"}:
@@ -1831,6 +1834,9 @@ class BrowserSessions:
             raise CoordinationError("Seen must be true or false.")
         if "handled" in body and not isinstance(body["handled"], bool):
             raise CoordinationError("Handled must be true or false.")
+        # Only handling and placement depend on the provider's current state.
+        if body.get("handled") or body.get("attention") is not None:
+            thread = self.work_thread(thread_id, history=False)
         if body.get("handled") and thread["status"] in {"running", "needs input"}:
             raise BrowserBusyError("Answer or cancel live input and wait for the running turn before dismissing its response.")
         if "pinned" in body and not isinstance(body["pinned"], bool):
@@ -1841,9 +1847,9 @@ class BrowserSessions:
             raise CoordinationError("Attention must be now, later, or archived.")
         if body.get("attention") == "archived" and thread["status"] in {"running", "needs input"}:
             raise BrowserBusyError("Stop the running turn before archiving this thread.")
-        if thread["browser_session"] and body.get("attention") in {"now", "later"} and self._record(thread_id)["archived"]:
+        if body.get("attention") in {"now", "later"} and thread["browser_session"] and self._record(thread_id)["archived"]:
             self.update(thread_id, {"archived": False})
-        self.store.threads.update(thread_id, title=body.get("title"), attention=body.get("attention"), seen=body.get("seen", False),
+        self.store.threads.update(thread_id, return_thread=False, title=body.get("title"), attention=body.get("attention"), seen=body.get("seen", False),
                                   seen_checkpoint_id=body.get("seen_checkpoint_id"), seen_completion_id=body.get("seen_completion_id"),
                                   handled=body.get("handled", False), handled_checkpoint_id=body.get("handled_checkpoint_id"),
                                   handled_completion_id=body.get("handled_completion_id"),
@@ -1851,7 +1857,7 @@ class BrowserSessions:
                                   **{key: body[key] for key in ("snoozed_until", "resume_snooze") if key in body},
                                   **({"pinned": body["pinned"]} if "pinned" in body else {}), **associations)
         self._publish("browser/changed", {"threadId": thread_id})
-        return self.work_thread(thread_id)
+        return {"seen": True} if minimal_receipt else self.work_thread(thread_id)
 
     def close_work_thread(self, thread_id: str, *, stop_timeout: float = 10) -> dict:
         """Stop owned execution, or hide an externally owned conversation.
