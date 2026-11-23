@@ -47,3 +47,19 @@ test("legacy boundary fallbacks apply only to the first user and final assistant
   first.timelineAt = 1793030410;
   assert.equal(context.messageTimestamp(first, turn).date.toISOString(), "2026-10-26T16:00:10.000Z");
 });
+
+
+test("timeline timestamps share locale formatters across messages", () => {
+  let constructions = 0, individual = 0;
+  class Format extends Intl.DateTimeFormat {
+    constructor(...args) { super(...args); constructions++; }
+  }
+  class TimedDate extends Date {
+    toLocaleString(...args) { individual++; return super.toLocaleString(...args); }
+  }
+  const page = vm.createContext({node: context.node, Intl: {DateTimeFormat: Format}, Date: TimedDate});
+  vm.runInContext(source.slice(source.indexOf("function messageTimestamp("), source.indexOf("function forkRelations(")), page);
+  for (let i = 0; i < 10; i++) page.messageTimeLabel({timelineAt: 1793030400 + i}, {});
+  assert.equal(individual, 0);
+  assert.equal(constructions, 2);
+});

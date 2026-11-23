@@ -192,6 +192,41 @@ function overview() {
   return c;
 }
 
+test("refreshing an open conversation renders the sidebar without allocating hidden overview cards", () => {
+  const c = overview(), original = c.threadCard, cards = [];
+  c.threadCard = (thread, compact, attention) => {
+    cards.push(compact);
+    return original(thread, compact, attention);
+  };
+  c.$("welcome").hidden = true;
+  c.state.selected = c.state.sessions[0].thread_id;
+  c.renderList();
+  assert.ok(cards.includes(true));
+  assert.ok(!cards.includes(false));
+  cards.length = 0;
+  c.$("welcome").hidden = false;
+  c.renderList();
+  assert.ok(cards.includes(false), "the current overview cards must be built on return");
+});
+
+test("changing one inventory row retains the other sidebar button", () => {
+  const c = overview(), original = c.threadCard, drawn = [];
+  c.threadCard = (row, compact, attention) => {
+    if (compact) drawn.push(row.thread_id);
+    return original(row, compact, attention);
+  };
+  c.$("welcome").hidden = true;
+  c.state.sessions = [thread("one"), thread("two")];
+  c.renderList();
+  drawn.length = 0;
+  c.state.sessions[1] = {...c.state.sessions[1], title: "Changed"};
+  c.renderList();
+  assert.deepEqual(drawn, ["two"]);
+  c.state.selected = "one";
+  c.renderList();
+  assert.deepEqual(drawn, ["two", "one"]);
+});
+
 test("mobile board keeps its horizontal position when a checkpoint refresh rebuilds cards", () => {
   const c = overview(), oldBoard = c.board();
   oldBoard.scrollLeft = 930; oldBoard.onscroll();

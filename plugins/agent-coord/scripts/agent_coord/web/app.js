@@ -744,7 +744,8 @@ function renderList() {
   const groupBy = $("group-by").value;
   $("group-by-domain").setAttribute("aria-pressed", String(groupBy === "domain"));
   const viewId = (state.projectCwd || "") + ":" + (savedViews?.activeId || "all");
-  const signature = JSON.stringify([state.overviewLayout?.mode, threads, upcoming, state.selected, [...(state.closing || [])], [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
+  const boardVisible = !$("welcome").hidden && !["atlas", "working-set", "list"].includes(state.overviewLayout?.mode);
+  const signature = JSON.stringify([boardVisible, state.overviewLayout?.mode, threads, upcoming, state.selected, [...(state.closing || [])], [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
   $("back-home").setAttribute("aria-current", state.selected && !state.dispatchDock?.active ? "false" : "page");
   const projects = new Set(threads.map(t => t.project_id).filter(Boolean)).size;
   const stopped = (state.viewThreads || []).filter(t => t.wake_pause_kind === "stop" && t.attention !== "archived").length;
@@ -769,20 +770,41 @@ function renderList() {
   const scrollPositions = [$("welcome"), $("sessions")].map(el => ({el, top: el.scrollTop, left: el.scrollLeft}));
   $("sessions").replaceChildren(); $("overview").replaceChildren();
   const agentTree = agentThreadTree(threads);
+  const priorSidebar = state.sidebarCards || new Map();
+  state.sidebarCards = new Map();
+  function sidebarCard(thread, group) {
+    if (!agentTree.children || agentTree.children.has(thread.thread_id) || thread.created_by_thread_id ||
+        thread.forked_from || thread.forked_sessions?.length || thread.attention_items?.length)
+      return agentThreadCard(thread, agentTree, true);
+    // A leaf's compact button depends on its own record and selection. Keep
+    // separate nodes if the same thread appears in more than one group.
+    const key = JSON.stringify([group, thread.thread_id]);
+    const revision = JSON.stringify([thread, state.selected === thread.thread_id]);
+    const previous = priorSidebar.get(key);
+    const card = previous?.revision === revision ? previous : {revision, node: agentThreadCard(thread, agentTree, true)};
+    state.sidebarCards.set(key, card);
+    return card.node;
+  }
   const groups = threadGrouping.groupThreads(agentTree.roots);
   const filtered = Boolean(query || $("phase-filter").value || ["attention", "completed"].includes($("view").value) || $("repository").value || $("project").value);
   function addGroup(key, label, items, parent, description = "", sidebarItems = items) {
-    const section = node("section", null, "thread-group " + key), overview = node("section", null, "thread-group " + key);
-    section.setAttribute("aria-label", label); overview.setAttribute("aria-label", label);
+    if (sidebarItems.length) {
+      const section = node("section", null, "thread-group " + key), heading = groupHeading(label);
+      section.setAttribute("aria-label", label);
+      if (key === "priority") heading.className += " sr-only";
+      section.append(heading);
+      for (const thread of sidebarItems) section.append(sidebarCard(thread, key));
+      $("sessions").append(section);
+    }
+    if (!boardVisible) return;
+    const overview = node("section", null, "thread-group " + key), overviewHeading = groupHeading(label);
+    overview.setAttribute("aria-label", label);
     overview.dataset.group = key;
     overview.dataset.empty = String(items.length === 0);
-    const sidebarHeading = groupHeading(label), overviewHeading = groupHeading(label);
-    if (key === "priority") { sidebarHeading.className += " sr-only"; overviewHeading.className += " sr-only"; }
-    section.append(sidebarHeading);
+    if (key === "priority") overviewHeading.className += " sr-only";
     overview.append(overviewHeading);
     if (description) overview.append(node("p", description, "group-description"));
     const cards = node("div", null, "thread-cards");
-    for (const thread of sidebarItems) section.append(agentThreadCard(thread, agentTree, true));
     for (const thread of items) {
       const card = agentThreadCard(thread, agentTree, false, key === "priority" || groupBy === "domain" && threadGrouping.awaitsUser(thread));
       card.dataset.cardThread = thread.thread_id;
@@ -790,7 +812,6 @@ function renderList() {
     }
     if (!items.length) cards.append(node("p", "—", "stage-empty"));
     overview.append(cards);
-    if (sidebarItems.length) $("sessions").append(section);
     parent.append(overview);
   }
   state.schedules?.renderUpcoming($("overview"), upcoming);
@@ -1796,14 +1817,18 @@ function messageTimestamp(item, turn) {
   }
   return null;
 }
+let messageTimeFormats;
 function messageTimeLabel(item, turn) {
   const timing = messageTimestamp(item, turn);
   if (!timing) return node("span", "Time unavailable", "message-time");
-  const label = node("time", timing.date.toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"}), "message-time");
+  messageTimeFormats ||= {
+    label: new Intl.DateTimeFormat([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"}),
+    title: new Intl.DateTimeFormat([], {year: "numeric", month: "long", day: "numeric", hour: "numeric",
+      minute: "2-digit", second: "2-digit", timeZoneName: "short"}),
+  };
+  const label = node("time", messageTimeFormats.label.format(timing.date), "message-time");
   label.dateTime = timing.date.toISOString();
-  label.title = timing.label + " · " + timing.date.toLocaleString([], {
-    year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short",
-  });
+  label.title = timing.label + " · " + messageTimeFormats.title.format(timing.date);
   return label;
 }
 function forkRelations(work) {
@@ -4154,6 +4179,9 @@ function setupComposerSizing(input) {
   return resize;
 }
 async function boot() {
+  const refreshTimeFormats = () => { messageTimeFormats = null; };
+  window.addEventListener("languagechange", refreshTimeFormats);
+  window.addEventListener("focus", refreshTimeFormats);
   const historyNavigation = new agentCoordNavigation.HistoryNavigation(window);
   state.permissionMenu = new PermissionMenu({document, view: window});
   state.resizeComposer = setupComposerSizing($("message"));
