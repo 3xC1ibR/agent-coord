@@ -240,3 +240,20 @@ test("Enter can submit an ordinary message behind a starting turn on a verified 
     if (active) assert.equal(requests[0].expectedTurnId, active);
   }
 });
+
+test("only visit posts use the isolated loopback origin and restricted credential", async () => {
+  const calls = [], origin = "http://127.0.0.1:2431";
+  const api = vm.runInNewContext(source.slice(source.indexOf("async function api("), source.indexOf("async function openMentionFile(")) + ";api",
+    {base: "/api/browser/", state: {config: {interactionContinuity:true, token:"main", visitTransport:{origin,token:"visits"}}},
+     fetch: async (url, options) => { calls.push({url,options}); return {ok:true, status:200, json:async()=>({})}; }});
+  const batch = {events:[{event_id:"same",window_id:"one",visit_id:"visit"}]};
+  await api("activity/events", batch, {keepalive:true});
+  await api("sessions/one/messages", {message:"work"});
+  await api("activity/settings");
+  assert.deepEqual(calls.map(r=>r.url), [origin+"/api/browser/activity/events", "/api/browser/sessions/one/messages","/api/browser/activity/settings"]);
+  assert.equal(calls[0].options.keepalive, true);
+  assert.equal(calls[0].options.credentials, "omit");
+  assert.equal(calls[0].options.headers["X-Agent-Coord-Token"], "visits");
+  assert.equal(calls[1].options.headers["X-Agent-Coord-Token"], "main");
+  assert.deepEqual(JSON.parse(calls[0].options.body), batch);
+});

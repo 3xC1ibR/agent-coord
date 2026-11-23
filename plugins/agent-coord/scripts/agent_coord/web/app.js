@@ -43,6 +43,16 @@ async function api(path, body, requestOptions = {}) {
   if (submission && !body.action) options.priority = "high";
   if (entity?.tag && entity.value) options.headers = {...options.headers, "If-None-Match": entity.tag};
   if (body !== undefined) Object.assign(options, {method: "POST", headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token}, body: JSON.stringify(body)});
+  let address = base + path;
+  const visit = path === "activity/events" && body !== undefined && state.config?.interactionContinuity && state.config.visitTransport;
+  if (visit && /^http:\/\/127\.0\.0\.1:\d+$/.test(visit.origin) && visit.token) {
+    // Long source writes and pagehide keepalives cannot occupy a composer or
+    // history connection. A visit token authorizes only this reporting route.
+    address = visit.origin + base + path;
+    options.headers["X-Agent-Coord-Token"] = visit.token;
+    options.credentials = "omit";
+    options.redirect = "error";
+  }
   const read = body === undefined && (options.method || "GET").toUpperCase() === "GET";
   for (let attempt = 0; ; ++attempt) {
     let response, unreadable = false;
@@ -51,8 +61,8 @@ async function api(path, body, requestOptions = {}) {
       // for other windows' background visit writes before occupying a socket.
       // On page exit a keepalive fetch must be registered before the page dies.
       if (path === "activity/events" && state.config?.interactionContinuity && !options.keepalive && globalThis.navigator?.locks) {
-        response = await navigator.locks.request("ribbon-field-activity-write", () => fetch(base + path, options));
-      } else response = await fetch(base + path, options);
+        response = await navigator.locks.request("ribbon-field-activity-write", () => fetch(address, options));
+      } else response = await fetch(address, options);
       if (response.status === 401 && location.protocol === "https:") location.reload();
       if (response.status === 304 && entity?.value) return entity.value;
       let result;

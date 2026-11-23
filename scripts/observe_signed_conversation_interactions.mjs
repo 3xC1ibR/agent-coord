@@ -15,7 +15,11 @@ const browser = await chromium.launch({headless: true});
 const context = await browser.newContext();
 await context.route("**/*", route => {
   const u = new URL(route.request().url());
-  return u.protocol === "http:" && u.hostname === "127.0.0.1" && u.origin === new URL(state().url).origin ? route.continue() : route.abort();
+  const active = state();
+  const visit = u.origin === active.visit_origin && u.pathname === "/api/browser/activity/events" &&
+    !u.search && ["POST", "OPTIONS"].includes(route.request().method());
+  return u.protocol === "http:" && u.hostname === "127.0.0.1" &&
+    (u.origin === new URL(active.url).origin || visit) ? route.continue() : route.abort();
 });
 const interval = 250;
 const pageFor = async () => {

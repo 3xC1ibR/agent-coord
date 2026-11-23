@@ -78,11 +78,22 @@
     }
     clear() { this.queue = []; this.current = null; this.intentSurface = this.navigationSurface = null; }
     async flush({keepalive = false} = {}) {
-      if (this.pending || !this.queue.length) return this.pending;
-      const batch = this.queue.slice(0, 40), ids = new Set(batch.map(event => event.event_id));
-      this.pending = Promise.resolve().then(() => this.send(batch, {keepalive})).then(() => {
-        this.queue = this.queue.filter(event => !ids.has(event.event_id));
-      }).catch(() => { /* Bounded retry on the next tick; no content or keystrokes are retained. */ });
+      if (!this.queue.length || this.pending && !keepalive) return this.pending;
+      const send = async batch => {
+        try {
+          await this.send(batch, {keepalive});
+          const confirmed = new Set(batch.map(event => event.event_id));
+          this.queue = this.queue.filter(event => !confirmed.has(event.event_id));
+        } catch { /* Retry unconfirmed observations on the next flush with their original event IDs. */ }
+      };
+      if (keepalive) {
+        // A normal fetch or an outstanding Web Lock can be cancelled at page
+        // exit. Register every unconfirmed observation before the document dies.
+        const transfers = [];
+        for (let i = 0; i < this.queue.length; i += 40) transfers.push(send(this.queue.slice(i, i + 40)));
+        return Promise.all(transfers);
+      }
+      this.pending = send(this.queue.slice(0, 40));
       try { await this.pending; } finally { this.pending = null; }
     }
   }

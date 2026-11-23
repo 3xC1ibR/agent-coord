@@ -100,6 +100,8 @@ class InteractionGateway:
         self.cache = {}
         self.instance = secrets.token_hex(16)
         self.url = None
+        self.visit_origin = None
+        self.visit_token = None
         self.token = None
         self.control_token = None
 
@@ -288,7 +290,9 @@ class InteractionGateway:
                 (SELECT COALESCE(MAX(sequence),0) FROM coordinator_events),
                 (SELECT COALESCE(MAX(id),0) FROM turn_completions)""").fetchone()
         return {**self.config, "token": self.token, "eventCursor": event, "completionCursor": completion,
-                "interactionContinuity": True, "conversationSnapshotControls": True}
+                "interactionContinuity": True, "conversationSnapshotControls": True,
+                "visitTransport": ({"origin": self.visit_origin, "token": self.visit_token}
+                                  if self.visit_origin else None)}
 
     def _source_status(self, wanted):
         record = runtime.discover(self.database, timeout=2)
@@ -689,7 +693,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         pass  # The path may contain a private search or thread identifier.
 
     def local(self):
-        return (self.headers.get_all("Host") == [urlsplit(self.gateway.url).netloc]
+        return (self.headers.get_all("Host") == [f"127.0.0.1:{self.server.server_port}"]
                 and not any(k.lower().startswith(("forwarded", "x-forwarded-", "tailscale-")) for k in self.headers)
                 and self.path.startswith("/") and not self.path.startswith("//")
                 and not any(c in self.path for c in ("\r", "\n", "\\", "#"))
@@ -704,6 +708,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         fields = browser_content_policy(self.path, status, mime, self.gateway.url.rstrip("/"), self.local())
+        # The app page may send only visit observations to this exact loopback
+        # origin. Keep the sandbox and preview policies intact.
+        if self.gateway.visit_origin and mime.startswith("text/html") and urlsplit(self.path).path == "/":
+            fields["Content-Security-Policy"] = fields["Content-Security-Policy"].replace(
+                "connect-src 'self';", f"connect-src 'self' {self.gateway.visit_origin}{BROWSER}activity/events;")
         fields["Cache-Control"] = "no-store"
         fields.update(headers or {})
         for name, value in fields.items():
@@ -996,11 +1005,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
         return secrets.compare_digest(self.headers.get("Authorization", "").encode(),
                                       ("Bearer " + self.gateway.control_token).encode())
 
-    def post(self, parsed):
+    def post(self, parsed, *, browser_token=None):
         gateway = self.gateway
         control = parsed.path.startswith("/_runtime/")
         permitted = (self.control_authorized() if control else
-                     secrets.compare_digest(self.headers.get("X-Agent-Coord-Token", "").encode(), gateway.token.encode()))
+                     secrets.compare_digest(self.headers.get("X-Agent-Coord-Token", "").encode(),
+                                            (browser_token or gateway.token).encode()))
         if (not permitted or self.headers.get("Origin") not in (None, gateway.url.rstrip("/"))
                 or self.headers.get("Sec-Fetch-Site") == "cross-site"):
             return self.json(403, {"error": "Reload Ribbon Field before making changes."})
@@ -1090,6 +1100,53 @@ class GatewayHandler(BaseHTTPRequestHandler):
     do_GET = do_POST = handle_interaction
 
 
+
+class VisitHandler(GatewayHandler):
+    """A dedicated browser connection pool for synchronous, owner-confirmed visit writes."""
+
+    def permitted_origin(self):
+        return bool(self.gateway.url) and self.local() and self.headers.get_all("Origin") == [self.gateway.url.rstrip("/")]
+
+    def end_headers(self):
+        if self.permitted_origin():
+            self.send_header("Access-Control-Allow-Origin", self.gateway.url.rstrip("/"))
+            self.send_header("Vary", "Origin")
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        headers = {name.strip().lower() for name in self.headers.get("Access-Control-Request-Headers", "").split(",")}
+        if (not self.permitted_origin() or self.path != BROWSER + "activity/events"
+                or self.headers.get("Access-Control-Request-Method") != "POST"
+                or headers != {"content-type", "x-agent-coord-token"}):
+            return self.json(403, {"error": "Visit reporting requires the local app."})
+        self.answer(204, b"", headers={"Access-Control-Allow-Methods": "POST",
+                    "Access-Control-Allow-Headers": "Content-Type, X-Agent-Coord-Token",
+                    "Access-Control-Max-Age": "300"})
+
+    def post(self, parsed, **kwargs):
+        if not self.permitted_origin() or self.path != BROWSER + "activity/events":
+            return self.json(403, {"error": "Visit reporting requires the local app."})
+        return super().post(parsed, browser_token=self.gateway.visit_token)
+
+    def do_GET(self):
+        self.json(404, {"error": "Unknown visit reporting route"})
+
+
+@contextlib.contextmanager
+def visit_listener(gateway, port=0):
+    with GatewayServer(("127.0.0.1", port), VisitHandler) as server:
+        server.gateway = gateway
+        gateway.visit_origin = f"http://127.0.0.1:{server.server_port}"
+        gateway.visit_token = hmac.new(gateway.control_token.encode(),
+            ("visit-reporting:" + gateway.visit_origin).encode(), hashlib.sha256).hexdigest()
+        worker = threading.Thread(target=server.serve_forever, name="rf-visit-reporting", daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            server.shutdown()
+            worker.join()
+
 def serve(database, directory, ready_fd):
     directory = Path(directory)
     payload = Path(__file__).resolve().parents[2]
@@ -1105,12 +1162,15 @@ def serve(database, directory, ready_fd):
     gateway.control_token = previous.get("control_token") or secrets.token_urlsafe(32)
     gateway.token = previous.get("browser_token") or secrets.token_urlsafe(32)
     port = urlsplit(previous["url"]).port if previous else 0
-    with GatewayServer(("127.0.0.1", port), GatewayHandler) as server:
+    visit_port = urlsplit(previous["visit_origin"]).port if previous.get("visit_origin") else 0
+    with GatewayServer(("127.0.0.1", port), GatewayHandler) as server, contextlib.ExitStack() as listeners:
         server.gateway = gateway
         server.timeout = .5
         gateway.url = f"http://127.0.0.1:{server.server_port}/"
+        listeners.enter_context(visit_listener(gateway, visit_port))
         runtime.atomic_json(directory / "gateway.json", {**gateway.identity(), "control_token": gateway.control_token,
-                                                         "browser_token": gateway.token, "opened_at": gateway.opened_at})
+                                                         "browser_token": gateway.token, "opened_at": gateway.opened_at,
+                                                         "visit_origin": gateway.visit_origin})
         monitor = threading.Thread(target=gateway.monitor, name="rf-update-delivery", daemon=True)
         monitor.start()
         try:

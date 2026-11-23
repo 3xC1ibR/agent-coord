@@ -171,3 +171,22 @@ test('a foreground system exposure upgrades to a separate human visit and cannot
   assert.equal(r.submission('alpha',{message:'accepted next'}).activity.visit_id,r.current.visit_id);
   r.select('alpha','programmatic');assert.equal(r.current.source,'focus');
 });
+
+test("page exit registers the unconfirmed start and final end with keepalive while a visit write is blocked", async () => {
+  let release;
+  const calls = [];
+  const {recorder} = fixture({send: async (events, options) => {
+    calls.push({events, options});
+    if (!options.keepalive) await new Promise(resolve => { release = resolve; });
+  }});
+  recorder.select("thread", "focus");
+  const normal = recorder.flush();
+  recorder.end();
+  const ended = recorder.flush({keepalive: true});
+  assert.deepEqual(calls[1].events.map(e => e.kind), ["visit_started", "visit_ended"]);
+  assert.equal(calls[0].events[0].event_id, calls[1].events[0].event_id);
+  assert.equal(calls[1].events[0].visit_id, calls[1].events[1].visit_id);
+  assert.equal(calls[1].options.keepalive, true);
+  await ended; release(); await normal;
+  assert.deepEqual(recorder.queue, []);
+});

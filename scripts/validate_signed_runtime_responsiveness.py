@@ -460,6 +460,14 @@ class SignedUpgrade(Validation):
             raise RuntimeError("The gateway listener is not executing the private signed payload")
         self.report["interaction_gateway"] = {key: identity[key] for key in ("instance", "database", "payload", "url", "settled")}
         self.report["interaction_gateway"]["pid"] = pid
+        visit = config.get("visitTransport")
+        if visit:
+            address = urllib.parse.urlsplit(visit["origin"])
+            if (address.scheme != "http" or address.hostname != "127.0.0.1" or not address.port
+                    or visit["origin"] != f"http://127.0.0.1:{address.port}"
+                    or listener_pids(address.port) != owners or not visit.get("token")):
+                raise RuntimeError("Visit reporting is outside the verified private gateway")
+            self.report["interaction_gateway"]["visit_origin"] = visit["origin"]
         self.address = identity["url"], config["token"]
         # Authenticate the actual three browser pages on the held source.
         # A slow old coordinator may never finish a send. Every attempt is
@@ -673,7 +681,9 @@ class SignedUpgrade(Validation):
         temporary = self.root / "browser-state.partial"
         temporary.write_text(
             json.dumps(
-                {"phase": name, "url": self.address[0], "peers": self.open_targets, "composer": self.composer}
+                {"phase": name, "url": self.address[0], "peers": self.open_targets, "composer": self.composer,
+                 "visit_origin": (self.report["interaction_gateway"].get("visit_origin")
+                                 if self.report.get("interaction_gateway", {}).get("url") == self.address[0] else None)}
             )
         )
         temporary.replace(self.root / "browser-state.json")
