@@ -12,6 +12,12 @@ and build 54 reboot recovery interrupted execution. See the
 [incident note](runtime-upgrade-incident-2026-11-22.md) and
 [current rollout evidence](runtime-updates.md#observed-following-upgrade).
 
+The failed-launch repair was published in build 65 at `9177309`, with independent
+old/new-owner and downgrade checks. A separate build 63 replacement retained
+observed provider work and cleared the original delivery warning. Further local
+deployment was then held; build 65 has no installed-runtime continuity result.
+See the [published correction and local boundary](runtime-updates.md#failed-launch-recovery-and-published-correction).
+
 ## Execution boundary
 
 A stable, provider-neutral transport owner retains the provider processes and

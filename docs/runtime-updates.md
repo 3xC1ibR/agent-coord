@@ -13,6 +13,13 @@ continuity, separate from the interrupted build 52 adoption and build 54 reboot
 recovery. See the [live evidence](#observed-following-upgrade) and the
 [earlier incident and acceptance gaps](runtime-upgrade-incident-2026-11-22.md).
 
+The failed-launch follow-up, commit `9177309`, was published as version `0.1.14`,
+build `65`, after exact-source CI, signed artifact validation and full-size
+readiness checks. The laptop remained on build 63 when checked at 01:19 UTC on
+November 23; a later operator instruction holds further local deployment.
+Publication therefore does not establish local build 65 activation. See the
+[failed-launch rollout record](#failed-launch-recovery-and-published-correction).
+
 This installation already has an independent runtime. Future authorized local
 changes use the [normal local rebuild workflow](../desktop/macos/README.md#build-and-install-locally),
 not the legacy one-time interruption below. Public publication remains a
@@ -334,6 +341,56 @@ with no PID and an uncertain launch receipt. Forty-two recorded restore attempts
 failed between 15:57:51 and 16:00:02 CST. A bounded reconciliation removed its
 derived channel entry without replay; build 62 resumed service but retained the
 warning. This separate defect does not invalidate the observed continuity proof.
+
+### Failed-launch recovery and published correction
+
+The cause repair in `91d258b` distinguishes a provider process rejected before
+input from an uncertain delivery. A missing working directory fails cleanly.
+For the retained legacy ENOENT receipt, the coordinator inspects the owner's
+closed channel with no PID before recording rejection; it never resubmits the
+failed open. Uncertain writes and launches without that proof remain uncertain.
+
+A separately authorized build 63 update,
+`9fb545c8-0e5b-404a-9b4a-54426e58ac5a`, committed on November 22. Observation
+across that replacement recorded 16 unchanged channel/PID pairs, 17 unchanged
+active turn identities and four retained approval hashes. Transport PID 8569
+continued under epoch 55, the original coordinator receipt became `rejected`,
+and the live delivery warning cleared. The owner journal retains its original
+receipt as historical evidence. This observation allows bounded HTTP gaps; it
+does not establish uninterrupted interface availability.
+
+Follow-up `9177309` removes only the proved-rejected derived channel in the same
+transaction as its terminal receipt. Keeping a closed channel with no PID would
+prevent an older coordinator from loading it after a downgrade. Malformed
+retained receipt JSON now remains uncertain, with its original bytes preserved,
+instead of preventing restoration of an otherwise recoverable orphaned receipt.
+A fresh independent Claude review passed 40 real old/new-owner checks, including
+downgrade, lost acknowledgement, malformed evidence and no replay; the older
+source failed seven controls. Local checks passed 30 projection and 11 recovery
+tests. The unchanged database gate passed with zero errors or admission timeouts.
+
+[Exact-source CI](https://github.com/3xC1ibR/agent-coord/actions/runs/45082941373)
+and the [signed release](https://github.com/3xC1ibR/agent-coord/actions/runs/45082980278)
+completed for `9177309`. Both architecture artifact sets were validated and
+downloaded through the public host. The immutable
+[build 65 manifest](https://downloads.ribbonfield.com/releases/0.1.14/release.json)
+records version `0.1.14`, build `65` and that source commit. The signed candidate
+reached prepared, paused trial readiness in 5.4876 seconds normally and 4.5827
+seconds with an orphaned launch receipt on an 8.46 GB, 1,853-conversation clone,
+below the 30-second deadline. Its isolated fixture accepted no provider commands.
+
+Further local staging, installation and activation were subsequently held by
+operator instruction. At 01:19 UTC on November 23, build 63 was serving unpaused,
+with no pending payload or transport warning. Build 65 had not been staged or
+activated, and its planned native long-tool probe had not started. The read-only
+version-targeted observer expired after recording only build 63; that timeout is
+not evidence of a failed backend update. Local acceptance of build 65 or a
+validated successor remains separate from its completed public publication.
+
+Local receipts are under `build/corrected-runtime-release-65/` and
+`build/provider-launch-recovery/`. The latter keeps the build 63 observation in
+`runtime-observation/` and the unfulfilled build 65 observation in
+`runtime-observation-65/`; do not confuse either with a build 65 continuity proof.
 
 ### First adoption from a legacy runtime
 

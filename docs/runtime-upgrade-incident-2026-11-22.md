@@ -66,3 +66,21 @@ Operator evidence remains local: the integration worktree's
 `build/uninterrupted-runtime-execution/receipts/`; and the main checkout's
 `build/runtime-incident-recovery/`. Current status and limits are recorded in
 [the update contract](runtime-updates.md#live-adoption-incident-and-reboot-recovery).
+
+## Later failed-launch recovery
+
+A separate incident involved a removed working directory. The transport retained
+an ENOENT open receipt and a closed channel with no PID; coordinator restoration
+treated its derived channel as an uncertain launch and repeatedly failed. Build
+63 later classified that never-started launch without replay and cleared the
+warning while observed supported provider work continued.
+
+Independent review identified two additional boundaries: retaining the derived
+null-PID row prevented downgrade, and malformed retained receipt JSON could block
+startup. Commit `9177309` corrected both, passed 40 real old/new-owner checks and
+was published as build 65 after exact-source CI, signed artifact validation and
+full-size candidate readiness. Later operator instructions held local deployment;
+the laptop still served build 63 at the November 23 01:19 UTC check. Public
+publication is not an installed build 65 continuity result. Detailed evidence
+and the current boundary are in the
+[failed-launch rollout record](runtime-updates.md#failed-launch-recovery-and-published-correction).
