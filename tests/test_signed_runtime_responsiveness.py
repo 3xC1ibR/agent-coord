@@ -86,3 +86,97 @@ class SignedAcceptanceGateTests(unittest.TestCase):
         run.summarize()
         self.assertEqual(run.report["results"]["upgrade"]["inventory"]["maximum_seconds_without_success"], 6)
         self.assertTrue(any(v["kind"] == "inventory" for v in run.report["violations"]))
+
+
+class GuardedAuthorizationTests(unittest.TestCase):
+    def setUp(self):
+        import validate_signed_runtime_responsiveness as gate
+
+        self.gate = gate
+        root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.run_fixture = run = object.__new__(SignedUpgrade)
+        run.database = root / "db.sqlite3"
+        self.directory = gate.runtime.runtime_directory(run.database)
+        self.old = str(self.directory / "payloads" / "old")
+        self.new = str(self.directory / "payloads" / "new")
+        self.source = {"payload": self.old, "instance": "source-owner"}
+        self.target = {"payload": self.new, "instance": "candidate-owner"}
+        run.old = (root / "old", {"payload_digest": "old"})
+        run.new = (root / "new", {"payload_digest": "new"})
+        run.report = {"initial_runtime": {"payload": "old", "instance": "source-owner"}}
+        run.launch_signed = mock.Mock(
+            return_value={**self.source, "pending": self.new, "pending_confirmation": True}
+        )
+        run.publish_phase = mock.Mock()
+        run.status = mock.Mock(side_effect=AssertionError("Unnecessary full-status scan"))
+        run.identity = mock.Mock(return_value=self.target)
+        self.enterContext(mock.patch.object(gate, "fetch", return_value={"token": "fixture"}))
+        self.enterContext(mock.patch.object(gate.time, "sleep"))
+        # Move the monotonic deadline forward deterministically.
+        ticks = iter(range(1000))
+        self.enterContext(mock.patch.object(gate.time, "monotonic", side_effect=lambda: next(ticks)))
+
+    def write_receipt(self, request, phase):
+        receipt = {
+            "id": request,
+            "phase": phase,
+            "source_instance": self.source["instance"],
+            "previous": self.old,
+            "target": self.new,
+            "database": str(self.run_fixture.database),
+        }
+        (self.directory / "update.json").write_text(json.dumps(receipt))
+        return receipt
+
+    def test_guarded_attach_authorizes_without_reading_full_status_on_source(self):
+        run = self.run_fixture
+
+        def control(record, action, **body):
+            if record == self.source:
+                self.assertEqual(action, "activate-update")
+                self.receipt = self.write_receipt(body["request_id"], "committed")
+                return {**record, "update": self.receipt}
+            self.assertEqual(record, self.target)
+            self.assertEqual(action, "status")
+            return {**record, "status": "serving", "url": "http://127.0.0.1:1234/", "update": self.receipt}
+
+        with mock.patch.object(
+            self.gate.runtime, "discover", side_effect=[self.source, self.target]
+        ), mock.patch.object(self.gate.runtime, "control", side_effect=control) as controls:
+            run.swap_signed()
+        self.assertEqual(controls.call_count, 2)
+        self.assertEqual(run.report["guarded_update_phase"], "committed")
+        self.assertEqual(run.report["guarded_control"]["id"], run.report["activation_request_id"])
+
+    def test_changed_source_instance_is_never_authorized(self):
+        run = self.run_fixture
+        with mock.patch.object(
+            self.gate.runtime, "discover", return_value={**self.source, "instance": "other"}
+        ), mock.patch.object(self.gate.runtime, "control") as controls:
+            with self.assertRaisesRegex(RuntimeError, "changed before authorization"):
+                run.swap_signed()
+        controls.assert_not_called()
+
+    def test_terminal_receipt_survives_lost_authorization_ack_and_candidate_status_timeout(self):
+        run = self.run_fixture
+
+        def control(record, action, **body):
+            if action == "activate-update":
+                self.write_receipt(body["request_id"], "committed")
+            raise TimeoutError(action)
+
+        with mock.patch.object(
+            self.gate.runtime,
+            "discover",
+            side_effect=lambda *a, **k: self.target
+            if (self.directory / "update.json").is_file()
+            else self.source,
+        ), mock.patch.object(self.gate.runtime, "control", side_effect=control):
+            with self.assertRaisesRegex(AssertionError, "Could not verify"):
+                run.swap_signed()
+        self.assertEqual(run.report["guarded_control"]["phase"], "committed")
+        self.assertNotIn("candidate_runtime", run.report)
+        self.assertEqual(
+            {e["operation"] for e in run.report["guarded_control_observation_errors"]},
+            {"activate-update", "status"},
+        )

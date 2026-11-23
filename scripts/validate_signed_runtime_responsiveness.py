@@ -345,7 +345,8 @@ class SignedUpgrade(Validation):
         status = self.launch_signed(initial[0])
         if Path(status["payload"]).name != initial[1]["payload_digest"]:
             raise RuntimeError("Unexpected initial serving payload")
-        self.address = self.endpoint()
+        self.report["initial_runtime"] = self.identity(status)
+        self.address = status["url"], fetch(status["url"], "", "config", timeout=3)["token"]
         for i in range(6):
             client = "claude" if i >= 4 else "codex"
             session = fetch(
@@ -402,7 +403,6 @@ class SignedUpgrade(Validation):
         for tid in self.peers[4:]:
             self.wait(lambda: consumed_large_turn(tid), timeout=60)
         self.report["large_stream_observations"] = consumed
-        self.report["initial_runtime"] = self.identity(self.status())
         self.report["workload"]["coverage"] = {
             "saved_histories_reopened": 0,
             "active_streams": 6,
@@ -548,60 +548,133 @@ class SignedUpgrade(Validation):
         self.report["wall_phase_bounds"][name].append(time.time() * 1000)
         self.report.setdefault("phase_bounds", {})[name] = [start, time.monotonic()]
 
+    def capture_update(self):
+        """Retain this authorization's durable decision independent of control availability."""
+        request = self.report.get("activation_request_id")
+        if not request:
+            return None
+        directory = runtime.runtime_directory(self.database)
+        path = directory / "update.json"
+        if not path.exists():
+            return None
+        update = json.loads(path.read_bytes())
+        if update["id"] != request:
+            return None
+        source = self.report["initial_runtime"]
+        if (
+            update.get("source_instance") != source["instance"]
+            or update.get("previous") != str(directory / "payloads" / source["payload"])
+            or update.get("target") != str(directory / "payloads" / self.new[1]["payload_digest"])
+            or update.get("database") != str(self.database.resolve())
+        ):
+            raise AssertionError(
+                "Durable authorization does not match the tested source, candidate and database"
+            )
+        self.report["guarded_control"] = {
+            key: update.get(key)
+            for key in (
+                "id",
+                "phase",
+                "error",
+                "source_instance",
+                "previous",
+                "target",
+                "created_at",
+                "updated_at",
+                "admission_drain_seconds",
+                "blocked",
+            )
+        }
+        return update["phase"]
+
     def swap_signed(self):
-        # Confirmed attach stages but cannot silently install. Press the same
-        # authenticated activate-update control as Update and Continue.
+        directory = runtime.runtime_directory(self.database)
+        initial = self.report["initial_runtime"]
+        previous = str(directory / "payloads" / self.old[1]["payload_digest"])
+        target = str(directory / "payloads" / self.new[1]["payload_digest"])
         held = self.launch_signed(self.new[0], hold=True)
-        target = held["pending"]
-        if not target or Path(target).name != self.new[1]["payload_digest"]:
+        if held.get("pending") != target or held.get("pending_confirmation") is not True:
             raise RuntimeError("Exact signed candidate was not held for confirmation")
-        status = self.status()
-        if Path(status["payload"]).name != self.old[1]["payload_digest"]:
+        self.report["guarded_attachment"] = {
+            "instance": held.get("instance"),
+            "payload": held.get("payload"),
+            "pending": target,
+        }
+        # The guarded bootstrap already performed attach. Authenticate the
+        # original instance again with its lock-independent identity handshake.
+        # The control request below is addressed to that same instance.
+        record = runtime.discover(self.database, timeout=3)
+        if (
+            not record
+            or initial["payload"] != self.old[1]["payload_digest"]
+            or any(
+                r.get("instance") != initial["instance"] or r.get("payload") != previous
+                for r in (held, record)
+            )
+        ):
             raise RuntimeError("Initial coordinator changed before authorization")
         self.publish_phase("upgrade")
         begin = time.monotonic()
         self.report.setdefault("wall_phase_bounds", {})["upgrade"] = [time.time() * 1000]
-        op = str(uuid.uuid4())
-        self.report["activation_request_id"] = op
+        request = self.report["activation_request_id"] = str(uuid.uuid4())
+        errors = self.report["guarded_control_observation_errors"] = []
         try:
-            record = runtime.discover(self.database, timeout=3)
-            runtime.control(record, "activate-update", payload=target, request_id=op, timeout=35)
+            try:
+                runtime.control(record, "activate-update", payload=target, request_id=request, timeout=35)
+            except (OSError, ValueError, RuntimeError) as error:
+                # A lost response can follow a durable admission. Do not send
+                # the command twice; observe the decision for this request ID.
+                errors.append(
+                    {
+                        "operation": "activate-update",
+                        "error": repr(error),
+                        "after_seconds": time.monotonic() - begin,
+                    }
+                )
             deadline = time.monotonic() + 75
             while time.monotonic() < deadline:
-                control_path = runtime.runtime_directory(self.database) / "update.json"
-                if control_path.exists():
-                    update = json.loads(control_path.read_bytes())
-                    self.report["guarded_control"] = {
-                        k: update.get(k)
-                        for k in (
-                            "id",
-                            "phase",
-                            "error",
-                            "source_instance",
-                            "source",
-                            "target",
-                            "created_at",
-                            "updated_at",
+                phase = self.capture_update()
+                if phase in {"failed", "rolled-back"}:
+                    raise AssertionError(
+                        "Guarded update failed: " + str(self.report["guarded_control"]["error"])
+                    )
+                if phase == "committed":
+                    operation = "discover"
+                    try:
+                        candidate = runtime.discover(self.database, timeout=3)
+                        if (
+                            candidate
+                            and candidate["payload"] == target
+                            and candidate["instance"] != initial["instance"]
+                        ):
+                            operation = "status"
+                            status = runtime.control(candidate, "status", timeout=2)
+                            if (
+                                status.get("status") == "serving"
+                                and status.get("payload") == target
+                                and (status.get("update") or {}).get("id") == request
+                                and status["update"].get("phase") == "committed"
+                            ):
+                                operation = "browser config"
+                                self.address = (
+                                    status["url"],
+                                    fetch(status["url"], "", "config", timeout=3)["token"],
+                                )
+                                self.report["candidate_runtime"] = self.identity(status)
+                                self.report["guarded_update_phase"] = phase
+                                return
+                    except (OSError, ValueError, RuntimeError) as error:
+                        errors.append(
+                            {
+                                "operation": operation,
+                                "error": repr(error),
+                                "after_seconds": time.monotonic() - begin,
+                            }
                         )
-                    }
-                    if update.get("phase") in {"failed", "rolled-back"}:
-                        raise AssertionError("Guarded update failed: " + str(update.get("error")))
-                try:
-                    status = self.status()
-                    if (
-                        status
-                        and status["status"] == "serving"
-                        and Path(status["payload"]).name == Path(target).name
-                    ):
-                        self.address = self.endpoint()
-                        self.report["candidate_runtime"] = self.identity(status)
-                        self.report["guarded_update_phase"] = (status.get("update") or {}).get("phase")
-                        return
-                except (OSError, ValueError, RuntimeError):
-                    pass
                 time.sleep(0.1)
-            raise AssertionError("Signed candidate did not activate under continuous request traffic")
+            raise AssertionError("Could not verify the signed candidate serving the committed guarded update")
         finally:
+            self.capture_update()
             self.report.setdefault("phase_bounds", {})["upgrade"] = [begin, time.monotonic()]
             self.report["wall_phase_bounds"]["upgrade"].append(time.time() * 1000)
 
@@ -831,6 +904,7 @@ class SignedUpgrade(Validation):
             for thread in self.workers:
                 thread.join(25)
             self.finish_browser()
+            self.capture_update()
             if "phase_bounds" in self.report:
                 self.summarize()
             if self.peers:
