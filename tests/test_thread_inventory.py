@@ -163,8 +163,9 @@ class ThreadInventoryTests(unittest.TestCase):
         builds = 0
         waiters = 0
 
-        def build_inventory(*, archived=False):
+        def build_inventory(*, archived=False, cards_only=False):
             nonlocal builds
+            self.assertTrue(cards_only)
             with condition:
                 builds += 1
                 generation = self.runtime.inventory_generation
