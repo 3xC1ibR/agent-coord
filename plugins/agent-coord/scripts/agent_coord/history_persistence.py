@@ -61,12 +61,51 @@ class _Document:
     references: list[str]
     chunks: dict[str, bytes]
     source_bytes: int
-    fingerprint: bytes
+    fingerprint: bytes | None
     committed: bool = False
+
+    def content_digest(self):
+        if self.fingerprint is not None:
+            return self.fingerprint
+        digest = hashlib.sha256()
+        for reference in self.references:
+            digest.update(self.chunks[reference])
+        return digest.digest()
 
 
 def _json(value):
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _extend_item_text(value, previous):
+    """Reuse canonical JSON blocks before an append to a single large text field."""
+    if previous.committed or not isinstance(value, dict) or not isinstance(previous.value, dict):
+        return None
+    for field in ("text", "aggregatedOutput"):
+        before, after = previous.value.get(field), value.get(field)
+        if (not isinstance(before, str) or len(before) < CHUNK_BYTES or not isinstance(after, str)
+                or len(after) <= len(before) or not after.startswith(before)):
+            continue
+        old_metadata = _json({k: v for k, v in previous.value.items() if k != field})
+        metadata = _json({k: v for k, v in value.items() if k != field})
+        if old_metadata != metadata:
+            return None
+        following = {k: v for k, v in value.items() if k > field}
+        suffix = ('",' + _json(following)[1:] if following else '"}').encode()
+        complete, partial = divmod(previous.source_bytes - len(suffix), CHUNK_BYTES)
+        references = previous.references[:complete]
+        blocks = {digest: previous.chunks[digest] for digest in references}
+        tail = previous.chunks[previous.references[complete]][:partial] if partial else b""
+        addition = _json(after[len(before):]).encode()[1:-1]
+        remaining = tail + addition + suffix
+        for offset in range(0, len(remaining), CHUNK_BYTES):
+            block = remaining[offset:offset + CHUNK_BYTES]
+            digest = hashlib.sha256(block).hexdigest()
+            references.append(digest)
+            blocks[digest] = block
+        document = _Document(copy.deepcopy(value), references, blocks, previous.source_bytes + len(addition), None)
+        return document, len(old_metadata) + len(metadata) + len(suffix) + len(addition)
+    return None
 
 
 def ensure_schema(db):
@@ -115,6 +154,14 @@ def prepare_history_steps(history, *, previous=None):
                 for index, digest in enumerate(existing.references):
                     durable_chunks[digest] = min(CHUNK_BYTES, existing.source_bytes - index * CHUNK_BYTES)
             return existing.references, existing.source_bytes
+        if existing is not None and len(key) == 2:
+            extended = _extend_item_text(value, existing)
+            if extended is not None:
+                document, encoded_bytes = extended
+                encoded_document_bytes += encoded_bytes
+                documents[key] = document
+                chunks.update(document.chunks)
+                return document.references, document.source_bytes
         if content is None:
             content = _json(value).encode("utf-8")
             encoded_document_bytes += len(content)
@@ -191,7 +238,7 @@ def compact_history(prepared):
         # preparation so a later transition to chunked history writes them.
         return PreparedHistory(prepared.serialized, {}, prepared.source_bytes, prepared.documents,
                                cache_bytes=2 * prepared.source_bytes + 1024 * len(prepared.documents))
-    documents = {key: _Document(None, value.references, {}, value.source_bytes, value.fingerprint, True)
+    documents = {key: _Document(None, value.references, {}, value.source_bytes, value.content_digest(), True)
                  for key, value in prepared.documents.items()}
     # Charge conservative per-document/container and digest-reference overhead;
     # logical transcript bytes remain a separate workload metric.

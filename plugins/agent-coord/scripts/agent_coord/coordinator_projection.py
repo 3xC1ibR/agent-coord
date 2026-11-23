@@ -283,8 +283,11 @@ class CoordinatorProjection:
         from .history_persistence import prepare_history, stage_history
         prepared = {identity: prepare_history(self.sessions.histories[identity], previous=self.prepared_histories.get(identity))
                     for identity in self.sessions.dirty_histories if identity in self.sessions.histories}
-        for history in prepared.values():
-            stage_history(self.store, history)
+        for identity, history in prepared.items():
+            # This cache is populated only after the root transaction commits.
+            # Published blocks are immutable and retained for rollback.
+            previous = self.prepared_histories.get(identity)
+            stage_history(self.store, history, confirmed=previous.chunks if previous is not None else ())
         # These roots and the projection commit together. Exclude only a matching
         # terminal outcome, and keep the live recovery copy until commit succeeds.
         completions = {}
@@ -577,7 +580,8 @@ class CoordinatorProjection:
             affected.update(self.channels.get(event["channel"], {}).get("thread_id") for event, _ in decoded)
             if any(event["stream"] == "eof" for event, _ in decoded):
                 affected = None
-            before = self.state(affected=affected)
+            with self.store._writer.measure_request("provider.rollback_snapshot"):
+                before = self.state(affected=affected)
             try:
                 if affected is not None:
                     # While the next batch is uncommitted, an unrelated unloaded
@@ -614,7 +618,8 @@ class CoordinatorProjection:
                     # Histories and the replay cursor share the same snapshot.
                     # Metadata callbacks are finite and borrow this transaction;
                     # nested callbacks append to this list before it is exhausted.
-                    prepared, published_completions, encoded = self.prepare_checkpoint()
+                    with self.store._writer.measure_request("provider.prepare_event_checkpoint"):
+                        prepared, published_completions, encoded = self.prepare_checkpoint()
                     with self.store.database_operation("coordinator.project"), self.store._connection() as db:
                         db.execute("BEGIN IMMEDIATE")
                         with self.store.sharing_transaction(db):
@@ -661,7 +666,8 @@ class CoordinatorProjection:
         # No candidate consumes events before its durable activation commit.
         # Consequently this cursor is also the oldest restorable checkpoint;
         # pre-commit rollback retains the source cursor and cannot lose frames.
-        self.client.call("acknowledge_events", cursor=self.cursor, retain_after=self.cursor)
+        with self.store._writer.measure_request("provider.acknowledge_events"):
+            self.client.call("acknowledge_events", cursor=self.cursor, retain_after=self.cursor)
 
     def start(self):
         self.recover_commands()

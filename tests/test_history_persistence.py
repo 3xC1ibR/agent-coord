@@ -127,6 +127,26 @@ class HistoryPersistenceTests(unittest.TestCase):
         self.assertGreater(result["reused_bytes"], 1024 * 1024)
         self.assertEqual(read_history(self.store, "conversation"), history)
 
+    def test_appending_native_text_encodes_only_the_changed_tail(self):
+        for field in ("text", "aggregatedOutput"):
+            with self.subTest(field=field):
+                item = {"id": "output", field: 'line "\n😀' * 32000, "z": {"note": "trailing metadata"}}
+                value = {"turns": [{"id": "turn", "status": "inProgress", "items": [item]}]}
+                previous = prepare_history(value)
+                for suffix in (" next", '"\\\n😀', "z" * (CHUNK_BYTES + 1)):
+                    item[field] += suffix
+                    updated = prepare_history(value, previous=previous)
+                    full = prepare_history(value)
+                    self.assertEqual((updated.serialized, updated.chunks), (full.serialized, full.chunks))
+                    self.assertLess(updated.encoded_document_bytes, len(suffix) + CHUNK_BYTES * 2)
+                    compact = history_storage.compact_history(updated)
+                    self.assertFalse(prepare_history(value, previous=compact).chunks)
+                    previous = updated
+                item["z"]["note"] = "changed after the text"
+                item[field] += "!"
+                corrected = prepare_history(value, previous=previous)
+                self.assertEqual(corrected.serialized, prepare_history(value).serialized)
+
     def test_retry_and_one_item_change_only_stage_changed_documents(self):
         history = large_history()
         self.persistence.save("conversation", history)

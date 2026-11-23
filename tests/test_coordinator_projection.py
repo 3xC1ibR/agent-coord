@@ -109,6 +109,23 @@ class ProjectionTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             pack(object())
 
+    def test_next_checkpoint_recognizes_blocks_from_a_published_history(self):
+        from agent_coord import history_persistence as storage
+        item = {"id": "output", "type": "agentMessage", "text": "initial " * 90000}
+        history = {"id": self.identity, "turns": [{"id": "turn", "status": "inProgress", "items": [item]}]}
+        self.sessions.loaded.add(self.identity)
+        self.sessions.histories[self.identity] = history
+        self.sessions.dirty_histories.add(self.identity)
+        self.projection.checkpoint()
+        published = set(self.projection.prepared_histories[self.identity].chunks)
+        self.assertTrue(published)
+        item["text"] += "continued"
+        self.sessions.dirty_histories.add(self.identity)
+        with patch.object(storage, "stage_history", wraps=storage.stage_history) as stage:
+            self.projection.checkpoint()
+        self.assertEqual(set(stage.call_args.kwargs.get("confirmed", ())), published)
+        self.assertEqual(storage.read_history(self.store, self.identity), history)
+
     def test_large_active_turn_payloads_survive_restart_rollback_and_legacy_handover(self):
         from agent_coord.coordinator_projection import MIN_PAYLOAD_CHARACTERS
         large = "中" * MIN_PAYLOAD_CHARACTERS + "\udc00"
