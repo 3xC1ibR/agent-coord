@@ -375,9 +375,10 @@ class ProviderTests(unittest.TestCase):
         self.emit(thread, {"type": "result", "subtype": "success"})
         await_persistence = self.sessions._await_persistence
 
-        def observed_barrier(identity):
+        def observed_barrier(identity, *, before_input):
+            self.assertTrue(before_input)
             waiting.set()
-            await_persistence(identity)
+            await_persistence(identity, before_input=before_input)
 
         with patch.object(self.sessions, "_await_persistence", side_effect=observed_barrier):
             sender = threading.Thread(target=send)
