@@ -314,7 +314,7 @@ def _finite_operation(name, kwargs, database, *, read_only=False):
 
 def _control_wait_kind(arguments):
     if (arguments.command == "thread" and arguments.thread_command in {
-            "create", "settings", "models", "provider-limits", "move", "resume", "request-status"}
+            "create", "settings", "models", "provider-limits", "move", "resume", "interrupt", "request-status"}
             or arguments.command == "sidecar" and arguments.sidecar_command == "attach"
             or arguments.command in {"session-control", "schedule"}):
         return "app"

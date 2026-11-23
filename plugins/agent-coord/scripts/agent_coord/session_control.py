@@ -30,6 +30,12 @@ class SessionControl:
                     UNIQUE(thread_id, event_key)
                 );
                 CREATE INDEX IF NOT EXISTS interactive_events_thread ON interactive_events(thread_id, seq);
+                CREATE TABLE IF NOT EXISTS supervisor_interrupts (
+                    request_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL, requester TEXT NOT NULL,
+                    reason TEXT NOT NULL, requested_at REAL NOT NULL,
+                    UNIQUE(thread_id, turn_id)
+                );
             """
             )
 
@@ -237,6 +243,68 @@ class SessionControl:
                 )
 
 
+def supervisor_interrupted(store, thread_id, turn_id):
+    """An immutable provider-boundary receipt, independent of request outcome."""
+    with store.reading(), store._connection() as db:
+        return db.execute("SELECT 1 FROM supervisor_interrupts WHERE thread_id=? AND turn_id=?",
+                          (thread_id, turn_id)).fetchone() is not None
+
+
+def validate_interrupt(control, sender, thread, payload, request_id):
+    if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 160:
+        raise CoordinationError("Supervisor interruption requires a stable request ID of 1–160 characters.")
+    if set(payload) != {"expected_turn_id", "reason"}:
+        raise CoordinationError("Supervisor interruption requires an exact turn ID and reason.")
+    for key, limit in (("expected_turn_id", 200), ("reason", 1000)):
+        if not isinstance(payload[key], str) or not payload[key].strip() or len(payload[key]) > limit:
+            raise CoordinationError(f"{key} must contain 1–{limit} characters.")
+    with control.store.reading(), control.store._connection() as db:
+        if not supervision.authorizes(db, sender, thread):
+            raise CoordinationError("Only this app agent's current supervisor can interrupt it.")
+    record = control.settings(thread)
+    if record["client"] not in {"codex", "claude"}:
+        raise CoordinationError("Supervisor interruption requires a Codex or Claude app conversation.")
+    return record["cwd"]
+
+
+def execute_interrupt(worker, request, payload):
+    """Reserve one exact native interrupt before crossing the provider boundary."""
+    store, sessions = worker.control.store, worker.sessions
+    thread, sender, turn = request["thread_id"], request["sender_session_id"], payload["expected_turn_id"]
+    with sessions._thread_lock(thread):
+        validate_interrupt(worker.control, sender, thread, payload, request["request_id"])
+        detail = sessions.read(thread)
+        if detail.get("activeTurn") != turn or not detail.get("running"):
+            raise CoordinationError("The active turn changed. Inspect the exact turn before interrupting.")
+        with store.database_operation("supervisor.interrupt"), store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not supervision.authorizes(db, sender, thread):
+                raise CoordinationError("Only this app agent's current supervisor can interrupt it.")
+            pending_close = (db.execute("SELECT 1 FROM sqlite_master WHERE name='thread_close_requests'").fetchone()
+                             and db.execute("SELECT 1 FROM thread_close_requests WHERE thread_id=? AND status IN ('queued','closing')", (thread,)).fetchone())
+            if db.execute("SELECT attention FROM work_threads WHERE thread_id=?", (thread,)).fetchone()[0] == "archived" or pending_close:
+                raise CoordinationError("The conversation is closed or has a pending close request.")
+            if db.execute("SELECT 1 FROM supervisor_interrupts WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone():
+                raise CoordinationError("This turn already has an interrupt receipt. Inspect its request status; never retry native interruption.")
+            wake = db.execute("SELECT * FROM browser_inbox_wake WHERE thread_id=?", (thread,)).fetchone()
+            user_stop = db.execute("SELECT 1 FROM turn_stop_requests WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
+            if (wake and wake["paused"] and wake["pause_kind"] == "stop") or user_stop:
+                raise CoordinationError("The user stopped this turn. Supervisor interruption cannot replace user Stop intent.")
+            db.execute("INSERT INTO supervisor_interrupts VALUES (?,?,?,?,?,?)",
+                       (request["request_id"], thread, turn, sender, payload["reason"], store.clock()))
+            sessions.inbox_wake._save_pause(db, thread, "The supervisor interrupted this turn. Inspect outcomes and queue fresh instructions.", "supervisor")
+            db.execute("UPDATE browser_inbox_wake SET recovery_after_message_id=(SELECT COALESCE(MAX(id),0) FROM messages) WHERE thread_id=?", (thread,))
+        sessions.queue.pause(thread, "The supervisor interrupted this turn. Review queued user input before resuming.")
+        try:
+            # Never use the UI interrupt path: it deliberately records user Stop.
+            native = sessions._rpc(thread).request("turn/interrupt", {"threadId": thread, "turnId": turn})
+        except Exception as exc:
+            worker.control.complete(request["request_id"], error=str(exc), uncertain=True)
+            return None
+        return {"thread_id": thread, "interrupted_turn_id": turn, "interrupted_by": sender,
+                "request_id": request["request_id"], "native": native}
+
+
 def validate(control, sender, thread, payload):
     service = SessionControl(control.store)
     action = payload.get("action")
@@ -289,6 +357,14 @@ def execute(worker, request, payload):
     control, sessions = worker.control, worker.sessions
     service = SessionControl(control.store)
     tid, sender = request["thread_id"], request["sender_session_id"]
+    if payload["action"] == "interrupt" and payload.get("expected_turn_id"):
+        # A pre-upgrade queued interactive request receives the same current
+        # supervisor guards as requests submitted through the new entry point.
+        with control.store.reading(), control.store._connection() as db:
+            supervised = supervision.authorizes(db, sender, tid)
+        if supervised:
+            return execute_interrupt(worker, request, {"expected_turn_id": payload["expected_turn_id"],
+                "reason": "Current supervisor requested interruption through session-control."})
     if payload["action"] == "watch" and payload.get("adopt") is True:
         service.adopt(sender, tid)
     service.authorize(sender, tid)

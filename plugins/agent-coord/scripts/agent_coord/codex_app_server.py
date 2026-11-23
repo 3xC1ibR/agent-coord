@@ -960,11 +960,13 @@ class BrowserSessions:
                 self.reviews.bind(db, thread_id, params["turn"]["id"])
         if method == "turn/completed" and thread_id:
             turn = params.get("turn", {})
-            if turn.get("id") and (turn.get("termination") or {}).get("origin") == "user":
+            from .session_control import supervisor_interrupted
+            supervised = supervisor_interrupted(self.store, thread_id, turn.get("id"))
+            if turn.get("id") and (turn.get("termination") or {}).get("origin") == "user" and not supervised:
                 self.store.threads.request_stop(thread_id, turn["id"])
             user_stop = self.store.threads.stop_requested(thread_id, turn.get("id"))
             update_recovery = getattr(self, "runtime_recovery_turns", {}).get(thread_id) == turn.get("id")
-            deliberate = params.get("controlledShutdown", False) or user_stop or update_recovery
+            deliberate = params.get("controlledShutdown", False) or user_stop or update_recovery or supervised
             unsuccessful = turn.get("status") in {"failed", "interrupted", "cancelled", "canceled"}
             status = turn.get("status", "completed")
             if (unsuccessful and user_stop) or status in {"cancelled", "canceled"}:
@@ -988,7 +990,7 @@ class BrowserSessions:
             elif not (getattr(self, "runtime_handover", False) or update_recovery) or user_stop:
                 self.queue.pause(thread_id, "The turn stopped or failed. Resume queued messages when ready.")
                 self.inbox_wake.pause(thread_id, "The turn stopped or failed. Send a message to continue.",
-                                     kind="stop" if deliberate else "failure")
+                                     kind="stop" if user_stop else "supervisor" if supervised else "stop" if deliberate else "failure")
         for identity in disconnected:
             reason = ("Codex disconnected. Review queued messages before resuming."
                       if method == "bridge/disconnected" else "The thread closed. Reopen it to resume queued messages.")

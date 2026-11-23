@@ -5,6 +5,7 @@ import json
 import math
 import sqlite3
 import sys
+import time
 import uuid
 
 from .context import bind_caller, request_session
@@ -45,6 +46,67 @@ ACTIVITY_HISTORY_TOOL = {
     }},
     "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
 }
+
+INTERRUPT_TOOL = {
+    "name": "interrupt_thread",
+    "description": "Current supervisor: interrupt one exact active Codex or Claude app-agent turn. "
+                   "Requires a stable request ID and audit reason. Reuse identical arguments after a timeout; "
+                   "uncertain native interruptions are never replayed. Inspect thread request-status. "
+                   "Then inspect native and tool outcomes, send fresh actionable instructions, and use resume_thread. "
+                   "A genuine user Stop remains protected.",
+    "inputSchema": {"type": "object", "additionalProperties": False,
+        "required": ["session_id", "expected_turn_id", "request_id", "reason"], "properties": {
+            "session_id": {"type": "string", "minLength": 1, "description": "Target app agent."},
+            "from_session": {"type": "string", "description": "Optional assertion of the bound caller identity."},
+            "expected_turn_id": {"type": "string", "minLength": 1, "maxLength": 200},
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 160},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "wait_seconds": {"type": "number", "minimum": 0, "maximum": 30},
+        }},
+    "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+}
+
+RESUME_TOOL = {
+    "name": "resume_thread",
+    "description": "Current supervisor: authorize fresh inbox work after a failed or interrupted app-agent turn. "
+                   "Send a fresh actionable continuation first. For an interrupted turn, inspect native execution "
+                   "and tool outcomes, then supply confirm_stopped and an audit reason. Never replay unknown side effects. "
+                   "Cannot override a genuine user Stop. Reuse request_id and arguments on retries.",
+    "inputSchema": {"type": "object", "additionalProperties": False,
+        "required": ["session_id", "expected_turn_id", "request_id"], "properties": {
+            **INTERRUPT_TOOL["inputSchema"]["properties"],
+            "confirm_stopped": {"type": "boolean", "description": "Attest native execution stopped; requires reason."},
+        }},
+    "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+}
+
+
+def _supervisor_control(arguments, operation, schema, store):
+    if (not isinstance(arguments, dict) or set(arguments) - schema["properties"].keys()
+            or set(schema["required"]) - arguments.keys()):
+        raise CoordinationError("Supply the required supervisor-control fields.")
+    sender = bind_caller(arguments.get("from_session"), require_context=True)
+    for key in ("session_id", "request_id", "expected_turn_id"):
+        if not isinstance(arguments[key], str) or not arguments[key].strip():
+            raise CoordinationError(f"{key} must be a nonempty string.")
+    wait = arguments.get("wait_seconds", 5)
+    if isinstance(wait, bool) or not isinstance(wait, (int, float)) or not math.isfinite(wait) or not 0 <= wait <= 30:
+        raise CoordinationError("Wait must be between 0 and 30 seconds.")
+    payload = {key: arguments[key] for key in ("expected_turn_id", "reason") if key in arguments}
+    if "confirm_stopped" in arguments:
+        payload["execution_confirmed"] = arguments["confirm_stopped"]
+    from .app_control import AppControl
+    control = AppControl(store or CoordinationStore())
+    result = control.request(operation, sender, payload, thread_id=arguments["session_id"], request_id=arguments["request_id"])
+    return control.status(result["request_id"], wait=wait)
+
+
+def interrupt_thread(arguments, *, store=None):
+    return _supervisor_control(arguments, "interrupt", INTERRUPT_TOOL["inputSchema"], store)
+
+
+def resume_thread(arguments, *, store=None):
+    return _supervisor_control(arguments, "resume", RESUME_TOOL["inputSchema"], store)
 
 
 def query_activity(arguments, *, store=None):
@@ -310,6 +372,7 @@ def update_checkpoint(arguments, *, store=None):
 
 def call_tool(name, arguments, *, store=None, remote=False):
     handlers = {TOOL["name"]: update_checkpoint, MOVE_TOOL["name"]: move_thread,
+                INTERRUPT_TOOL["name"]: interrupt_thread, RESUME_TOOL["name"]: resume_thread,
                 ASK_TOOL["name"]: ask_human, SCHEDULE_TOOL["name"]: schedule_prompt,
                 ACTIVITY_TOOL["name"]: query_activity, ACTIVITY_HISTORY_TOOL["name"]: read_activity_history}
     handler = handlers.get(name)
@@ -317,11 +380,29 @@ def call_tool(name, arguments, *, store=None, remote=False):
         raise CoordinationError("Unknown tool.")
     if not isinstance(arguments, dict):
         raise CoordinationError("Tool arguments must be an object.")
-    if handler in {update_checkpoint, ask_human, schedule_prompt, move_thread}:
-        field = "from_session" if handler is move_thread else "session_id"
+    if handler in {update_checkpoint, ask_human, schedule_prompt, move_thread, interrupt_thread, resume_thread}:
+        field = "from_session" if handler in {move_thread, interrupt_thread, resume_thread} else "session_id"
         arguments = {**arguments, field: bind_caller(arguments.get(field), require_context=True)}
     if remote and store is None:
         from .runtime_requests import run_local_or_forward
+        if handler in {interrupt_thread, resume_thread}:
+            # Waiting belongs to the caller. The owner must be free to execute
+            # the queued request between finite status reads.
+            wait = arguments.get("wait_seconds", 5)
+            if type(wait) not in (int, float) or not math.isfinite(wait) or not 0 <= wait <= 30:
+                raise CoordinationError("Wait must be between 0 and 30 seconds.")
+            finite = {**arguments, "wait_seconds": 0}
+            result = run_local_or_forward("mcp", {"name": name, "arguments": finite},
+                lambda: call_tool(name, finite, store=CoordinationStore()))
+            deadline = time.monotonic() + wait
+            while result["status"] not in {"completed", "failed", "uncertain", "cancelled"}:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(.1, remaining))
+                from .runtime_requests import _finite_operation
+                result = _finite_operation("app.wait-poll", {"request_id": result["request_id"]}, None)
+            return result
         read_only = name in {ACTIVITY_TOOL["name"], ACTIVITY_HISTORY_TOOL["name"]}
         return run_local_or_forward("mcp", {"name": name, "arguments": arguments},
             lambda: call_tool(name, arguments, store=CoordinationStore(read_only=read_only)),
@@ -352,9 +433,10 @@ def dispatch(message, *, remote=False):
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": [TOOL, MOVE_TOOL, ASK_TOOL, SCHEDULE_TOOL, ACTIVITY_TOOL, ACTIVITY_HISTORY_TOOL]}
+        result = {"tools": [TOOL, MOVE_TOOL, ASK_TOOL, SCHEDULE_TOOL, ACTIVITY_TOOL, ACTIVITY_HISTORY_TOOL, INTERRUPT_TOOL, RESUME_TOOL]}
     elif method == "tools/call":
         handler = {TOOL["name"]: update_checkpoint, MOVE_TOOL["name"]: move_thread,
+                   INTERRUPT_TOOL["name"]: interrupt_thread, RESUME_TOOL["name"]: resume_thread,
                    ASK_TOOL["name"]: ask_human, SCHEDULE_TOOL["name"]: schedule_prompt,
                    ACTIVITY_TOOL["name"]: query_activity,
                    ACTIVITY_HISTORY_TOOL["name"]: read_activity_history}.get(params.get("name"))
@@ -368,12 +450,12 @@ def dispatch(message, *, remote=False):
             token = request_session.set(session_id)
             try:
                 arguments = params.get("arguments", {})
-                if handler in {update_checkpoint, ask_human, schedule_prompt, move_thread}:
+                if handler in {update_checkpoint, ask_human, schedule_prompt, move_thread, interrupt_thread, resume_thread}:
                     if not isinstance(arguments, dict):
                         raise CoordinationError("Tool arguments must be an object.")
                     # move_thread's session_id is a target; from_session is the
                     # actor. Other mutations own the caller's session directly.
-                    field = "from_session" if handler is move_thread else "session_id"
+                    field = "from_session" if handler in {move_thread, interrupt_thread, resume_thread} else "session_id"
                     identity = bind_caller(arguments.get(field), require_context=True)
                     arguments = {**arguments, field: identity}
                 receipt = call_tool(params.get("name"), arguments, remote=remote)

@@ -90,11 +90,14 @@ class BrowserInboxWake:
     def _save_pause(self, db, thread_id, reason, kind, message_id=None):
         db.execute("""INSERT INTO browser_inbox_wake (thread_id, paused, error, pause_kind, wake_message_id, paused_at)
             VALUES (?, 1, ?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET paused = 1,
-            error = CASE WHEN pause_kind = 'stop' THEN error ELSE excluded.error END,
-            pause_kind = CASE WHEN pause_kind = 'stop' THEN 'stop' ELSE excluded.pause_kind END,
+            error = CASE WHEN pause_kind = 'stop' OR (pause_kind = 'supervisor' AND excluded.pause_kind != 'stop') THEN error ELSE excluded.error END,
+            pause_kind = CASE WHEN pause_kind = 'stop' THEN 'stop'
+                WHEN pause_kind = 'supervisor' AND excluded.pause_kind != 'stop' THEN 'supervisor' ELSE excluded.pause_kind END,
             wake_message_id = CASE WHEN pause_kind = 'stop' THEN NULL ELSE excluded.wake_message_id END,
             paused_at = COALESCE(paused_at, excluded.paused_at), retry_at = NULL,
-            recovery_turn_id = NULL, reconciled_turn_id = NULL, recovery_after_message_id = 0""",
+            recovery_turn_id = NULL, reconciled_turn_id = NULL,
+            recovery_after_message_id = CASE WHEN pause_kind = 'supervisor' AND excluded.pause_kind != 'stop'
+                THEN recovery_after_message_id ELSE 0 END""",
             (thread_id, reason, kind, message_id, self.store.clock()))
 
     def _pause_uncertain(self, thread_id, ids, error):
@@ -454,13 +457,15 @@ class BrowserInboxWake:
                 if wake["dispatching"]:
                     raise CoordinationError("Recovery refused: an inbox wake is still dispatching; inspect its outcome first.")
                 # A Stop the user released is recoverable like a failure; an unreleased Stop is not.
-                if wake["pause_kind"] not in {"failure", "released"}:
+                if wake["pause_kind"] not in {"failure", "released", "supervisor"}:
                     raise CoordinationError(f"Recovery refused: pause kind {wake['pause_kind']!r} is uncertain; "
                                             "Stop or uncertain wake needs direct user input.")
-                if latest.get("status") == "completed" and wake["reconciled_turn_id"] != expected_turn_id:
+                supervised = wake["pause_kind"] == "supervisor" and db.execute(
+                    "SELECT 1 FROM supervisor_interrupts WHERE thread_id=? AND turn_id=?", (thread_id, expected_turn_id)).fetchone() is not None
+                if latest.get("status") == "completed" and wake["reconciled_turn_id"] != expected_turn_id and not supervised:
                     raise CoordinationError("Recovery refused: a completed turn has no recorded false-failure correction.")
                 termination = latest.get("termination") or {}
-                uncertain = (latest.get("status") == "interrupted"
+                uncertain = (supervised or latest.get("status") == "interrupted"
                              or termination.get("execution") == "unknown"
                              or any(i.get("type") not in {"userMessage", "agentMessage", "reasoning", "plan"}
                                     and i.get("status") in {"inProgress", "unknown"}
@@ -651,11 +656,13 @@ class BrowserInboxWake:
                                           (thread_id,)).fetchone()
                 if not (recovery and recovery[0] == turns[-1].get("id")):
                     latest = turns[-1]
-                    deliberate = ((latest.get("termination") or {}).get("origin") == "user"
+                    from .session_control import supervisor_interrupted
+                    supervised = supervisor_interrupted(self.store, thread_id, latest.get("id"))
+                    deliberate = (((latest.get("termination") or {}).get("origin") == "user" and not supervised)
                                   or self.store.threads.stop_requested(thread_id, latest.get("id")))
                     self.pause(thread_id, "The last turn stopped or failed. Send a message to continue.",
-                               kind="stop" if deliberate else "failure")
-                    if not deliberate:
+                               kind="stop" if deliberate else "supervisor" if supervised else "failure")
+                    if not deliberate and not supervised:
                         notify_agent_failure(self.store, thread_id, event_key=["turn", latest.get("id")],
                                              stage="turn", turn_id=latest.get("id"), error=latest.get("error") or
                                              "The provider interrupted this turn. Native execution and tool outcomes must be inspected.")

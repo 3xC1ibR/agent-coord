@@ -275,6 +275,13 @@ def _parser() -> argparse.ArgumentParser:
     boundary.add_argument("--expected-turn-id", help="Failed or interrupted turn inspected before requesting recovery.")
     resume.add_argument("--reason", help="Why this explicit recovery is safe; saved in the recovery audit.")
     resume.add_argument("--confirm-stopped", action="store_true", help="Attest that native execution stopped after inspecting agent and tool outcomes; requires --reason.")
+    interrupt = thread_commands.add_parser("interrupt", help="Current supervisor: interrupt one exact Codex or Claude turn, preserving guarded recovery.")
+    interrupt.add_argument("--session-id", required=True, help="Target app agent.")
+    interrupt.add_argument("--from-session", help="Current supervisor; defaults to the current caller.")
+    interrupt.add_argument("--expected-turn-id", required=True, help="Immutable active turn ID inspected before interruption.")
+    interrupt.add_argument("--request-id", required=True, help="Stable idempotency key; reuse exactly when retrying.")
+    interrupt.add_argument("--reason", required=True, help="Reason for interruption, retained in the audit.")
+    interrupt.add_argument("--wait", type=float, default=5, help="Wait up to 0–30 seconds for confirmation.")
     adopt = thread_commands.add_parser("adopt", help="Adopt selected idle app agents from a supervisor that has ended or been closed; never wakes or stops them.")
     adopt.add_argument("--from-session", help="Successor that adopts the agents; defaults to the current caller.")
     adopt.add_argument("--from-supervisor", required=True, help="Ended or closed supervisor of every selected agent.")
@@ -870,7 +877,7 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
         if arguments.thread_command == "dispatch-history":
             from .dispatch_runtime import routing_history
             return routing_history(store, arguments.session_id, after=arguments.after, limit=arguments.limit)
-        if arguments.thread_command in {"create", "settings", "models", "provider-limits", "move", "resume", "request-status", "cancel-request"}:
+        if arguments.thread_command in {"create", "settings", "models", "provider-limits", "move", "resume", "interrupt", "request-status", "cancel-request"}:
             control = AppControl(store)
             operation = arguments.thread_command
             if operation == "cancel-request":
@@ -879,7 +886,9 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
                 raise CoordinationError("Wait must be between 0 and 30 seconds.")
             if operation == "request-status":
                 return control.status(arguments.request_id, wait=arguments.wait)
-            if operation == "resume":
+            if operation == "interrupt":
+                payload = {"expected_turn_id": arguments.expected_turn_id, "reason": arguments.reason}
+            elif operation == "resume":
                 payload = ({"expected_message_id": arguments.expected_message_id} if arguments.expected_message_id is not None
                            else {"expected_turn_id": arguments.expected_turn_id})
                 if arguments.reason is not None:
