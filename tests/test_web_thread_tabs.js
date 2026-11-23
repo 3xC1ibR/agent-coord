@@ -449,6 +449,32 @@ test("startup restores the saved tab only when no explicit destination was reque
   }
 });
 
+test("a direct conversation opens while the initial overview request is outstanding", async () => {
+  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+  const beforeRouting = source.slice(source.indexOf("  window.addEventListener", source.indexOf("  setupRollUp({document")),
+    source.indexOf("  navigation = new agentCoordNavigation.Router"));
+  const destination = source.slice(source.indexOf("  if (initialNavigation) await navigation.open"),
+    source.indexOf("  state.dispatchReady = true;"));
+  let releaseInventory;
+  const calls = [];
+  const context = {
+    window: {addEventListener() {}}, state: {threadTabs: {destination: () => null}},
+    savedViews: {restoreScroll: () => calls.push("scroll")}, connect() {},
+    refreshList: () => new Promise(resolve => { releaseInventory = resolve; }),
+    initialThread: "linked", initialMessage: null, initialNavigation: null, initialDispatcher: null,
+    projectQuery: new URLSearchParams(), select: async id => calls.push(id), showError: assert.fail,
+  };
+  const boot = vm.runInNewContext("(async () => {" + beforeRouting + destination + "})()", context);
+  await new Promise(resolve => setImmediate(resolve));
+  try {
+    assert.deepEqual(calls, ["linked"]);
+  } finally {
+    releaseInventory();
+    await boot;
+  }
+  assert.deepEqual(calls, ["linked", "scroll"]);
+});
+
 test("reload of a selected child restores the family tab instead of creating a child tab", async () => {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const startup = source.slice(source.indexOf("  if (initialNavigation) await navigation.open"), source.indexOf("  state.dispatchReady = true;"));

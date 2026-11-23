@@ -4366,8 +4366,15 @@ async function boot() {
       if (!window.agentCoordPanes.tabLayout) state.threadTabs?.suspend();
     }
   });
-  await refreshList(); connect();
-  savedViews.restoreScroll();
+  const inventoryProject = state.projectCwd;
+  const inventoryReady = refreshList().then(() => {
+    if (state.projectCwd === inventoryProject) savedViews.restoreScroll();
+  });
+  // A direct conversation has its own detail and history routes.
+  if (initialThread && initialThread !== "new-session" && !initialNavigation && !initialDispatcher) {
+    inventoryReady.catch(showError);
+  } else await inventoryReady;
+  connect();
   navigation = new agentCoordNavigation.Router({api, history, location, windowId: state.sourceWindowId, onError: showError,
     blocked: () => Boolean(document.querySelector("dialog[open]") || window.agentCoordPanes?.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")),
     capture: () => ({directory: state.projectCwd, viewId: savedViews.activeId, ...savedViews.read(),
