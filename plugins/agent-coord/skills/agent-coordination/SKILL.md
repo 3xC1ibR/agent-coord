@@ -519,6 +519,15 @@ agent-coord ask --kind request --non-blocking \
 - **Act on the resolution.** After `done`, verify the result before relying on
   it. After `declined`, `not done` or `dismissed`, continue on your stated
   default; ask again only if the need changed.
+- **Answer a reply.** The user can reply to an ask in their own words without
+  resolving it. The reply arrives as an ordinary user message that names the
+  ask: `Re ask #12 "Add payout billing details" (still open): which account?`.
+  The ask is still open. Answer in the conversation. Then make the Queue
+  current: withdraw the ask if the reply settles the need, replace it with
+  `--supersedes <id>` if the need changed, or leave it open only when you still
+  need its original resolution. When the reply states the user's choice for a
+  decision, act on it and withdraw the ask. Never leave a replied ask open
+  without saying in the conversation what you still need.
 - Do not ask for routine judgment calls, confirmation of work you are
   authorized to do, or questions you can answer from the code.
 
