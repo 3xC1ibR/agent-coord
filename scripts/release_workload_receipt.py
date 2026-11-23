@@ -130,22 +130,8 @@ def verify_report(report, *, candidate, version, build, architecture, digest):
     if (proof["version"] != "0.1.12+63" or proof["red"] is not True
             or proof["architecture"] != architecture or proof["payload_digest"] != AFFECTED_PAYLOADS[architecture]):
         raise ValueError("Missing affected signed-build evidence for this architecture")
-    histories = report["saved_histories"]
-    if (len(histories) != 2 or {h["size_band"] for h in histories} != {"medium", "large"}
-            or any(h["turns"] < 3 or h["source_bytes"] <= 0 or h["sanitized_bytes"] <= 0 for h in histories)):
-        raise ValueError("Representative saved conversation histories are missing")
-    reopened = {r.get("fixture") for r in report["samples"] if r["phase"] == "candidate"
-                and r["kind"] == "history" and r["outcome"] == "success"}
-    if not {h["fixture_id"] for h in histories}.issubset(reopened):
-        raise ValueError("Candidate did not reopen both sampled histories")
-    for name in ("browser_open", "browser_send"):
-        if report["browser_results"]["upgrade"][name]["attempts"] < 1:
-            raise ValueError(f"Missing {name} attempts during the guarded upgrade")
+    verify_workload(report)
     coverage = report["workload"]["coverage"]
-    for key, minimum in {"saved_histories_reopened": 2, "active_streams": 6, "large_streams": 2,
-                         "accepted_verified": 1, "browser_sends": 1, "browser_opens": 1}.items():
-        if type(coverage.get(key)) is not int or coverage[key] < minimum:
-            raise ValueError(f"Representative workload did not exercise {key}")
     accepted = 0
     unique = set()
     for receipt in report["receipts"]:
@@ -165,6 +151,45 @@ def verify_report(report, *, candidate, version, build, architecture, digest):
     if accepted != coverage["accepted_verified"]:
         raise ValueError("Accepted count does not match the verified provider receipts")
 
+
+
+def verify_workload(report):
+    histories = report["saved_histories"]
+    bands = {"medium": (256 * 1024, 10 * 1024**2 - 1), "large": (10 * 1024**2, 36 * 1024**2)}
+    if len(histories) != 2 or {h["size_band"] for h in histories} != set(bands):
+        raise ValueError("Representative saved conversation histories are missing")
+    if len({h["fixture_id"] for h in histories}) != 2:
+        raise ValueError("Saved history fixtures must be distinct")
+    for history in histories:
+        minimum, maximum = bands[history["size_band"]]
+        if (history["turns"] < 3 or any(type(history[k]) is not int or not minimum <= history[k] <= maximum
+                                        for k in ("source_bytes", "sanitized_bytes"))):
+            raise ValueError("Saved history size or turn count is outside its workload band")
+    reopened = {r.get("fixture") for r in report["samples"] if r["phase"] == "candidate"
+                and r["kind"] == "history" and r["outcome"] == "success"}
+    if not {h["fixture_id"] for h in histories}.issubset(reopened):
+        raise ValueError("Candidate did not reopen both sampled histories")
+    for name in ("browser_open", "browser_send"):
+        if report["browser_results"]["upgrade"][name]["attempts"] < 1:
+            raise ValueError(f"Missing {name} attempts during the guarded upgrade")
+    workload = report["workload"]
+    if (type(workload["claude_streams"]) is not int or workload["claude_streams"] < 2
+            or type(workload["initial_text_bytes_per_claude"]) is not int
+            or workload["initial_text_bytes_per_claude"] < 10 * 1024**2):
+        raise ValueError("Two incident-sized Claude output streams are required")
+    identities = report["stream_identity_counts"]
+    if len(identities) < 6 or any(type(n) is not int or n != 1 for n in identities.values()):
+        raise ValueError("The active provider stream identities did not remain continuous")
+    for phase, minimum in (("baseline", 15), ("upgrade", 1), ("candidate", 15)):
+        observed = report["observed_stream_events"][phase]
+        if any(type(observed.get(key)) is not int or observed[key] < minimum for key in identities):
+            raise ValueError(f"Provider streams were not exercised throughout the {phase} phase")
+    coverage = workload["coverage"]
+    for key, minimum in {"saved_histories_reopened": 2, "active_streams": 6, "large_streams": 2,
+                         "large_stream_bytes": 20 * 1024**2,
+                         "accepted_verified": 1, "browser_sends": 1, "browser_opens": 1}.items():
+        if type(coverage.get(key)) is not int or coverage[key] < minimum:
+            raise ValueError(f"Representative workload did not exercise {key}")
 
 def signed_code_hash(app):
     requirement = 'anchor apple generic and identifier "com.agentcoord.desktop" and certificate leaf[subject.OU] = "R6Z7YTP6YG"'
