@@ -577,8 +577,12 @@ class CoordinatorProjection:
         self.stopped.clear()
         self.worker = threading.Thread(target=self._run, name="provider-projection", daemon=True)
         self.worker.start()
-        if getattr(self.sessions.rpc, "process", None) is not None and not self.sessions.rpc.ready:
-            self.sessions.rpc.start()
+        rpc = self.sessions.rpc
+        process = getattr(rpc, "process", None)
+        # Readiness completes only a retained, running initialization. Admission
+        # is closed here, so an exited provider waits for its first admitted request.
+        if process is not None and process.poll() is None and not rpc.ready:
+            rpc.start()
 
     def reconcile_restored_completion(self):
         identity, turn_id, status = self.restored_completions.popleft()

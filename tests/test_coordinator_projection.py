@@ -56,6 +56,8 @@ class ProviderOwner(TransportClient):
         if action == "status":
             return {"channels": [{"channel": name, "pid": 123, "state": state}
                                  for name, state in self.channels.items()]}
+        if action == "events":
+            return {"events": []}
         if action != "command":
             return super().call(action, **values)
         channel, operation, value = values["channel"], values["operation"], values["value"]
@@ -503,6 +505,32 @@ class ProjectionTests(unittest.TestCase):
                     row = db.execute("SELECT role, pid, closed FROM coordinator_channels WHERE channel=?",
                                      (rpc.channel,)).fetchone()
                 self.assertEqual(tuple(row), ("main", transport.pid, 0))
+
+    def test_readiness_defers_replacing_an_exited_codex_provider_to_its_first_request(self):
+        from agent_coord.codex_app_server import CodexRPC
+        transport = ProviderOwner(self.projection, {"codex": "running"})
+        self.projection.client = transport
+        rpc = CodexRPC(self.store, self.sessions._event)
+        self.sessions.rpc = rpc
+        rpc.channel = "codex"
+        rpc.process = self.projection.attach("codex", 123, rpc._message, provider="codex")
+        rpc.process.returncode = 1
+        # Readiness runs with admission closed. A gated provider request there
+        # raised BrowserBusyError and failed every coordinator start.
+        self.sessions.admission.wrap(rpc, "request")
+        self.sessions.admission.pause()
+        self.projection.start()
+        self.addCleanup(lambda: (self.projection.stopped.set(), self.projection.worker.join(timeout=3)))
+        self.assertEqual((transport.closed, transport.opened), ([], []))
+        self.assertFalse(rpc.ready)
+
+        # The first admitted request replaces it; its initialize passes the gate.
+        self.sessions.admission.resume()
+        rpc.start()
+
+        self.assertEqual(transport.closed, ["codex"])
+        self.assertEqual(transport.opened, [rpc.channel])
+        self.assertTrue(rpc.ready)
 
     def test_exited_codex_provider_is_not_replaced_during_coordinator_handover(self):
         from agent_coord.codex_app_server import CodexRPC
