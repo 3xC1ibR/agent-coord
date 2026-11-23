@@ -139,7 +139,7 @@ class GuardedAuthorizationTests(unittest.TestCase):
         ticks = iter(range(1000))
         resources.enter_context(mock.patch.object(gate.time, "monotonic", side_effect=lambda: next(ticks)))
 
-    def write_receipt(self, request, phase):
+    def write_receipt(self, request, phase, **fields):
         receipt = {
             "id": request,
             "phase": phase,
@@ -147,9 +147,30 @@ class GuardedAuthorizationTests(unittest.TestCase):
             "previous": self.old,
             "target": self.new,
             "database": str(self.run_fixture.database),
+            **fields,
         }
         (self.directory / "update.json").write_text(json.dumps(receipt))
         return receipt
+
+    def test_capture_retains_observed_drain_timing_after_the_final_receipt(self):
+        run = self.run_fixture
+        run.report["activation_request_id"] = "request"
+        self.write_receipt("request", "accepted", updated_at=100)
+        run.capture_update()
+        self.write_receipt("request", "draining", updated_at=166, admission_drain_started_at=166)
+        run.capture_update()
+        run.capture_update()
+        self.write_receipt("request", "accepted", updated_at=167)
+        run.capture_update()
+        self.write_receipt("request", "draining", updated_at=168, admission_drain_started_at=168)
+        run.capture_update()
+        self.write_receipt("request", "committed", updated_at=170, admission_drain_seconds=0.5)
+        run.capture_update()
+        observations = run.report["guarded_control_observations"]
+        self.assertEqual([row["phase"] for row in observations],
+                         ["accepted", "draining", "accepted", "draining", "committed"])
+        self.assertEqual(observations[1]["admission_drain_started_at"] - observations[0]["updated_at"], 66)
+        self.assertEqual(run.report["guarded_control"]["phase"], "committed")
 
     def test_guarded_attach_authorizes_without_reading_full_status_on_source(self):
         run = self.run_fixture

@@ -581,10 +581,19 @@ class SignedUpgrade(Validation):
                 "target",
                 "created_at",
                 "updated_at",
+                "admission_drain_started_at",
                 "admission_drain_seconds",
                 "blocked",
             )
         }
+        # The final receipt can overwrite the start of an earlier drain attempt.
+        # Keep each observed change, including a drain that reopened admission.
+        observed = {key: update.get(key) for key in (
+            "phase", "updated_at", "admission_drain_started_at", "admission_drain_seconds", "blocked"
+        )}
+        observations = self.report.setdefault("guarded_control_observations", [])
+        if not observations or observations[-1] != observed:
+            observations.append(observed)
         return update["phase"]
 
     def swap_signed(self):
