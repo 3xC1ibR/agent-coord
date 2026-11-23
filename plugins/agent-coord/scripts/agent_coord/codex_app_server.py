@@ -217,8 +217,9 @@ class CodexRPC:
             # follows that transaction without holding the browser state lock.
             if projection is not None:
                 projection.write_registered(self.channel, register)
-            else:
-                self.write(register())
+                with self.store._writer.measure_request("provider.wait_response"):
+                    return future.result(timeout=timeout)
+            self.write(register())
             return future.result(timeout=timeout)
         except TimeoutError as exc:
             raise CoordinationError(f"Codex did not respond to {method}; refresh before retrying.") from exc

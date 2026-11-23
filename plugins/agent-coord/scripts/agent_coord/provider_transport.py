@@ -287,6 +287,7 @@ class Journal:
             if current["epoch"] != expected:
                 raise TransportError("Transport ownership changed before claim.")
             self.db.execute("UPDATE ownership SET epoch=epoch+1, coordinator=?", (coordinator,))
+            self.changed.notify_all()
             return self.ownership()
 
     def append(self, channel, stream, data):
@@ -454,7 +455,16 @@ class Owner:
         with self.journal.lock:
             self.journal.fence(body.get("epoch"), body.get("coordinator"))
             if action == "events":
-                return {"events": self.journal.events(body["after"])}
+                events = self.journal.events(body["after"])
+                if body.get("wait") is not True:
+                    return {"events": events}
+                if not events and not self.journal.stopping:
+                    # Release the journal lock while the provider writes. A
+                    # replacement may have claimed the journal in the meantime.
+                    self.journal.changed.wait(.25)
+                    self.journal.fence(body.get("epoch"), body.get("coordinator"))
+                    events = self.journal.events(body["after"])
+                return {"events": events, "event_wait": True}
             if action == "acknowledge_events":
                 return self.journal.acknowledge_events(body["cursor"], body.get("retain_after", 0))
             if action == "outcome":

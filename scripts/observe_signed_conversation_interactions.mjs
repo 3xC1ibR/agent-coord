@@ -58,6 +58,20 @@ async function openingState(thread) {
 }
 const profiles = [];
 if (existsSync(resolve(directory, "measure-browser-execution"))) {
+  await receiving.addInitScript(() => {
+    const NativeEventSource = window.EventSource;
+    window.EventSource = class extends NativeEventSource {
+      constructor(...args) {
+        super(...args);
+        this.addEventListener("message", event => {
+          if (window.__releaseObservedMarker && window.__releaseStreamAt == null &&
+              event.data.includes(window.__releaseObservedMarker)) {
+            window.__releaseStreamAt = performance.timeOrigin + performance.now();
+          }
+        });
+      }
+    };
+  });
   for (const [name, page] of Object.entries({opening, composing, receiving})) {
     const client = await context.newCDPSession(page);
     await client.send("Profiler.enable");
@@ -116,6 +130,10 @@ async function sends() {
         current = url;
       }
       await composing.locator("#message").fill(marker);
+      if (profiles.length) await receiving.evaluate(token => {
+        window.__releaseObservedMarker = token;
+        window.__releaseStreamAt = null;
+      }, marker);
       await composing.evaluate(marker => {
         document.querySelector("#message").addEventListener("keydown", e => {
           window.__releaseEnter = e.timeStamp;
@@ -132,9 +150,9 @@ async function sends() {
       }, marker);
       const tracked = composing.waitForRequest(r => r.method() === "POST" && /\/messages$/.test(new URL(r.url()).pathname)
         && r.postDataJSON()?.message === marker, {timeout: 7000}).then(async request => {
-        const body = request.postDataJSON();
+        const body = request.postDataJSON(), requested = Date.now();
         const response = await request.response();
-        return {request_id: body.requestId || null, status: response?.status() || null};
+        return {request_id: body.requestId || null, status: response?.status() || null, requested, responded: Date.now()};
       }).catch(() => ({request_id: null, status: null}));
       const see = page => page.evaluate(token => new Promise(resolve => {
         const check = () => [...document.querySelectorAll("#timeline article.message.user")].some(el => el.textContent.includes(token));
@@ -147,7 +165,8 @@ async function sends() {
       await composing.locator("#message").press("Enter");
       const [own,other,receipt] = await Promise.all([first,second,tracked]);
       const [enter, controlsAtEnter] = await composing.evaluate(() => [performance.timeOrigin + window.__releaseEnter, window.__releaseComposer]);
-      log({phase, kind:"browser_send", marker, ...receipt, controls_at_enter: controlsAtEnter, ok: receipt.status >= 200 && receipt.status < 300 && own !== null && other !== null,
+      const streamAt = profiles.length ? await receiving.evaluate(() => window.__releaseStreamAt) : null;
+      log({phase, kind:"browser_send", marker, ...receipt, enter, stream_at: streamAt, controls_at_enter: controlsAtEnter, ok: receipt.status >= 200 && receipt.status < 300 && own !== null && other !== null,
         start, end:Date.now(), own_ms:own === null ? null : own-enter, other_ms:other === null ? null : other-enter});
     } catch (error) {
       current = null;

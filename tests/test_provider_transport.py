@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 import tempfile
@@ -104,6 +105,27 @@ class TransportTests(unittest.TestCase):
         self.assertEqual([r["data"] for r in events], ["first\n", "second\n"])
         self.assertEqual(self.owner.processes["provider"].pid, pid)
         self.assertIsNone(self.owner.processes["provider"].poll())
+
+    def test_waiting_event_read_wakes_on_append_and_rechecks_ownership(self):
+        request = {"action": "events", "after": 0, "wait": True, **self.claim}
+        entered = threading.Event()
+        wait = self.owner.journal.changed.wait
+        def observed_wait(timeout):
+            entered.set()
+            return wait(timeout)
+        with patch.object(self.owner.journal.changed, "wait", side_effect=observed_wait), ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(self.owner.dispatch, request)
+            self.assertTrue(entered.wait(1))
+            self.owner.journal.append("one", "stdout", "input accepted")
+            result = pending.result(1)
+            self.assertTrue(result["event_wait"])
+            self.assertEqual([event["data"] for event in result["events"]], ["input accepted"])
+            entered.clear()
+            pending = pool.submit(self.owner.dispatch, {**request, "after": result["events"][0]["sequence"]})
+            self.assertTrue(entered.wait(1))
+            self.owner.dispatch({"action": "claim", "expected_epoch": 1, "coordinator": "replacement"})
+            with self.assertRaisesRegex(TransportError, "fenced"):
+                pending.result(1)
 
     def test_duplicate_command_does_not_write_again(self):
         self.open()

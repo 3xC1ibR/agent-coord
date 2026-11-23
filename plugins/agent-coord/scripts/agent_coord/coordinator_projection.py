@@ -96,6 +96,7 @@ class CoordinatorProjection:
         sessions.claude.lock = sessions.lock
         self.cursor = 0
         self.stopped = threading.Event()
+        self.command_delivered = threading.Event()
         self.worker = None
         self.channels = {}
         self.error = None
@@ -395,7 +396,7 @@ class CoordinatorProjection:
         """Register adapter state and intent together, then deliver outside locks."""
         # Store intent and adapter state before provider input. A recovered
         # coordinator queries this identity; it never invents a replacement.
-        with self.lock:
+        with self.store._writer.measure_request("provider.register_command"), self.lock:
             message = register()
             value = {"data": json.dumps(message) + "\n"}
             if getattr(self.in_event, "active", False):
@@ -404,7 +405,8 @@ class CoordinatorProjection:
                 self.in_event.commands.append((identity, channel, "write", json.dumps(value)))
                 return  # Dispatch only after this event and its command commit.
             identity = "initialized:" + channel if message.get("method") == "initialized" else uuid.uuid4().hex
-            prepared, completions, encoded = self.prepare_checkpoint()
+            with self.store._writer.measure_request("provider.prepare_command_checkpoint"):
+                prepared, completions, encoded = self.prepare_checkpoint()
             value_json = json.dumps(value)
             with self.store.database_operation("coordinator.command"), self.store._connection() as db:
                 self.publish_histories(db, prepared)
@@ -412,11 +414,13 @@ class CoordinatorProjection:
                 db.execute("INSERT OR IGNORE INTO coordinator_commands VALUES (?,?,?,?, 'pending',NULL)",
                            (identity, channel, "write", value_json))
             self.remember_histories(prepared, completions)
-        self.deliver(identity, channel, "write", value)
+        with self.store._writer.measure_request("provider.deliver_command"):
+            self.deliver(identity, channel, "write", value)
 
     def deliver(self, identity, channel, operation, value):
         try:
             result = self.client.call("command", command_id=identity, channel=channel, operation=operation, value=value)
+            self.command_delivered.set()
         except Exception:
             self.delivery_error = "Provider command acknowledgement was lost; its retained outcome is being reconciled."
             raise
@@ -694,13 +698,19 @@ class CoordinatorProjection:
                 if self.delivery_error and time.monotonic() >= getattr(self, "next_reconciliation", 0):
                     self.next_reconciliation = time.monotonic() + 1
                     self.recover_commands()
-                events = self.client.call("events", after=self.cursor)["events"]
+                self.command_delivered.clear()
+                response = self.client.call("events", after=self.cursor, wait=True)
+                events = response["events"]
                 if self.stopped.is_set():
                     return
-                self.project_batch(events)
+                if events:
+                    with self.store._writer.measure_request("provider.apply_events"):
+                        self.project_batch(events)
                 self.error = None
-                if not events:
-                    self.stopped.wait(.02)
+                if not events and not response.get("event_wait"):
+                    # An older retained owner polls. Wake its coordinator as
+                    # soon as input is written rather than delaying the reply.
+                    self.command_delivered.wait(.02)
             except Exception as error:
                 self.error = str(error)
                 logging.getLogger(__name__).exception("Provider projection paused at cursor %s", self.cursor)
@@ -708,6 +718,7 @@ class CoordinatorProjection:
 
     def freeze(self):
         self.stopped.set()
+        self.command_delivered.set()
         if self.worker is not None:
             self.worker.join(timeout=10)
             if self.worker.is_alive():
