@@ -107,6 +107,43 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(version, 1)
         self.assertEqual(unpack(json.loads(zlib.decompress(encoded)))["claude"]["turns"], self.sessions.claude.turns)
 
+    def test_existing_single_payload_database_loads_before_next_checkpoint(self):
+        text = "v2" * 9000
+        self.sessions.claude.turns[self.identity] = {"id": "old", "items": [{"text": text}]}
+        self.projection.checkpoint()
+        # Version two represented every large value by a single digest.
+        with self.store._connection() as db:
+            db.execute("UPDATE coordinator_projection SET version=2")
+        self.sessions.claude.turns.clear()
+        self.projection = CoordinatorProjection(self.sessions, self.client)
+        self.projection.load()
+        self.assertEqual(self.sessions.claude.turns[self.identity]["items"][0]["text"], text)
+
+    def test_appending_to_streamed_text_preserves_durable_prefix_segments(self):
+        # Unchanged prefixes of a growing provider message must survive retries
+        # and restart without holding the shared lock to recompress them.
+        size = 64 * 1024
+        text = "a" * size + "b" * size + "c" * size
+        item = {"id": "growing", "text": text}
+        self.sessions.claude.turns[self.identity] = {"id": "active", "items": [item]}
+        self.projection.checkpoint()
+        with self.store.reading(), self.store._connection() as db:
+            original = {row[0] for row in db.execute("SELECT digest FROM coordinator_projection_payloads")}
+        item["text"] += "new output"
+        compress = zlib.compress
+        def compress_appended_text(data, level):
+            self.assertLessEqual(len(data), size, "A short append recompressed the entire active message")
+            return compress(data, level)
+        with patch("agent_coord.coordinator_projection.zlib.compress", side_effect=compress_appended_text):
+            self.projection.checkpoint()
+        with self.store.reading(), self.store._connection() as db:
+            updated = {row[0] for row in db.execute("SELECT digest FROM coordinator_projection_payloads")}
+        self.assertTrue(original <= updated)
+        self.assertEqual(len(updated - original), 1)
+        self.projection = CoordinatorProjection(self.sessions, self.client)
+        self.projection.load()
+        self.assertEqual(self.sessions.claude.turns[self.identity]["items"][0]["text"], text + "new output")
+
     def test_codec_recovers_existing_tuple_keys_and_set_members(self):
         value = {"requests": {("thread", ("turn", 1)): ["pending"]},
                  "confirmed": {("thread", "item")}}

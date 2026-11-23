@@ -23,7 +23,9 @@ from .provider_transport import Client, ProviderLaunchRejected, TransportError
 from .history_persistence import saved_turn_status
 
 VERSION = 1
-PAYLOAD_FORMAT = 2
+SINGLE_PAYLOAD_FORMAT = 2
+PAYLOAD_FORMAT = 3
+PAYLOAD_SEGMENT_CHARACTERS = 64 * 1024
 MIN_PAYLOAD_CHARACTERS = 16 * 1024
 BROWSER_FIELDS = ("sequence", "turn_revisions", "requests", "active", "loaded", "loaded_clients",
     "starting_notification_context", "histories", "dirty_histories", "history_revisions",
@@ -64,7 +66,10 @@ def unpack(value, texts=None):
         if "$set" in value:
             return {_unpack_hashable(v, texts) for v in value["$set"]}
         if "$text" in value and texts is not None:
-            return texts[value["$text"]]
+            reference = value["$text"]
+            if isinstance(reference, list):
+                return "".join(texts[digest] for digest in reference)
+            return texts[reference]
         raise ValueError("Unknown coordinator state representation")
     return value
 
@@ -96,6 +101,7 @@ class CoordinatorProjection:
         self.delivery_error = None
         self.prepared_histories = {}
         self.payload_cache = {}
+        self.text_references = {}
         self.restored_completions = deque()
         self.in_event = threading.local()
         with self.store._connection() as db:
@@ -173,16 +179,17 @@ class CoordinatorProjection:
             row = db.execute("SELECT * FROM coordinator_projection WHERE singleton=1").fetchone()
             if row is None:
                 return
-            if row["version"] not in (VERSION, PAYLOAD_FORMAT) or row["transport_instance"] != self.client.record["instance"]:
+            if row["version"] not in (VERSION, SINGLE_PAYLOAD_FORMAT, PAYLOAD_FORMAT) or row["transport_instance"] != self.client.record["instance"]:
                 raise TransportError("The saved coordinator projection does not match the surviving transport.")
             payloads = (db.execute("SELECT digest, compressed FROM coordinator_projection_payloads").fetchall()
-                        if row["version"] == PAYLOAD_FORMAT else [])
+                        if row["version"] != VERSION else [])
         texts = {}
         for digest, compressed in payloads:
             data = zlib.decompress(compressed)
             if hashlib.sha256(data).hexdigest() != digest:
                 raise TransportError("Saved coordinator payload failed integrity verification.")
             texts[digest] = data.decode("utf-8", "surrogatepass")
+            self.payload_cache[digest] = compressed
         state = unpack(json.loads(zlib.decompress(row["state"])), texts)
         self.restore(state)
         # Earlier versions also checkpointed turns already published in history.
@@ -285,23 +292,31 @@ class CoordinatorProjection:
                     for turn in reversed(self.sessions.histories[identity].get("turns", []))):
                 completions[identity] = {completed["id"]: completed["status"]}
         state = self.state(durable=True, published_completions=completions)
-        # A long-lived Claude turn can hold megabytes of immutable tool output.
-        # Keep only the current root's values in memory. The database determines
-        # which payloads committed, so rollback or retry cannot leave a dangling reference.
-        current = {}
+        # A growing provider message shares all complete segments with its
+        # previous checkpoint. Only new segment contents need compression.
+        references, payloads = {}, {}
 
         def encode_text(text):
-            entry = self.payload_cache.get(text) or current.get(text)
-            if entry is None:
-                data = text.encode("utf-8", "surrogatepass")
-                entry = hashlib.sha256(data).hexdigest(), zlib.compress(data, level=1)
-            current[text] = entry
-            return entry[0]
+            parts = references.get(text) or self.text_references.get(text)
+            if parts is None:
+                parts = []
+                for offset in range(0, len(text), PAYLOAD_SEGMENT_CHARACTERS):
+                    data = text[offset:offset + PAYLOAD_SEGMENT_CHARACTERS].encode("utf-8", "surrogatepass")
+                    digest = hashlib.sha256(data).hexdigest()
+                    if digest not in payloads:
+                        payloads[digest] = self.payload_cache.get(digest) or zlib.compress(data, level=1)
+                    parts.append(digest)
+            else:
+                for digest in parts:
+                    if digest not in payloads:
+                        payloads[digest] = self.payload_cache[digest]
+            references[text] = parts
+            return parts[0] if len(parts) == 1 else parts
 
         root = pack(state, None if inline else encode_text)
         encoded = zlib.compress(json.dumps(root, separators=(",", ":")).encode(), level=1)
-        self.payload_cache = current
-        return prepared, completions, (encoded, dict(current.values()))
+        self.text_references, self.payload_cache = references, payloads
+        return prepared, completions, (encoded, payloads)
 
     def publish_histories(self, db, prepared):
         from .history_persistence import publish_history
