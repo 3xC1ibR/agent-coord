@@ -90,6 +90,26 @@ class ThreadSnoozeTests(unittest.TestCase):
         self.assertIsNone(resumed["snoozed_until"])
         self.assertEqual(resumed["work_phase"], before["work_phase"])
 
+    def test_notification_polls_reserve_the_writer_only_for_a_due_reminder(self):
+        self.update(snoozed_until=1200)
+        threads = self.store.threads
+
+        def no_writer():
+            return patch.object(self.store._writer, "reserve",
+                                side_effect=AssertionError("Notification observation tried to reserve the writer"))
+
+        with no_writer():
+            self.assertEqual(threads.snooze_notifications(), [])
+            self.assertEqual(threads.completion_cursor(), 0)
+            self.assertEqual(threads.completions_after(0), {"events": [], "seq": 0})
+            self.assertFalse(threads.is_browser_session("thread"))
+        self.now = 1300
+        event, = threads.snooze_notifications()
+        with no_writer():
+            self.assertEqual(threads.snooze_notifications(), [event])
+        self.assertTrue(threads.claim_snooze_notification(event["id"]))
+        self.assertFalse(threads.claim_snooze_notification(event["id"]))
+
     def test_required_input_and_failure_survive_snooze_resume(self):
         for status, actor in (("completed", "user"), ("failed", "nobody")):
             with self.subTest(status=status):

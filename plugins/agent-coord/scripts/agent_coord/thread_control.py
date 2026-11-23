@@ -287,8 +287,7 @@ class ThreadControlWorker:
     def process_once(self):
         sessions = self.sessions
         self._heartbeat()
-        with sessions.store._connection() as db:
-            sessions.store.threads._wake_snoozes(db)
+        sessions.store.threads.wake_snoozes()
         for request in self.control.queued():
             if self.stopped.is_set() or sessions.closed:
                 return

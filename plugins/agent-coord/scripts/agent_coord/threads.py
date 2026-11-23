@@ -428,35 +428,38 @@ class ThreadStore:
                        (source["thread_id"], turn_id, source["original_request"], thread_id))
             self.organization.update(db, thread_id, repository_id=source["repository_id"], project_id=source["project_id"])
 
-    def _wake_snoozes(self, db):
+    def wake_snoozes(self):
         # Persist wake-up on observation, including the first read after restart.
         # Keep the deadline until an explicit user action acknowledges the reminder.
         now = self.store.clock()
         # Most overview refreshes only observe existing state. Even a no-op
         # INSERT/UPDATE takes SQLite's sole writer lock, once for every thread
         # read; streaming refreshes must not compete with active agent writes.
-        pending = db.execute("""SELECT 1 FROM work_threads t
-            WHERE t.attention IN ('now', 'later') AND t.snoozed_until <= ?
-              AND (t.attention = 'later' OR NOT EXISTS (
-                SELECT 1 FROM snooze_notifications n WHERE n.thread_id = t.thread_id
-                  AND n.snoozed_until = t.snoozed_until)) LIMIT 1""", (now,)).fetchone()
+        with self.store.reading(), self.store._connection() as db:
+            pending = db.execute("""SELECT 1 FROM work_threads t
+                WHERE t.attention IN ('now', 'later') AND t.snoozed_until <= ?
+                  AND (t.attention = 'later' OR NOT EXISTS (
+                    SELECT 1 FROM snooze_notifications n WHERE n.thread_id = t.thread_id
+                      AND n.snoozed_until = t.snoozed_until)) LIMIT 1""", (now,)).fetchone()
         if pending is None:
             return
         # The reminder and placement change commit together. Include already
         # returned reminders from older runtimes; the unique receipt survives
         # rereads, competing processes and restarts without creating fake turns.
-        db.execute("""INSERT OR IGNORE INTO snooze_notifications (thread_id, snoozed_until)
-                      SELECT thread_id, snoozed_until FROM work_threads
-                      WHERE attention IN ('now', 'later') AND snoozed_until <= ?
-                        AND NOT EXISTS (SELECT 1 FROM snooze_notifications n
-                                        WHERE n.thread_id = work_threads.thread_id
-                                          AND n.snoozed_until = work_threads.snoozed_until)""", (now,))
-        db.execute("""UPDATE work_threads SET attention = 'now'
-                      WHERE attention = 'later' AND snoozed_until <= ?""", (now,))
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""INSERT OR IGNORE INTO snooze_notifications (thread_id, snoozed_until)
+                          SELECT thread_id, snoozed_until FROM work_threads
+                          WHERE attention IN ('now', 'later') AND snoozed_until <= ?
+                            AND NOT EXISTS (SELECT 1 FROM snooze_notifications n
+                                            WHERE n.thread_id = work_threads.thread_id
+                                              AND n.snoozed_until = work_threads.snoozed_until)""", (now,))
+            db.execute("""UPDATE work_threads SET attention = 'now'
+                          WHERE attention = 'later' AND snoozed_until <= ?""", (now,))
 
     def snooze_notifications(self, *, include_claimed=False) -> list[dict]:
-        with self.store._connection() as db:
-            self._wake_snoozes(db)
+        self.wake_snoozes()
+        with self.store.reading(), self.store._connection() as db:
             rows = db.execute("""SELECT n.id, n.thread_id, n.snoozed_until, 'snooze' AS status,
                                          t.title, p.name AS project_name, r.name AS repository_name, s.cwd
                                   FROM snooze_notifications n JOIN work_threads t ON t.thread_id = n.thread_id
@@ -635,7 +638,7 @@ class ThreadStore:
             logging.getLogger(__name__).exception("Could not record %s activity for thread %s", kind, session_id)
 
     def is_browser_session(self, session_id: str) -> bool:
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'browser_sessions'").fetchone():
                 return False
             return db.execute("SELECT 1 FROM browser_sessions WHERE thread_id = ?", (session_id,)).fetchone() is not None
@@ -682,11 +685,11 @@ class ThreadStore:
                 db.execute("UPDATE work_threads SET updated_at = ? WHERE thread_id = ?", (now, session_id))
 
     def completion_cursor(self) -> int:
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             return db.execute("SELECT COALESCE(MAX(id), 0) FROM turn_completions").fetchone()[0]
 
     def completions_after(self, sequence: int) -> dict:
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             latest = db.execute("SELECT COALESCE(MAX(id), 0) FROM turn_completions").fetchone()[0]
             rows = db.execute("""SELECT c.id, c.thread_id, c.status, c.completed_at,
                                         t.title, t.attention, t.snoozed_until, p.name AS project_name,
