@@ -47,6 +47,31 @@ these holds:
    strengths (`--client codex | claude | antigravity | kimi | muse`) or running
    a `sidecar attach` acceptance monitor alongside implementation.
 
+## Supervise delegated work
+
+Use an independently addressable Ribbon Field app agent for long-running work.
+Keep foreground provider-native subagents for bounded tasks. A foreground call
+keeps its parent turn occupied and can leave subsequent instructions waiting.
+
+Arm a timed progress check as soon as you delegate. For an active assignment,
+subscribe to the worker's exact turn with a timeout and a continuation:
+
+```bash
+agent-coord subscribe --turn <worker-session-id>:<turn-id> --timeout 900 \
+  --continue 'Inspect the worker checkpoint, native progress, pending requests and inbox. Continue supervision until the assignment is resolved.'
+```
+
+Choose the interval to fit the work. If progress continues after a timeout,
+arm the next check. If an alert identifies a live tool, inspect its output and
+CPU activity before interrupting. If it identifies an outstanding approval,
+inspect the request and route it to its authorized decision maker. Check the
+oldest queued instruction before authorizing a continuation.
+
+Give each Bash call a finite timeout appropriate to the command. The Claude
+Bash tool accepts `timeout` in milliseconds. For work that can outlast a tool
+call, use a managed job with `--timeout` in seconds and subscribe to its result.
+Inspect any partial effects before retrying a timed-out command.
+
 ## Use the coordination CLI
 
 Use `agent-coord` on PATH. Ribbon Field and managed workers add the bundled
@@ -893,6 +918,20 @@ what to inspect before repeating side effects. Authorize that continuation with:
 agent-coord thread resume --session-id <agent-id> \
   --expected-turn-id <failed-turn-id> --request-id <unique-recovery-key> --wait 30
 ```
+
+To interrupt a running Claude or Codex app agent, inspect its current turn ID,
+then submit the interruption as its current supervisor:
+
+```bash
+agent-coord thread interrupt --session-id <agent-id> --expected-turn-id <active-turn-id> \
+  --request-id <unique-interrupt-key> --reason 'The inspected turn requires intervention.' --wait 30
+```
+
+The MCP operations are `interrupt_thread` and `resume_thread`. Inspect the
+terminal turn and any outstanding tool outcomes, send the agent fresh actionable
+instructions, then run the turn-keyed resume command above. If execution remains
+unverified, inspect it before using `--confirm-stopped` with a specific reason.
+A Stop issued by the user retains its existing user-controlled release.
 
 The current supervisor can authorize recovery. A completed request with
 `result.state: ready` means the inbox can accept work again.

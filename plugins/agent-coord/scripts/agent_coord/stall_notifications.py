@@ -271,7 +271,11 @@ def apply_attention(thread, *, waiting=False):
         'next_alert_at': incident['next_alert_at'], 'alert_count': incident['alert_count']}
     if state == 'stalled' and not waiting:
         thread.update(status='stalled', response_state='action')
-    if incident['last_user_alert_at'] is None or thread['attention'] == 'archived' or thread['snoozed']:
+    # A genuinely stalled delegated turn is visible on the first supervisor alert.
+    # Device escalation remains governed by the occurrence's user_escalated flag.
+    if thread['attention'] == 'archived' or thread['snoozed']:
+        return
+    if incident['last_user_alert_at'] is None and (state != 'stalled' or waiting):
         return
     action = ('Review the unattended approval' if classification == 'waiting_for_approval' else
               'Review the outstanding tool' if classification == 'long_running_tool' else 'Review the stalled agent')

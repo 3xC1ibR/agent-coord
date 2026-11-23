@@ -1,8 +1,10 @@
 import copy
 import json
+import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,20 +20,21 @@ class TurnWatchdogTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.store = CoordinationStore(self.root / "state.sqlite3")
+        self.now = 0
+        self.epoch = time.time()
+        self.store = CoordinationStore(self.root / "state.sqlite3", clock=lambda: self.epoch + self.now)
         self.sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex,
                                         claude_factory=claude_factory)
         self.addCleanup(self.sessions.close)
-        self.now = 0
         self.watchdog = self.sessions.watchdog
         self.watchdog.clock = lambda: self.now
         self.worker = AppControlWorker(self.sessions)
         self.addCleanup(self.worker.close)
         self.parent = self.sessions.create({"name": "Orchestrator"})["session"]["thread_id"]
 
-    def child(self, client="codex"):
+    def child(self, client="codex", *, mode=None):
         request = self.worker.control.request("create", self.parent, {
-            "cwd": str(self.root), "client": client, "prompt": "Implement the change.", "name": "Worker"})
+            "cwd": str(self.root), "client": client, "prompt": "Implement the change.", "name": "Worker", "mode": mode})
         self.worker.process_once()
         child = self.worker.control.status(request["request_id"])["thread_id"]
         self.sessions.inbox_wake._dispatch(child)
@@ -50,6 +53,11 @@ class TurnWatchdogTests(unittest.TestCase):
     def reports(self):
         return self.store.inbox(self.parent, mark_delivered=False)
 
+    def alert_sequences(self, child):
+        with self.store.reading(), self.store._connection() as db:
+            return [r[0] for r in db.execute("""SELECT a.sequence FROM app_agent_stall_alerts a
+                JOIN app_agent_stall_incidents i ON i.id=a.incident_id WHERE i.thread_id=? ORDER BY a.id""", (child,))]
+
     def nudges(self, child):
         return [p for method, p in self.sessions.rpc.calls if method == "turn/steer" and p["threadId"] == child]
 
@@ -57,6 +65,111 @@ class TurnWatchdogTests(unittest.TestCase):
         self.sessions._event({"method": "item/started", "params": {
             "threadId": child, "turnId": turn_id or self.turn(child)["id"],
             "item": item or {"id": "reasoning", "type": "reasoning", "summary": ["Working"]}}})
+
+    def claude_transcripts(self):
+        base = 1_700_000_000
+        self.store.clock = lambda: base + self.now
+        config = self.root / "claude"
+        self.start_patch(patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(config)}))
+        child = self.child("claude")
+        self.sessions.claude.connections[child].process.pid = 4321
+        self.start_patch(patch("agent_coord.claude_progress.read_process_table", return_value={4321: (1, 0.0, False)}))
+        project = config / "projects" / "work"
+        nested = project / child / "subagents"
+        nested.mkdir(parents=True)
+        main = project / (child + ".jsonl")
+        main.write_text("{}\n")
+        os.utime(main, (base, base))
+        return child, main, nested / "agent-one.jsonl", base
+
+    def start_patch(self, context):
+        result = context.start()
+        self.addCleanup(context.stop)
+        return result
+
+    def test_subagent_transcript_growth_prevents_false_stall_and_later_silence_alerts(self):
+        child, main, nested, base = self.claude_transcripts()
+        self.tick(20)
+        for now in (290, 550, 810, 1070, 1330):
+            with nested.open("a") as output:
+                output.write('{"type":"assistant"}\n')
+            os.utime(nested, (base + now, base + now))
+            self.tick(now + 15)
+        self.assertEqual(self.reports(), [])
+        self.assertEqual(self.watchdog.snapshot(child)["state"], "healthy")
+        self.tick(1940)
+        body = json.loads(self.reports()[0]["body"])
+        self.assertIn("no live tool", body["error"].lower())
+        self.assertEqual(body["turn_id"], self.sessions.active[child])
+
+    def test_live_claude_tool_is_identified_with_cpu_even_if_parent_transcript_is_quiet(self):
+        child, main, nested, base = self.claude_transcripts()
+        with patch("agent_coord.claude_progress.read_process_table", return_value={
+                4321: (1, 9.0, False), 4322: (4321, 2.5, False)}) as table:
+            self.tick(301)
+            table.return_value[4322] = (4321, 17.5, False)
+            self.tick(1201)
+        body = json.loads(self.reports()[0]["body"])
+        self.assertIn("long-running tool", body["error"].lower())
+        self.assertIn("cpu", body["error"].lower())
+        self.assertEqual(len(self.sessions.claude.connections[child].writes), 1)
+
+    def test_claude_checkpoint_helper_does_not_hide_hung_foreground_agent_tool(self):
+        child, main, nested, base = self.claude_transcripts()
+        self.progress(child, turn_id=self.sessions.active[child],
+                      item={"id": "foreground", "type": "mcpToolCall", "tool": "Agent", "status": "inProgress"})
+        with patch("agent_coord.claude_progress.read_process_table", return_value={
+                4321: (1, 1.0, False), 4322: (4321, 0.4, True)}):
+            self.tick(301)
+            self.tick(601)
+        self.assertIn("no live tool", json.loads(self.reports()[0]["body"])["error"].lower())
+
+    def test_verified_new_tool_resolves_prior_silence_and_later_loss_rearms_stall(self):
+        child, _, _, _ = self.claude_transcripts()
+        rows = {4321: (1, 1.0, False)}
+        with patch("agent_coord.claude_progress.read_process_table", return_value=rows):
+            self.tick(601)
+            self.assertEqual(self.watchdog.snapshot(child)["state"], "stalled")
+            rows[4322] = (4321, 1.0, False)
+            self.tick(670)
+            self.assertEqual(self.watchdog.snapshot(child)["state"], "healthy")
+            self.tick(1871)
+            self.assertEqual(self.watchdog.snapshot(child)["state"], "long_running_tool")
+            del rows[4322]
+            self.tick(1932)
+            self.tick(2533)
+            self.assertEqual(self.watchdog.snapshot(child)["classification"], "stalled")
+
+    def test_codex_stall_realerts_and_new_native_output_starts_a_new_episode(self):
+        child = self.child()
+        self.tick(601)
+        self.tick(1202)
+        self.assertEqual(self.alert_sequences(child), [1, 2])
+        self.progress(child)
+        self.tick(1503)
+        self.assertEqual(self.alert_sequences(child), [1, 2])
+        self.tick(1803)
+        self.assertEqual(self.alert_sequences(child), [1, 2, 1])
+
+    def test_unattended_provider_permission_is_reported_without_steering(self):
+        child = self.child()
+        self.sessions._event({"id": "approval", "method": "item/commandExecution/requestApproval",
+            "params": {"threadId": child, "turnId": self.turn(child)["id"], "command": "test command"}})
+        self.tick(1)
+        self.tick(602)
+        self.assertEqual(self.nudges(child), [])
+        self.assertIn("approval", json.loads(self.reports()[0]["body"])["error"].lower())
+
+    def test_handover_preserves_unanswered_permission_age(self):
+        child = self.child("claude")
+        self.sessions._event({"id": "approval", "method": "item/commandExecution/requestApproval",
+            "params": {"threadId": child, "turnId": self.sessions.active[child], "command": "test command"}})
+        self.now = 4375
+        self.watchdog = self.sessions.watchdog = TurnWatchdog(self.sessions, clock=lambda: self.now)
+        self.tick(4375)
+        body = json.loads(self.reports()[0]["body"])
+        self.assertIn("approval", body["error"].lower())
+        self.assertIn("4375", body["error"])
 
     def test_repairs_missed_completion_and_durable_flag_without_replaying_work(self):
         for status in ("completed", "failed", "interrupted"):
@@ -89,7 +202,7 @@ class TurnWatchdogTests(unittest.TestCase):
         self.assertEqual(self.reports(), [])  # Deliberate Stop is not a failure.
 
     def test_nudges_once_then_alerts_and_wakes_orchestrator(self):
-        child = self.child()
+        child = self.child(mode="orchestration")
         self.tick(299)
         self.assertEqual(self.nudges(child), [])
         self.tick(301)
@@ -106,6 +219,8 @@ class TurnWatchdogTests(unittest.TestCase):
         self.assertEqual(body["turn_id"], self.turn(child)["id"])
         self.assertFalse(self.reports()[0]["reply_required"])
         self.assertEqual(self.sessions.work_thread(child)["status"], "stalled")
+        self.assertTrue(self.sessions.work_thread(child)["needs_attention"])
+        self.assertFalse(body["user_escalated"])
         self.assertTrue(self.store.get_session(child)["turn_active"])
         self.assertIsNone(self.store.threads.get(child)["turn_completion"])
         self.sessions.inbox_wake._dispatch(self.parent)
@@ -133,15 +248,15 @@ class TurnWatchdogTests(unittest.TestCase):
         self.assertEqual(len(self.nudges(child)), 1)  # One attempt for this turn, ever.
         self.assertEqual(self.watchdog.snapshot(child)["state"], "healthy")
 
-    def test_approval_and_answer_waits_are_not_stalls(self):
+    def test_recent_approval_and_answer_waits_are_not_stalls(self):
         child = self.child()
         self.sessions._event({"id": "approval", "method": "item/tool/requestUserInput",
             "params": {"threadId": child, "turnId": self.turn(child)["id"], "questions": []}})
-        self.tick(10000)
+        self.tick(150)
         self.assertEqual(self.nudges(child), [])
         self.assertEqual(self.reports(), [])
         self.sessions._event({"method": "serverRequest/resolved", "params": {"threadId": child, "requestId": "approval"}})
-        self.tick(10001)
+        self.tick(151)
         self.assertEqual(self.nudges(child), [])
 
     def test_silent_tool_is_not_cancelled_or_nudged_but_eventually_alerts(self):
@@ -223,6 +338,18 @@ class TurnWatchdogTests(unittest.TestCase):
         self.assertEqual(len(self.nudges(child)), 1)
         self.assertEqual(len(self.reports()), 1)
 
+    def test_restore_keeps_native_progress_age_before_the_first_alert(self):
+        child = self.child()
+        self.now = 180
+        self.progress(child)
+        self.tick(250)
+        self.watchdog = self.sessions.watchdog = TurnWatchdog(self.sessions, clock=lambda: self.now)
+        self.tick(590)
+        self.assertEqual(self.watchdog.snapshot(child)["quiet_seconds"], 410)
+        self.assertEqual(self.reports(), [])
+        self.tick(781)
+        self.assertEqual(len(self.reports()), 1)
+
     def test_recovery_claim_and_alert_survive_watchdog_recreation(self):
         child = self.child()
         self.tick(301)
@@ -234,8 +361,9 @@ class TurnWatchdogTests(unittest.TestCase):
         self.assertEqual(len(self.reports()), 1)
         self.watchdog = self.sessions.watchdog = TurnWatchdog(self.sessions, clock=lambda: self.now)
         self.tick(904)
+        self.assertEqual(len(self.reports()), 1)  # Handover cannot duplicate an alert.
         self.tick(1505)
-        self.assertEqual(len(self.reports()), 1)
+        self.assertEqual(self.alert_sequences(child), [1, 2])  # The second reminder survives handover.
 
     def test_old_completion_and_old_probe_cannot_end_newer_turn(self):
         child = self.child()
@@ -313,7 +441,7 @@ class TurnWatchdogTests(unittest.TestCase):
     def test_database_failure_retries_alert_without_recovery_replay(self):
         child = self.child()
         self.tick(301)
-        with patch("agent_coord.turn_watchdog.notify_agent_stall", side_effect=sqlite3.OperationalError("database is locked")):
+        with patch("agent_coord.stall_notifications.record_stall", side_effect=sqlite3.OperationalError("database is locked")):
             with self.assertLogs("agent_coord.turn_watchdog", level="ERROR"):
                 self.tick(601)
         self.tick(701)

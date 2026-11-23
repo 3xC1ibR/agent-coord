@@ -2068,22 +2068,35 @@ proof of progress. Reasoning, output, and tool events are progress; metadata and
 status polling are not. Other providers receive state reconciliation without
 unsupported steering.
 
-After ten minutes without progress, an unresolved turn becomes **stalled** in
-the app and its creating orchestrator receives one durable `app_agent_stalled`
-message for that turn. An idle orchestrator wakes through the normal inbox; a
-busy orchestrator receives the alert at its next inbox delivery. Ordinary user
-conversations show the stall in the app without receiving automatic input.
-Pending user approvals and questions are waiting states. A quiet outstanding
-tool gets a longer, twenty-minute threshold and an uncertainty alert, without
-automatic steering or cancellation.
+Claude's watchdog also observes growth in the native session transcript and its
+subagent transcripts. For quiet turns it checks descendant processes and their
+CPU time. It excludes Ribbon Field's persistent MCP helper. Codex progress
+comes from native work events tagged with the active turn ID.
 
-The watchdog never assumes silence proves termination, restarts a shared
-provider, replays the original prompt, releases a write scope, or declares the
-assignment complete. The orchestrator must confirm termination before handing
-off unfinished writes. Monitoring is limited to conversations owned by this
-running app backend; it is not a machine-wide process supervisor. Loading a
-saved conversation starts a fresh observation grace period, while durable
-recovery and notification receipts prevent duplicate actions.
+A silent provider triggers a supervisor alert after ten minutes. A confirmed
+live tool, or an outstanding tool whose process cannot be verified, gets a
+twenty-minute threshold. Alerts identify the evidence and report the number
+and oldest age of pending actionable instructions. An unattended approval
+is identified as a wait for input. The app preserves its approval controls.
+
+Alerts wake an eligible current supervisor. A busy supervisor receives a
+durable inbox message. The user receives an escalation if the turn remains
+unresolved, or immediately when there is no reachable supervisor. Intervals
+increase to forty minutes and repeat while the condition persists. The
+watchdog records each delivery and carries open incidents through handover.
+New native progress clears the episode. Another quiet period in the same
+turn can trigger a new alert. Completion or an authorized stop ends it.
+
+The current supervisor can interrupt an exact Claude or Codex app turn with
+`agent-coord thread interrupt --session-id <agent> --expected-turn-id <turn>
+--request-id <key> --reason <reason> --wait 30` or the MCP `interrupt_thread`
+operation. Reuse the same key when retrying. Inspect the terminal turn and tool
+outcomes, queue new actionable instructions, then use `agent-coord thread resume`
+with the interrupted turn ID or the MCP `resume_thread` operation. User-issued
+Stops retain the app's existing Release control.
+
+Verify tool outcomes before retrying work or transferring its write scope.
+The watchdog monitors conversations owned by the running backend.
 
 ## Develop and validate
 

@@ -16,6 +16,20 @@ const text = node => [node.textContent || '', ...(node.children || []).map(text)
 const descendants = node => [node, ...node.children.flatMap(descendants)];
 const withClass = (node, name) => descendants(node).find(n => n.className === name);
 
+test('watchdog preview shows outstanding work and queue age while disclosure preserves the receipt', () => {
+  const body = JSON.stringify({source: 'runtime', stage: 'watchdog', classification: 'waiting_for_approval',
+    detail: 'Claude is waiting for tool approval.', actionable_inbox_count: 4, oldest_actionable_age_seconds: 1340});
+  const card = AgentMessages.card(document, sample({thread_id: 'app-agent-stall:12:2', body}));
+  const preview = withClass(card, 'agent-message-preview').textContent;
+  assert.match(preview, /waiting for tool approval/);
+  assert.match(preview, /4 queued.*oldest 22 min/);
+  assert.equal(withClass(card, 'agent-message-body').textContent, body);
+  for (const [thread_id, value] of [['other', body], ['app-agent-stall:12:3', '{unparsed']]) {
+    const ordinary = AgentMessages.card(document, sample({thread_id, body: value}));
+    assert.ok(withClass(ordinary, 'agent-message-preview').textContent.startsWith(value.slice(0, 40)));
+  }
+});
+
 test('both sides keep identity and link to the same message with safe literal text', () => {
   const visits = [];
   for (const direction of ['sent', 'received']) {

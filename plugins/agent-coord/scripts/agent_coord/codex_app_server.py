@@ -1394,12 +1394,17 @@ class BrowserSessions:
                 notifications.append({"request_key": "ask:" + str(ask["id"]), "thread_id": ask["session_id"],
                                       "status": "question", "client": thread["client"], "title": thread["title"],
                                       "project_name": thread["project_name"], "repository_name": thread["repository_name"]})
+        from .stall_notifications import notifications as stall_notifications
+        notifications.extend(stall_notifications(self.store, include_claimed=include_claimed, cwd=self.cwd))
         return notifications
 
     def claim_approval_notification(self, key: str) -> bool:
         """Atomically claim a live approval across tabs without answering it."""
         if not isinstance(key, str) or not key.strip():
             raise CoordinationError("Choose a valid approval request key.")
+        if key.startswith("stall:"):
+            from .stall_notifications import claim_notification
+            return claim_notification(self.store, key, cwd=self.cwd)
         if key.startswith("ask:"):
             try:
                 ask = self.store.asks.get(int(key[4:]))
@@ -1662,6 +1667,8 @@ class BrowserSessions:
         if policy["quiet"] and not thread["snooze_due"]:
             thread.update(needs_attention=False, attention_reason=None, attention_key=None, attention_since=None,
                           can_handle_response=False)
+        from .stall_notifications import apply_attention
+        apply_attention(thread, waiting=bool(waiting))
         thread["can_read_history"] = bool(thread["browser_session"] or thread["client"] == "codex")
         # Stale registrations can request an explicit handoff. The action, not
         # inventory projection, verifies native history and process ownership.

@@ -47,6 +47,15 @@
     return item.type === "userMessage" && [WAKE_PROMPT, AUTOMATIC_WAKE_PROMPT].includes(text) &&
       messages.some(message => message.started_turn && message.wake_turn_id === turn.id);
   }
+  function previewText(message, text) {
+    if (!message.thread_id?.startsWith("app-agent-stall:")) return text;
+    let alert;
+    try { alert = JSON.parse(text); } catch { return text; }
+    if (alert?.source !== "runtime" || alert.stage !== "watchdog" || typeof alert.detail !== "string") return text;
+    const count = alert.actionable_inbox_count, age = alert.oldest_actionable_age_seconds;
+    if (!(count > 0 && Number.isFinite(age))) return alert.detail;
+    return count + " queued, oldest " + Math.floor(age / 60) + " min. " + alert.detail;
+  }
   function card(document, message, {open, expanded = false} = {}) {
     const el = (tag, text, className) => {
       const element = document.createElement(tag);
@@ -84,7 +93,7 @@
     const details = el("details", null, "agent-message-content");
     details.dataset.id = "agent-message:" + message.id;
     details.open = expanded;
-    const compactText = text.replace(/\s+/g, " ");
+    const compactText = previewText(message, text).replace(/\s+/g, " ");
     const preview = compactText.slice(0, 180) + (compactText.length > 180 ? "…" : "");
     const summary = el("summary");
     summary.append(heading, el("span", preview, "agent-message-preview"));
