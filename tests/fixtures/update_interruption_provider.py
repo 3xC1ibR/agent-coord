@@ -2,8 +2,8 @@
 """Independent stdio provider for backend-update interruption tests.
 
 Speaks the wire protocols the real Kimi (ACP), Antigravity (ACP) and Muse
-(MSP) connections use. It imports nothing from the runtime. Every request and
-signal is appended to ``provider.jsonl`` under ``RIBBON_UPDATE_FIXTURE_ROOT``.
+(MSP) connections use. It imports nothing from the runtime. Requests and
+handled signals are appended to ``provider.jsonl`` under ``RIBBON_UPDATE_FIXTURE_ROOT``.
 
 Prompt text controls the turn:
   HOLD  stays running until cancelled or ``release-<native id>`` exists;
@@ -49,7 +49,9 @@ def on_signal(number, _frame):
 
 
 for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-    signal.signal(number, on_signal)
+    # An ACP process can exit on SIGTERM without emitting a final event.
+    handler = signal.SIG_DFL if MODE == "kimi" and number == signal.SIGTERM else on_signal
+    signal.signal(number, handler)
 
 
 def emit(message):

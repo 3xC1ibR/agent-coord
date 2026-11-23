@@ -222,6 +222,10 @@ class UnsupportedProviderUpdateTests(unittest.TestCase):
     def test_explicit_update_pauses_and_continues_each_provider_once(self):
         work = {client: self.start(client) for client in PROVIDERS}
         natives = {client: self.native(client, thread) for client, (thread, _) in work.items()}
+        original_processes = {client: self.sessions._rpc(thread).connections[thread].process
+                              for client, (thread, _) in work.items()}
+        for client, process in original_processes.items():
+            self.assertIsNone(process.poll(), client)
         owner = self.owner()
         self.request(owner)
         self.assertTrue(self.drive(owner))
@@ -237,7 +241,9 @@ class UnsupportedProviderUpdateTests(unittest.TestCase):
             original = self.prompts(natives[client])[0]
             if client == "muse":
                 self.assertIn("turn/interrupt", [e["method"] for e in self.events("request") if e["pid"] == original["pid"]])
-            self.assertTrue([e for e in self.events() if e["pid"] == original["pid"] and e["kind"] in {"signal", "eof"}], client)
+            process = original_processes[client]
+            self.assertEqual(process.pid, original["pid"], client)
+            self.assertIsNotNone(process.poll(), f"{client} still owns its original process at handover")
             self.assertNotIn(original["turn"], [e["turn"] for e in self.events("prompt-ended")
                                                 if e["stop_reason"] in {"end_turn", "completed"}])
             self.assertEqual(self.store.threads.get(thread, history=False)["turn_completion"]["status"], "interrupted")
