@@ -9,10 +9,15 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from validate_signed_runtime_responsiveness import SignedUpgrade, match_snapshot_size
+from validate_signed_runtime_responsiveness import SignedUpgrade, diagnostic_reason, match_snapshot_size
 
 
 class SignedAcceptanceGateTests(unittest.TestCase):
+    def test_rollback_capacity_failure_is_identifiable_without_recording_private_control_text(self):
+        message = "Candidate validation failed: Insufficient free space for the update rollback snapshot."
+        self.assertEqual(diagnostic_reason(message), "rollback-capacity")
+        self.assertEqual(diagnostic_reason("Candidate validation failed: private error"), "candidate-validation")
+
     def test_terminal_service_distinguishes_existing_backlog_and_canonical_work_from_new_arrivals(self):
         run = object.__new__(SignedUpgrade)
         run.peers, run.composer = ["active"], "idle"

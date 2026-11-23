@@ -74,6 +74,7 @@ def diagnostic_reason(error):
         ("accepted submission still needs confirmation", "unresolved-accepted-submission"),
         ("forwarded request is still completing", "forward-in-progress"),
         ("Candidate exited before readiness", "candidate-exited"),
+        ("Insufficient free space for the update rollback snapshot", "rollback-capacity"),
         ("Candidate validation failed", "candidate-validation"),
         ("did not confirm", "confirmation-missing"),
         ("released its rejected preparation", "preparation-rejected"),
