@@ -249,8 +249,8 @@ class ProjectionTests(unittest.TestCase):
         identity = self.saved_conversation()
         read_history = codex_app_server.read_history
         self.projection.unloaded_observation = {"excluded": {self.identity}, "revisions": {}}
-        def crossed_commit(store, thread_id):
-            history = read_history(store, thread_id)
+        def crossed_commit(store, thread_id, **options):
+            history = read_history(store, thread_id, **options)
             if self.projection.unloaded_observation is not None:
                 with self.sessions.lock:
                     self.sessions.requests["waiting"] = {

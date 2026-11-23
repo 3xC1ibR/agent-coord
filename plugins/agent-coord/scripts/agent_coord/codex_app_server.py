@@ -30,7 +30,7 @@ from .thread_inventory import WAKE_PAUSES, has_table, wake_fields
 from .inventory_projection import entity_tag, list_card
 from .conversation_residency import Resident, releasable
 from .history_window import recent_view
-from .history_persistence import (HistoryPersistence, ensure_schema as ensure_history_schema,
+from .history_persistence import (HistoryPersistence, SavedHistoryWindows, ensure_schema as ensure_history_schema,
                                   prepare_history, publish_history, read_history, stage_history)
 from .browser_persistence import BrowserPersistence
 from .thread_usage import codex_totals
@@ -333,6 +333,7 @@ class BrowserSessions:
         self.histories: dict[str, dict] = {}
         self.dirty_histories: set[str] = set()
         self.history_revisions: dict[str, int] = {}
+        self.saved_history_windows = SavedHistoryWindows()
         self.usage_recovery_attempts: set[str] = set()
         self.persistence = BrowserPersistence(context=self._persistence_context)
         # A runtime handover shares one monotonic budget with its supervisor.
@@ -2491,20 +2492,27 @@ class BrowserSessions:
                 revision = self.turn_revisions.get(thread_id, 0)
         waiting, running, _, _ = runtime_state
         work_thread = self.work_thread(thread_id, _runtime=runtime_state)
+        if not running and work_thread["status"] == "running":
+            # A live lifecycle hook can precede the provider subscription.
+            active_turn, running = work_thread["turn_id"], True
+        # A pending lifecycle recovery can require a terminal turn outside
+        # the recent window. Use the complete history for that observation.
+        needs_outcome = work_thread["turn_id"] and (work_thread["turn_active"] or not work_thread["turn_completion"])
+        saved_window = thread is None and recent and not needs_outcome
         if thread is None:
-            thread = read_history(self.store, thread_id)
+            thread = read_history(self.store, thread_id, windows=self.saved_history_windows if saved_window else None,
+                                  live_turn=active_turn)
             if thread is None:
+                saved_window = False
                 thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
         if unloaded and projection.unloaded_observation is not observation:
             # A commit or rollback overtook the database read. Recheck live
             # ownership and input once before returning the new history.
             return self._read_snapshot(thread_id, recent=recent, synchronized=True)
-        self._schedule_saved_completion(thread_id, thread, work_thread, revision)
-        if not running and work_thread["status"] == "running":
-            # A live lifecycle hook can precede the provider subscription.
-            active_turn, running = work_thread["turn_id"], True
-        if recent:
-            thread = recent_view(thread, live_turn=active_turn)
+        if not saved_window:
+            self._schedule_saved_completion(thread_id, thread, work_thread, revision)
+            if recent:
+                thread = recent_view(thread, live_turn=active_turn)
         return {"session": record, "thread": self.reviews.public_history(thread_id, thread),
                 "work_thread": work_thread, "requests": self._public_requests(waiting.values()),
                 "activeTurn": active_turn, "running": running,

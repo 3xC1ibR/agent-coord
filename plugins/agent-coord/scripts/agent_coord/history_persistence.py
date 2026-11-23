@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .store import CoordinationError
 from .sqlite_compatibility import SQLITE_CANTOPEN
+from .history_window import recent_view
 
 
 INLINE_BYTES = 256 * 1024
@@ -356,12 +357,49 @@ def saved_turn_status(store, thread_id, turn_id):
         return next((turn.get("status") for turn in reversed(turns) if turn.get("id") == turn_id), None)
 
 
-def read_history(store, thread_id):
-    """Read the root and its complete history in one snapshot, without a writer."""
+def read_history(store, thread_id, *, windows=None, live_turn=None):
+    """Read the published history or its recent view in a single query-only snapshot."""
     with store.reading(), store._connection() as db:
         db.execute("BEGIN")
-        row = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
-        return decode_history(row[0], db=db) if row else None
+        row = db.execute("SELECT CAST(history_json AS BLOB) FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
+        if not row:
+            return None
+        if windows is not None:
+            return windows.read(row[0], db, live_turn)
+        return decode_history(row[0], db=db)
+
+
+class SavedHistoryWindows:
+    """Reuse bounded recent views of large inline histories written by older builds."""
+
+    def __init__(self):
+        self.windows = OrderedDict()
+        self.lock = threading.Lock()
+
+    def read(self, raw, db, live_turn):
+        key = (hashlib.sha256(raw).digest(), live_turn) if len(raw) > INLINE_BYTES else None
+        if key:
+            with self.lock:
+                cached = self.windows.get(key)
+                if cached is not None:
+                    self.windows.move_to_end(key)
+            if cached is not None:
+                return json.loads(cached)
+        thread = json.loads(raw)
+        if MARKER in thread:
+            # Verify all referenced blocks against this read snapshot.
+            thread = _decode(db, thread)
+            key = None
+        window = recent_view(thread, live_turn=live_turn)
+        if key:
+            encoded = json.dumps(window, separators=(",", ":")).encode()
+            if len(encoded) <= 4 * 1024 * 1024:
+                with self.lock:
+                    self.windows[key] = encoded
+                    self.windows.move_to_end(key)
+                    if len(self.windows) > 4:
+                        self.windows.popitem(last=False)
+        return window
 
 
 def stage_history(store, prepared, *, on_commit=None, confirmed=()):
