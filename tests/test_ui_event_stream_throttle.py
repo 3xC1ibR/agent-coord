@@ -38,6 +38,35 @@ class EventStreamThrottleTests(unittest.TestCase):
         self.server.server_close()
         self.worker.join(2)
 
+    def test_committed_provider_input_is_visible_while_coordination_reads_are_blocked(self):
+        release, polling, visible = threading.Event(), threading.Event(), threading.Event()
+        received = []
+        def held(cursor):
+            polling.set()
+            release.wait(4)
+            return {"seq": cursor, "events": []}
+        def listen():
+            with urllib.request.urlopen(self.url + "/api/browser/events?after=0:0", timeout=5) as response:
+                for line in response:
+                    if line.startswith(b"data: "):
+                        received.append(json.loads(line[6:]))
+                        if received[-1]["events"]:
+                            visible.set()
+                        if "snoozes" in received[-1]:
+                            return
+        self.sessions._publish("item/started", {"threadId": "terminal", "item": {"type": "userMessage"}})
+        with patch.object(self.sessions, "completions_after", side_effect=held):
+            listener = threading.Thread(target=listen, daemon=True)
+            listener.start()
+            try:
+                self.assertTrue(polling.wait(3))
+                self.assertTrue(visible.wait(0.5), "A committed message waited for unrelated notification reads")
+            finally:
+                release.set()
+                listener.join(5)
+        self.assertEqual([event["method"] for batch in received for event in batch["events"]], ["item/started"])
+        self.assertEqual(received[-1]["completionSeq"], 0)
+
     def test_provider_deltas_stream_without_rereading_coordination_state(self):
         reads = []
         original = self.sessions.completions_after

@@ -2413,20 +2413,22 @@ function renderRequests() {
     box.append(actions); area.append(box);
   }
 }
-function scheduleTimelineRender() {
+function scheduleTimelineRender({userMessage = false} = {}) {
   const pending = state.timelineRender;
-  if (pending?.id === state.selected && pending.detail === state.detail) return;
+  if (pending?.id === state.selected && pending.detail === state.detail && (!userMessage || pending.userMessage)) return;
   if (pending) clearTimeout(pending.timer);
-  const render = {id: state.selected, detail: state.detail};
+  const render = {id: state.selected, detail: state.detail, userMessage};
   state.timelineRender = render;
-  // Bound both large SSE replay batches and individual provider chunks. A
-  // timer also flushes hidden panes, where animation frames may be suspended.
-  render.timer = setTimeout(() => {
+  const paint = () => {
     if (state.timelineRender !== render) return;
     state.timelineRender = null;
     if (state.selected !== render.id || state.detail !== render.detail) return;
     renderTimeline(); renderStatus();
-  }, 50);
+  };
+  // All user input in this event batch paints together immediately. Streamed
+  // output still uses the bounded timer, including in hidden panes.
+  if (userMessage) Promise.resolve().then(paint);
+  else render.timer = setTimeout(paint, 50);
 }
 function applyEvent(event) {
   if (event.method === "coordination/messageSent") { state.agentTreeController?.message(event.params); return; }
@@ -2494,7 +2496,7 @@ function applyEvent(event) {
     if (item && method === "item/agentMessage/delta") item.text = (item.text || "") + params.delta;
     if (item && method === "item/commandExecution/outputDelta") item.aggregatedOutput = (item.aggregatedOutput || "") + params.delta;
   }
-  scheduleTimelineRender();
+  scheduleTimelineRender({userMessage: params.item?.type === "userMessage"});
 }
 let listTimer, detailTimer;
 let listScheduledAt = 0;

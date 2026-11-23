@@ -547,6 +547,11 @@ def _handler(
                 b'{"error":"not found"}',
             )
 
+        def _event_batch(self, batch: dict) -> None:
+            cursor = f"{batch['seq']}:{batch['completionSeq']}"
+            self.wfile.write(f"id: {cursor}\ndata: {json.dumps(batch)}\n\n".encode())
+            self.wfile.flush()
+
         def _json(self, status: HTTPStatus, payload: Any) -> None:
             self._send(status, "application/json; charset=utf-8", json.dumps(payload).encode())
 
@@ -816,6 +821,11 @@ def _handler(
                         # once a second, as an idle stream already does.
                         if time.monotonic() >= coordination_due:
                             coordination_due = time.monotonic() + 1
+                            if batch["events"] or batch["reset"]:
+                                # Publish committed provider events before reading
+                                # unrelated coordination and notification tables.
+                                self._event_batch(batch)
+                                batch = {"seq": sequence, "reset": False, "events": []}
                             completions = browser_sessions.completions_after(completion_sequence)
                             completion_sequence = completions["seq"]
                             message_sequence, coordination_events = message_changes(store, message_sequence, browser_sessions.cwd)
@@ -825,8 +835,7 @@ def _handler(
                             batch.update(completions=completions["events"], completionSeq=completion_sequence,
                                          snoozes=browser_sessions.snooze_notifications(),
                                          approvals=browser_sessions.approval_notifications())
-                        self.wfile.write(f"id: {sequence}:{completion_sequence}\ndata: {json.dumps(batch)}\n\n".encode())
-                        self.wfile.flush()
+                        self._event_batch(batch)
                 except sqlite3.OperationalError as exc:
                     if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                         raise

@@ -281,6 +281,20 @@ test("first-send acknowledgement opens its cached conversation before full detai
   c.gate.resolve(fixture("created")); await sending;
 });
 
+test("a received user message paints once before the streaming delay expires", async () => {
+  const c = setup(); await c.select("one");
+  vm.runInContext(source.slice(source.indexOf("function scheduleTimelineRender("), source.indexOf("function applyEvent(")), c);
+  let paints = 0;
+  c.renderTimeline = () => paints++;
+  c.applyEvent({method: "item/agentMessage/delta", params: {threadId:"one",turnId:"turn",itemId:"answer",delta:"more"}});
+  const params = {threadId:"one",turnId:"turn",item:{id:"input",type:"userMessage",content:[]}};
+  c.applyEvent({method:"item/started",params});
+  c.applyEvent({method:"item/completed",params});
+  await Promise.resolve();
+  assert.equal(paints, 1);
+  assert.equal(c.state.timelineRender, null);
+});
+
 test("a detail read paints a streamed item whose batched render is still pending", async () => {
   const c = setup(); await c.select("one");
   vm.runInContext(source.slice(source.indexOf("function scheduleTimelineRender("), source.indexOf("function applyEvent(")), c);
