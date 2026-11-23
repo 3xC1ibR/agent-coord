@@ -25,6 +25,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scripts", type=Path, default=ROOT / "plugins/agent-coord/scripts",
                         help="Backend scripts to test, including an installed plugin's scripts directory.")
+    parser.add_argument("--portfolio", action="store_true",
+                        help="Check the saved portfolio regression, all tabs, and its action round trip.")
+    parser.add_argument("--screenshot", type=Path, help="Save the native WebKit result as a PNG.")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("This regression check requires macOS and the Swift compiler.")
@@ -35,6 +38,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="openui-webkit-") as directory:
         temporary = Path(directory)
         base_handler = _handler(CoordinationStore(temporary / "state.sqlite3"), None, None)
+        source = (ROOT / "tests/fixtures/openui/portfolio.openui").read_text() if args.portfolio else SOURCE
         page = ('''<!doctype html><html><head><meta charset="utf-8">
 <script src="/markdown.js"></script><script src="/openui.js"></script>
 <link rel="stylesheet" href="/openui.css"></head><body><main id="timeline"></main><pre id="received"></pre>
@@ -54,7 +58,7 @@ OpenUIThread.commit(document.getElementById('timeline'), fragment, {
     window.webkit.messageHandlers.openuiSmoke.postMessage({kind:'result', event});
   }
 });
-</script></body></html>'''.replace("SOURCE", json.dumps(SOURCE))).encode()
+</script></body></html>'''.replace("SOURCE", json.dumps(source))).encode()
 
         class Handler(base_handler):
             def do_GET(self):
@@ -70,7 +74,12 @@ OpenUIThread.commit(document.getElementById('timeline'), fragment, {
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            result = subprocess.run([str(binary), f"http://127.0.0.1:{server.server_port}/openui-smoke"],
+            command = [str(binary), f"http://127.0.0.1:{server.server_port}/openui-smoke",
+                       "portfolio" if args.portfolio else "form"]
+            if args.screenshot:
+                args.screenshot.parent.mkdir(parents=True, exist_ok=True)
+                command.append(str(args.screenshot.resolve()))
+            result = subprocess.run(command,
                                     capture_output=True, text=True, timeout=40)
             print(result.stdout.strip())
             if result.returncode:

@@ -20,6 +20,14 @@ dispatcher directly. The composer draft is preserved. Closed threads and
 cards in unfinished turns cannot submit. Source remains available for copying
 or diagnosing output that does not render.
 
+Saved responses using `Stack(children)` or `Grid(children, columns)` are
+adapted to the chat library's vertical `Card` container. Two-argument
+`TabItem(label, children)` calls use that label as their value and trigger.
+This compatibility pass preserves the original displayed source, quoted text,
+comments and actions; new responses should use the documented chat signatures.
+Other rendering failures name the failing statement and parser error in the
+existing inline notice.
+
 The integration vendors the official browser bundle and styles at version
 0.2.1, loaded only when an OpenUI fence appears. It needs no additional model
 service, API key, CDN request, npm install, or frontend build. See
@@ -49,3 +57,9 @@ check. It uses an isolated temporary database, serves the real frame policy and
 runtime assets, and verifies rendering, sandbox isolation, and a form round
 trip without starting a model or touching user conversations. Use `--scripts`
 to check a refreshed installed plugin's scripts directory.
+
+Add `--portfolio` to replay the saved portfolio regression. It checks all
+three tabs, all 13 candidates across pagination, and the original action
+payload. Both scenarios run in macOS CI. `--screenshot path.png` retains a
+native screenshot for visual review. The same portfolio check must fail
+against the affected installed payload and pass against the signed candidate.

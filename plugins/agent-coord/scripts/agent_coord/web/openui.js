@@ -77,6 +77,7 @@
     preview.append(status);
     const record = {block, source, state, options, status, disabled: !!options.disabled, theme: options.theme, ready: false};
     const fail = message => {
+      record.failed = true;
       status.textContent = message; block.querySelector("details").open = true;
       if (record.frame) record.frame.style.display = "none";
     };
@@ -92,6 +93,7 @@
       channel.port1.onmessage = async ({data}) => {
         if (!data || records.get(id) !== record) return;
         if (data.type === "ready") { record.ready = true; clearTimeout(record.timer); frame.style.display = ""; status.textContent = ""; update(record); }
+        if (data.type === "rendered" && record.failed) { record.failed = false; frame.style.display = ""; status.textContent = ""; }
         if (data.type === "height" && Number.isFinite(data.height)) frame.style.height = Math.max(80, Math.min(1400, data.height)) + "px";
         if (data.type === "state") record.state = data.state;
         if (data.type === "error") fail(String(data.message).slice(0, 300));

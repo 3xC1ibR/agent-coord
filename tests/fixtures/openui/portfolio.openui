@@ -1,0 +1,153 @@
+root = Stack([header, kpis, tabs, action_card])
+
+header = CardHeader("HoldCo 15-Stream Discovery Pipeline (24 Live Probes Run Today)", "13 ADVANCE + 5 PARK + 6 REJECT — Saved in /opt/projects/holdco/probes/latest/probe_report.md")
+
+kpis = Grid([kpi1, kpi2, kpi3, kpi4], 4)
+kpi1 = Card([TextContent("Niches Probed Live", "small"), TextContent("87 -> 24 Scored", "large-heavy"), TagBlock(["Apify + Search + Forge + GitHub"])])
+kpi2 = Card([TextContent("ADVANCE Streams (4/4 Gates)", "small"), TextContent("13 Streams", "large-heavy"), TagBlock(["Zero-Owner-Block Today"])])
+kpi3 = Card([TextContent("PARK Streams (1 Gate Away)", "small"), TextContent("5 Streams", "large-heavy"), TagBlock(["3 Forge + 2 Tax XML"])])
+kpi4 = Card([TextContent("Killed by Free-Sub / Cold Lag", "small"), TextContent("6 Rejected", "large-heavy"), TagBlock(["Saved ~80 Agent-Hours"])])
+
+tabs = Tabs([tab_advance, tab_engines, tab_park_kill])
+
+tab_advance = TabItem("1. Top 13 ADVANCE Streams (Ready Now)", [
+  TextContent("Every row below passed all 4 Hard Kill Gates (Zero Customer Contact, Free-Substitute Gap, Reachable Exposure Floor, and Active Stripe/Apify Payment Rail):"),
+  Table([
+    Col("Score", [
+      "83/100",
+      "83/100",
+      "79/100",
+      "77/100",
+      "73/100",
+      "71/100",
+      "71/100",
+      "71/100",
+      "70/100",
+      "68/100",
+      "68/100",
+      "66/100",
+      "63/100"
+    ]),
+    Col("Stream / Candidate", [
+      "1. Apify Multi-ATS Jobs + 12-ATS Cluster (5 Actors)",
+      "2. Apify Dataset Dedup & Google Sheets Exporters (2 Actors)",
+      "3. Apify Dataset -> Notion Bulk Upsert & Sync (NEW)",
+      "4. US 1099 Bridge: FIRE/1220 & Excel -> IRS IRIS CSV",
+      "5. Poland KSeF FA(3) XML Batch Validator & CSV Preflight (NEW)",
+      "6. SWIFT MT940 / BAI2 -> ISO 20022 CAMT.053 & CSV Bridge (NEW)",
+      "7. Excel/CSV -> ISO 20022 SEPA pain.001 / pain.008 XML (NEW)",
+      "8. Apify SAM.gov Active Federal RFPs + USAspending Awards (NEW)",
+      "9. US Federal W-2 Excel/CSV -> SSA EFW2 Wage File Bridge (NEW)",
+      "10. France Factur-X PDF/A-3 + EN 16931 XML Validator (NEW)",
+      "11. Apify USPTO & EUIPO Trademark Conflict Watch (NEW)",
+      "12. Germany XRechnung / ZUGFeRD B2B E-Invoice Preflight",
+      "13. HIPAA X12 EDI 835 Healthcare ERA -> Excel Reconciler (NEW)"
+    ]),
+    Col("Live Demand & Incumbent Failure Proof", [
+      "~3,000 cluster 30d users; leader $12/1k; bytepulselabs 40.2% run failure",
+      "google-sheets leader (878 users) fails 54.6%; dedup leader (529 users) fails 63.9%",
+      "5,184 actors; top uploader filip_cicvarek/notion-uploader fails 32.8% of 30d runs",
+      "FIRE retired Nov 19; 10-100/mo pre-season searches; TIN Comply lacks Excel/multi-payer",
+      "Mandatory PL B2B schema; 262 GitHub issues (365d); 4 PL autocomplete hits; Gate 0 GO",
+      "SWIFT retired MT940; 10 US + 10 DE autocomplete hits; 237 GitHub issues; ProperConvert $199/yr",
+      "10 pain.001 + 8 SEPA autocomplete hits; 181 GitHub issues; sepaxmlgenerator forces cloud signup",
+      "113 top-20 30d users on sam.gov; incumbent sam-gov-scraper has 12% run failure rate",
+      "Feb 1 deadline; 10 EFW2 autocomplete hits; SSA BSO caps manual entry at 50 W-2s",
+      "France Sept 2026/2027 mandate; 223 GitHub issues; 6 FR/EN autocomplete hits",
+      "191 trademark + 114 USPTO top-20 30d users; existing scrapers break on TSDR/PII",
+      ">=1,310/mo DE validator searches (+900% YoY); 272 GitHub issues; EUR 9-29/mo API wedge",
+      "4 US autocomplete hits ('835 to excel converter'); 100% browser-local avoids HIPAA PHI upload"
+    ]),
+    Col("Price & Smoke Test", [
+      "$2-$3/1k + MCP ($0 cash)",
+      "$0.30-$0.50/1k ($0 cash)",
+      "$0.40/1k rows ($0 cash)",
+      "$39 / $99 / $249 ($50-$200 Ads)",
+      "PLN 39-119/mo ($75 PL Ads)",
+      "$49 / $149 browser-local ($75 Ads)",
+      "EUR 29 / EUR 79 browser-local ($75 Ads)",
+      "$3-$4/1k + MCP ($0 cash)",
+      "$79/employer ($75 US Ads)",
+      "EUR 9-29/mo ($50 FR Ads)",
+      "$3.50/1k + MCP ($0 cash)",
+      "EUR 9-29/mo ($100 DE Ads)",
+      "$79 / $199 browser-local ($75 Ads)"
+    ])
+  ])
+])
+
+tab_engines = TabItem("2. How We Run 15-20 Streams Without Chaos", [
+  TextContent("Instead of building 20 unrelated codebases, we group all 15-20 streams into 5 Shared Fulfillment Engines so each new stream takes 6-10 agent-hours and $0-$75 to test:"),
+  Table([
+    Col("Engine Cluster", [
+      "Cluster A: Browser-Local Treasury & Accounting Bridges",
+      "Cluster B: EU/National E-Invoice & Fiscal Preflight",
+      "Cluster C: US Tax & Healthcare Compliance Bridges",
+      "Cluster D: Apify High-Failure Utility & B2B Data Clusters",
+      "Cluster E: Atlassian Forge Embedded B2B SaaS (0% Rev Share)"
+    ]),
+    Col("Streams in Cluster (18 Total)", [
+      "1. MT940/BAI2 -> CAMT.053 & CSV (#6)\n2. Excel/CSV -> SEPA pain.001/008 XML (#7)",
+      "3. Germany XRechnung/ZUGFeRD (#12)\n4. Poland KSeF FA(3) XML (#5)\n5. France Factur-X PDF/A-3 (#10)",
+      "6. IRS 1099 FIRE/Excel -> IRIS CSV (#4)\n7. Federal W-2 -> SSA EFW2 (#9)\n8. HIPAA EDI 835 ERA -> Excel (#13)\n9. [Parked] SC 1099 A2A XML & ACA 1095-C",
+      "10. Multi-ATS + 12-ATS Job Feeds (#1)\n11. Sheets & Dataset Dedup Utilities (#2)\n12. Notion Bulk Upsert Utility (#3)\n13. Federal SAM.gov + USAspending (#8)\n14. USPTO/EUIPO Trademark Watch (#11)\n15. B2B LeadGen/Enrichment + Crawlers (verified in queue)",
+      "16. Forge Zero-Egress Mermaid/OpenAPI Macro (60/100)\n17. Forge Deterministic Markdown Sync (56/100)\n18. Forge GitLab Jira Status Panel (49/100)"
+    ]),
+    Col("Why It Wins (Shared Moat)", [
+      "100% client-side Web Worker (zero bank IBAN/statement upload to server = instant enterprise trust) + HoldCo Stripe Live.",
+      "Reuses our verified Cloudflare Worker + hashed API key + Stripe webhook rail across DE, PL, and FR mandates.",
+      "100% browser-local parsing (zero SSN/EIN/PHI on our servers) + high-ticket ($49-$249) exact-match search.",
+      "38 actors already built & verified across 6 clusters; $0 cash acquisition; 267M weekly Apify runs + agi.apify.com MCP.",
+      "20k-33k category installs against 1.6*-3.0* rated incumbents; unlocks as soon as you do 15-min Atlassian Vendor setup."
+    ])
+  ])
+])
+
+tab_park_kill = TabItem("3. Parked (5) & Permanently Killed (6)", [
+  TextContent("Hard gates prevent us from wasting agent hours or ad spend on traps:"),
+  Table([
+    Col("Status", [
+      "PARK (60/100)",
+      "PARK (56/100)",
+      "PARK (64/100)",
+      "PARK (60/100)",
+      "REJECT (50/100)",
+      "REJECT (43/100)",
+      "REJECT (38/100)",
+      "REJECT (28/100)",
+      "REJECT (22/100)"
+    ]),
+    Col("Candidate", [
+      "Atlassian Forge: Zero-Egress Mermaid Diagram Macro",
+      "Atlassian Forge: Confluence Markdown Importer/Sync",
+      "IRS ACA 1095-C / 1094-C AIR XML Generator",
+      "South Carolina MyDORWAY 1099 A2A XML",
+      "Excel/CSV to NACHA ACH File Generator",
+      "CPSC eFiling FTZ Product Registry CSV Validator",
+      "CSV/OFX to QuickBooks QBO / IIF Converter",
+      "Standalone x402 / MPP Pay-Per-Call Endpoints",
+      "Etsy / Gumroad / Contra Bookkeeping Templates"
+    ]),
+    Col("Empirical Reason", [
+      "26,395 top-10 installs vs 2.8*-3.0* incumbents; gated only on 15-min Atlassian Vendor account setup.",
+      "20,756 top-10 installs vs 1.6* Importer+ (21/24 1-star reviews); gated on Atlassian Vendor account.",
+      "Unlike SSA BSO (EFW2), raw IRS AIR XML upload requires the employer to hold an active IRS AIR Transmitter Control Code (TCC).",
+      "Authoritative IRS IRIS A2A XML XSD schema is gated behind authorized e-Services SOR mailboxes.",
+      "KILLED by Free-Substitute Gate: achfilegenerator.com live HTTP check shows JSON-LD Offer price=$0 ('Your first export is free').",
+      "KILLED by Free-Substitute Gate: entrycerts.com already provides a free browser CPSC CSV validator.",
+      "KILLED by Free-Substitute Gate: QuickBooks Online natively imports CSVs; free tools saturate legacy IIF.",
+      "KILLED by Exposure Gate: Krimskrams built 46 x402+MPP endpoints, burned ~$7k tokens, and earned $1.54 total.",
+      "KILLED by Exposure Gate: 62-day median to first review on Etsy; needs 53-123 orders to clear $500."
+    ])
+  ])
+])
+
+action_card = Card([
+  CardHeader("Launch Next Wave of Stream Probes / Builds?", "Pick which of the newly discovered ADVANCE streams to kick off right now"),
+  Buttons([btn_treasury, btn_eu_expansion, btn_apify_notion, btn_all_wave2], "column")
+])
+
+btn_treasury = Button("1. Build & Probe Stream 4: ISO 20022 Treasury Bridge (MT940/BAI2 <-> CAMT.053 & SEPA pain.001)", @ToAssistant("Launch a YOLO builder/operator for Stream 4: the 100% browser-local ISO 20022 Treasury Bridge (MT940/BAI2 to CAMT.053/CSV + Excel to SEPA pain.001/pain.008 XML validator) and run the Keyword Planner volume/CPC check."), "primary")
+btn_eu_expansion = Button("2. Queue Poland KSeF FA(3) & France Factur-X on Stream 3 E-Invoice Engine", @ToAssistant("Send the Poland KSeF FA(3) XML (73/100) and France Factur-X PDF/A-3 (68/100) expansion specs to the Stream 3 E-Invoice operator so they are queued right behind the Germany XRechnung launch."), "secondary")
+btn_apify_notion = Button("3. Add Notion Bulk Upsert (32.8% Incumbent Fail) & SAM.gov/USPTO to Stream 2 Backlog", @ToAssistant("Send the newly discovered Apify Notion Exporter (79/100, incumbent 32.8% fail rate), SAM.gov Opportunities (71/100), and USPTO/EUIPO Trademark Watch (68/100) specs to the Stream 2 Apify operator for Batch 2."), "secondary")
+btn_all_wave2 = Button("4. Execute All Three Above (Treasury Stream 4 + EU Fiscal Expansion + Apify Batch 2)", @ToAssistant("Execute all three Wave 2 pipeline expansions: kick off the ISO 20022 Treasury Bridge (MT940/CAMT.053 + SEPA pain.001), queue Poland KSeF FA(3) and France Factur-X on Stream 3, and send the Notion/SAM.gov/USPTO specs to Stream 2."), "secondary")

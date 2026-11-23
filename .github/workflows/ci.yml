@@ -57,6 +57,11 @@ jobs:
         run: python3 -m compileall -q plugins/agent-coord/scripts scripts tests desktop/macos
       - name: Run JavaScript tests
         run: node --test tests/*.js
+      - name: Verify isolated OpenUI rendering in WebKit
+        if: runner.os == 'macOS'
+        run: |
+          python3 desktop/macos/openui_smoke.py
+          python3 desktop/macos/openui_smoke.py --portfolio
       - name: Run Python tests
         run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
       - name: Verify database latency and writer admission

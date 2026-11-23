@@ -4,6 +4,76 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const {actionMessage, reconcileChildren, commit} = require("../plugins/agent-coord/scripts/agent_coord/web/openui.js");
+const {normalizeSource, renderError} = require("../plugins/agent-coord/scripts/agent_coord/web/openui-frame.js");
+
+test("saved portfolio layout and tab shorthand adapt to the installed chat catalog", () => {
+  const source = fs.readFileSync(require.resolve("./fixtures/openui/portfolio.openui"), "utf8");
+  const normalized = normalizeSource(source);
+  assert.ok(normalized.startsWith("root = Card([header, kpis, tabs, action_card])"));
+  assert.ok(normalized.includes("kpis = Card([kpi1, kpi2, kpi3, kpi4])"));
+  assert.ok(normalized.includes('TabItem("1. Top 13 ADVANCE Streams (Ready Now)","1. Top 13 ADVANCE Streams (Ready Now)"\n, ['));
+  assert.equal((normalized.match(/@ToAssistant\(/g) || []).length, 4);
+  assert.equal(normalizeSource(normalized), normalized);
+});
+
+test("compatibility preserves quoted source, comments, references, and current signatures", () => {
+  const source = 'root = Card([TextContent("Stack([x]), Grid([a], 4), TabItem(\\\"x\\\", [])"), tabs])\n' +
+    '// Stack([a])\n# Grid([a], 4)\n/* TabItem("a", []) */\n' +
+    'tabs = Tabs([TabItem("id", "Label", [TextContent("a, b)")])])\n' +
+    'Stack = "reference"\nGrid = 4\nTabItem = "reference"';
+  assert.equal(normalizeSource(source), source);
+});
+
+test("compatibility handles nested calls and leaves unsupported or incomplete signatures diagnosable", () => {
+  assert.equal(normalizeSource('root = Stack([Grid([Card([TextContent("a, b)")])], 4)])'),
+    'root = Card([Card([Card([TextContent("a, b)")])])])');
+  assert.equal(normalizeSource('root = TabItem(label, [TextContent("x")])'),
+    'root = TabItem(label,label\n, [TextContent("x")])');
+  assert.equal(normalizeSource('root = TabItem("Label" // explanation\n, [TextContent("hello")])'),
+    'root = TabItem("Label" // explanation\n,"Label" // explanation\n, [TextContent("hello")])');
+  for (const source of ['root = Grid([x], columns)', 'root = Stack([x], "horizontal")',
+    'root = Grid([x], 2, "gap")', 'root = Stack([x]', 'root = Stack([x})',
+    'root = @Stack([x])', 'root = object.Stack([x])', 'root = "Stack([x])',
+    'root = /* Stack([x])']) {
+    assert.equal(normalizeSource(source), source);
+  }
+});
+
+test("render diagnostics identify the failing statement and remain bounded", () => {
+  assert.equal(renderError([]), null);
+  assert.equal(renderError([{severity: "warning", message: "partial"}]), null);
+  assert.equal(renderError([{statementId: "root", message: 'Unknown component "Missing"'}]),
+    'OpenUI: root: Unknown component "Missing"');
+  assert.ok(renderError([{message: "x".repeat(2000)}]).length < 300);
+});
+
+test("the sandbox normalizes rendering, reports recovery, and forwards literal actions once", () => {
+  const rendered = [], messages = [], handlers = {};
+  const parent = {}, port = {start() {}, postMessage: message => messages.push(message)};
+  const body = {setAttribute() {}, getBoundingClientRect: () => ({height: 100})};
+  const context = {parent, document: {body, documentElement: {dataset: {}, classList: {toggle() {}}},
+    getElementById() {}, addEventListener() {}},
+    ResizeObserver: class { observe() {} }};
+  context.window = {addEventListener: (name, handler) => { handlers[name] = handler; },
+    __OpenUI: {React: {createElement: (_, props) => props}, createRoot: () => ({render: props => rendered.push(props)}),
+      Renderer: {}, openuiChatLibrary: {}}};
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/openui-frame.js"), "utf8"), context);
+  handlers.message({source: parent, data: {type: "rf-openui-init"}, ports: [port]});
+  port.onmessage({data: {type: "render", response: 'root = Stack([TextContent("hello")])', theme: "dark", disabled: false}});
+  assert.equal(rendered.at(-1).response, 'root = Card([TextContent("hello")])');
+  rendered.at(-1).onError([{statementId: "root", message: "example"}]);
+  assert.equal(messages.at(-1).type, "error");
+  rendered.at(-1).onError([]);
+  assert.equal(messages.at(-1).type, "rendered");
+  const event = {type: "continue_conversation", humanFriendlyMessage: 'Stack([literal]) /close', params: {}};
+  rendered.at(-1).onAction(event);
+  const action = messages.find(message => message.type === "action");
+  assert.equal(action.event, event);
+  assert.equal(body.inert, true);
+  rendered.at(-1).onAction(event);
+  assert.equal(messages.filter(message => message.type === "action").length, 1);
+});
 
 test("UI responses preserve action and submitted values as a literal message", () => {
   const event = {type: "to_assistant", message: "/close", formState: {trip: {destination: {value: "Paris"}}}};

@@ -11,6 +11,10 @@ Strings use JSON quoting. A response can mix prose and multiple independent
 OpenUI fences. Close each fence; incomplete fences stay literal code. Controls
 in a still-running turn remain disabled until the turn ends.
 
+Use the chat catalog below, not the separate OpenUI layout library. `Card`
+already stacks its children vertically. Do not generate `Stack` or `Grid`.
+For tabs, use all three arguments: `TabItem("unique-id", "Label", [children])`.
+
 ```openui
 root = Card([heading, chart, actions])
 heading = CardHeader("Weekly signups", "Example data")
@@ -45,7 +49,7 @@ Useful signatures (trailing optional arguments may be omitted):
 | --- | --- |
 | Card | children, sources? |
 | CardHeader | title?, subtitle? |
-| TextContent | text |
+| TextContent | text, size? (`small`, `default`, `large`, `small-heavy`, `large-heavy`) |
 | Form | name, buttons, fields |
 | FormControl | label, input, hint? |
 | Input | name, placeholder?, type?, rules?, value? |
@@ -54,6 +58,9 @@ Useful signatures (trailing optional arguments may be omitted):
 | Button | label, action?, variant?, type?, size? |
 | Table | columns |
 | Col | label, data, type? |
+| Tabs | items (TabItem references) |
+| TabItem | value (unique string), trigger (label), content (children array) |
+| TagBlock | tags (strings), size? (`sm`, `md`, `lg`) |
 | BarChart / LineChart / AreaChart | labels, series, variant?, xLabel?, yLabel?, height? |
 | Series | category, values |
 
