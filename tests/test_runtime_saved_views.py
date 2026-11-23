@@ -140,6 +140,17 @@ class SavedViewTests(unittest.TestCase):
         with self.store._connection() as db:
             db.execute("INSERT OR REPLACE INTO coordinator_projection(singleton,version,state) VALUES(1,1,?)", (blob,))
 
+    def test_untargeted_input_can_queue_while_a_native_turn_start_awaits_its_identity(self):
+        message = {"message": "send after pending messages", "requestId": "next"}
+        self.save_projection(active={self.identity: None})
+        self.assertTrue(self.views.authorize_composer(self.identity, message))
+        with self.assertRaisesRegex(CoordinationError, "active turn changed"):
+            self.views.authorize_composer(self.identity, message, legacy_delivery=True)
+        with self.assertRaisesRegex(CoordinationError, "active turn changed"):
+            self.views.authorize_composer(self.identity, dict(message, expectedTurnId="previous"))
+        self.save_projection(active={self.identity: "ready"})
+        self.assertTrue(self.views.authorize_composer(self.identity, message, legacy_delivery=True))
+
     def test_admission_rejects_mismatched_turn_approval_closed_routing_and_unsupported_input(self):
         body = {"message":"continue", "requestId":"one", "expectedTurnId":"running"}
         self.save_projection(active={self.identity:"running"})

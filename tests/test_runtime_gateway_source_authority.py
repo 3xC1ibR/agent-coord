@@ -35,7 +35,7 @@ class SourceAuthorityTests(unittest.TestCase):
         resources.enter_context(patch.object(gateway.runtime, "discover", side_effect=lambda *_args, **_kw: self.record.copy()))
         resources.enter_context(patch.object(gateway.runtime, "control", side_effect=lambda *_args, **_kw: self.status.copy()))
         resources.enter_context(patch.object(gateway, "_exchange", side_effect=self.exchange))
-        views = SimpleNamespace(authorize_composer=lambda *_: True, close=lambda: None)
+        views = SimpleNamespace(authorize_composer=lambda *_args, **_options: True, close=lambda: None)
         resources.enter_context(patch.object(gateway, "SavedRuntimeViews", return_value=views))
         self.g = self.restart()
         self.g.connect_backend()
@@ -103,6 +103,26 @@ class SourceAuthorityTests(unittest.TestCase):
         self.accept()
         gateway.runtime.atomic_json(self.g.directory / "activation-request.json", {
             "request_id": "old", "source_instance": "old-source", "target": self.target, "phase": "authorized"})
+        self.g.resume()
+        self.assertEqual(self.queued(), "committed")
+        self.assertEqual(len(self.exchanges), 1)
+
+    def test_staged_ordinary_input_waits_for_native_start_before_the_first_delivery(self):
+        starting = True
+
+        def authorize(thread, body, *, legacy_delivery=False):
+            self.assertNotIn("expectedTurnId", body)
+            if starting and legacy_delivery:
+                raise gateway.CoordinationError("The active turn changed. Refresh before sending.")
+
+        self.g.views.authorize_composer = authorize
+        self.accept()
+        self.g.resume()
+        self.assertEqual(self.queued(), "queued")
+        self.assertFalse(self.exchanges)
+        self.assertFalse(self.g.intake.legacy_attempts())
+        starting = False
+        self.g.resume()
         self.g.resume()
         self.assertEqual(self.queued(), "committed")
         self.assertEqual(len(self.exchanges), 1)

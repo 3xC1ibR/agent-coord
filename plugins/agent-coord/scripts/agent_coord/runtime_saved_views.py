@@ -333,7 +333,7 @@ class SavedRuntimeViews:
         selector = SimpleNamespace(cwd=self.cwd, list_work_threads=lambda *, archived: [] if archived else visible)
         thread_mentions(body["message"], body, selector)
 
-    def authorize_composer(self, thread_id, body, *, receiver_owns_turn=False):
+    def authorize_composer(self, thread_id, body, *, receiver_owns_turn=False, legacy_delivery=False):
         """Admit ordinary composer input. The coordinator repeats its own checks on delivery."""
         if not isinstance(body, dict) or set(body) - {
                 "message", "images", "mentions", "requestId", "expectedTurnId", "activity", "windowId"}:
@@ -368,8 +368,11 @@ class SavedRuntimeViews:
                 raise CoordinationError("A decision is pending. Answer it in the conversation.")
             # The receipt-first native receiver can prove whether the exact
             # targeted turn just finished successfully and hand off once.
-            if not receiver_owns_turn and ((running and not active) or
-                    ("expectedTurnId" in body and body["expectedTurnId"] != active)):
+            # An ordinary draft has no turn target. The durable queue can
+            # accept it while a native start awaits its ID. The legacy HTTP
+            # delivery waits for that start before attempting transport.
+            if ((legacy_delivery and running and not active) or
+                    (not receiver_owns_turn and "expectedTurnId" in body and body["expectedTurnId"] != active)):
                 raise CoordinationError("The active turn changed. Refresh before sending.")
             if running and member["client"] not in {"codex", "claude"}:
                 raise CoordinationError("This provider needs its serving coordinator to receive active-turn input.")

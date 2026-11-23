@@ -504,7 +504,7 @@ class InteractionGateway:
         address, token, instance, payload = self.backend
         authority = self._destination()
         try:
-            self.views.authorize_composer(thread_id, body)
+            self.views.authorize_composer(thread_id, body, legacy_delivery=True)
         except (OSError, sqlite3.Error, ValueError, RuntimeError) as error:
             raise TransportNotAttempted(str(error)) from error
         self._before_transport(authority)

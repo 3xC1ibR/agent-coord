@@ -58,7 +58,7 @@ class GatewayTests(unittest.TestCase):
         if identity != "one":
             raise gateway.CoordinationError("Unknown thread")
 
-    def authorize_composer(self, identity, body):
+    def authorize_composer(self, identity, body, *, legacy_delivery=False):
         self.authorize_thread(identity)
 
     def get(self, route, query=None, **opts):
