@@ -321,3 +321,39 @@ test("stall escalation has its own receipt and opens the affected conversation",
   assert.equal(f.shared.shown[1].title, "agent-coord · Approval still waiting");
   f.client.destroy();
 });
+
+test("all incident descriptions and queued ages pass through with shared Settings opt-in", async () => {
+  const shared = {}, settings = fixture(shared), workspace = fixture(shared, false);
+  workspace.env.Notification.permission = "granted";
+  const cases = [
+    ["stalled", "Agent needs progress review", "No confirmed progress."],
+    ["unverified_tool", "Tool status unverified", "Tool execution could not be verified."],
+    ["long_running_tool", "Tool still running", "A tool is confirmed running."],
+    ["waiting_for_approval", "Approval still waiting", "An approval remains unanswered."],
+  ];
+  const events = cases.map(([classification, label, explanation], i) => approval(`stall:${100 + i}`, {
+    status: "stalled", classification, label,
+    body: `${explanation} Review the affected agent. 2 queued actionable requests; oldest 10 min.`,
+  }));
+  await workspace.client.receive(events);
+  assert.equal(shared.approvalClaims.size, 0, "Settings off leaves incident receipts available");
+  await settings.button.onclick();
+  assert.match(settings.button.title, /progress reviews/);
+  await workspace.client.receive(events);
+  assert.equal(shared.shown.length, 4);
+  shared.shown.forEach((notice, i) => {
+    assert.equal(notice.title, `agent-coord · ${cases[i][1]}`);
+    assert.equal(notice.options.body, `Check the build. ${events[i].body}`);
+  });
+  await settings.button.onclick();
+  const next = {...events[2], request_key: "stall:104"};
+  await workspace.client.receive([next]);
+  assert.equal(shared.shown.length, 4);
+  assert.equal(shared.approvalClaims.has(next.request_key), false);
+  await settings.button.onclick();
+  await workspace.client.receive([next, next]);
+  assert.equal(shared.shown.length, 5);
+  await shared.shown[4].onclick();
+  assert.deepEqual(workspace.opened, ["thread-one"]);
+  settings.client.destroy(); workspace.client.destroy();
+});

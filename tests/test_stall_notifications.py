@@ -363,3 +363,52 @@ class StallPushTests(unittest.TestCase):
         f.push.tick()
         reminders = [item for item in f.transport.sent if 'still waiting' in item['payload']['title']]
         self.assertEqual(len(reminders), 2)
+
+    def test_all_user_payload_classes_preserve_audited_queue_counts_on_web_and_native_push(self):
+        expected = {
+            'stalled': ('Agent needs progress review', 'No confirmed progress.'),
+            'unverified_tool': ('Tool status unverified', 'Tool execution could not be verified.'),
+            'long_running_tool': ('Tool still running', 'A tool is confirmed running.'),
+            'waiting_for_approval': ('Approval still waiting', 'An approval remains unanswered.'),
+        }
+        for native in (False, True):
+            for classification, (label, explanation) in expected.items():
+                with self.subTest(native=native, classification=classification):
+                    f = self.fixture(native)
+                    f.store.register(session_id='sender', client='codex', cwd=f.temp.name)
+                    for age in (0, 300):
+                        f.now = 1600 + age
+                        f.store.send_message(sender_session_id='sender', recipient_session_id='worker',
+                                             body='PRIVATE queued instruction', classification='action_required',
+                                             reply_required=False)
+                    f.now = 2200
+                    receipt = self.record(f, classification)
+                    # Delivery after observation must not rewrite an occurrence's audit facts.
+                    f.store.inbox('worker')
+                    notice = stalls.notifications(f.store)[0]
+                    self.assertEqual(notice['request_key'], 'stall:' + str(receipt['id']))
+                    self.assertEqual(notice['label'], label)
+                    self.assertEqual(notice['actionable_inbox_count'], 2)
+                    self.assertEqual(notice['oldest_actionable_age_seconds'], 600)
+                    self.assertIn(explanation, notice['body'])
+                    self.assertIn('2 queued actionable requests; oldest 10 min', notice['body'])
+                    self.assertNotIn('PRIVATE', json.dumps(notice))
+                    f.push.tick()
+                    self.assertEqual(len(f.transport.sent), 1)
+                    payload = f.transport.sent[0]['payload']
+                    self.assertTrue(payload['title'].endswith(label))
+                    self.assertIn(explanation, payload['body'])
+                    self.assertIn('2 queued actionable requests; oldest 10 min', payload['body'])
+                    self.assertNotIn('PRIVATE', json.dumps(payload))
+
+    def test_user_notification_reports_no_queued_work_and_respects_push_unsubscribe(self):
+        for native in (False, True):
+            with self.subTest(native=native):
+                f = self.fixture(native)
+                self.record(f)
+                notice = stalls.notifications(f.store)[0]
+                self.assertIn('0 queued actionable requests', notice['body'])
+                self.assertNotIn('oldest', notice['body'])
+                f.push.unsubscribe(f.device)
+                f.push.tick()
+                self.assertEqual(f.transport.sent, [])

@@ -215,8 +215,9 @@ class WebPush:
                  "snooze": "Reminder", "stalled": "Agent needs progress review",
                  "test": "Phone notifications are working"}[kind]
         context = context or {}
-        if kind == "stalled" and context.get("classification") == "waiting_for_approval":
-            label = "Approval still waiting"
+        if kind == "stalled":
+            from .stall_notifications import NOTIFICATION_COPY
+            label = context.get("label") or NOTIFICATION_COPY[context.get("classification", "stalled")][0]
         if kind == "approval":
             label = {"muse": "Muse", "kimi": "Kimi", "antigravity": "Antigravity", "claude": "Claude"}.get(context.get("client"), "Codex") + " is requesting approval"
         # Match desktop alerts using notification metadata, never turn contents
