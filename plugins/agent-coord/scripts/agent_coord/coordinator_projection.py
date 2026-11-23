@@ -307,22 +307,29 @@ class CoordinatorProjection:
         # A growing provider message shares all complete segments with its
         # previous checkpoint. Only new segment contents need compression.
         references, payloads = {}, {}
-        previous_by_prefix = {}
-        for previous_text in self.text_references:
-            if len(previous_text) >= PAYLOAD_SEGMENT_CHARACTERS:
-                prefix = previous_text[:PAYLOAD_SEGMENT_CHARACTERS]
-                previous_by_prefix.setdefault(prefix, []).append(previous_text)
+        previous_by_prefix = None
 
         def encode_text(text):
-            parts = references.get(text) or self.text_references.get(text)
-            if parts is None:
+            nonlocal previous_by_prefix
+            # Deep copies share immutable strings. Remember each live object,
+            # including separate equal outputs, so repeated fields and control
+            # checkpoints never hash or compare their complete contents again.
+            identity = id(text)
+            if identity in references:
+                parts = references[identity][1]
+                return parts[0] if len(parts) == 1 else parts
+            previous = self.text_references.get(identity)
+            if previous is None:
                 parts = []
-                # Concurrent outputs can have the same first segment and different tails.
-                # Reuse only a verified previous value's complete segments.
-                for previous in previous_by_prefix.get(text[:PAYLOAD_SEGMENT_CHARACTERS], ()):
-                    if text.startswith(previous):
-                        count = len(previous) // PAYLOAD_SEGMENT_CHARACTERS
-                        parts.extend(self.text_references[previous][:count])
+                if previous_by_prefix is None:
+                    previous_by_prefix = {}
+                    for value, previous_parts in self.text_references.values():
+                        if len(value) >= PAYLOAD_SEGMENT_CHARACTERS:
+                            previous_by_prefix.setdefault(value[:PAYLOAD_SEGMENT_CHARACTERS], []).append((value, previous_parts))
+                # Verify the actual previous text before reusing complete segments.
+                for value, previous_parts in previous_by_prefix.get(text[:PAYLOAD_SEGMENT_CHARACTERS], ()):
+                    if text.startswith(value):
+                        parts.extend(previous_parts[:len(value) // PAYLOAD_SEGMENT_CHARACTERS])
                         for digest in parts:
                             payloads[digest] = self.payload_cache[digest]
                         break
@@ -333,10 +340,12 @@ class CoordinatorProjection:
                         payloads[digest] = self.payload_cache.get(digest) or zlib.compress(data, level=1)
                     parts.append(digest)
             else:
+                parts = previous[1]
                 for digest in parts:
                     if digest not in payloads:
                         payloads[digest] = self.payload_cache[digest]
-            references[text] = parts
+            # A strong reference prevents object identity reuse until the next checkpoint.
+            references[identity] = (text, parts)
             return parts[0] if len(parts) == 1 else parts
 
         root = pack(state, None if inline else encode_text)

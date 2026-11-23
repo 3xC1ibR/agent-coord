@@ -145,6 +145,34 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(set(stage.call_args.kwargs.get("confirmed", ())), published)
         self.assertEqual(storage.read_history(self.store, self.identity), history)
 
+    def test_unchanged_retained_outputs_do_not_compare_entire_messages_each_checkpoint(self):
+        from agent_coord.coordinator_projection import PAYLOAD_SEGMENT_CHARACTERS
+        comparisons = []
+
+        class ObservableText(str):
+            __hash__ = str.__hash__
+
+            def __deepcopy__(self, _):
+                return self  # Ordinary immutable strings retain their identity on deepcopy.
+
+            def __eq__(self, other):
+                if self is not other:
+                    comparisons.append(len(self))
+                return str.__eq__(self, other)
+
+        content = "a" * (3 * PAYLOAD_SEGMENT_CHARACTERS + 5)
+        left, right = ObservableText(content), ObservableText(content)
+        self.sessions.claude.turns = {"left": {"items": [{"text": left}]}, "right": {"items": [{"text": right}]}}
+        self.projection.checkpoint()
+        comparisons.clear()
+        self.projection.checkpoint()
+        self.assertEqual(comparisons, [])
+        self.sessions.claude.turns["right"]["items"][0]["text"] = right + "!"
+        self.projection.checkpoint()
+        self.projection.load()
+        self.assertEqual(self.sessions.claude.turns["left"]["items"][0]["text"], content)
+        self.assertEqual(self.sessions.claude.turns["right"]["items"][0]["text"], content + "!")
+
     def test_large_active_turn_payloads_survive_restart_rollback_and_legacy_handover(self):
         from agent_coord.coordinator_projection import MIN_PAYLOAD_CHARACTERS
         large = "中" * MIN_PAYLOAD_CHARACTERS + "\udc00"
