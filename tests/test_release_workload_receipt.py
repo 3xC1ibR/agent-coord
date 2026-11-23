@@ -71,6 +71,27 @@ class ReleaseWorkloadTests(unittest.TestCase):
         self.check_private(self.report)
         self.check_public(self.release, self.receipts)
 
+    def test_stream_continuity_uses_original_provider_turns_while_the_composer_starts_new_ones(self):
+        turns = [[str(i), 200 + i, "turn-" + str(i)] for i in range(6)]
+        turns.append(["approval", 300, "approval-turn"])
+        self.report["pending_work"] = {"approval_thread": "approval", "preserved": True,
+                                       "before": {"provider_turns": turns}, "after": {"provider_turns": turns}}
+        self.report["stream_identity_counts"]["composer"] = 100
+        self.check_private(self.report)
+        for broken in ("missing", "restarted", "silent", "changed-turn"):
+            with self.subTest(broken=broken):
+                report = copy.deepcopy(self.report)
+                if broken == "missing":
+                    del report["stream_identity_counts"]["0"]
+                elif broken == "restarted":
+                    report["stream_identity_counts"]["0"] = 2
+                elif broken == "silent":
+                    del report["observed_stream_events"]["candidate"]["0"]
+                else:
+                    report["pending_work"]["after"] = {"provider_turns": turns[:-1] + [["approval", 301, "new-turn"]]}
+                with self.assertRaises(ValueError):
+                    self.check_private(report)
+
     def test_revision_attempt_architecture_and_rebuilt_files_are_bound(self):
         original = self.receipts[0]["context"]
         for index, value in enumerate([dict(self.run, id=100), "1.2.4", "5", "x86_64", "d"*64, "e"*64]):

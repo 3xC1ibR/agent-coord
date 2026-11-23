@@ -166,6 +166,25 @@ def verify_report(report, *, candidate, version, build, architecture, digest, sn
 
 
 
+def original_stream_counts(report):
+    counts = report["stream_identity_counts"]
+    pending = report.get("pending_work")
+    if pending is None:
+        return counts  # Earlier receipts contained only the sustained streams.
+    before = pending.get("before", {}).get("provider_turns", [])
+    if (pending.get("preserved") is not True or not before or before != pending.get("after", {}).get("provider_turns")
+            or any(not isinstance(row, list) or len(row) != 3 or not isinstance(row[0], str) or not row[0]
+                   or type(row[1]) is not int or row[1] <= 0 or not isinstance(row[2], str) or not row[2] for row in before)):
+        raise ValueError("The original provider turns were not preserved")
+    threads = {row[0] for row in before}
+    approval = pending.get("approval_thread")
+    if approval not in threads or len(threads) != len(before):
+        raise ValueError("The original streaming and approval conversations are not distinct")
+    # Each browser submission can start a fresh turn on the separate composer.
+    # The six sustained streams were already running before that client started.
+    return {thread: counts.get(thread) for thread in threads if thread != approval}
+
+
 def verify_workload(report):
     histories = report["saved_histories"]
     bands = {"medium": (256 * 1024, 10 * 1024**2 - 1), "large": (10 * 1024**2, 36 * 1024**2)}
@@ -190,7 +209,7 @@ def verify_workload(report):
             or type(workload["initial_text_bytes_per_claude"]) is not int
             or workload["initial_text_bytes_per_claude"] < 10 * 1024**2):
         raise ValueError("Two incident-sized Claude output streams are required")
-    identities = report["stream_identity_counts"]
+    identities = original_stream_counts(report)
     if len(identities) < 6 or any(type(n) is not int or n != 1 for n in identities.values()):
         raise ValueError("The active provider stream identities did not remain continuous")
     for phase, minimum in (("baseline", 15), ("upgrade", 1), ("candidate", 15)):
