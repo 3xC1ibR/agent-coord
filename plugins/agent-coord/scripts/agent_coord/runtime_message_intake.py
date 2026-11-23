@@ -244,6 +244,12 @@ class RuntimeMessageIntake:
                 if row["digest"] != digest:
                     raise CoordinationError("Submission request ID was already used for different input.")
                 return self._record(row)
+            target = body.get("expectedTurnId")
+            if target and db.execute("""SELECT 1 FROM intake WHERE thread_id=?
+                    AND state IN ('queued','uncertain')
+                    AND json_extract(display,'$.expectedTurnId') IS NOT ? LIMIT 1""",
+                                     (thread_id, target)).fetchone():
+                raise CoordinationError("An earlier message can change the active turn. Your steering was not accepted.")
             # Assign a foreground handoff only when it is the next input. This
             # check and the durable insertion share the same writer transaction.
             if serving_authority and db.execute("""SELECT 1 FROM intake WHERE thread_id=?

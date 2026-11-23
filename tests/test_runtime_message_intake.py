@@ -44,6 +44,32 @@ class RuntimeMessageIntakeTests(unittest.TestCase):
             return {"turnId": body["expectedTurnId"]}
         return self.receipts.run(thread, body, deliver)
 
+    def test_explicit_target_never_registers_behind_a_turn_changing_predecessor(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        original = {"message":"earlier", "requestId":"prior"}
+        self.intake.accept("one", original)
+        started, release = threading.Event(), threading.Event()
+        def previous(thread, body):
+            started.set()
+            self.assertTrue(release.wait(3))
+            self.receipts.run(thread, body, lambda: {"turn":{"id":"advanced"}})
+        with ThreadPoolExecutor(1) as pool:
+            worker = pool.submit(self.intake.drain_one,"one",self.lookup,previous)
+            self.assertTrue(started.wait(2))
+            try:
+                with self.assertRaisesRegex(CoordinationError, "earlier message"):
+                    self.intake.accept("one", self.body)
+                self.assertIsNone(self.intake.get("one", self.body["requestId"]))
+            finally:
+                release.set()
+            self.assertEqual(worker.result()["state"],"committed")
+        self.assertEqual(self.intake.accept("one",self.body)["state"],"queued")
+        different = {**self.body,"expectedTurnId":"unrelated","requestId":"unrelated"}
+        with self.assertRaisesRegex(CoordinationError, "earlier message"):
+            self.intake.accept("one",different)
+        self.assertIsNone(self.intake.get("one","unrelated"))
+
     def test_durable_accept_then_restart_drains_original_request_exactly_once(self):
         first = self.intake.accept("one", self.body)
         self.assertEqual(first["state"], "queued")

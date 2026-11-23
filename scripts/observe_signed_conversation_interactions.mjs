@@ -230,6 +230,8 @@ async function sends() {
             draft_matches: e.target.value === marker,
             selected_matches: state.selected === decodeURIComponent(location.hash.slice(1)),
             detail_running: !!state.detail?.running, active_turn_present: !!state.detail?.activeTurn,
+            pending_transfer: !!state.outgoing?.pendingTransferCounts?.has(state.selected),
+            ordered_composer: document.querySelector("#send").getAttribute("aria-label") === "Send after pending messages",
             accepts_untargeted_input: !!state.detail?.acceptsUntargetedInput, has_detail: !!state.detail, refreshing: !!state.detailRefreshing,
             read_pending: !!entry?.pending, opening_submission: !!entry?.openingSubmission,
             sending: !!state.sending?.has(state.selected), send_disabled: document.querySelector("#send").disabled,

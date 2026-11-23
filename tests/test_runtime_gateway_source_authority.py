@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -251,6 +252,14 @@ class SourceAuthorityTests(unittest.TestCase):
         runtime.payload = self.root
         admission = gateway.runtime.AdmissionGate()
         runtime.server = SimpleNamespace(browser_sessions=SimpleNamespace(admission=admission), server_port=3)
+        runtime.server.browser_sessions.lock = threading.RLock()
+        runtime.server.browser_sessions.active = {"one":"active"}
+        for target, matches in (("other",False),("active",True)):
+            result = runtime.dispatch({"action":"transfer-admission", "thread_id":"one","expected_turn_id":target})
+            self.assertIs(result["matches_active_turn"],matches)
+        runtime.server.browser_sessions.active.clear()
+        self.assertFalse(runtime.dispatch({"action":"transfer-admission", "thread_id":"one",
+                                         "expected_turn_id":"active"})["matches_active_turn"])
         with patch.object(gateway.runtime.Runtime, "status", side_effect=AssertionError("full status called")):
             for paused in [False, True, False]:
                 admission.pause() if paused else admission.resume()

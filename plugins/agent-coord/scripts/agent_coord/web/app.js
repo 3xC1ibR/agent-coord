@@ -1660,13 +1660,15 @@ function renderStatus() {
   $("composer").hidden = !work?.browser_session && !(!state.detail && state.detailRefreshing);
   renderDetailRefresh();
   const starting = !dispatcher && running && !state.detail.activeTurn;
-  const ordinaryStartingInput = starting && state.detail.acceptsUntargetedInput && ["codex", "claude"].includes(work?.client);
+  const orderedInput = !dispatcher && state.outgoing?.pendingTransferCounts?.has(state.selected) &&
+    ["codex", "claude"].includes(work?.client);
+  const ordinaryStartingInput = starting && (orderedInput || state.detail.acceptsUntargetedInput) && ["codex", "claude"].includes(work?.client);
   $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (starting && !ordinaryStartingInput) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
-  const sendAction = dispatcher ? "Send request" : running && !ordinaryStartingInput ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue message" : "Steer current turn") : "Send message";
+  const sendAction = dispatcher ? "Send request" : orderedInput ? "Send after pending messages" : running && !ordinaryStartingInput ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue message" : "Steer current turn") : "Send message";
   $("send").setAttribute?.("aria-label", sendAction);
   $("send").title = sendAction + " (Enter)";
   $("queue").hidden = dispatcher || !running || !["codex", "claude", "muse"].includes(work?.client);
-  $("queue").disabled = $("send").disabled || starting;
+  $("queue").disabled = $("send").disabled || starting || !!orderedInput;
   $("message").disabled = archived || !!state.transferLocks?.has(state.selected);
   $("stop").hidden = !running;
   $("close-thread").textContent = archived ? "Reopen" : running || ["running", "needs input"].includes(work?.status) ? "Stop and close" : "Close thread";
@@ -1926,6 +1928,7 @@ class OutgoingMessages {
     this.threads = new Map();
     this.sequence = 0;
     this.transferStates = new Map();
+    this.pendingTransferCounts = new Map();
   }
 
   list(id) { return this.threads.get(id) || []; }
@@ -1958,6 +1961,13 @@ class OutgoingMessages {
       const previous = states.get(record.requestId);
       if (previous === record.state || previous === "committed" || previous === "failed" ||
           (previous === "uncertain" && record.state === "queued")) continue;
+      const wasPending = previous === "queued" || previous === "uncertain";
+      const isPending = record.state === "queued" || record.state === "uncertain";
+      if (isPending !== wasPending) {
+        const count = (this.pendingTransferCounts.get(id) || 0) + (isPending ? 1 : -1);
+        if (count) this.pendingTransferCounts.set(id, count);
+        else this.pendingTransferCounts.delete(id);
+      }
       states.set(record.requestId, record.state);
       let entry = this.list(id).find(row => row.submissionId === record.requestId);
       // A new or reconnected window uses ordinary history for past deliveries.
@@ -3789,7 +3799,9 @@ async function sendMessage(mode = "steer") {
   const draftId = draft?.draftId || id;
   const ticket = state.rollUp?.ticket(id);
   const images = state.attachments?.snapshot(draftId) || [];
-  const ordinaryStartingInput = mode === "steer" && detail?.acceptsUntargetedInput &&
+  const orderedInput = mode === "steer" && !dispatcher && !reviewing && !text.trimStart().startsWith("/") &&
+    state.outgoing?.pendingTransferCounts?.has(id) && ["codex", "claude"].includes(detail?.work_thread?.client);
+  const ordinaryStartingInput = mode === "steer" && (orderedInput || detail?.acceptsUntargetedInput) &&
     ["codex", "claude"].includes(detail.work_thread?.client) && !text.trimStart().startsWith("/");
   if (state.busy || state.sending?.has(sendKey) || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
       (!dispatcher && !reviewing && detail.running && !detail.activeTurn && !ordinaryStartingInput) || state.attachments?.pending(draftId) || (!text.trim() && !images.length)) return;
@@ -3798,7 +3810,7 @@ async function sendMessage(mode = "steer") {
   if (mentions.length) body.mentions = mentions;
   if (state.sourceWindowId) body.windowId = state.sourceWindowId;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
-  if (!dispatcher && !reviewing && detail.running && detail.activeTurn && mode !== "queue") body.expectedTurnId = detail.activeTurn;
+  if (!dispatcher && !reviewing && !orderedInput && detail.running && detail.activeTurn && mode !== "queue") body.expectedTurnId = detail.activeTurn;
   (state.sending ||= new Set()).add(sendKey); renderStatus();
   let echo = null;
   const showOutgoing = () => {
@@ -4433,8 +4445,10 @@ async function boot() {
       receive: (id, records) => {
         if (id !== state.selected) return;
         const detail = state.conversations?.get(id)?.detail;
+        const wasWaiting = state.outgoing.pendingTransferCounts.has(id);
         if (state.outgoing.transfers(id, records, detail) && state.timelineThread === id)
           state.outgoing.update(document, $("timeline"), id, detail);
+        if (wasWaiting !== state.outgoing.pendingTransferCounts.has(id)) renderStatus();
       }
     });
     // Tiled conversations share the workspace window's existing provider stream.

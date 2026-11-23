@@ -156,7 +156,7 @@ class InteractionGateway:
             return self.terminal
         return self.source
 
-    def verify_origin(self, backend, *, require_admission=False):
+    def verify_origin(self, backend, *, require_admission=False, target=None):
         authority = self._destination()
         self._before_transport(authority)
         if require_admission:
@@ -165,7 +165,12 @@ class InteractionGateway:
             # serving-status call on the asynchronous delivery path.
             record = _private_json(self.runtime_directory / "discovery.json")
             action = "transfer-admission" if self.admission_probe else "status"
-            status = runtime.control(record, action, timeout=3)
+            if target and not self.admission_probe:
+                raise CoordinationError("The receiving coordinator cannot confirm this steering target.")
+            probe = {"thread_id": target[0], "expected_turn_id": target[1]} if target else {}
+            status = runtime.control(record, action, timeout=3, **probe)
+            if target and status.get("matches_active_turn") is not True:
+                raise CoordinationError("The active turn changed. Refresh before sending.")
             if (status.get("paused") or status.get("status") != "serving"
                     or any(status.get(k) != authority[k] for k in ("url", "payload", "instance", "database"))):
                 raise CoordinationError("The receiving coordinator changed or work is paused.")
@@ -392,11 +397,11 @@ class InteractionGateway:
         submission = self.intake.accept(thread, body, serving_authority=receiver.authority)
         waiting = submission is None
         if waiting:
-            # An untargeted ordinary message can wait in FIFO order while the
-            # earlier native start obtains its turn ID. A supplied target
-            # still needs the saved-turn check before accepting deferred work.
+            # A verified live turn and a FIFO containing only steers to that
+            # same target allow ordered steering. Ordinary messages may start a
+            # successor, so the intake checks predecessors inside its insert.
             if "expectedTurnId" in body:
-                return None
+                self.verify_origin(self.backend, require_admission=True, target=(thread, body["expectedTurnId"]))
             self._before_transport(self.terminal)
             submission = self.intake.accept(thread, body)
         self.receipt_completed(thread)
@@ -407,7 +412,10 @@ class InteractionGateway:
         except TEMPORARY:
             # The journal already accepted the request. A transient failure
             # cannot convert its receipt into a definitive client rejection.
-            return 202, {"transferSubmission": self.intake.get(thread, body["requestId"])}
+            submission = self.intake.get(thread, body["requestId"])
+            if "expectedTurnId" in body:
+                return self.submission_response(thread, body, submission)
+            return 202, {"transferSubmission": submission}
         finally:
             self.receipt_completed(thread)
         return self.submission_response(thread, body, self.intake.get(thread, body["requestId"]))
@@ -419,6 +427,22 @@ class InteractionGateway:
             if not receiver or receiver.authority != authority:
                 raise CoordinationError("The receiving coordinator changed.")
             self.verify_origin(self.backend, require_admission=True)
+            if "expectedTurnId" in body and submission["state"] in {"queued", "uncertain"}:
+                # A concurrent drainer may own this head. Wait for its real
+                # decision without issuing another provider request.
+                deadline = time.monotonic() + 2
+                while submission["state"] in {"queued", "uncertain"} and not self.stop.is_set():
+                    with self.condition:
+                        revision = self.revision
+                    submission = self.intake.get(thread, body["requestId"])
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or submission["state"] not in {"queued", "uncertain"}:
+                        break
+                    with self.condition:
+                        self.condition.wait_for(lambda: self.revision != revision or self.stop.is_set(), timeout=remaining)
+                if submission["state"] in {"queued", "uncertain"}:
+                    return 503, {"code":"submission_unconfirmed", "requestId":body["requestId"],
+                                 "error":"The receiver has not confirmed this steering request. Check the conversation before sending again."}
             if submission["state"] == "failed":
                 raise CoordinationError("The receiving coordinator declined this submission. Refresh before sending.")
             if submission["state"] == "committed":

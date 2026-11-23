@@ -125,9 +125,42 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(seen, [body])
         self.assertEqual(self.http("POST", endpoint, first, auth)[1]["transferSubmission"]["state"], "committed")
         self.assertEqual(self.g.intake.pending_threads(), ["other"])
+        pending = {**body, "requestId":"pending-explicit"}
+        self.g.intake.accept("one", pending, serving_authority=self.g.receiver.authority)
+        with self.g.intake._connection() as db:
+            db.execute("UPDATE intake SET state='uncertain' WHERE request_id=?", (pending["requestId"],))
+        status, response = self.http("POST", endpoint, pending, auth)
+        self.assertEqual((status,response["code"],response["requestId"]), (503,"submission_unconfirmed","pending-explicit"))
+        self.assertEqual(seen, [body])
         self.current["paused"] = True
         self.assertNotEqual(self.http("POST", endpoint, {**body, "requestId":"stopped"}, auth)[0], 200)
         self.assertEqual(seen, [body])
+
+    def test_ordered_steering_requires_exact_live_target_and_matching_predecessors(self):
+        from agent_coord.runtime_message_intake import OrdinaryComposerReceiver
+        self.current.update(instance="new", payload=self.g.payload)
+        self.g.backend = (*self.g.backend[:2], "new", self.g.payload)
+        self.g.terminal = self.g._authority(self.current)
+        self.g.admission_probe = True
+        gateway.runtime.atomic_json(self.g.runtime_directory / "discovery.json", self.current)
+        self.g.fence = {**self.request, "state":"draining"}
+        self.g.views.authorize_composer = lambda thread, body, **options: self.authorize_thread(thread)
+        self.g.receiver = OrdinaryComposerReceiver(self.g.database,"new",self.g.payload,lambda *_: self.fail("replayed"))
+        auth, path = {"X-Agent-Coord-Token":"browser"}, "/api/browser/sessions/one/messages"
+        first={"requestId":"older","message":"one","expectedTurnId":"exact"}
+        self.g.intake.accept("one",first)
+        live = {"one":"exact"}
+        def control(record, action, **options):
+            self.assertEqual(action,"transfer-admission")
+            return {**self.current, "matches_active_turn": live.get(options.get("thread_id")) == options.get("expected_turn_id")}
+        with patch.object(gateway.runtime, "control", side_effect=control):
+            self.assertEqual(self.http("POST",path,{**first,"requestId":"also-exact"},auth)[0],202)
+            self.assertEqual(self.http("POST",path,{**first,"requestId":"stale","expectedTurnId":"other"},auth)[0],409)
+            live["one"] = "successor"
+            self.assertEqual(self.http("POST",path,{**first,"requestId":"finished"},auth)[0],409)
+            self.g.intake.accept("one",{"message":"may start new turn","requestId":"unbound"})
+            self.assertEqual(self.http("POST",path,{**first,"expectedTurnId":"successor","requestId":"changed"},auth)[0],409)
+        self.assertEqual([r["requestId"] for r in self.g.intake.outstanding("one")],["older","also-exact","unbound"])
 
     def test_untargeted_input_waits_for_earlier_native_start_without_choosing_a_turn(self):
         import hashlib

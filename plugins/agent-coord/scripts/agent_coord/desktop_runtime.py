@@ -1224,9 +1224,17 @@ class Runtime:
         if action == "transfer-admission":
             # The caller must check work admission before durably claiming a
             # message. A per-input check does not need recovery or DB metrics.
-            admission = self.server.browser_sessions.admission
+            sessions = self.server.browser_sessions
+            admission = sessions.admission
+            target = {}
+            if "thread_id" in body or "expected_turn_id" in body:
+                thread, turn = body.get("thread_id"), body.get("expected_turn_id")
+                if not all(isinstance(value, str) and 0 < len(value) <= 200 for value in (thread, turn)):
+                    raise RuntimeError("A thread and turn identity are required for steering.")
+                with sessions.lock:
+                    target["matches_active_turn"] = sessions.active.get(thread) == turn
             with admission.lock:
-                return {**self.identity(), "status": "preparing" if self.trial else "serving",
+                return {**self.identity(), **target, "status": "preparing" if self.trial else "serving",
                         "paused": admission.paused, "url": f"http://127.0.0.1:{self.server.server_port}/"}
         if action == "client-request":
             from .runtime_requests import execute_request
