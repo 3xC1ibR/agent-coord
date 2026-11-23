@@ -17,7 +17,10 @@ import weakref
 
 
 PART_CHARACTERS = 16 * 1024
-BATCH_BYTES = 256 * 1024
+# Tokenizing several full output parts in one transaction can hold the only
+# writer beyond foreground admission deadlines. Keep the persisted part format
+# and its two-character overlap, but yield between full parts.
+BATCH_BYTES = 24 * 1024
 BATCH_ROWS = 512
 READ_ROWS = 32
 MERGE_PAGES = 8
@@ -134,19 +137,20 @@ def _text_rows(source, folded):
 
 def _write_batch(store, parts, completed, size):
     from .conversation_search import _measure, _operation
+    keys = _json([(source, part) for source, part, _ in parts])
     payload, markers = _json(parts), _json(completed)
     with _measure(store, "substring_stage") as measurement:
         with _operation(store, "search.substring_stage"), store._connection() as db:
             if parts:
                 db.execute("""INSERT OR IGNORE INTO conversation_substring_parts(source,part)
-                    SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)""", (payload,))
+                    SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)""", (keys,))
                 db.execute("""INSERT INTO conversation_substring_terms(rowid,folded)
                     SELECT p.id,json_extract(j.value,'$[2]') FROM json_each(?) j
                     JOIN conversation_substring_parts p ON p.source=json_extract(j.value,'$[0]')
                       AND p.part=json_extract(j.value,'$[1]') WHERE p.indexed=0""", (payload,))
                 db.execute("""UPDATE conversation_substring_parts SET indexed=1
-                    WHERE (source,part) IN (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]')
-                        FROM json_each(?))""", (payload,))
+                    WHERE indexed=0 AND (source,part) IN (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]')
+                        FROM json_each(?))""", (keys,))
             if completed:
                 db.execute("""INSERT OR IGNORE INTO conversation_substring_ready
                     SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)""", (markers,))
@@ -174,7 +178,7 @@ def _stage_steps(store, rows):
             continue
         kind, row = event
         length = len(_json(row).encode("utf-8")) + 1
-        if size + length > BATCH_BYTES or len(parts) + len(completed) >= BATCH_ROWS:
+        if (parts or completed) and (size + length > BATCH_BYTES or len(parts) + len(completed) >= BATCH_ROWS):
             _write_batch(store, parts, completed, size)
             batches += 1
             parts, completed, size = [], [], 4
