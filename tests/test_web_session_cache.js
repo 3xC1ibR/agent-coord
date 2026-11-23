@@ -36,7 +36,7 @@ function setup() {
     renderTitle() {}, renderList() {}, renderThread() {}, renderRequests() {}, renderQueuedMessages() {}, renderStatus() {},
     refreshList: async () => {}, loadSessionModels() {}, sessionPath: id => "sessions/" + id, threadPath: id => "threads/" + id,
     scheduleDetail: () => { c.scheduled = (c.scheduled || 0) + 1; }, scheduleList() {}, showError() {},
-    window: {addEventListener() {}}, EventSource: function () { c.events = this; },
+    window: {addEventListener() {}}, EventSource: function (url) { c.events = this; this.url = url; },
     renderTimeline() {
       c.renders = (c.renders || 0) + 1;
       c.state.timelineThread = c.state.selected;
@@ -435,6 +435,17 @@ test("cached approvals wait for authoritative refresh while the composer stays u
   assert.equal(c.state.detailRefreshing, false, "cached sending must remain usable");
   gate.resolve(fixture("one")); await opening;
   assert.equal(c.state.detailRefreshing, false);
+});
+
+test("a new page subscribes from its configuration snapshot and supports older backends", () => {
+  const c = setup();
+  vm.runInContext(source.slice(source.indexOf("function connect("), source.indexOf("function newProject(")), c);
+  c.state.config = {eventCursor: 81, completionCursor: 17};
+  c.connect();
+  assert.equal(c.events.url, "/api/browser/events?after=81&completion_after=17");
+  delete c.state.config.eventCursor;
+  c.connect();
+  assert.equal(c.events.url, "/api/browser/events?after=0&completion_after=17");
 });
 
 test("an SSE reset invalidates an outstanding cached refresh", async () => {

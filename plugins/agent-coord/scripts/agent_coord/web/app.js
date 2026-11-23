@@ -2506,7 +2506,8 @@ function scheduleDetail() {
   }, 100);
 }
 function connect() {
-  const events = new EventSource(base + "events?completion_after=" + state.config.completionCursor);
+  const events = new EventSource(base + "events?after=" + (state.config.eventCursor ?? 0)
+    + "&completion_after=" + state.config.completionCursor);
   events.onopen = () => { for (const entry of state.conversations?.values() || []) entry.revision++; $("connection").replaceChildren(node("span", "Connected locally", "sr-only")); $("connection").title = "Connected locally"; $("connection").dataset.state = "connected"; scheduleList(); if (state.selected) scheduleDetail(); };
   events.onerror = () => { $("connection").textContent = "Reconnecting…"; $("connection").title = "Reconnecting…"; $("connection").dataset.state = "reconnecting"; };
   events.onmessage = message => {

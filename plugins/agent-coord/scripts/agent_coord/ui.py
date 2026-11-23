@@ -585,6 +585,10 @@ def _handler(
             route = parsed.path.removeprefix("/api/browser/")
             query = parse_qs(parsed.query, keep_blank_values=True)
             if route == "config":
+                # The page fetches its conversation snapshots after config.
+                # Subscribe from here to cover events arriving during startup.
+                with browser_sessions.changed:
+                    event_cursor = browser_sessions.sequence
                 self._json(HTTPStatus.OK, {"token": csrf_token, "cwd": browser_sessions.cwd or os.getcwd(), "workspaceRoot": browser_sessions.cwd,
                                           "recurringSchedules": True,
                                           # The asks view checks this before offering kinds, notes, snooze and the log.
@@ -592,6 +596,7 @@ def _handler(
                                           # Records the user's reply to an open ask, for the mark every device shows.
                                           "askReplies": True,
                                           "remote": self._remote_request(),
+                                          "eventCursor": event_cursor,
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
                 from .database_writer import performance_snapshot

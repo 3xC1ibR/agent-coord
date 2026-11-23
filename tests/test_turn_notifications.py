@@ -245,6 +245,22 @@ class NotificationHTTPTests(unittest.TestCase):
                 if line.startswith("data: "):
                     return json.loads(line[6:])
 
+    def test_fresh_page_stream_skips_prior_output_and_delivers_events_after_config(self):
+        method = "item/commandExecution/outputDelta"
+        self.sessions._publish(method, {"threadId": "background", "delta": "x" * (1024 * 1024)})
+        with urllib.request.urlopen(self.url + "/api/browser/config", timeout=3) as response:
+            config = json.load(response)
+        self.sessions._publish(method, {"threadId": "background", "delta": "new"})
+        # Use the older client's fallback to reproduce the unnecessary replay
+        # when running this check against a release without the cursor.
+        path = "/api/browser/events?after={}&completion_after={}".format(
+            config.get("eventCursor", 0), config["completionCursor"])
+        first = self.event_batch(path)
+        self.assertEqual([len(e["params"]["delta"]) for e in first["events"] if e["method"] == method], [3])
+        self.sessions._publish(method, {"threadId": "background", "delta": "next"})
+        resumed = self.event_batch(path, f'{first["seq"]}:{first["completionSeq"]}')
+        self.assertEqual([e["params"]["delta"] for e in resumed["events"] if e["method"] == method], ["next"])
+
     def test_stream_delivers_external_completions_and_resumes_without_replay(self):
         self.assertEqual(self.config["completionCursor"], 0)
         first = self.complete("first")
