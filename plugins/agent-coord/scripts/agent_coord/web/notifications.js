@@ -10,9 +10,13 @@ class TurnNotifications {
     this.preferenceKey = "agent-coord.notifications.enabled";
     this.focusKey = "agent-coord.notifications.focus";
     this.changed = () => { this.syncFocus(); this.render(); };
+    this.storageChanged = event => {
+      if (event.key === null || event.key === this.preferenceKey) this.render();
+    };
     this.pagehide = () => this.destroy();
     if (this.button) this.button.onclick = () => this.toggle().catch(onError);
-    for (const event of ["focus", "blur", "storage"]) env.addEventListener(event, this.changed);
+    for (const event of ["focus", "blur"]) env.addEventListener(event, this.changed);
+    env.addEventListener("storage", this.storageChanged);
     env.document.addEventListener("visibilitychange", this.changed);
     env.addEventListener("pagehide", this.pagehide);
     // A crashed or closed tab must not suppress future alerts indefinitely.
@@ -114,7 +118,8 @@ class TurnNotifications {
     if (this.savedFocus()?.owner === this.owner) this.write(this.focusKey, "null");
     this.closed = true;
     this.env.clearInterval(this.timer);
-    for (const event of ["focus", "blur", "storage"]) this.env.removeEventListener(event, this.changed);
+    for (const event of ["focus", "blur"]) this.env.removeEventListener(event, this.changed);
+    this.env.removeEventListener("storage", this.storageChanged);
     this.env.document.removeEventListener("visibilitychange", this.changed);
     this.env.removeEventListener("pagehide", this.pagehide);
   }

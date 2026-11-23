@@ -39,6 +39,21 @@ const completion = (id = 1, values = {}) => ({id, thread_id: "thread-one", title
 const approval = (key = "request-one", values = {}) => ({request_key: key, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "approval", ...values});
 const snooze = (id = 1, values = {}) => ({id, thread_id: "thread-one", title: "Check the build", project_name: "agent-coord", status: "snooze", ...values});
 
+test("another window's storage event never publishes focus back to that window", () => {
+  const first = fixture(), second = fixture(first.shared);
+  first.focus("first");
+  second.focus("second");
+  const published = first.shared.values.get(second.client.focusKey);
+  for (const key of [second.client.focusKey, "unrelated", second.client.preferenceKey, null]) {
+    first.listeners.get("storage")({key});
+    assert.equal(first.shared.values.get(second.client.focusKey), published);
+  }
+  first.env.Notification.permission = "granted";
+  first.shared.values.set(first.client.preferenceKey, "true");
+  first.listeners.get("storage")({key: first.client.preferenceKey});
+  assert.equal(first.button["aria-pressed"], "true");
+});
+
 test("a live question alerts once and opens the child with the actual question", async () => {
   const f = fixture();
   await f.button.onclick();

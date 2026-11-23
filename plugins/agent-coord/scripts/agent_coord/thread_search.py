@@ -25,7 +25,10 @@ from urllib.parse import quote, urlencode
 from .organization import UNSET
 from .store import CoordinationError
 from .threads import project_root
-from .conversation_search import _measure, _operation, message_condition, refresh_messages
+from .conversation_search import (
+    _measure, _operation, ensure_message_schema, index_search_snapshot, message_condition,
+    pending_search_evidence, refresh_messages,
+)
 
 # Separators of str.split(); none is above U+3000.
 _SPACE = "".join(chr(code) for code in range(0x3001) if chr(code).isspace())
@@ -168,6 +171,8 @@ def _number(column):
 
 
 def _decode_number(value):
+    if isinstance(value, str) and value.startswith("binary64:"):
+        return float.fromhex(value[9:])
     if not isinstance(value, list):
         return value
     whole, fraction, remainder, rendered = value
@@ -262,7 +267,7 @@ def _search_connection(store):
         with store.reading(), store._connection() as db:
             names, organization_missing = db.execute(f"""SELECT
                 (SELECT json_group_array(name) FROM sqlite_master WHERE name IN
-                 ('browser_sessions', 'browser_inbox_wake', {','.join('?' * len(_CONTEXT_SCHEMA))})),
+                 ('browser_sessions', 'browser_history', 'browser_inbox_wake', {','.join('?' * len(_CONTEXT_SCHEMA))})),
                 EXISTS (SELECT 1 FROM work_threads t LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
                         WHERE o.thread_id IS NULL)""", tuple(_CONTEXT_SCHEMA)).fetchone()
             tables = set(json.loads(names))
@@ -280,7 +285,7 @@ def _search_connection(store):
 
 def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                    repository_id=UNSET, project_id=UNSET, app_only=False,
-                   source="all", my_messages=False, thread_ids=None, schedule_index=None):
+                   source="all", my_messages=False, thread_ids=None, schedule_index=None, snapshot_dirty=False):
     if not isinstance(query, str) or not query.strip() or len(query) > 500:
         raise CoordinationError("Search query must contain 1–500 characters.")
     terms = list(dict.fromkeys(query.casefold().split()))
@@ -322,7 +327,11 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     use_context, use_messages = source != "messages", source != "context"
     message_where = message_condition(terms, "user" if my_messages else None)
     message_relevance = _message_relevance_sql(single, closeness)
-    refresh_messages(store, schedule_index=schedule_index)
+    if snapshot_dirty:
+        ensure_message_schema(store)
+    else:
+        refresh_messages(store, schedule_index=schedule_index)
+    dirty = {}
     with _measure(store, "query"), _search_connection(store) as (db, tables):
         app = "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)" if "browser_sessions" in tables else "0"
         if app_only:
@@ -337,6 +346,23 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
             params["substring_candidates"] = indexed
             message_rows = message_source(include_text=True, indexed=indexed is not None)
             folded_rows = message_source(include_text=False, indexed=indexed is not None)
+            history_rows = "conversation_search_history_index"
+            if snapshot_dirty and "browser_history" in tables:
+                dirty, hits = pending_search_evidence(db, terms, thread_ids, user_only=my_messages)
+                if dirty:
+                    params["dirty_histories"] = json.dumps(dirty)
+                    params["dirty_hits"] = json.dumps(hits)
+                    current = "thread_id NOT IN (SELECT key FROM json_each(:dirty_histories))"
+                    history_rows = f"""(SELECT thread_id, status FROM conversation_search_history_index
+                        WHERE {current} UNION ALL SELECT key, value FROM json_each(:dirty_histories))"""
+                    columns = ("thread_id", "turn_id", "item_id", "role", "timestamp", "text", "folded", "position")
+                    values = [f"json_extract(value, '$[{i}]')" for i in range(len(columns))]
+                    evidence = ",".join(f"{value} AS {name}" for value, name in zip(values, columns))
+                    def with_dirty(rows):
+                        return f"""SELECT * FROM ({rows}) WHERE {current}
+                            UNION ALL SELECT {evidence} FROM json_each(:dirty_hits)"""
+                    message_rows = with_dirty(message_rows)
+                    folded_rows = with_dirty(folded_rows)
             if use_context:
                 # Sources first, then the casefolded text that the search compares.
                 overlay = {row[0]: [*row[1:], *map(_normalize, row[1:])]
@@ -410,7 +436,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                             OR (high, last_work_at, thread_id) >= (SELECT low, last_work_at, thread_id FROM floor))),
                        -- Coverage describes the searched inventory, before the keyword filter.
                        (SELECT json_array(COUNT(*), SUM(h.status = 'saved'), SUM(h.status = 'partial'))
-                        FROM scope s LEFT JOIN conversation_search_history_index h ON h.thread_id = s.thread_id)""",
+                        FROM scope s LEFT JOIN {history_rows} h ON h.thread_id = s.thread_id)""",
                 params).fetchone()
             threads, saved, partial = json.loads(coverage)
             coverage = {"threads": threads, "saved_histories": saved or 0, "partial_histories": partial or 0}
@@ -498,6 +524,9 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     "measure": json.dumps([c.thread_id for c in page if c.uncertain and c.measured is None])}).fetchone()
         finally:
             db.commit()
+    if dirty and schedule_index is not None:
+        schedule_index(lambda: index_search_snapshot(store, tuple(dirty), schedule_index),
+                       coalesce="search-snapshot")
     if overlay:
         from .browser_persistence import database_busy
         try:
@@ -593,6 +622,6 @@ def search_browser_threads(store, sessions, query):
         directory = str(Path(directory).expanduser().resolve()) if directory else ""
         threads = [t for t in threads if t["project_cwd"] == directory]
     return search_threads(store, query.get("q", [""])[0], limit=20, cursor=query.get("cursor", [None])[0],
-                          my_messages=query.get("my_messages") == ["true"],
+                          my_messages=query.get("my_messages") == ["true"], snapshot_dirty=True,
                           schedule_index=partial(sessions.persistence.submit, key="conversation-substring-index", required=False),
                           thread_ids=[t["thread_id"] for t in threads])

@@ -280,6 +280,40 @@ class SearchExecutionTests(unittest.TestCase):
         with self.store._connection() as db:
             db.execute("CREATE TABLE browser_history (thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL)")
 
+    def test_browser_search_reads_dirty_history_without_publishing_an_index(self):
+        from types import SimpleNamespace
+        self.store.register(session_id="stream", client="codex", cwd=str(self.root), name="Stream")
+        def save(items):
+            history = {"turns": [{"id": "turn", "items": items}]}
+            with self.store._connection() as db:
+                db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", ("stream", json.dumps(history)))
+        save([{"id": "a", "type": "agentMessage", "text": "obsolete evidence"}])
+        search_threads(self.store, "obsolete")
+        save([{"id": "a", "type": "agentMessage", "text": "obsolete duplicate"},
+              {"id": "a", "type": "agentMessage", "text": "current evidence"}])
+        scheduled = []
+        sessions = SimpleNamespace(cwd=str(self.root), persistence=SimpleNamespace(
+            submit=lambda callback, **options: scheduled.append(callback)))
+        with patch("agent_coord.conversation_search.publish_messages",
+                   side_effect=AssertionError("Interactive search waited for index publication")):
+            fresh = search_browser_threads(self.store, sessions, {"q": ["current evidence"]})
+            stale = search_browser_threads(self.store, sessions, {"q": ["obsolete"]})
+        self.assertEqual([item["thread_id"] for item in fresh["items"]], ["stream"])
+        self.assertEqual(fresh["items"][0]["message_count"], 1)
+        self.assertEqual(stale["items"], [])
+        self.assertTrue(scheduled)
+
+    def test_dirty_snapshot_pages_match_indexed_pages_and_coverage(self):
+        self.seed(16)
+        coverage = search_threads(self.store, "radio", snapshot_dirty=True)["coverage"]
+        dirty = [self.pages(query, snapshot_dirty=True, **options)
+                 for query, options in [("radio alarm", {}), ("strasse", {"my_messages": True})]]
+        indexed = [self.pages(query, **options)
+                   for query, options in [("radio alarm", {}), ("strasse", {"my_messages": True})]]
+        self.assertEqual(coverage, search_threads(self.store, "radio")["coverage"])
+        self.assertEqual(dirty, indexed)
+        self.assertTrue(all(dirty))
+
     def text(self, generator, count):
         return "".join(generator.choice(self.WORDS) + generator.choice(self.SPACES) for _ in range(count)).strip()
 

@@ -735,7 +735,7 @@ def refresh_messages(store, *, cwd=None, schedule_index=None):
         _refresh_messages(store, cwd, measurement, schedule_index)
 
 
-def _refresh_messages(store, cwd, measurement, schedule_index):
+def ensure_message_schema(store, cwd=None):
     with store.reading(), store._connection() as db:
         try:
             ready, identities, garbage = _pending_messages(db, cwd)
@@ -752,9 +752,14 @@ def _refresh_messages(store, cwd, measurement, schedule_index):
     if not ready:
         with _operation(store, "search.schema"), store._connection() as db:
             if not _ensure_generation_schema(db):
-                return
+                return [], False
         with store.reading(), store._connection() as db:
             _, identities, garbage = _pending_messages(db, cwd)
+    return identities, garbage
+
+
+def _refresh_messages(store, cwd, measurement, schedule_index):
+    identities, garbage = ensure_message_schema(store, cwd)
     measurement["pending_histories"] = len(identities)
     publish = publish_messages if schedule_index is None else partial(publish_messages, schedule_index=schedule_index)
     for thread_id in identities:
@@ -776,6 +781,48 @@ def _refresh_messages(store, cwd, measurement, schedule_index):
         except sqlite3.OperationalError as error:
             if not database_busy(error):
                 raise
+
+
+def pending_search_evidence(db, terms, thread_ids, *, user_only):
+    """Inspect current revisions in the same SQLite snapshot as the ranked query."""
+    from .history_persistence import decode_history
+
+    filter_ids = "" if thread_ids is None else " WHERE p.thread_id IN (SELECT value FROM json_each(?))"
+    parameters = () if thread_ids is None else (json.dumps(sorted(thread_ids)),)
+    rows = db.execute(f"""SELECT p.thread_id, h.history_json FROM ({_PENDING}) p
+        LEFT JOIN browser_history h ON h.thread_id=p.thread_id{filter_ids}""", parameters)
+    statuses, matches = {}, []
+    for identity, serialized in rows:
+        statuses[identity] = None
+        if serialized is None:
+            continue
+        try:
+            history = decode_history(serialized, db=db)
+            if not isinstance(history, dict) or not isinstance(history.get("turns", []), list):
+                raise ValueError("Invalid conversation history")
+            found = {}
+            for position, record in enumerate(messages(history)):
+                turn, item, role, stamp, text, folded = record
+                key = (turn, item)
+                if (not user_only or role == "user") and all(term in folded for term in terms):
+                    # Keep the original precision through SQLite JSON functions.
+                    timestamp = None if stamp is None else "binary64:" + stamp.hex()
+                    found[key] = (identity, turn, item, role, timestamp, text, folded, position)
+                else:
+                    found.pop(key, None)
+            matches.extend(found.values())
+            statuses[identity] = "partial" if history.get("historyUnavailable") else "saved"
+        except (ValueError, TypeError, AttributeError, KeyError):
+            statuses[identity] = "unavailable"
+    return statuses, matches
+
+
+def index_search_snapshot(store, identities, schedule_index):
+    """Try each observed thread once. A later search can schedule a newer revision."""
+    for identity in identities:
+        publish_messages(store, prepare_messages(store, identity), schedule_index=schedule_index)
+        yield
+    _cleanup_messages(store)
 
 
 def message_condition(terms, role):
