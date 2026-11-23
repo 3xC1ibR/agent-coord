@@ -296,12 +296,22 @@ class CoordinatorProjection:
         # A growing provider message shares all complete segments with its
         # previous checkpoint. Only new segment contents need compression.
         references, payloads = {}, {}
+        previous_by_prefix = {text[:PAYLOAD_SEGMENT_CHARACTERS]: text for text in self.text_references
+                              if len(text) >= PAYLOAD_SEGMENT_CHARACTERS}
 
         def encode_text(text):
             parts = references.get(text) or self.text_references.get(text)
             if parts is None:
                 parts = []
-                for offset in range(0, len(text), PAYLOAD_SEGMENT_CHARACTERS):
+                previous = previous_by_prefix.get(text[:PAYLOAD_SEGMENT_CHARACTERS])
+                if previous is not None and text.startswith(previous):
+                    # Only a complete prior segment has the same boundaries
+                    # after appending. Rebuild the previous partial tail.
+                    count = len(previous) // PAYLOAD_SEGMENT_CHARACTERS
+                    parts.extend(self.text_references[previous][:count])
+                    for digest in parts:
+                        payloads[digest] = self.payload_cache[digest]
+                for offset in range(len(parts) * PAYLOAD_SEGMENT_CHARACTERS, len(text), PAYLOAD_SEGMENT_CHARACTERS):
                     data = text[offset:offset + PAYLOAD_SEGMENT_CHARACTERS].encode("utf-8", "surrogatepass")
                     digest = hashlib.sha256(data).hexdigest()
                     if digest not in payloads:

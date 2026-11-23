@@ -1,4 +1,5 @@
 """Atomic event application and command identity across coordinator recovery."""
+import hashlib
 import json
 import copy
 from pathlib import Path
@@ -172,7 +173,13 @@ class ProjectionTests(unittest.TestCase):
         def compress_appended_text(data, level):
             self.assertLessEqual(len(data), size, "A short append recompressed the entire active message")
             return compress(data, level)
-        with patch("agent_coord.coordinator_projection.zlib.compress", side_effect=compress_appended_text):
+        sha256 = hashlib.sha256
+        def hash_appended_text(data):
+            self.assertFalse(data in (b"a" * size, b"b" * size, b"c" * size),
+                             "A short append rehashed an unchanged provider output segment")
+            return sha256(data)
+        with patch("agent_coord.coordinator_projection.zlib.compress", side_effect=compress_appended_text), \
+                patch("agent_coord.coordinator_projection.hashlib.sha256", side_effect=hash_appended_text):
             self.projection.checkpoint()
         with self.store.reading(), self.store._connection() as db:
             updated = {row[0] for row in db.execute("SELECT digest FROM coordinator_projection_payloads")}
@@ -181,6 +188,19 @@ class ProjectionTests(unittest.TestCase):
         self.projection = CoordinatorProjection(self.sessions, self.client)
         self.projection.load()
         self.assertEqual(self.sessions.claude.turns[self.identity]["items"][0]["text"], text + "new output")
+
+    def test_streams_with_shared_prefixes_and_partial_tails_restore_exact_text(self):
+        prefix = "a" * (64 * 1024)
+        items = [{"id": "first", "text": prefix + "α"}, {"id": "second", "text": prefix + "β"}]
+        self.sessions.claude.turns[self.identity] = {"id": "active", "items": items}
+        self.projection.checkpoint()
+        items[0]["text"] += "γ" * (64 * 1024)
+        items[1]["text"] = prefix + "changed"
+        expected = copy.deepcopy(items)
+        self.projection.checkpoint()
+        self.projection = CoordinatorProjection(self.sessions, self.client)
+        self.projection.load()
+        self.assertEqual(self.sessions.claude.turns[self.identity]["items"], expected)
 
     def test_codec_recovers_existing_tuple_keys_and_set_members(self):
         value = {"requests": {("thread", ("turn", 1)): ["pending"]},

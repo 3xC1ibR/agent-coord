@@ -63,6 +63,28 @@ class HistoryPersistenceTests(unittest.TestCase):
         self.assertEqual(decode_history(self.raw(), database_path=self.store.database_path), history)
         self.assertGreater(result["staged_chunks"], 10)
 
+    def test_growing_output_reuses_verified_chunks_and_detects_changed_prefixes(self):
+        history = large_history(size=4 * CHUNK_BYTES)
+        previous = prepare_history(history)
+        item = history["turns"][0]["items"][0]
+        output = item["aggregatedOutput"]
+        item["aggregatedOutput"] = output[:CHUNK_BYTES] + "!" + output[CHUNK_BYTES + 1:] + " more output"
+        complete = prepare_history(history)
+        full_chunks = 0
+        digest = history_storage.hashlib.sha256
+
+        def count_chunks(value):
+            nonlocal full_chunks
+            if len(value) == CHUNK_BYTES:
+                full_chunks += 1
+            return digest(value)
+
+        with patch.object(history_storage.hashlib, "sha256", side_effect=count_chunks):
+            incremental = prepare_history(history, previous=previous)
+        self.assertEqual(incremental.serialized, complete.serialized)
+        self.assertEqual(incremental.chunks, complete.chunks)
+        self.assertEqual(full_chunks, 1, "only the edited full chunk needs a new digest")
+
     def test_one_item_change_reuses_the_large_previous_turn_and_unchanged_save_does_not_invalidate(self):
         history = large_history(size=4 * 1024 * 1024)
         initial = self.persistence.save("conversation", history)

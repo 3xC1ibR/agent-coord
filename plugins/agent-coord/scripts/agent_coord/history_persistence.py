@@ -118,9 +118,19 @@ def prepare_history_steps(history, *, previous=None):
             content = _json(value).encode("utf-8")
             encoded_document_bytes += len(content)
         result, blocks = [], {}
-        for offset in range(0, len(content), CHUNK_BYTES):
-            payload = content[offset:offset + CHUNK_BYTES]
-            digest = hashlib.sha256(payload).hexdigest()
+        for index, offset in enumerate(range(0, len(content), CHUNK_BYTES)):
+            # A streamed output usually changes only its final block. Reuse a
+            # digest only after comparing the actual bytes at the same offset.
+            payload = None
+            if existing is not None and index < len(existing.references):
+                digest = existing.references[index]
+                cached = existing.chunks.get(digest)
+                if (cached is not None and len(cached) == min(CHUNK_BYTES, len(content) - offset)
+                        and content.startswith(cached, offset)):
+                    payload = cached
+            if payload is None:
+                payload = content[offset:offset + CHUNK_BYTES]
+                digest = hashlib.sha256(payload).hexdigest()
             blocks.setdefault(digest, payload)
             result.append(digest)
         chunks.update(blocks)
