@@ -80,6 +80,21 @@ class GatewayTests(unittest.TestCase):
                 gateway.runtime, "control", return_value=self.current):
             return self.http("POST", "/_runtime/prepare", self.request, {"Authorization": "Bearer control"})
 
+    def test_preparation_uses_its_remaining_time_to_verify_a_busy_original_coordinator(self):
+        def legacy_status(record, action, *, timeout):
+            self.assertEqual((record, action), (self.current, "status"))
+            if timeout < 8:
+                raise TimeoutError("Legacy status is still in progress")
+            self.assertLessEqual(timeout, 25)
+            return self.current
+
+        with patch.object(gateway.runtime, "discover", return_value=self.current), patch.object(
+                gateway.runtime, "control", side_effect=legacy_status):
+            code, body = self.http("POST", "/_runtime/prepare", self.request, {"Authorization": "Bearer control"})
+        self.assertEqual(code, 200)
+        self.assertIs(body["prepared"], True)
+        self.assertEqual(self.g.fence["source_instance"], "old")
+
     def test_terminal_receiver_owns_turn_handoff_after_earlier_inputs_resolve(self):
         import hashlib
         from agent_coord.runtime_message_intake import OrdinaryComposerReceiver

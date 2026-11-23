@@ -299,13 +299,16 @@ class InteractionGateway:
                 "visitTransport": ({"origin": self.visit_origin, "token": self.visit_token}
                                   if self.visit_origin else None)}
 
-    def _source_status(self, wanted):
+    def _source_status(self, wanted, *, deadline=None):
         record = runtime.discover(self.database, timeout=2)
         if (not record or self._authority(record) != self.source or
                 record["instance"] != wanted["source_instance"] or wanted["target"] != self.payload):
             raise CoordinationError("The update source or target changed")
         self._require_work(self.source)
-        status = runtime.control(record, "status", timeout=5)
+        timeout = 5 if deadline is None else deadline - time.monotonic()
+        if timeout <= 0:
+            raise RuntimeError("Waiting for the original coordinator to confirm its status")
+        status = runtime.control(record, "status", timeout=timeout)
         if status.get("instance") != wanted["source_instance"] or status.get("paused"):
             raise CoordinationError("The original coordinator has not resumed")
         return status
@@ -314,7 +317,8 @@ class InteractionGateway:
         wanted = {k: request[k] for k in ("request_id", "target", "source_instance")}
         if not isinstance(wanted["request_id"], str) or not 1 <= len(wanted["request_id"]) <= 200:
             raise ValueError("Invalid update identity")
-        current = self._source_status(wanted) if not self.fence else None
+        limit = time.monotonic() + 25
+        current = self._source_status(wanted, deadline=limit) if not self.fence else None
         with self.condition:
             if self.fence and any(self.fence.get(k) != v for k, v in wanted.items()):
                 raise CoordinationError("Another transition owns this endpoint")
@@ -328,7 +332,6 @@ class InteractionGateway:
         # The listener continues accepting and displaying work during this
         # wait. Only legacy operations that have already reached the original
         # source must finish; all other intake can transfer to the successor.
-        limit = time.monotonic() + 25
         while True:
             with self.condition:
                 forwarding = self.writers or self.source_deliveries
@@ -514,14 +517,25 @@ class InteractionGateway:
             raise RuntimeError("The coordinator did not confirm the forwarded input")
 
     def drain_staged_source(self):
-        with self.condition:
+        def source_can_deliver():
             if not self.staged_source():
+                return False
+            # Once the held candidate has been explicitly authorized, keep
+            # new inputs in order for the verified receiver. prepare() still
+            # reconciles any legacy transport that was already underway.
+            intent = _private_json(self.directory / "activation-request.json")
+            return not (intent.get("phase") in {"authorized", "releasing"}
+                        and intent.get("source_instance") == self.source["instance"]
+                        and intent.get("target") == self.payload)
+
+        with self.condition:
+            if not source_can_deliver():
                 return
             self.source_deliveries += 1
         try:
             for thread in self.intake.pending_threads():
                 with self.condition:
-                    if not self.staged_source():
+                    if not source_can_deliver():
                         break
                 result = self.intake.drain_one(thread, self._legacy_receipt,
                                               self.legacy_forward, preflight=self._verify_delivery)

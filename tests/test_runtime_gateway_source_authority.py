@@ -84,6 +84,29 @@ class SourceAuthorityTests(unittest.TestCase):
         self.status = dict(self.record, status="serving", paused=False, update=update)
         self.publish_discovery()
 
+    def test_authorized_transition_holds_new_legacy_deliveries_until_released(self):
+        self.accept()
+        path = self.g.directory / "activation-request.json"
+        intent = {"request_id": "operation", "source_instance": self.source["instance"], "target": self.target}
+        for phase in ("authorized", "releasing"):
+            gateway.runtime.atomic_json(path, {**intent, "phase": phase})
+            self.g.resume()
+            self.assertEqual(self.queued(), "queued")
+            self.assertFalse(self.exchanges)
+        gateway.runtime.atomic_json(path, {**intent, "phase": "released"})
+        self.g.resume()
+        self.assertEqual(self.queued(), "committed")
+        self.g.resume()
+        self.assertEqual(len(self.exchanges), 1)
+
+    def test_unrelated_activation_does_not_hold_the_staged_sources_work(self):
+        self.accept()
+        gateway.runtime.atomic_json(self.g.directory / "activation-request.json", {
+            "request_id": "old", "source_instance": "old-source", "target": self.target, "phase": "authorized"})
+        self.g.resume()
+        self.assertEqual(self.queued(), "committed")
+        self.assertEqual(len(self.exchanges), 1)
+
     def test_staged_restart_rejects_new_owner_new_payload_or_replaced_database_before_forward(self):
         self.accept()
         for change in ({"instance":"replacement"}, {"payload":self.target}, {"url":"http://127.0.0.1:2/"}):
