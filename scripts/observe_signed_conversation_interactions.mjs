@@ -26,6 +26,36 @@ const pageFor = async () => {
 const opening = await pageFor();
 const composing = await pageFor();
 const receiving = await pageFor();
+// Keep a bounded navigation trace in the observer. A refresh can replace the
+// whole document, so retain document identity and distinguish fragment events.
+await opening.addInitScript(() => {
+  window.__releaseNavigation = [];
+  for (const type of ["popstate", "hashchange", "pageshow"]) {
+    addEventListener(type, () => {
+      window.__releaseNavigation.push({type, at: Math.round(performance.now()),
+        hash: location.hash, saved: history.state?.agentCoord?.thread});
+      if (window.__releaseNavigation.length > 10) window.__releaseNavigation.shift();
+    });
+  }
+});
+async function openingState(thread) {
+  return opening.evaluate(id => {
+    const ready = typeof state !== "undefined", selected = ready && state.selected;
+    const entry = ready && state.conversations?.get(id);
+    const matches = hash => hash === "#" + encodeURIComponent(id);
+    return {document_started: performance.timeOrigin, hash_matches: matches(location.hash),
+      has_directory: new URLSearchParams(location.search).has("directory"),
+      router_ready: typeof navigation !== "undefined" && !!navigation,
+      router_applying: typeof navigation !== "undefined" && !!navigation?.applying,
+      selected_matches: selected === id, saved_matches: history.state?.agentCoord?.thread === id,
+      timeline_matches: ready && state.timelineThread === id, navigation_revision: ready && state.navigationRevision,
+      detail_available: !!entry?.detail, read_pending: !!entry?.pending, read_failed: !!entry?.refreshError,
+      messages: document.querySelectorAll("#timeline article.message").length,
+      events: (window.__releaseNavigation || []).map(event => ({
+        type: event.type, at: event.at, hash_matches: matches(event.hash), saved_matches: event.saved === id,
+      }))};
+  }, thread).catch(() => null);
+}
 const profiles = [];
 if (existsSync(resolve(directory, "measure-browser-execution"))) {
   for (const [name, page] of Object.entries({opening, composing, receiving})) {
@@ -59,12 +89,15 @@ async function opens() {
     const {phase, url, peers} = state();
     const id = peers[counter++ % peers.length];
     const start = Date.now();
+    let navigated;
     try {
       await opening.goto(url + "#" + encodeURIComponent(id), {waitUntil: "domcontentloaded"});
+      navigated = Date.now();
       await visible(opening, id);
-      log({phase, kind: "browser_open", ok: true, start, end: Date.now()});
+      log({phase, kind: "browser_open", ok: true, start, navigated, end: Date.now(), state: await openingState(id)});
     } catch (error) {
-      log({phase, kind: "browser_open", ok: false, start, end: Date.now(), error: error.message.split("\n")[0]});
+      log({phase, kind: "browser_open", ok: false, start, navigated, end: Date.now(),
+        error: error.message.split("\n")[0], state: await openingState(id)});
     }
     await sleep(interval);
   }
