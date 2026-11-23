@@ -26,6 +26,29 @@ const pageFor = async () => {
 const opening = await pageFor();
 const composing = await pageFor();
 const receiving = await pageFor();
+const profiles = [];
+if (existsSync(resolve(directory, "measure-browser-execution"))) {
+  for (const [name, page] of Object.entries({opening, composing, receiving})) {
+    const client = await context.newCDPSession(page);
+    await client.send("Profiler.enable");
+    await client.send("Profiler.setSamplingInterval", {interval: 10000});
+    await client.send("Profiler.start");
+    profiles.push({name, client});
+    page.on("pageerror", error => log({phase: state().phase, kind: "page_error", page: name,
+      error: error.message.slice(0, 250)}));
+    const requests = new WeakMap();
+    page.on("request", request => requests.set(request, Date.now()));
+    const recordRequest = request => {
+      const elapsed = Date.now() - requests.get(request);
+      if (elapsed >= 500 || request.failure()) {
+        log({phase: state().phase, kind: "browser_request", page: name, method: request.method(),
+          path: new URL(request.url()).pathname, elapsed_ms: elapsed, failure: request.failure()?.errorText});
+      }
+    };
+    page.on("requestfinished", recordRequest);
+    page.on("requestfailed", recordRequest);
+  }
+}
 let counter = 0;
 const visible = async (page, id) => {
   await page.waitForFunction(id => typeof state !== "undefined" && state.timelineThread === id
@@ -92,5 +115,19 @@ async function sends() {
 try {
   await Promise.all([opens(), sends()]);
 } finally {
+  await Promise.all(profiles.map(async ({name, client}) => {
+    const {profile} = await client.send("Profiler.stop");
+    const nodes = new Map(profile.nodes.map(node => [node.id, node]));
+    const elapsed = new Map();
+    for (const [index, id] of profile.samples.entries()) {
+      elapsed.set(id, (elapsed.get(id) || 0) + profile.timeDeltas[index] / 1000);
+    }
+    const frames = [...elapsed].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([id, ms]) => {
+      const frame = nodes.get(id).callFrame;
+      return {name: frame.functionName, file: frame.url.split("/").pop().split("?")[0],
+        line: frame.lineNumber + 1, elapsed_ms: Math.round(ms)};
+    });
+    log({phase: "profiling", kind: "browser_cpu", page: name, frames});
+  }));
   await browser.close();
 }

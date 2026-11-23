@@ -20,6 +20,7 @@ from agent_coord.store import CoordinationStore
 
 class GeneratedConversationWorkload(SignedUpgrade):
     def execute(self):
+        (self.root / "measure-browser-execution").touch()
         try:
             super().execute()
         finally:
