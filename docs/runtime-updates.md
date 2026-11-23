@@ -191,9 +191,10 @@ accepted requests to drain. Continuous interface polling and agent requests cann
 starve that boundary. The drain has a 30-second monotonic deadline measured from
 admission closure; a timeout fails the update and reopens the current backend.
 Status exposes the `draining` phase, current `blocked` reasons and
-`admission_drain_seconds`. Unsupported active providers defer closure, and work
-that becomes unsupported during a drain reopens admission so it remains answerable.
-Passive updates continue to wait for a quiet request boundary.
+`admission_drain_seconds`. Kimi, Antigravity and Muse work follows the bounded
+procedure in [Explicit updates with coordinator-owned providers](#explicit-updates-with-coordinator-owned-providers);
+work that becomes unsupported during a drain reopens admission so it remains
+answerable. Passive updates continue to wait for a quiet request boundary.
 
 Coordinator startup migrates only incomplete work-thread metadata, including
 missing request text, directories and current Beads links. Restoring the adapter
@@ -207,10 +208,105 @@ Native update confirmation remains effective: a held pending payload does not
 activate until Install or **Apply Backend Update… → Update and Continue** authorizes
 it. Passive compatible attachment without a confirmation hold can also replace the
 coordinator while supported turns run. Active Kimi, Antigravity or Muse turns and
-Muse background workflows defer this replacement. Incompatible transport or
+Muse background workflows defer a passive replacement; an explicit update pauses
+and continues eligible turns as described below. Incompatible transport or
 projection versions also defer activation; they do not fall back to interrupting
 agents. Providers keep executing while the interface reconnects, so bounded HTTP
 or event-stream gaps are possible.
+
+### Explicit updates with coordinator-owned providers
+
+The coordinator owns the Kimi, Antigravity and Muse processes, so the provider
+transport cannot retain them across a replacement. On November 23, 2026, an
+installed build 64 stayed `accepted` indefinitely behind such turns while the
+interface showed only "Updating backend…". Runtimes that advertise
+`interrupted_provider_continuation: 1` bound that wait for an explicit Install
+or **Update and Continue**. Passive updates never interrupt work.
+
+1. Admission stays open for up to `UPDATE_UNSUPPORTED_GRACE_SECONDS` (30) while
+   those turns may finish on their own. `update.notice` names the conversations.
+2. A pending approval or question on such a turn, or a running Muse workflow
+   (background or inside the foreground turn), keeps the update waiting with
+   admission open. The notice names the conversation. Approvals are never
+   withdrawn, and no native evidence shows that resuming a Muse session
+   restores a workflow.
+3. The candidate is probed and its rollback space checked before any provider
+   is signalled. Then admission closes and accepted operations drain.
+4. Each exact turn is recorded in `runtime_update_interruptions` and in
+   `runtime_update_recoveries` as `interrupting`. Immediately before signalling,
+   the update rechecks the active turn and its approvals. It then sends the
+   adapter's native interrupt, marked as update-owned: this is neither a user
+   Stop nor a failure report. Each adapter refuses that interrupt under its own
+   lock while a request is pending. After it begins stopping, it declines a
+   late provider request to the provider instead of presenting it, so no
+   approval shown to the user is withdrawn. No turn is signalled after
+   `UPDATE_INTERRUPTION_SECONDS` (20). Each signalled turn must reach a saved
+   terminal state within `UPDATE_CONFIRMATION_SECONDS` (10) of its interrupt
+   returning.
+5. Outcomes: `confirmed` turns become `prepared` for one continuation. A turn
+   that finished on its own records `finished` and keeps its outcome, including
+   the failure guard of a natural failure. A turn with a pending approval, or
+   one reached after the signalling budget, is `withdrawn` and keeps running.
+   A recorded user Stop is carried out with its user origin and never
+   continued. A turn that is still running, or that stopped without a saved
+   outcome, is `unconfirmed`. The latter keeps the failure guard.
+6. If any turn still blocks transfer, or any outcome is `unconfirmed`, the
+   update fails visibly. The current coordinator then immediately continues
+   the turns it paused. The same applies if admission reopens and new
+   provider work starts before the handover; no second round of stops runs.
+   Otherwise the ordinary uninterrupted Codex and Claude replacement proceeds.
+7. After commit, after rollback to the previous coordinator, or after a failure
+   before handover, the serving coordinator submits one continuation into the
+   same native session (`session/resume`, `session/load` or Muse
+   `session/resume`). The existing recovery guards apply: queued user input
+   first, user Stop, settings changes, closure, approvals, uncertain receipts,
+   and claims `prepared → submitting → continued | uncertain`.
+8. A coordinator that exits during step 4 leaves those rows `uncertain`, and
+   they are never continued automatically. A restarted coordinator marks an
+   update failed if its accepting coordinator exited before handover. This
+   includes a `stopping` update when the previous payload restarts, and it
+   applies to Codex and Claude updates as well, which previously stayed stuck
+   in that phase. Confirmed turns then continue once. Stop Work and Quit
+   cancels continuation.
+
+`continued` means the provider accepted the continuation, not that it is
+running successfully. `recovery.conversations[].continuation.status` reports the
+native result (`running`, `completed`, `failed`, `interrupted` or `superseded`).
+A failed continuation, such as one hitting a provider quota, keeps its ordinary
+failure report and inbox guard.
+
+The behavior runs in the outgoing coordinator. A running build without it,
+such as build 64, cannot acquire it retroactively, so the first update from
+such a build still waits while these turns run. Its native prompt now says so.
+Both prompt variants depend on capabilities the running runtime advertises.
+
+Inspect an update without private files or HTTP routes:
+
+```bash
+env -u PYTHONHOME PYTHONPATH="$candidate_resources/backend" PYTHONNOUSERSITE=1 \
+"$candidate_resources/runtime/bin/python3" -B "$candidate_resources/backend.py" \
+  --db "$coord_database" --runtime-command update-status
+```
+
+It returns `update` with `phase`, `notice`, `blocked`, `unsupported`, and
+`recovery` counts and conversations, including each `interruption` and
+`continuation`. It is read-only: it never bootstraps a runtime. Without a live
+owner it returns the saved transaction as `unavailable`. It reports state; it
+does not replace explicit recovery controls such as `thread resume`.
+
+Regression evidence for this path is `tests/test_runtime_unsupported_update.py`.
+Its in-process tests drive the real Kimi, Antigravity and Muse adapters and
+stdio connections against the independent wire fixture
+`tests/fixtures/update_interruption_provider.py`. Its process test covers the
+actual runtime, provider transport and supervisor with that fixture as `kimi`.
+On unchanged `2d7e525`, 16 of the original 18 in-process tests and the process
+test fail. The process test leaves the update `accepted`. The two that pass
+there are invariants: passive updates never interrupt, and every adapter
+reports a finished turn with the phrase the update recognizes. Nine further
+tests cover findings from an independent review: slow interrupts beyond the
+signalling budget, an interrupt that does not stop its turn, approvals that
+arrive before or inside the adapter interrupt, Muse foreground workflows, a
+second round of work, a crash after `stopping`, and Antigravity Stop origin.
 
 The full ownership, receipt, retention, crash-recovery and rollback contract is in
 [Provider ownership during coordinator replacement](runtime-provider-ownership.md).
@@ -402,7 +498,8 @@ execution and continues eligible saved conversations under the existing recovery
 rules. It is never evidence of an uninterrupted upgrade.
 
 Before first adoption, finish pending approvals and arrange explicit continuation
-for any active Kimi, Antigravity or Muse assignments. Preserve checkpoints and
+for any active Kimi, Antigravity or Muse assignments. The bounded continuation
+above requires the outgoing runtime to advertise `interrupted_provider_continuation`. Preserve checkpoints and
 external action outcomes. The old backend performs the shutdown drain, so a
 legacy drain failure can commit the new backend with `requires_review: true`.
 Inspect its exact recovery states and tool outcomes before authenticated `resume`;
@@ -669,7 +766,8 @@ any test on real conversations. Tests must demonstrate:
 4. Concurrent launches, stale discovery, and failed candidate startup do not
    create two owners or terminate an unrelated process.
 5. Compatible coordinator replacement retains supported running providers and
-   excludes new admissions during transfer; unsupported active providers defer it.
+   excludes new admissions during transfer; unsupported active providers defer a
+   passive replacement and pause for an explicit one, then continue exactly once.
 6. Incompatible runtime/UI combinations and invalid update metadata fail safely.
 7. Both standalone packaging paths retain signature/runtime integrity; ordinary
    development builds and native smoke tests still work and clean up owned tests.

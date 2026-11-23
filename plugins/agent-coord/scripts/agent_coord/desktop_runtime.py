@@ -40,6 +40,15 @@ UPDATE_SHUTDOWN_SECONDS = 30
 UPDATE_DRAIN_SECONDS = 20
 # Close new requests before waiting for admitted operations to finish.
 UPDATE_ADMISSION_SECONDS = 30
+# An explicitly requested update first lets coordinator-owned provider turns
+# (Kimi, Antigravity and Muse) finish on their own. It then stops each exact
+# turn, confirms its terminal state within a separate bound, and continues the
+# confirmed turns once in their saved native sessions after the update.
+UPDATE_UNSUPPORTED_GRACE_SECONDS = 30
+# No turn is signalled after this budget; each signalled turn then has its own
+# confirmation window measured from when the adapter's interrupt returns.
+UPDATE_INTERRUPTION_SECONDS = 20
+UPDATE_CONFIRMATION_SECONDS = 10
 REVIEW_NOTICE = ("The backend update finished, but work stays paused for review because the previous "
                  "backend could not confirm a clean shutdown. Waiting will not resume it. Inspect running "
                  "tools, then run the runtime maintenance resume command.")
@@ -401,6 +410,61 @@ def uninterrupted_readiness(sessions):
     return reasons
 
 
+def interruptible(blocked):
+    """Only coordinator-owned provider work (and its own admission) blocks transfer."""
+    unsupported = [reason for reason in blocked if reason.startswith("active unsupported provider: ")
+                   or reason == "Muse background workflows"]
+    return bool(unsupported) and all(reason == "admitted operations" or reason in unsupported for reason in blocked)
+
+
+def unsupported_work(sessions):
+    """Separate interruptible provider turns from work only the user can settle.
+
+    A pending approval or question is never withdrawn for an update, and no
+    native evidence shows that resuming a Muse session restores a background
+    workflow. Both keep an explicit update waiting with admission open.
+    """
+    turns, waiting = [], []
+    with sessions.lock:
+        requested = {(value.get("params") or {}).get("threadId")
+                     for value in getattr(sessions, "requests", {}).values()}
+        for identity, turn_id in sessions.active.items():
+            client = sessions.loaded_clients.get(identity, "codex")
+            if client in {"codex", "claude"}:
+                continue
+            if identity in requested:
+                waiting.append({"thread_id": identity, "client": client, "turn_id": turn_id, "reason": "approval"})
+            elif turn_id:
+                turns.append({"thread_id": identity, "client": client, "turn_id": turn_id})
+    muse = getattr(sessions, "muse", None)
+    background = getattr(muse, "background_active", None)
+    if background:
+        for identity in list(getattr(muse, "background_turns", {})):
+            if background(identity):
+                waiting.append({"thread_id": identity, "client": "muse", "turn_id": None, "reason": "background"})
+    # A workflow still running inside a foreground Muse turn dies with its
+    # process as well; read it outside sessions.lock, under the adapter lock.
+    for entry in [entry for entry in turns if entry["client"] == "muse"]:
+        with muse.lock:
+            items = list(getattr(muse, "turns", {}).get(entry["thread_id"], {}).get("items", []))
+        if any(item.get("nativeKind") == "workflow" and item.get("status") == "inProgress" for item in items):
+            turns.remove(entry)
+            waiting.append({**entry, "reason": "background"})
+    return turns, waiting
+
+
+def conversation_labels(sessions, entries):
+    names = []
+    for entry in entries[:3]:
+        try:
+            title = sessions.store.threads.get(entry["thread_id"], history=False)["title"]
+        except Exception:
+            title = None
+        names.append("\u201c" + str(title or entry["thread_id"])[:80] + "\u201d")
+    extra = len(entries) - len(names)
+    return ", ".join(names) + (f" and {extra} more" if extra > 0 else "")
+
+
 def payload_digest(resources):
     digest = hashlib.sha256()
     for path in sorted(resources.rglob("*")):
@@ -581,6 +645,9 @@ class Runtime:
         self.trial = commit_fd is not None
         self.update_requested = None
         self.update_drain_started = None
+        self.update_grace_started = None
+        self.update_validated = None
+        self.interruption = None
         self.update_exit_fd = None
         self.instance = uuid.uuid4().hex
         self.token = secrets.token_urlsafe(32)
@@ -644,19 +711,25 @@ class Runtime:
         return {"database": self.database, "instance": self.instance,
                 "protocol": PROTOCOL_VERSION, "schema": SCHEMA_VERSION, "pid": os.getpid(),
                 "payload": str(self.payload), "client_requests": 1, "runtime_updates": 1,
-                "runtime_update_prompts": 1, "uninterrupted_updates": 1}
+                "runtime_update_prompts": 1, "uninterrupted_updates": 1,
+                "interrupted_provider_continuation": 1}
 
-    def status(self):
-        from .database_writer import performance_snapshot
+    def update_status(self):
+        """Read-only update transaction, blockers and per-conversation recovery."""
         from . import runtime_update
+        from .runtime_recovery import status
         update = runtime_update.read(self.directory)
         if update:
-            from .runtime_recovery import status
             update["recovery"] = status(self.server.browser_sessions.store, update["id"])
             if update["phase"] not in runtime_update.TERMINAL:
                 update["blocked"] = uninterrupted_readiness(self.server.browser_sessions)
                 if self.update_drain_started is not None:
                     update["admission_drain_seconds"] = time.monotonic() - self.update_drain_started
+        return update
+
+    def status(self):
+        from .database_writer import performance_snapshot
+        update = self.update_status()
         projection = getattr(self.server.browser_sessions, "projection", None)
         transport = None
         if projection is not None:
@@ -696,6 +769,8 @@ class Runtime:
             "target": payload, "source_instance": self.instance, "database": self.database,
             "created_at": time.time(), "error": None})
         self.update_drain_started = None
+        self.update_grace_started = None
+        self.interruption = None
         return self.update_requested
 
     def prepare_handover(self):
@@ -707,6 +782,15 @@ class Runtime:
         from . import runtime_update
         sessions = self.server.browser_sessions
         blocked = uninterrupted_readiness(sessions)
+        if self.update_requested and (self.interruption is not None or interruptible(blocked)):
+            return self.prepare_interruption(sessions)
+        self.update_grace_started = None
+        if (blocked and blocked != ["admitted operations"] and self.update_requested
+                and self.update_requested.get("interrupted_unsupported")):
+            self.fail_update(sessions, "The update could not proceed after pausing conversations ("
+                             + "; ".join(blocked) + "). The current backend remains active and paused "
+                             "conversations continue now.", blocked=blocked)
+            return False
         if blocked and (not self.update_requested or blocked != ["admitted operations"]):
             # A previously admitted operation can start an unsupported provider
             # during the drain. Reopen so that work can finish or be answered.
@@ -745,9 +829,343 @@ class Runtime:
             return False
         return True
 
+    def prepare_interruption(self, sessions):
+        """Bound an explicit update behind Kimi, Antigravity or Muse work.
+
+        The caller holds the runtime mutex. Candidate validation and provider
+        I/O run on the interruption worker, never under this mutex. Passive
+        updates never reach this path and never interrupt work.
+        """
+        from . import runtime_update
+        if self.interruption is not None:
+            return self.finish_interruption(sessions)
+        if self.recovery_running:
+            return False  # Saved continuation decisions own admission until they finish.
+        if self.update_requested.get("interrupted_unsupported"):
+            # Work started after this update already paused conversations. Never
+            # leave those waiting or run a second, unrecorded round of stops.
+            self.fail_update(sessions, "New Kimi, Muse or Antigravity work started after the update paused "
+                             "conversations; the current backend remains active and paused conversations continue now.",
+                             blocked=uninterrupted_readiness(sessions))
+            return False
+        turns, waiting = unsupported_work(sessions)
+        now = time.monotonic()
+        if self.update_grace_started is None:
+            self.update_grace_started = now
+        remaining = UPDATE_UNSUPPORTED_GRACE_SECONDS - (now - self.update_grace_started)
+        if waiting or remaining > 0:
+            # Leave admission open: the user can answer, and turns can finish.
+            self.reopen_drain(sessions)
+            approvals = [entry for entry in waiting if entry["reason"] == "approval"]
+            if approvals:
+                notice = ("The update is waiting for you to answer the request in "
+                          + conversation_labels(sessions, approvals) + ".")
+            elif waiting:
+                notice = ("The update is waiting for the Muse background workflow in "
+                          + conversation_labels(sessions, waiting) + " to finish. Stop that conversation to update now.")
+            else:
+                notice = ("Waiting for " + conversation_labels(sessions, turns) + " to finish. Turns still running after "
+                          f"{UPDATE_UNSUPPORTED_GRACE_SECONDS:g} seconds pause for the update and then continue automatically.")
+            self.note_update(phase="accepted", notice=notice, unsupported=turns + waiting)
+            return False
+        if not turns:
+            return False  # An admitted request is still starting provider work.
+        sessions.admission.pause()
+        if self.update_drain_started is None:
+            self.update_drain_started = now
+            self.update_requested = runtime_update.write(self.directory, self.update_requested,
+                phase="draining", admission_drain_started_at=time.time())
+        if sessions.admission.inflight:
+            if now - self.update_drain_started >= UPDATE_ADMISSION_SECONDS:
+                self.fail_update(sessions, "Accepted operations did not drain; the current backend remains active.",
+                                 blocked=uninterrupted_readiness(sessions))
+            return False
+        # Admission is closed and drained; reclassify before any interruption.
+        turns, waiting = unsupported_work(sessions)
+        if waiting or not turns:
+            return False
+        notice = ("Pausing " + conversation_labels(sessions, turns)
+                  + " for the update. They continue automatically afterward.")
+        self.update_requested = runtime_update.write(self.directory, self.update_requested, phase="interrupting",
+            interrupted_unsupported=True, notice=notice, unsupported=turns)
+        state = {"done": threading.Event(), "failure": None, "validated": False, "results": {}, "signalled": set()}
+        self.interruption = state
+        threading.Thread(target=self.interrupt_unsupported, name="runtime-update-interruption", daemon=True,
+                         args=(self.update_requested["id"], self.pending, turns, state)).start()
+        return False
+
+    def finish_interruption(self, sessions):
+        from . import runtime_update
+        state = self.interruption
+        if not state["done"].is_set():
+            return False  # The worker bounds validation and every interruption.
+        self.interruption = None
+        if state["validated"]:
+            self.update_validated = self.update_requested["id"]
+        if state["failure"]:
+            self.fail_update(sessions, state["failure"])
+            return False
+        remaining = [reason for reason in uninterrupted_readiness(sessions) if reason != "admitted operations"]
+        remaining += [f"{outcome} interruption: {thread}" for thread, outcome in state["results"].items()
+                      if outcome in {"unconfirmed", "uncertain"}]
+        if remaining:
+            # Some turn could not be paused (for example, an approval arrived).
+            # Fail visibly and continue every turn already paused right away.
+            stopped = [thread for thread, outcome in state["results"].items() if outcome == "confirmed"]
+            self.fail_update(sessions, "The update could not pause every conversation it needed to ("
+                             + "; ".join(remaining) + "). The current backend remains active and "
+                             f"{len(stopped)} paused conversation(s) continue now.", blocked=remaining)
+            return False
+        self.update_requested = runtime_update.write(self.directory, self.update_requested,
+            notice="Applying the backend update. Paused conversations continue automatically afterward.")
+        return False  # The ordinary drain path completes the handover.
+
+    def interrupt_unsupported(self, update_id, candidate, turns, state):
+        """Validate first; then stop and confirm each exact planned turn."""
+        from .runtime_recovery import RuntimeRecovery
+        sessions = self.server.browser_sessions
+        try:
+            failure = self.validate_candidate(candidate, capacity=True)
+            if failure is not None:
+                state["failure"] = "Candidate validation failed: " + failure
+                return
+            state["validated"] = True
+            recovery = RuntimeRecovery(sessions)
+            for entry in turns:
+                recovery.plan_interruption(update_id, entry["thread_id"], entry["turn_id"], entry["client"])
+            deadline = time.monotonic() + UPDATE_INTERRUPTION_SECONDS
+            for entry in turns:
+                outcome, reason = self.interrupt_turn(sessions, entry, deadline, state["signalled"])
+                recovery.settle_interruption(update_id, entry["thread_id"], outcome, reason)
+                state["results"][entry["thread_id"]] = outcome
+        except Exception as exc:
+            state["failure"] = "Provider interruption failed: " + str(exc)[:1000]
+            try:
+                recovery = RuntimeRecovery(sessions)
+                for entry in turns:
+                    thread_id, turn_id = entry["thread_id"], entry["turn_id"]
+                    if thread_id in state["results"]:
+                        continue
+                    if thread_id in state["signalled"]:
+                        with sessions.lock:
+                            running = sessions.active.get(thread_id) == turn_id
+                        self.restore_failure_guard(sessions, thread_id, turn_id, None, running=running)
+                        recovery.settle_interruption(update_id, thread_id, "uncertain",
+                            "The update failed while stopping this turn; inspect it before continuing.")
+                    else:
+                        self.restore_failure_guard(sessions, thread_id, turn_id, None, running=True)
+                        recovery.settle_interruption(update_id, thread_id, "withdrawn",
+                            "The update failed before stopping this turn; it kept running.")
+            except Exception:
+                pass
+        finally:
+            state["done"].set()
+
+    def interrupt_turn(self, sessions, entry, deadline, signalled):
+        """Revalidate, request one native interrupt, and confirm its outcome.
+
+        The completion is marked as update-owned so it is neither a user Stop
+        nor a failure report. A turn that ended on its own keeps its outcome.
+        """
+        from .store import CoordinationError
+        thread_id, turn_id = entry["thread_id"], entry["turn_id"]
+        store = sessions.store
+        with sessions.lock:
+            current = sessions.active.get(thread_id)
+            requested = any((value.get("params") or {}).get("threadId") == thread_id
+                            for value in sessions.requests.values())
+        if current != turn_id:
+            return "finished", "The turn finished before the update stopped it."
+        if requested:
+            return "withdrawn", "An approval or answer requires the user."
+        if time.monotonic() >= deadline:
+            # Leave the turn running; the update then fails and continues the
+            # turns it already paused instead of dropping this one.
+            return "withdrawn", "The update ran out of time before stopping this turn; it kept running."
+        # A Stop pressed while admission is closed is recorded, but its native
+        # request is refused. Carry out that Stop; never continue the turn.
+        user_stop = store.threads.stop_requested(thread_id, turn_id)
+        if not user_stop:
+            markers = getattr(sessions, "runtime_recovery_turns", None)
+            if markers is None:
+                markers = sessions.runtime_recovery_turns = {}
+            markers[thread_id] = turn_id
+        natural = False
+        signalled.add(thread_id)
+        try:
+            with sessions.admission.enter(maintenance=True):
+                sessions._rpc(thread_id).request("turn/interrupt", {
+                    "threadId": thread_id, "turnId": turn_id, **({} if user_stop else {"runtimeUpdate": True})})
+        except CoordinationError as exc:
+            natural = "changed or finished" in str(exc)
+            if "waiting for an approval or answer" in str(exc):
+                # The adapter refused atomically: an approval arrived first.
+                self.restore_failure_guard(sessions, thread_id, turn_id, None, running=True)
+                return "withdrawn", "An approval or answer requires the user."
+        status = None
+        confirmation = time.monotonic() + UPDATE_CONFIRMATION_SECONDS
+        while time.monotonic() < confirmation:
+            with sessions.lock:
+                running = sessions.active.get(thread_id) == turn_id
+            if not running:
+                record = store.threads.get(thread_id, history=False)
+                if record["turn_id"] != turn_id:
+                    status = "superseded"
+                    break
+                status = (record.get("turn_completion") or {}).get("status")
+                if status:
+                    break
+            time.sleep(.02)
+        else:
+            with sessions.lock:
+                running = sessions.active.get(thread_id) == turn_id
+            self.restore_failure_guard(sessions, thread_id, turn_id, None, running=running)
+            return "unconfirmed", ("The update could not stop this turn; it is still running." if running else
+                                   "This turn stopped without a saved outcome; inspect it before continuing.")
+        if user_stop or store.threads.stop_requested(thread_id, turn_id):
+            return "withdrawn", "The user stopped this turn."
+        if natural or status != "interrupted":
+            self.restore_failure_guard(sessions, thread_id, turn_id, status)
+            return "finished", f"The turn ended on its own ({status}) before the update stopped it."
+        return "confirmed", None
+
+    def restore_failure_guard(self, sessions, thread_id, turn_id, status, *, running=False):
+        """Reinstate the failure guard the update marker may have suppressed.
+
+        A still-running turn only loses the marker; its own completion is
+        then handled normally. A stopped turn without a successful outcome
+        keeps the inbox pause and failure report.
+        """
+        markers = getattr(sessions, "runtime_recovery_turns", {})
+        if markers.get(thread_id) == turn_id:
+            markers.pop(thread_id, None)
+        if running or status in {"completed", "superseded"} or sessions.store.threads.stop_requested(thread_id, turn_id):
+            return
+        with sessions.store.reading(), sessions.store._connection() as db:
+            paused = db.execute("SELECT 1 FROM browser_inbox_wake WHERE thread_id=? AND paused=1",
+                                (thread_id,)).fetchone()
+        if paused:
+            return
+        from .app_agent_failures import notify_agent_failure
+        sessions.queue.pause(thread_id, "The turn stopped or failed. Resume queued messages when ready.")
+        sessions.inbox_wake.pause(thread_id, "The turn stopped or failed. Send a message to continue.", kind="failure")
+        notify_agent_failure(sessions.store, thread_id, event_key=["turn", turn_id], stage="turn", turn_id=turn_id,
+                             error="The provider ended this turn while a backend update was preparing. "
+                                   "Inspect native execution and tool outcomes before recovery.")
+
+    def validate_candidate(self, candidate, *, capacity):
+        from . import runtime_update
+        try:
+            if capacity:
+                runtime_update.check_capacity(self.database, self.directory)
+            probe = subprocess.run(payload_command(candidate) + ["--runtime-probe"],
+                                   env=payload_environment(candidate), capture_output=True, timeout=30)
+            return probe.stderr.decode(errors="replace")[-1000:] if probe.returncode else None
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            return str(exc)
+
+    def abandon_unstarted_update(self, update):
+        """Void an update whose accepting coordinator exited before handover.
+
+        A turn that coordinator was stopping has no proof of its outcome and
+        is never continued automatically; turns it confirmed continue once.
+        """
+        from . import runtime_update
+        from .runtime_recovery import RuntimeRecovery
+        if not update or update.get("source_instance") == self.instance:
+            return
+        # A coordinator that wrote "stopping" and then crashed (exit other than
+        # the handover status) is restarted on its own payload by the supervisor.
+        stopped_before_transfer = (update["phase"] == "stopping" and update.get("uninterrupted")
+                                   and update.get("previous") == str(self.payload))
+        if not stopped_before_transfer and (update["phase"] not in {"accepted", "draining", "interrupting"}
+                                            or update.get("uninterrupted")):
+            return
+        RuntimeRecovery(self.server.browser_sessions).abandon_interruptions(update["id"])
+        runtime_update.write(self.directory, update, phase="failed", notice=None,
+            error="The backend restarted before this update started; the current backend remains active.")
+
+    def note_update(self, **changes):
+        from . import runtime_update
+        if any(self.update_requested.get(key) != value for key, value in changes.items()):
+            self.update_requested = runtime_update.write(self.directory, self.update_requested, **changes)
+
+    def reopen_drain(self, sessions):
+        if self.update_drain_started is not None or sessions.admission.paused:
+            if self.update_drain_started is not None:
+                from . import runtime_update
+                self.update_requested = runtime_update.write(self.directory, self.update_requested, phase="accepted",
+                    admission_drain_seconds=time.monotonic() - self.update_drain_started)
+            self.update_drain_started = None
+            sessions.admission.resume()
+            sessions.queue.wake()
+            sessions.dispatch.wake()
+
+    def fail_update(self, sessions, error, **details):
+        """Fail visibly; continue any turn this update already paused."""
+        from . import runtime_update
+        elapsed = None if self.update_drain_started is None else time.monotonic() - self.update_drain_started
+        self.error = error
+        runtime_update.write(self.directory, self.update_requested, phase="failed", error=error, notice=None,
+                             admission_drain_seconds=elapsed, **details)
+        self.update_requested = None
+        self.update_drain_started = None
+        self.update_grace_started = None
+        self.interruption = None
+        self.pending = None
+        self.reopen_work(sessions)
+
+    def reopen_work(self, sessions):
+        if self.stopping.is_set() or self.maintenance:
+            return
+        if not self.start_recovery():
+            sessions.admission.resume()
+            sessions.queue.wake()
+            sessions.dispatch.wake()
+
+    def start_recovery(self):
+        """Run saved continuation decisions once per update in this process."""
+        from . import runtime_update
+        sessions = self.server.browser_sessions
+        if self.recovery_running:
+            return True
+        update = runtime_update.read(self.directory)
+        if (not update or update["id"] == self.recovery_started or update.get("cancelled")
+                or update.get("recovery_uncertain")):
+            return False
+        if update.get("interrupted_unsupported"):
+            # Turns this update paused continue after commit, rollback or a
+            # failure before handover, whether or not a candidate launched.
+            eligible = update["phase"] in runtime_update.TERMINAL
+        else:
+            eligible = not update.get("uninterrupted") and update["phase"] in {"committed", "rolled-back"}
+        if not eligible:
+            return False
+        self.recovery_started = update["id"]
+        self.recovery_running = True
+        sessions.admission.pause()
+        def recover_work():
+            from .runtime_recovery import RuntimeRecovery
+            def permitted():
+                current = runtime_update.read(self.directory)
+                return not self.stopping.is_set() and not self.maintenance and not current.get("cancelled")
+            try:
+                with sessions.admission.enter(maintenance=True):
+                    RuntimeRecovery(sessions, permitted=permitted).recover(update["id"])
+            except Exception as exc:
+                self.error = "Conversation recovery requires review: " + str(exc)
+            finally:
+                with self.mutex:
+                    self.recovery_running = False
+                    if not self.stopping.is_set() and not self.maintenance:
+                        sessions.admission.resume()
+                        sessions.queue.wake()
+                        sessions.dispatch.wake()
+        threading.Thread(target=recover_work, daemon=True, name="runtime-recovery").start()
+        return True
+
     def resume_work(self):
         """Finish saved recovery decisions before admitting automatic work."""
-        from . import runtime_update
         sessions = self.server.browser_sessions
         if self.stopping.is_set() or self.maintenance or self.recovery_running:
             return
@@ -755,31 +1173,7 @@ class Runtime:
         projection = getattr(sessions, "projection", None)
         if projection is not None and projection.worker is None:
             projection.start()
-        update = runtime_update.read(self.directory)
-        if (update and not update.get("uninterrupted") and update["id"] != self.recovery_started and not update.get("cancelled")
-                and not update.get("recovery_uncertain") and update["phase"] in {"committed", "rolled-back"}):
-            self.recovery_started = update["id"]
-            self.recovery_running = True
-            sessions.admission.pause()
-            def recover_work():
-                from .runtime_recovery import RuntimeRecovery
-                def permitted():
-                    current = runtime_update.read(self.directory)
-                    return not self.stopping.is_set() and not self.maintenance and not current.get("cancelled")
-                try:
-                    with sessions.admission.enter(maintenance=True):
-                        RuntimeRecovery(sessions, permitted=permitted).recover(update["id"])
-                except Exception as exc:
-                    self.error = "Conversation recovery requires review: " + str(exc)
-                finally:
-                    with self.mutex:
-                        self.recovery_running = False
-                        if not self.stopping.is_set() and not self.maintenance:
-                            sessions.admission.resume()
-                            sessions.queue.wake()
-                            sessions.dispatch.wake()
-            threading.Thread(target=recover_work, daemon=True, name="runtime-recovery").start()
-        else:
+        if not self.start_recovery():
             sessions.admission.resume()
             sessions.queue.wake()
             sessions.dispatch.wake()
@@ -805,8 +1199,11 @@ class Runtime:
 
     def dispatch(self, body):
         action = body.get("action")
-        if self.trial and action not in {"identity", "status", "stop"}:
+        if self.trial and action not in {"identity", "status", "update-status", "stop"}:
             raise RuntimeError("Candidate activation has not been committed.")
+        if action == "update-status":
+            # Read-only; a supported alternative to inspecting private files.
+            return {**self.identity(), "update": self.update_status()}
         if action == "identity":
             # The control handler has already authenticated token + instance.
             # Readiness is required for handover, not for routing a hook/CLI.
@@ -1013,6 +1410,8 @@ class Runtime:
                 expected = update["target"] if update["phase"] == "committed" else update["previous"]
                 if update.get("superseded_by") or str(self.payload) != expected:
                     runtime_update.write(self.directory, update, superseded_by=str(self.payload))
+            else:
+                self.abandon_unstarted_update(update)
         with self.mutex:
             self.ensure_supervisor()
             if not self.maintenance:
@@ -1044,14 +1443,10 @@ class Runtime:
                         continue
                     self.upgrading = True
                     candidate = self.pending
-                try:
-                    if self.update_requested:
-                        runtime_update.check_capacity(self.database, self.directory)
-                    probe = subprocess.run(payload_command(candidate) + ["--runtime-probe"],
-                                           env=payload_environment(candidate), capture_output=True, timeout=30)
-                    failure = probe.stderr.decode(errors="replace")[-1000:] if probe.returncode else None
-                except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-                    failure = str(exc)
+                # An update that paused provider turns validated this exact
+                # candidate before signalling them; repeat only otherwise.
+                failure = (None if self.update_requested and self.update_validated == self.update_requested["id"]
+                           else self.validate_candidate(candidate, capacity=bool(self.update_requested)))
                 if failure is not None:
                     if self.update_requested:
                         runtime_update.write(self.directory, self.update_requested, phase="failed", error="Candidate validation failed: " + failure)
@@ -1060,9 +1455,7 @@ class Runtime:
                         self.error = "Candidate validation failed: " + failure
                         self.pending = None
                         self.upgrading = False
-                        if not self.stopping.is_set() and not self.maintenance:
-                            sessions.admission.resume()
-                            sessions.queue.wake()
+                        self.reopen_work(sessions)
                     candidate = None
                     continue
                 with self.mutex:
@@ -1072,7 +1465,12 @@ class Runtime:
                     if self.maintenance or uninterrupted_readiness(sessions):
                         self.upgrading = False
                         candidate = None
-                        if not self.maintenance:
+                        if (not self.maintenance and self.update_requested
+                                and self.update_requested.get("interrupted_unsupported")):
+                            self.fail_update(sessions, "The update could not proceed after pausing conversations; "
+                                             "the current backend remains active and paused conversations continue now.",
+                                             blocked=uninterrupted_readiness(sessions))
+                        elif not self.maintenance:
                             sessions.admission.resume()
                         continue
                 with self.mutex:
@@ -1106,6 +1504,8 @@ class Runtime:
                                 sessions.admission.resume()
                             else:
                                 self.maintenance = True
+                            if not self.maintenance:
+                                self.start_recovery()  # Turns this update paused continue now.
                             continue
                         break
                     if self.update_requested:
@@ -1608,7 +2008,8 @@ def main(argv=None):
     parser.add_argument("--runtime-probe", action="store_true")
     parser.add_argument("--runtime-start-paused", action="store_true")
     parser.add_argument("--runtime-confirm-updates", action="store_true")
-    parser.add_argument("--runtime-command", choices=("status", "pause", "resume", "stop", "decision", "activate-update", "cancel-update-authorization"))
+    parser.add_argument("--runtime-command", choices=("status", "update-status", "pause", "resume", "stop", "decision",
+                                                      "activate-update", "cancel-update-authorization"))
     parser.add_argument("--inherit-owner-fd", type=int)
     parser.add_argument("--ready-fd", type=int)
     parser.add_argument("--commit-fd", type=int)
@@ -1638,7 +2039,7 @@ def main(argv=None):
             update = runtime_update.read(directory)
             if not update or update["phase"] in runtime_update.TERMINAL:
                 raise
-            if args.runtime_command == "status":
+            if args.runtime_command in {"status", "update-status"}:
                 print(json.dumps({"status": "updating", "update": update}), flush=True)
                 return 0
             if args.runtime_command == "stop":
@@ -1667,6 +2068,10 @@ def main(argv=None):
             raise
         if not record:
             update = runtime_update.read(directory)
+            if args.runtime_command == "update-status":
+                # Read-only: never bootstrap or adopt ownership to answer it.
+                print(json.dumps({"status": "unavailable", "update": update}), flush=True)
+                return 0
             if (args.runtime_command == "status" and update and not update.get("cancelled")
                     and not (directory / "stop-proof.json").exists() and owner_available(directory)):
                 selected = args.resources or update["target"]

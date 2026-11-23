@@ -47,6 +47,8 @@ final class Backend {
     private(set) var pendingUpdateVersion: String?
     private(set) var pendingUpdateRequiresConfirmation = false
     private(set) var supportsRuntimeUpdates = false
+    private(set) var supportsUninterruptedUpdates = false
+    private(set) var continuesInterruptedProviders = false
     var updateInProgress: Bool { expectedUpdate != nil }
     private var expectedUpdate: (id: String, payload: String)?
     private var reportedUpdate: String?
@@ -183,7 +185,8 @@ final class Backend {
             }
             if !["committed", "rolled-back", "failed"].contains(phase) {
                 if let target = update["target"] as? String { expectedUpdate = (identity, target) }
-                updateStatus?("Updating backend…", false)
+                // The backend names what the update is waiting for or pausing.
+                updateStatus?(update["notice"] as? String ?? "Updating backend…", false)
                 if status["status"] as? String != "serving" { return }
             } else if reportedUpdate != identity + phase {
                 let matches = phase == "committed" && status["status"] as? String == "serving"
@@ -225,6 +228,8 @@ final class Backend {
         }
         pendingUpdate = pending
         supportsRuntimeUpdates = (status["runtime_updates"] as? Int ?? 0) >= 1
+        supportsUninterruptedUpdates = (status["uninterrupted_updates"] as? Int ?? 0) >= 1
+        continuesInterruptedProviders = (status["interrupted_provider_continuation"] as? Int ?? 0) >= 1
         pendingUpdateRequiresConfirmation = (status["runtime_update_prompts"] as? Int ?? 0) >= 1
             && status["pending_confirmation"] as? Bool == true
         self.instance = instance

@@ -78,6 +78,8 @@ class KimiRPC:
         self.connections, self.options, self.native, self.generations = {}, {}, {}, {}
         self.turns, self.completed, self.requests, self.settings, self.capabilities = {}, {}, {}, {}, {}
         self.journals = {}
+        # Turns a backend update is stopping; their late requests are refused.
+        self.update_stopping = set()
         self.catalog = None
         self.permission_catalogs = {}
         self.effective_permissions = {}
@@ -307,6 +309,7 @@ class KimiRPC:
         if method == "turn/start":
             if thread_id in self.turns:
                 raise CoordinationError("A Kimi turn is already running.")
+            self.update_stopping.discard(thread_id)
             connection = self._connection(thread_id, self._options(params))
             prompt = [{"type": "text", "text": coordination_bootstrap(self.store, thread_id)}]
             for part in params["input"]:
@@ -333,6 +336,12 @@ class KimiRPC:
             turn = self.turns.get(thread_id)
             if not turn or turn["id"] != params["turnId"]:
                 raise CoordinationError("The active Kimi turn changed or finished.")
+            if params.get("runtimeUpdate"):
+                # Requests register under this lock: an update never withdraws one.
+                with self.lock:
+                    if any(value["thread"] == thread_id for value in self.requests.values()):
+                        raise CoordinationError("Kimi is waiting for an approval or answer; the update did not stop this turn.")
+                    self.update_stopping.add(thread_id)
             self._finish(thread_id, "interrupted")
             connection = self.connections.get(thread_id)
             try:
@@ -509,8 +518,11 @@ class KimiRPC:
         if questions:
             params.update(questions=questions, allowCancel=True)
         key = f"kimi:{thread_id}:{message['id']}"
-        self.requests[key] = {"thread": thread_id, "id": message["id"], "request": request,
-                              "elicitation": elicitation, "questions": questions}
+        with self.lock:
+            if thread_id in self.update_stopping:
+                raise CoordinationError("This Kimi turn is stopping for a backend update.")
+            self.requests[key] = {"thread": thread_id, "id": message["id"], "request": request,
+                                  "elicitation": elicitation, "questions": questions}
         self.on_event({"id": key, "method": "item/tool/requestUserInput" if questions else "item/commandExecution/requestApproval", "params": params})
 
     def write(self, message):
