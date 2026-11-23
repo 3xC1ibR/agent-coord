@@ -1,17 +1,16 @@
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
 import http.client
-import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
 from test_codex_app_server import FakeCodex
-from agent_coord import cli
 from agent_coord.codex_app_server import BrowserBusyError, BrowserSessions
 from agent_coord.external_work import ExternalWorkRuntime
 from agent_coord.external_work_control import provision_token, read_token, token_file
@@ -429,10 +428,13 @@ class ExternalWorkTests(unittest.TestCase):
                 connection.close()
 
         def command(*args):
-            output = io.StringIO()
-            with redirect_stdout(output), redirect_stderr(output):
-                self.assertEqual(cli.main(["--db", str(self.store.database_path), *args]), 0, output.getvalue())
-            return json.loads(output.getvalue())
+            # Keep the CLI response separate from the concurrent server's
+            # diagnostics, as it is when an operator runs this command.
+            script = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts/agent-coord"
+            result = subprocess.run([sys.executable, str(script), "--db", str(self.store.database_path), *args],
+                                    text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
 
         self.assertEqual(request("GET", path)[0], 403)
         receipt = command("external-work", "provision-token")
