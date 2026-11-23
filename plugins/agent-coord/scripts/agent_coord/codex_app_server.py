@@ -48,7 +48,7 @@ from .attention import AttentionClassifier
 from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
-from .organization import app_agent_creators, describe_creators
+from .organization import OrganizationStore, app_agent_creators, describe_creators
 from . import notification_policy
 from .session_close import is_external_codex_session, stop_terminal_session, verify_terminal_handoff
 from .session_defaults import session_defaults
@@ -1399,25 +1399,47 @@ class BrowserSessions:
             "item/tool/requestUserInput", "mcpServer/elicitation/request",
         }
 
+    def _approval_thread_labels(self, thread_ids: set[str]) -> dict[str, dict]:
+        if not thread_ids:
+            return {}
+        with self.store.reading(), self.store._connection() as db:
+            rows = db.execute(
+                """SELECT b.thread_id, b.client, b.cwd AS browser_cwd, s.cwd, t.title,
+                          o.thread_id AS organized, p.name AS project_name, r.name AS repository_name
+                   FROM json_each(?) ids JOIN browser_sessions b ON b.thread_id = ids.value
+                   JOIN work_threads t ON t.thread_id = b.thread_id
+                   JOIN sessions s ON s.session_id = b.thread_id
+                   JOIN work_projects w ON w.id = t.project_id
+                   LEFT JOIN thread_organization o ON o.thread_id = b.thread_id
+                   LEFT JOIN named_projects p ON p.id = o.project_id
+                   LEFT JOIN work_repositories r ON r.id = o.repository_id
+                   WHERE t.attention != 'archived' AND
+                         (t.attention != 'later' OR t.snoozed_until IS NULL OR t.snoozed_until <= ?)""",
+                (json.dumps(list(thread_ids)), self.store.clock()),
+            ).fetchall()
+            labels = {}
+            for row in rows:
+                if matches_workspace(row["browser_cwd"], self.cwd):
+                    association = (row if row["organized"] is not None else
+                                   OrganizationStore.projected_association(db, row["thread_id"], row["cwd"]))
+                    labels[row["thread_id"]] = {"thread_id": row["thread_id"], "client": row["client"],
+                                                "title": row["title"], "project_name": association["project_name"],
+                                                "repository_name": association["repository_name"]}
+            return labels
+
     def approval_notifications(self, *, include_claimed: bool = False) -> list[dict]:
         """Include still-pending approvals on fresh streams and reconnects."""
         with self.lock:
-            notifications = []
-            for key, request in self.requests.items():
-                if not self._input_request(request) or (request.get("notification_claimed") and not include_claimed):
-                    continue
-                try:
-                    thread_id = request["params"].get("threadId")
-                    self._record(thread_id)
-                    thread = self.store.threads.get(thread_id, history=False)
-                except CoordinationError:
-                    continue
-                if thread["attention"] != "archived" and not thread["snoozed"]:
-                    notifications.append({"request_key": key, "thread_id": thread_id,
-                                          "status": "approval" if self._approval_request(request) else "question",
-                                          "client": self._record(thread_id)["client"],
-                                          "title": thread["title"], "project_name": thread["project_name"],
-                                          "repository_name": thread["repository_name"]})
+            pending = [(key, request, request["params"].get("threadId")) for key, request in self.requests.items()
+                       if self._input_request(request) and (include_claimed or not request.get("notification_claimed"))]
+        # Database and workspace lookups can take longer than a native input.
+        # Recheck identity so replacing, answering or claiming a request during the read takes effect.
+        labels = self._approval_thread_labels({thread_id for _, _, thread_id in pending if isinstance(thread_id, str)})
+        with self.lock:
+            notifications = [{"request_key": key, "status": "approval" if self._approval_request(request) else "question",
+                              **labels[thread_id]} for key, request, thread_id in pending
+                             if isinstance(thread_id, str) and thread_id in labels and self.requests.get(key) is request
+                             and (include_claimed or not request.get("notification_claimed"))]
         # Open blocking asks share the approval alert path: one claim per ask,
         # labelled "Answer needed", scoped to this app's workspace like approvals.
         for ask in self.store.asks.list(status="open", blocking=True):

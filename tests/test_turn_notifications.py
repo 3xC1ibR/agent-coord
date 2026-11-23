@@ -10,6 +10,7 @@ import unittest
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -57,6 +58,62 @@ class TurnNotificationTests(unittest.TestCase):
         self.assertEqual({event["status"] for event in events}, {"approval", "question"})
         self.assertTrue(all(event["title"] == "Approval test" for event in events))
         self.assertEqual(self.store.threads.completion_cursor(), 0)
+
+    def test_delayed_approval_read_allows_native_input_and_rechecks_resolution(self):
+        _, key = self.approval()
+        destination = self.sessions.create({})["session"]["thread_id"]
+        started = threading.Event()
+        release = threading.Event()
+        reader = threading.local()
+        original = self.store._connection
+
+        @contextmanager
+        def delayed_reader():
+            if getattr(reader, "polling", False):
+                started.set()
+                if not release.wait(4):
+                    raise RuntimeError("Test notification reader was never released")
+            with original() as db:
+                yield db
+
+        def poll():
+            reader.polling = True
+            return self.sessions.approval_notifications()
+
+        with patch.object(self.store, "_connection", delayed_reader), ThreadPoolExecutor(2) as pool:
+            observer = pool.submit(poll)
+            try:
+                self.assertTrue(started.wait(2))
+                submission = pool.submit(self.sessions.submit, destination,
+                                         {"requestId": "concurrent-input", "message": "Continue."})
+                result = submission.result(timeout=1)
+                self.assertEqual(result["turn"]["id"], self.sessions.rpc.threads[destination]["turns"][0]["id"])
+                self.sessions._event({"method": "serverRequest/resolved", "params": {"requestId": 42}})
+            finally:
+                release.set()
+            self.assertNotIn(key, {item["request_key"] for item in observer.result(timeout=2)})
+        with self.store.reading(), self.store._connection() as db:
+            receipts = db.execute("SELECT request_id, state FROM browser_submission_receipts").fetchall()
+        self.assertEqual([tuple(row) for row in receipts], [("concurrent-input", "completed")])
+        self.assertEqual(sum(name == "turn/start" for name, _ in self.sessions.rpc.calls), 1)
+
+    def test_pending_notification_labels_handle_snoozes_and_legacy_repositories(self):
+        (self.root / ".git").mkdir()
+        thread_id, key = self.approval()
+        project = self.store.threads.organization.create_project("Investigation")
+        self.store.threads.update(thread_id, project_id=project["id"])
+        event, = self.sessions.approval_notifications()
+        self.assertEqual((event["project_name"], event["repository_name"]), ("Investigation", self.root.name))
+        self.store.threads.update(thread_id, snoozed_until=1030.0)
+        self.assertEqual(self.sessions.approval_notifications(), [])
+        with self.store._connection() as db:
+            db.execute("DELETE FROM thread_organization WHERE thread_id = ?", (thread_id,))
+        with patch.object(self.store, "clock", return_value=1030.0), self.store.reading():
+            event, = self.sessions.approval_notifications()
+            self.assertEqual((event["request_key"], event["project_name"], event["repository_name"]),
+                             (key, None, self.root.name))
+            with self.store._connection() as db:
+                self.assertIsNone(db.execute("SELECT 1 FROM thread_organization WHERE thread_id = ?", (thread_id,)).fetchone())
 
     def test_approval_claim_is_atomic_and_resolved_requests_stay_quiet(self):
         thread_id, key = self.approval()
