@@ -29,7 +29,7 @@ from .browser_queue import BrowserMessageQueue
 from .thread_inventory import WAKE_PAUSES, has_table, wake_fields
 from .inventory_projection import entity_tag, list_card
 from .conversation_residency import Resident, releasable
-from .history_window import recent_view
+from .history_window import RECENT_TURNS, recent_view
 from .history_persistence import (HistoryPersistence, SavedHistoryWindows, ensure_schema as ensure_history_schema,
                                   prepare_history, publish_history, read_history, stage_history)
 from .browser_persistence import BrowserPersistence
@@ -2508,6 +2508,7 @@ class BrowserSessions:
         if observation is not None and getattr(projection.in_event, "active", False):
             observation = None
         unloaded = observation is not None and thread_id not in observation["excluded"]
+        omitted_turns = 0
         if unloaded:
             runtime_state = ({}, False, False, None)
             thread, active_turn = None, None
@@ -2515,7 +2516,14 @@ class BrowserSessions:
         else:
             with self.lock:
                 self.last_used[thread_id] = time.monotonic()
-                thread = copy.deepcopy(self.histories.get(thread_id))
+                resident = self.histories.get(thread_id)
+                if recent and resident and len(turns := resident.get("turns") or []) > RECENT_TURNS:
+                    # Detach only the displayed turns under the provider lock. A full
+                    # transcript copy here serializes every sender behind this read.
+                    omitted_turns = len(turns) - RECENT_TURNS
+                    thread = copy.deepcopy({**resident, "turns": turns[-RECENT_TURNS:]})
+                else:
+                    thread = copy.deepcopy(resident)
                 active_turn = self.active.get(thread_id)
                 runtime_state = self._thread_runtime_state(thread_id)
                 revision = self.turn_revisions.get(thread_id, 0)
@@ -2539,9 +2547,19 @@ class BrowserSessions:
             # ownership and input once before returning the new history.
             return self._read_snapshot(thread_id, recent=recent, synchronized=True)
         if not saved_window:
-            self._schedule_saved_completion(thread_id, thread, work_thread, revision)
+            if omitted_turns and needs_outcome and not any(
+                    turn.get("id") == work_thread["turn_id"] for turn in thread["turns"]):
+                # Recovery needs only the recorded turn's terminal metadata. The
+                # history and lifecycle fence must still identify the same mirror.
+                with self.lock:
+                    if (self.histories.get(thread_id) is resident
+                            and self.turn_revisions.get(thread_id, 0) == revision):
+                        self._schedule_saved_completion(thread_id, resident, work_thread, revision)
+            else:
+                self._schedule_saved_completion(thread_id, thread, work_thread, revision)
             if recent:
                 thread = recent_view(thread, live_turn=active_turn)
+                thread["earlierTurns"] += omitted_turns
         return {"session": record, "thread": self.reviews.public_history(thread_id, thread),
                 "work_thread": work_thread, "requests": self._public_requests(waiting.values()),
                 "activeTurn": active_turn, "running": running,

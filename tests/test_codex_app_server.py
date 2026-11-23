@@ -2085,6 +2085,27 @@ class DatabaseContentionTests(unittest.TestCase):
             blocker.rollback()
             blocker.close()
 
+    def test_recent_resident_snapshot_omits_old_payloads_but_recovers_their_terminal_outcome(self):
+        from agent_coord.history_window import RECENT_TURNS
+
+        class OldOutput(list):
+            def __deepcopy__(self, memo):
+                raise AssertionError("Recent read copied omitted provider output")
+
+        identity = self.reopen_with_saved_outcome("completed")
+        turns = [{"id": "recorded-turn", "status": "completed", "completedAt": 120, "items": OldOutput()}]
+        turns.extend({"id": str(index), "status": "completed", "items": [
+            {"id": "text", "type": "agentMessage", "text": str(index)}]} for index in range(RECENT_TURNS))
+        self.sessions.histories[identity] = {"id": identity, "turns": turns}
+        with self.store.reading():
+            result = self.sessions.read(identity, snapshot=True, recent=True)["thread"]
+        self.assertEqual(result["earlierTurns"], 1)
+        self.assertEqual([turn["id"] for turn in result["turns"]], [str(index) for index in range(RECENT_TURNS)])
+        result["turns"][-1]["items"][0]["text"] = "changed in response"
+        self.assertEqual(turns[-1]["items"][0]["text"], str(RECENT_TURNS - 1))
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
+        self.assertEqual(self.store.threads.get(identity)["turn_completion"]["completed_at"], 120)
+
     def test_full_snapshot_keeps_all_saved_turns_and_output_without_provider_requests(self):
         identity = self.create()
         turns = [{"id": str(index), "status": "completed", "items": [
