@@ -119,6 +119,18 @@ class NavigationTests(unittest.TestCase):
             with self.assertRaisesRegex(CoordinationError, "Install the app"):
                 self.nav.open(target)
 
+    def test_sending_from_the_bound_window_requires_no_writer_admission(self):
+        first = str(uuid.uuid4())
+        self.nav.bind("manager", first)
+        with patch.object(self.store._writer, "reserve", side_effect=AssertionError("unnecessary writer admission")):
+            for thread, source in (("manager", first), ("without-window", None)):
+                with self.subTest(thread=thread):
+                    with self.nav.sending(thread, source):
+                        self.assertEqual(self.nav.origin(thread), source)
+                    with self.assertRaisesRegex(RuntimeError, "provider rejected input"):
+                        with self.nav.sending(thread, source):
+                            raise RuntimeError("provider rejected input")
+
     def test_origin_is_available_during_rpc_rolls_back_errors_and_follows_queued_turn(self):
         sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
         self.addCleanup(sessions.close)

@@ -2780,10 +2780,7 @@ class BrowserSessions:
                         self.starting_notification_context.pop(thread_id, None)
                 self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, turn_id), key=thread_id)
                 self.dispatch.confirm_context(thread_id, dispatch_context)
-                self.store.threads.user_message(thread_id)
-                self.inbox_wake.resume(thread_id)
-                with self.store._connection() as connection:
-                    connection.execute("UPDATE browser_sessions SET updated_at = ? WHERE thread_id = ?", (time.time(), thread_id))
+                self._record_accepted_input(thread_id, user_input=True)
                 self._publish("browser/changed", {"threadId": thread_id})
                 return result
             if record["model"]:
@@ -2846,19 +2843,27 @@ class BrowserSessions:
             if result.get("model"):
                 self._capture_settings(thread_id, result)
             self.dispatch.confirm_context(thread_id, dispatch_context)
-            # Some app-server versions omit input items from turn/started.
-            if not automatic and not recovery:
-                self.store.threads.user_message(thread_id)
-                self.store.threads.capture_request(thread_id, message or "\n".join("[Image]" for _ in images))
-                self.inbox_wake.resume(thread_id)
             with self.lock:
                 # A fast completed event may arrive before the request response.
                 if thread_id in self.active:
                     self.active[thread_id] = result["turn"]["id"]
-            with self.store._connection() as connection:
-                connection.execute("UPDATE browser_sessions SET updated_at = ? WHERE thread_id = ?", (time.time(), thread_id))
+            # Some app-server versions omit input items from turn/started.
+            self._record_accepted_input(thread_id, user_input=not automatic and not recovery,
+                                        original_request=message or "\n".join("[Image]" for _ in images))
             self._publish("browser/changed", {"threadId": thread_id})
             return result
+
+    def _record_accepted_input(self, thread_id, *, user_input, original_request=None):
+        # These state changes all describe the same provider acknowledgement.
+        # Commit them together before publishing browser/changed.
+        with self.store.database_operation("send.record_accepted_input"), self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if user_input:
+                self.store.threads.user_message(thread_id, connection=db)
+                if original_request is not None:
+                    self.store.threads.capture_request(thread_id, original_request, connection=db)
+                self.inbox_wake.resume(thread_id, connection=db)
+            db.execute("UPDATE browser_sessions SET updated_at=? WHERE thread_id=?", (time.time(), thread_id))
 
     def interrupt(self, thread_id: str) -> dict:
         if self.reviews.cancel(thread_id):

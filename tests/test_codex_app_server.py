@@ -142,6 +142,23 @@ class BrowserSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(CoordinationError, "Reopen this thread"):
                 self.sessions.send(identity, {"message": "Follow up"})
 
+    def test_failed_accepted_input_bookkeeping_rolls_back_without_repeating_provider_work(self):
+        identity = self.create()
+        self.store.threads.update(identity, attention="later")
+        body = {"message": "A single provider input", "requestId": "original-request"}
+        with patch.object(self.sessions.inbox_wake, "resume", side_effect=sqlite3.OperationalError("write failed")):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "write failed"):
+                self.sessions.submit(identity, body)
+        with self.store.reading(), self.store._connection() as db:
+            attention = db.execute("SELECT attention FROM work_threads WHERE thread_id=?", (identity,)).fetchone()[0]
+            state = db.execute("SELECT state FROM browser_submission_receipts WHERE thread_id=? AND request_id=?",
+                               (identity, body["requestId"])).fetchone()[0]
+        self.assertEqual(attention, "later")
+        self.assertEqual(state, "uncertain")
+        with self.assertRaises(CoordinationError):
+            self.sessions.submit(identity, body)
+        self.assertEqual([name for name, _ in self.sessions.rpc.calls].count("turn/start"), 1)
+
     def test_superseding_an_absent_review_needs_no_write_transaction(self):
         identity = self.create()
         with self.store.reading():

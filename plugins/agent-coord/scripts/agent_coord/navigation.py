@@ -44,7 +44,7 @@ class NavigationStore:
             """)
 
     def origin(self, session_id):
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             row = db.execute("SELECT window_id FROM ui_turn_windows WHERE session_id = ?", (session_id,)).fetchone()
         return row[0] if row else None
 
@@ -59,7 +59,12 @@ class NavigationStore:
     @contextmanager
     def sending(self, session_id, value):
         """Publish before RPC so even a fast turn can navigate; roll back failures."""
+        value = window_id(value)
         previous = self.origin(session_id)
+        # The caller holds the per-conversation send lock through the RPC.
+        if previous == value:
+            yield
+            return
         self.bind(session_id, value)
         try:
             yield

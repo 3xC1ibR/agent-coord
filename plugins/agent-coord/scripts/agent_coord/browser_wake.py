@@ -11,6 +11,7 @@ import os
 import sqlite3
 import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -112,10 +113,10 @@ class BrowserInboxWake:
                 [(str(error), ident, thread_id) for ident in ids])
             db.execute("UPDATE browser_inbox_wake SET dispatching=0 WHERE thread_id=?", (thread_id,))
 
-    def resume(self, thread_id):
+    def resume(self, thread_id, *, connection=None):
         """Accepted user input re-enables wakes, including after deliberate Stop."""
         self.checked_pauses.pop(thread_id, None)
-        with self.store._connection() as db:
+        with (nullcontext(connection) if connection is not None else self.store._connection()) as db:
             db.execute("""UPDATE browser_inbox_wake SET paused = 0, dispatching = 0,
                 error = NULL, pause_kind = NULL, wake_message_id = NULL, recovery_turn_id = NULL,
                 retry_count = 0, retry_at = NULL, paused_at = NULL,

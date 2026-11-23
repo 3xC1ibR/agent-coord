@@ -6,6 +6,7 @@ import logging
 import math
 import shlex
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
@@ -550,11 +551,12 @@ class ThreadStore:
                 (SELECT MAX(id) FROM {table} WHERE thread_id = ? AND (? IS NULL OR id <= ?)), 0))
                 WHERE thread_id = ?""", (thread_id, cursor, cursor, thread_id))
 
-    def user_message(self, session_id: str) -> None:
+    def user_message(self, session_id: str, *, connection=None) -> None:
         """Resume a parked thread when a user message is accepted."""
         from .thread_control import cancel_pending
-        with self.store._connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with (nullcontext(connection) if connection is not None else self.store._connection()) as db:
+            if connection is None:
+                db.execute("BEGIN IMMEDIATE")
             cancel_pending(db, session_id, self.store.clock())
             db.execute("""UPDATE work_threads SET attention = 'now', snoozed_until = NULL, updated_at = ?
                           WHERE thread_id = ? AND (attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL))""",
@@ -693,10 +695,10 @@ class ThreadStore:
             return db.execute("UPDATE turn_completions SET notified_at = ? WHERE id = ? AND notified_at IS NULL AND status != 'interrupted'",
                               (self.store.clock(), completion_id)).rowcount == 1
 
-    def capture_request(self, session_id: str, prompt: str) -> None:
+    def capture_request(self, session_id: str, prompt: str, *, connection=None) -> None:
         """Record the first accepted user request, without changing turn freshness."""
         request = prompt.strip()[:100000]
-        with self.store._connection() as db:
+        with (nullcontext(connection) if connection is not None else self.store._connection()) as db:
             db.execute("UPDATE work_threads SET original_request = ?, title = CASE WHEN title_source = 'auto' AND title IN ('New session', 'New thread') THEN ? ELSE title END WHERE thread_id = ? AND original_request = ''",
                        (request, " ".join(request.split())[:100], session_id))
 
