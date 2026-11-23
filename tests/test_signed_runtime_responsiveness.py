@@ -13,6 +13,26 @@ from validate_signed_runtime_responsiveness import SignedUpgrade
 
 
 class SignedAcceptanceGateTests(unittest.TestCase):
+    def test_browser_send_intent_does_not_count_as_a_completed_interaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = object.__new__(SignedUpgrade)
+            run.root = Path(directory)
+            run.browser = mock.Mock()
+            run.browser_err = mock.Mock()
+            (run.root / "browser-errors.log").touch()
+            rows = [
+                {"phase": "upgrade", "kind": "browser_send_intent", "marker": "request", "start": 100},
+                {"phase": "upgrade", "kind": "browser_send", "ok": False, "start": 100, "end": 300},
+            ]
+            (run.root / "browser-observations.jsonl").write_text("\n".join(map(json.dumps, rows)))
+            run.report = {"phase_bounds": {"upgrade": [0, 6]}, "wall_phase_bounds": {"upgrade": [0, 6000]},
+                          "violations": []}
+            run.finish_browser()
+            result = run.report["browser_results"]["upgrade"]["browser_send"]
+            self.assertEqual((result["attempts"], result["successes"]), (1, 0))
+            self.assertEqual(result["maximum_seconds_without_success"], 6)
+            self.assertTrue(any(v["kind"] == "browser_send" for v in run.report["violations"]))
+
     def test_durable_acceptance_is_checked_even_when_the_client_timed_out(self):
         with tempfile.TemporaryDirectory() as root:
             run = object.__new__(SignedUpgrade)

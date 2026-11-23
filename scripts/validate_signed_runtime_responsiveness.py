@@ -837,7 +837,7 @@ class SignedUpgrade(Validation):
                 self.report.setdefault("browser_results", {}).setdefault(phase, {})[kind] = stats
                 if phase == "upgrade":
                     lo, hi = self.report["wall_phase_bounds"][phase]
-                    completions = sorted(r["end"] for r in rows if r["ok"] and r["kind"] == kind)
+                    completions = sorted(r["end"] for r in rows if r["kind"] == kind and r["ok"])
                     before = max((end for end in completions if end <= lo), default=lo)
                     after = min((end for end in completions if end >= hi), default=hi)
                     points = [before, *(end for end in completions if lo < end < hi), after]
