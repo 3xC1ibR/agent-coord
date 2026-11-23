@@ -3702,6 +3702,26 @@ function composerKeydown(event) {
     if (globalThis.matchMedia?.("(hover: none) and (pointer: coarse)").matches) return;
     event.preventDefault();
     if (!$("send").disabled) $("composer").requestSubmit();
+    else if (!state.detail && state.detailRefreshing) {
+      // The cold-open composer already accepts typing. Honor its explicit Enter
+      // only for this read, selection and draft, after normal send checks pass.
+      const id = state.selected, revision = state.navigationRevision;
+      const entry = state.conversations?.get(id), text = $("message").value;
+      const images = state.attachments?.snapshot(id) || [];
+      if (!entry?.pending || (!text.trim() && !images.length) || state.attachments?.pending(id)) return;
+      const intent = {text, images};
+      entry.openingSubmission = intent;
+      entry.pending.then(fresh => {
+        if (fresh === false || entry.openingSubmission !== intent || state.selected !== id ||
+            state.navigationRevision !== revision || state.detail?.work_thread?.thread_id !== id ||
+            $("message").value !== text || $("send").disabled || $("composer").hidden) return;
+        const current = state.attachments?.snapshot(id) || [];
+        if (current.length === images.length && current.every((image, i) => image === images[i]))
+          $("composer").requestSubmit();
+      }, () => {}).finally(() => {
+        if (entry.openingSubmission === intent) delete entry.openingSubmission;
+      });
+    }
   } else if (event.key === "Tab" && state.detail?.running && ($("message").value.trim() || state.attachments?.snapshot().length)) {
     event.preventDefault();
     if (!$("queue").disabled) action(() => sendMessage("queue"));

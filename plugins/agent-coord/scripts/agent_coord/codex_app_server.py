@@ -2697,10 +2697,14 @@ class BrowserSessions:
             self._resume_thread(thread_id, record)
             with self.lock:
                 believed_running = thread_id in self.active
-            # A full read reconciles a missed completion before choosing steer or
-            # start. A loaded conversation this runtime considers idle has no
-            # turn to reconcile, so its send skips reading the whole transcript.
-            if not loaded or believed_running:
+                observed_turn = self.active.get(thread_id)
+            # Codex checks the expected turn on the steering RPC itself. A
+            # matching explicit target needs no second native round trip to
+            # copy the whole transcript. Ambiguous outcomes still cannot retry.
+            targeted_steer = (record["client"] == "codex" and expected_turn and expected_turn == observed_turn
+                              and not automatic and not recovery and completed_turn_id is None
+                              and not message.lstrip().startswith("/"))
+            if not loaded or (believed_running and not targeted_steer):
                 self.read(thread_id)
             record = self._record(thread_id)
             if recovery:
@@ -2755,6 +2759,7 @@ class BrowserSessions:
                     # acknowledgements retain their uncertain outcome.
                     if str(error) in {
                         "no active turn to steer",
+                        "Active turn mismatch.",
                         "The active Claude turn changed or finished. Your message was not sent.",
                         "The active Muse turn changed or finished. Your message was not sent.",
                     }:

@@ -957,6 +957,14 @@ class BrowserSessionTests(unittest.TestCase):
             history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
         self.assertEqual(history["turns"][0]["items"][-1]["content"][0]["text"], "New direction")
 
+    def test_steering_the_observed_codex_turn_does_not_fetch_its_transcript(self):
+        identity = self.create()
+        turn = self.sessions.send(identity, {"message": "Start"})["turn"]["id"]
+        with patch.object(self.sessions, "read", side_effect=AssertionError("Full transcript requested")):
+            self.sessions.submit(identity, {"message": "Continue", "expectedTurnId": turn, "requestId": "steering"})
+        sent = [params for method, params in self.sessions.rpc.calls if method == "turn/steer"]
+        self.assertEqual([params["expectedTurnId"] for params in sent], [turn])
+
     def test_stale_steering_does_not_start_or_target_another_turn(self):
         thread_id = self.create()
         turn = self.sessions.send(thread_id, {"message": "Start"})["turn"]

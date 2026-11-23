@@ -67,6 +67,30 @@ test("Tab queues a draft without steering, while Enter submits normally", async 
   assert.equal(prevented, 2);
 });
 
+test("Enter during the initial conversation read submits the same draft once after opening", async () => {
+  for (const outcome of ["ready", "navigated", "edited", "closed", "failed"]) {
+    const c = setup();
+    let finish, sends = 0;
+    const entry = {pending: new Promise(resolve => { finish = resolve; })};
+    c.state.conversations = new Map([["one", entry]]);
+    c.state.detail = null;
+    c.state.detailRefreshing = true;
+    c.state.navigationRevision = 1;
+    c.$("send").disabled = true;
+    c.$("composer").requestSubmit = () => { sends++; };
+    for (let i = 0; i < 2; i++) c.composerKeydown({key: "Enter", preventDefault() {}});
+    assert.equal(sends, 0);
+    if (outcome === "navigated") c.state.navigationRevision++;
+    if (outcome === "edited") c.$("message").value = "Changed";
+    c.state.detail = {work_thread: {thread_id: "one", browser_session: true}};
+    c.state.detailRefreshing = false;
+    c.$("send").disabled = outcome === "closed";
+    finish(outcome !== "failed");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sends, outcome === "ready" ? 1 : 0, outcome);
+  }
+});
+
 test("empty Tab, idle Tab, modified keys and IME retain normal keyboard behavior", () => {
   for (const mode of ["empty", "idle", "shiftKey", "ctrlKey", "altKey", "metaKey", "isComposing"]) {
     const c = setup();
