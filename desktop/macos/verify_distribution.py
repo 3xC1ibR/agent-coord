@@ -53,6 +53,19 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
         result.update(json.loads(probe.stdout))
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(relocated)], check=True)
         result["relocated"] = True
+        # Run the incident regression with the bundle's interpreter and backend.
+        # The fixture modules normally add their own checkout to sys.path.
+        # Copy them outside the checkout so they cannot import its implementation.
+        fixtures = root / "regression-tests"
+        fixtures.mkdir()
+        tests = Path(__file__).resolve().parents[2] / "tests"
+        for filename in ("test_codex_app_server.py", "test_coordinator_projection.py"):
+            shutil.copyfile(tests / filename, fixtures / filename)
+        subprocess.run([str(python), "-m", "unittest", "-v",
+                        "test_coordinator_projection.ProjectionTests."
+                        "test_next_request_replaces_codex_provider_whose_output_ended"],
+                       cwd=fixtures, env=environment, check=True, capture_output=True, text=True, timeout=60)
+        result["codex_provider_relaunch"] = True
         with subprocess.Popen([str(python), "-u", str(resources / "backend.py")], cwd=home,
                               env=environment, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
