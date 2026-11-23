@@ -589,6 +589,8 @@ def _handler(
                                           "recurringSchedules": True,
                                           # The asks view checks this before offering kinds, notes, snooze and the log.
                                           "askKinds": True,
+                                          # Records the user's reply to an open ask, for the mark every device shows.
+                                          "askReplies": True,
                                           "remote": self._remote_request(),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
@@ -1155,13 +1157,17 @@ def _handler(
                     self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.add_repository(body["path"]))
                     return
                 if route[:3] == ["api", "browser", "asks"]:
-                    if len(route) not in (4, 5) or (len(route) == 5 and route[4] != "snooze"):
+                    if len(route) not in (4, 5) or (len(route) == 5 and route[4] not in {"snooze", "reply"}):
                         raise CoordinationError("Choose an ask to resolve.")
                     try:
                         ask_id = int(route[3])
                     except ValueError as exc:
                         raise CoordinationError("Ask ID must be a positive integer.") from exc
-                    if len(route) == 5:
+                    if len(route) == 5 and route[4] == "reply":
+                        if set(body) != {"text"}:
+                            raise CoordinationError("Record a reply to an ask with text.")
+                        result = store.asks.reply(ask_id, body["text"])
+                    elif len(route) == 5:
                         if set(body) != {"until"}:
                             raise CoordinationError("Snooze an ask with until: a future time, or null to show it again.")
                         result = store.asks.snooze(ask_id, body["until"])

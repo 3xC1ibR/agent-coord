@@ -133,6 +133,10 @@ by other agents before filing its own.
 - `POST /api/browser/asks/<id>` with `{resolution, option?, answer?, note?}`.
   The legacy `{option}` and `{answer}` bodies remain valid.
 - `POST /api/browser/asks/<id>/snooze` with `{until}`.
+- `POST /api/browser/asks/<id>/reply` with `{text}` records the user's last
+  reply on an open ask (`reply_text`, `replied_at`). It delivers nothing and
+  leaves the ask open; the reply itself is an ordinary message to the asking
+  conversation. `GET /api/browser/config` reports `"askReplies": true`.
 
 ## View
 
@@ -147,11 +151,17 @@ the question-mark button opens the view.
 - **Snoozed** and **Resolved**. Resolved is the decision log, filterable by
   project, kind and date.
 - Resolution happens in place. Unsaved input is preserved on failure.
+- **Reply.** Every ask of every kind has a text field in view. Sending the text
+  alone is a reply: it goes to the asking conversation as the user's own message,
+  `Re ask #12 "<title>" (still open): <text>`, and the ask stays open showing
+  "You replied" with the text and time. Choosing a resolution with text in the
+  field sends the text as the note. **Reply in conversation** opens the asking
+  conversation with that reference, and any typed text, in its message draft.
 - The same view works at phone width.
-- **In a conversation.** A conversation shows its own asks in a strip above its
-  composer: the open ones with the same resolution controls, note, Snooze and
-  Dismiss, and its resolutions of the last 30 days folded away beneath them.
-  The strip is absent when the conversation has neither.
+- **In a conversation.** A conversation shows its own open asks in a strip
+  above its composer, with the same reply field, resolution controls, Snooze
+  and Dismiss. The strip is absent when the conversation has no open ask. Its
+  resolved asks are listed in the conversation's side panel.
 - **While the navigation is closed** (a phone, or a collapsed sidebar), the
   navigation toggle carries the open count.
 - Follow `DESIGN.md`. Reference apps: Linear Inbox for triage and Things for
@@ -208,7 +218,7 @@ points the specification left open.
 | The name "Queue" appears only in the copy block at the top of `web/asks.js`. Files, identifiers and tests use `asks`. | The name and the reference apps are defaults the owner has not confirmed; renaming the view is a one-line copy change. |
 | **Deviation:** the open count moved from the question-mark button to the sidebar entry. The button stays and opens the view, without a count. | Two counts for one list duplicate an affordance. |
 | The affirmative control of each row is the standard button, not the primary button. | A list has no single principal action; a primary button on every row would spend the view's emphasis many times over. |
-| The note field of an action, approval, review or request appears when the user chooses **Add note**. A decision's answer field is always shown. | An image-only design review found the always-present optional field dominating every row. Most resolutions carry no note; one click reveals the field. |
+| **Superseded 2026-11-22.** The note field of an action, approval, review or request appeared only after **Add note**. Every ask now shows its text field. | The owner could not say anything an ask's buttons did not offer without copying the ask into the composer by hand. A field that is always there costs a row; a hidden one cost the reply. |
 | Red marks only the Blocking group and the sidebar count. Overdue and stale use the attention colour; resolved outcomes are muted. The link sits in the row's meta line, next to the title. | The same review found red used four ways and the link far from the title. The specification's red count is the sidebar entry's. |
 | An ask whose text has several lines leads with its first line; the remainder and a long context start collapsed behind **Show more**. | The six open production asks carry whole instruction lists in the title. Without this one ask fills the screen. |
 | Typing text and then choosing a decision's option sends the text as the note. Enter in a note field never chooses a resolution. | The typed text is not lost, and a resolution is always a deliberate click. |
@@ -217,11 +227,20 @@ points the specification left open.
 | The Resolved section lists user resolutions only. Withdrawn asks remain available from the API and CLI (`--status withdrawn`). | Resolved is the user's decision log; an agent's withdrawal is not the user's decision. |
 | The Resolved date filter applies to the resolution time and runs in the page. | The API's `since` selects by creation time, which would hide an old ask resolved today. |
 | A conversation's strip (added 2026-11-22, after stage 1) reuses the view's rows and resolves through the view's data, so the count, the view and the strip never disagree. It ships in the same `web/asks.js` and `web/asks.css`; its element and the toggle count are in `index.html`. | The owner could not see a thread's asks in the thread. One row builder keeps the kinds' controls identical in both places, and no new URL keeps the change safe before a backend update. |
-| The strip starts unfolded while an ask waits and folded when the conversation has only snoozed asks or resolutions. The user's folding choice is kept per conversation until the page reloads. Its height is capped at 35% of the window (55% of the conversation on a phone; 75% while a phone keyboard is open on one of its fields) and it scrolls inside that. | An ask waiting in the open conversation is the reason to look; history is one muted line. The cap keeps the conversation readable and the composer in place. |
+| The strip starts unfolded while an ask waits and folded when every open ask is snoozed. The user's folding choice is kept per conversation until the page reloads. Its height is capped at 40% of the window (55% of the conversation on a phone; 75% while focus is inside it on a phone) and it scrolls inside that. | An ask waiting in the open conversation is the reason to look. The cap keeps the conversation readable and the composer in place. The larger size holds for any focused control, not only the field: a strip that shrank when focus left the field moved the control under the finger and the tap was lost. |
 | In the strip one ask is shown in full: the first in order, or the one the user opened by its title. The others show their title and meta line. The ask in full does not change while it stays open, even when a more urgent one arrives. Folded, the strip's line gives the count, the blocking count and the first ask's title. | An image-only design review found that two full rows hid the second ask's controls behind the composer with no sign it could scroll, and on a phone cut the first ask's controls. One ask in full fits the cap; a row must not move under a half-typed answer. |
 | Review findings not adopted: a card surface and inset for the strip; a filled primary button; moving Answer into the field and Snooze and Dismiss into an overflow menu; a tappable count row on the phone overview. | The contract uses dividers, not cards, and no primary button per row. The strip must keep the view's controls. The overview row is a larger change than the count on the toggle and can follow if the count proves too quiet. |
-| The strip selects its thread's asks in the page from the two existing listings. The resolved log is read when a conversation opens, at most once a minute, and again when one of the conversation's asks leaves the open list without a local resolution. | No backend change was allowed, and the store's `session_id` selection is not exposed by the browser API. The log is at most 500 rows and changes rarely, so a per-thread read is not worth a new parameter yet. |
+| The strip and the side panel select their thread's asks in the page from the two existing listings. The resolved log is read when a conversation opens, at most once a minute, and again when one of the conversation's asks leaves the open list without a local resolution. | No backend change was allowed for the strip, and the store's `session_id` selection is not exposed by the browser API. The log is at most 500 rows and changes rarely, so a per-thread read is not worth a new parameter yet. |
 | In a conversation, a row carries the Blocking flag and does not name its thread. Snoozed asks stay listed, after the others, with **Show now**. | The view's Blocking heading and thread link are absent or redundant there. A person who opened the thread should still find an ask they postponed. |
+| **Resolved asks moved to the side panel (2026-11-22).** The conversation's resolutions are a section of its thread context panel, the ten most recent, with a line saying when earlier ones are in the Queue. Nothing about asks sits above the composer when no ask is open. | The owner asked for it: "remove this from the chat view, put it in the side bar." History is context, and the panel already holds the thread's status, checkpoint and notes. On a phone the panel is in the thread options sheet. |
+| **A reply is an ordinary user message to the asking conversation**, sent through the existing `POST /api/browser/sessions/<id>/messages` with a request ID that a retry reuses. It is not an ask resolution and uses no new delivery path. | It is what the owner did by hand, so the agent and the transcript see nothing new. It works on every installed backend, starts a turn in an idle conversation and steers a running one, and it is the path that resumes an agent whose inbox wake is paused. |
+| The reply message is `Re ask #<id> "<first line, at most 120 characters>" (still open): <text>`. | The agent needs the number to act on the ask, the title to recognise it, and the state so it does not treat the reply as a resolution. Older agents without the new guidance still read a self-explaining message. |
+| **Enter and Send reply send a reply and never resolve.** A decision has **Answer with my text** among its resolutions, which closes it with the typed text; options and the other kinds' buttons take typed text as the note. Every kind has the same arrangement: the field and Send reply, then the resolutions. Once text is typed, one muted line says that Send reply keeps the ask open and a resolution closes it with the text. | A reply is not destructive and a wrong resolution is: a question typed on a decision must not be recorded as its answer. This changes the earlier behaviour, where Enter answered a decision. An image-only review found "Reply" and "Answer" side by side indistinguishable, and nothing showing that typed text goes with a resolution. |
+| Inside the asking conversation the hand-off control reads **Quote in message**; in the Queue it reads **Reply in conversation**. The replied mark gives a relative time ("You replied 2m ago"), like the row's age. | The same review: "Reply in conversation" means nothing to someone already in it, and an absolute time sat beside a relative one. |
+| **The replied mark** is the last reply and its time. A backend that reports `askReplies` records it with `POST /api/browser/asks/<id>/reply` (two nullable columns, `reply_text` and `replied_at`), so every device shows it. Against an older backend the browser keeps the mark in its own storage and forgets it when the ask closes. Failing to record never undoes a reply that was sent. | The mark must be durable across the Mac and the phone, which needs a field. The interface ships before a backend update is applied, so it cannot depend on that field. |
+| A reply does not change the count, the order or the snooze of an ask. | The user usually still owes the ask its resolution. The agent closes the ask when the reply settled it; the skill says so. |
+| A thread that runs outside Ribbon Field cannot take a reply from the interface. The row says so and keeps the text; a resolution still carries it as the note. | The message route serves conversations the app owns. Posting to another thread fails in the backend without a clear error, so the interface checks the thread it knows before sending. |
+| **Reply in conversation** writes the reference and any typed text to the conversation's composer when it is open, and otherwise to that conversation's saved draft before opening it. It never sends. | Opening a conversation finishes after its history loads; text inserted on arrival was lost. The saved draft is what opening already restores. An existing draft is kept and the reference is not repeated. |
 | The count on the navigation toggle shows only while the toggle reports the navigation closed. It is the toggle's description for assistive technology; the toggle keeps its own name and action. | The sidebar entry is the count's home. On a phone that entry is inside the drawer, which is how the earlier dialog went unnoticed. |
 
 ### Model and delivery

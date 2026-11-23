@@ -1825,7 +1825,17 @@ resolves with `POST /api/browser/asks/<id>` carrying
 `{"resolution": "...", "option"?, "answer"?, "note"?}`; the earlier bodies
 `{"option": "..."}` and `{"answer": "..."}` still answer a decision. It snoozes
 with `POST /api/browser/asks/<id>/snooze` carrying `{"until": <time>}`, or
-`null` to show the ask again. Open blocking asks share the approval alert path
+`null` to show the ask again.
+
+A reply is the user's own words about an open ask. The UI sends it to the asking
+conversation as an ordinary user message through
+`POST /api/browser/sessions/<id>/messages`, in the form
+`Re ask #12 "<title>" (still open): <text>`, and the ask stays open. It then
+records the mark with `POST /api/browser/asks/<id>/reply` carrying
+`{"text": "..."}`, which stores `reply_text` and `replied_at` on the ask and
+delivers nothing. Listings and `ask --show` return both fields.
+`GET /api/browser/config` reports `"askReplies": true`; against a backend
+without it the browser keeps the mark itself. Open blocking asks share the approval alert path
 (desktop and phone notifications labelled “Answer needed”), claimed once per
 ask and scoped to the app's workspace like approvals.
 

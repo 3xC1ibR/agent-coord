@@ -296,6 +296,46 @@ class AskMigrationTests(AskFixture):
                 (3, "asker", "Upload ID photo", "[]", 0, "Default: wait.", "open", None, 2, 300.0, 300.0, None, None),
             ])
 
+    def test_a_reply_is_recorded_on_an_open_ask_without_resolving_it(self):
+        ask = self.action()
+        self.assertEqual((ask["reply_text"], ask["replied_at"]), (None, None))
+        for text, message in ((None, "must not be empty"), ("  ", "must not be empty"), (7, "must be text"),
+                              ("x" * 4001, "4000")):
+            with self.assertRaisesRegex(CoordinationError, message, msg=repr(text)[:20]):
+                self.asks.reply(ask["id"], text)
+        replied = self.asks.reply(ask["id"], "  which payout method?  ")
+        self.assertEqual((replied["status"], replied["reply_text"], replied["replied_at"]),
+                         ("open", "which payout method?", "2023-11-14T22:13:20+00:00"))
+        # The reply travels as the user's own message; recording it sends nothing and changes no other state.
+        self.assertEqual(self.inbox(), [])
+        self.assertEqual([item["id"] for item in self.asks.list(status="open", blocking=True)], [ask["id"]])
+        shown = self.asks.overview()[0]
+        self.assertEqual((shown["reply_text"], shown["replied_at"], shown["snoozed"]),
+                         ("which payout method?", "2023-11-14T22:13:20+00:00", False))
+        self.now += HOUR
+        self.assertEqual(self.asks.reply(ask["id"], "and the login?")["replied_at"], "2023-11-14T23:13:20+00:00")
+        # A resolution keeps the last reply beside it.
+        resolved = self.asks.resolve(ask["id"], "done", note="Card saved.")
+        self.assertEqual((resolved["status"], resolved["note"], resolved["reply_text"]), ("resolved", "Card saved.", "and the login?"))
+        with self.assertRaisesRegex(CoordinationError, "already resolved"):
+            self.asks.reply(ask["id"], "too late")
+        with self.assertRaisesRegex(CoordinationError, "Unknown ask"):
+            self.asks.reply(999, "nobody")
+
+    def test_a_reader_accepts_a_database_from_before_reply_records(self):
+        ask = self.action()
+        with self.store._connection() as db:
+            for column in ("reply_text", "replied_at"):
+                db.execute(f"ALTER TABLE asks DROP COLUMN {column}")
+        reader = AskStore(self.store, initialize=False)
+        record = reader.get(ask["id"])
+        self.assertEqual((record["status"], record["reply_text"], record["replied_at"]), ("open", None, None))
+        self.assertEqual(reader.overview()[0]["reply_text"], None)
+        # Opening the store for writing adds the columns back without touching the rows.
+        with self.store._connection() as db:
+            initialize_schema(db)
+        self.assertEqual(self.asks.reply(ask["id"], "now recorded")["reply_text"], "now recorded")
+
     def test_existing_rows_become_decisions_and_answered_becomes_resolved(self):
         self.legacy_database()
         for _ in range(2):  # The migration is idempotent.
@@ -308,6 +348,7 @@ class AskMigrationTests(AskFixture):
         self.assertEqual(answered["answered_at"], answered["resolved_at"])
         self.assertEqual((withdrawn["kind"], withdrawn["status"], withdrawn["resolution"]), ("decision", "withdrawn", None))
         self.assertEqual((still_open["kind"], still_open["status"], still_open["supersedes"]), ("decision", "open", 2))
+        self.assertEqual((still_open["reply_text"], still_open["replied_at"]), (None, None))
         with self.store._connection() as db:
             self.assertEqual(db.execute("SELECT status, resolution, resolved_at FROM asks WHERE id = 1").fetchone()[:],
                              ("resolved", "answered", 400.0))
@@ -575,6 +616,40 @@ class AskBrowserTests(unittest.TestCase):
         self.assertEqual([(item["id"], item["resolution"], item["note"], item["kind"]) for item in log],
                          [(settled["id"], "approved", "For one week.", "approval")])
         self.assertEqual(log[0]["resolved_at"], resolution["resolved_at"])
+
+    def test_a_reply_reaches_the_conversation_as_the_users_message_and_marks_the_open_ask(self):
+        self.assertIs(self.get("/api/browser/config")["askReplies"], True)
+        for client in ("codex", "claude"):
+            with self.subTest(client=client):
+                thread = self.app_thread(client)
+                ask = self.run_cli(thread, "ask", "--kind", "action", "--non-blocking", "--context", "Default: wait for you.",
+                                   "--unblocks", "Keyword data for the audit.", "Verify the DataForSEO account")
+                # The interface sends the reply through the ordinary message route, naming the ask.
+                message = f'Re ask #{ask["id"]} "Verify the DataForSEO account" (still open): what do you need for dataforseo?'
+                self.post(f"/api/browser/sessions/{thread}/messages", {"message": message, "requestId": f"reply-{client}"})
+                turns = self.turns(thread)
+                self.assertEqual(len(turns), 1)
+                self.assertEqual(turns[0]["items"][0]["type"], "userMessage")
+                self.assertIn(message, turns[0]["items"][0]["content"][0]["text"])
+                # Then it asks the backend to keep the mark. The ask stays open and nothing more is delivered.
+                recorded = self.post(f"/api/browser/asks/{ask['id']}/reply", {"text": " what do you need for dataforseo? "})
+                self.assertEqual((recorded["status"], recorded["reply_text"], recorded["session_id"]),
+                                 ("open", "what do you need for dataforseo?", thread))
+                self.assertTrue(recorded["replied_at"])
+                listed = next(item for item in self.get("/api/browser/asks")["data"] if item["id"] == ask["id"])
+                self.assertEqual((listed["reply_text"], listed["replied_at"]), (recorded["reply_text"], recorded["replied_at"]))
+                self.sessions.inbox_wake.process_once()
+                self.assertEqual(len(self.turns(thread)), 1)
+                # The asking agent can read the reply on its ask.
+                self.assertEqual(self.run_cli(thread, "ask", "--show", str(ask["id"]))["reply_text"], recorded["reply_text"])
+                for body, expected in (({}, "Record a reply to an ask with text"), ({"text": "x", "note": "y"}, "Record a reply"),
+                                       ({"text": "  "}, "Reply must not be empty"), ({"text": 5}, "Reply must be text")):
+                    code, error = self.rejected(f"/api/browser/asks/{ask['id']}/reply", body)
+                    self.assertEqual(code, 400, body)
+                    self.assertIn(expected, error)
+                self.post(f"/api/browser/asks/{ask['id']}", {"resolution": "done", "note": "Verified."})
+                code, error = self.rejected(f"/api/browser/asks/{ask['id']}/reply", {"text": "late"})
+                self.assertEqual((code, "already resolved" in error), (400, True))
 
     def test_config_advertises_ask_kinds_and_the_view_needs_no_new_urls(self):
         self.assertIs(self.get("/api/browser/config")["askKinds"], True)

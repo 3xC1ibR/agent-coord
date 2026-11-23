@@ -62,6 +62,9 @@ _ADDED_COLUMNS = (
     ("note", "TEXT"),
     ("resolved_at", "REAL"),
     ("snoozed_until", "REAL"),
+    # What the user last replied without resolving the ask, and when.
+    ("reply_text", "TEXT"),
+    ("replied_at", "REAL"),
 )
 
 
@@ -240,6 +243,9 @@ def _record(row) -> dict[str, Any]:
         "answered_at": _iso(resolved_at if resolution == ANSWERED else None),
         "withdrawn_at": _iso(row["withdrawn_at"]),
         "snoozed_until": _iso(row["snoozed_until"]),
+        # A reader may open a database whose update has not added these columns yet.
+        "reply_text": row["reply_text"] if "reply_text" in row.keys() else None,
+        "replied_at": _iso(row["replied_at"] if "replied_at" in row.keys() else None),
         "notification_claimed": row["notification_claimed_at"] is not None,
     }
 
@@ -624,6 +630,25 @@ class AskStore:
         with self.store._connection() as db:
             cursor = db.execute("UPDATE asks SET snoozed_until = ?, updated_at = ? WHERE id = ? AND status = 'open'",
                                 (deadline, now, ask_id))
+            row = db.execute("SELECT * FROM asks WHERE id = ?", (ask_id,)).fetchone()
+        if cursor.rowcount != 1:
+            raise CoordinationError(f"Ask {ask_id} is already {_status(row)}.")
+        return _record(row)
+
+    def reply(self, ask_id: Any, text: Any) -> dict[str, Any]:
+        """Record what the user last replied to an open ask without resolving it.
+
+        The reply itself reaches the asking conversation as the user's own message.
+        This keeps the mark that every device shows on the ask, and the ask stays open.
+        """
+        reply = _text(text, "Reply", MAX_NOTE, required=True)
+        current = self.get(ask_id)
+        if current["status"] != "open":
+            raise CoordinationError(f"Ask {ask_id} is already {current['status']}.")
+        now = self.store.clock()
+        with self.store._connection() as db:
+            cursor = db.execute("""UPDATE asks SET reply_text = ?, replied_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'open'""", (reply, now, now, ask_id))
             row = db.execute("SELECT * FROM asks WHERE id = ?", (ask_id,)).fetchone()
         if cursor.rowcount != 1:
             raise CoordinationError(f"Ask {ask_id} is already {_status(row)}.")
