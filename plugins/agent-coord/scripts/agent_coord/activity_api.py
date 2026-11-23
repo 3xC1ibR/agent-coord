@@ -76,7 +76,7 @@ def record_accepted(store, kind, thread_id, *, context=None, source="app", turn_
     """Telemetry failure must never turn an accepted action into a failed send."""
     context = context or {}
     try:
-        return ActivityStore(store).record(kind, thread_id, event_id=event_id or context.get("event_id"),
+        return store.threads.activity.record(kind, thread_id, event_id=event_id or context.get("event_id"),
             window_id=context.get("window_id"), visit_id=context.get("visit_id"),
             actor="human", source=source, turn_id=turn_id, details=details)
     except (CoordinationError, sqlite3.Error, OSError):
@@ -106,7 +106,7 @@ def record_browser_events(sessions, body):
         if stamp > sessions.store.clock() + 60:
             raise CoordinationError("The activity timestamp is in the future; check this device's clock.")
         sessions.work_thread(event["thread_id"], history=False)
-    activity = ActivityStore(sessions.store)
+    activity = sessions.activity
     receipts = []
     for event in events:
         data = {key: value for key, value in event.items() if key not in {"kind", "thread_id", "surface"}}

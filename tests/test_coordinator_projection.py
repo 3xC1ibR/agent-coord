@@ -690,6 +690,51 @@ class ProjectionTests(unittest.TestCase):
         self.assertIsNone(process.poll())
         self.assertEqual(self.projection.cursor, 0)
 
+    def test_native_reply_commits_before_later_output_and_survives_its_rollback(self):
+        from agent_coord.codex_app_server import CodexRPC
+        rpc = CodexRPC(self.store, self.sessions._event)
+        self.sessions.rpc = rpc
+        rpc.channel = "codex"
+        rpc.process = self.projection.attach("codex", 123, rpc._message, provider="codex")
+        reply = rpc.pending[1] = Future()
+        rpc.pending_methods[1] = "turn/steer"
+        responses = []
+        reply.add_done_callback(lambda future: responses.append(future.result()))
+        batch = [
+            self.event(1, "item/started", item={"id": "output", "type": "agentMessage", "text": ""}),
+            {"sequence": 2, "channel": "codex", "stream": "stdout",
+             "data": json.dumps({"id": 1, "result": {"turnId": self.turn_id}})},
+            self.event(3, "item/agentMessage/delta", itemId="output", delta="once"),
+        ]
+        writing_output, release = threading.Event(), threading.Event()
+        save = self.projection._save
+
+        def fail_output(db, encoded, cursor):
+            save(db, encoded, cursor)
+            if cursor == 3:
+                writing_output.set()
+                release.wait(5)
+                raise sqlite3.IntegrityError("Later output rolled back")
+
+        with patch.object(self.projection, "_save", side_effect=fail_output), ThreadPoolExecutor(max_workers=1) as worker:
+            applying = worker.submit(self.projection.project_batch, batch)
+            try:
+                self.assertTrue(writing_output.wait(3))
+                self.assertTrue(reply.done(), "A committed native reply waited for unrelated later output")
+                with self.store.reading(), self.store._connection() as db:
+                    self.assertEqual(db.execute("SELECT cursor FROM coordinator_projection").fetchone()[0], 2)
+            finally:
+                release.set()
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "Later output"):
+                applying.result(timeout=3)
+        self.assertEqual(self.projection.cursor, 2)
+        self.projection.project_batch(batch)
+        self.projection.project_batch(batch)
+        self.assertEqual(self.projection.cursor, 3)
+        self.assertEqual(responses, [{"turnId": self.turn_id}])
+        turn = self.sessions.histories[self.identity]["turns"][-1]
+        self.assertEqual(next(item["text"] for item in turn["items"] if item["id"] == "output"), "once")
+
     def test_provider_eof_rejects_pending_rpc_only_after_commit(self):
         from agent_coord.codex_app_server import CodexRPC
         rpc = CodexRPC(self.store, self.sessions._event)

@@ -53,7 +53,6 @@ from . import notification_policy
 from .session_close import is_external_codex_session, stop_terminal_session, verify_terminal_handoff
 from .session_defaults import session_defaults
 from .workspaces import matches_workspace, workspace_choices
-from .activity import ActivityStore
 from .activity_api import activity_context, record_accepted
 
 
@@ -363,7 +362,7 @@ class BrowserSessions:
         from .execution_state import RuntimeExecution
         self.execution = RuntimeExecution(self)
         self.closed = False
-        self.activity = ActivityStore(store)
+        self.activity = store.threads.activity
         with store._connection() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS browser_sessions (
                 thread_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, name TEXT NOT NULL,

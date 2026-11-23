@@ -562,6 +562,8 @@ class CoordinatorProjection:
         self.project_batch([event])
 
     def project_batch(self, events):
+        if not events:
+            return
         decoded = []
         for event in events:
             message = None
@@ -571,6 +573,17 @@ class CoordinatorProjection:
                 except ValueError:
                     logging.getLogger(__name__).warning("Ignoring malformed provider frame at sequence %s", event["sequence"])
             decoded.append((event, message))
+        while decoded:
+            decoded = self._commit_through_reply(decoded)
+            if decoded is None:
+                return  # The complete remainder was already committed.
+        # No candidate consumes events before its durable activation commit.
+        # Consequently this cursor is also the oldest restorable checkpoint;
+        # pre-commit rollback retains the source cursor and cannot lose frames.
+        with self.store._writer.measure_request("provider.acknowledge_events"):
+            self.client.call("acknowledge_events", cursor=self.cursor, retain_after=self.cursor)
+
+    def _commit_through_reply(self, decoded):
         with self.lock, self.sessions.claude.lock, self.sessions.lock:
             decoded = [(event, message) for event, message in decoded if event["sequence"] > self.cursor]
             if not decoded:
@@ -599,7 +612,7 @@ class CoordinatorProjection:
                     self.in_event.publications = []
                     self.in_event.commands = []
                     self.in_event.completions = []
-                    for event, message in decoded:
+                    for position, (event, message) in enumerate(decoded):
                         entry = self.channels.get(event["channel"])
                         if entry is None:
                             raise TransportError("Event belongs to a transport missing from the saved adapter state.")
@@ -615,6 +628,10 @@ class CoordinatorProjection:
                                 entry["callback"]({"method": "bridge/disconnected", "params": {}})
                             else:
                                 entry["callback"]({"type": "disconnected", "error": "Provider transport closed."})
+                        # A native waiter becomes eligible only after its response
+                        # commits. Later output must not delay or roll it back.
+                        if self.in_event.completions:
+                            break
                     # Histories and the replay cursor share the same snapshot.
                     # Metadata callbacks are finite and borrow this transaction;
                     # nested callbacks append to this list before it is exhausted.
@@ -663,11 +680,7 @@ class CoordinatorProjection:
             callback()
         for identity, channel, operation, value in commands:
             self.deliver(identity, channel, operation, json.loads(value))
-        # No candidate consumes events before its durable activation commit.
-        # Consequently this cursor is also the oldest restorable checkpoint;
-        # pre-commit rollback retains the source cursor and cannot lose frames.
-        with self.store._writer.measure_request("provider.acknowledge_events"):
-            self.client.call("acknowledge_events", cursor=self.cursor, retain_after=self.cursor)
+        return decoded[position + 1:]
 
     def start(self):
         self.recover_commands()

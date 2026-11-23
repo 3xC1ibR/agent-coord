@@ -39,6 +39,12 @@ class EventStreamThrottleTests(unittest.TestCase):
         self.worker.join(2)
 
     def test_committed_provider_input_is_visible_while_coordination_reads_are_blocked(self):
+        self.assert_input_visible_during_poll(already_committed=True)
+
+    def test_new_provider_input_is_visible_while_coordination_reads_are_blocked(self):
+        self.assert_input_visible_during_poll(already_committed=False)
+
+    def assert_input_visible_during_poll(self, *, already_committed):
         release, polling, visible = threading.Event(), threading.Event(), threading.Event()
         received = []
         def held(cursor):
@@ -54,12 +60,17 @@ class EventStreamThrottleTests(unittest.TestCase):
                             visible.set()
                         if "snoozes" in received[-1]:
                             return
-        self.sessions._publish("item/started", {"threadId": "terminal", "item": {"type": "userMessage"}})
+        def publish_input():
+            self.sessions._publish("item/started", {"threadId": "terminal", "item": {"type": "userMessage"}})
+        if already_committed:
+            publish_input()
         with patch.object(self.sessions, "completions_after", side_effect=held):
             listener = threading.Thread(target=listen, daemon=True)
             listener.start()
             try:
                 self.assertTrue(polling.wait(3))
+                if not already_committed:
+                    publish_input()
                 self.assertTrue(visible.wait(0.5), "A committed message waited for unrelated notification reads")
             finally:
                 release.set()

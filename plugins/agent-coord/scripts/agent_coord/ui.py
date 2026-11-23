@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import lru_cache
 from http import HTTPStatus
@@ -574,6 +575,42 @@ def _handler(
                 b'{"error":"not found"}',
             )
 
+        def _coordination_events(self, completion_sequence, message_sequence, send_sequence):
+            completions = browser_sessions.completions_after(completion_sequence)
+            message_sequence, changes = message_changes(store, message_sequence, browser_sessions.cwd)
+            send_sequence, sends = message_sends(store, send_sequence, browser_sessions.cwd)
+            notifications = {
+                "completions": completions["events"], "completionSeq": completions["seq"],
+                "snoozes": browser_sessions.snooze_notifications(),
+                "approvals": browser_sessions.approval_notifications(),
+            }
+            return message_sequence, send_sequence, changes + sends, notifications
+
+        def _stream_events(self, sequence, completion_sequence):
+            message_sequence = message_cursor(store)
+            send_sequence, _ = message_sends(store)
+            # Keep one poll in flight per connection. Only this handler writes
+            # frames and advances the cursors advertised to this client.
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rf-notifications") as reader:
+                poll = None
+                next_poll = 0.0
+                while not browser_sessions.closed:
+                    if poll is None and time.monotonic() >= next_poll:
+                        next_poll = time.monotonic() + 1
+                        poll = reader.submit(self._coordination_events, completion_sequence, message_sequence, send_sequence)
+                    batch = browser_sessions.events_after(sequence, timeout=1)
+                    if browser_sessions.closed or not self._authorized():
+                        return
+                    sequence = batch["seq"]
+                    batch.update(completions=[], completionSeq=completion_sequence)
+                    if poll is not None and poll.done():
+                        message_sequence, send_sequence, changes, notifications = poll.result()
+                        poll = None
+                        batch["events"].extend(changes)
+                        batch.update(notifications)
+                        completion_sequence = batch["completionSeq"]
+                    self._event_batch(batch)
+
         def _event_batch(self, batch: dict) -> None:
             cursor = f"{batch['seq']}:{batch['completionSeq']}"
             batch["serverSentAt"] = time.time() * 1000
@@ -833,37 +870,7 @@ def _handler(
                 try:
                     self.wfile.write(b"retry: 1500\n\n")
                     self.wfile.flush()
-                    message_sequence = message_cursor(store)
-                    send_sequence, _ = message_sends(store)
-                    coordination_due = 0.0
-                    while not browser_sessions.closed:
-                        # Terminal hooks run in separate processes. Read their durable
-                        # events even when no app-server event wakes this connection.
-                        batch = browser_sessions.events_after(sequence, timeout=1)
-                        if browser_sessions.closed or not self._authorized():
-                            break
-                        sequence = batch["seq"]
-                        batch.update(completions=[], completionSeq=completion_sequence)
-                        # Provider deltas arrive many times a second. Forward them
-                        # immediately, but read durable coordination state at most
-                        # once a second, as an idle stream already does.
-                        if time.monotonic() >= coordination_due:
-                            coordination_due = time.monotonic() + 1
-                            if batch["events"] or batch["reset"]:
-                                # Publish committed provider events before reading
-                                # unrelated coordination and notification tables.
-                                self._event_batch(batch)
-                                batch = {"seq": sequence, "reset": False, "events": []}
-                            completions = browser_sessions.completions_after(completion_sequence)
-                            completion_sequence = completions["seq"]
-                            message_sequence, coordination_events = message_changes(store, message_sequence, browser_sessions.cwd)
-                            batch["events"].extend(coordination_events)
-                            send_sequence, send_events = message_sends(store, send_sequence, browser_sessions.cwd)
-                            batch["events"].extend(send_events)
-                            batch.update(completions=completions["events"], completionSeq=completion_sequence,
-                                         snoozes=browser_sessions.snooze_notifications(),
-                                         approvals=browser_sessions.approval_notifications())
-                        self._event_batch(batch)
+                    self._stream_events(sequence, completion_sequence)
                 except sqlite3.OperationalError as exc:
                     if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                         raise

@@ -61,6 +61,13 @@ class ActivityIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.sessions.rpc.calls), calls)
         self.assertEqual(self.report()["totals"]["messages"], 0)
 
+    def test_composer_reuses_activity_schema_for_accepted_input(self):
+        with patch("agent_coord.activity_api.ActivityStore.__init__",
+                   side_effect=AssertionError("Accepted input initialized the activity schema")):
+            self.sessions.submit(self.thread, {"message": "Continue", "requestId": "activity-once"})
+            self.sessions.submit(self.thread, {"message": "Continue", "requestId": "activity-once"})
+        self.assertEqual(self.report()["totals"]["messages"], 1)
+
     def test_durable_request_retries_without_activity_metadata_count_once(self):
         for result in ({"dispatched": True, "receipt": {"id": 1}}, {"review": {"id": "run"}}):
             with self.subTest(result=result), patch.object(self.sessions, "_submit", return_value=result):
