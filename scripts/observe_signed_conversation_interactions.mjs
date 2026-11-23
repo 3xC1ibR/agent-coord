@@ -146,7 +146,7 @@ async function sends() {
             sending: !!state.sending?.has(state.selected), send_disabled: document.querySelector("#send").disabled,
             composer_hidden: document.querySelector("#composer").hidden, detail_pending_input: !!state.detail?.requests?.length,
           };
-        }, {once:true});
+        }, {once:true, capture:true});
       }, marker);
       const tracked = composing.waitForRequest(r => r.method() === "POST" && /\/messages$/.test(new URL(r.url()).pathname)
         && r.postDataJSON()?.message === marker, {timeout: 7000}).then(async request => {

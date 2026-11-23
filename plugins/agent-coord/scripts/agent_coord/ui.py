@@ -4,6 +4,7 @@ import errno
 import ipaddress
 import json
 import os
+import queue
 import secrets
 import socket
 import socketserver
@@ -1375,6 +1376,7 @@ def _handler(
 
 class LoopbackHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+    max_idle_workers = 8
     browser_sessions: BrowserSessions | None = None
     remote_access: RemoteAccess | None = None
     web_push: WebPush | None = None
@@ -1385,7 +1387,40 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
 
     stoic_integration = None
 
+    def __init__(self, *args, **kwargs):
+        self._worker_lock = threading.Lock()
+        self._idle_workers = []
+        self._workers_closing = False
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        # Reuse a worker's thread-local SQLite handles across short requests.
+        # Long-lived event streams never occupy a slot needed by another client.
+        with self._worker_lock:
+            if self._idle_workers:
+                self._idle_workers.pop().put((request, client_address))
+                return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        mailbox = queue.SimpleQueue()
+        while True:
+            super().process_request_thread(request, client_address)
+            with self._worker_lock:
+                if self._workers_closing or len(self._idle_workers) >= self.max_idle_workers:
+                    return
+                self._idle_workers.append(mailbox)
+            next_request = mailbox.get()
+            if next_request is None:
+                return
+            request, client_address = next_request
+
     def server_close(self) -> None:
+        with self._worker_lock:
+            self._workers_closing = True
+            for mailbox in self._idle_workers:
+                mailbox.put(None)
+            self._idle_workers.clear()
         try:
             if self.stoic_integration is not None:
                 self.stoic_integration.close()

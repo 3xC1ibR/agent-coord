@@ -12,6 +12,7 @@ import unittest
 import urllib.request
 import urllib.error
 from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -20,10 +21,60 @@ sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
 from agent_coord.managed_pty import output_log_path
 from agent_coord.store import CoordinationError, CoordinationStore
-from agent_coord.ui import _handler, build_snapshot, make_ui_server
+from agent_coord.ui import LoopbackHTTPServer, _handler, build_snapshot, make_ui_server
 from agent_coord.codex_app_server import BrowserSessions
 from agent_coord.message_timeline import message_changes, message_cursor
 from test_codex_app_server import FakeCodex
+
+
+class HTTPRequestWorkerTests(unittest.TestCase):
+    def test_short_requests_reuse_database_readers_while_streams_remain_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CoordinationStore(Path(directory) / "fixture.sqlite3")
+            readers = set()
+            release = threading.Event()
+            entered = threading.Barrier(3)
+
+            class Probe(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    if self.path == "/stream":
+                        entered.wait(timeout=5)
+                        release.wait(timeout=5)
+                    else:
+                        with store.reading(), store._connection() as db:
+                            db.execute("SELECT COUNT(*) FROM work_threads").fetchone()
+                            readers.add(db)
+                    self.send_response(200)
+                    self.end_headers()
+
+                def log_message(self, *args):
+                    pass
+
+            server = LoopbackHTTPServer(("127.0.0.1", 0), Probe)
+            server.max_idle_workers = 1
+            worker = threading.Thread(target=server.serve_forever)
+            worker.start()
+            address = "http://127.0.0.1:" + str(server.server_port)
+
+            def request(path):
+                with urllib.request.urlopen(address + path, timeout=5) as response:
+                    response.read()
+
+            streams = [threading.Thread(target=request, args=("/stream",)) for _ in range(2)]
+            try:
+                for stream in streams:
+                    stream.start()
+                entered.wait(timeout=5)
+                for _ in range(12):
+                    request("/short")
+                self.assertLess(len(readers), 6, "fresh HTTP connections repeatedly reopened the database")
+            finally:
+                release.set()
+                for stream in streams:
+                    stream.join(5)
+                server.shutdown()
+                server.server_close()
+                worker.join(5)
 
 
 class MonitorBrowserTests(unittest.TestCase):
