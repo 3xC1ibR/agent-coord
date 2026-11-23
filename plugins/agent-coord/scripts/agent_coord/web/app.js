@@ -2723,13 +2723,34 @@ function connect() {
   events.onopen = () => { for (const entry of state.conversations?.values() || []) entry.revision++; $("connection").replaceChildren(node("span", "Connected locally", "sr-only")); $("connection").title = "Connected locally"; $("connection").dataset.state = "connected"; scheduleList(); if (state.selected) scheduleDetail(); };
   events.onerror = () => { $("connection").textContent = "Reconnecting…"; $("connection").title = "Reconnecting…"; $("connection").dataset.state = "reconnecting"; };
   let resumeCursor;
+  let previousApprovals = new Map();
   events.onmessage = message => {
     const batch = JSON.parse(message.data);
     resumeCursor = {eventCursor: batch.seq, completionCursor: batch.completionSeq};
+    // Approvals are a snapshot of unclaimed requests. Batches between polls
+    // omit the field, and each poll can repeat the same unanswered requests.
+    const changedThreads = new Set();
+    if (Array.isArray(batch.approvals)) {
+      const current = new Map();
+      for (const approval of batch.approvals) {
+        const thread = approval.thread_id, value = JSON.stringify(approval);
+        const previous = previousApprovals.get(approval.request_key);
+        current.set(approval.request_key, {thread, value});
+        if (previous?.value !== value) {
+          changedThreads.add(thread);
+          if (previous) changedThreads.add(previous.thread);
+        }
+      }
+      for (const [key, previous] of previousApprovals) {
+        if (!current.has(key)) changedThreads.add(previous.thread);
+      }
+      previousApprovals = current;
+    }
+    const approvalChanges = Array.from(changedThreads, thread_id => ({thread_id}));
     globalThis.agentCoordSpeech?.receive(batch.completions || []);
-    globalThis.agentCoordPanes?.receive(batch);
+    globalThis.agentCoordPanes?.receive({...batch, approvals: approvalChanges});
     // Completions apply to every thread, including when this tab is hidden.
-    for (const notification of [...(batch.completions || []), ...(batch.approvals || [])]) {
+    for (const notification of [...(batch.completions || []), ...approvalChanges]) {
       const entry = state.conversations?.get(notification.thread_id);
       if (entry) entry.revision++;
     }
@@ -2738,7 +2759,8 @@ function connect() {
     notifications.receive(batch.snoozes || []);
     // A notification can arrive after the request event was missed. Reconcile
     // the pending controls as well as notifying, even without an item event.
-    if (batch.completions?.length || batch.snoozes?.length || batch.approvals?.length) { scheduleList(); if (state.selected) scheduleDetail(); }
+    if (batch.completions?.length || batch.snoozes?.length || changedThreads.size) scheduleList();
+    if (state.selected && (batch.completions?.length || batch.snoozes?.length || changedThreads.has(state.selected))) scheduleDetail();
     if (batch.reset) { for (const entry of state.conversations?.values() || []) entry.revision++; scheduleDetail(); }
     for (const event of batch.events) {
       if (event.method === "bridge/disconnected") { for (const entry of state.conversations?.values() || []) entry.revision++; showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail?.work_thread?.client === "codex" && state.detail) { state.detail.running = false; state.detailRefreshing = true; renderRequests(); } renderStatus(); }

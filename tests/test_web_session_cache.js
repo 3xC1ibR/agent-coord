@@ -544,6 +544,33 @@ test("a completion notification without an item event invalidates an outstanding
   assert.ok(c.scheduled > 0);
 });
 
+test("only changes in reported approvals invalidate a conversation across windows and panes", async () => {
+  const c = setup(); await c.select("one");
+  let lists = 0, controls = 0;
+  const paneUpdates = [], alerts = [];
+  c.scheduleList = () => lists++;
+  c.scheduleDetail = () => controls++;
+  c.agentCoordPanes = {receive: batch => paneUpdates.push((batch.approvals || []).map(n => n.thread_id).join(","))};
+  c.notifications.receive = entries => alerts.push(...entries);
+  vm.runInContext(source.slice(source.indexOf("function connect("), source.indexOf("function newProject(")), c);
+  c.connect();
+  const entry = c.state.conversations.get("one"), initial = entry.revision;
+  const approval = {thread_id: "one", request_key: "native-1", status: "approval"};
+  const deliver = fields => c.events.onmessage({data: JSON.stringify({events: [], ...fields})});
+  deliver({approvals: [approval]});
+  deliver({}); // Provider deltas can arrive between notification polls.
+  deliver({approvals: [approval]});
+  assert.deepEqual([lists, controls, entry.revision - initial], [1, 1, 1]);
+  deliver({approvals: [{...approval, request_key: "native-2"}]});
+  deliver({approvals: []});
+  deliver({approvals: []});
+  assert.deepEqual([lists, controls, entry.revision - initial], [3, 3, 3]);
+  assert.deepEqual(paneUpdates, ["one", "", "", "one", "one", ""]);
+  assert.equal(alerts.length, 3, "unclaimed alerts remain available for desktop notification");
+  deliver({snoozes: [{thread_id: "one"}], approvals: []});
+  assert.deepEqual([lists, controls], [4, 4]);
+});
+
 test("an approval notification recovers missing controls without an item event", async () => {
   const c = setup(); await c.select("one");
   vm.runInContext(source.slice(source.indexOf("function connect("), source.indexOf("function newProject(")), c);
