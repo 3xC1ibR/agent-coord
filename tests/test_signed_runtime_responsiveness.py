@@ -13,6 +13,38 @@ from validate_signed_runtime_responsiveness import SignedUpgrade, diagnostic_rea
 
 
 class SignedAcceptanceGateTests(unittest.TestCase):
+    def test_offline_snapshot_readers_close_before_the_upgrade(self):
+        import validate_signed_runtime_responsiveness as gate
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "offline.sqlite3"
+            with closing(sqlite3.connect(snapshot)) as db:
+                db.executescript("""
+                    CREATE TABLE work_threads(thread_id, attention);
+                    CREATE TABLE sessions(session_id, client);
+                    INSERT INTO sessions VALUES (1, 'codex');
+                    WITH RECURSIVE n(i) AS (VALUES (1) UNION ALL SELECT i+1 FROM n WHERE i<650)
+                    INSERT INTO work_threads SELECT 1, 'now' FROM n;
+                """)
+            connect = sqlite3.connect
+            snapshot_readers = []
+
+            def record_connection(path, *args, **kwargs):
+                connection = connect(path, *args, **kwargs)
+                if path == snapshot.resolve().as_uri() + "?mode=ro":
+                    snapshot_readers.append(connection)
+                return connection
+
+            with mock.patch.object(gate.sqlite3, "connect", side_effect=record_connection):
+                self.assertEqual(gate.saved_inventory(snapshot), [("codex", "now", 650)])
+                with self.assertRaisesRegex(sqlite3.OperationalError, "no such table"):
+                    gate.copy_saved_histories(snapshot, root / "fixture.sqlite3", root)
+            self.assertEqual(len(snapshot_readers), 2)
+            for index, connection in enumerate(snapshot_readers):
+                with self.subTest(reader=index), self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                    connection.execute("SELECT 1")
+
     def test_rollback_capacity_failure_is_identifiable_without_recording_private_control_text(self):
         message = "Candidate validation failed: Insufficient free space for the update rollback snapshot."
         self.assertEqual(diagnostic_reason(message), "rollback-capacity")

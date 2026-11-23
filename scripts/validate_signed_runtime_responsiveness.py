@@ -108,7 +108,7 @@ def signed_resources(bundle):
 def saved_inventory(snapshot):
     # Read only the dimensions required by the fixture; no real session IDs,
     # directories, queued jobs, user text, credentials or integrations cross.
-    with sqlite3.connect(snapshot.resolve(strict=True).as_uri() + "?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(snapshot.resolve(strict=True).as_uri() + "?mode=ro", uri=True)) as db:
         rows = db.execute(
             """
             SELECT s.client, t.attention, COUNT(*)
@@ -205,7 +205,7 @@ def copy_saved_histories(snapshot, database, root):
         )
         history.ensure_schema(db)
     refs = []
-    with sqlite3.connect(snapshot.resolve(strict=True).as_uri() + "?mode=ro", uri=True) as source:
+    with closing(sqlite3.connect(snapshot.resolve(strict=True).as_uri() + "?mode=ro", uri=True)) as source:
         source.execute("PRAGMA query_only=ON")
         # SQLite reads octet_length directly from the record header even for a
         # many-megabyte legacy document. Prefer a retained legacy large history,
