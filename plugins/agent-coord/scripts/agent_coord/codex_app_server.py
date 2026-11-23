@@ -1513,8 +1513,13 @@ class BrowserSessions:
     def pending_requests(self, thread_id: str) -> list[dict]:
         self._record(thread_id)
         with self.lock:
-            return [{k: v for k, v in request.items() if k not in {"id", "notification_claimed"}}
-                    for request in self.requests.values() if request["params"].get("threadId") == thread_id]
+            return self._public_requests(request for request in self.requests.values()
+                                         if request["params"].get("threadId") == thread_id)
+
+    @staticmethod
+    def _public_requests(requests):
+        return [{k: v for k, v in request.items() if k not in {"id", "notification_claimed"}}
+                for request in requests]
 
     def _app_agent_creators(self, *, db=None, shared=False) -> dict:
         # Each single-thread display projection (opening a conversation, each
@@ -1550,7 +1555,13 @@ class BrowserSessions:
             self.creators_cache = (generation, time.monotonic(), creators)
         return creators
 
-    def work_thread(self, thread_id: str, *, history=True, _creators=None, _inventory=None) -> dict:
+    def _thread_runtime_state(self, thread_id):
+        with self.lock:
+            waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
+            health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
+            return waiting, thread_id in self.active, thread_id in self.loaded, health
+
+    def work_thread(self, thread_id: str, *, history=True, _creators=None, _inventory=None, _runtime=None) -> dict:
         thread = (self.store.threads.get(thread_id, history=history) if _inventory is None
                   else _inventory.projected[thread_id])
         if not matches_workspace(thread["cwd"], self.cwd):
@@ -1588,10 +1599,7 @@ class BrowserSessions:
         thread["open_ask"] = open_ask
         thread["last_tool"] = session.get("last_tool")
         if _inventory is None:
-            with self.lock:
-                waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
-                active, loaded = thread_id in self.active, thread_id in self.loaded
-                health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
+            waiting, active, loaded, health = _runtime or self._thread_runtime_state(thread_id)
         else:
             waiting = _inventory.waiting.get(thread_id, {})
             active, loaded = thread_id in _inventory.active, thread_id in _inventory.loaded
@@ -2455,7 +2463,7 @@ class BrowserSessions:
                 "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                 "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
-    def _read_snapshot(self, thread_id: str, *, recent: bool = True) -> dict:
+    def _read_snapshot(self, thread_id: str, *, recent: bool = True, synchronized: bool = False) -> dict:
         """Open from saved history and received events, without provider admission.
 
         Full reads and sends reconcile native execution. Opening a window must
@@ -2465,17 +2473,32 @@ class BrowserSessions:
         the event stream and watchdog retain their existing recovery roles.
         """
         record = self._record(thread_id)
-        work_thread = self.work_thread(thread_id)
-        with self.lock:
-            self.last_used[thread_id] = time.monotonic()
-            thread = copy.deepcopy(self.histories.get(thread_id))
-            active_turn = self.active.get(thread_id)
-            running = thread_id in self.active
-            revision = self.turn_revisions.get(thread_id, 0)
+        projection = getattr(self, "projection", None)
+        observation = None if synchronized else getattr(projection, "unloaded_observation", None)
+        if observation is not None and getattr(projection.in_event, "active", False):
+            observation = None
+        unloaded = observation is not None and thread_id not in observation["excluded"]
+        if unloaded:
+            runtime_state = ({}, False, False, None)
+            thread, active_turn = None, None
+            revision = observation["revisions"].get(thread_id, 0)
+        else:
+            with self.lock:
+                self.last_used[thread_id] = time.monotonic()
+                thread = copy.deepcopy(self.histories.get(thread_id))
+                active_turn = self.active.get(thread_id)
+                runtime_state = self._thread_runtime_state(thread_id)
+                revision = self.turn_revisions.get(thread_id, 0)
+        waiting, running, _, _ = runtime_state
+        work_thread = self.work_thread(thread_id, _runtime=runtime_state)
         if thread is None:
             thread = read_history(self.store, thread_id)
             if thread is None:
                 thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
+        if unloaded and projection.unloaded_observation is not observation:
+            # A commit or rollback overtook the database read. Recheck live
+            # ownership and input once before returning the new history.
+            return self._read_snapshot(thread_id, recent=recent, synchronized=True)
         self._schedule_saved_completion(thread_id, thread, work_thread, revision)
         if not running and work_thread["status"] == "running":
             # A live lifecycle hook can precede the provider subscription.
@@ -2483,7 +2506,7 @@ class BrowserSessions:
         if recent:
             thread = recent_view(thread, live_turn=active_turn)
         return {"session": record, "thread": self.reviews.public_history(thread_id, thread),
-                "work_thread": work_thread, "requests": self.pending_requests(thread_id),
+                "work_thread": work_thread, "requests": self._public_requests(waiting.values()),
                 "activeTurn": active_turn, "running": running,
                 "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                 "dispatchRequests": self.dispatch.receipts(thread_id),

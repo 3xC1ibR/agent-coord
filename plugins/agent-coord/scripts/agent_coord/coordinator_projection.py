@@ -103,6 +103,7 @@ class CoordinatorProjection:
         self.prepared_histories = {}
         self.payload_cache = {}
         self.text_references = {}
+        self.unloaded_observation = None
         self.restored_completions = deque()
         self.in_event = threading.local()
         with self.store._connection() as db:
@@ -574,6 +575,17 @@ class CoordinatorProjection:
                 affected = None
             before = self.state(affected=affected)
             try:
+                if affected is not None:
+                    # While the next batch is uncommitted, an unrelated unloaded
+                    # conversation can be read entirely from its published history.
+                    # Never use this shortcut for resident state, input or health.
+                    prior = before["browser"]
+                    excluded = set(affected).union(prior["loaded"], prior["active"], prior["histories"], before["watchdog"])
+                    for request in prior["requests"].values():
+                        params = request.get("params")
+                        if isinstance(params, dict) and isinstance(params.get("threadId"), str):
+                            excluded.add(params["threadId"])
+                    self.unloaded_observation = {"excluded": excluded, "revisions": prior["turn_revisions"]}
                 with capture_writes() as writes:
                     self.in_event.active = True
                     self.in_event.publications = []
@@ -636,6 +648,7 @@ class CoordinatorProjection:
                 self.restore(before)
                 raise
             finally:
+                self.unloaded_observation = None
                 self.in_event.active = False
         for callback in completions:
             callback()

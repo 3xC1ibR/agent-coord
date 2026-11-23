@@ -9,7 +9,7 @@ import threading
 import unittest
 import urllib.request
 import zlib
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import patch
 
 from test_codex_app_server import FakeCodex
@@ -206,6 +206,62 @@ class ProjectionTests(unittest.TestCase):
         value = {"requests": {("thread", ("turn", 1)): ["pending"]},
                  "confirmed": {("thread", "item")}}
         self.assertEqual(unpack(json.loads(json.dumps(pack(value)))), value)
+
+    def saved_conversation(self):
+        identity = "saved-conversation"
+        self.store.register(session_id=identity, client="codex", cwd=self.temporary.name, name="Saved")
+        history = {"id": identity, "turns": [{"id": "old", "status": "completed",
+                    "items": [{"type": "agentMessage", "id": "message", "text": "Saved answer"}]}]}
+        with self.store._connection() as db:
+            db.execute("""INSERT INTO browser_sessions(thread_id,cwd,name,created_at,updated_at)
+                VALUES(?,?,?,1,1)""", (identity, self.temporary.name, "Saved"))
+            db.execute("INSERT INTO browser_history VALUES (?,?)", (identity, json.dumps(history)))
+        return identity
+
+    def test_unloaded_conversation_opens_while_another_provider_checkpoint_is_pending(self):
+        identity = self.saved_conversation()
+        entered, release = threading.Event(), threading.Event()
+        prepare = self.projection.prepare_checkpoint
+        def held_checkpoint():
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("Checkpoint barrier was not released")
+            return prepare()
+        def open_saved():
+            with self.store.reading():
+                return self.sessions.read(identity, recent=True, snapshot=True)
+        with patch.object(self.projection, "prepare_checkpoint", side_effect=held_checkpoint), ThreadPoolExecutor(2) as pool:
+            event = self.event(1, "item/started", item={"id": "other", "type": "agentMessage", "text": ""})
+            projection = pool.submit(self.projection.project_batch, [event])
+            try:
+                self.assertTrue(entered.wait(2))
+                response = pool.submit(open_saved).result(timeout=1)
+                self.assertEqual(response["thread"]["turns"][0]["items"][0]["text"], "Saved answer")
+                self.assertEqual(response["requests"], [])
+                self.assertFalse(response["running"])
+            finally:
+                release.set()
+            projection.result(timeout=2)
+            self.assertIsNone(self.projection.unloaded_observation)
+
+    def test_saved_open_rechecks_input_when_a_projection_overtakes_the_read(self):
+        from agent_coord import codex_app_server
+        identity = self.saved_conversation()
+        read_history = codex_app_server.read_history
+        self.projection.unloaded_observation = {"excluded": {self.identity}, "revisions": {}}
+        def crossed_commit(store, thread_id):
+            history = read_history(store, thread_id)
+            if self.projection.unloaded_observation is not None:
+                with self.sessions.lock:
+                    self.sessions.requests["waiting"] = {
+                        "id": 33, "key": "waiting", "method": "item/tool/requestUserInput",
+                        "received_at": store.clock(), "params": {"threadId": identity}}
+                    self.projection.unloaded_observation = None
+            return history
+        with patch.object(codex_app_server, "read_history", side_effect=crossed_commit), self.store.reading():
+            response = self.sessions.read(identity, recent=True, snapshot=True)
+        self.assertEqual([request["key"] for request in response["requests"]], ["waiting"])
+        self.assertEqual(response["work_thread"]["status"], "needs input")
 
     def test_projection_failure_rolls_back_effects_state_and_cursor(self):
         event = self.event(1, "item/started", item={"id": "output", "type": "agentMessage", "text": ""})

@@ -175,7 +175,8 @@ class ReadOnlyHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200, detail)
         self.assertEqual(detail["work_thread"]["close_when_done"], work["close_when_done"])
         self.assertEqual(detail["thread"]["view"], "recent")
-        project.assert_called_once_with(self.identity)
+        project.assert_called_once()
+        self.assertEqual(project.call_args.args, (self.identity,))
 
     def test_panel_reads_do_not_wait_for_the_live_card_and_enforce_the_workspace(self):
         routes = ["scratchpad", "sidecars", "close-when-done"]
