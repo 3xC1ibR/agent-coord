@@ -113,14 +113,21 @@ class TurnWatchdog:
         if was_stalled:
             self.sessions._publish("browser/changed", {"threadId": tid})
 
+    @staticmethod
+    def _snapshot(state, now):
+        return {"turn_id": state["turn_id"], "state": state["state"],
+                "quiet_seconds": max(0, int(now - state["progress"])),
+                "detail": state["detail"], "classification": state["classification"]}
+
     def snapshot(self, tid):
         with self.sessions.lock:
             state = self.observed.get(tid)
-            if not state:
-                return None
-            return {"turn_id": state["turn_id"], "state": state["state"],
-                    "quiet_seconds": max(0, int(self.clock() - state["progress"])),
-                    "detail": state["detail"], "classification": state["classification"]}
+            return self._snapshot(state, self.clock()) if state else None
+
+    def snapshots(self):
+        with self.sessions.lock:
+            now = self.clock()
+            return {tid: self._snapshot(state, now) for tid, state in self.observed.items()}
 
     def _gated(self, tid):
         with self.store.reading(), self.store._connection() as db:

@@ -46,6 +46,28 @@ class ThreadInventoryTests(unittest.TestCase):
             db.execute("""CREATE TABLE dispatch_settings (thread_id TEXT PRIMARY KEY,
                 enabled INTEGER NOT NULL DEFAULT 0, defaults_json TEXT NOT NULL DEFAULT '{}')""")
 
+    def test_inventory_takes_one_provider_snapshot_for_all_cards(self):
+        from agent_coord.turn_watchdog import TurnWatchdog
+        for n in range(20):
+            self.register(f"thread-{n}")
+        original = self.runtime.lock
+        from unittest.mock import MagicMock
+        self.runtime.lock = MagicMock(wraps=original)
+        self.runtime.lock.__enter__.side_effect = original.__enter__
+        self.runtime.lock.__exit__.side_effect = original.__exit__
+        self.runtime.watchdog = TurnWatchdog.__new__(TurnWatchdog)
+        self.runtime.watchdog.sessions = self.runtime
+        self.runtime.watchdog.clock = lambda: 25
+        self.runtime.watchdog.observed = {"thread-0": {"turn_id": "active", "state": "stalled",
+            "progress": 10, "detail": "waiting", "classification": "stalled"}}
+        self.runtime.loaded.add("thread-1")
+        self.runtime.active["thread-2"] = "busy"
+        self.runtime.requests["approval"] = {"params": {"threadId": "thread-3"}, "received_at": 5}
+        rows = {r["thread_id"]: r for r in self.runtime.list_work_threads()}
+        self.assertEqual(rows["thread-0"]["turn_health"]["quiet_seconds"], 15)
+        self.assertEqual([rows[f"thread-{n}"]["status"] for n in range(4)], ["stalled", "idle", "running", "needs input"])
+        self.assertLessEqual(self.runtime.lock.__enter__.call_count, 2)
+
     def register(self, thread_id, *, browser=False, cwd=None):
         self.store.register(session_id=thread_id, client="codex", cwd=str(cwd or self.root))
         if browser:

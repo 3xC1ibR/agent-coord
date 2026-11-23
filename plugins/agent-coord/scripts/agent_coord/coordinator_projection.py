@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterator
 import copy
+import hashlib
 import json
 import logging
 import sqlite3
@@ -22,6 +23,8 @@ from .provider_transport import Client, ProviderLaunchRejected, TransportError
 from .history_persistence import saved_turn_status
 
 VERSION = 1
+PAYLOAD_FORMAT = 2
+MIN_PAYLOAD_CHARACTERS = 16 * 1024
 BROWSER_FIELDS = ("sequence", "turn_revisions", "requests", "active", "loaded", "loaded_clients",
     "starting_notification_context", "histories", "dirty_histories", "history_revisions",
     "usage_recovery_attempts", "last_used", "permission_catalogs", "permission_effective")
@@ -29,35 +32,39 @@ CLAUDE_FIELDS = ("options", "turns", "requests", "completed", "blocks", "confirm
                  "catalog", "effective_permissions")
 
 
-def pack(value):
+def pack(value, encode_text=None):
     """Preserve integer keys and sets without accepting arbitrary object types."""
     if isinstance(value, dict):
-        return {"$map": [[pack(k), pack(v)] for k, v in value.items()]}
+        return {"$map": [[pack(k, encode_text), pack(v, encode_text)] for k, v in value.items()]}
     if isinstance(value, set):
-        return {"$set": [pack(v) for v in value]}
+        return {"$set": [pack(v, encode_text) for v in value]}
     if isinstance(value, (tuple, list, deque)):
-        return [pack(v) for v in value]
+        return [pack(v, encode_text) for v in value]
+    if encode_text is not None and isinstance(value, str) and len(value) >= MIN_PAYLOAD_CHARACTERS:
+        return {"$text": encode_text(value)}
     if value is None or type(value) in {str, int, float, bool}:
         return value
     raise TypeError("Unsupported coordinator state: " + type(value).__name__)
 
 
-def _unpack_hashable(value):
+def _unpack_hashable(value, texts):
     # Arrays in mapping keys and set members were tuples before serialization.
     # Keep decoding the existing representation so retained journals recover.
     if isinstance(value, list):
-        return tuple(_unpack_hashable(v) for v in value)
-    return unpack(value)
+        return tuple(_unpack_hashable(v, texts) for v in value)
+    return unpack(value, texts)
 
 
-def unpack(value):
+def unpack(value, texts=None):
     if isinstance(value, list):
-        return [unpack(v) for v in value]
+        return [unpack(v, texts) for v in value]
     if isinstance(value, dict):
         if "$map" in value:
-            return {_unpack_hashable(k): unpack(v) for k, v in value["$map"]}
+            return {_unpack_hashable(k, texts): unpack(v, texts) for k, v in value["$map"]}
         if "$set" in value:
-            return {_unpack_hashable(v) for v in value["$set"]}
+            return {_unpack_hashable(v, texts) for v in value["$set"]}
+        if "$text" in value and texts is not None:
+            return texts[value["$text"]]
         raise ValueError("Unknown coordinator state representation")
     return value
 
@@ -88,12 +95,15 @@ class CoordinatorProjection:
         self.error = None
         self.delivery_error = None
         self.prepared_histories = {}
+        self.payload_cache = {}
         self.restored_completions = deque()
         self.in_event = threading.local()
         with self.store._connection() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS coordinator_projection (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL,
                 transport_instance TEXT NOT NULL, cursor INTEGER NOT NULL, state BLOB NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS coordinator_projection_payloads (
+                digest TEXT PRIMARY KEY, compressed BLOB NOT NULL) WITHOUT ROWID""")
             db.execute("""CREATE TABLE IF NOT EXISTS coordinator_commands (
                 command_id TEXT PRIMARY KEY, channel TEXT NOT NULL, operation TEXT NOT NULL,
                 value_json TEXT NOT NULL, outcome TEXT NOT NULL, result_json TEXT)""")
@@ -158,12 +168,22 @@ class CoordinatorProjection:
 
     def load(self):
         with self.store.reading(), self.store._connection() as db:
+            if not db.in_transaction:
+                db.execute("BEGIN")
             row = db.execute("SELECT * FROM coordinator_projection WHERE singleton=1").fetchone()
-        if row is None:
-            return
-        if row["version"] != VERSION or row["transport_instance"] != self.client.record["instance"]:
-            raise TransportError("The saved coordinator projection does not match the surviving transport.")
-        state = unpack(json.loads(zlib.decompress(row["state"])))
+            if row is None:
+                return
+            if row["version"] not in (VERSION, PAYLOAD_FORMAT) or row["transport_instance"] != self.client.record["instance"]:
+                raise TransportError("The saved coordinator projection does not match the surviving transport.")
+            payloads = (db.execute("SELECT digest, compressed FROM coordinator_projection_payloads").fetchall()
+                        if row["version"] == PAYLOAD_FORMAT else [])
+        texts = {}
+        for digest, compressed in payloads:
+            data = zlib.decompress(compressed)
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise TransportError("Saved coordinator payload failed integrity verification.")
+            texts[digest] = data.decode("utf-8", "surrogatepass")
+        state = unpack(json.loads(zlib.decompress(row["state"])), texts)
         self.restore(state)
         # Earlier versions also checkpointed turns already published in history.
         # Verify those copies incrementally after readiness, outside the session lock.
@@ -249,7 +269,7 @@ class CoordinatorProjection:
         result = self.deliver(identity, channel, "open", value)
         return self.attach(channel, result["pid"], callback, provider=provider, thread_id=thread_id)
 
-    def prepare_checkpoint(self):
+    def prepare_checkpoint(self, *, inline=False):
         from .history_persistence import prepare_history, stage_history
         prepared = {identity: prepare_history(self.sessions.histories[identity], previous=self.prepared_histories.get(identity))
                     for identity in self.sessions.dirty_histories if identity in self.sessions.histories}
@@ -265,8 +285,23 @@ class CoordinatorProjection:
                     for turn in reversed(self.sessions.histories[identity].get("turns", []))):
                 completions[identity] = {completed["id"]: completed["status"]}
         state = self.state(durable=True, published_completions=completions)
-        encoded = zlib.compress(json.dumps(pack(state), separators=(",", ":")).encode(), level=1)
-        return prepared, completions, encoded
+        # A long-lived Claude turn can hold megabytes of immutable tool output.
+        # Keep only the current root's values in memory. The database determines
+        # which payloads committed, so rollback or retry cannot leave a dangling reference.
+        current = {}
+
+        def encode_text(text):
+            entry = self.payload_cache.get(text) or current.get(text)
+            if entry is None:
+                data = text.encode("utf-8", "surrogatepass")
+                entry = hashlib.sha256(data).hexdigest(), zlib.compress(data, level=1)
+            current[text] = entry
+            return entry[0]
+
+        root = pack(state, None if inline else encode_text)
+        encoded = zlib.compress(json.dumps(root, separators=(",", ":")).encode(), level=1)
+        self.payload_cache = current
+        return prepared, completions, (encoded, dict(current.values()))
 
     def publish_histories(self, db, prepared):
         from .history_persistence import publish_history
@@ -309,12 +344,18 @@ class CoordinatorProjection:
             db.execute("DELETE FROM coordinator_events WHERE sequence <= ?", (rows[-1][0] - 1500,))
 
     def _save(self, db, encoded, cursor):
+        root, payloads = encoded
         db.execute("INSERT OR REPLACE INTO coordinator_projection VALUES (1,?,?,?,?)",
-                   (VERSION, self.client.record["instance"], cursor, encoded))
+                   (PAYLOAD_FORMAT if payloads else VERSION, self.client.record["instance"], cursor, root))
+        stored = {row[0] for row in db.execute("SELECT digest FROM coordinator_projection_payloads")}
+        db.executemany("INSERT INTO coordinator_projection_payloads VALUES (?,?)",
+                       ((digest, payloads[digest]) for digest in payloads.keys() - stored))
+        db.executemany("DELETE FROM coordinator_projection_payloads WHERE digest=?",
+                       ((digest,) for digest in stored - payloads.keys()))
 
-    def checkpoint(self):
+    def checkpoint(self, *, inline=False):
         with self.lock, self.sessions.claude.lock, self.sessions.lock:
-            prepared, completions, encoded = self.prepare_checkpoint()
+            prepared, completions, encoded = self.prepare_checkpoint(inline=inline)
             with self.store.database_operation("coordinator.checkpoint"), self.store._connection() as db:
                 self.publish_histories(db, prepared)
                 self._save(db, encoded, self.cursor)
@@ -609,4 +650,5 @@ class CoordinatorProjection:
                 raise TransportError("Provider projection did not reach its transaction boundary.")
         if self.error:
             raise TransportError("Provider projection is not healthy: " + self.error)
-        self.checkpoint()
+        # Planned handover also supports a reader that predates payload references.
+        self.checkpoint(inline=True)

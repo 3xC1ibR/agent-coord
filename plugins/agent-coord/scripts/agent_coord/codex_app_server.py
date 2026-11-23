@@ -1560,14 +1560,20 @@ class BrowserSessions:
             wake_pause = _inventory.wake_pauses.get(thread_id)
         thread["open_ask"] = open_ask
         thread["last_tool"] = session.get("last_tool")
-        with self.lock:
-            waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
-            # Loading provider context does not establish idleness. A live hook
-            # heartbeat can precede this runtime's turn notification.
-            running = thread_id in self.active or (session["turn_active"] and session["presence"] == "online")
-            thread["status"] = ("needs input" if waiting else "running" if running
-                                else "idle" if thread_id in self.loaded else "saved" if session["presence"] == "offline"
-                                else session["presence"])
+        if _inventory is None:
+            with self.lock:
+                waiting = {key: r for key, r in self.requests.items() if r["params"].get("threadId") == thread_id}
+                active, loaded = thread_id in self.active, thread_id in self.loaded
+                health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
+        else:
+            waiting = _inventory.waiting.get(thread_id, {})
+            active, loaded = thread_id in _inventory.active, thread_id in _inventory.loaded
+            health = _inventory.health.get(thread_id)
+        # A live hook heartbeat can precede this runtime's turn notification.
+        running = active or (session["turn_active"] and session["presence"] == "online")
+        thread["status"] = ("needs input" if waiting else "running" if running
+                            else "idle" if loaded else "saved" if session["presence"] == "offline"
+                            else session["presence"])
         checkpoint = thread["checkpoint"] if not thread["checkpoint_stale"] else None
         completion = thread["turn_completion"]
         classification = thread["response_classification"]
@@ -1651,7 +1657,6 @@ class BrowserSessions:
                           attention_since=wake_pause["paused_at"] or thread["updated_at"], can_handle_response=False)
         thread.update(wake_fields(wake_pause))
         policy = notification_policy.decide(thread, waiting=bool(waiting) or blocked_on_ask or blocked_wake, owners=owners)
-        health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
         thread["turn_health"] = health
         if health and health["state"] == "stalled" and not waiting:
             thread.update(status="stalled", response_state="action", needs_attention=thread["attention"] != "archived",
@@ -1725,6 +1730,15 @@ class BrowserSessions:
             inventory.supervision = relations(db)
             inventory.projected = {row["thread_id"]: inventory.read(db, row) for row in inventory.rows
                                    if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)}
+        # One consistent snapshot for the entire list. Taking the shared provider
+        # lock for every card can make a single list wait for hundreds of checkpoints.
+        with self.lock:
+            inventory.active, inventory.loaded = set(self.active), set(self.loaded)
+            inventory.waiting = {}
+            for key, request in self.requests.items():
+                tid = request["params"].get("threadId")
+                inventory.waiting.setdefault(tid, {})[key] = request.copy()
+            inventory.health = self.watchdog.snapshots() if hasattr(self, "watchdog") else {}
         return notification_policy.group_attention([
             self.work_thread(thread_id, history=False, _creators=inventory.creators, _inventory=inventory)
             for thread_id in inventory.projected])

@@ -57,17 +57,19 @@ class ThreadInventory:
                 if thread_id not in self.associations:
                     self.associations[thread_id] = OrganizationStore.projected_association(
                         db, thread_id, row["cwd"], creators=creators)
+        # Start from visible threads, then seek each current turn or checkpoint.
+        # A provider journal can have years of historical rows for these joins.
         self.latest = {row["thread_id"]: dict(row) for row in db.execute("""
-            SELECT c.* FROM thread_checkpoints c WHERE c.id IN (
-                SELECT MAX(id) FROM thread_checkpoints WHERE thread_id IN (
-        """ + self.selected + ") GROUP BY thread_id)", self.params)}
+            SELECT c.* FROM work_threads t CROSS JOIN thread_checkpoints c
+            ON c.id = (SELECT id FROM thread_checkpoints WHERE thread_id = t.thread_id ORDER BY id DESC LIMIT 1)
+            WHERE (t.attention = 'archived') = ?""", self.params)}
         self.notification_contexts = {row["thread_id"]: dict(row) for row in db.execute("""
-            SELECT n.* FROM turn_notification_context n JOIN work_threads t
-            ON t.thread_id = n.thread_id AND t.turn_key = n.turn_key
+            SELECT n.* FROM work_threads t CROSS JOIN turn_notification_context n
+            ON n.thread_id = t.thread_id AND n.turn_key = t.turn_key
             WHERE (t.attention = 'archived') = ?""", self.params)}
-        self.automatic_turns = {row[0] for row in db.execute("""SELECT DISTINCT t.thread_id
-            FROM work_threads t JOIN messages m ON m.recipient_session_id = t.thread_id AND m.wake_turn_id = t.turn_id
-            WHERE (t.attention = 'archived') = ?""", self.params)}
+        self.automatic_turns = {row[0] for row in db.execute("""SELECT t.thread_id FROM work_threads t
+            WHERE (t.attention = 'archived') = ? AND EXISTS (SELECT 1 FROM messages m
+                WHERE m.recipient_session_id = t.thread_id AND m.wake_turn_id = t.turn_id)""", self.params)}
         # Walk each thread's checkpoint index from the newest entry instead of
         # grouping every checkpoint by phase.
         self.prior = {row["thread_id"]: row["phase"] for row in db.execute("""
@@ -75,8 +77,8 @@ class ThreadInventory:
                 WHERE c.thread_id = t.thread_id AND c.phase != 'finished' ORDER BY c.id DESC LIMIT 1) AS phase
             FROM work_threads t WHERE (t.attention = 'archived') = ?) WHERE phase IS NOT NULL""", self.params)}
         self.completions = {row["thread_id"]: dict(row) for row in db.execute("""
-            SELECT c.thread_id, c.id, c.status, c.completed_at FROM turn_completions c
-            JOIN work_threads t ON t.thread_id = c.thread_id AND t.turn_key = c.turn_key
+            SELECT c.thread_id, c.id, c.status, c.completed_at FROM work_threads t
+            CROSS JOIN turn_completions c ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
             WHERE (t.attention = 'archived') = ?
         """, self.params)}
         # Links are the largest batch. Aggregate them in SQLite: each result
@@ -90,9 +92,9 @@ class ThreadInventory:
             self.links[link["thread_id"]].append(link)
         self.classifications = {}
         for row in db.execute("""
-            SELECT r.* FROM response_classification_cache r
-            JOIN turn_completions c ON c.id = r.completion_id
-            JOIN work_threads t ON t.thread_id = c.thread_id AND t.turn_key = c.turn_key
+            SELECT r.* FROM work_threads t
+            CROSS JOIN turn_completions c ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
+            CROSS JOIN response_classification_cache r ON r.completion_id = c.id
             WHERE (t.attention = 'archived') = ? AND r.model = ? AND r.policy_version = ?
         """, (*self.params, MODEL, POLICY_VERSION)):
             self.classifications[(row["completion_id"], row["checkpoint_id"], row["model"], row["policy_version"])] = row

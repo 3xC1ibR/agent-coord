@@ -70,6 +70,43 @@ class ProjectionTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             pack(object())
 
+    def test_large_active_turn_payloads_survive_restart_rollback_and_legacy_handover(self):
+        from agent_coord.coordinator_projection import MIN_PAYLOAD_CHARACTERS
+        large = "中" * MIN_PAYLOAD_CHARACTERS + "\udc00"
+        turn = {"id": "active", "items": [{"id": "a", "text": large}, {"id": "b", "text": large}]}
+        self.sessions.claude.turns[self.identity] = turn
+        self.projection.checkpoint()
+        with self.store.reading(), self.store._connection() as db:
+            original = db.execute("SELECT digest, compressed FROM coordinator_projection_payloads").fetchall()
+            size = db.execute("SELECT length(state) FROM coordinator_projection").fetchone()[0]
+        self.assertEqual(len(original), 1)
+        self.assertLess(size, len(large))
+        with patch("agent_coord.coordinator_projection.hashlib.sha256", side_effect=AssertionError("rehashed immutable text")):
+            self.projection.checkpoint()
+        original_save = self.projection._save
+        def fail_after_save(db, encoded, cursor):
+            original_save(db, encoded, cursor)
+            raise sqlite3.IntegrityError("rollback after replacing the payload")
+        self.sessions.claude.turns[self.identity]["items"] = [{"id": "b", "text": large + "changed"}]
+        with patch.object(self.projection, "_save", side_effect=fail_after_save), self.assertRaises(sqlite3.IntegrityError):
+            self.projection.checkpoint()
+        self.projection = CoordinatorProjection(self.sessions, self.client)
+        self.projection.load()
+        self.assertEqual(self.sessions.claude.turns[self.identity]["items"], [
+            {"id": "a", "text": large}, {"id": "b", "text": large}])
+        self.sessions.claude.turns[self.identity]["items"].pop()
+        self.sessions.claude.turns[self.identity]["items"][0]["text"] = large + "new"
+        self.projection.checkpoint()
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM coordinator_projection_payloads").fetchone()[0], 1)
+            self.assertIsNone(db.execute("SELECT 1 FROM coordinator_projection_payloads WHERE digest=?", (original[0][0],)).fetchone())
+        self.projection.freeze()
+        with self.store.reading(), self.store._connection() as db:
+            version, encoded = db.execute("SELECT version, state FROM coordinator_projection").fetchone()
+            self.assertEqual(db.execute("SELECT count(*) FROM coordinator_projection_payloads").fetchone()[0], 0)
+        self.assertEqual(version, 1)
+        self.assertEqual(unpack(json.loads(zlib.decompress(encoded)))["claude"]["turns"], self.sessions.claude.turns)
+
     def test_codec_recovers_existing_tuple_keys_and_set_members(self):
         value = {"requests": {("thread", ("turn", 1)): ["pending"]},
                  "confirmed": {("thread", "item")}}
