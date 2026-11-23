@@ -992,6 +992,35 @@ class SignedUpgrade(Validation):
         )
 
 
+def run_and_clean_up(runner):
+    try:
+        try:
+            runner.execute()
+        except Exception as error:
+            runner.report["execution_error"] = repr(error)
+            raise
+    finally:
+        runner.persist()
+        try:
+            runner.close()
+        finally:
+            # Validation.close stops only processes proved to belong to the
+            # temporary root and records any survivors.
+            runner.persist()
+            if "leftover_processes" in runner.report and not any(
+                v["alive_after_cleanup"] for v in runner.report["leftover_processes"].values()
+            ):
+                shutil.rmtree(runner.root)
+            else:
+                runner.report.update(passed=False, standalone_passed=False)
+                runner.report["violations"].append(
+                    {"phase": "cleanup", "kind": "fixture process cleanup unverified"}
+                )
+                runner.persist()
+    result = runner.report.get("standalone_passed", False) if runner.candidate_only else runner.report["passed"]
+    return 0 if result else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("previous", "candidate", "snapshot", "report"):
@@ -1025,32 +1054,7 @@ def main():
             "Private reports must remain separate from the source snapshot, signed bundles and checkout"
         )
     runner = SignedUpgrade(args, old, new)
-    try:
-        try:
-            runner.execute()
-        except Exception as error:
-            runner.report["execution_error"] = repr(error)
-            raise
-    finally:
-        runner.persist()
-        try:
-            runner.close()
-        finally:
-            # Validation.close stops only processes proved to belong to the
-            # temporary root and records any survivors.
-            runner.persist()
-            if "leftover_processes" in runner.report and not any(
-                v["alive_after_cleanup"] for v in runner.report["leftover_processes"].values()
-            ):
-                shutil.rmtree(runner.root)
-            else:
-                runner.report.update(passed=False, standalone_passed=False)
-                runner.report["violations"].append(
-                    {"phase": "cleanup", "kind": "fixture process cleanup unverified"}
-                )
-                runner.persist()
-    result = runner.report.get("standalone_passed", False) if args.candidate_only else runner.report["passed"]
-    return 0 if result else 1
+    return run_and_clean_up(runner)
 
 
 if __name__ == "__main__":

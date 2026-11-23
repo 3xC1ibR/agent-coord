@@ -78,7 +78,7 @@ jobs:
   macos-build:
     name: macOS standalone build (arm64)
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -106,3 +106,25 @@ jobs:
           python3 desktop/macos/verify_distribution.py \
             --dmg build/ci/Ribbon-Field-arm64-test.dmg \
             --report build/ci/distribution-validation.json
+      - name: Set up Node.js for browser measurements
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install the workload browser
+        run: |
+          npm ci --prefix demo --ignore-scripts --omit=dev
+          demo/node_modules/.bin/playwright install chromium
+      - name: Measure packaged conversations under streaming load
+        run: |
+          python3 scripts/measure_packaged_conversation_workload.py \
+            --app 'build/ci/Ribbon Field.app' --report build/ci/generated-conversation-workload.json
+      - name: Retain generated workload measurements
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packaged-conversation-workload
+          path: |
+            build/ci/generated-conversation-workload.json
+            build/ci/generated-conversation-workload.sample.txt
+          retention-days: 30
