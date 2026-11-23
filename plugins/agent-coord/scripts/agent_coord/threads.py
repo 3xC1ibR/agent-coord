@@ -339,8 +339,12 @@ class ThreadStore:
             # Legacy threads may have a saved result without turn receipts.
             or (latest and not result["checkpoint_stale"] and latest["id"] > row["handled_checkpoint_id"]
                 and (not row["turn_key"] or completion and completion["status"] != "interrupted")))
-        result["links"] = [dict(link) for link in (inventory.links[row["thread_id"]] if inventory is not None else
-                           db.execute("SELECT * FROM thread_links WHERE thread_id = ? ORDER BY id", (row["thread_id"],)))]
+        if inventory is not None and inventory.link_counts is not None:
+            result["link_count"] = inventory.link_counts.get(row["thread_id"], 0)
+        else:
+            links = (inventory.links[row["thread_id"]] if inventory is not None else
+                     db.execute("SELECT * FROM thread_links WHERE thread_id = ? ORDER BY id", (row["thread_id"],)))
+            result["links"] = [dict(link) for link in links]
         if history:
             from .sqlite_rows import read_rows
             result["checkpoints"] = [context_lifecycle.checkpoint_record(cp) for cp in read_rows(

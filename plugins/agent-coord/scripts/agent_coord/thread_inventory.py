@@ -28,7 +28,7 @@ def has_table(db, name):
 
 
 class ThreadInventory:
-    def __init__(self, threads, db, *, archived=False):
+    def __init__(self, threads, db, *, archived=False, cards_only=False):
         self.threads = threads
         self.selected = "SELECT thread_id FROM work_threads WHERE (attention = 'archived') = ?"
         self.params = (int(archived),)
@@ -81,15 +81,18 @@ class ThreadInventory:
             CROSS JOIN turn_completions c ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
             WHERE (t.attention = 'archived') = ?
         """, self.params)}
-        # Links are the largest batch. Aggregate them in SQLite: each result
-        # row costs a GIL handoff, which convoys behind other request threads.
-        self.links = defaultdict(list)
-        for link in sorted(json.loads(db.execute("""SELECT json_group_array(json_object(
-                'id', id, 'thread_id', thread_id, 'kind', kind, 'label', label,
-                'target', target, 'project_id', project_id))
-                FROM thread_links WHERE thread_id IN (""" + self.selected + ")", self.params).fetchone()[0]),
-                key=lambda link: link["id"]):
-            self.links[link["thread_id"]].append(link)
+        self.link_counts = None
+        if cards_only:
+            self.link_counts = dict(db.execute("SELECT thread_id, COUNT(*) FROM thread_links WHERE thread_id IN ("
+                                               + self.selected + ") GROUP BY thread_id", self.params))
+        else:
+            self.links = defaultdict(list)
+            for link in sorted(json.loads(db.execute("""SELECT json_group_array(json_object(
+                    'id', id, 'thread_id', thread_id, 'kind', kind, 'label', label,
+                    'target', target, 'project_id', project_id))
+                    FROM thread_links WHERE thread_id IN (""" + self.selected + ")", self.params).fetchone()[0]),
+                    key=lambda link: link["id"]):
+                self.links[link["thread_id"]].append(link)
         self.classifications = {}
         for row in db.execute("""
             SELECT r.* FROM work_threads t

@@ -226,7 +226,7 @@ class OrganizationStore:
             # writer. Registration and explicit maintenance repair the record.
             association = OrganizationStore.projected_association(db, thread["thread_id"], thread["cwd"])
         thread.update(dict(association))
-        for link in thread["links"]:
+        for link in thread.get("links", ()):
             link["workspace_id"] = link.pop("project_id")
         return thread
 

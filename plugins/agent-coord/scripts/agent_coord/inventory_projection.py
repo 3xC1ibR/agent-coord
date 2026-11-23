@@ -20,7 +20,7 @@ def list_card(thread: dict) -> dict:
     if isinstance(request, str) and len(request) > ORIGINAL_REQUEST_PREVIEW:
         card["original_request"] = request[:ORIGINAL_REQUEST_PREVIEW]
         card["original_request_truncated"] = True
-    card["link_count"] = len(card.pop("links", None) or [])
+    card.setdefault("link_count", len(card.pop("links", None) or []))
     checkpoint = card.get("checkpoint")
     if isinstance(checkpoint, dict) and "context_lifecycle" in checkpoint:
         card["checkpoint"] = {key: value for key, value in checkpoint.items() if key != "context_lifecycle"}

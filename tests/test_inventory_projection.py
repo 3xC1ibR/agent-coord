@@ -8,6 +8,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
@@ -104,6 +105,15 @@ class InventoryTransferTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotEqual(changed, tag)
         self.assertIn(b"Renamed", body)
+
+    def test_list_counts_links_without_decoding_their_contents(self):
+        target = str(self.root / "notes.md")
+        with patch("agent_coord.thread_inventory.json.loads", wraps=json.loads) as decode:
+            cards = self.sessions.work_thread_inventory()
+        self.assertEqual(json.loads(cards)["data"][0]["link_count"], 1)
+        self.assertFalse(any(target in call.args[0] for call in decode.call_args_list
+                             if isinstance(call.args[0], str)))
+        self.assertEqual(self.sessions.work_thread(self.thread)["links"][0]["target"], target)
 
     def test_open_and_closed_lists_have_separate_validators(self):
         _, open_tag, _ = self.get("/api/browser/threads")

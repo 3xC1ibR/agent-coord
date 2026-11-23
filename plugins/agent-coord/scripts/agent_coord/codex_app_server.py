@@ -744,7 +744,8 @@ class BrowserSessions:
                 owner = False
         if owner:
             try:
-                encoded = json.dumps({"data": [list_card(thread) for thread in self.list_work_threads(archived=archived)]}).encode()
+                threads = self.list_work_threads(archived=archived, cards_only=True)
+                encoded = json.dumps({"data": [list_card(thread) for thread in threads]}).encode()
             except BaseException as exc:
                 build.finished = time.monotonic()
                 build.set_exception(exc)
@@ -1749,10 +1750,10 @@ class BrowserSessions:
                                  inventory=_inventory.reviews if _inventory is not None else None)
         return thread
 
-    def list_work_threads(self, *, archived=False) -> list[dict]:
+    def list_work_threads(self, *, archived=False, cards_only=False) -> list[dict]:
         from .thread_inventory import ThreadInventory
         with self.store.reading(), self.store._connection() as db:
-            inventory = ThreadInventory(self.store.threads, db, archived=archived)
+            inventory = ThreadInventory(self.store.threads, db, archived=archived, cards_only=cards_only)
             inventory.load_runtime(db)
             if hasattr(self, "reviews"):
                 inventory.reviews = self.reviews.inventory(db)

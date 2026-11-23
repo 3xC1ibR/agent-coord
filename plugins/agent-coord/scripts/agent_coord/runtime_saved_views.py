@@ -433,7 +433,7 @@ class SavedRuntimeViews:
         with self._inventory_reader.observe() as (db, generation):
             cached = self._inventories.get(archived)
             if cached is None or cached[0] != generation:
-                inventory = ThreadInventory(self.store.threads, db, archived=archived)
+                inventory = ThreadInventory(self.store.threads, db, archived=archived, cards_only=True)
                 delegated = {r[0] for r in db.execute("""SELECT d.child_session_id FROM delegations d
                     JOIN work_threads t ON t.thread_id=d.parent_session_id WHERE d.child_session_id IS NOT NULL""")}
                 browser = {r[0] for r in db.execute("SELECT thread_id FROM browser_sessions")}
