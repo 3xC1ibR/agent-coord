@@ -789,6 +789,15 @@ do not rebuild or overwrite immutable release files.
 
 ## Acceptance evidence
 
+For a live upgrade, verify which backend each installed desktop window has actually loaded.
+Launch the signed application with `--observe-window-origins /absolute/path/native.sock`
+to enable a read-only Unix socket in a new, user-owned directory with mode `0700`.
+Each connection returns the window IDs, top-level loopback origins and navigation readiness
+sampled from WebKit. Match the socket peer PID to the signed running application, compare
+every window with the staged gateway before activation, then repeat against the committed
+backend. The native smoke test exercises this observation on two windows with independent
+drafts. Run it with `python3 desktop/macos/smoke_test.py --origins-only --app 'Ribbon Field.app'`.
+
 Validation uses isolated databases, runtime directories, and fake providers before
 any test on real conversations. Tests must demonstrate:
 

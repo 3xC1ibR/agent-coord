@@ -106,6 +106,10 @@ jobs:
           python3 desktop/macos/verify_distribution.py \
             --dmg build/ci/Ribbon-Field-arm64-test.dmg \
             --report build/ci/distribution-validation.json
+      - name: Verify native window origins across a backend change
+        run: |
+          python3 desktop/macos/smoke_test.py --origins-only \
+            --app 'build/ci/Ribbon Field.app' --report build/ci/native-window-origins.json
       - name: Set up Node.js for browser measurements
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -126,5 +130,6 @@ jobs:
           name: packaged-conversation-workload
           path: |
             build/ci/generated-conversation-workload.json
+            build/ci/native-window-origins.json
             build/ci/generated-conversation-workload.sample.txt
           retention-days: 30

@@ -3,16 +3,59 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def read_window_origins(address: Path, expected_pid: int) -> list:
+    """Read one new snapshot from the running native process on macOS."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(2)
+        client.connect(str(address))
+        # Darwin sys/un.h: SOL_LOCAL, LOCAL_PEERPID.
+        if client.getsockopt(0, 2) != expected_pid:
+            raise RuntimeError("Window observation came from another process")
+        with client.makefile("rb") as stream:
+            data = stream.read(65537)
+    if len(data) > 65536:
+        raise RuntimeError("Window observation exceeds its size limit")
+    if not data:
+        raise ConnectionResetError("Native interface closed before returning a window observation")
+    return json.loads(data)["windows"]
+
+
+def observe_window_moves(app, address):
+    observations = set()
+    last = None
+    while app.poll() is None:
+        try:
+            windows = read_window_origins(address, app.pid)
+        except (FileNotFoundError, ConnectionRefusedError, ConnectionResetError):
+            time.sleep(.025)
+            continue
+        if len(windows) == 2 and all(row["ready"] for row in windows):
+            rows = tuple(sorted((row["id"], row["origin"]) for row in windows))
+            if rows != last:
+                last = rows
+                observations.add(rows)
+                origins = {origin for _, origin in rows}
+                if len(origins) == 1:
+                    host = urlsplit(next(iter(origins))).hostname
+                    if host == "localhost" or host == "127.0.0.1" and (address.parent / "observed-localhost").exists():
+                        (address.parent / ("observed-" + host)).touch()
+        time.sleep(.025)
+    return observations
 
 
 def stopped(pid: int) -> bool:
@@ -35,12 +78,14 @@ def main() -> int:
     parser.add_argument("--attribution-only", action="store_true", help="Verify the native download-token handoff without sending telemetry.")
     parser.add_argument("--titlebar-only", action="store_true", help="Run focused workspace title band checks.")
     parser.add_argument("--runtime-only", action="store_true", help="Quit and reconnect two native interfaces to the same detached runtime.")
+    parser.add_argument("--origins-only", action="store_true", help="Observe the origins of two native windows across a backend change.")
     args = parser.parse_args()
     executable = args.app.expanduser().resolve() / "Contents/MacOS/Agent Coord"
     report = args.report.expanduser().resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     report.unlink(missing_ok=True)
-    temporary = tempfile.TemporaryDirectory(prefix="ribbon-native-smoke-")
+    # The macOS Unix-domain socket address has a 104-byte limit, including the directory.
+    temporary = tempfile.TemporaryDirectory(prefix="ribbon-native-smoke-", dir="/private/tmp" if args.origins_only else None)
     smoke_directory = Path(temporary.name)
     command = [str(executable), "--smoke-test", str(report), "--smoke-directory", str(smoke_directory)]
     if args.files_only:
@@ -59,16 +104,24 @@ def main() -> int:
         command.append("--smoke-titlebar-only")
     if args.runtime_only:
         command += ["--smoke-runtime-only", "--smoke-preserve-runtime"]
+    address = smoke_directory / "origins"
+    if args.origins_only:
+        command += ["--smoke-origin-change-only", "--smoke-observe-origins", "--observe-window-origins", str(address)]
     first = None
     try:
         for attempt in range(2 if args.runtime_only else 1):
-            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as app:
+            with ThreadPoolExecutor(max_workers=1) as executor, subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            ) as app:
+                observation = executor.submit(observe_window_moves, app, address) if args.origins_only else None
                 try:
                     _, errors = app.communicate(timeout=110)
                 except subprocess.TimeoutExpired:
                     app.kill()
                     _, errors = app.communicate(timeout=5)
                     raise RuntimeError("Native smoke test timed out: " + errors[-4000:])
+                if observation is not None:
+                    observed = observation.result()
                 if app.returncode != 0 or not report.exists():
                     raise RuntimeError(f"Native app failed (exit {app.returncode}): {errors[-4000:]}")
             if args.runtime_only:
@@ -99,6 +152,20 @@ def main() -> int:
     result = json.loads(report.read_text())
     if result.get("error"):
         raise RuntimeError(result["error"])
+    if args.origins_only:
+        port = urlsplit(result["url"]).port
+        expected = {f"http://{host}:{port}/" for host in ("localhost", "127.0.0.1")}
+        matching = {}
+        for rows in observed:
+            ids = tuple(identifier for identifier, _ in rows)
+            values = {origin for _, origin in rows}
+            if len(set(ids)) == 2 and len(values) == 1:
+                matching.setdefault(ids, set()).update(values)
+        if not any(expected <= origins for origins in matching.values()):
+            raise RuntimeError("The same two native windows were not observed on both loopback origins")
+        result["observed_both_native_window_origins"] = True
+        report.write_text(json.dumps(result, indent=2) + "\n")
+        return 0
     if args.runtime_only:
         if not stopped(result["backend_pid"]):
             raise RuntimeError("Explicit native Stop and Quit left the test runtime alive")

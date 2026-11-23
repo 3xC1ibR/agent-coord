@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import Network
 import UserNotifications
 import UniformTypeIdentifiers
 import Darwin
@@ -123,6 +124,50 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var nextFolderSlot = 0
     private var windowSaveScheduled = false
     private let windowPersistenceQueue = DispatchQueue(label: "com.agentcoord.desktop.windows", qos: .utility)
+    private var windowOriginListener: NWListener?
+
+    // Only a release observer launching the native app requests this local socket.
+    // Each connection reads the committed WebKit documents on the main thread.
+    private func startWindowOriginObservation() {
+        let arguments = CommandLine.arguments
+        guard let flag = arguments.firstIndex(of: "--observe-window-origins"),
+              flag + 1 < arguments.count else { return }
+        let path = arguments[flag + 1]
+        let parent = URL(fileURLWithPath: path).deletingLastPathComponent()
+        var info = stat()
+        guard path.hasPrefix("/"), path.utf8.count < MemoryLayout.size(ofValue: sockaddr_un().sun_path),
+              lstat(parent.path, &info) == 0, info.st_uid == geteuid(),
+              (info.st_mode & S_IFMT) == S_IFDIR, (info.st_mode & 0o777) == 0o700,
+              lstat(path, &info) != 0, errno == ENOENT else { return }
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .unix(path: path)
+        guard let listener = try? NWListener(using: parameters) else { return }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self = self else { connection.cancel(); return }
+            let observations = self.windows.map { item -> [String: Any] in
+                let url = item.webView.url
+                let origin: String? = url.flatMap { address in
+                    guard address.scheme == "http", let host = address.host,
+                          ["localhost", "127.0.0.1"].contains(host), let port = address.port,
+                          address.user == nil, address.password == nil else { return nil }
+                    return "http://\(host):\(port)/"
+                }
+                let ready = origin != nil && item.loaded && !item.webView.isHidden && !item.webView.isLoading &&
+                    item.nextOrigin == nil && item.replacement == nil && !item.restoringWorkspace &&
+                    url.map { self.isLocal($0, at: item.documentOrigin) } == true && item.documentOrigin != nil
+                return ["id": item.id, "origin": origin as Any, "ready": ready]
+            }
+            guard let bytes = try? JSONSerialization.data(withJSONObject: ["windows": observations]) else {
+                connection.cancel()
+                return
+            }
+            connection.start(queue: .main)
+            connection.send(content: bytes, contentContext: .finalMessage, isComplete: true,
+                            completion: .contentProcessed { _ in connection.cancel() })
+        }
+        windowOriginListener = listener
+        listener.start(queue: .main)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -161,6 +206,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 return
             }
             backend = Backend(directory: directory)
+            startWindowOriginObservation()
             updater = RibbonUpdater(compatibility: { [weak self] target in
                 guard let backend = self?.backend else { throw Backend.failure("Runtime unavailable.") }
                 try backend.validateCompatibility(target)
@@ -1557,6 +1603,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
     }
     func applicationWillTerminate(_ notification: Notification) {
+        windowOriginListener?.cancel()
         if let monitor = sessionKeyMonitor { NSEvent.removeMonitor(monitor) }
         if let activity = activity { ProcessInfo.processInfo.endActivity(activity) }
         if lockFile >= 0 { flock(lockFile, LOCK_UN); close(lockFile) }
@@ -2058,6 +2105,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try smokeCheck("origin_change_staged_window", stagedRestored)
         let otherStaged = await reached(sibling, staged, text: "Second window draft")
         try smokeCheck("origin_change_independent_drafts", otherStaged)
+        if CommandLine.arguments.contains("--smoke-observe-origins") {
+            // The external reader acknowledges a fresh sample from both windows.
+            for endpoint in [staged, direct] {
+                if endpoint == direct { backend.ready?(direct) }
+                let acknowledgment = directory.appendingPathComponent("observed-" + endpoint.host!)
+                for _ in 0..<200 {
+                    if FileManager.default.fileExists(atPath: acknowledgment.path) { break }
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                try smokeCheck("observed_" + endpoint.host!, FileManager.default.fileExists(atPath: acknowledgment.path))
+            }
+            return
+        }
         _ = try await smokeJS("(state.sending ||= new Set()).add(id); return true;",
                               in: item.webView, arguments: ["id": thread])
         backend.ready?(direct)
