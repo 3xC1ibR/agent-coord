@@ -1,4 +1,5 @@
 """Release gates must catch uncertain acknowledgments and silence across phase boundaries."""
+from contextlib import ExitStack
 from pathlib import Path
 import json
 import sqlite3
@@ -93,7 +94,9 @@ class GuardedAuthorizationTests(unittest.TestCase):
         import validate_signed_runtime_responsiveness as gate
 
         self.gate = gate
-        root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        resources = ExitStack()
+        self.addCleanup(resources.close)
+        root = Path(resources.enter_context(tempfile.TemporaryDirectory())).resolve()
         self.run_fixture = run = object.__new__(SignedUpgrade)
         run.database = root / "db.sqlite3"
         self.directory = gate.runtime.runtime_directory(run.database)
@@ -110,11 +113,11 @@ class GuardedAuthorizationTests(unittest.TestCase):
         run.publish_phase = mock.Mock()
         run.status = mock.Mock(side_effect=AssertionError("Unnecessary full-status scan"))
         run.identity = mock.Mock(return_value=self.target)
-        self.enterContext(mock.patch.object(gate, "fetch", return_value={"token": "fixture"}))
-        self.enterContext(mock.patch.object(gate.time, "sleep"))
+        resources.enter_context(mock.patch.object(gate, "fetch", return_value={"token": "fixture"}))
+        resources.enter_context(mock.patch.object(gate.time, "sleep"))
         # Move the monotonic deadline forward deterministically.
         ticks = iter(range(1000))
-        self.enterContext(mock.patch.object(gate.time, "monotonic", side_effect=lambda: next(ticks)))
+        resources.enter_context(mock.patch.object(gate.time, "monotonic", side_effect=lambda: next(ticks)))
 
     def write_receipt(self, request, phase):
         receipt = {
