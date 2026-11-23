@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -426,6 +428,45 @@ class BrowserHTTPTests(unittest.TestCase):
         self.server.server_close()
         self.worker.join(2)
 
+    def test_reopening_workspace_reuses_only_matching_static_asset_bytes(self):
+        from agent_coord import ui
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = b'<link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script>'
+            (root / "index.html").write_bytes(home)
+            (root / "app.js").write_bytes(b"first revision")
+            (root / "styles.css").write_bytes(b"body {}")
+
+            def get(path):
+                with urllib.request.urlopen(self.url + path, timeout=3) as response:
+                    return response.read(), response.headers["Cache-Control"]
+
+            with patch.object(ui, "_WEB_ROOT", root):
+                html, policy = get("/")
+                self.assertEqual(policy, "no-store")
+                assets = re.findall(rb'(?:src|href)="([^"]+)"', html)
+                self.assertEqual(len(assets), 2)
+                for address in assets:
+                    body, policy = get(address.decode())
+                    self.assertIn(b"?v=" + hashlib.sha256(body).hexdigest().encode(), address)
+                    self.assertIn("immutable", policy)
+                    self.assertIn("private", policy)
+                script = assets[1].decode()
+                (root / "app.js").write_bytes(b"second revision")
+                self.assertEqual(get(script), (b"second revision", "no-store"))
+                self.assertNotIn(script.encode(), get("/")[0])
+                self.assertEqual(get("/app.js")[1], "no-store")
+                self.assertEqual(get("/api/browser/config" + script[script.index("?"):])[1], "no-store")
+
+    def test_every_workspace_script_and_stylesheet_can_be_reused_on_a_new_document(self):
+        with urllib.request.urlopen(self.url + "/", timeout=3) as response:
+            paths = re.findall(rb'(?:src|href)="(/[^"?]+\.(?:js|css)(?:\?[^"]*)?)"', response.read())
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(path=path), urllib.request.urlopen(self.url + path.decode(), timeout=3) as response:
+                self.assertEqual(response.headers["Cache-Control"], "private, max-age=31536000, immutable")
+                self.assertTrue(path.endswith(b"?v=" + hashlib.sha256(response.read()).hexdigest().encode()))
+
     def request(self, path, body=None, headers=None):
         request_headers = dict(headers or {})
         if body is not None:
@@ -664,18 +705,18 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertIn("New session", shell)
         self.assertEqual(self.request("/app.js")[0], 200)
         self.assertEqual(self.request("/slash-commands.js")[0], 200)
-        self.assertIn('src="/slash-commands.js"', shell)
+        self.assertIn('src="/slash-commands.js?v=', shell)
         self.assertIn('aria-controls="slash-commands"', shell)
         self.assertEqual(self.request("/styles.css")[0], 200)
         self.assertEqual(self.request("/mobile-chat.js")[0], 200)
-        self.assertIn('src="/mobile-chat.js"', shell)
+        self.assertIn('src="/mobile-chat.js?v=', shell)
         self.assertEqual(self.request("/filter-menu.js")[0], 200)
         self.assertEqual(self.request("/filter-menu.css")[0], 200)
         self.assertIn('id="filter-menu"', shell)
         self.assertIn('id="repository"', shell)
         self.assertIn('id="project"', shell)
         self.assertEqual(self.request("/markdown.js")[0], 200)
-        self.assertIn('src="/markdown.js"', shell)
+        self.assertIn('src="/markdown.js?v=', shell)
         monitor = self.request("/monitor")[1]
         self.assertIn('src="/markdown.js"', monitor)
         self.assertIn("messageMarkdown.render(m.body)", monitor)

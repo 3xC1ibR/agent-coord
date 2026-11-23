@@ -32,9 +32,9 @@ class AtlasBrowserTests(unittest.TestCase):
                 with urllib.request.urlopen(base + "/") as response:
                     page = response.read()
                     self.assertIn(b'id="atlas-overview"', page)
-                    self.assertIn(b'href="/atlas.css"', page)
+                    self.assertIn(b'href="/atlas.css?v=', page)
                     for script in [b"atlas-layout.js", b"atlas.js", b"overview-layout.js"]:
-                        self.assertIn(b'src="/' + script + b'"', page)
+                        self.assertIn(b'src="/' + script + b'?v=', page)
                 for path, mime in [("atlas-layout.js", "javascript"), ("atlas.js", "javascript"),
                                    ("overview-layout.js", "javascript"), ("atlas.css", "css")]:
                     with urllib.request.urlopen(base + "/" + path) as response:

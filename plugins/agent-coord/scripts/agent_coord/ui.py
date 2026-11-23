@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import ipaddress
 import json
 import os
 import queue
+import re
 import secrets
 import socket
 import socketserver
@@ -14,6 +16,7 @@ import threading
 import time
 import webbrowser
 from contextlib import nullcontext
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .remote_access import PAIR_PAGE, RemoteAccess
@@ -50,6 +53,24 @@ DEFAULT_OUTPUT_BYTES = 24 * 1024
 SORT_KEYS = {"created", "last_activity", "name"}
 _CLIENT_DISCONNECT_ERRNOS = {errno.ECONNABORTED, errno.ECONNRESET, errno.EPIPE}
 _WEB_ROOT = Path(__file__).with_name("web")
+_WORKSPACE_ASSET = re.compile(rb'(?:src|href)="/([a-zA-Z0-9_-]+\.(?:js|css))"')
+
+
+@lru_cache(maxsize=192)
+def _asset_digest(path, file_identity):
+    return hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii")
+
+
+def _workspace_html():
+    def versioned(match):
+        path = _WEB_ROOT / match[1].decode("ascii")
+        stat = path.stat()
+        digest = _asset_digest(path, (stat.st_ino, stat.st_ctime_ns, stat.st_size))
+        return match[0][:-1] + b"?v=" + digest + b'"'
+
+    return _WORKSPACE_ASSET.sub(versioned, (_WEB_ROOT / "index.html").read_bytes())
+
+
 _MAX_BODY_BYTES = 128 * 1024
 # Transport cleanup has its own fixed budget, independent of the endpoint's
 # accepted payload limit. Modestly oversized requests still receive their 413.
@@ -312,8 +333,17 @@ def _handler(
             self._metric_operation = operation
             self._metric_started = time.monotonic()
 
+        def _static_asset(self, parsed) -> None:
+            body = (_WEB_ROOT / parsed.path[1:]).read_bytes()
+            version = parse_qs(parsed.query).get("v")
+            policy = "no-store"
+            if version and version == [hashlib.sha256(body).hexdigest()]:
+                policy = "private, max-age=31536000, immutable"
+            content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+            self._send(HTTPStatus.OK, content_type + "; charset=utf-8", body, cache_control=policy)
+
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None,
-                  entity_tag: str | None = None) -> None:
+                  entity_tag: str | None = None, cache_control: str = "no-store") -> None:
             operation = getattr(self, "_metric_operation", None)
             if operation:
                 store._writer.record_request(operation, (time.monotonic() - self._metric_started) * 1000, int(status))
@@ -322,7 +352,7 @@ def _handler(
                 self.send_response(status.value)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", cache_control)
                 if entity_tag:
                     self.send_header("ETag", entity_tag)
                 self.send_header("X-Content-Type-Options", "nosniff")
@@ -415,10 +445,11 @@ def _handler(
             if not self._authorized():
                 self._json(HTTPStatus.UNAUTHORIZED, {"error": "Pair this device using a fresh link from your Mac."})
                 return
-            if parsed.path in {"/html-preview", "/html-preview.js", "/html-preview.css"}:
-                asset = "html-preview.html" if parsed.path == "/html-preview" else parsed.path[1:]
-                content_type = {"html": "text/html", "js": "text/javascript", "css": "text/css"}[asset.rsplit(".", 1)[1]]
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / asset).read_bytes())
+            if parsed.path == "/html-preview":
+                self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "html-preview.html").read_bytes())
+                return
+            if parsed.path in {"/html-preview.js", "/html-preview.css"}:
+                self._static_asset(parsed)
                 return
             if parsed.path == "/api/browser/native-push/status" and native_push is not None:
                 device = remote_access.device_id(self.headers.get("Cookie", "")) if self._remote_request() else None
@@ -435,15 +466,13 @@ def _handler(
                     self._json(HTTPStatus.OK, web_push.status(device))
                 return
             if parsed.path in {"/scratchpad.js", "/project-scratchpad.js", "/project-scratchpad.css", "/atlas.js", "/atlas.css", "/atlas-layout.js", "/overview-layout.js", "/working-set.js", "/working-set.css", "/agent-tree.js", "/agent-tree.css"}:
-                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path == "/push-notifications.js":
-                self._send(HTTPStatus.OK, "text/javascript; charset=utf-8", (_WEB_ROOT / "push-notifications.js").read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path in {"/openui.js", "/openui.css"}:
-                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path == "/api/remote/status":
                 if not self._local_request():
@@ -454,7 +483,7 @@ def _handler(
                     self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Remote access is unavailable."})
                 return
             if parsed.path == "/":
-                self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "index.html").read_bytes())
+                self._send(HTTPStatus.OK, "text/html; charset=utf-8", _workspace_html())
                 return
             if parsed.path == "/settings":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "settings.html").read_bytes())
@@ -466,31 +495,25 @@ def _handler(
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "coordination-metrics.html").read_bytes())
                 return
             if parsed.path in {"/coordination-metrics.js", "/coordination-metrics.css"}:
-                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path == "/activity":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "activity.html").read_bytes())
                 return
             if parsed.path in {"/activity.js", "/activity.css", "/activity-collector.js"}:
-                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path in {"/provider-usage.js", "/provider-usage.css"}:
-                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path in {"/settings.js", "/settings.css", "/jev.js", "/jev.css", "/thread-usage.js", "/context-lifecycle.js", "/context-lifecycle.css"}:
-                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path in {"/reviews.js", "/reviews.css", "/sidecars.js", "/sidecars.css", "/asks.js", "/asks.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
-                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/permission-menu.js", "/response-actions.js", "/conversation-scroll.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css", "/thread-tabs.js", "/thread-tabs.css"}:
-                content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
-                self._send(HTTPStatus.OK, content_type + "; charset=utf-8", (_WEB_ROOT / parsed.path[1:]).read_bytes())
+                self._static_asset(parsed)
                 return
             if parsed.path == "/monitor":
                 self._send(
