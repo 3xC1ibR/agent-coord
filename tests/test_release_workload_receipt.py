@@ -48,7 +48,8 @@ class ReleaseWorkloadTests(unittest.TestCase):
             "stream_identity_counts": {str(i): 1 for i in range(6)},
             "observed_stream_events": {p: {str(i): 15 for i in range(6)}
                                        for p in ("baseline", "upgrade", "candidate")},
-            "workload": {"claude_streams": 2, "initial_text_bytes_per_claude": 10 * 1024**2,
+            "workload": {"source_database_bytes": 9045114880, "fixture_database_bytes": 9045118976,
+                         "claude_streams": 2, "initial_text_bytes_per_claude": 10 * 1024**2,
                          "coverage": {"saved_histories_reopened": 2, "active_streams": 6, "large_streams": 2,
                                       "large_stream_bytes": 20 * 1024**2,
                                       "accepted_verified": 1, "browser_opens": 3, "browser_sends": 3}},
@@ -58,7 +59,7 @@ class ReleaseWorkloadTests(unittest.TestCase):
 
     def check_private(self, report):
         gate.verify_report(report, candidate=self.candidate, version="1.2.3", build="4",
-                           architecture="arm64", digest="e"*64)
+                           architecture="arm64", digest="e"*64, snapshot_bytes=9045114880)
 
     def check_public(self, release, statuses, run=None):
         with mock.patch.object(gate, "release_run", return_value=run or self.run), \
@@ -102,6 +103,7 @@ class ReleaseWorkloadTests(unittest.TestCase):
             (["saved_histories", 0, "source_bytes"], 256 * 1024 - 1),
             (["saved_histories", 1, "sanitized_bytes"], 10 * 1024**2 - 1),
             (["saved_histories", 1, "source_bytes"], 36 * 1024**2 + 1),
+            (["workload", "source_database_bytes"], 1024**2), (["workload", "fixture_database_bytes"], 9045114879),
             (["workload", "initial_text_bytes_per_claude"], 5 * 1024**2),
             (["workload", "coverage", "large_stream_bytes"], 20 * 1024**2 - 1),
             (["observed_stream_events", "upgrade", "0"], 0), (["stream_identity_counts", "0"], 2),

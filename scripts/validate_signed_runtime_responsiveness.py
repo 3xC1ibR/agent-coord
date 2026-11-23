@@ -2,7 +2,7 @@
 """Run a private old-to-new signed coordinator upgrade with simultaneous interactive traffic.
 
 On macOS, pass two signed .app directories, an offline SQLite snapshot for
-inventory proportions and two saved histories, and a private report pathname.
+database size, inventory proportions and two saved histories, and a private report pathname.
 The fixture replaces original text and identities before booting. No operator state
 is booted. The provider processes, HOME, database, transport and HTTP servers
 are private to this invocation. The two app directories are read-only inputs.
@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import collections
 from functools import lru_cache
+from contextlib import closing
 import hashlib
 import json
 import math
@@ -32,6 +33,7 @@ import urllib.request
 import uuid
 
 from measure_backend_latency import BUDGETS
+from release_workload_receipt import database_bytes
 from runtime_upgrade_validation import Validation, process_command, runtime
 
 
@@ -95,6 +97,27 @@ def seed_inventory(database, root, rows):
             store.register(session_id=thread, client=client, cwd=str(root), name=name)
             with store._connection() as db:
                 db.execute("UPDATE work_threads SET attention=? WHERE thread_id=?", (attention, thread))
+
+
+def match_snapshot_size(snapshot, database):
+    """Maintain the rollback copy cost without importing private tables or jobs."""
+    source_bytes = database_bytes(snapshot)
+    fixture_bytes = database_bytes(database)
+    if fixture_bytes < source_bytes:
+        batch_bytes = 8 * 1024**2
+        # Allow room for the added data, one complete rollback copy and the
+        # temporary journal for an individual insert.
+        required_space = source_bytes - fixture_bytes + source_bytes + 2 * batch_bytes
+        if shutil.disk_usage(database.parent).free < required_space:
+            raise RuntimeError("Insufficient space for the full-size private upgrade fixture and rollback copy")
+        with closing(sqlite3.connect(database, isolation_level=None)) as db:
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            db.execute("CREATE TABLE IF NOT EXISTS release_workload_storage (content BLOB NOT NULL)")
+            while fixture_bytes < source_bytes:
+                db.execute("INSERT INTO release_workload_storage VALUES (zeroblob(?))",
+                           (min(batch_bytes, source_bytes - fixture_bytes),))
+                fixture_bytes = db.execute("PRAGMA page_count").fetchone()[0] * page_size
+    return {"source_database_bytes": source_bytes, "fixture_database_bytes": fixture_bytes}
 
 
 def copy_saved_histories(snapshot, database, root):
@@ -337,6 +360,8 @@ class SignedUpgrade(Validation):
     def start(self):
         seed_inventory(self.database, self.root, self.sources)
         self.saved = copy_saved_histories(self.snapshot, self.database, self.root)
+        if not self.candidate_only:
+            self.report["workload"].update(match_snapshot_size(self.snapshot, self.database))
         self.report["saved_histories"] = self.saved
         self.open_targets = [r["fixture_id"] for r in self.saved]
         profile = {"raw_bytes": LARGE_OUTPUT_BYTES * 3 // 4, "interval_seconds": 1}

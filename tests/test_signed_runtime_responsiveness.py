@@ -1,5 +1,5 @@
 """Release gates must catch uncertain acknowledgments and silence across phase boundaries."""
-from contextlib import ExitStack
+from contextlib import closing, ExitStack
 from pathlib import Path
 import json
 import sqlite3
@@ -9,10 +9,31 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from validate_signed_runtime_responsiveness import SignedUpgrade
+from validate_signed_runtime_responsiveness import SignedUpgrade, match_snapshot_size
 
 
 class SignedAcceptanceGateTests(unittest.TestCase):
+    def test_guarded_upgrade_preserves_database_copy_size_without_private_tables(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            source = Path(directory) / "offline.sqlite3"
+            fixture = Path(directory) / "private.sqlite3"
+            backup = Path(directory) / "rollback.sqlite3"
+            original = stack.enter_context(closing(sqlite3.connect(source, isolation_level=None)))
+            original.execute("PRAGMA journal_mode=WAL")
+            original.execute("PRAGMA wal_autocheckpoint=0")
+            original.execute("CREATE TABLE private_jobs (command BLOB)")
+            original.execute("INSERT INTO private_jobs VALUES (zeroblob(10000000))")
+            with closing(sqlite3.connect(fixture)) as db:
+                db.execute("CREATE TABLE saved_messages (id INTEGER PRIMARY KEY)")
+            evidence = match_snapshot_size(source, fixture)
+            self.assertGreater(evidence["source_database_bytes"], source.stat().st_size)
+            self.assertGreaterEqual(evidence["fixture_database_bytes"], evidence["source_database_bytes"])
+            self.assertEqual(match_snapshot_size(source, fixture), evidence)
+            with closing(sqlite3.connect(fixture)) as db, closing(sqlite3.connect(backup)) as target:
+                self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='private_jobs'").fetchone())
+                db.backup(target)
+            self.assertEqual(backup.stat().st_size, evidence["fixture_database_bytes"])
+
     def test_browser_send_intent_does_not_count_as_a_completed_interaction(self):
         with tempfile.TemporaryDirectory() as directory:
             run = object.__new__(SignedUpgrade)

@@ -10,10 +10,12 @@ import os
 from pathlib import Path
 import platform
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import closing
 
 REPO = "3xC1ibR/agent-coord"
 OPERATOR_ID = 111322275
@@ -113,7 +115,13 @@ def file_hash(path):
     return digest.hexdigest()
 
 
-def verify_report(report, *, candidate, version, build, architecture, digest):
+def database_bytes(database):
+    """Logical SQLite size, including committed pages that remain in the WAL."""
+    with closing(sqlite3.connect(database.resolve(strict=True).as_uri() + "?mode=ro", uri=True)) as db:
+        return db.execute("SELECT page_count * page_size FROM pragma_page_count, pragma_page_size").fetchone()[0]
+
+
+def verify_report(report, *, candidate, version, build, architecture, digest, snapshot_bytes):
     if (report.get("schema_version") != 1 or report.get("passed") is not True
             or report.get("workload_contract") != "ribbon-field-saved-interaction-v1"
             or report.get("mode") != "signed_guarded_upgrade" or report.get("guarded_update_phase") != "committed"):
@@ -130,6 +138,11 @@ def verify_report(report, *, candidate, version, build, architecture, digest):
     if (proof["version"] != "0.1.12+63" or proof["red"] is not True
             or proof["architecture"] != architecture or proof["payload_digest"] != AFFECTED_PAYLOADS[architecture]):
         raise ValueError("Missing affected signed-build evidence for this architecture")
+    workload = report["workload"]
+    fixture_bytes = workload.get("fixture_database_bytes")
+    if (snapshot_bytes <= 0 or workload.get("source_database_bytes") != snapshot_bytes
+            or type(fixture_bytes) is not int or fixture_bytes < snapshot_bytes):
+        raise ValueError("The guarded upgrade did not exercise the full workload database size")
     verify_workload(report)
     coverage = report["workload"]["coverage"]
     accepted = 0
@@ -262,7 +275,8 @@ def run_operator_gate(args):
             command.extend(["--playwright-module", args.playwright_module.resolve(strict=True)])
         subprocess.run(command, cwd=ROOT, check=True)
         verify_report(json.loads(report.read_text()), candidate=candidate, version=version,
-                      build=source["build_number"], architecture=args.architecture, digest=digest)
+                      build=source["build_number"], architecture=args.architecture, digest=digest,
+                      snapshot_bytes=database_bytes(snapshot))
         if release_run(args.run)["run_attempt"] != run["run_attempt"]:
             raise ValueError("Release was rerun during validation")
         result = github(f"repos/{REPO}/statuses/{head}", "-f", "state=success", "-f",
