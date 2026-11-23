@@ -106,8 +106,11 @@ def require_release_receipts(release, wait_seconds=0):
 
 
 def file_hash(path):
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def verify_report(report, *, candidate, version, build, architecture, digest):
