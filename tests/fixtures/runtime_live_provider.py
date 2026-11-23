@@ -6,9 +6,11 @@ the original approval reply; coordinator EOF and provider signals are recorded.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import os
+import random
 from pathlib import Path
 import signal
 import subprocess
@@ -101,12 +103,23 @@ def work(thread, turn, role, *, claude=False, input_id=None):
             event("item/completed", thread, turn, item={"id": "tool-" + turn["id"],
                   "type": "commandExecution", "command": "isolated-fake-tool",
                   "status": "completed", "exitCode": result})
+    # The signed release gate starts all providers before opening the workload.
+    profile_file = ROOT / "stream-profile.json"
+    profile = json.loads(profile_file.read_text()) if profile_file.exists() else None
+    if profile and role == "stream":
+        while not (ROOT / "start-streams").exists() and not (ROOT / "release").exists():
+            time.sleep(.05)
     sequence = 0
     while True:
         sequence += 1
         delta = f"[{sequence}]"
+        if profile and role == "stream" and claude and sequence == 1:
+            delta = base64.b64encode(random.Random(372).randbytes(profile["raw_bytes"])).decode("ascii")
         output["text"] += delta
-        record("output", thread=thread, turn=turn["id"], sequence=sequence, delta=delta)
+        if profile:
+            record("output", thread=thread, turn=turn["id"], sequence=sequence, size=len(delta))
+        else:
+            record("output", thread=thread, turn=turn["id"], sequence=sequence, delta=delta)
         if claude:
             emit({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
                   "delta": {"type": "text_delta", "text": delta}}})
@@ -114,7 +127,7 @@ def work(thread, turn, role, *, claude=False, input_id=None):
             event("item/agentMessage/delta", thread, turn, itemId=output["id"], delta=delta)
         if role != "stream" or (ROOT / "release").exists():
             break
-        time.sleep(.05)
+        time.sleep(profile["interval_seconds"] if profile else .05)
     turn["items"].append(output)
     turn["status"] = "completed"
     record("complete", thread=thread, turn=turn["id"])
