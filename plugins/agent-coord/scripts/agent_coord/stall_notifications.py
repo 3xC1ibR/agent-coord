@@ -68,11 +68,10 @@ THREAD_FIELDS_SQL = '''(SELECT json_object('count', COUNT(*), 'oldest', MIN(crea
     AND ''' + _LIVE + ') AS stall_incident_json'
 
 
-def projected_fields(row, now):
+def projected_fields(row):
     inbox = json.loads(row.pop('stall_inbox_json'))
     incident = row.pop('stall_incident_json')
     return {'actionable_inbox_count': inbox['count'], 'oldest_actionable_at': inbox['oldest'],
-            'oldest_actionable_age_seconds': max(0, now - inbox['oldest']) if inbox['oldest'] is not None else None,
             'stall_incident': json.loads(incident) if incident else None}
 
 
@@ -257,7 +256,7 @@ def snapshot(store, thread_id, turn_id=None):
         return dict(row) if row else None
 
 
-def apply_attention(thread, *, waiting=False):
+def apply_attention(thread, *, now, waiting=False):
     """Project durable health after ordinary attention policy, without provider IO."""
     incident = thread.get('stall_incident')
     if not incident:
@@ -281,7 +280,7 @@ def apply_attention(thread, *, waiting=False):
               'Review the outstanding tool' if classification == 'long_running_tool' else 'Review the stalled agent')
     count = thread.get('actionable_inbox_count', 0)
     if count:
-        age = int(thread.get('oldest_actionable_age_seconds') or 0)
+        age = int(max(0, now - thread['oldest_actionable_at']))
         action += f"; {count} queued request{'s' if count != 1 else ''}, oldest {age // 60} min"
     thread.update(needs_attention=True, attention_reason='blocked', attention_key=f"stall:{incident['id']}",
                   attention_since=incident['created_at'], attention_action=action,

@@ -274,7 +274,7 @@ class ThreadStore:
             # worker has not yet committed its durable notification receipt.
             row["attention"] = "now"
         from .stall_notifications import projected_fields
-        fields = projected_fields(row, self.store.clock())
+        fields = projected_fields(row)
         result = {**row, **fields}
         from .execution_state import read_many
         result["execution"] = (inventory.executions[row["thread_id"]] if inventory is not None else

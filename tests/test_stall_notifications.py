@@ -254,7 +254,7 @@ class StallNotificationsTests(unittest.TestCase):
                                    detail='Pending work', classification=classification)
                 thread = self.store.threads.get('child', history=False)
                 thread.update(status='running', needs_attention=False, response_state='working')
-                stalls.apply_attention(thread, waiting=classification == 'waiting_for_approval')
+                stalls.apply_attention(thread, now=self.now, waiting=classification == 'waiting_for_approval')
                 self.assertTrue(thread['needs_attention'])
                 self.assertFalse(thread['can_handle_response'])
                 self.assertEqual(thread['attention_owner_thread_id'], 'child')
@@ -263,8 +263,20 @@ class StallNotificationsTests(unittest.TestCase):
                 key = stalls.notifications(self.store)[0]['request_key']
                 self.assertTrue(stalls.claim_notification(self.store, key))
                 again = self.store.threads.get('child', history=False)
-                stalls.apply_attention(again)
+                stalls.apply_attention(again, now=self.now)
                 self.assertTrue(again['needs_attention'])
+
+    def test_inventory_is_stable_while_attention_reports_current_queue_age(self):
+        self.store.send_message(sender_session_id='parent', recipient_session_id='child',
+                                body='Progress check', classification='action_required', reply_required=False)
+        self.at(600)
+        self.record()
+        thread = self.store.threads.get('child', history=False)
+        self.now += 120
+        again = self.store.threads.get('child', history=False)
+        self.assertEqual(again, thread)
+        stalls.apply_attention(again, now=self.now)
+        self.assertIn('1 queued request, oldest 12 min', again['attention_action'])
 
     def test_inventory_stall_fields_keep_existing_fifteen_query_budget(self):
         self.at(600)

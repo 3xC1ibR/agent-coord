@@ -1668,7 +1668,7 @@ class BrowserSessions:
             thread.update(needs_attention=False, attention_reason=None, attention_key=None, attention_since=None,
                           can_handle_response=False)
         from .stall_notifications import apply_attention
-        apply_attention(thread, waiting=bool(waiting))
+        apply_attention(thread, now=self.store.clock(), waiting=bool(waiting))
         thread["can_read_history"] = bool(thread["browser_session"] or thread["client"] == "codex")
         # Stale registrations can request an explicit handoff. The action, not
         # inventory projection, verifies native history and process ownership.
