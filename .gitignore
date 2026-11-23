@@ -29,3 +29,6 @@ braindump.txt
 dummy-experiment.txt
 .agent-coord/delegations/*.usage.json
 .agent-coord/deployments/
+
+# Private production incident record in the primary checkout
+/docs/rf-performance-reliability-and-operational-excellence.md

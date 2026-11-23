@@ -2,6 +2,10 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## Production performance, reliability, and operational excellence
+
+Follow the production incident record and release requirements in [AGENTS.md](AGENTS.md#production-performance-reliability-and-operational-excellence).
+
 ## Product focus
 
 **Launch mode.** Prioritize getting the useful product into other people's hands

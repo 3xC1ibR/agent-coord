@@ -40,6 +40,14 @@ From an agent shell, prefix this command with
 `env -u AGENT_COORD_SESSION_ID -u CODEX_THREAD_ID` so fixture callers do not
 inherit the executing agent's identity.
 
+## Production performance, reliability, and operational excellence
+
+Own the outcome I experience. Turn each production failure into a permanent release test. Show that the affected build fails it. Upgrade the exact signed candidate on a representative copy of my workload while agents stream large outputs and a client continuously opens threads and sends messages. Fail the release if the app becomes unreachable beyond its stated allowance, misses its latency budgets, or loses or duplicates accepted work. After activation, verify those same outcomes on the backend actually serving my Mac before calling it fixed.
+
+Keep the private incident record at `/opt/projects/agent-coord/docs/rf-performance-reliability-and-operational-excellence.md` up to date in the primary checkout, including when working in another worktree. Read it when investigating a production failure or preparing a release that affects a previously reported interaction. Add a dated section for each new incident of slowness, conversation refresh failure, or other user-visible reliability failure as soon as it is reported or observed. Preserve each repeated user complaint with its timestamp and source, even when it describes an open incident.
+
+Record the interaction, user impact, workload, affected build, evidence, cause or outstanding question, permanent regression test and owner. Append the failing baseline, signed-candidate measurements, release decision and installed-backend verification as they become available. Use the interaction budgets in [Responsiveness](docs/responsiveness.md) and the upgrade allowances in the [runtime update contract](docs/runtime-updates.md). Keep incidents open when verification is pending. Keep the incident record outside Git.
+
 ## Database correctness and latency
 
 For database, persistence, search, provider-event or request-path changes, run
