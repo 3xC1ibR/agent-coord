@@ -56,19 +56,28 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
         # Run the incident regression with the bundle's interpreter and backend.
         # The fixture modules normally add their own checkout to sys.path.
         # Copy them outside the checkout so they cannot import its implementation.
-        fixtures = root / "regression-tests"
-        fixtures.mkdir()
+        fixtures = root / "tests"
+        (fixtures / "fixtures").mkdir(parents=True)
         tests = Path(__file__).resolve().parents[2] / "tests"
-        for filename in ("test_codex_app_server.py", "test_coordinator_projection.py"):
+        for filename in ("test_codex_app_server.py", "test_coordinator_projection.py",
+                         "test_desktop_runtime.py", "test_runtime_unsupported_update.py",
+                         "fixtures/update_interruption_provider.py"):
             shutil.copyfile(tests / filename, fixtures / filename)
         subprocess.run([str(python), "-m", "unittest", "-v",
                         "test_coordinator_projection.ProjectionTests."
                         "test_next_request_replaces_codex_provider_whose_output_ended",
                         "test_coordinator_projection.ProjectionTests."
-                        "test_signed_legacy_watchdog_restores_approval_and_processes_next_event"],
-                       cwd=fixtures, env=environment, check=True, capture_output=True, text=True, timeout=60)
+                        "test_signed_legacy_watchdog_restores_approval_and_processes_next_event",
+                        "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
+                        "test_explicit_update_pauses_and_continues_each_provider_once",
+                        "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
+                        "test_pending_approval_waits_with_admission_open_and_is_never_withdrawn",
+                        "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
+                        "test_muse_background_workflow_waits_with_a_named_reason"],
+                       cwd=fixtures, env=environment, check=True, timeout=60)
         result["codex_provider_relaunch"] = True
         result["legacy_watchdog_approval_recovery"] = True
+        result["coordinator_owned_provider_update"] = ["kimi", "antigravity", "muse"]
         with subprocess.Popen([str(python), "-u", str(resources / "backend.py")], cwd=home,
                               env=environment, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
