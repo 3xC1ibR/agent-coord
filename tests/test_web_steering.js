@@ -91,6 +91,26 @@ test("Enter during the initial conversation read submits the same draft once aft
   }
 });
 
+test("Enter between invalidation and the next detail read uses the refreshed send controls", async () => {
+  const c = setup(), entry = {pending: null};
+  let reads = 0, sends = 0;
+  c.state.conversations = new Map([["one", entry]]);
+  c.state.detail = {work_thread: {thread_id: "one", browser_session: true}};
+  c.state.detailRefreshing = true;
+  c.$("send").disabled = true;
+  c.$("composer").requestSubmit = () => { sends++; };
+  c.refreshDetail = async () => {
+    reads++;
+    c.state.detailRefreshing = false;
+    c.$("send").disabled = false;
+    return true;
+  };
+  c.composerKeydown({key: "Enter", preventDefault() {}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 1);
+  assert.equal(sends, 1);
+});
+
 test("empty Tab, idle Tab, modified keys and IME retain normal keyboard behavior", () => {
   for (const mode of ["empty", "idle", "shiftKey", "ctrlKey", "altKey", "metaKey", "isComposing"]) {
     const c = setup();
