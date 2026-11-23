@@ -233,7 +233,7 @@
       const request = {revision: ++this.revision};
       this.pending = request;
       request.promise = (async () => {
-        const items = (await this.api("schedules")).data;
+        const items = (await this.api("schedules", undefined, {priority: background ? "low" : "auto"})).data;
         if (request.revision !== this.revision) return;
         this.update(items);
       })();

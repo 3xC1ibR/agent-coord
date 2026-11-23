@@ -274,6 +274,22 @@ test("an unchanged list is validated, not reprocessed, and companions keep their
   assert.deepEqual(companions, ["organization", "views", "organization", "views"]);
 });
 
+test("composer submissions take transport priority over background inventory reads", async () => {
+  const {c} = setup(), priorities = new Map();
+  Object.assign(c, {base: "/api/browser/", location: {protocol: "http:"},
+    fetch: async (url, options) => {
+      priorities.set(url, options.priority);
+      return {status: 200, ok: true, headers: {get: () => "application/json"},
+        json: async () => url.endsWith("organization") ? {repositories: [], projects: []} : {data: []}};
+    }});
+  c.state.config = {token: "fixture"};
+  vm.runInContext(source.slice(source.indexOf("async function api("), source.indexOf("async function openMentionFile(")), c);
+  await c.refreshList({background: true});
+  await c.api("sessions/one/messages", {message: "Follow up", requestId: "one"});
+  assert.equal(priorities.get("/api/browser/threads?archived=false"), "low");
+  assert.equal(priorities.get("/api/browser/sessions/one/messages"), "high");
+});
+
 test("a validated read sends its entity tag and resolves a 304 to the previous value", async () => {
   const requests = [];
   const responses = [

@@ -346,10 +346,13 @@ def _handler(
                   entity_tag: str | None = None, cache_control: str = "no-store") -> None:
             operation = getattr(self, "_metric_operation", None)
             if operation:
-                store._writer.record_request(operation, (time.monotonic() - self._metric_started) * 1000, int(status))
+                processing_ms = (time.monotonic() - self._metric_started) * 1000
+                store._writer.record_request(operation, processing_ms, int(status))
                 self._metric_operation = None
             try:
                 self.send_response(status.value)
+                if operation == "send_acceptance":
+                    self.send_header("Server-Timing", f"submission;dur={processing_ms:.3f}")
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", cache_control)
@@ -573,6 +576,7 @@ def _handler(
 
         def _event_batch(self, batch: dict) -> None:
             cursor = f"{batch['seq']}:{batch['completionSeq']}"
+            batch["serverSentAt"] = time.time() * 1000
             self.wfile.write(f"id: {cursor}\ndata: {json.dumps(batch)}\n\n".encode())
             self.wfile.flush()
 

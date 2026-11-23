@@ -507,12 +507,13 @@
       this.signature = null;
       this.render();
     }
-    async refresh() {
+    async refresh({background = false} = {}) {
       const sequence = ++this.sequence;
       try {
-        const requests = [this.api("asks")];
+        const options = {priority: background ? "low" : "auto"};
+        const requests = [this.api("asks", undefined, options)];
         const log = !this.legacy && (this.resolvedDue || this.visible && this.section === "resolved");
-        if (log) requests.push(this.api("asks?status=resolved"));
+        if (log) requests.push(this.api("asks?status=resolved", undefined, options));
         const [open, resolved] = await Promise.all(requests);
         if (sequence !== this.sequence) return;
         this.open = open.data || [];

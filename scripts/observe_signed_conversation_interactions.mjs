@@ -67,6 +67,7 @@ if (existsSync(resolve(directory, "measure-browser-execution"))) {
           if (window.__releaseObservedMarker && window.__releaseStreamAt == null &&
               event.data.includes(window.__releaseObservedMarker)) {
             window.__releaseStreamAt = performance.timeOrigin + performance.now();
+            window.__releaseServerSentAt = JSON.parse(event.data).serverSentAt ?? null;
           }
         });
       }
@@ -133,6 +134,7 @@ async function sends() {
       if (profiles.length) await receiving.evaluate(token => {
         window.__releaseObservedMarker = token;
         window.__releaseStreamAt = null;
+        window.__releaseServerSentAt = null;
       }, marker);
       await composing.evaluate(marker => {
         document.querySelector("#message").addEventListener("keydown", e => {
@@ -152,7 +154,11 @@ async function sends() {
         && r.postDataJSON()?.message === marker, {timeout: 7000}).then(async request => {
         const body = request.postDataJSON(), requested = Date.now();
         const response = await request.response();
-        return {request_id: body.requestId || null, status: response?.status() || null, requested, responded: Date.now()};
+        const responded = Date.now(), timing = request.timing();
+        const serverTiming = response?.headers()["server-timing"]?.match(/submission;dur=([\d.]+)/);
+        return {request_id: body.requestId || null, status: response?.status() || null, requested, responded,
+          sent_at: timing.requestStart >= 0 ? timing.startTime + timing.requestStart : null,
+          server_ms: serverTiming ? Number(serverTiming[1]) : null};
       }).catch(() => ({request_id: null, status: null}));
       const see = page => page.evaluate(token => new Promise(resolve => {
         const check = () => [...document.querySelectorAll("#timeline article.message.user")].some(el => el.textContent.includes(token));
@@ -165,8 +171,9 @@ async function sends() {
       await composing.locator("#message").press("Enter");
       const [own,other,receipt] = await Promise.all([first,second,tracked]);
       const [enter, controlsAtEnter] = await composing.evaluate(() => [performance.timeOrigin + window.__releaseEnter, window.__releaseComposer]);
-      const streamAt = profiles.length ? await receiving.evaluate(() => window.__releaseStreamAt) : null;
-      log({phase, kind:"browser_send", marker, ...receipt, enter, stream_at: streamAt, controls_at_enter: controlsAtEnter, ok: receipt.status >= 200 && receipt.status < 300 && own !== null && other !== null,
+      const [streamAt, serverSentAt] = profiles.length ? await receiving.evaluate(() =>
+        [window.__releaseStreamAt, window.__releaseServerSentAt]) : [null, null];
+      log({phase, kind:"browser_send", marker, ...receipt, enter, stream_at: streamAt, server_sent_at: serverSentAt, controls_at_enter: controlsAtEnter, ok: receipt.status >= 200 && receipt.status < 300 && own !== null && other !== null,
         start, end:Date.now(), own_ms:own === null ? null : own-enter, other_ms:other === null ? null : other-enter});
     } catch (error) {
       current = null;

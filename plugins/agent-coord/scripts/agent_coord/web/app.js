@@ -40,6 +40,7 @@ async function api(path, body, requestOptions = {}) {
   if (viewMutation) ++listRequest;
   const {entity, ...fetchOptions} = requestOptions;
   const options = {cache: "no-store", ...fetchOptions};
+  if (submission && !body.action) options.priority = "high";
   if (entity?.tag && entity.value) options.headers = {...options.headers, "If-None-Match": entity.tag};
   if (body !== undefined) Object.assign(options, {method: "POST", headers: {"Content-Type": "application/json", "X-Agent-Coord-Token": state.config.token}, body: JSON.stringify(body)});
   const read = body === undefined && (options.method || "GET").toUpperCase() === "GET";
@@ -86,7 +87,7 @@ async function openMentionFile(ref) {
   dialog.addEventListener("close", ()=>dialog.remove());document.body.append(dialog);dialog.showModal();
 }
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
-async function refreshList({background = false} = {}) {
+async function refreshList({background = false, priority = background ? "low" : "auto"} = {}) {
   if (state.paneMode) { refreshDecisionsIfDue(background); window.parent.agentCoordPanes?.requestList({background}); return; }
   const view = $("view").value, pending = state.listRefresh;
   // Polls and streamed events must not keep superseding a slow inventory read.
@@ -98,7 +99,7 @@ async function refreshList({background = false} = {}) {
   refreshDecisionsIfDue(background);
   const refresh = {view, request: ++listRequest};
   state.listRefresh = refresh;
-  refresh.promise = loadThreadList(view, refresh.request, {background});
+  refresh.promise = loadThreadList(view, refresh.request, {background, priority});
   try { return await refresh.promise; }
   finally { if (state.listRefresh === refresh) state.listRefresh = null; }
 }
@@ -108,21 +109,21 @@ const DECISIONS_REFRESH_INTERVAL = 15000, ORGANIZATION_REFRESH_INTERVAL = 60000;
 function refreshDecisionsIfDue(background) {
   if (background && Date.now() - (state.decisionsReadAt || 0) < DECISIONS_REFRESH_INTERVAL) return;
   state.decisionsReadAt = Date.now();
-  refreshDecisionsAndSchedules();
+  refreshDecisionsAndSchedules(background);
 }
-function refreshDecisionsAndSchedules() {
+function refreshDecisionsAndSchedules(background = false) {
   state.schedules?.refresh({background: true}).catch(showError);
-  state.asks?.refresh().catch(showError);
+  state.asks?.refresh({background}).catch(showError);
 }
-async function loadThreadList(view, request, {background = false} = {}) {
+async function loadThreadList(view, request, {background = false, priority = "auto"} = {}) {
   const entities = state.inventoryEntities ||= {open: {}, closed: {}};
   // Groups, repositories and saved views change by explicit action; a
   // background refresh reads them at most once a minute.
   const companions = !background || !state.organization || Date.now() - (state.organizationReadAt || 0) >= ORGANIZATION_REFRESH_INTERVAL;
   // Open threads feed every tab's badges, including while browsing a Closed view.
-  const [open, closed, organization, views] = await Promise.all([api("threads?archived=false", undefined, {entity: entities.open}),
-    view === "archived" ? api("threads?archived=true", undefined, {entity: entities.closed}) : null,
-    companions ? api("organization") : null, companions ? api("views") : null]);
+  const [open, closed, organization, views] = await Promise.all([api("threads?archived=false", undefined, {entity: entities.open, priority}),
+    view === "archived" ? api("threads?archived=true", undefined, {entity: entities.closed, priority}) : null,
+    companions ? api("organization", undefined, {priority}) : null, companions ? api("views", undefined, {priority}) : null]);
   if (request !== listRequest || view !== $("view").value) return;
   if (companions) state.organizationReadAt = Date.now();
   // An unchanged list (304) needs no reprocessing or redraw; relative times
@@ -1235,7 +1236,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
     if (focus) (state.mobileChat?.matches && !dock ? $("timeline") : $("message")).focus({preventScroll: true});
   } else $("session-name").focus({preventScroll: true});
 }
-async function refreshDetail({markSeen = true} = {}) {
+async function refreshDetail({markSeen = true, background = false} = {}) {
   state.schedules?.refresh({background: true}).catch(showError);
   const id = state.selected;
   if (!id || isSessionDraft()) return;
@@ -1252,7 +1253,7 @@ async function refreshDetail({markSeen = true} = {}) {
     // Only reads use this deadline; a submitted message must never be retried.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
-    const options = {signal: controller.signal};
+    const options = {signal: controller.signal, priority: background ? "low" : "auto"};
     // Opening transfers the latest turns with shortened tool output. A search
     // result or message link, earlier turns, or full output need everything;
     // the conversation then keeps its complete history while it is cached.
@@ -1349,18 +1350,18 @@ async function refreshDetail({markSeen = true} = {}) {
   if (id === state.selected) renderStatus();
   return entry.pending;
 }
-async function refreshThread() {
+async function refreshThread({background = false} = {}) {
   // A pane is refreshed by its parent window, rather than its own timer.
   // Reconcile any event snapshot deferred while that pane was inactive.
   if (state.backgroundDetailPending) {
     state.backgroundDetailPending = false;
-    return refreshDetail();
+    return refreshDetail({background});
   }
   if (state.paneMode) state.schedules?.refresh({background: true}).catch(showError);
   const id = state.selected;
   if (!id || !state.detail || isSessionDraft()) return;
   const revision = state.attentionMutations?.get(id)?.revision || 0;
-  const thread = await api(threadPath(id));
+  const thread = await api(threadPath(id), undefined, {priority: background ? "low" : "auto"});
   if (id !== state.selected || !state.detail) return;
   const previous = state.detail.work_thread;
   if (!state.closeWhenDoneSaving?.has(id)) state.detail.close_when_done = thread.close_when_done;
@@ -2518,8 +2519,8 @@ function refreshBackgroundView({reconcile = false} = {}) {
   if (backgroundRefreshAllowed("detail")) {
     if (reconcile || state.backgroundDetailPending) {
       state.backgroundDetailPending = false;
-      refreshDetail().catch(showError);
-    } else refreshThread().catch(showError);
+      refreshDetail({background: true}).catch(showError);
+    } else refreshThread({background: true}).catch(showError);
     window.agentCoordPanes?.refresh();
   }
 }
@@ -2536,7 +2537,7 @@ function scheduleDetail() {
   detailTimer = setTimeout(() => {
     if (backgroundRefreshAllowed("detail")) {
       state.backgroundDetailPending = false;
-      refreshDetail().catch(showError);
+      refreshDetail({background: true}).catch(showError);
     } else state.backgroundDetailPending = true;
   }, 100);
 }
@@ -3683,7 +3684,7 @@ async function sendMessage(mode = "steer") {
     // Acceptance releases the composer. Neither transcript reconciliation nor
     // an unrelated inventory read is part of sending the user's message.
     const refreshFailed = error => showError(new Error("Your message was received, but the view could not refresh. " + error.message));
-    const refreshing = id === state.selected ? refreshDetail() : Promise.resolve();
+    const refreshing = id === state.selected ? refreshDetail({background: true}) : Promise.resolve();
     refreshing.then(() => {
       if (!result.command) return state.rollUp?.responded(ticket, {pending: !!state.detail?.requests?.length});
     }).catch(refreshFailed);
@@ -4431,7 +4432,7 @@ async function boot() {
     }
   });
   const inventoryProject = state.projectCwd;
-  const inventoryReady = refreshList().then(() => {
+  const inventoryReady = refreshList({priority: initialThread ? "low" : "auto"}).then(() => {
     if (state.projectCwd === inventoryProject) savedViews.restoreScroll();
   });
   // A direct conversation has its own detail and history routes.
