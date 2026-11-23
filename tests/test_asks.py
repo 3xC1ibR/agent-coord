@@ -337,6 +337,8 @@ class AskAttentionTests(unittest.TestCase):
                                  ("/asks.css", b".asks-count"), ("/asks.css", b".asks-view"), ("/", b'id="open-asks"'),
                                  ("/", b'id="open-asks-view"'), ("/", b'id="asks-dialog"'), ("/", b'id="asks-list"'),
                                  ("/", b'<section id="thread-asks" class="asks-view thread-asks" hidden>'),
+                                 ("/", b'<section id="thread-asks-history" class="thread-context thread-asks-history"'),
+                                 ("/asks.js", b"Reply in conversation"), ("/asks.css", b".ask-reply"),
                                  ("/", b'<span id="asks-toggle-count" class="asks-count asks-toggle-count" hidden>')):
                 with urllib.request.urlopen(base + path) as response:
                     self.assertIn(needle, response.read(), path)

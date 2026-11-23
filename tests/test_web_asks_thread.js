@@ -7,7 +7,7 @@ const {Element, makeDocument} = require("./web_dom_stub.js");
 const NOW = new Date(2026, 10, 22, 10, 0, 0).getTime();
 const DAY = 86400000;
 const IDS = ["open-asks-view", "asks-entry-label", "asks-count", "open-asks", "asks-dialog", "sidebar-backdrop", "menu-toggle",
-  "asks-toggle-count", "thread-asks", "asks-title", "asks-summary", "close-asks", "asks-sections", "asks-filters",
+  "asks-toggle-count", "thread-asks", "thread-asks-history", "asks-title", "asks-summary", "close-asks", "asks-sections", "asks-filters",
   "asks-filter-project", "asks-filter-kind", "asks-filter-since", "asks-notice", "asks-error", "asks-status", "asks-list"];
 const base = {session_id: "thread-1", thread_title: "Checkout", project_label: "Shop", context: null, unblocks: null,
   effort_minutes: null, link: null, due_at: null, options: [], blocking: false, status: "open", age_seconds: 4000,
@@ -34,12 +34,15 @@ const log = [
     note: null, answer: null, resolved_at: resolvedAt(2), session_id: "thread-2", thread_title: "Crawler"},
 ];
 
-function setup(open, {resolved = log, kinds, ids = IDS, respond} = {}) {
+function setup(open, {resolved = log, kinds, ids = IDS, respond, composer = true} = {}) {
   const calls = [], errors = [], navigated = [];
-  const state = {open, resolved, now: NOW};
+  const state = {open, resolved, now: NOW, sent: [], opened: [], requests: 0};
+  // The message draft of the conversation the page shows.
+  const draft = Object.assign(new Element("textarea"), {setSelectionRange(start, end) { this.selection = [start, end]; }});
   const document = makeDocument(ids);
   const $ = id => document.getElementById(id);
   $("asks-filter-project").append(Object.assign(new Element("option"), {textContent: "All projects"}));
+  $("sidebar-backdrop").hidden = true;
   const api = async (path, body) => {
     calls.push({path, body});
     if (path === "config") return {askKinds: kinds !== false};
@@ -47,15 +50,17 @@ function setup(open, {resolved = log, kinds, ids = IDS, respond} = {}) {
     return {data: path.includes("status=resolved") ? state.resolved : state.open};
   };
   const ui = new AsksUI({document, api, view: {setInterval() {}, clearInterval() {}}, navigate: url => { navigated.push(url); },
-    onError: error => errors.push(error), copyText: async () => {}, clock: () => state.now, ...(kinds === undefined ? {} : {kinds})});
-  const strip = $("thread-asks");
+    onError: error => errors.push(error), copyText: async () => {}, clock: () => state.now, ...(kinds === undefined ? {} : {kinds}),
+    messageSent: thread => state.sent.push(thread), requestId: () => "request-" + (state.requests += 1),
+    openComposer: async thread => { state.opened.push(thread); return composer ? draft : null; }});
+  const strip = $("thread-asks"), history = $("thread-asks-history");
   const rows = part => strip ? strip.children.find(node => node.id === "thread-asks-" + part).byClass("ask-row") : [];
   const toggle = part => strip.children.find(node => node.className.includes("thread-asks-" + part) && node.tagName === "button");
   const list = part => strip.children.find(node => node.id === "thread-asks-" + part);
   const control = (node, text) => node.byTag("button").find(button => button.textContent === text);
   const reads = path => calls.filter(call => call.body === undefined && call.path === path).length;
   const posts = () => calls.filter(call => call.body !== undefined);
-  return {ui, $, state, strip, rows, toggle, list, control, calls, reads, posts, errors, navigated};
+  return {ui, $, state, strip, history, draft, rows, toggle, list, control, calls, reads, posts, errors, navigated};
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -90,15 +95,14 @@ test("a conversation lists its own open asks: blocking, overdue, oldest, then sn
   assert.equal(strip.hidden, true);
 });
 
-test("resolving in the conversation posts the kind's outcome and moves the row to its resolutions", async () => {
-  const {ui, $, rows, toggle, list, control, posts} = setup([decision, request, elsewhere], {resolved: []});
+test("resolving in the conversation posts the kind's outcome, and the strip leaves with the last open ask", async () => {
+  const {ui, $, strip, history, rows, control, posts} = setup([decision, request, elsewhere], {resolved: []});
   await ui.refresh();
   await ui.showThread("thread-1");
   assert.equal($("asks-count").textContent, "3");
   const row = rows("open").find(node => node.dataset.id === "2");
-  control(row, "Add note").onclick();
-  await settle();
   const note = row.byClass("ask-note")[0];
+  assert.equal(note.hidden, false, "the reply field is in view on every ask");
   note.value = "  In 1Password under Stripe.  ";
   control(row, "Grant").onclick();
   await settle();
@@ -107,15 +111,15 @@ test("resolving in the conversation posts the kind's outcome and moves the row t
   assert.deepEqual(rows("open").map(node => node.dataset.id), ["1"]);
   assert.equal($("asks-count").textContent, "2", "the sidebar count moves with the conversation");
   assert.equal($("asks-toggle-count").textContent, "2");
-  assert.equal(toggle("resolved").text, "▸ 1 resolved ask");
-  assert.equal(list("resolved").hidden, true, "resolutions stay folded");
-  assert.match(rows("resolved")[0].text, /Provide a Stripe test key Granted .* Note In 1Password under Stripe\./);
+  // The resolution is recorded in the side panel, not above the composer.
+  assert.deepEqual(strip.children.map(node => node.className), ["thread-asks-toggle thread-asks-open", "thread-asks-list"]);
+  assert.match(history.text, /^Resolved asks Provide a Stripe test key Granted · Request Note In 1Password under Stripe\.$/);
 
   control(rows("open")[0], "Annual").onclick();
   await settle();
   assert.deepEqual(posts()[1].body, {resolution: "answered", option: "Annual"});
-  assert.equal(toggle("open").hidden, true);
-  assert.equal(toggle("resolved").text, "▸ 2 resolved asks");
+  assert.equal(strip.hidden, true, "with nothing open, nothing about asks sits above the composer");
+  assert.equal(history.byClass("thread-asks-history-item").length, 2);
   assert.equal($("asks-count").textContent, "1");
 });
 
@@ -125,8 +129,6 @@ test("a failed resolution keeps the row and what was typed", async () => {
   await ui.refresh();
   await ui.showThread("thread-1");
   const row = rows("open")[0];
-  control(row, "Add note").onclick();
-  await settle();
   row.byClass("ask-note")[0].value = "Kept";
   control(row, "Decline").onclick();
   await settle();
@@ -138,38 +140,112 @@ test("a failed resolution keeps the row and what was typed", async () => {
   assert.equal(control(row, "Decline").disabled, false);
 });
 
-test("recent resolutions of the conversation are folded away until asked for", async () => {
-  const {ui, strip, rows, toggle, list, reads} = setup([decision]);
+test("a reply from the conversation's strip is sent as the user's message and marks the ask", async () => {
+  const {ui, state, rows, posts} = setup([request, elsewhere], {resolved: []});
+  await ui.refresh();
+  await ui.showThread("thread-1");
+  const row = rows("open")[0], field = row.byClass("ask-note")[0];
+  field.value = "what do you need for stripe?";
+  row.byTag("form")[0].onsubmit({preventDefault() {}});
+  await settle();
+  assert.deepEqual(posts(), [{path: "sessions/thread-1/messages", body: {
+    message: 'Re ask #2 "Provide a Stripe test key" (still open): what do you need for stripe?', requestId: "request-1"}}]);
+  assert.deepEqual(state.sent, ["thread-1"]);
+  assert.equal(rows("open")[0], row, "the ask stays, in the same row");
+  assert.equal(field.value, "");
+  assert.equal(row.byClass("ask-replied")[0].text, "You replied just now what do you need for stripe?");
+  // The Queue shows the same mark: both read one record.
+  assert.deepEqual(ui.viewer.replyOf(request).text, "what do you need for stripe?");
+});
+
+test("Quote in message names the ask in the conversation's draft without losing what is there", async () => {
+  const {ui, state, draft, rows, control, posts} = setup([request, elsewhere], {resolved: []});
+  await ui.refresh();
+  await ui.showThread("thread-1");
+  const row = rows("open")[0], field = row.byClass("ask-note")[0];
+  draft.value = "Half a thought";
+  field.value = "which key?";
+  control(row, "Quote in message").onclick();
+  await settle();
+  assert.deepEqual(state.opened, ["thread-1"]);
+  assert.equal(draft.value, 'Half a thought\n\nRe ask #2 "Provide a Stripe test key" (still open): which key?');
+  assert.equal(draft.focused, true);
+  assert.deepEqual(draft.selection, [draft.value.length, draft.value.length]);
+  assert.equal(field.value, "");
+  assert.equal(posts().length, 0, "nothing is sent until the user sends the message");
+  assert.equal(control(row, "Reply in conversation"), undefined, "the conversation is already open");
+  // Asking again does not repeat a reference the draft already has.
+  draft.value = 'Re ask #2 "Provide a Stripe test key" (still open): ';
+  control(row, "Quote in message").onclick();
+  await settle();
+  assert.equal(draft.value, 'Re ask #2 "Provide a Stripe test key" (still open): ');
+});
+
+test("Reply in conversation from the Queue closes it and opens the asking conversation", async () => {
+  const {ui, $, state, draft, control} = setup([request, elsewhere], {resolved: []});
+  await $("open-asks-view").onclick({preventDefault() {}});
+  assert.equal($("asks-dialog").open, true);
+  const row = $("asks-list").byClass("ask-row").find(node => node.dataset.id === "5");
+  control(row, "Reply in conversation").onclick();
+  await settle();
+  assert.equal($("asks-dialog").open, false);
+  assert.deepEqual(state.opened, ["thread-2"]);
+  assert.equal(draft.value, 'Re ask #5 "Add payout details" (still open): ');
+});
+
+test("a conversation whose draft cannot take text is opened and the typed text stays with the ask", async () => {
+  const {ui, state, draft, rows, control} = setup([request], {resolved: [], composer: false});
+  await ui.refresh();
+  await ui.showThread("thread-1");
+  const field = rows("open")[0].byClass("ask-note")[0];
+  field.value = "which key?";
+  control(rows("open")[0], "Quote in message").onclick();
+  await settle();
+  assert.deepEqual(state.opened, ["thread-1"]);
+  assert.equal(field.value, "which key?");
+  assert.equal(draft.value, "");
+});
+
+test("a conversation's resolutions are listed in its side panel, never above the composer", async () => {
+  const {ui, strip, history, reads} = setup([decision]);
   await ui.refresh();
   assert.equal(reads("asks?status=resolved"), 0, "the log is not read until a conversation is open");
+  assert.equal(history.hidden, true);
   await ui.showThread("thread-1");
   assert.equal(reads("asks?status=resolved"), 1);
-  // Its own resolutions from the last 30 days, newest first.
-  assert.deepEqual(rows("resolved").map(row => row.dataset.id), ["11", "12"]);
-  assert.equal(toggle("resolved").text, "▸ 2 resolved asks");
-  assert.equal(toggle("resolved").getAttribute("aria-expanded"), "false");
-  assert.equal(list("resolved").hidden, true);
-  toggle("resolved").onclick();
-  await settle();
-  assert.equal(list("resolved").hidden, false);
-  assert.equal(toggle("resolved").text, "▾ 2 resolved asks");
-  const [approved, answered] = rows("resolved");
-  assert.match(approved.text, /Approve the launch discount Approved Approval resolved .* Note For 30 days only\./);
-  assert.match(answered.text, /Which currency first\? Answered Decision resolved .* Answer USD/);
-  assert.equal(approved.byClass("ask-thread").length, 0);
+  // Its own resolutions, newest first, whatever their age.
+  assert.equal(history.hidden, false);
+  assert.equal(history.children[0].tagName, "h3");
+  assert.equal(history.children[0].textContent, "Resolved asks");
+  const items = history.byClass("thread-asks-history-item");
+  assert.deepEqual(items.map(item => item.byTag("strong")[0].textContent),
+    ["Approve the launch discount", "Which currency first?", "Read the old memo"]);
+  assert.match(items[0].text, /^Approve the launch discount Approved · Approval · Nov 21, .* Note For 30 days only\.$/);
+  assert.match(items[1].text, /^Which currency first\? Answered · Decision · Nov 19, .* Answer USD$/);
+  assert.equal(strip.byClass("ask-row-resolved").length, 0);
 
-  // A conversation with nothing open shows its resolutions alone, still folded.
+  // A conversation with nothing open shows nothing above its composer; its history is still in the panel.
   await ui.showThread("thread-2");
   assert.equal(reads("asks?status=resolved"), 1, "the log was read within the last minute");
-  assert.equal(strip.hidden, false);
-  assert.equal(toggle("open").hidden, true);
-  assert.equal(toggle("resolved").hidden, false);
-  assert.equal(toggle("resolved").text, "▸ 1 resolved ask");
-  assert.equal(list("resolved").hidden, true);
+  assert.equal(strip.hidden, true);
+  assert.deepEqual(history.byTag("strong").map(node => node.textContent), ["Confirm the speaker test"]);
+  await ui.showThread("thread-9");
+  assert.equal(history.hidden, true);
+  assert.equal(history.children.length, 0);
+});
+
+test("the side panel lists the ten most recent resolutions and says where the rest are", async () => {
+  const many = Array.from({length: 13}, (_, index) => ({...base, id: 100 + index, kind: "action", question: "Step " + index,
+    status: "resolved", resolution: "done", note: null, answer: null, resolved_at: resolvedAt(index)}));
+  const {ui, history} = setup([], {resolved: many});
+  await ui.refresh();
+  await ui.showThread("thread-1");
+  assert.equal(history.byClass("thread-asks-history-item").length, 10);
+  assert.equal(history.children.at(-1).textContent, "3 earlier in the Queue's Resolved section.");
 });
 
 test("the resolved log is reread after a minute and when an ask is resolved elsewhere", async () => {
-  const {ui, state, rows, reads} = setup([decision, request]);
+  const {ui, state, history, rows, reads} = setup([decision, request]);
   await ui.refresh();
   await ui.showThread("thread-1");
   await ui.showThread("thread-2");
@@ -185,7 +261,8 @@ test("the resolved log is reread after a minute and when an ask is resolved else
   await settle();
   assert.equal(reads("asks?status=resolved"), 3);
   assert.deepEqual(rows("open").map(row => row.dataset.id), ["1"]);
-  assert.deepEqual(rows("resolved").map(row => row.dataset.id), ["2", "11", "12"]);
+  assert.deepEqual(history.byTag("strong").map(node => node.textContent),
+    ["Provide a Stripe test key", "Approve the launch discount", "Which currency first?", "Read the old memo"]);
   // An unchanged list reads nothing more.
   await ui.refresh();
   await settle();
@@ -296,12 +373,11 @@ test("snoozing in the conversation keeps the ask there, and a conversation with 
 
 test("a backend from before kinds gets decisions answered with the bodies it accepts and no resolved log", async () => {
   const legacy = {...decision, kind: undefined, resolutions: undefined};
-  const {ui, strip, rows, toggle, control, posts, reads} = setup([legacy], {kinds: false});
+  const {ui, strip, rows, control, posts, reads} = setup([legacy], {kinds: false});
   await ui.refresh();
   await ui.showThread("thread-1");
   assert.equal(reads("asks?status=resolved"), 0);
   assert.equal(strip.hidden, false);
-  assert.equal(toggle("resolved").hidden, true);
   const row = rows("open")[0];
   assert.equal(row.byClass("ask-snooze").length, 0);
   assert.equal(control(row, "Dismiss"), undefined);
@@ -335,7 +411,7 @@ test("the navigation toggle carries the open count while the sidebar entry is ou
 });
 
 test("a page without the strip or the toggle count still counts and opens the view", async () => {
-  const ids = IDS.filter(id => id !== "thread-asks" && id !== "asks-toggle-count" && id !== "menu-toggle");
+  const ids = IDS.filter(id => !["thread-asks", "thread-asks-history", "asks-toggle-count", "menu-toggle"].includes(id));
   const {ui, $, reads, errors} = setup([decision], {ids});
   await ui.refresh();
   await ui.showThread("thread-1");

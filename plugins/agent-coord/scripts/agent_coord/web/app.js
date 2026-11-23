@@ -4286,7 +4286,23 @@ async function boot() {
   state.sidecars = new SidecarsUI({document, api, getThreads: () => state.sessions, openThread: select, onError: showError});
   if (globalThis.ReviewUI) state.reviewUI = new ReviewUI({document, api, onError: showError, changed: renderStatus});
   window.addEventListener("pagehide", () => clearInterval(state.sidecars.timer), {once: true});
-  state.asks = new AsksUI({document, api, navigate: url => window.agentCoordNavigate(url), onError: showError, kinds: Boolean(state.config.askKinds)});
+  let askStorage; try { askStorage = localStorage; } catch { /* Reply marks then last for this page. */ }
+  const askThread = id => state.sessions?.find(thread => thread.thread_id === id)
+    || (state.selected === id ? state.detail?.work_thread : state.conversations?.get(id)?.detail?.work_thread);
+  state.asks = new AsksUI({document, api, navigate: url => window.agentCoordNavigate(url), onError: showError,
+    kinds: Boolean(state.config.askKinds), replyRecords: state.config.askReplies === true, storage: askStorage,
+    threadInfo: askThread,
+    // A reply sent from an ask is a message in its conversation; show it there at once.
+    messageSent: id => { if (id === state.selected) scheduleDetail(); },
+    // Where text for a conversation's message goes: its composer when it is open, else its saved
+    // draft, which opening the conversation restores. Null when the conversation takes no messages.
+    openComposer: async id => {
+      if (state.selected === id) return !$("composer").hidden && !$("message").disabled ? $("message") : null;
+      const thread = askThread(id);
+      if (thread && (!thread.browser_session || thread.attention === "archived")) { action(() => select(id)); return null; }
+      return {get value() { return state.drafts.get(id) || ""; }, set value(text) { state.drafts.set(id, text); },
+        focus() { action(() => select(id)); }};
+    }});
   state.asks.refresh().catch(showError);
   const sidecarButton = document.createElement("button");
   sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet thread-menu-action";

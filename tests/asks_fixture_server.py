@@ -3,7 +3,9 @@
 
 Uses a temporary database (or an explicit copy passed with --database) and
 fake providers, so no agent process starts and no agent work is submitted.
-Only ask resolution, snooze and the boot-time workspace probe accept POSTs.
+Only ask resolution, snooze, reply records, messages to a conversation (a reply
+to an ask is one; the fake provider accepts it and runs nothing) and the
+boot-time workspace probe accept POSTs.
 Never point --database at a live coordination database: opening it migrates
 its schema.
 
@@ -28,6 +30,8 @@ from agent_coord.ui import make_ui_server
 
 HOUR, DAY = 3600.0, 86400.0
 PERMITTED_POSTS = ("/api/browser/asks/", "/api/browser/workspaces/open")
+# A reply to an ask is an ordinary message to its conversation; the fake provider accepts it and runs nothing.
+PERMITTED_MESSAGES = ("/messages", "/queue")
 
 
 def seed(store, clock, root):
@@ -177,7 +181,8 @@ def main():
 
         class FixtureHandler(parent):
             def do_POST(self):
-                if not self.path.startswith(PERMITTED_POSTS):
+                message = self.path.startswith("/api/browser/sessions/") and self.path.endswith(PERMITTED_MESSAGES)
+                if not message and not self.path.startswith(PERMITTED_POSTS):
                     self._json(HTTPStatus.FORBIDDEN, {"error": "The asks fixture cannot submit agent work."})
                     return
                 super().do_POST()

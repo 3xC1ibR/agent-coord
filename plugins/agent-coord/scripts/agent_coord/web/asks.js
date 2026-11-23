@@ -22,13 +22,38 @@
       filtered: "No resolved asks match these filters.",
     },
     legacyNotice: "Showing decisions only. Kinds, notes, snooze, dismissal and the resolved log appear once the backend update is applied.",
-    // A conversation's own asks, shown above its composer.
+    // A conversation's own asks: the open ones above its composer, its resolutions in the side panel.
     thread: {
       label: "Asks from this conversation",
       waiting: count => count + (count === 1 ? " ask" : " asks") + " waiting for you",
       snoozed: count => count + (count === 1 ? " snoozed ask" : " snoozed asks"),
       blocking: count => count + " blocking",
-      resolved: count => count + (count === 1 ? " resolved ask" : " resolved asks"),
+      history: "Resolved asks",
+      earlier(count) { return count + " earlier in the " + copy.viewName + "'s " + copy.sections.resolved + " section."; },
+    },
+    // A reply in the user's own words. It goes to the asking conversation as the user's message and leaves the ask open.
+    reply: {
+      placeholder: "Reply in your own words…",
+      label: "Reply",
+      send: "Send reply",
+      sendTitle: "Send this to the agent. The ask stays open.",
+      answer: "Answer with my text",
+      answerTitle: "Record this as your answer and close the ask.",
+      // Shown once something is typed: what each control does with the text.
+      hint: "Send reply keeps the ask open. Choosing a resolution closes it with this text attached.",
+      converse: "Reply in conversation",
+      converseTitle: "Open the conversation with this ask referenced in your message.",
+      // The same control inside the asking conversation, where the message box is just below.
+      converseHere: "Quote in message",
+      converseHereTitle: "Put this ask and your text in the message below.",
+      mark: age => "You replied " + (age === "just now" ? age : age + " ago"),
+      external: "This thread runs outside Ribbon Field, so a reply cannot reach it from here. Choose a resolution to send your text as its note.",
+      /* How a reply names its ask to the agent: number, title and that it is still open. */
+      reference(ask) {
+        const title = splitQuestion(ask.question).title;
+        const short = title.length > REPLY_TITLE_CHARACTERS ? title.slice(0, REPLY_TITLE_CHARACTERS - 1).trimEnd() + "…" : title;
+        return "Re ask #" + ask.id + " \"" + short + "\" (still open): ";
+      },
     },
     entryTitle(count, blocking) {
       if (!count) return this.viewName;
@@ -38,11 +63,15 @@
   const SECTIONS = ["open", "snoozed", "resolved"];
   const SNOOZE_CHOICES = [["hour", "In 1 hour"], ["three_hours", "In 3 hours"], ["tomorrow", "Tomorrow at 9 AM"], ["week", "Next week"]];
   const REFRESH_MILLISECONDS = 5000;
-  // A conversation lists its resolutions from this period; the full log is in the view.
-  const THREAD_RESOLVED_DAYS = 30;
   // The resolved log changes rarely, so a conversation rereads it at most this often.
   const RESOLVED_REREAD_MILLISECONDS = 60000;
   const LONG_TEXT_CHARACTERS = 240, LONG_TEXT_LINES = 3;
+  // A reply quotes this much of its ask's title.
+  const REPLY_TITLE_CHARACTERS = 120;
+  // Where this browser keeps the user's last reply to each open ask, for a backend that does not record it.
+  const REPLIES_STORAGE_KEY = "agent-coord.ask-replies";
+  // A conversation's side panel lists this many of its resolutions; the rest are in the view.
+  const THREAD_HISTORY_ROWS = 10;
 
   function formatAge(seconds) {
     if (!Number.isFinite(seconds) || seconds < 60) return "just now";
@@ -132,6 +161,18 @@
 
   /* Rows for one ask, open or resolved, and the controls that resolve it. The view and a
      conversation's strip build the same rows. A subclass supplies resolve, snooze and legacy. */
+  /* Add text to a message draft without losing what is there, and leave the cursor after it. */
+  function addToDraft(input, text, view = globalThis) {
+    const draft = input.value;
+    if (!draft.includes(text.trim())) {
+      const separator = !draft || draft.endsWith("\n\n") ? "" : draft.endsWith("\n") ? "\n" : "\n\n";
+      input.value = draft + separator + text;
+      if (view.Event) input.dispatchEvent?.(new view.Event("input", {bubbles: true}));
+    }
+    input.focus?.({preventScroll: true});
+    input.setSelectionRange?.(input.value.length, input.value.length);
+  }
+
   class AskRows {
     node(tag, text, className) {
       const element = this.document.createElement(tag);
@@ -190,8 +231,9 @@
       return link;
     }
     /* An open ask. `snoozed` gives the row the control that shows it again; `grouped` means a
-       heading above already says it is blocking; `thread` names the asking thread; `fold` makes
-       the title a control that opens and closes the rest of the row. */
+       heading above already says it is blocking; `thread` names the asking thread, and without it
+       the row is in that thread's own conversation; `fold` makes the title a control that opens
+       and closes the rest of the row. */
     buildRow(ask, {snoozed: snoozedSection = false, grouped = false, thread = true, fold = null} = {}) {
       const element = this.node("article", "", "ask-row");
       element.dataset.id = String(ask.id);
@@ -234,12 +276,21 @@
       const resolutions = ask.resolutions || ["answered", "dismissed"];
       const decision = kind === "decision";
       const form = this.node("form", "", "ask-resolve");
+      // Every ask takes a reply in the user's own words. The same text is the note when a resolution is chosen.
       const input = this.node("input", "", "ask-note"); input.type = "text"; input.maxLength = 4000;
-      input.placeholder = !decision ? "Note for the agent (optional)"
-        : ask.options.length ? "Or answer in your own words…" : "Your answer…";
-      input.setAttribute("aria-label", (decision ? "Answer: " : "Note: ") + ask.question);
+      input.placeholder = copy.reply.placeholder;
+      input.setAttribute("aria-label", copy.reply.label + ": " + ask.question);
+      const send = this.node("button", copy.reply.send, "ask-send"); send.type = "submit";
+      send.title = copy.reply.sendTitle;
+      const reply = this.node("div", "", "ask-reply");
+      reply.append(input, send);
+      const hint = this.node("p", copy.reply.hint, "ask-hint"); hint.hidden = true;
+      // What the user last replied, while the ask stays open.
+      const replied = this.node("p", "", "ask-unblocks ask-replied");
+      const repliedWhen = this.node("span", "", "ask-label"), repliedText = this.node("span", "");
+      replied.append(repliedWhen, repliedText);
       const error = this.node("p", "", "ask-row-error"); error.setAttribute("role", "alert"); error.hidden = true;
-      const controls = [input];
+      const controls = [input, send];
       const record = {element, controls, error, input};
       // A folded row keeps its title and meta line; what was typed in it stays.
       record.fold = folded => {
@@ -248,30 +299,34 @@
         disclosure.setAttribute("aria-expanded", String(!folded));
         caret.textContent = folded ? "▸" : "▾";
       };
-      const note = () => { const text = input.value.trim(); return text ? {note: text} : {}; };
+      const text = () => input.value.trim();
+      const note = () => text() ? {note: text()} : {};
+      // Once there is text, say what Send reply and a resolution each do with it.
+      record.sync = () => { hint.hidden = !text(); };
+      input.oninput = record.sync;
       const resolveWith = resolution => () => this.resolve(ask, {resolution, ...note()}, record);
+      // Enter sends the reply and never picks a resolution for the user.
+      form.onsubmit = event => {
+        event?.preventDefault?.();
+        if (!text()) { input.focus?.(); return; }
+        return this.reply(ask, text(), record);
+      };
       // One row of controls: the kind's resolutions at a fixed left edge, quiet text controls after them.
       const entry = this.node("div", "", "ask-entry");
       const later = this.node("div", "", "ask-later");
       if (decision) {
-        if (ask.options.length) {
-          const options = this.node("div", "", "ask-options");
-          for (const option of ask.options) {
-            const choice = this.button(option, () => this.resolve(ask,
-              legacy ? {option} : {resolution: "answered", option, ...note()}, record), "ask-option");
-            controls.push(choice); options.append(choice);
-          }
-          form.append(options);
+        // A decision closes on one of its options, or on the typed text as its answer.
+        for (const option of ask.options) {
+          const choice = this.button(option, () => this.resolve(ask,
+            legacy ? {option} : {resolution: "answered", option, ...note()}, record), "ask-option");
+          controls.push(choice); entry.append(choice);
         }
-        const send = this.node("button", copy.resolve.answered, "ask-affirm"); send.type = "submit";
-        controls.push(send);
-        entry.append(input, send);
-        form.onsubmit = event => {
-          event?.preventDefault?.();
-          const text = input.value.trim();
-          if (!text) return;
-          return this.resolve(ask, legacy ? {answer: text} : {resolution: "answered", answer: text}, record);
-        };
+        const answer = this.button(copy.reply.answer, () => {
+          if (!text()) { input.focus?.(); return; }
+          return this.resolve(ask, legacy ? {answer: text()} : {resolution: "answered", answer: text()}, record);
+        }, "ask-affirm");
+        answer.title = copy.reply.answerTitle;
+        controls.push(answer); entry.append(answer);
       } else {
         const [affirm, ...others] = resolutions.filter(resolution => resolution !== "dismissed");
         const primary = this.button(copy.resolve[affirm] || affirm, resolveWith(affirm), "ask-affirm");
@@ -280,17 +335,12 @@
           const other = this.button(copy.resolve[resolution] || resolution, resolveWith(resolution), "quiet");
           controls.push(other); entry.append(other);
         }
-        // A note is optional and rare, so its field appears on request, above the resolutions.
-        input.hidden = true;
-        const addNote = this.button("Add note", () => {
-          input.hidden = false; addNote.hidden = true;
-          input.focus?.();
-        }, "ask-text-control");
-        controls.push(addNote); later.append(addNote);
-        form.append(input);
-        // Enter in the note must not pick a resolution for the user.
-        form.onsubmit = event => event?.preventDefault?.();
       }
+      form.append(reply, hint);
+      const converse = this.button(thread ? copy.reply.converse : copy.reply.converseHere,
+        () => this.converse(ask, text(), record), "ask-text-control");
+      converse.title = thread ? copy.reply.converseTitle : copy.reply.converseHereTitle;
+      controls.push(converse); later.append(converse);
       if (legacy) {
         // Snooze and dismissal need the updated backend.
       } else if (snoozedSection) {
@@ -317,7 +367,7 @@
       }
       entry.append(later);
       form.append(entry);
-      element.append(form, error);
+      element.append(replied, form, error);
 
       record.update = current => {
         const now = this.clock();
@@ -332,6 +382,11 @@
         due.className = "ask-flag" + (current.overdue ? " ask-flag-attention" : "");
         snoozed.hidden = !current.snoozed;
         snoozed.textContent = current.snoozed ? "Snoozed until " + formatMoment(current.snoozed_until, now) : "";
+        const mark = this.replyOf(current);
+        replied.hidden = !mark;
+        repliedWhen.textContent = mark ? copy.reply.mark(formatAge((now - new Date(mark.at).getTime()) / 1000)) : "";
+        repliedText.textContent = mark ? mark.text : "";
+        if (mark) replied.title = formatMoment(mark.at, now);
       };
       return record;
     }
@@ -357,27 +412,33 @@
       }
       return element;
     }
-    async submit(ask, record, path, body) {
+    /* Run one change to an ask from its row: one at a time, and a failure keeps the row and what was typed. */
+    async attempt(ask, record, work) {
       if (this.pending.has(ask.id)) return null;
       this.pending.add(ask.id);
       for (const control of record.controls) control.disabled = true;
       record.error.hidden = true;
       try {
-        return await this.api(path, body);
+        return await work();
       } catch (error) {
-        // Keep the row and whatever the user typed; say what went wrong beside it.
         for (const control of record.controls) control.disabled = false;
         record.error.textContent = (error?.message || String(error)).replace(/[.\s]*$/, ".") + " Your input is kept.";
         record.error.hidden = false;
         return null;
       } finally { this.pending.delete(ask.id); }
     }
+    submit(ask, record, path, body) { return this.attempt(ask, record, () => this.api(path, body)); }
   }
 
   class AsksView extends AskRows {
-    constructor({document, api, openThread, navigate, close, copyText, clock = () => Date.now()}) {
+    constructor({document, api, openThread, navigate, close, copyText, clock = () => Date.now(),
+                 compose, threadInfo, messageSent, storage, requestId = () => globalThis.crypto.randomUUID()}) {
       super();
-      Object.assign(this, {document, api, openThread, navigate, close, copyText, clock});
+      Object.assign(this, {document, api, openThread, navigate, close, copyText, clock,
+        compose, threadInfo, messageSent, storage, requestId});
+      // A backend that records replies says so in its configuration; until then this browser keeps the mark.
+      this.replyRecords = false;
+      this.replies = this.loadReplies();
       // The dialog is closed until the user opens it; data still loads for the count.
       this.visible = false;
       // An older backend serves this view until its update is applied; it knows only decisions.
@@ -455,6 +516,7 @@
         const [open, resolved] = await Promise.all(requests);
         if (sequence !== this.sequence) return;
         this.open = open.data || [];
+        this.forgetReplies();
         if (resolved) {
           this.resolved = resolved.data || [];
           this.resolvedLoaded = true; this.resolvedDue = false; this.resolvedReadAt = this.clock();
@@ -589,17 +651,76 @@
         ? {...item, snoozed_until: saved.snoozed_until, snoozed: saved.snoozed_until != null} : item);
       this.render();
     }
+    /* Send the user's own words to the asking conversation as their message. The ask stays open and shows the reply. */
+    async reply(ask, text, record) {
+      const sent = await this.attempt(ask, record, async () => {
+        if (this.threadInfo?.(ask.session_id)?.browser_session === false) throw new Error(copy.reply.external);
+        // The same text sent again after an unconfirmed attempt must not arrive twice.
+        if (record.replyAttempt?.text !== text) record.replyAttempt = {text, id: this.requestId()};
+        await this.api("sessions/" + encodeURIComponent(ask.session_id) + "/messages",
+          {message: copy.reply.reference(ask) + text, requestId: record.replyAttempt.id});
+        return true;
+      });
+      if (!sent) return;
+      record.replyAttempt = null;
+      for (const control of record.controls) control.disabled = false;
+      record.input.value = "";
+      record.sync();
+      this.replies.set(ask.id, {text, at: new Date(this.clock()).toISOString()});
+      this.saveReplies();
+      this.render();
+      this.messageSent?.(ask.session_id);
+      if (!this.replyRecords) return;
+      try {
+        const saved = await this.api("asks/" + encodeURIComponent(ask.id) + "/reply", {text});
+        this.open = this.open.map(item => item.id === ask.id
+          ? {...item, reply_text: saved.reply_text, replied_at: saved.replied_at} : item);
+        this.render();
+      } catch { /* The reply reached the agent. This browser's own mark stands in for the record. */ }
+    }
+    /* Continue in the asking conversation, with the ask named in the message being written. */
+    async converse(ask, text, record) {
+      const reference = copy.reply.reference(ask) + text;
+      if (!this.compose) return this.openThread(ask.session_id);
+      // The typed text moves to the conversation's draft only when that draft took it.
+      if (await this.compose(ask.session_id, reference)) { record.input.value = ""; record.sync(); }
+    }
+    /* The user's last reply to an open ask: the backend's record where it keeps one, else this browser's. */
+    replyOf(ask) {
+      if (ask.replied_at) return {text: ask.reply_text || "", at: ask.replied_at};
+      return this.replies.get(ask.id) || null;
+    }
+    loadReplies() {
+      try {
+        const saved = JSON.parse(this.storage?.getItem(REPLIES_STORAGE_KEY) || "{}");
+        return new Map(Object.entries(saved).map(([id, mark]) => [Number(id), mark])
+          .filter(([id, mark]) => Number.isInteger(id) && typeof mark?.text === "string" && typeof mark?.at === "string"));
+      } catch { return new Map(); }
+    }
+    saveReplies() {
+      try { this.storage?.setItem(REPLIES_STORAGE_KEY, JSON.stringify(Object.fromEntries(this.replies))); }
+      catch { /* The mark lasts for this page when storage is unavailable. */ }
+    }
+    /* A reply is kept only while its ask is open. */
+    forgetReplies() {
+      const open = new Set(this.open.map(ask => ask.id));
+      const closed = [...this.replies.keys()].filter(id => !open.has(id));
+      if (!closed.length) return;
+      for (const id of closed) this.replies.delete(id);
+      this.saveReplies();
+    }
   }
 
-  /* A conversation's own asks, above its composer: the open ones with the view's controls, and its
-     recent resolutions folded away. It shows the view's data and resolves through the view. */
+  /* A conversation's own asks: the open ones above its composer with the view's controls, and its
+     resolutions in the side panel. It shows the view's data and resolves through the view. */
   class ThreadAsksView extends AskRows {
-    constructor({document, source, element, onError}) {
+    constructor({document, source, element, history, onError}) {
       super();
-      Object.assign(this, {document, source, element, onError});
+      Object.assign(this, {document, source, element, history, onError});
       this.thread = null;
       this.records = new Map();
       this.signature = null;
+      this.historySignature = null;
       // This conversation's open asks at the last render, to notice one resolved elsewhere.
       this.shown = new Set();
       // What the user folded or unfolded, by thread, until the page reloads.
@@ -615,25 +736,23 @@
     fail(error) { this.onError?.(error); }
     resolve(ask, body, record) { return this.source.resolve(ask, body, record); }
     snooze(ask, until, record) { return this.source.snooze(ask, until, record); }
+    reply(ask, text, record) { return this.source.reply(ask, text, record); }
+    converse(ask, text, record) { return this.source.converse(ask, text, record); }
+    replyOf(ask) { return this.source.replyOf(ask); }
     setup() {
       const {element} = this;
       element.setAttribute("aria-label", copy.thread.label);
-      const part = (key, className) => {
-        const list = this.node("div", "", "thread-asks-list");
-        list.id = "thread-asks-" + key;
-        const toggle = this.button("", () => this.fold(key), "thread-asks-toggle " + className);
-        toggle.setAttribute("aria-controls", list.id);
-        const caret = this.node("span", "", "thread-asks-caret"); caret.setAttribute("aria-hidden", "true");
-        const summary = this.node("span", "");
-        toggle.append(caret, summary);
-        return {toggle, caret, summary, list};
-      };
-      this.parts = {open: part("open", "thread-asks-open"), resolved: part("resolved", "thread-asks-resolved")};
+      this.list = this.node("div", "", "thread-asks-list");
+      this.list.id = "thread-asks-open";
+      this.toggle = this.button("", () => this.fold(), "thread-asks-toggle thread-asks-open");
+      this.toggle.setAttribute("aria-controls", this.list.id);
+      this.caret = this.node("span", "", "thread-asks-caret"); this.caret.setAttribute("aria-hidden", "true");
+      this.summary = this.node("span", "");
       this.blocking = this.node("span", "", "ask-flag-urgent");
       // Folded, the line names the first ask, so the user knows what waits without unfolding.
       this.first = this.node("span", "", "thread-asks-first");
-      this.parts.open.toggle.append(this.blocking, this.first);
-      element.replaceChildren(this.parts.open.toggle, this.parts.open.list, this.parts.resolved.toggle, this.parts.resolved.list);
+      this.toggle.append(this.caret, this.summary, this.blocking, this.first);
+      element.replaceChildren(this.toggle, this.list);
       this.render();
     }
     /* Show the asks of one conversation, or of none. */
@@ -649,17 +768,12 @@
       // Nothing else keeps the resolved log current, and it changes rarely.
       const {source} = this;
       const due = source.clock() - (source.resolvedReadAt ?? -Infinity) >= RESOLVED_REREAD_MILLISECONDS;
-      return thread && this.element && due ? source.readResolved() : Promise.resolve();
+      return thread && this.history && due ? source.readResolved() : Promise.resolve();
     }
-    fold(key) {
-      const choice = this.choices.get(this.thread) || {};
-      choice[key] = !this.expanded(key);
-      this.choices.set(this.thread, choice);
+    fold() {
+      this.choices.set(this.thread, {...this.choices.get(this.thread), open: !this.expanded()});
       this.render();
-      // Bring what was unfolded to the top of the strip, under the line that stays in place.
-      const {open, resolved} = this.parts;
-      const top = key === "open" ? 0 : resolved.toggle.offsetTop - open.toggle.offsetHeight * !open.toggle.hidden;
-      if (choice[key] && Number.isFinite(top)) this.element.scrollTop = top;
+      if (this.expanded()) this.element.scrollTop = 0;
     }
     /* One open ask is shown in full: the one the user opened, else the one already in full, else
        the first in order. The rest show their title and meta line. */
@@ -675,11 +789,10 @@
       this.choices.set(this.thread, choice);
       this.render();
     }
-    /* Open asks start unfolded while one waits; resolutions start folded. */
-    expanded(key) {
-      const choice = this.choices.get(this.thread)?.[key];
-      if (choice != null) return choice;
-      return key === "open" && this.openAsks().some(ask => !ask.snoozed);
+    /* The strip starts unfolded while an ask waits, and folded when every ask is snoozed. */
+    expanded() {
+      const choice = this.choices.get(this.thread)?.open;
+      return choice != null ? choice : this.openAsks().some(ask => !ask.snoozed);
     }
     /* Blocking first, then overdue, then oldest first; snoozed asks last. */
     openAsks() {
@@ -688,49 +801,40 @@
       return this.source.open.filter(ask => ask.session_id === this.thread)
         .sort((a, b) => rank(a) - rank(b) || b.age_seconds - a.age_seconds || a.id - b.id);
     }
-    recentResolved() {
+    /* This conversation's resolutions, newest first, as the resolved log lists them. */
+    resolvedAsks() {
       if (!this.thread || this.legacy) return [];
-      const cutoff = this.clock() - THREAD_RESOLVED_DAYS * 86400000;
-      return this.source.resolved.filter(ask => {
-        const at = new Date(ask.resolved_at).getTime();
-        return ask.session_id === this.thread && (Number.isNaN(at) || at >= cutoff);
-      });
+      return this.source.resolved.filter(ask => ask.session_id === this.thread);
     }
     render() {
+      this.renderHistory();
       const {element, source} = this;
       if (!element) return;
-      const {open, resolved} = this.parts;
-      const asks = this.openAsks(), log = this.recentResolved();
+      const asks = this.openAsks();
       // An ask that left the open list and is not in the log was resolved elsewhere: reread the log.
       const ids = new Set(asks.map(ask => ask.id)), logged = new Set(source.resolved.map(ask => ask.id));
-      const departed = [...this.shown].some(id => !ids.has(id) && !logged.has(id));
+      const departed = this.history && [...this.shown].some(id => !ids.has(id) && !logged.has(id));
       this.shown = ids;
       if (departed) source.readResolved().catch(error => this.fail(error));
-      element.hidden = !asks.length && !log.length;
+      // With nothing open, nothing about asks sits above the composer.
+      element.hidden = !asks.length;
       if (element.hidden) {
         this.records.clear();
         this.signature = null;
-        open.list.replaceChildren(); resolved.list.replaceChildren();
+        this.list.replaceChildren();
         return;
       }
       const waiting = asks.filter(ask => !ask.snoozed), blocking = waiting.filter(ask => ask.blocking).length;
-      const openExpanded = this.expanded("open"), resolvedExpanded = this.expanded("resolved");
-      open.toggle.hidden = !asks.length;
-      open.list.hidden = !asks.length || !openExpanded;
-      open.summary.textContent = waiting.length ? copy.thread.waiting(waiting.length) : copy.thread.snoozed(asks.length);
+      const expanded = this.expanded();
+      this.list.hidden = !expanded;
+      this.summary.textContent = waiting.length ? copy.thread.waiting(waiting.length) : copy.thread.snoozed(asks.length);
       // Unfolded, the rows carry the Blocking flag and their titles; folded, the line has to.
-      this.blocking.textContent = blocking && !openExpanded ? copy.thread.blocking(blocking) : "";
+      this.blocking.textContent = blocking && !expanded ? copy.thread.blocking(blocking) : "";
       this.blocking.hidden = !this.blocking.textContent;
-      this.first.textContent = waiting.length && !openExpanded ? splitQuestion(waiting[0].question).title : "";
+      this.first.textContent = waiting.length && !expanded ? splitQuestion(waiting[0].question).title : "";
       this.first.hidden = !this.first.textContent;
-      // The resolutions fold away with the open asks, and stand alone when nothing is open.
-      resolved.toggle.hidden = !log.length || asks.length > 0 && !openExpanded;
-      resolved.list.hidden = resolved.toggle.hidden || !resolvedExpanded;
-      resolved.summary.textContent = copy.thread.resolved(log.length);
-      for (const [part, expanded] of [[open, openExpanded], [resolved, resolvedExpanded]]) {
-        part.toggle.setAttribute("aria-expanded", String(expanded));
-        part.caret.textContent = expanded ? "▾" : "▸";
-      }
+      this.toggle.setAttribute("aria-expanded", String(expanded));
+      this.caret.textContent = expanded ? "▾" : "▸";
       // The ask in full stays in place while the conversation is open, even when a more urgent one arrives mid-answer.
       const full = this.full = this.unfolded(asks);
       const live = new Set();
@@ -745,17 +849,46 @@
         record.fold(ask.id !== full);
       }
       for (const key of [...this.records.keys()]) if (!live.has(key)) this.records.delete(key);
-      // Reuse rows across refreshes so a typed note, focus and selection survive.
-      const signature = [this.thread, this.legacy, [...live].join(","), log.map(ask => ask.id + ":" + ask.resolution).join(",")].join("|");
+      // Reuse rows across refreshes so a typed reply, focus and selection survive.
+      const signature = [this.thread, this.legacy, [...live].join(",")].join("|");
       if (signature === this.signature) return;
       this.signature = signature;
       const active = this.document.activeElement;
       const selectionStart = active?.selectionStart, selectionEnd = active?.selectionEnd;
-      open.list.replaceChildren(...[...live].map(key => this.records.get(key).element));
-      resolved.list.replaceChildren(...log.map(ask => this.buildResolvedRow(ask, {thread: false})));
-      if (active && open.list.contains?.(active)) {
+      this.list.replaceChildren(...[...live].map(key => this.records.get(key).element));
+      if (active && this.list.contains?.(active)) {
         active.focus?.();
         if (selectionStart != null) active.setSelectionRange?.(selectionStart, selectionEnd);
+      }
+    }
+    /* The conversation's resolutions, in its side panel with the thread's other context. */
+    renderHistory() {
+      const {history} = this;
+      if (!history) return;
+      const log = this.resolvedAsks(), now = this.clock();
+      const signature = this.thread + "|" + log.map(ask => ask.id + ":" + ask.resolution + ":" + ask.resolved_at).join(",");
+      if (signature === this.historySignature) return;
+      this.historySignature = signature;
+      history.hidden = !log.length;
+      if (!log.length) { history.replaceChildren(); return; }
+      const items = log.slice(0, THREAD_HISTORY_ROWS).map(ask => {
+        const item = this.node("div", "", "thread-asks-history-item");
+        const title = this.node("p", "", "thread-asks-history-title");
+        title.append(this.node("strong", splitQuestion(ask.question).title));
+        const outcome = this.node("p", [copy.resolved[ask.resolution] || ask.resolution, copy.kinds[ask.kind] || ask.kind,
+          formatMoment(ask.resolved_at, now)].filter(Boolean).join(" · "), "thread-asks-history-outcome");
+        item.append(title, outcome);
+        for (const [label, text] of [["Answer", ask.answer], ["Note", ask.note]]) {
+          if (!text) continue;
+          const line = this.node("p", "", "thread-asks-history-text");
+          line.append(this.node("span", label, "ask-label"), this.node("span", text));
+          item.append(line);
+        }
+        return item;
+      });
+      history.replaceChildren(this.node("h3", copy.thread.history), ...items);
+      if (log.length > THREAD_HISTORY_ROWS) {
+        history.append(this.node("p", copy.thread.earlier(log.length - THREAD_HISTORY_ROWS), "thread-asks-history-outcome"));
       }
     }
   }
@@ -763,8 +896,9 @@
   /* Workspace entry: the sidebar count, the dialog, the refresh cycle while it is open, the count
      on the navigation toggle, and the open conversation's strip. */
   class AsksUI {
-    constructor({document, api, view = globalThis, navigate, onError, copyText, clock, kinds}) {
-      Object.assign(this, {document, api, view, navigate, onError});
+    constructor({document, api, view = globalThis, navigate, onError, copyText, clock, kinds, replyRecords,
+                 openComposer, threadInfo, messageSent, storage, requestId}) {
+      Object.assign(this, {document, api, view, navigate, onError, openComposer});
       const $ = id => document.getElementById(id);
       this.entry = $("open-asks-view");
       this.label = $("asks-entry-label");
@@ -780,10 +914,13 @@
         openThread: id => this.follow("agentcoord://thread/" + encodeURIComponent(id)),
         navigate: url => this.follow(url), close: () => this.dialog.close(),
         copyText: copyText || (text => view.navigator.clipboard.writeText(text)),
-        ...(clock ? {clock} : {})});
+        compose: (thread, text) => this.compose(thread, text), threadInfo, messageSent, storage,
+        ...(requestId ? {requestId} : {}), ...(clock ? {clock} : {})});
+      this.viewer.replyRecords = replyRecords === true;
       // The workspace already knows whether its backend predates kinds; opening the view asks again.
       if (kinds === false) this.viewer.setLegacy(true);
-      this.thread = new ThreadAsksView({document, source: this.viewer, element: $("thread-asks"), onError});
+      this.thread = new ThreadAsksView({document, source: this.viewer, element: $("thread-asks"),
+        history: $("thread-asks-history"), onError});
       const render = this.viewer.render.bind(this.viewer);
       // Every change to the list, including an in-place resolution, also moves the counts and the strip.
       this.viewer.render = () => { render(); this.updateBadge(); this.thread.render(); };
@@ -826,12 +963,21 @@
         // A backend from before kinds serves this view until its update is applied.
         const config = await this.api("config");
         this.viewer.setLegacy(!config.askKinds);
+        this.viewer.replyRecords = config.askReplies === true;
       } catch (error) { this.onError?.(error); }
       await this.refresh();
     }
     follow(url) {
       this.dialog.close();
       Promise.resolve(this.navigate(url)).catch(this.onError);
+    }
+    /* Open a conversation and put text in its message draft. False when its draft cannot take text. */
+    async compose(thread, text) {
+      if (this.dialog.open) this.dialog.close();
+      const input = await this.openComposer?.(thread);
+      if (!input) return false;
+      addToDraft(input, text, this.view);
+      return true;
     }
     closed() {
       this.view.clearInterval?.(this.timer);
@@ -842,7 +988,7 @@
     }
   }
 
-  const exported = {AsksUI, AsksView, ThreadAsksView, AsksCopy: copy, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget, splitQuestion, isLong};
+  const exported = {AsksUI, AsksView, ThreadAsksView, AsksCopy: copy, addToDraft, formatAge, formatEffort, snoozeUntil, openGroups, linkTarget, splitQuestion, isLong};
   if (typeof module !== "undefined") module.exports = exported;
   globalThis.AsksUI = AsksUI;
 })();
