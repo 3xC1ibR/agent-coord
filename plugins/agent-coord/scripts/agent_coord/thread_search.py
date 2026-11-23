@@ -18,6 +18,7 @@ import json
 import math
 import sqlite3
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -279,7 +280,7 @@ def _search_connection(store):
 
 def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                    repository_id=UNSET, project_id=UNSET, app_only=False,
-                   source="all", my_messages=False, thread_ids=None):
+                   source="all", my_messages=False, thread_ids=None, schedule_index=None):
     if not isinstance(query, str) or not query.strip() or len(query) > 500:
         raise CoordinationError("Search query must contain 1–500 characters.")
     terms = list(dict.fromkeys(query.casefold().split()))
@@ -321,7 +322,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     use_context, use_messages = source != "messages", source != "context"
     message_where = message_condition(terms, "user" if my_messages else None)
     message_relevance = _message_relevance_sql(single, closeness)
-    refresh_messages(store)
+    refresh_messages(store, schedule_index=schedule_index)
     with _measure(store, "query"), _search_connection(store) as (db, tables):
         app = "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)" if "browser_sessions" in tables else "0"
         if app_only:
@@ -593,4 +594,5 @@ def search_browser_threads(store, sessions, query):
         threads = [t for t in threads if t["project_cwd"] == directory]
     return search_threads(store, query.get("q", [""])[0], limit=20, cursor=query.get("cursor", [None])[0],
                           my_messages=query.get("my_messages") == ["true"],
+                          schedule_index=partial(sessions.persistence.submit, key="conversation-substring-index", required=False),
                           thread_ids=[t["thread_id"] for t in threads])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 import shutil
 import subprocess
 import sys
@@ -10,7 +11,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.cli import _parser, run
@@ -18,7 +19,7 @@ from agent_coord import conversation_search
 from agent_coord.conversation_search import prepare_messages, publish_messages, refresh_messages, sync_messages
 from agent_coord.navigation import NavigationStore
 from agent_coord.store import CoordinationError, CoordinationStore, _StoreCursor
-from agent_coord.thread_search import search_threads
+from agent_coord.thread_search import search_browser_threads, search_threads
 
 
 class ConversationSearchTests(unittest.TestCase):
@@ -58,6 +59,27 @@ class ConversationSearchTests(unittest.TestCase):
         history = {"turns": [{"id": "turn", "startedAt": 1200, "items": [item]}]}
         with self.store._connection() as db:
             db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (identity, json.dumps(history)))
+
+    def test_browser_search_returns_exact_matches_before_building_the_substring_index(self):
+        from agent_coord import conversation_substrings as substrings
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        self.create("archive", "x" * 32768 + " rare needle")
+        persistence = Mock()
+        sessions = SimpleNamespace(cwd=str(self.root), persistence=persistence)
+        query = {"q": ["needle"]}
+        first = search_browser_threads(self.store, sessions, query)
+        self.assertEqual([item["thread_id"] for item in first["items"]], ["archive"])
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_substring_ready").fetchone()[0], 0)
+        persistence.submit.assert_called_once()
+        index = persistence.submit.call_args.args[0]
+        for _ in index():
+            pass
+        with self.store.reading(), self.store._connection() as db:
+            self.assertGreater(db.execute("SELECT COUNT(*) FROM conversation_substring_ready").fetchone()[0], 0)
+        self.assertEqual(search_browser_threads(self.store, sessions, query), first)
+        persistence.submit.assert_called_once()
 
     def test_jev_in_middle_of_closed_conversation_with_unrelated_metadata(self):
         self.create("overview", "we use jev to sort attention", attention="archived")

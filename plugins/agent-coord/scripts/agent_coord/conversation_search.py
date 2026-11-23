@@ -14,6 +14,7 @@ import uuid
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from functools import partial
 from itertools import islice
 
 from .timeline_clock import seconds
@@ -630,16 +631,17 @@ def _stage_batch(store, generation, batch):
     return True
 
 
-def publish_messages(store, prepared):
+def publish_messages(store, prepared, *, schedule_index=None):
     """Stage bounded transactions and expose a complete, unchanged revision."""
     with _measure(store, "projection") as measurement:
-        published = _publish_messages(store, prepared)
+        published = _publish_messages(store, prepared, schedule_index)
         measurement["published" if published else "discarded"] = 1
         return published
 
 
-def _publish_messages(store, prepared):
+def _publish_messages(store, prepared, schedule_index):
     generation = uuid.uuid4().hex if prepared.status is not None else None
+    index_steps = None
     if generation is not None:
         with _operation(store, "search.stage"), store._connection() as db:
             db.execute("INSERT INTO conversation_search_generations VALUES (?, ?, 'staging', ?)",
@@ -648,14 +650,22 @@ def _publish_messages(store, prepared):
             if not _stage_batch(store, generation, batch):
                 return False
         from .conversation_substrings import index_document_steps, index_generation_steps
-        indexing = (index_document_steps(store, (record[-1] for record in prepared.document_records))
-                    if prepared.document_records else index_generation_steps(store, generation))
-        for _ in indexing:
-            pass
+        if prepared.document_records:
+            documents = tuple(record[-1] for record in prepared.document_records)
+            index_steps = partial(index_document_steps, store, documents)
+        else:
+            index_steps = partial(index_generation_steps, store, generation)
+        if schedule_index is None:
+            for _ in index_steps():
+                pass
     with _measure(store, "publish") as measurement:
         result = _publish_head(store, prepared, generation)
         measurement["published" if result else "discarded"] = 1
-        return result
+    if result and index_steps is not None and schedule_index is not None:
+        # Queries scan the published prose until its trigram index is ready.
+        # A restart before this callback runs is covered by the startup backfill.
+        schedule_index(index_steps)
+    return result
 
 
 def _publish_head(store, prepared, generation):
@@ -719,13 +729,13 @@ def _cleanup_messages(store):
                 db.execute("DELETE FROM conversation_search_generations WHERE generation=?", (generation,))
 
 
-def refresh_messages(store, *, cwd=None):
+def refresh_messages(store, *, cwd=None, schedule_index=None):
     """Refresh the initial pending inventory without holding a writer to parse."""
     with _measure(store, "refresh") as measurement:
-        _refresh_messages(store, cwd, measurement)
+        _refresh_messages(store, cwd, measurement, schedule_index)
 
 
-def _refresh_messages(store, cwd, measurement):
+def _refresh_messages(store, cwd, measurement, schedule_index):
     with store.reading(), store._connection() as db:
         try:
             ready, identities, garbage = _pending_messages(db, cwd)
@@ -746,9 +756,10 @@ def _refresh_messages(store, cwd, measurement):
         with store.reading(), store._connection() as db:
             _, identities, garbage = _pending_messages(db, cwd)
     measurement["pending_histories"] = len(identities)
+    publish = publish_messages if schedule_index is None else partial(publish_messages, schedule_index=schedule_index)
     for thread_id in identities:
         for attempt in range(3):
-            if publish_messages(store, prepare_messages(store, thread_id)):
+            if publish(store, prepare_messages(store, thread_id)):
                 break
             measurement["revision_conflicts"] = measurement.get("revision_conflicts", 0) + 1
         else:
