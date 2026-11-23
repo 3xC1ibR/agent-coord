@@ -73,13 +73,18 @@ class ConversationSearchTests(unittest.TestCase):
         with self.store.reading(), self.store._connection() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_substring_ready").fetchone()[0], 0)
         persistence.submit.assert_called_once()
-        index = persistence.submit.call_args.args[0]
-        for _ in index():
-            pass
+        # Publishing searchable prose schedules optional substring indexing.
+        # Drain both stages, as the persistence worker does in production.
+        finished = 0
+        while finished < persistence.submit.call_count:
+            index = persistence.submit.call_args_list[finished].args[0]
+            for _ in index():
+                pass
+            finished += 1
         with self.store.reading(), self.store._connection() as db:
             self.assertGreater(db.execute("SELECT COUNT(*) FROM conversation_substring_ready").fetchone()[0], 0)
         self.assertEqual(search_browser_threads(self.store, sessions, query), first)
-        persistence.submit.assert_called_once()
+        self.assertEqual(persistence.submit.call_count, finished)
 
     def test_jev_in_middle_of_closed_conversation_with_unrelated_metadata(self):
         self.create("overview", "we use jev to sort attention", attention="archived")
