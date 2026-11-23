@@ -171,6 +171,36 @@ class TurnWatchdogTests(unittest.TestCase):
         self.assertIn("approval", body["error"].lower())
         self.assertIn("4375", body["error"])
 
+    def test_native_subagent_approval_remains_answerable_after_supervisor_and_user_alerts(self):
+        child = self.child("claude", mode="orchestration")
+        connection = self.sessions.claude.connections[child]
+        connection.callback({"type": "control_request", "request_id": "nested-approval",
+            "parent_tool_use_id": "foreground-agent", "request": {"subtype": "can_use_tool",
+                "agent_id": "fixture-agent", "tool_use_id": "nested-bash", "tool_name": "Bash",
+                "input": {"command": "pwd"}}})
+        original, = self.sessions.pending_requests(child)
+        self.assertTrue(self.sessions.claim_approval_notification(original["key"]))
+        self.tick(1)
+        self.tick(602)
+        alerts = self.reports()
+        self.assertEqual(len(alerts), 1, "The supervisor should receive the unattended native approval")
+        first = json.loads(alerts[0]["body"])
+        self.assertEqual(first["classification"], "waiting_for_approval")
+        self.assertFalse(first["user_escalated"])
+        self.tick(1203)
+        notice, = [n for n in self.sessions.approval_notifications() if n.get("classification") == "waiting_for_approval"]
+        self.assertEqual(notice["thread_id"], child)
+        self.assertNotEqual(notice["request_key"], original["key"])
+        view = self.sessions.read(child)
+        self.assertEqual(view["work_thread"]["turn_health"]["state"], "waiting")
+        request, = view["requests"]
+        self.assertEqual(request["key"], original["key"])
+        self.assertIn("decline", request["params"]["availableDecisions"])
+        self.sessions.answer(child, request["key"], {"decision": "decline"})
+        responses = [m["response"] for m in connection.writes if m["type"] == "control_response"]
+        self.assertEqual([(r["request_id"], r["response"]["behavior"]) for r in responses], [("nested-approval", "deny")])
+        self.assertEqual(self.sessions.pending_requests(child), [])
+
     def test_repairs_missed_completion_and_durable_flag_without_replaying_work(self):
         for status in ("completed", "failed", "interrupted"):
             child = self.child()
@@ -318,10 +348,18 @@ class TurnWatchdogTests(unittest.TestCase):
         child = self.sessions.create({})["session"]["thread_id"]
         self.sessions.send(child, {"message": "Work"})
         self.tick(301)
+        self.assertEqual(self.sessions.approval_notifications(), [])
         self.tick(601)
         self.assertEqual(self.nudges(child), [])
         self.assertEqual(self.sessions.work_thread(child)["status"], "stalled")
         self.assertTrue(self.sessions.work_thread(child)["needs_attention"])
+        notices = self.sessions.approval_notifications()
+        self.assertEqual(len(notices), 1, "The first stall should notify the user for a parentless turn")
+        notice, = notices
+        self.assertEqual((notice["thread_id"], notice["classification"]), (child, "stalled"))
+        self.assertEqual(self.alert_sequences(child), [1])
+        self.assertEqual(self.reports(), [])
+        self.assertTrue(self.sessions.claim_approval_notification(notice["request_key"]))
 
     def test_recovery_timeout_never_retries_uncertain_submission(self):
         child = self.child()

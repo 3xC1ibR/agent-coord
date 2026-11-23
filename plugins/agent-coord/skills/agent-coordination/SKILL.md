@@ -53,19 +53,17 @@ Use an independently addressable Ribbon Field app agent for long-running work.
 Keep foreground provider-native subagents for bounded tasks. A foreground call
 keeps its parent turn occupied and can leave subsequent instructions waiting.
 
-Arm a timed progress check as soon as you delegate. For an active assignment,
-subscribe to the worker's exact turn with a timeout and a continuation:
+Ribbon Field monitors delegated turns automatically. Leave progress-check
+scheduling to Ribbon Field. It alerts the current supervisor first. If there
+is no reachable supervisor, the first alert goes directly to the user. If the
+condition persists, Ribbon Field repeats the alert and escalates to the user.
 
-```bash
-agent-coord subscribe --turn <worker-session-id>:<turn-id> --timeout 900 \
-  --continue 'Inspect the worker checkpoint, native progress, pending requests and inbox. Continue supervision until the assignment is resolved.'
-```
-
-Choose the interval to fit the work. If progress continues after a timeout,
-arm the next check. If an alert identifies a live tool, inspect its output and
-CPU activity before interrupting. If it identifies an outstanding approval,
-inspect the request and route it to its authorized decision maker. Check the
-oldest queued instruction before authorizing a continuation.
+Act on every stall alert before dismissing it. Open the reported turn and
+check its last confirmed progress and oldest queued instruction. For a live
+tool, inspect its output and CPU activity before deciding whether to interrupt.
+For a pending approval, route the original request to its authorized decision
+maker. For a silent turn, use the guarded supervisor controls when recovery is
+needed. Verify the outcome of the action you took.
 
 Give each Bash call a finite timeout appropriate to the command. The Claude
 Bash tool accepts `timeout` in milliseconds. For work that can outlast a tool
