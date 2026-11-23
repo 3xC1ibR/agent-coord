@@ -60,6 +60,16 @@ class TurnWatchdog:
                 "tool_cpu": None, "classification": None, "waiting_since": None,
                 "alert_pending": False, "next_alert_at": None, "saved_progress": None}
 
+    def restore_observations(self, observations):
+        """Extend retained records from older coordinators without resetting their progress clocks."""
+        self.observed = observations
+        for state in observations.values():
+            defaults = self._new(state["turn_id"])
+            # Compatible handovers run on the same boot and share the monotonic clock.
+            defaults["progress_at"] -= max(0, defaults["progress"] - state["progress"])
+            for name, value in defaults.items():
+                state.setdefault(name, value)
+
     def observe(self, method, params):
         """Only work events count; polling, metadata and steering echoes do not."""
         tid = params.get("threadId")

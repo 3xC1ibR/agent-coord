@@ -169,7 +169,7 @@ class CoordinatorProjection:
         sessions.rpc.initialized_response = state["codex"].get("initialized_response", False)
         sessions.rpc.pending_methods = state["codex"].get("pending_methods", {})
         sessions.execution.permissions = copy.deepcopy(state["permissions"])
-        sessions.watchdog.observed = copy.deepcopy(state["watchdog"])
+        sessions.watchdog.restore_observations(copy.deepcopy(state["watchdog"]))
         for channel, entry in state["channels"].items():
             if channel in self.channels:
                 self.channels[channel]["closed"] = entry.get("closed", False)

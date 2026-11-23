@@ -393,6 +393,32 @@ class ProjectionTests(unittest.TestCase):
         with self.store.reading(), self.store._connection() as db:
             self.assertEqual(db.execute("SELECT cursor FROM coordinator_projection").fetchone()[0], 2)
 
+    def test_signed_legacy_watchdog_restores_approval_and_processes_next_event(self):
+        self.projection.attach("codex", 123, self.sessions.rpc._message, provider="codex")
+        self.projection.project(self.event(1, "item/started", item={"id": "output", "type": "agentMessage", "text": ""}))
+        state = self.projection.state(durable=True)
+        progress = self.sessions.watchdog.clock() - 45
+        state["watchdog"] = {self.identity: {"turn_id": self.turn_id, "progress": progress, "probe": None,
+                                            "state": "waiting", "detail": None, "tools": {"original-tool"}}}
+        request = {"id": 7, "key": "approval-7", "method": "item/commandExecution/requestApproval",
+                   "params": {"threadId": self.identity, "turnId": self.turn_id}}
+        state["browser"]["requests"] = {"approval-7": request}
+        with self.store._connection() as db:
+            db.execute("UPDATE coordinator_projection SET version=1,state=? WHERE singleton=1",
+                       (zlib.compress(json.dumps(pack(state)).encode()),))
+        self.projection.load()
+        watchdog = self.sessions.watchdog
+        self.assertEqual(watchdog.observed[self.identity]["progress"], progress)
+        self.assertEqual(watchdog.observed[self.identity]["tools"], {"original-tool"})
+        self.assertGreaterEqual(watchdog.snapshot(self.identity)["quiet_seconds"], 45)
+        self.assertAlmostEqual(self.store.clock() - watchdog.observed[self.identity]["progress_at"], 45, delta=2)
+        event = self.event(2, "item/agentMessage/delta", itemId="output", delta="continued")
+        self.projection.project(event)
+        self.projection.project(event)
+        self.assertEqual(self.projection.cursor, 2)
+        self.assertEqual(self.sessions.histories[self.identity]["turns"][-1]["items"][-1]["text"], "continued")
+        self.assertEqual(self.sessions.requests, {"approval-7": request})
+
     def test_restore_loads_history_on_first_event_and_rolls_back_failed_delta(self):
         from agent_coord.history_persistence import read_history
         self.projection.attach("codex", 123, self.sessions.rpc._message, provider="codex")

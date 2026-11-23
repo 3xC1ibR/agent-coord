@@ -63,9 +63,12 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
             shutil.copyfile(tests / filename, fixtures / filename)
         subprocess.run([str(python), "-m", "unittest", "-v",
                         "test_coordinator_projection.ProjectionTests."
-                        "test_next_request_replaces_codex_provider_whose_output_ended"],
+                        "test_next_request_replaces_codex_provider_whose_output_ended",
+                        "test_coordinator_projection.ProjectionTests."
+                        "test_signed_legacy_watchdog_restores_approval_and_processes_next_event"],
                        cwd=fixtures, env=environment, check=True, capture_output=True, text=True, timeout=60)
         result["codex_provider_relaunch"] = True
+        result["legacy_watchdog_approval_recovery"] = True
         with subprocess.Popen([str(python), "-u", str(resources / "backend.py")], cwd=home,
                               env=environment, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
