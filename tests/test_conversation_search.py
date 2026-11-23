@@ -749,6 +749,30 @@ class ConversationSearchTests(unittest.TestCase):
                 self.assertNotIn(document.references, requested)
         self.assertEqual(conversation_search.search_metrics(self.store)["document_read"]["decoded_documents"], 0)
 
+    def test_search_preparation_reuses_unchanged_turns_in_a_long_conversation(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread")
+        history = {"turns": [{"startedAt": index + 1, "items": [
+            {"type": "agentMessage", "text": "Saved prose " + str(index)},
+            {"type": "commandExecution", "output": "excluded " * 100}]} for index in range(331)]}
+        previous = self.save_chunked("thread", history, seed=True)
+        conversation_search.ensure_message_schema(self.store)
+        original = prepare_messages(self.store, "thread")
+        history["turns"] = [history["turns"][-1], *history["turns"][:-1],
+                            {"items": [{"type": "agentMessage", "text": "New prose"}]}]
+        self.save_chunked("thread", history, previous=storage.compact_history(previous), seed=True)
+        with patch.object(storage, "_documents", wraps=storage._documents) as documents:
+            changed = prepare_messages(self.store, "thread")
+        requested = [reference for call in documents.call_args_list for reference in call.args[1]]
+        self.assertFalse(any(previous.documents[(index,)].references in requested for index in range(331)),
+                         "An unchanged turn was decoded again while preparing one appended message")
+        # Reordering must update fallback IDs and positions while retaining timestamps.
+        self.assertEqual(changed.document_records[0][1:5], ("search-turn-0", "search-item-0", "assistant", 331))
+        self.assertEqual(changed.document_records[-1][1:3], ("search-turn-331", "search-item-0"))
+        self.assertEqual(len(changed.document_records), len(original.document_records) + 1)
+        reopened = CoordinationStore(self.store.database_path, clock=lambda: 1000)
+        self.assertEqual(changed, prepare_messages(reopened, "thread"))
+
     def test_document_cache_preserves_contextual_ids_timestamps_and_routing_duplicates(self):
         self.create("thread")
         item = {"type": "agentMessage", "text": "Repeated shared document"}
@@ -768,6 +792,48 @@ class ConversationSearchTests(unittest.TestCase):
         self.assertEqual(len(evidence["messages"]), 4)
         self.assertEqual(search_threads(self.store, "discarded earlier")["items"], [])
         self.assertEqual(search_threads(self.store, "retained later")["items"][0]["thread_id"], "thread")
+
+    def test_turn_metadata_cache_rebuilds_prose_after_database_replacement(self):
+        self.create("thread")
+        history = {"turns": [{"items": [
+            {"type": "agentMessage", "text": "Retained searchable prose"},
+            {"type": "commandExecution", "output": "excluded " * 40000}]}]}
+        self.save_chunked("thread", history, seed=True)
+        conversation_search.ensure_message_schema(self.store)
+        expected = prepare_messages(self.store, "thread")
+        replacement = self.root / "replacement.sqlite3"
+        destination = sqlite3.connect(replacement)
+        try:
+            with self.store.reading(), self.store._connection() as db:
+                db.backup(destination)
+            destination.execute("DELETE FROM conversation_search_documents")
+            destination.execute("DELETE FROM conversation_search_document_text")
+            destination.commit()
+        finally:
+            destination.close()
+        # Close the test's idle WAL handles before atomically replacing the file.
+        for name in ("reader", "holder"):
+            holder = getattr(self.store._idle_connections, name, None)
+            if holder:
+                holder.discard()
+        replacement.replace(self.store.database_path)
+        self.assertEqual(prepare_messages(self.store, "thread"), expected)
+        self.assertEqual(search_threads(self.store, "retained searchable")["items"][0]["thread_id"], "thread")
+
+    def test_turn_metadata_cache_eviction_preserves_search_results(self):
+        self.create("thread")
+        history = {"turns": [{"items": [
+            {"type": "agentMessage", "text": "Searchable prose " + str(index)},
+            {"type": "commandExecution", "output": "excluded " * 10000}]} for index in range(4)]}
+        self.save_chunked("thread", history, seed=True)
+        conversation_search.ensure_message_schema(self.store)
+        with patch.object(conversation_search, "_TURN_CACHE_ENTRIES", 2), patch.object(
+                conversation_search, "_TURN_CACHE_BYTES", 2000):
+            expected = prepare_messages(self.store, "thread")
+            self.assertEqual(prepare_messages(self.store, "thread"), expected)
+            _, entries, size = conversation_search._TURN_CACHES[self.store]
+            self.assertLessEqual(len(entries), 2)
+            self.assertLessEqual(size, 2000)
 
     def test_interrupted_document_seeding_has_no_complete_header_and_resumes(self):
         from agent_coord import history_persistence as storage

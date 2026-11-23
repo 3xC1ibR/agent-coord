@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import weakref
+from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
@@ -189,6 +190,10 @@ _STAGE_LEASE_SECONDS = 300
 _CLEANUP_BATCHES = 8
 _METRICS_LOCK = threading.Lock()
 _METRICS = weakref.WeakKeyDictionary()
+_TURN_CACHE_LOCK = threading.Lock()
+_TURN_CACHES = weakref.WeakKeyDictionary()
+_TURN_CACHE_BYTES = 8 * 1024 * 1024
+_TURN_CACHE_ENTRIES = 4096
 _DOCUMENT_SCHEMA = {
     "conversation_search_documents": """CREATE TABLE IF NOT EXISTS conversation_search_documents (
         document TEXT PRIMARY KEY, item_id TEXT, role TEXT, timestamp REAL,
@@ -518,6 +523,7 @@ def seed_prepared_history_steps(store, prepared):
 def _prepare_document_messages(store, thread_id, revision, manifest):
     from .history_persistence import _documents
     _ensure_document_cache(store)
+    file_identity = store._database_file_identity()
     with _measure(store, "document_read") as measurement:
         with store.reading(), store._connection() as db:
             db.execute("BEGIN")
@@ -525,7 +531,16 @@ def _prepare_document_messages(store, thread_id, revision, manifest):
             metadata, turn_references = root["metadata"], root["turns"]
             if not isinstance(metadata, dict) or not isinstance(turn_references, list):
                 raise ValueError("Invalid conversation manifest")
-            turns = _documents(db, turn_references)
+            keys = [tuple(reference) for reference in turn_references]
+            with _TURN_CACHE_LOCK:
+                identity, cache, _ = _TURN_CACHES.get(store, (None, {}, 0))
+                if identity != file_identity:
+                    cache = {}
+                retained = {key: cache[key][0] for key in keys if key in cache}
+                for key in retained:
+                    cache.move_to_end(key)
+            absent = list(dict.fromkeys(key for key in keys if key not in retained))
+            turns = _documents(db, [list(key) for key in absent])
             references = {}
             for turn in turns:
                 if not isinstance(turn.get("metadata"), dict) or not isinstance(turn.get("items", []), list):
@@ -545,12 +560,40 @@ def _prepare_document_messages(store, thread_id, revision, manifest):
             measurement.update(decoded_documents=len(missing), reused_documents=len(references) - len(missing))
         for _ in _stage_document_steps(store, documents):
             pass
+        # Turn references are content addressed. Retain only their compact
+        # occurrence metadata, after every referenced prose header is durable.
+        # Positions, fallback IDs and routing are rebuilt from the current root;
+        # no revision or publication decision is cached.
+        added = {}
+        for key, turn in zip(absent, turns):
+            headers = tuple(cached[_document_key(reference)] for reference in turn.get("items", []))
+            headers = tuple((*header[:4], None, header[5]) for header in headers)
+            value = ({field: turn["metadata"][field] for field in ("id", "startedAt")
+                      if field in turn["metadata"]}, headers)
+            size = len(json.dumps((key, value)).encode("utf-8")) + 256 + 256 * len(headers)
+            retained[key] = value
+            if size <= _TURN_CACHE_BYTES:
+                added[key] = (value, size)
+        with _TURN_CACHE_LOCK:
+            identity, cache, size = _TURN_CACHES.get(store, (None, OrderedDict(), 0))
+            if identity != file_identity:
+                cache, size = OrderedDict(), 0
+            for key, entry in added.items():
+                previous = cache.pop(key, None)
+                size += entry[1] - (previous[1] if previous else 0)
+                cache[key] = entry
+            while size > _TURN_CACHE_BYTES or len(cache) > _TURN_CACHE_ENTRIES:
+                _, (_, removed) = cache.popitem(last=False)
+                size -= removed
+            if file_identity == store._database_file_identity():
+                _TURN_CACHES[store] = (file_identity, cache, size)
+        measurement.update(decoded_turns=len(absent), reused_turns=len(keys) - len(absent))
     records, routing, count = {}, [], 0
-    for turn_index, turn in enumerate(turns):
-        turn_metadata = turn["metadata"]
+    for turn_index, key in enumerate(keys):
+        turn_metadata, headers = retained[key]
         turn_id = str(turn_metadata.get("id") or f"search-turn-{turn_index}")
-        for item_index, reference in enumerate(turn.get("items", [])):
-            document, item_id, role, timestamp, excerpt, text_length = cached[_document_key(reference)]
+        for item_index, header in enumerate(headers):
+            document, item_id, role, timestamp, excerpt, text_length = header
             if role is None:
                 continue
             item_id = item_id or f"search-item-{item_index}"
