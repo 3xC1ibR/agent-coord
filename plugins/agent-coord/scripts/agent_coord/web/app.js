@@ -2761,7 +2761,9 @@ function connect() {
     // A notification can arrive after the request event was missed. Reconcile
     // the pending controls as well as notifying, even without an item event.
     if (batch.completions?.length || batch.snoozes?.length || changedThreads.size) scheduleList();
-    if (state.selected && (batch.completions?.length || batch.snoozes?.length || changedThreads.has(state.selected))) scheduleDetail();
+    if (state.selected && (changedThreads.has(state.selected)
+        || batch.completions?.some(row => row.thread_id === state.selected)
+        || batch.snoozes?.some(row => row.thread_id === state.selected))) scheduleDetail();
     if (batch.reset) { for (const entry of state.conversations?.values() || []) entry.revision++; scheduleDetail(); }
     for (const event of batch.events) {
       if (event.method === "bridge/disconnected") { for (const entry of state.conversations?.values() || []) entry.revision++; showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail?.work_thread?.client === "codex" && state.detail) { state.detail.running = false; state.detailRefreshing = true; renderRequests(); } renderStatus(); }

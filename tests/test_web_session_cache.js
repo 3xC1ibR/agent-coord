@@ -554,6 +554,26 @@ test("a schedule change refreshes a window or pane even with a fresh cached list
   }
 });
 
+test("another conversation's completion and snooze notify without rereading the open conversation", async () => {
+  const c = setup();
+  await c.select("one");
+  const notifications = [];
+  let details = 0, lists = 0;
+  c.scheduleList = () => lists++;
+  c.scheduleDetail = () => details++;
+  c.notifications.receive = rows => notifications.push(...rows);
+  vm.runInContext(source.slice(source.indexOf("function connect("), source.indexOf("function newProject(")), c);
+  c.connect();
+  const deliver = id => c.events.onmessage({data: JSON.stringify({events: [],
+    completions: [{thread_id: id}], snoozes: [{thread_id: id}]})});
+  deliver("two");
+  assert.equal(details, 0);
+  assert.equal(lists, 1);
+  assert.deepEqual(notifications.map(row => row.thread_id), ["two", "two"]);
+  deliver("one");
+  assert.equal(details, 1);
+});
+
 test("only changes in reported approvals invalidate a conversation across windows and panes", async () => {
   const c = setup(); await c.select("one");
   let lists = 0, controls = 0;
