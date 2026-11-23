@@ -6,7 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import closing, redirect_stderr, redirect_stdout
+from contextlib import closing, nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -61,6 +61,33 @@ class CoordinationStoreTests(unittest.TestCase):
             # This fixture represents a database awaiting the wake migration,
             # rather than a current database written by an obsolete client.
             db.execute("DELETE FROM coordination_schema")
+
+    def test_reused_connections_preserve_compiled_queries_and_restore_changed_settings(self):
+        self.register("thread")
+        for reading in (False, True):
+            with self.subTest(reading=reading), self.store.reading() if reading else nullcontext():
+                compiled = []
+
+                def authorize(action, table, column, *_):
+                    if action == sqlite3.SQLITE_READ and table == "work_threads" and column == "title":
+                        compiled.append(column)
+                    return sqlite3.SQLITE_OK
+
+                with self.store._connection() as original:
+                    foreign_keys = original.execute("PRAGMA foreign_keys").fetchone()[0]
+                    original.set_authorizer(authorize)
+                for _ in range(5):
+                    with self.store._connection() as db:
+                        self.assertIs(db, original)
+                        self.assertIsNotNone(db.execute("SELECT title FROM work_threads WHERE thread_id=?", ("thread",)).fetchone())
+                self.assertEqual(compiled, ["title"])
+                with self.store._connection() as db:
+                    db.execute(f"PRAGMA foreign_keys={1 - foreign_keys}")
+                    db.execute(f"PRAGMA query_only={int(not reading)}")
+                with self.store._connection() as db:
+                    self.assertIs(db, original)
+                    self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], foreign_keys)
+                    self.assertEqual(db.execute("PRAGMA query_only").fetchone()[0], int(reading))
 
     def test_startup_retries_real_migration_lock_before_sending_once(self) -> None:
         from agent_coord.cli import main

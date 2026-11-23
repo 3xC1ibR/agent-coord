@@ -761,7 +761,10 @@ class CoordinationStore:
                     # Start each use with the settings its factory produced.
                     connection.row_factory = sqlite3.Row
                     connection.execute(f"PRAGMA busy_timeout = {connection.settings[0]}")
-                    connection.execute(f"PRAGMA foreign_keys = {connection.settings[1]}")
+                    # Writing foreign_keys expires every prepared statement, even
+                    # when the setting is already correct. Restore only a change.
+                    if connection.execute("PRAGMA foreign_keys").fetchone()[0] != connection.settings[1]:
+                        connection.execute(f"PRAGMA foreign_keys = {connection.settings[1]}")
                 except sqlite3.Error:
                     connection = None
             if connection is None:
@@ -785,7 +788,9 @@ class CoordinationStore:
                 connection.execute(f"PRAGMA wal_autocheckpoint = {pages}")
                 if isinstance(connection, _StoreConnection):
                     connection.automatic_checkpoint_pages = pages
-        connection.execute(f"PRAGMA query_only = {int(reading)}")
+        # This setter also expires statements on an unchanged connection.
+        if fresh or connection.execute("PRAGMA query_only").fetchone()[0] != int(reading):
+            connection.execute(f"PRAGMA query_only = {int(reading)}")
         reusable = False
         if not nested:
             holder.in_use = True
