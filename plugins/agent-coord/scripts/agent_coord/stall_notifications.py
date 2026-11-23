@@ -16,6 +16,12 @@ from .workspaces import matches_workspace
 
 CLASSIFICATIONS = {'stalled', 'unverified_tool', 'long_running_tool', 'waiting_for_approval'}
 MAX_INTERVAL = 2400
+NOTIFICATION_COPY = {
+    'stalled': ('Agent needs progress review', 'No confirmed progress. Review the silent turn.'),
+    'unverified_tool': ('Tool status unverified', 'Tool execution could not be verified. Review the outstanding tool.'),
+    'long_running_tool': ('Tool still running', 'A tool is confirmed running. Review its progress.'),
+    'waiting_for_approval': ('Approval still waiting', 'An approval remains unanswered. Review the pending approval.'),
+}
 
 
 def _exists(db):
@@ -282,7 +288,7 @@ def notifications(store, *, include_claimed=False, cwd=None):
     with store.database_operation('stall.notifications', priority='background'), store.reading(), store._connection() as db:
         if not _exists(db):
             return []
-        rows = db.execute('''SELECT a.id, a.created_at, a.claimed_at, i.thread_id, i.turn_id, i.classification,
+        rows = db.execute('''SELECT a.id, a.created_at, a.claimed_at, a.body_json, i.thread_id, i.turn_id, i.classification,
             t.title, s.client, s.cwd, p.name AS project_name, r.name AS repository_name
             FROM app_agent_stall_alerts a JOIN app_agent_stall_incidents i ON i.id=a.incident_id
             JOIN work_threads t ON t.thread_id=i.thread_id JOIN sessions s ON s.session_id=i.thread_id
@@ -291,10 +297,25 @@ def notifications(store, *, include_claimed=False, cwd=None):
             WHERE ''' + _LIVE + ''' AND a.sequence=i.alert_count AND a.user_escalated=1
             AND (t.snoozed_until IS NULL OR t.snoozed_until<=?) AND (? OR a.claimed_at IS NULL)
             ORDER BY a.id''', (store.clock(), include_claimed)).fetchall()
-    return [dict(row, request_key='stall:' + str(row['id']), status='stalled',
-                 body=('Review the unattended approval' if row['classification'] == 'waiting_for_approval'
-                       else 'Review the agent without confirmed progress'))
-            for row in rows if matches_workspace(row['cwd'], cwd)]
+    result = []
+    for row in rows:
+        if not matches_workspace(row['cwd'], cwd):
+            continue
+        event = dict(row)
+        # The occurrence owns its classification/counts, independently of later
+        # inbox delivery or incident observations. Never expose its private detail.
+        audit = json.loads(event.pop('body_json'))
+        classification = audit.get('classification', event['classification'])
+        label, description = NOTIFICATION_COPY[classification]
+        count = audit.get('actionable_inbox_count', 0)
+        age = audit.get('oldest_actionable_age_seconds')
+        queue = f"{count} queued actionable request{'s' if count != 1 else ''}"
+        if count and age is not None:
+            queue += f"; oldest {max(0, int(age)) // 60} min"
+        result.append(dict(event, request_key='stall:' + str(row['id']), status='stalled',
+                           classification=classification, label=label, body=f'{description} {queue}.',
+                           actionable_inbox_count=count, oldest_actionable_age_seconds=age))
+    return result
 
 
 def claim_notification(store, key, *, cwd=None):
