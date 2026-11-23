@@ -34,6 +34,27 @@ class ThreadControlTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def test_idle_close_poll_uses_no_writer(self):
+        initial = self.store._writer.snapshot()["completed_scopes"]
+        for _ in range(10):
+            self.assertEqual(self.control.queued(), [])
+        self.assertEqual(self.store._writer.snapshot()["completed_scopes"], initial)
+
+    def test_polling_renews_the_worker_lease_before_expiry_without_rewriting_each_time(self):
+        initial = self.store._writer.snapshot()["completed_scopes"]
+        with patch.object(self.store, "clock", return_value=100) as clock:
+            self.worker._heartbeat()
+            clock.return_value = 101
+            for _ in range(10):
+                self.worker._heartbeat()
+            self.assertEqual(self.store._writer.snapshot()["completed_scopes"], initial + 1)
+            clock.return_value = 110
+            self.worker._heartbeat()
+        with self.store.reading(), self.store._connection() as db:
+            heartbeat, = db.execute("SELECT heartbeat FROM thread_control_runtimes WHERE id=?",
+                                    (self.worker.owner,)).fetchone()
+        self.assertEqual(heartbeat, 110)
+
     def send(self, thread_id, body):
         result = self.sessions.send(thread_id, body)
         # The fake provider acknowledges before its asynchronous lifecycle

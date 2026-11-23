@@ -374,7 +374,8 @@ class AppControlWorker:
             db.execute("INSERT OR REPLACE INTO app_control_runtimes VALUES (?, ?)", (self.owner, self.control.store.clock()))
 
     def process_once(self):
-        self._heartbeat()
+        if self.heartbeat is None or not self.heartbeat.is_alive():
+            self._heartbeat()
         for request in self.control.pending():
             if self.stopped.is_set() or self.sessions.closed:
                 return

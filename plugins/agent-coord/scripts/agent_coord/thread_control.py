@@ -194,6 +194,10 @@ class ThreadControl:
         return self.status(thread_id)
 
     def queued(self) -> list[dict]:
+        with self.store.reading(), self.store._connection() as db:
+            if not db.execute("""SELECT 1 FROM thread_close_requests
+                WHERE status IN ('queued', 'closing') LIMIT 1""").fetchone():
+                return []
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             self._reconcile(db)
@@ -274,15 +278,20 @@ class ThreadControlWorker:
         self.owner = str(uuid.uuid4())
         self.stopped = threading.Event()
         self.worker = None
+        self.last_heartbeat = None
 
     def start(self):
         self.worker = threading.Thread(target=self._run, name="thread-control", daemon=True)
         self.worker.start()
 
     def _heartbeat(self):
+        now = self.sessions.store.clock()
+        if self.last_heartbeat is not None and 0 <= now - self.last_heartbeat < 10:
+            return
         with self.sessions.store._connection() as db:
             db.execute("INSERT OR REPLACE INTO thread_control_runtimes VALUES (?, ?)",
-                       (self.owner, self.sessions.store.clock()))
+                       (self.owner, now))
+        self.last_heartbeat = now
 
     def process_once(self):
         sessions = self.sessions
@@ -338,3 +347,4 @@ class ThreadControlWorker:
             self.worker.join(timeout=5)
         with self.sessions.store._connection() as db:
             db.execute("DELETE FROM thread_control_runtimes WHERE id = ?", (self.owner,))
+        self.last_heartbeat = None

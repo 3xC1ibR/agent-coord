@@ -681,6 +681,14 @@ class AppControlTests(unittest.TestCase):
         self.worker.process_once()
         self.assertFalse(self.sessions.rpc.calls)
 
+    def test_request_polls_share_the_running_heartbeat_worker(self):
+        with patch.object(self.worker, "heartbeat", threading.current_thread()), patch.object(self.worker, "_heartbeat") as write:
+            self.worker.process_once()
+            write.assert_not_called()
+        with patch.object(self.worker, "_heartbeat") as write:
+            self.worker.process_once()
+            write.assert_called_once()
+
     def test_atomic_claim_and_workspace_and_runtime_ownership(self):
         request = self.request()
         other, worker = self.runtime(self.root / "other")
